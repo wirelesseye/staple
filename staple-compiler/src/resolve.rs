@@ -4812,6 +4812,13 @@ impl NameResolver {
                 self.resolve_expression(&call.argument, None, None);
             }
             Expression::Access(access) => {
+                if let Accessor::Method(name) = &access.accessor {
+                    self.trait_method_references.insert(
+                        access.syntax.id,
+                        self.visible_trait_methods.get(name).cloned().unwrap_or_default(),
+                    );
+                    return;
+                }
                 if let Accessor::Name(member_name) = &access.accessor
                     && let Some(trait_id) = self.trait_id_from_expression(&access.value)
                 {

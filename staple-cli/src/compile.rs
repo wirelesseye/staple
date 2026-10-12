@@ -2966,7 +2966,7 @@ mod tests {
                 "match Buffer.get_ref empty 0 { None() => (), Some _ => exit 1 }\n",
                 "Buffer.push empty 42\n",
                 "match Buffer.get_ref empty 0 { Some (Ref value) => if (value != 42) { exit 1 }, None() => exit 1 }\n",
-                "match empty^get_ref 1 { None() => (), Some _ => exit 1 }\n",
+                "match empty |> get_ref 1 { None() => (), Some _ => exit 1 }\n",
                 "match Buffer.get_ref empty 100 { None() => (), Some _ => exit 1 }\n",
                 "let kept_ref = make_ref ()\n",
                 "let kept_slice = make_slice ()\n",
@@ -3303,7 +3303,7 @@ mod tests {
                 "let mut slice: Slice I32 = Slice.from_ref fixed\n",
                 "slice[index] = 22\n",
                 "match Slice.get_ref slice 0 { Some (Ref value) => if (value != 10) { exit 1 }, None() => exit 1 }\n",
-                "match slice^get_ref 2 { Some (Ref value) => if (value != 30) { exit 1 }, None() => exit 1 }\n",
+                "match slice |> get_ref 2 { Some (Ref value) => if (value != 30) { exit 1 }, None() => exit 1 }\n",
                 "match Slice.get_ref slice 3 { None() => (), Some _ => exit 1 }\n",
                 "match Slice.get_ref slice 100 { None() => (), Some _ => exit 1 }\n",
                 "let empty: Slice I32 = Slice.from_ref (Ref ())\n",
@@ -5106,5 +5106,58 @@ mod tests {
             status.or_else(|| output.status.signal().map(|signal| -signal))
         };
         Ok((status, String::from_utf8_lossy(&output.stdout).into_owned()))
+    }
+    #[test]
+    #[cfg(unix)]
+    fn runs_pipe_chains_with_receiver_evaluated_once() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-pipe-run-{nonce}.sta"));
+        std::fs::write(&source, concat!(
+            "extern \"c\" { exit: I32 -> () }\n",
+            "type Boxed = wrap I32\n",
+            "companion Boxed { pub def step: Boxed -> I32 -> I32 = Boxed value => n => value + n }\n",
+            "trait Finish T { finish: T -> I32 -> I32 }\n",
+            "impl Finish I32 { finish = value => n => value * n }\n",
+            "type Counter = wrap (value: I32)\n",
+            "def make: mut Counter -> Boxed = mut count => { count.value = count.value + 1; Boxed 3 }\n",
+            "let mut count = Counter (value: 0)\n",
+            "let result: I32 = make count |> step 1 |> finish 2\n",
+            "exit ((result - 8) + (count.value - 1))\n",
+        )).unwrap();
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        let outcome = run([
+            "run".into(),
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("pipe executable should compile and run");
+        let _ = std::fs::remove_file(source);
+        let Outcome::Executed(status) = outcome else {
+            panic!("expected execution")
+        };
+        assert!(status.success(), "{status}");
+    }
+    #[test]
+    fn expands_macros_inside_pipe_stages_as_valid_source() {
+        let expanded = expand_source(
+            "pipe-macros",
+            concat!(
+                "use std.syntax.(Expr, parse_quote)\n",
+                "macro increment: Expr -> Expr = value => parse_quote { ($value) + 1 }\n",
+                "type Boxed = wrap I32\n",
+                "companion Boxed { pub def step: Boxed -> I32 -> Boxed = value => _ => value }\n",
+                "let result = Boxed 3 |> step (increment 1) |> step 2\n",
+            ),
+        );
+        assert!(expanded.contains("|>"), "{expanded}");
+        assert!(!expanded.contains("increment 1"), "{expanded}");
+        staple_syntax::parse(&expanded).expect("expanded pipe stages should parse");
     }
 }

@@ -462,7 +462,28 @@ fn render_expr(program: &Program, expression: &Expression) -> String {
                 repeated.count,
             )
         }
-        Expression::Call(call) => splice(program, &call.syntax, &[&call.callee, &call.argument]),
+        Expression::Call(call) => {
+            let mut root = expression;
+            let mut arguments = Vec::new();
+            while let Expression::Call(call) = root {
+                arguments.push(call.argument.as_ref());
+                root = &call.callee;
+            }
+            if root.syntax().pipe_stage {
+                arguments.reverse();
+                let mut text = format!(
+                    "({}) |> {}",
+                    render_expr(program, arguments[0]),
+                    render_expr(program, root)
+                );
+                for argument in &arguments[1..] {
+                    text.push_str(&format!(" ({})", render_expr(program, argument)));
+                }
+                text
+            } else {
+                splice(program, &call.syntax, &[&call.callee, &call.argument])
+            }
+        }
         Expression::Unary(unary) => format!(
             "{}{}",
             unary.operator.text(),
@@ -475,6 +496,9 @@ fn render_expr(program: &Program, expression: &Expression) -> String {
             render_expr(program, &binary.right),
         ),
         Expression::Access(access) => {
+            if let Accessor::Method(name) = &access.accessor {
+                return name.clone();
+            }
             format!(
                 "{}{}",
                 render_expr(program, &access.value),
@@ -532,7 +556,7 @@ fn accessor_suffix(accessor: &Accessor) -> String {
         Accessor::Name(name) => format!(".{name}"),
         Accessor::Index(index) => format!(".{index}"),
         Accessor::Representation => ".*".to_owned(),
-        Accessor::Method(method) => format!("^{method}"),
+        Accessor::Method(method) => format!(" |> {method}"),
     }
 }
 

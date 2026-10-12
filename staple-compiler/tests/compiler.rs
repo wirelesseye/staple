@@ -5121,18 +5121,18 @@ fn list_grows_past_initial_capacity_and_type_checks() {
 }
 
 #[test]
-fn migrated_stdlib_methods_accept_caret_method_call_syntax() {
+fn migrated_stdlib_methods_accept_pipe_method_call_syntax() {
     // The juxtaposed companion methods take the receiver as their first slot,
-    // so `receiver^method rest…` resolves the same call as `Type.method`.
+    // so `receiver |> method rest…` resolves the same call as `Type.method`.
     let module = type_check(concat!(
         "def exercise: () -> () = () => {\n",
         "let mut values: List I32 = List.new ()\n",
-        "values^push 1\n",
-        "values^push 2\n",
-        "let first: Option I32 = values^get (USize :: 0)\n",
-        "let first_unchecked: I32 = values^get_unchecked (USize :: 0)\n",
-        "let first_ref: Option (Ref I32) = values^get_ref (USize :: 0)\n",
-        "let last_ref_unchecked: Ref I32 = values^get_ref_unchecked (USize :: 0)\n",
+        "values |> push 1\n",
+        "values |> push 2\n",
+        "let first: Option I32 = values |> get (USize :: 0)\n",
+        "let first_unchecked: I32 = values |> get_unchecked (USize :: 0)\n",
+        "let first_ref: Option (Ref I32) = values |> get_ref (USize :: 0)\n",
+        "let last_ref_unchecked: Ref I32 = values |> get_ref_unchecked (USize :: 0)\n",
         "()\n}\n",
     ));
     let context = Context::create();
@@ -6299,7 +6299,7 @@ fn alias_companions_extend_the_aliased_type() {
         "let animal = Animal 1\n",
         "let from_alias: I32 = Animal.legs animal\n",
         "let from_type: String = Pet.name animal\n",
-        "let method: I32 = animal^legs\n",
+        "let method: I32 = animal |> legs\n",
     ));
 }
 
@@ -6362,11 +6362,11 @@ fn type_checks_companion_method_call_syntax() {
         "type Animal = from I32\n",
         "companion Animal { pub def move_to: Animal -> (F32, F32) -> Animal = animal => _ => animal }\n",
         "let animal: Animal = 1\n",
-        "let moved: Animal = animal^move_to (1.0, 1.0)\n",
-        "let partially_applied: (F32, F32) -> Animal = animal^move_to\n",
-        "def relocate: Animal -> Animal = value => value^move_to (1.0, 1.0)\n",
+        "let moved: Animal = animal |> move_to (1.0, 1.0)\n",
+        "let partially_applied: (F32, F32) -> Animal = animal |> move_to\n",
+        "def relocate: Animal -> Animal = value => value |> move_to (1.0, 1.0)\n",
         "def make: () -> Animal = () => animal\n",
-        "let moved_from_call: Animal = (make ())^move_to (1.0, 1.0)\n",
+        "let moved_from_call: Animal = (make ()) |> move_to (1.0, 1.0)\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
@@ -6383,13 +6383,13 @@ fn type_checks_method_call_syntax_for_juxtaposed_companion_methods() {
         "    pub def teleport: [Animal, F32, F32] -> Animal = [animal, _, _] => animal\n",
         "}\n",
         "let animal: Animal = 1\n",
-        "let moved: Animal = animal^move_to (1.0, 1.0)\n",
-        "let hopped: Animal = animal^teleport 1.0 2.0\n",
-        "def relocate: Animal -> Animal = value => value^move_to (1.0, 1.0)\n",
+        "let moved: Animal = animal |> move_to (1.0, 1.0)\n",
+        "let hopped: Animal = animal |> teleport 1.0 2.0\n",
+        "def relocate: Animal -> Animal = value => value |> move_to (1.0, 1.0)\n",
         "def make: () -> Animal = () => animal\n",
-        "let moved_from_call: Animal = (make ())^teleport 1.0 2.0\n",
+        "let moved_from_call: Animal = (make ()) |> teleport 1.0 2.0\n",
         "companion Animal { pub def tag: <T> [Animal, T] -> Animal = [animal, _] => animal }\n",
-        "let tagged: Animal = animal^tag 7\n",
+        "let tagged: Animal = animal |> tag 7\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
@@ -6406,7 +6406,7 @@ fn rejects_incomplete_method_call_on_a_juxtaposed_companion_method() {
             "    pub def move_to: [Animal, (F32, F32)] -> Animal = [animal, _] => animal\n",
             "}\n",
             "let animal: Animal = 1\n",
-            "let incomplete = animal^move_to\n",
+            "let incomplete = animal |> move_to\n",
         )))
         .expect_err_diagnostics(
             "a receiver-applied juxtaposed companion method is an incomplete call",
@@ -12398,7 +12398,7 @@ fn parameter_product_template_spreads_and_markers_normalize_after_substitution()
         "def sum: Expand Inputs I32 = [a, b] => a + b\n",
         "let result: I32 = sum 1 2\n",
         "type In T = alias [mut List T, move T]\n",
-        "def push: In I32 -> () = [mut list, move value] => list^push value\n",
+        "def push: In I32 -> () = [mut list, move value] => list |> push value\n",
         "let mut list: List I32 = List.new ()\n",
         "push list 1\n",
     ));
@@ -12450,7 +12450,7 @@ fn single_slot_parameter_products_collapse_names_and_markers() {
         "def identity: One -> I32 = [x] => x\n",
         "let plain: I32 -> I32 = identity\n",
         "type Borrow = alias [mut List I32]\n",
-        "def append_one: Borrow -> () = [mut list] => list^push 1\n",
+        "def append_one: Borrow -> () = [mut list] => list |> push 1\n",
         "let plain_push: mut List I32 -> () = append_one\n",
         "type Owned = alias [move String]\n",
         "def take: Owned -> String = [move value] => value\n",
@@ -12652,14 +12652,14 @@ fn from_types_are_not_subtypes_and_do_not_share_traits_or_members() {
             "def bounded: <T where T <: A> T -> () = value => ()\n",
             "let by_trait = named (B 1)\n",
             "let by_bound = bounded (B 1)\n",
-            "let by_member = (B 1)^legs\n",
+            "let by_member = (B 1) |> legs\n",
         ),
         "`from` introductions stay out of traits, bounds, and members",
     );
     for expected in [
         "trait bound is not satisfied for",
         "is not a subtype of",
-        "no accessible companion method named `legs`",
+        "no compatible accessible companion or visible trait method",
     ] {
         assert!(
             messages.iter().any(|message| message.contains(expected)),
@@ -14078,4 +14078,128 @@ fn generic_trait_members_preserve_product_trait_parameters() {
     CodeGenerator::new(&context)
         .compile_module(&lower(&module))
         .expect("product trait parameters remain grouped before member arguments");
+}
+
+#[test]
+fn pipe_stages_resolve_companions_traits_and_qualified_members() {
+    let module = type_check(concat!(
+        "type Boxed = wrap I32\n",
+        "companion Boxed { pub def step: Boxed -> I32 -> Boxed = value => _ => value }\n",
+        "trait Finish T { finish: T -> I32 -> I32 }\n",
+        "impl Finish Boxed { finish = Boxed value => n => value + n }\n",
+        "let value = Boxed 3\n",
+        "let chained: I32 = value |> step 1 |> finish 2\n",
+        "let qualified: I32 = value |> Boxed.step 1 |> Finish.finish 2\n",
+        "let explicit_trait: I32 = value |> Finish.finish.<Boxed> 2\n",
+        "let grouped: I32 = value |> (step 1) |> (finish 2)\n",
+        "let partial: I32 -> I32 = value |> finish\n",
+        "companion Boxed { pub def tag: <T> Boxed -> [T] -> I32 = _ => [_] => 4 }\n",
+        "let generic: I32 = value |> tag.<I32> 2\n",
+        "trait Associated T { type Output; convert: T -> Output }\n",
+        "impl Associated Boxed { type Output = I32; convert = Boxed value => value }\n",
+        "let associated: I32 = value |> convert\n",
+        "trait Pair T { first: T -> I32 }\n",
+        "impl Pair (I32, I32) { first = (a, _) => a }\n",
+        "let structural: I32 = (1, 2) |> first\n",
+        "trait Hop T { hop: [T, I32] -> T }\n",
+        "impl Hop Boxed { hop = [value, _] => value }\n",
+        "let juxtaposed: Boxed = value |> hop 2\n",
+        "companion Boxed { pub def marked: <T> [Boxed, T] -> Boxed = [value, _] => value }\n",
+        "let explicit_slots: Boxed = value |> marked.<I32> 2\n",
+        "let explicit_trait_slots: Boxed = value |> Hop.hop.<Boxed> 2\n",
+        "mod Helpers { pub trait Render T { render: T -> String } }\n",
+        "use Helpers.(Render)\n",
+        "impl Render Boxed { render = _ => \"box\" }\n",
+        "let imported: String = value |> render\n",
+        "def bounded: <T where Finish T> T -> I32 = value => value |> finish 1\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("pipes should lower");
+}
+
+#[test]
+fn pipe_lookup_prefers_compatible_companions_and_falls_back_to_traits() {
+    type_check(concat!(
+        "type Boxed = wrap I32\n",
+        "companion Boxed { pub def pick: Boxed -> String -> String = _ => text => text }\n",
+        "trait Pick T { pick: T -> I32 -> I32 }\n",
+        "impl Pick Boxed { pick = Boxed value => n => value + n }\n",
+        "trait OtherPick T { pick: T -> String -> I32 }\n",
+        "impl OtherPick Boxed { pick = _ => _ => 7 }\n",
+        "let value = Boxed 3\n",
+        "let preferred: String = value |> pick \"text\"\n",
+        "let fallback: I32 = value |> pick 2\n",
+    ));
+}
+
+#[test]
+fn pipe_stages_reject_ambiguous_incomplete_and_non_method_calls() {
+    let cases = [
+        (
+            concat!(
+                "trait First T { pick: T -> I32 }\n",
+                "trait Second T { pick: T -> I32 }\n",
+                "impl First I32 { pick = value => value }\n",
+                "impl Second I32 { pick = value => value }\n",
+                "let result = 1 |> pick\n",
+            ),
+            "ambiguous trait method",
+        ),
+        (
+            concat!(
+                "trait Hop T { hop: [T, I32] -> T }\n",
+                "impl Hop I32 { hop = [value, _] => value }\n",
+                "let result = 1 |> hop\n",
+            ),
+            "juxtaposed",
+        ),
+        (
+            "mod Helpers { pub def identity: I32 -> I32 = value => value }\nlet result = 1 |> Helpers.identity\n",
+            "qualified pipe stage",
+        ),
+        (
+            "def identity: I32 -> I32 = value => value\nlet result = 1 |> identity\n",
+            "no compatible",
+        ),
+        (
+            "trait Missing T { missing: T -> I32 }\nlet result = 1 |> missing\n",
+            "no trait implementation",
+        ),
+        (
+            concat!(
+                "trait Hop T { hop: [T, I32] -> T }\n",
+                "impl Hop I32 { hop = [value, _] => value }\n",
+                "let result = 1 |> Hop.hop.<String> 2\n",
+            ),
+            "no trait implementation",
+        ),
+        (
+            concat!(
+                "trait Pair T { pair: (T, T) -> T }\n",
+                "impl Pair I32 { pair = (left, _) => left }\n",
+                "let result = 1 |> pair 2\n",
+            ),
+            "trait method",
+        ),
+        (
+            concat!(
+                "mod Hidden { pub trait Show T { show: T -> I32 }; impl Show I32 { show = value => value } }\n",
+                "let result = 1 |> show\n",
+            ),
+            "no compatible",
+        ),
+    ];
+    for (source, message) in cases {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("invalid stage must fail");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(message)),
+            "{diagnostics:?}"
+        );
+    }
 }

@@ -753,15 +753,15 @@ let animal: Animal = ...
 let moved = Animal.move_to animal (1.0, 1.0)
 ```
 
-Companion functions can also be called with postfix method syntax. The
+Companion and visible trait functions can also be called with pipe syntax. The
 receiver is supplied as the function's first curried argument:
 
 ```staple
-let moved = animal^move_to (1.0, 1.0)
+let moved = animal |> move_to (1.0, 1.0)
 // Equivalent to Animal.move_to animal (1.0, 1.0)
 ```
 
-A bare `animal^move_to` is the receiver-applied value, so it may be a
+A bare `animal |> move_to` is the receiver-applied value, so it may be a
 partially-applied function when the companion function accepts more curried
 arguments.
 
@@ -774,21 +774,45 @@ companion Animal {
     pub def teleport: [Animal, F32, F32] -> Animal = [animal, x, y] => animal
 }
 
-let hopped = animal^teleport 1.0 2.0
+let hopped = animal |> teleport 1.0 2.0
 // Equivalent to Animal.teleport animal 1.0 2.0
 ```
 
-Juxtaposed slots keep their exact arity through `^`: a bare `animal^teleport`,
+Juxtaposed slots keep their exact arity through `|>`: a bare `animal |> teleport`,
 or one supplied with fewer arguments than the method's slot count, is an
 incomplete call rather than a partial closure.
 
-Method lookup uses the receiver's static named type. Type aliases are
+Companion lookup uses the receiver's static named type. Type aliases are
 transparent, so `companion A` for `type A = alias B` is the same as
 `companion B`: its members belong to `B` and are reachable as both `A.member`
 and `B.member`, and by method syntax on any `B` value. `B` must be a nominal
 type declared in the same module as the alias, where `companion B` could be
 written directly. A companion for an alias of a structural type, such as a sum
 or product, is rejected, because those types cannot have companion items.
+
+Pipes associate left and bind below every binary operator. Each stage groups
+its ordinary application arguments before the next pipe:
+
+```staple
+value |> method_a 1 |> method_b 2
+// Equivalent to method_b (method_a value 1) 2, with receiver-based lookup.
+a + b |> method
+value |> method (1 + 2)
+```
+
+Operator expressions in stage arguments require parentheses; `value |> method
+1 + 2` is rejected. Parenthesized stages such as `value |> (method_a 1)` are
+also accepted. Existing newline rules still separate statements.
+
+A compatible accessible companion function takes priority. If none matches
+the receiver and supplied arguments, lookup searches trait functions visible
+in scope, using existing implementations and generic bounds. Trait methods
+also work for structural receivers. Multiple compatible trait functions are
+ambiguous: select one explicitly with `value |> Trait.method arguments`.
+Qualified companion calls such as `value |> Animal.move_to position` are also
+supported. Ordinary local functions and arbitrary callable expressions are
+not pipe stages. The receiver is supplied first; tuple parameters are not
+assembled automatically. The old `value^method` syntax is no longer supported.
 
 More than one companion block may contribute to the same type. Companion
 blocks have no visibility of their own; visibility is declared on their items.
@@ -1105,6 +1129,7 @@ these imports:
 | `..`, `..=` | 3 | none | the prelude's `range`/`range_inclusive` functions |
 | `&&` | 2 | left | not a call; see below |
 | `\|\|` | 1 | left | not a call; see below |
+| `\|>` | 0 | left | receiver-first companion/trait call |
 
 Function application and access bind tighter than every operator above.
 Chaining two non-associative operators at the same precedence (for example
@@ -2719,7 +2744,7 @@ that holds a product is destructured with parentheses:
 Calls have exact arity: arguments are supplied as an application chain, a call
 with fewer arguments than slots is an error, and any extra arguments are
 applied to the result. Slots cannot be skipped by an incompatible argument or
-filled with an `_` placeholder. Through `^`, the receiver fills the first slot
+filled with an `_` placeholder. Through `|>`, the receiver fills the first slot
 (see the companion section). Slot names and markers are part of the function
 type.
 

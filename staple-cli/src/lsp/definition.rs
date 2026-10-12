@@ -1139,6 +1139,7 @@ impl Collector<'_> {
                     !matches!(definition, DefinitionId::Symbol(candidate) if *candidate != symbol)
                 });
             }
+            definitions.retain(|definition| !matches!(definition, DefinitionId::TraitMethod(_)));
             definitions.push(DefinitionId::Symbol(symbol));
         }
         if let Some(dispatch) = self

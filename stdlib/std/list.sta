@@ -28,23 +28,23 @@ def grow: <T> mut List T -> () = mut list => {
 companion<T> List T {
     use std.buffer.(Buffer)
     /// Returns the number of elements in the list.
-    pub def length: List T -> USize = list => list.*^length
+    pub def length: List T -> USize = list => list.* |> length
 
     /// Returns the number of elements the list can hold without growing.
-    pub def capacity: List T -> USize = list => list.*^capacity
+    pub def capacity: List T -> USize = list => list.* |> capacity
 
     /// Appends a value, growing the list when necessary.
     pub def push: [mut List T, move T] -> () = [mut list, move value] => {
-        if (list.*^length < list.*^capacity) {
-            list.*^push value
+        if ((list.* |> length) < (list.* |> capacity)) {
+            list.* |> push value
         } else {
             grow list
-            list.*^push value
+            list.* |> push value
         }
     }
 
     /// Removes and returns the final value, or `None` when empty.
-    pub def pop: mut List T -> Option T = mut list => list.*^pop
+    pub def pop: mut List T -> Option T = mut list => list.* |> pop
 
     /// Returns a reference to the value at an index, or `None` when out of bounds.
     pub def get_ref: [List T, USize] -> Option (Ref T) = [List buffer, index] => {
@@ -79,7 +79,7 @@ companion<T> List T {
     /// Creates a list containing one value.
     pub def singleton: move T -> List T = move value => {
         let mut list: List T = List.with_capacity 1
-        list^push value
+        list |> push value
         list
     }
 
@@ -95,7 +95,7 @@ companion<T> List T {
     // instead.
     /// Appends a value and returns the list handle.
     pub def push_and_return: [mut List T, move T] -> List T = [mut list, move value] => {
-        list^push value
+        list |> push value
         list
     }
 }

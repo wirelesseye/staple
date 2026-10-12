@@ -1958,7 +1958,7 @@ impl Grammar {
             Err(error) => error,
         };
         self.position = checkpoint;
-        let expression = self.parse_or_expression()?;
+        let expression = self.parse_pipe_expression()?;
         if matches!(self.peek(), Some(TokenKind::Arrow | TokenKind::FatArrow)) {
             return Err(function_error);
         }
@@ -2770,6 +2770,124 @@ impl Grammar {
     ];
 
     /// Parses `||` (precedence 1, left-associative) as surface syntax.
+    /// Pipes group complete calls and feed each stage's receiver into slot one.
+    fn parse_pipe_expression(&mut self) -> Result<Expression, ParseError> {
+        let start = self.position;
+        let mut receiver = self.parse_or_expression()?;
+        while !(self.newline_terminates_expression && self.has_newline_before_next_token())
+            && self.eat_operator("|>")
+        {
+            if self.newline_terminates_expression && self.has_newline_before_next_token() {
+                return Err(self.error("expected a method stage on the same statement after `|>`"));
+            }
+            let stage_start = self.position;
+            let stage = self.parse_call_expression()?;
+            if matches!(
+                self.peek(),
+                Some(TokenKind::Plus | TokenKind::Minus | TokenKind::Star | TokenKind::Slash)
+            ) || [
+                "as", "==", "!=", "<", "<=", ">", ">=", "..", "..=", "&&", "||",
+            ]
+            .iter()
+            .any(|op| self.peek_text(op))
+            {
+                return Err(
+                    self.error("pipe stage arguments containing operators must be parenthesized")
+                );
+            }
+            receiver = self.apply_pipe_stage(receiver, stage, start, stage_start)?;
+        }
+        Ok(receiver)
+    }
+
+    fn apply_pipe_stage(
+        &mut self,
+        receiver: Expression,
+        stage: Expression,
+        start: usize,
+        stage_start: usize,
+    ) -> Result<Expression, ParseError> {
+        fn ungroup(expression: Expression) -> Expression {
+            match expression {
+                Expression::Product(mut product)
+                    if product.elements.len() == 1
+                        && product.elements[0].name.is_none()
+                        && !product.elements[0].spread
+                        && !product.elements[0].designated =>
+                {
+                    ungroup(product.elements.remove(0).value)
+                }
+                expression => expression,
+            }
+        }
+        fn split(stage: Expression, arguments: &mut Vec<Expression>) -> Expression {
+            match ungroup(stage) {
+                Expression::Call(call) => {
+                    let head = split(*call.callee, arguments);
+                    arguments.push(*call.argument);
+                    head
+                }
+                head => head,
+            }
+        }
+        fn select(head: Expression, empty: Expression) -> Option<Expression> {
+            match head {
+                Expression::Name(name) => {
+                    let mut syntax = name.syntax;
+                    syntax.pipe_stage = true;
+                    Some(Expression::Access(AccessExpression {
+                        syntax,
+                        value: Box::new(empty),
+                        accessor: Accessor::Method(name.name),
+                    }))
+                }
+                Expression::Access(mut access) if matches!(access.accessor, Accessor::Name(_)) => {
+                    access.syntax.pipe_stage = true;
+                    Some(Expression::Access(access))
+                }
+                Expression::TypeApplication(mut application) => {
+                    application.value = Box::new(select(*application.value, empty)?);
+                    application.syntax.pipe_stage = true;
+                    Some(Expression::TypeApplication(application))
+                }
+                _ => None,
+            }
+        }
+        let mut arguments = Vec::new();
+        let head = split(stage, &mut arguments);
+        // The selector carries no receiver copy: the receiver occurs only in
+        // the first call argument, keeping syntax identities and evaluation unique.
+        let empty = Expression::Product(ProductExpression {
+            syntax: Syntax::synthetic(self.syntax(stage_start).id, head.syntax().span.clone()),
+            elements: Vec::new(),
+        });
+        let head = select(head, empty)
+            .ok_or_else(|| self.error("expected a companion or trait method stage after `|>`"))?;
+        let stage_end = self.position;
+        self.position = head.syntax().token_range.end;
+        let receiver_call_syntax = self.syntax(start);
+        self.position = stage_end;
+        let mut result = Expression::Call(CallExpression {
+            syntax: receiver_call_syntax,
+            callee: Box::new(head),
+            argument: Box::new(receiver),
+        });
+        for argument in arguments {
+            self.position = argument.syntax().token_range.end;
+            let syntax = self.syntax(start);
+            self.position = stage_end;
+            result = Expression::Call(CallExpression {
+                syntax,
+                callee: Box::new(result),
+                argument: Box::new(argument),
+            });
+        }
+        if let Expression::Call(call) = &mut result {
+            call.syntax = self.syntax(start);
+        }
+        Ok(result)
+    }
+
     fn parse_or_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let mut expression = self.parse_and_expression()?;
@@ -3185,24 +3303,6 @@ impl Grammar {
                     syntax: self.syntax(start),
                     value: Box::new(expression),
                     accessor,
-                });
-            } else if self.eat_operator("^") {
-                let method = self
-                    .expect(
-                        TokenKind::Identifier,
-                        "expected companion method name after `^`",
-                    )?
-                    .text;
-                let receiver = expression;
-                let selector = Expression::Access(AccessExpression {
-                    syntax: self.syntax(self.position.saturating_sub(2)),
-                    value: Box::new(receiver.clone()),
-                    accessor: Accessor::Method(method),
-                });
-                expression = Expression::Call(CallExpression {
-                    syntax: self.syntax(start),
-                    callee: Box::new(selector),
-                    argument: Box::new(receiver),
                 });
             } else if !self.has_trivia_before_next_token() && self.eat(TokenKind::LBracket) {
                 let index = self.parse_expression()?;
@@ -4068,6 +4168,7 @@ impl Grammar {
             location: Some(self.location(diagnostic_start)),
         });
         Syntax {
+            pipe_stage: false,
             id,
             span,
             tokens: Arc::clone(&self.tokens),

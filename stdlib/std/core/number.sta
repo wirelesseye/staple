@@ -120,18 +120,18 @@ extern "staple-intrinsic" {
     __f64_gt: (F64, F64) -> Bool
 }
 
-impl Display I8 { fmt = (value, mut formatter) => formatter^write (__i8_to_string value) }
-impl Display I16 { fmt = (value, mut formatter) => formatter^write (__i16_to_string value) }
-impl Display I32 { fmt = (value, mut formatter) => formatter^write (__i32_to_string value) }
-impl Display I64 { fmt = (value, mut formatter) => formatter^write (__i64_to_string value) }
-impl Display U8 { fmt = (value, mut formatter) => formatter^write (__u8_to_string value) }
-impl Display U16 { fmt = (value, mut formatter) => formatter^write (__u16_to_string value) }
-impl Display U32 { fmt = (value, mut formatter) => formatter^write (__u32_to_string value) }
-impl Display U64 { fmt = (value, mut formatter) => formatter^write (__u64_to_string value) }
-impl Display ISize { fmt = (value, mut formatter) => formatter^write (__isize_to_string value) }
-impl Display USize { fmt = (value, mut formatter) => formatter^write (__usize_to_string value) }
-impl Display F32 { fmt = (value, mut formatter) => formatter^write (__f32_to_string value) }
-impl Display F64 { fmt = (value, mut formatter) => formatter^write (__f64_to_string value) }
+impl Display I8 { fmt = (value, mut formatter) => formatter |> write (__i8_to_string value) }
+impl Display I16 { fmt = (value, mut formatter) => formatter |> write (__i16_to_string value) }
+impl Display I32 { fmt = (value, mut formatter) => formatter |> write (__i32_to_string value) }
+impl Display I64 { fmt = (value, mut formatter) => formatter |> write (__i64_to_string value) }
+impl Display U8 { fmt = (value, mut formatter) => formatter |> write (__u8_to_string value) }
+impl Display U16 { fmt = (value, mut formatter) => formatter |> write (__u16_to_string value) }
+impl Display U32 { fmt = (value, mut formatter) => formatter |> write (__u32_to_string value) }
+impl Display U64 { fmt = (value, mut formatter) => formatter |> write (__u64_to_string value) }
+impl Display ISize { fmt = (value, mut formatter) => formatter |> write (__isize_to_string value) }
+impl Display USize { fmt = (value, mut formatter) => formatter |> write (__usize_to_string value) }
+impl Display F32 { fmt = (value, mut formatter) => formatter |> write (__f32_to_string value) }
+impl Display F64 { fmt = (value, mut formatter) => formatter |> write (__f64_to_string value) }
 
 impl Debug I8 { fmt = (value, mut formatter) => Display.fmt (value, formatter) }
 impl Debug I16 { fmt = (value, mut formatter) => Display.fmt (value, formatter) }

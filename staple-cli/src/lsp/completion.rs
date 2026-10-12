@@ -413,26 +413,87 @@ impl Collector<'_> {
         }
     }
 
-    fn register_named_method(&mut self, owner: ModuleId, name: &str, definitions: &[DefinitionId]) {
+    fn pipe_items(
+        &self,
+        owner: ModuleId,
+        receiver: &CheckedType,
+        ty: Option<TypeId>,
+        syntax: Option<SyntaxId>,
+    ) -> Vec<CompletionItem> {
         let mut items = Vec::new();
-        for definition in definitions {
-            let DefinitionId::Symbol(receiver) = definition else {
-                continue;
-            };
-            let Some(ty) = self.typed.companion_type_of_symbol(*receiver) else {
-                continue;
-            };
-            for (member, symbol) in self.typed.resolved().companion_members(ty, Some(owner)) {
-                if self.typed.is_companion_method(symbol, ty)
-                    && let Some(candidate) =
-                        self.definition(member, DefinitionId::Symbol(symbol), 0)
-                {
+        if let Some(ty) = ty {
+            for (name, symbol) in self
+                .typed
+                .pipe_companion_methods(owner, receiver, ty, syntax)
+            {
+                if let Some(candidate) = self.definition(&name, DefinitionId::Symbol(symbol), 0) {
                     items.push(CompletionItem {
                         kind: Some(CompletionItemKind::METHOD),
                         ..candidate.item
                     });
                 }
             }
+        }
+        let companion_names = items
+            .iter()
+            .map(|item| item.label.clone())
+            .collect::<HashSet<_>>();
+        let methods = self.typed.pipe_trait_methods(owner, receiver, syntax);
+        let mut counts = HashMap::new();
+        for method in &methods {
+            let member = self.typed.resolved().trait_method(*method).unwrap();
+            *counts.entry(member.name.clone()).or_insert(0usize) += 1;
+        }
+        for method in methods {
+            let resolved = self.typed.resolved();
+            let member = resolved.trait_method(method).unwrap();
+            if companion_names.contains(&member.name) {
+                continue;
+            }
+            if let Some(candidate) =
+                self.definition(&member.name, DefinitionId::TraitMethod(method), 0)
+            {
+                let trait_id = resolved.trait_for_method(method).unwrap();
+                let owner_name = resolved
+                    .visible_definitions(owner)
+                    .and_then(|definitions| {
+                        definitions.iter().find_map(|(name, definitions)| {
+                            definitions
+                                .contains(&DefinitionId::Trait(trait_id))
+                                .then_some(name)
+                        })
+                    })
+                    .unwrap_or(&resolved.traits()[&trait_id].declaration.name);
+                let mut item = candidate.item;
+                item.label_details = Some(CompletionItemLabelDetails {
+                    detail: None,
+                    description: Some(owner_name.clone()),
+                });
+                if counts[&member.name] > 1 {
+                    item.insert_text = Some(format!("{owner_name}.{}", member.name));
+                }
+                items.push(item);
+            }
+        }
+        items.sort_by(|left, right| left.label.cmp(&right.label));
+        items
+    }
+
+    fn register_named_method(&mut self, owner: ModuleId, name: &str, definitions: &[DefinitionId]) {
+        let mut items = Vec::new();
+        for definition in definitions {
+            let DefinitionId::Symbol(receiver) = definition else {
+                continue;
+            };
+            let Some(receiver_type) = self.typed.type_of_symbol(*receiver) else {
+                continue;
+            };
+            items.extend(self.pipe_items(
+                owner,
+                receiver_type,
+                self.typed.companion_type_of_symbol(*receiver),
+                None,
+            ));
         }
         items.sort_by(|left, right| left.label.cmp(&right.label));
         items.dedup_by(|left, right| left.label == right.label);
@@ -677,25 +738,13 @@ impl Collector<'_> {
 
     fn expression(&mut self, expression: &Expression, module_index: usize) {
         self.qualified_items(expression, module_index);
-        if let Some(ty) = self.typed.companion_type_of_expression(expression) {
-            let accessing_module = Some(self.index.modules[module_index].id);
-            let mut items = self
-                .typed
-                .resolved()
-                .companion_members(ty, accessing_module)
-                .into_iter()
-                .filter_map(|(name, symbol)| {
-                    if !self.typed.is_companion_method(symbol, ty) {
-                        return None;
-                    }
-                    self.definition(name, DefinitionId::Symbol(symbol), 0)
-                        .map(|candidate| CompletionItem {
-                            kind: Some(CompletionItemKind::METHOD),
-                            ..candidate.item
-                        })
-                })
-                .collect::<Vec<_>>();
-            items.sort_by(|left, right| left.label.cmp(&right.label));
+        if let Some(receiver_type) = self.typed.type_of_expression(expression.syntax().id) {
+            let items = self.pipe_items(
+                self.index.modules[module_index].id,
+                receiver_type,
+                self.typed.companion_type_of_expression(expression),
+                Some(expression.syntax().id),
+            );
             if !items.is_empty() {
                 self.index.methods.push(MethodSite {
                     receiver_end: syntax_range(expression.syntax()).end,
@@ -2135,5 +2184,58 @@ mod tests {
             panics[0],
         );
         assert_eq!(panics[0].kind, Some(CompletionItemKind::FUNCTION));
+    }
+    #[test]
+    fn pipe_completion_filters_traits_and_qualifies_collisions() {
+        let source = concat!(
+            "trait First T { choose: T -> I32 }\n",
+            "trait Second T { choose: T -> I32 }\n",
+            "trait Wrong T { unavailable: T -> I32 }\n",
+            "impl First I32 { choose = value => value }\n",
+            "impl Second I32 { choose = value => value }\n",
+            "impl Wrong String { unavailable = _ => 0 }\n",
+            "def bounded: <T where First T> T -> I32 = value => value |> choose\n",
+            "let value = 3\n",
+            "(value)\n",
+        );
+        let path = std::env::temp_dir().join("staple-pipe-completions.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let typed = TypeChecker::new()
+            .check(NameResolver::new().resolve_program(program).unwrap())
+            .unwrap();
+        let module = parse(source).unwrap();
+        let index = index(&module, &typed);
+        let items = index.method_items(source.len() - 1);
+        let choices = items
+            .iter()
+            .filter(|item| item.label == "choose")
+            .collect::<Vec<_>>();
+        assert_eq!(choices.len(), 2, "{items:?}");
+        assert!(
+            choices
+                .iter()
+                .any(|item| item.insert_text.as_deref() == Some("First.choose"))
+        );
+        assert!(
+            choices
+                .iter()
+                .any(|item| item.insert_text.as_deref() == Some("Second.choose"))
+        );
+        assert!(!items.iter().any(|item| item.label == "unavailable"));
+        let generic_end = source.find("value |> choose").unwrap() + "value".len();
+        assert!(
+            index
+                .method_items(generic_end)
+                .iter()
+                .any(|item| item.label == "choose")
+        );
     }
 }

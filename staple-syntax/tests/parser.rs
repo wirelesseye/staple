@@ -324,7 +324,7 @@ fn parses_float_literals_losslessly_without_stealing_access_dots() {
 
 #[test]
 fn lexes_only_the_fixed_operator_vocabulary() {
-    let source = "..= && || == != <= >= .. <: ? | < > ^ *^ *. ++ %";
+    let source = "|> ..= && || == != <= >= .. <: ? | < > ^ *^ *. ++ %";
     let tokens = staple_syntax::lex(source)
         .into_iter()
         .filter(|token| !token.kind.is_trivia())
@@ -333,6 +333,7 @@ fn lexes_only_the_fixed_operator_vocabulary() {
     assert_eq!(
         tokens,
         [
+            (TokenKind::Operator, "|>"),
             (TokenKind::Operator, "..="),
             (TokenKind::Operator, "&&"),
             (TokenKind::Operator, "||"),
@@ -346,9 +347,9 @@ fn lexes_only_the_fixed_operator_vocabulary() {
             (TokenKind::Operator, "|"),
             (TokenKind::Operator, "<"),
             (TokenKind::Operator, ">"),
-            (TokenKind::Operator, "^"),
+            (TokenKind::Unknown, "^"),
             (TokenKind::Star, "*"),
-            (TokenKind::Operator, "^"),
+            (TokenKind::Unknown, "^"),
             (TokenKind::Star, "*"),
             (TokenKind::Dot, "."),
             (TokenKind::Plus, "+"),
@@ -361,7 +362,7 @@ fn lexes_only_the_fixed_operator_vocabulary() {
 
 #[test]
 fn parses_nominal_representation_access_losslessly() {
-    let source = "user.*\nuser.*.name\nouter.*.*.0\nlist.*^length\n";
+    let source = "user.*\nuser.*.name\nouter.*.*.0\nlist.* |> length\n";
     let root = parse(source).expect("representation access should parse");
     assert_eq!(root.text(), source);
     assert!(matches!(
@@ -394,7 +395,7 @@ fn parses_nominal_representation_access_losslessly() {
         call.callee.as_ref(),
         Expression::Access(method)
             if method.accessor == Accessor::Method("length".into())
-                && matches!(method.value.as_ref(), Expression::Access(representation)
+                && matches!(call.argument.as_ref(), Expression::Access(representation)
                     if representation.accessor == Accessor::Representation)
     ));
     assert!(parse("user.+\n").is_err());
@@ -1557,8 +1558,8 @@ fn parses_type_companion_blocks_losslessly() {
 }
 
 #[test]
-fn parses_companion_method_calls_at_postfix_precedence() {
-    let source = "animal^move_to (1.0, 1.0)\n";
+fn parses_pipe_method_calls_below_application_precedence() {
+    let source = "animal |> move_to (1.0, 1.0)\n";
     let root = parse(source).expect("companion method call should parse");
     assert_eq!(root.text(), source);
     let Item::Expression(Expression::Call(call)) = &root.items[0] else {
@@ -3281,4 +3282,71 @@ fn forall_annotations_are_storage_types_only_on_ordinary_lets() {
         error.message,
         "generic function types are not supported in signal bindings"
     );
+}
+
+#[test]
+fn pipe_stages_group_calls_and_bind_below_binary_operators() {
+    let source = "value |> method_a 1 |> method_b 2\n";
+    let module = parse(source).unwrap();
+    assert_eq!(module.text(), source);
+    fn unique_ids(
+        expression: &Expression,
+        ids: &mut std::collections::HashSet<staple_syntax::SyntaxId>,
+    ) {
+        assert!(
+            ids.insert(expression.syntax().id),
+            "duplicate expression syntax ID"
+        );
+        match expression {
+            Expression::Call(call) => {
+                unique_ids(&call.callee, ids);
+                unique_ids(&call.argument, ids);
+            }
+            Expression::Access(access) => unique_ids(&access.value, ids),
+            Expression::Product(product) => {
+                for element in &product.elements {
+                    unique_ids(&element.value, ids);
+                }
+            }
+            _ => {}
+        }
+    }
+    let Item::Expression(expression) = &module.items[0] else {
+        panic!()
+    };
+    unique_ids(expression, &mut std::collections::HashSet::new());
+    let Item::Expression(Expression::Call(second_arg)) = &module.items[0] else {
+        panic!()
+    };
+    let Expression::Call(second) = second_arg.callee.as_ref() else {
+        panic!()
+    };
+    assert!(
+        matches!(second.callee.as_ref(), Expression::Access(access) if access.accessor == Accessor::Method("method_b".into()))
+    );
+    let Expression::Call(first_arg) = second.argument.as_ref() else {
+        panic!()
+    };
+    let Expression::Call(first) = first_arg.callee.as_ref() else {
+        panic!()
+    };
+    assert!(matches!(first.argument.as_ref(), Expression::Name(name) if name.name == "value"));
+    for source in [
+        "a + b |> method\n",
+        "a || b |> method\n",
+        "value |> (method 1) |> Trait.other 2\n",
+        "value|>method (1 + 2)\n",
+        "value |> method.<I32> 1\n",
+    ] {
+        assert!(parse(source).is_ok(), "{source}");
+    }
+    for source in [
+        "value^method\n",
+        "value |> 1\n",
+        "value |> method 1 + 2\n",
+        "value |>\n",
+        "value |>\nmethod\n",
+    ] {
+        assert!(parse(source).is_err(), "{source}");
+    }
 }

@@ -2273,6 +2273,162 @@ impl TypedModule {
             .or_else(|| self.type_of_symbol(symbol).and_then(checked_type_id))
     }
 
+    fn pipe_completion_checker(&self, syntax: Option<SyntaxId>) -> TypeChecker {
+        let mut checker = TypeChecker {
+            trait_method_types: self.trait_method_types.clone(),
+            trait_member_schemes: self.trait_member_schemes.clone(),
+            trait_parameter_arguments: self.trait_parameter_arguments.clone(),
+            trait_functional_dependencies: self.trait_functional_dependencies.clone(),
+            trait_prerequisites: self.trait_prerequisites.clone(),
+            trait_implementations: self.trait_implementations.clone(),
+            copy_trait: self.copy_trait,
+            debug_trait: self.debug_trait,
+            sized_trait: self.resolved.standard_trait("Sized"),
+            index_trait: self.index_trait,
+            mutate_index_trait: self.mutate_index_trait,
+            into_iterator_trait: self.into_iterator_trait,
+            iterator_trait: self.iterator_trait,
+            ..TypeChecker::default()
+        };
+        if let Some(syntax) = syntax {
+            let mut owner = self.resolved.expression_function_owner(syntax);
+            while let Some(function) = owner {
+                checker
+                    .active_function_bounds
+                    .push(self.bounds_of_function(function).to_vec());
+                owner = self.resolved.function_parent(function);
+            }
+        }
+        checker
+    }
+
+    /// Accessible companion functions whose receiver and known bounds match.
+    pub fn pipe_companion_methods(
+        &self,
+        owner: ModuleId,
+        receiver: &CheckedType,
+        ty: TypeId,
+        syntax: Option<SyntaxId>,
+    ) -> Vec<(String, SymbolId)> {
+        let mut checker = self.pipe_completion_checker(syntax);
+        checker
+            .active_generic_parameters
+            .push(type_parameter_ids(receiver));
+        let mut methods = Vec::new();
+        for (name, symbol) in self.resolved.companion_members(ty, Some(owner)) {
+            let Some(raw) = self.symbol_types.get(&symbol) else {
+                continue;
+            };
+            let CheckedType::Function(function) = raw.scheme_body() else {
+                continue;
+            };
+            let parameter = match (function.parameter_style, function.parameter.as_ref()) {
+                (
+                    staple_syntax::FunctionParameterStyle::Juxtaposed,
+                    CheckedType::Product(product),
+                ) => {
+                    let Some(first) = product.elements.first() else {
+                        continue;
+                    };
+                    &first.value_type
+                }
+                _ => function.parameter.as_ref(),
+            };
+            let mut substitutions = HashMap::new();
+            if !infer_type_parameters(parameter, receiver, &mut substitutions) {
+                continue;
+            }
+            let (bounds, subtype_bounds) = match raw {
+                CheckedType::Forall(scheme) => {
+                    (scheme.trait_bounds.clone(), scheme.subtype_bounds.clone())
+                }
+                _ => (Vec::new(), Vec::new()),
+            };
+            checker.diagnostics.clear();
+            checker.check_substituted_bounds(
+                bounds,
+                subtype_bounds,
+                &substitutions,
+                Span::Compiler,
+            );
+            if checker.diagnostics.is_empty() {
+                methods.push((name.to_owned(), symbol));
+            }
+        }
+        methods
+    }
+
+    /// Receiver-compatible trait functions visible at a pipe completion site.
+    pub fn pipe_trait_methods(
+        &self,
+        owner: ModuleId,
+        receiver: &CheckedType,
+        syntax: Option<SyntaxId>,
+    ) -> Vec<TraitMethodId> {
+        let mut checker = self.pipe_completion_checker(syntax);
+        checker
+            .active_generic_parameters
+            .push(type_parameter_ids(receiver));
+        let mut methods = Vec::new();
+        if let Some(definitions) = self.resolved.visible_definitions(owner) {
+            for definition in definitions.values().flatten() {
+                let DefinitionId::TraitMethod(method) = definition else {
+                    continue;
+                };
+                let Some(CheckedType::Function(function)) = self.trait_method_types.get(method)
+                else {
+                    continue;
+                };
+                let parameter = match (function.parameter_style, function.parameter.as_ref()) {
+                    (
+                        staple_syntax::FunctionParameterStyle::Juxtaposed,
+                        CheckedType::Product(product),
+                    ) => {
+                        let Some(first) = product.elements.first() else {
+                            continue;
+                        };
+                        &first.value_type
+                    }
+                    _ => function.parameter.as_ref(),
+                };
+                let mut substitutions = HashMap::new();
+                if !infer_type_parameters(parameter, receiver, &mut substitutions) {
+                    continue;
+                }
+                let trait_id = self.resolved.trait_for_method(*method).unwrap();
+                for argument in &self.trait_parameter_arguments[&trait_id] {
+                    for id in type_parameter_ids(argument) {
+                        substitutions.entry(id).or_insert(CheckedType::Inferred);
+                    }
+                }
+                let arguments = self.trait_parameter_arguments[&trait_id]
+                    .iter()
+                    .map(|argument| substitute_type(argument.clone(), &substitutions))
+                    .collect::<Vec<_>>();
+                if let Some(arguments) = checker.resolve_trait_obligation(trait_id, &arguments) {
+                    substitutions.extend(trait_parameter_values(
+                        &self.trait_parameter_arguments[&trait_id],
+                        &arguments,
+                    ));
+                    let scheme = &self.trait_member_schemes[method];
+                    checker.diagnostics.clear();
+                    checker.check_substituted_bounds(
+                        scheme.trait_bounds.iter().skip(1).cloned().collect(),
+                        scheme.subtype_bounds.clone(),
+                        &substitutions,
+                        Span::Compiler,
+                    );
+                    if checker.diagnostics.is_empty() {
+                        methods.push(*method);
+                    }
+                }
+            }
+        }
+        methods.sort_by_key(|method| method.0);
+        methods.dedup();
+        methods
+    }
+
     pub fn is_companion_method(&self, symbol: SymbolId, receiver: TypeId) -> bool {
         let Some(CheckedType::Function(function)) = self.type_of_symbol(symbol) else {
             return false;
@@ -2489,6 +2645,7 @@ fn scheme_names_projection(scheme: &CheckedScheme) -> bool {
 /// A synthesized type parameter standing for `Trait.Name arguments` where the
 /// arguments mention type parameters. The matching declared bound
 /// `Trait arguments` is later rewritten to carry it as the associated type.
+#[derive(Clone)]
 struct ProjectionParameter {
     trait_id: TraitId,
     associated: usize,
@@ -2499,8 +2656,17 @@ struct ProjectionParameter {
     linked: bool,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Copy)]
+enum PipeTarget {
+    Companion(SymbolId),
+    Trait(TraitMethodId),
+}
+
+#[derive(Default, Clone)]
 pub struct TypeChecker {
+    pipe_targets: HashMap<SyntaxId, PipeTarget>,
+    /// Receivers already checked by the enclosing stage's candidate probe.
+    pipe_receivers: HashSet<SyntaxId>,
     direct_callee_syntax: HashSet<SyntaxId>,
     expression_types: HashMap<SyntaxId, CheckedType>,
     product_default_plans: HashMap<SyntaxId, CheckedProductDefaultPlan>,
@@ -8182,6 +8348,11 @@ impl TypeChecker {
         expression: &Expression,
         expected: Option<&CheckedType>,
     ) -> CheckedType {
+        if self.pipe_receivers.contains(&expression.syntax().id)
+            && let Some(actual) = self.expression_types.get(&expression.syntax().id).cloned()
+        {
+            return self.finish_expression_type(expression, actual, expected);
+        }
         if let Some(CheckedType::Forall(scheme)) = expected {
             self.active_generic_parameters.push(scheme.bound_ids());
             self.active_function_bounds
@@ -8260,8 +8431,10 @@ impl TypeChecker {
         }
         // `Drop.cleanup` only borrows its value, so calling it directly would
         // run the destructor again when the value is dropped normally.
-        let methods = module.trait_methods_for_expression(referenced.syntax().id);
+        let methods = self.pipe_trait_candidates(module, referenced.syntax().id);
         if !methods.is_empty()
+            && (!referenced.syntax().pipe_stage
+                || self.pipe_targets.contains_key(&referenced.syntax().id))
             && let Some(drop) = self.drop_trait.and_then(|id| module.traits().get(&id))
             && methods.iter().all(|method| drop.methods.contains(method))
         {
@@ -8357,9 +8530,7 @@ impl TypeChecker {
             self.expression_types.insert(syntax.id, value_type.clone());
             return value_type;
         }
-        let mut trait_methods = module
-            .trait_methods_for_expression(expression.syntax().id)
-            .to_vec();
+        let mut trait_methods = self.pipe_trait_candidates(module, expression.syntax().id);
         if trait_methods.len() > 1
             && let Some(expected_arity) = expected.and_then(function_outer_arity)
         {
@@ -8823,9 +8994,14 @@ impl TypeChecker {
                 }
             }
             Expression::Call(call) => {
+                let (root, _) = call_chain_root_and_arity(expression);
+                if root.syntax().pipe_stage && !self.pipe_targets.contains_key(&root.syntax().id) {
+                    return self.check_pipe_stage(module, expression, expected);
+                }
                 if let Expression::TypeApplication(application) = call.callee.as_ref()
-                    && let [method] =
-                        module.trait_methods_for_expression(application.value.syntax().id)
+                    && let [method] = self
+                        .pipe_trait_candidates(module, application.value.syntax().id)
+                        .as_slice()
                     && let CheckedType::Function(template) = self.trait_method_types[method].clone()
                 {
                     let argument = self.check_expression(module, &call.argument);
@@ -8854,7 +9030,7 @@ impl TypeChecker {
                 }
                 let (call_root, supplied_arguments) = call_chain_root_and_arity(expression);
                 let root_syntax = call_root.syntax().id;
-                let trait_candidates = module.trait_methods_for_expression(root_syntax);
+                let trait_candidates = self.pipe_trait_candidates(module, root_syntax);
                 if let Some(selected_arity) = trait_candidates
                     .first()
                     .and_then(|method| self.trait_method_types.get(method))
@@ -8889,6 +9065,24 @@ impl TypeChecker {
                             .collect(),
                         variadic: false,
                     });
+                    if let Expression::TypeApplication(application) = call_root
+                        && call_root.syntax().pipe_stage
+                        && let Some(method) = methods.first()
+                        && let CheckedType::Function(mut expected_function) =
+                            self.trait_method_types[method].clone()
+                    {
+                        expected_function.parameter = Box::new(product_type.clone());
+                        expected_function.result =
+                            Box::new(expected.cloned().unwrap_or(CheckedType::Inferred));
+                        if self.check_explicit_type_application(
+                            module,
+                            application,
+                            Some(&CheckedType::Function(expected_function)),
+                        ) == CheckedType::Error
+                        {
+                            return CheckedType::Error;
+                        }
+                    }
                     let selected_type = self.resolve_trait_method_use(
                         module,
                         root_syntax,
@@ -8935,6 +9129,10 @@ impl TypeChecker {
                 }
                 if let Expression::Access(selector) = call.callee.as_ref()
                     && let Accessor::Method(method) = &selector.accessor
+                    && !matches!(
+                        self.pipe_targets.get(&selector.syntax.id),
+                        Some(PipeTarget::Trait(_))
+                    )
                 {
                     let receiver_type = self.check_expression(module, &call.argument);
                     if self.did_return {
@@ -9046,9 +9244,7 @@ impl TypeChecker {
                     }
                     CheckedType::CString
                 } else {
-                    let trait_methods = module
-                        .trait_methods_for_expression(call.callee.syntax().id)
-                        .to_vec();
+                    let trait_methods = self.pipe_trait_candidates(module, call.callee.syntax().id);
                     let trait_methods = trait_methods.as_slice();
                     if !trait_methods.is_empty() {
                         if matches!(call.argument.as_ref(), Expression::Block(_)) {
@@ -10254,6 +10450,18 @@ impl TypeChecker {
                 }
             }
             Expression::Access(access) => {
+                if let Some(PipeTarget::Companion(symbol)) =
+                    self.pipe_targets.get(&access.syntax.id).copied()
+                {
+                    self.ensure_binding_checked(module, symbol);
+                    self.method_symbols.insert(access.syntax.id, symbol);
+                    let raw = self
+                        .symbol_types
+                        .get(&symbol)
+                        .cloned()
+                        .unwrap_or(CheckedType::Error);
+                    return self.finish_expression_type(expression, raw, expected);
+                }
                 if let Some(symbol) = module.symbol_for(access.syntax.id) {
                     self.ensure_binding_checked(module, symbol);
                     if let Some(function_id) = self.function_symbols.get(&symbol).copied() {
@@ -12951,10 +13159,25 @@ impl TypeChecker {
             ));
             return CheckedType::Error;
         }
-        let methods = module.trait_methods_for_expression(application.value.syntax().id);
-        let symbol = module.symbol_for(application.syntax.id);
+        let methods = self.pipe_trait_candidates(module, application.value.syntax().id);
+        let symbol = module
+            .symbol_for(application.syntax.id)
+            .or_else(|| {
+                self.method_symbols
+                    .get(&application.value.syntax().id)
+                    .copied()
+            })
+            .or_else(
+                || match self.pipe_targets.get(&application.value.syntax().id) {
+                    Some(PipeTarget::Companion(symbol)) => Some(*symbol),
+                    _ => None,
+                },
+            );
+        if let Some(symbol) = symbol {
+            self.method_symbols.insert(application.syntax.id, symbol);
+        }
         let mut value_scheme = None;
-        let (raw, parameters) = if let [method] = methods {
+        let (raw, parameters) = if let [method] = methods.as_slice() {
             let parameters: Vec<_> = self.trait_member_schemes[method]
                 .parameters
                 .iter()
@@ -13060,7 +13283,7 @@ impl TypeChecker {
             return self.resolve_trait_method_use(
                 module,
                 application.syntax.id,
-                methods,
+                &methods,
                 Some(&expected.parameter),
                 None,
                 application.syntax.span.clone(),
@@ -13117,7 +13340,7 @@ impl TypeChecker {
             return self.resolve_trait_method_use(
                 module,
                 application.syntax.id,
-                methods,
+                &methods,
                 None,
                 Some(&instantiated),
                 application.syntax.span.clone(),
@@ -13320,9 +13543,7 @@ impl TypeChecker {
         template: &CheckedType,
         instantiated: CheckedType,
     ) -> CheckedType {
-        let is_placeholder = |argument: &CheckedType| {
-            matches!(argument, CheckedType::Parameter { id, .. } if id.0 >= PROJECTION_PARAMETER_BASE)
-        };
+        let is_placeholder = |argument: &CheckedType| matches!(argument, CheckedType::Parameter { id, .. } if id.0 >= PROJECTION_PARAMETER_BASE);
         if !bounds
             .iter()
             .any(|bound| bound.arguments.iter().any(is_placeholder))
@@ -13352,7 +13573,9 @@ impl TypeChecker {
             if arguments
                 .iter()
                 .zip(&bound.arguments)
-                .any(|(argument, original)| !is_placeholder(original) && contains_inferred_type(argument))
+                .any(|(argument, original)| {
+                    !is_placeholder(original) && contains_inferred_type(argument)
+                })
             {
                 continue;
             }
@@ -13503,7 +13726,186 @@ impl TypeChecker {
         instantiated
     }
 
-    /// Seeds a juxtaposed call plan for `receiver^method` where the companion
+    fn pipe_trait_candidates(
+        &self,
+        module: &ResolvedModule,
+        syntax: SyntaxId,
+    ) -> Vec<TraitMethodId> {
+        match self.pipe_targets.get(&syntax) {
+            Some(PipeTarget::Companion(_)) => Vec::new(),
+            Some(PipeTarget::Trait(method)) => vec![*method],
+            None => module.trait_methods_for_expression(syntax).to_vec(),
+        }
+    }
+
+    /// Check a complete stage, committing only a uniquely compatible candidate.
+    /// The common single-candidate case needs no speculative checker copies.
+    fn check_pipe_stage(
+        &mut self,
+        module: &ResolvedModule,
+        expression: &Expression,
+        expected: Option<&CheckedType>,
+    ) -> CheckedType {
+        let (root, arguments) = call_chain_root_and_arguments(expression);
+        let selector = match root {
+            Expression::TypeApplication(application) => application.value.as_ref(),
+            root => root,
+        };
+        let Expression::Access(access) = selector else {
+            unreachable!("parser validates pipe heads")
+        };
+        let receiver = arguments[0];
+        let diagnostic_start = self.diagnostics.len();
+        let receiver_type = self.check_expression(module, receiver);
+        if self.did_return {
+            return CheckedType::empty_product();
+        }
+        self.pipe_receivers.insert(receiver.syntax().id);
+        let mut companions = Vec::new();
+        let traits = module
+            .trait_methods_for_expression(access.syntax.id)
+            .to_vec();
+        if let Accessor::Method(name) = &access.accessor {
+            if let Some(ty) = self
+                .companion_type_for_expression(module, receiver)
+                .or_else(|| checked_type_id(&receiver_type))
+                && let Some(symbol) =
+                    module.companion_member(ty, name, self.checking_modules.last().copied())
+            {
+                companions.push(symbol);
+            }
+        } else if let Some(symbol) = module.symbol_for(access.syntax.id)
+            && module
+                .symbol_module(symbol)
+                .and_then(|owner| module.companion_type_for_module(owner))
+                .is_some()
+        {
+            companions.push(symbol);
+        }
+        if companions.len() + traits.len() == 1 {
+            let target = companions
+                .first()
+                .map(|symbol| PipeTarget::Companion(*symbol))
+                .unwrap_or_else(|| PipeTarget::Trait(traits[0]));
+            return self.check_pipe_candidate(module, expression, expected, target);
+        }
+        if companions.is_empty() && traits.is_empty() {
+            self.pipe_receivers.remove(&receiver.syntax().id);
+            self.diagnostics.push(Diagnostic::new(
+                access.syntax.span.clone(),
+                if matches!(access.accessor, Accessor::Method(_)) {
+                    "no compatible accessible companion or visible trait method"
+                } else {
+                    "a qualified pipe stage must select a companion or trait function"
+                },
+            ));
+            return CheckedType::Error;
+        }
+        let base = self.clone();
+        let mut failed = None;
+        for symbol in companions {
+            let mut trial = base.clone();
+            let actual = trial.check_pipe_candidate(
+                module,
+                expression,
+                expected,
+                PipeTarget::Companion(symbol),
+            );
+            if actual != CheckedType::Error && trial.diagnostics.len() == diagnostic_start {
+                *self = trial;
+                return actual;
+            }
+            failed = Some(trial);
+        }
+        let mut matches = Vec::new();
+        for method in traits {
+            let mut trial = base.clone();
+            let actual =
+                trial.check_pipe_candidate(module, expression, expected, PipeTarget::Trait(method));
+            if actual != CheckedType::Error && trial.diagnostics.len() == diagnostic_start {
+                matches.push((trial, actual));
+            } else if failed.is_none() {
+                failed = Some(trial);
+            }
+        }
+        self.pipe_receivers.remove(&receiver.syntax().id);
+        if matches.len() == 1 {
+            let (trial, actual) = matches.pop().unwrap();
+            *self = trial;
+            return actual;
+        }
+        if matches.len() > 1 {
+            self.diagnostics.push(Diagnostic::new(
+                access.syntax.span.clone(),
+                "ambiguous trait method; qualify the trait name",
+            ));
+        } else if let Some(trial) = failed {
+            *self = trial;
+        }
+        CheckedType::Error
+    }
+
+    fn check_pipe_candidate(
+        &mut self,
+        module: &ResolvedModule,
+        expression: &Expression,
+        expected: Option<&CheckedType>,
+        target: PipeTarget,
+    ) -> CheckedType {
+        let (root, arguments) = call_chain_root_and_arguments(expression);
+        let selector = match root {
+            Expression::TypeApplication(application) => application.value.as_ref(),
+            root => root,
+        };
+        self.pipe_targets.insert(root.syntax().id, target);
+        self.pipe_targets.insert(selector.syntax().id, target);
+        self.direct_callee_syntax.insert(selector.syntax().id);
+        let actual = self.check_expression_expected(module, expression, expected);
+        if let PipeTarget::Trait(method) = target
+            && let Some(CheckedType::Function(function)) = self.trait_method_types.get(&method)
+            && function.parameter_style == staple_syntax::FunctionParameterStyle::Juxtaposed
+            && let CheckedType::Product(product) = function.parameter.as_ref()
+            && arguments.len()
+                < product
+                    .elements
+                    .iter()
+                    .rposition(|slot| slot.default.is_none())
+                    .map_or(0, |index| index + 1)
+        {
+            self.diagnostics.push(Diagnostic::new(
+                expression.syntax().span.clone(),
+                "incomplete juxtaposed pipe stage",
+            ));
+        }
+        let mut spine = expression;
+        while let Expression::Call(call) = spine {
+            if let Some(plan) = self.juxtaposed_call_plans.get(&call.syntax.id)
+                && let CheckedType::Product(product) = plan.function.parameter.as_ref()
+                && plan.arguments.len() < product.elements.len()
+                && !self.continued_juxtaposed_calls.contains(&call.syntax.id)
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    expression.syntax().span.clone(),
+                    "incomplete juxtaposed pipe stage",
+                ));
+            }
+            spine = &call.callee;
+        }
+        if root.syntax().id != selector.syntax().id {
+            if let Some(dispatch) = self.trait_dispatches.get(&root.syntax().id).cloned() {
+                self.trait_dispatches.insert(selector.syntax().id, dispatch);
+            }
+            if let Some(ty) = self.expression_types.get(&root.syntax().id).cloned() {
+                self.expression_types.insert(selector.syntax().id, ty);
+            }
+        }
+        self.pipe_targets.remove(&root.syntax().id);
+        self.pipe_targets.remove(&selector.syntax().id);
+        self.pipe_receivers.remove(&arguments[0].syntax().id);
+        actual
+    }
+
+    /// Seeds a juxtaposed call plan for `receiver |> method` where the companion
     /// `method` is a non-curried juxtaposed function. The receiver fills the
     /// first slot; the ordinary juxtaposed continuation logic then consumes the
     /// remaining slots from the following application chain. Returns the residual

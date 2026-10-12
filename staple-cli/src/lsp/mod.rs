@@ -183,7 +183,7 @@ fn initialize(connection: &Connection) -> Result<(), String> {
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         completion_provider: Some(CompletionOptions {
             resolve_provider: Some(true),
-            trigger_characters: Some(vec!["^".to_owned(), ".".to_owned()]),
+            trigger_characters: Some(vec![">".to_owned(), ".".to_owned()]),
             all_commit_characters: None,
             work_done_progress_options: WorkDoneProgressOptions::default(),
             completion_item: None,
@@ -279,6 +279,15 @@ impl Server {
                 .get(uri)
                 .and_then(|document| {
                     let offset = semantic::offset(&document.text, requested_position)?;
+                    if params
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.trigger_character.as_deref())
+                        == Some(">")
+                        && !document.text.get(..offset)?.ends_with("|>")
+                    {
+                        return Some(Vec::new());
+                    }
                     let successful = document.last_successful.as_ref()?;
                     let previous_offset =
                         TextChange::between(&successful.source, &document.text).old_offset(offset);
@@ -964,24 +973,33 @@ fn completion_receiver(text: &str, offset: usize) -> Option<(usize, bool, &str)>
     let before_cursor = text.get(..offset)?;
     let line_start = before_cursor.rfind('\n').map_or(0, |index| index + 1);
     let line = &before_cursor[line_start..];
-    let separator = line.rfind(['^', '.'])?;
-    let prefix = &line[separator + 1..];
+    let pipe = line.rfind("|>");
+    let dot = line.rfind('.');
+    let (separator, width, qualified) = match (pipe, dot) {
+        (Some(pipe), Some(dot)) if dot > pipe => (dot, 1, true),
+        (Some(pipe), _) => (pipe, 2, false),
+        (None, Some(dot)) => (dot, 1, true),
+        _ => return None,
+    };
+    let prefix = &line[separator + width..];
+    let prefix = if qualified {
+        prefix
+    } else {
+        prefix.trim_start()
+    };
     if prefix
         .chars()
         .all(|character| character == '_' || character.is_alphanumeric())
         && separator > 0
     {
-        let receiver = line[..separator]
-            .trim_end()
+        let receiver_text = line[..separator].trim_end();
+        let receiver_end = line_start + receiver_text.len();
+        let receiver = receiver_text
             .rsplit_once(|character: char| {
                 !(character == '_' || character == '.' || character.is_alphanumeric())
             })
-            .map_or(line[..separator].trim_end(), |(_, receiver)| receiver);
-        Some((
-            line_start + separator,
-            line.as_bytes()[separator] == b'.',
-            receiver,
-        ))
+            .map_or(receiver_text, |(_, receiver)| receiver);
+        Some((receiver_end, qualified, receiver))
     } else {
         None
     }
@@ -1877,7 +1895,17 @@ mod tests {
             result.capabilities.definition_provider,
             Some(OneOf::Left(true))
         );
-        assert!(result.capabilities.completion_provider.is_some());
+        assert_eq!(
+            result
+                .capabilities
+                .completion_provider
+                .as_ref()
+                .unwrap()
+                .trigger_characters
+                .as_ref()
+                .unwrap(),
+            &[">", "."]
+        );
         assert!(result.capabilities.signature_help_provider.is_some());
         client
             .sender
@@ -2435,5 +2463,88 @@ mod tests {
                     if action.title == "Import `println` from `std.io`")),
             "actions: {actions:?}"
         );
+    }
+    #[test]
+    fn pipe_completion_detects_whitespace_and_complete_receivers() {
+        for text in [
+            "value |> ",
+            "value |> met",
+            "(make ()) |> ",
+            "value |> first 1 |> ",
+        ] {
+            let (receiver_end, qualified, _) = completion_receiver(text, text.len()).unwrap();
+            assert!(!qualified);
+            assert_eq!(receiver_end, text.rfind("|>").unwrap() - 1);
+        }
+        let text = "value |> Trait.met";
+        assert!(completion_receiver(text, text.len()).unwrap().1);
+        assert!(completion_receiver("value >", 7).is_none());
+        assert!(completion_receiver("value^", 6).is_none());
+    }
+    #[test]
+    fn pipe_completion_uses_cached_chain_types_and_ignores_comparisons() {
+        let root = std::env::temp_dir().join(format!("staple-lsp-pipes-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = concat!(
+            "type Wrapped = wrap I32\n",
+            "companion Wrapped { pub def first: Wrapped -> I32 -> I32 = Wrapped value => n => value + n }\n",
+            "trait Last T { last: T -> I32 }\n",
+            "impl Last I32 { last = value => value }\n",
+            "let value = Wrapped 2\n",
+            "(value |> first 1)\n",
+        );
+        std::fs::write(root.join("main.sta"), source).unwrap();
+        let uri = path_to_uri(&std::fs::canonicalize(root.join("main.sta")).unwrap()).unwrap();
+        let (connection, client) = Connection::memory();
+        let mut server = Server {
+            connection,
+            documents: HashMap::from([(
+                uri.clone(),
+                Document {
+                    text: source.to_owned(),
+                    version: 1,
+                    ..Document::default()
+                },
+            )]),
+            published_by_root: HashMap::new(),
+            stdlib: Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            ),
+        };
+        server.analyze(&uri).unwrap();
+        assert!(server.documents[&uri].last_successful.is_some());
+        for (id, suffix, trigger, expect_method) in [
+            (1, " |>", true, true),
+            (2, " |> la", false, true),
+            (3, " >", true, false),
+        ] {
+            let text = format!("{}{suffix}", source.trim_end());
+            server.documents.get_mut(&uri).unwrap().text = text.clone();
+            let (line, character) = semantic::position(&text, text.len());
+            server.request(Request {
+                id: id.into(), method: Completion::METHOD.to_owned(),
+                params: serde_json::json!({
+                    "textDocument": { "uri": uri }, "position": { "line": line, "character": character },
+                    "context": if trigger { serde_json::json!({"triggerKind": 2, "triggerCharacter": ">"}) } else { serde_json::json!({"triggerKind": 1}) },
+                }),
+            }).unwrap();
+            let response = loop {
+                if let Message::Response(response) = recv(&client) {
+                    break response;
+                }
+            };
+            let items: Vec<CompletionItem> =
+                serde_json::from_value(response.response_result.unwrap()).unwrap();
+            if expect_method {
+                assert!(items.iter().any(|item| item.label == "last"), "{items:?}");
+                assert!(!items.iter().any(|item| item.label == "first"));
+            } else {
+                assert!(items.is_empty(), "{items:?}");
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

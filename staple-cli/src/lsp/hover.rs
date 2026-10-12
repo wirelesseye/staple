@@ -1383,6 +1383,24 @@ impl Collector<'_> {
             Expression::TypeApplication(application) => application.value.syntax().id,
             _ => expression.syntax().id,
         };
+        let selected_method = self
+            .typed
+            .trait_dispatch_for(expression.syntax().id)
+            .or_else(|| self.typed.trait_dispatch_for(method_syntax))
+            .map(|dispatch| dispatch.method)
+            .or_else(|| {
+                self.typed
+                    .symbol_for(expression.syntax().id)
+                    .is_none()
+                    .then(|| {
+                        self.typed
+                            .resolved()
+                            .trait_methods_for_expression(method_syntax)
+                            .first()
+                            .copied()
+                    })
+                    .flatten()
+            });
         let expression_type = self
             .typed
             .type_of_expression(expression.syntax().id)
@@ -1393,11 +1411,8 @@ impl Collector<'_> {
                     .and_then(|symbol| self.typed.declared_type_of_symbol(symbol))
             })
             .or_else(|| {
-                self.typed
-                    .resolved()
-                    .trait_methods_for_expression(method_syntax)
-                    .first()
-                    .and_then(|method| self.typed.scheme_of_trait_member(*method))
+                selected_method
+                    .and_then(|method| self.typed.scheme_of_trait_member(method))
                     .cloned()
                     .map(|scheme| CheckedType::Forall(Box::new(scheme)))
             });
@@ -1418,17 +1433,12 @@ impl Collector<'_> {
             let declared_type = symbol
                 .and_then(|symbol| self.typed.type_of_symbol(symbol))
                 .map(|ty| self.display_type(ty));
-            let trait_member = self
-                .typed
-                .resolved()
-                .trait_methods_for_expression(method_syntax)
-                .first()
-                .and_then(|method| {
-                    self.typed
-                        .resolved()
-                        .trait_method(*method)
-                        .map(|member| (*method, member))
-                });
+            let trait_member = selected_method.and_then(|method| {
+                self.typed
+                    .resolved()
+                    .trait_method(method)
+                    .map(|member| (method, member))
+            });
             let instantiation = declaration.as_ref().and_then(|declaration| {
                 if matches!(expression_type, Some(CheckedType::Forall(_))) {
                     return None;

@@ -17,7 +17,7 @@ pub typegroup Bool {
 pub use Bool.*
 
 impl Display Bool {
-    fmt = (value, mut formatter) => formatter^write (if value { "True" } else { "False" })
+    fmt = (value, mut formatter) => formatter |> write (if value { "True" } else { "False" })
 }
 
 impl Debug Bool {

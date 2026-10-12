@@ -139,6 +139,8 @@ impl SyntaxToken {
 /// The exact source covered by an AST node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Syntax {
+    /// Marks the callable head of a desugared pipe stage.
+    pub pipe_stage: bool,
     pub id: SyntaxId,
     pub span: Span,
     pub tokens: Arc<[SyntaxToken]>,
@@ -190,6 +192,7 @@ impl Syntax {
 
     pub fn compiler() -> Self {
         Self {
+            pipe_stage: false,
             id: SyntaxId::COMPILER,
             span: Span::Compiler,
             tokens: Arc::from([]),
@@ -202,6 +205,7 @@ impl Syntax {
 
     pub fn synthetic(id: SyntaxId, span: Span) -> Self {
         Self {
+            pipe_stage: false,
             id,
             span,
             tokens: Arc::from([]),

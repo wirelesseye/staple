@@ -7114,7 +7114,7 @@ mod tests {
             "use std.coroutine.*\n",
             "use std.io.(IO, println)\n",
             "def make: <T> Scheduler -> (Wait T, Resolver T) = sched => completion sched\n",
-            "def finish: <T> [Resolver T, T] -> () = [resolver, value] => resolver^complete value\n",
+            "def finish: <T> [Resolver T, T] -> () = [resolver, value] => resolver |> complete value\n",
             "def worker_io: () -> Coroutine{IO} I32 = () => coro { println \"work\"; 7 }\n",
             "def worker_pure: () -> Coroutine{} U8 = () => coro { U8 :: 8 }\n",
             "def launch: () -> Coroutine{Tasks, IO} () = () => coro {\n",
