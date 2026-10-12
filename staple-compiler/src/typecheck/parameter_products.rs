@@ -20,6 +20,17 @@ impl TypeChecker {
         let mut forced_values = HashSet::new();
         for trait_ in module.traits().values() {
             forced_values.extend(trait_.parameters.iter().copied());
+            // A member's own parameters are never capable either: dictionary
+            // slots and member values pass them at run time, which needs a
+            // known arity.
+            for method in &trait_.methods {
+                if let Some(Type::Forall(scheme)) = module
+                    .trait_method(*method)
+                    .map(|member| &member.annotation)
+                {
+                    forced_values.extend(scheme_binding_ids(module, scheme));
+                }
+            }
         }
         for (id, declaration) in module.type_declarations() {
             let builtin_value = matches!(module.builtin_type(*id), Some(BuiltinType::Buffer))
@@ -92,19 +103,20 @@ impl TypeChecker {
                     continue;
                 };
                 for binding in &block.bindings {
-                    for parameter in self.declared_type_parameters(module, &binding.type_parameters)
+                    for parameter in
+                        self.declared_type_parameters(module, &binding.all_type_parameters())
                     {
                         let uses = signatures.entry(parameter).or_default();
                         if let Some(target) = &binding.companion_target {
                             uses.push((target.clone(), false));
                         }
-                        if let Some(annotation) = &binding.annotation {
+                        if let Some(annotation) = binding.annotation_body() {
                             uses.push((annotation.clone(), false));
                         }
-                        for bound in &binding.trait_bounds {
+                        for bound in &binding.all_trait_bounds() {
                             uses.extend(bound.arguments.iter().cloned().map(|ty| (ty, false)));
                         }
-                        for bound in &binding.subtype_bounds {
+                        for bound in &binding.all_subtype_bounds() {
                             if let Some(id) = module.type_parameter_for(bound.syntax.id) {
                                 forced_values.insert(id);
                             }
@@ -279,6 +291,7 @@ fn capability_violation(
         {
             Some(named.syntax.span.clone())
         }
+        Type::Forall(scheme) => visit(&scheme.body, false),
         Type::Function(function) => visit(
             &function.parameter,
             function.mutations.is_empty() && function.moves.is_empty(),
@@ -468,4 +481,55 @@ pub(super) fn single_value_conflict<'a>(
         ) => template.iter().zip(actual).find_map(|(t, a)| recurse(t, a)),
         _ => None,
     }
+}
+
+/// A scheme used as a closure must have a fixed parameter arity.
+/// The type parameter ids a scheme's parameter list binds.
+fn scheme_binding_ids(
+    module: &ResolvedModule,
+    scheme: &staple_syntax::ForallType,
+) -> Vec<TypeParameterId> {
+    fn bindings<'a>(
+        p: &'a TypeParameterPattern,
+        out: &mut Vec<&'a staple_syntax::TypeParameterBinding>,
+    ) {
+        match p {
+            TypeParameterPattern::Binding(b) => out.push(b),
+            TypeParameterPattern::Product(p) => {
+                for p in &p.elements {
+                    bindings(p, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut parameters = Vec::new();
+    for p in &scheme.generics.parameters {
+        bindings(p, &mut parameters);
+    }
+    parameters
+        .into_iter()
+        .filter_map(|binding| module.type_parameter_for(binding.syntax.id))
+        .collect()
+}
+
+pub(super) fn scheme_has_capable_parameters(
+    module: &ResolvedModule,
+    scheme: &staple_syntax::ForallType,
+    capable: &HashSet<TypeParameterId>,
+) -> bool {
+    scheme_binding_ids(module, scheme).into_iter().any(|id| {
+        capability_violation(module, &scheme.body, id, false, capable).is_none()
+            && !scheme
+                .generics
+                .subtype_bounds
+                .iter()
+                .any(|bound| module.type_parameter_for(bound.syntax.id) == Some(id))
+            && !scheme.generics.trait_bounds.iter().any(|bound| {
+                bound
+                    .arguments
+                    .iter()
+                    .any(|ty| capability_violation(module, ty, id, false, capable).is_some())
+            })
+    })
 }

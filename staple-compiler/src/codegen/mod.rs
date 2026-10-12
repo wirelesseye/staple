@@ -2,7 +2,8 @@
 //!
 //! Codegen consumes only lowered records through their read-only emission view.
 //! It declares catalog functions using planned names and linkage, emits concrete
-//! instance and initializer bodies, expands recorded drop glue inline, and emits
+//! instance and initializer bodies, emits descriptor ABI bodies, expands recorded
+//! drop glue inline, and emits
 //! validated adapters, finalizers, coroutine pairs, and reactive runners. Recorded
 //! runtime requirements select the runtime modules to link. No source AST or
 //! checker query participates in emission; trait selection, coercion choices,
@@ -41,6 +42,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 mod conversions;
 mod abi;
+mod dynamic;
 #[doc(hidden)]
 pub mod corpus;
 mod ir;
@@ -149,6 +151,19 @@ pub(crate) fn lowered_catalog_types(
     let target_machine = create_target_machine(None).map_err(|diagnostic| vec![diagnostic])?;
     lowered::LoweredEmitter::new(context, module.program(), &target_machine)
         .declared_catalog_types(&target_machine)
+        .map_err(|diagnostic| vec![diagnostic])
+}
+
+/// Emit and verify one production instance body independently of its callers.
+#[cfg(test)]
+pub(crate) fn lowered_instance_body_ir(
+    context: &inkwell::context::Context,
+    module: &LoweredModule,
+    instance: crate::FunctionInstanceId,
+) -> Result<String, Vec<Diagnostic>> {
+    let target_machine = create_target_machine(None).map_err(|diagnostic| vec![diagnostic])?;
+    lowered::LoweredEmitter::new(context, module.program(), &target_machine)
+        .instance_body_ir(&target_machine, instance)
         .map_err(|diagnostic| vec![diagnostic])
 }
 

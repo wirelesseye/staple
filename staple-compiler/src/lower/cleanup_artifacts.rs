@@ -115,6 +115,11 @@ pub(super) fn expand_gc_finalizer(
                 drops: Some(drops),
             }
         }
+        // Dynamic closure environments and buffers drop their contents
+        // through descriptors; no drop-glue artifacts are requested.
+        GcFinalizerPlan::DynamicClosureEnvironment { .. }
+        | GcFinalizerPlan::DynamicBuffer
+        | GcFinalizerPlan::DynamicCell => plan,
     };
     Ok((LoweredArtifactPlan::GcFinalizer(plan), requests))
 }
@@ -1101,6 +1106,11 @@ impl<'a> LoweredWalker<'a> {
                         )?;
                     }
                 }
+                // A run-time element type clones through a dictionary and
+                // allocates its dynamic buffer itself.
+                IntrinsicFunction::BufferClone
+                    if matches!(&result_type, CheckedType::Buffer(element)
+                        if crate::contains_type_parameter(element)) => {}
                 IntrinsicFunction::BufferClone => {
                     if let CheckedType::Buffer(element) = &result_type {
                         // The per-element `Clone` call is an instance use of the
@@ -1256,6 +1266,11 @@ impl<'a> LoweredWalker<'a> {
                 "thunk argument instance has no materialized body".to_string(),
             )]);
         };
+        // Dynamic thunk environments are planned with their descriptors by
+        // descriptor_artifacts, rather than concrete capture drop glue.
+        if self.program.instance_is_dynamic(thunk_instance) {
+            return Ok(());
+        }
         let gate = body.captures.iter().any(|capture| {
             !capture.requires_initialization_state
                 && !capture.capture.borrowed
@@ -1308,6 +1323,11 @@ impl<'a> LoweredWalker<'a> {
         let Some(closure) = &value.closure else {
             return Ok(());
         };
+        // Quantified closures always use descriptor-layout environments;
+        // descriptor artifact scanning owns their finalizers.
+        if value.scheme.is_some() {
+            return Ok(());
+        }
         // Only a fresh, non-empty environment installs a closure finalizer.
         if closure.environment != super::LoweredClosureEnvironment::Fresh
             || closure.captures.is_empty()

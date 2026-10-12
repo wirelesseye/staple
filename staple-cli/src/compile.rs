@@ -683,6 +683,18 @@ fn format_diagnostics(diagnostics: Vec<Diagnostic>) -> String {
 }
 
 pub(crate) fn exit_code(status: ExitStatus) -> ExitCode {
+    // A program killed by a signal has no exit code. Say so, and exit as a
+    // shell would (128 + the signal), instead of a silent failure.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            eprintln!("staple: program terminated by signal {signal}");
+            return u8::try_from(128 + signal)
+                .map(ExitCode::from)
+                .unwrap_or(ExitCode::FAILURE);
+        }
+    }
     status
         .code()
         .and_then(|code| u8::try_from(code).ok())
@@ -806,7 +818,7 @@ mod tests {
         format_diagnostics, link_executable, parse_options, run,
     };
     use std::ffi::{OsStr, OsString};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1320,6 +1332,38 @@ mod tests {
             panic!("run mode should return a process status");
         };
         assert_eq!(status.code(), Some(7));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_program_killed_by_a_signal_exits_like_a_shell() {
+        use std::os::unix::process::ExitStatusExt;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-signal-{nonce}.sta"));
+        std::fs::write(&source, "extern \"c\" { abort: () -> () }\nabort ()\n")
+            .expect("temporary run source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        let outcome = run([
+            "run".into(),
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("source should run directly");
+        let _ = std::fs::remove_file(source);
+
+        let Outcome::Executed(status) = outcome else {
+            panic!("run mode should return a process status");
+        };
+        assert_eq!(status.signal(), Some(6));
+        // SIGABRT is reported as 128 + 6, not a silent 1.
+        assert_eq!(super::exit_code(status), std::process::ExitCode::from(134));
     }
 
     #[test]
@@ -4644,11 +4688,25 @@ mod tests {
             }
             let behavior = compile_link_run(&lowered, &options)
                 .unwrap_or_else(|error| panic!("`{}` should link and run: {error}", program.name));
+            // `compile_link_run` reports a signal as its negated number.
+            // `llvm.trap` is `ud2` (SIGILL) on x86-64 and `brk` (SIGTRAP) on
+            // AArch64; a Staple panic exits with status 1.
+            #[cfg(target_arch = "x86_64")]
+            const TRAP_STATUS: i32 = -4;
+            #[cfg(not(target_arch = "x86_64"))]
+            const TRAP_STATUS: i32 = -5;
+            let expected_status = if program.traps {
+                TRAP_STATUS
+            } else if program.panics {
+                1
+            } else {
+                0
+            };
             assert_eq!(
                 behavior.0,
-                if program.traps { None } else { Some(0) },
+                Some(expected_status),
                 "`{}` has unexpected exit status",
-                program.name
+                program.name,
             );
             let expected = program
                 .expected_stdout
@@ -4665,6 +4723,361 @@ mod tests {
             runnable + compile_only,
             staple_compiler::codegen_corpus().len()
         );
+    }
+
+    /// Run a generic-heavy subset of the corpus in both the default and
+    /// differential modes and require identical stdout and exit status. Also
+    /// reports how many call sites each program sent through
+    /// dynamic implementations.
+    #[cfg(unix)]
+    #[test]
+    fn codegen_corpus_differential_run_matches_default_subset() {
+        // The default suite runs a fixed, generic-heavy subset so the quick
+        // differential gate stays fast; the full run is
+        // `codegen_corpus_differential_run_matches_default`.
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = workspace_root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")])
+            .expect("corpus link options should parse");
+        const SUBSET: [&str; 24] = [
+            "trait_dictionary_values",
+            "trait_dictionary_adapters",
+            "trait_dictionary_builder",
+            "trait_dictionary_static_baseline",
+            "trait_dictionary_compound_baseline",
+            "local_recursive_generic",
+            "polymorphic_function_typed_instantiation",
+            "polymorphic_mixed_layout_calls",
+            "calls_generic",
+            "parameter_products",
+            "from_types",
+            "generic_drop_ownership",
+            "generic_drop_selection",
+            "loops_values",
+            "match_sums_products",
+            "destructuring",
+            "numeric_intrinsics",
+            "example_traits_and_generics",
+            "polymorphic_goal",
+            "polymorphic_inside_generic_body",
+            "polymorphic_function_values_in_generic_body",
+            "polymorphic_lambda_follows_scheme_order",
+            "polymorphic_scheme_subsumption",
+            "polymorphic_adapter_outlives_its_frame",
+        ];
+        let mut dynamic_calls = 0usize;
+        let mut matched = 0usize;
+        for program in staple_compiler::codegen_corpus() {
+            if !SUBSET.contains(&program.name) {
+                continue;
+            }
+            let (source, root) = corpus_source(program, workspace_root);
+            dynamic_calls +=
+                differential_compare(program.name, &source, &root, &standard_library, &options);
+            matched += 1;
+        }
+        assert_eq!(matched, SUBSET.len(), "every subset program exists");
+        eprintln!("quick differential run: {matched} programs, {dynamic_calls} dynamic call sites");
+        assert!(dynamic_calls > 0, "the quick subset must use dynamic calls");
+    }
+
+    /// The `dynamic_*` corpus programs must execute through the descriptor ABI.
+    #[cfg(unix)]
+    #[test]
+    fn dynamic_forms_differential() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
+        let mut tested = 0;
+        for program in staple_compiler::codegen_corpus() {
+            if !program.name.starts_with("dynamic_") {
+                continue;
+            }
+            let (source, source_root) = corpus_source(program, root);
+            let calls = differential_compare(
+                program.name,
+                &source,
+                &source_root,
+                &standard_library,
+                &options,
+            );
+            assert!(calls > 0, "{} must exercise dynamic calls", program.name);
+            tested += 1;
+        }
+        assert!(tested > 0);
+    }
+
+    /// Bounded generics must run through dictionaries.
+    #[cfg(unix)]
+    #[test]
+    fn trait_dictionary_differential() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
+        let mut tested = 0;
+        for program in staple_compiler::codegen_corpus() {
+            if !program.name.starts_with("trait_dictionary_") {
+                continue;
+            }
+            let (source, source_root) = corpus_source(program, root);
+            let calls = differential_compare(
+                program.name,
+                &source,
+                &source_root,
+                &standard_library,
+                &options,
+            );
+            eprintln!("{}: {calls} dynamic call sites", program.name);
+            tested += 1;
+        }
+        assert!(tested > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generic_trait_member_differential() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
+        let mut tested = 0;
+        for program in staple_compiler::codegen_corpus() {
+            if program.topic != "generic-trait-members" {
+                continue;
+            }
+            let (source, source_root) = corpus_source(program, root);
+            for effects in [false, true] {
+                differential_compare_with(
+                    program.name,
+                    &source,
+                    &source_root,
+                    &standard_library,
+                    &options,
+                    !effects,
+                    effects,
+                );
+            }
+            tested += 1;
+        }
+        assert!(tested >= 2);
+    }
+
+    /// Effect-generic programs must run in both modes. Type-and-effect
+    /// generics also go through the descriptor ABI with compile-time rows.
+    #[cfg(unix)]
+    #[test]
+    fn effect_generic_differential() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
+        let mut tested = 0;
+        for program in staple_compiler::codegen_corpus() {
+            if !program.name.starts_with("effect_generic_")
+                && !program.name.starts_with("effect_polymorphic_")
+            {
+                continue;
+            }
+            let (source, source_root) = corpus_source(program, root);
+            let calls = differential_compare(
+                program.name,
+                &source,
+                &source_root,
+                &standard_library,
+                &options,
+            );
+            if program.name == "effect_generic_rows" {
+                assert!(calls > 0, "type-and-effect generics must run dynamically");
+            }
+            tested += 1;
+        }
+        assert!(tested > 0);
+    }
+
+    /// The effect-row differential mode: every effect parameter of a
+    /// routed call arrives as a run-time bundle.
+    #[cfg(unix)]
+    #[test]
+    fn effect_row_differential() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
+        let mut tested = 0;
+        for program in staple_compiler::codegen_corpus() {
+            if !program.name.starts_with("effect_") {
+                continue;
+            }
+            let (source, source_root) = corpus_source(program, root);
+            let calls = differential_compare_with(
+                program.name,
+                &source,
+                &source_root,
+                &standard_library,
+                &options,
+                false,
+                true,
+            );
+            assert!(calls > 0, "{} must route calls through bundles", program.name);
+            tested += 1;
+        }
+        assert!(tested > 0);
+    }
+
+    /// The full effect-row differential run: every runnable corpus program with
+    /// both type descriptors and effect bundles at run time. Run explicitly with
+    /// `--ignored`.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "full effect-row differential run: run explicitly with --ignored"]
+    fn codegen_corpus_effect_row_differential_run_matches_default() {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = workspace_root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")])
+            .expect("corpus link options should parse");
+        let mut runnable = 0usize;
+        for program in staple_compiler::codegen_corpus() {
+            if program.expectation == staple_compiler::CorpusExpectation::CompileOnly {
+                continue;
+            }
+            let (source, root) = corpus_source(program, workspace_root);
+            differential_compare_with(
+                program.name,
+                &source,
+                &root,
+                &standard_library,
+                &options,
+                true,
+                true,
+            );
+            runnable += 1;
+        }
+        eprintln!("effect-row differential run: {runnable} programs");
+    }
+
+    /// The full differential run: every runnable corpus program
+    /// and every runnable example, both modes, identical stdout and exit
+    /// status. Run explicitly with `--ignored`.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "full differential run: run explicitly with --ignored"]
+    fn codegen_corpus_differential_run_matches_default() {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = workspace_root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")])
+            .expect("corpus link options should parse");
+
+        let mut runnable = 0usize;
+        let mut programs_with_dynamic_calls = 0usize;
+        let mut dynamic_calls = 0usize;
+        for program in staple_compiler::codegen_corpus() {
+            if program.expectation == staple_compiler::CorpusExpectation::CompileOnly {
+                continue;
+            }
+            let (source, root) = corpus_source(program, workspace_root);
+            let count =
+                differential_compare(program.name, &source, &root, &standard_library, &options);
+            dynamic_calls += count;
+            if count > 0 {
+                programs_with_dynamic_calls += 1;
+            }
+            runnable += 1;
+        }
+        // `macros.sta` is not a corpus entry (its expansion is covered by the
+        // standalone example gate), so the full differential run adds it here.
+        let macros = workspace_root.join("staple-compiler/examples/macros.sta");
+        let source = std::fs::read_to_string(&macros).expect("macros.sta should read");
+        dynamic_calls += differential_compare(
+            "example_macros",
+            &source,
+            macros.parent().unwrap(),
+            &standard_library,
+            &options,
+        );
+        runnable += 1;
+        eprintln!(
+            "differential run: {programs_with_dynamic_calls}/{runnable} programs used dynamic calls ({dynamic_calls} call sites)"
+        );
+        assert!(
+            programs_with_dynamic_calls * 2 > runnable,
+            "dynamic calls must be non-zero for most runnable programs"
+        );
+    }
+
+    /// The source text and root directory of one corpus program.
+    #[cfg(unix)]
+    fn corpus_source(
+        program: &staple_compiler::CorpusProgram,
+        workspace_root: &Path,
+    ) -> (String, std::path::PathBuf) {
+        use staple_compiler::CorpusSource;
+        match program.source {
+            CorpusSource::Inline(source) => (source.to_owned(), workspace_root.to_path_buf()),
+            CorpusSource::File(path) => {
+                let full = workspace_root.join(path);
+                let source = std::fs::read_to_string(&full)
+                    .unwrap_or_else(|error| panic!("`{path}` should read: {error}"));
+                let root = full
+                    .parent()
+                    .expect("a corpus file has a parent directory")
+                    .to_path_buf();
+                (source, root)
+            }
+        }
+    }
+
+    /// Lower one program both ways, run both, and require identical output.
+    /// Returns the differential mode's redirected call count.
+    #[cfg(unix)]
+    fn differential_compare(
+        name: &str,
+        source: &str,
+        root: &Path,
+        standard_library: &Path,
+        options: &Options,
+    ) -> usize {
+        differential_compare_with(name, source, root, standard_library, options, true, false)
+    }
+
+    /// Compares the default lowering with a differential one: `types` routes
+    /// generic calls through run-time type descriptors, `effects` makes every
+    /// effect parameter of a routed call a run-time bundle.
+    #[allow(clippy::too_many_arguments)]
+    fn differential_compare_with(
+        name: &str,
+        source: &str,
+        root: &Path,
+        standard_library: &Path,
+        options: &Options,
+        types: bool,
+        effects: bool,
+    ) -> usize {
+        use staple_compiler::{LoweredModule, Lowerer, NameResolver, ProgramLoader, TypeChecker};
+        let lower = |differential: bool| -> LoweredModule {
+            let loaded = ProgramLoader::new()
+                .with_standard_library_root(standard_library)
+                .load_source(source, root)
+                .unwrap_or_else(|diagnostics| panic!("`{name}` should load: {diagnostics:?}"));
+            let resolved = NameResolver::new()
+                .resolve_program(loaded)
+                .unwrap_or_else(|diagnostics| panic!("`{name}` should resolve: {diagnostics:?}"));
+            let checked = TypeChecker::new()
+                .check(resolved)
+                .unwrap_or_else(|diagnostics| panic!("`{name}` should check: {diagnostics:?}"));
+            Lowerer::new()
+                .with_dictionary_pass_generic_calls(differential && types)
+                .with_dictionary_pass_effect_rows(differential && effects)
+                .lower(&checked)
+                .unwrap_or_else(|diagnostics| panic!("`{name}` should lower: {diagnostics:?}"))
+        };
+        let default = compile_link_run(&lower(false), options)
+            .unwrap_or_else(|error| panic!("`{name}` should run: {error}"));
+        let lowered = lower(true);
+        let count = lowered.differential_dynamic_call_count();
+        let differential = compile_link_run(&lowered, options)
+            .unwrap_or_else(|error| panic!("`{name}` should run: {error}"));
+        assert_eq!(
+            default, differential,
+            "`{name}` differs between default and differential modes"
+        );
+        count
     }
 
     /// Compile one lowered program, emit an object, link it, run
@@ -4684,9 +5097,14 @@ mod tests {
         let output = Command::new(executable.path())
             .output()
             .map_err(|error| format!("could not run `{}`: {error}", executable.path().display()))?;
-        Ok((
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout).into_owned(),
-        ))
+        // A signal is part of the exit status: different crashes must not
+        // compare equal merely because neither process has an exit code.
+        let status = output.status.code();
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt;
+            status.or_else(|| output.status.signal().map(|signal| -signal))
+        };
+        Ok((status, String::from_utf8_lossy(&output.stdout).into_owned()))
     }
 }

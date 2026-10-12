@@ -6,7 +6,7 @@
 //! check binding shape, live sites, evidence, and dependency/use agreement.
 //! Codegen reads these tables without resolving dispatch again.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use staple_syntax::{Diagnostic, Span};
 
@@ -28,6 +28,26 @@ use super::{
     LoweredReactiveOperationId, LoweredReactiveOperationKind, LoweredStringTemplate,
     LoweredStringTemplatePart, Origin, TraitEvidence,
 };
+
+pub(super) fn direct_call_target(
+    program: &LoweredProgram,
+    initializer: InitializerId,
+    id: LoweredCallId,
+    call: &LoweredCall,
+) -> Result<Option<FunctionInstanceId>, Vec<Diagnostic>> {
+    if !matches!(call.target, LoweredCallableTarget::DirectFunction { .. }) {
+        return Ok(None);
+    }
+    let mut binder = InitializerBinder::new(program, initializer);
+    binder.bind_call(id, call);
+    if !binder.diagnostics.is_empty() {
+        return Err(binder.diagnostics);
+    }
+    Ok(match binder.bindings.get(&LoweredBindingSite::Call(id)) {
+        Some(LoweredBoundTarget::Instance(instance)) => Some(*instance),
+        _ => None,
+    })
+}
 
 impl LoweredProgram {
     /// Builds the emission initializer binding and evidence tables over
@@ -52,6 +72,20 @@ impl LoweredProgram {
         }
         self.initializer_bindings = bindings;
         self.initializer_evidence = evidence;
+        self.initializer_dictionary_calls = Vec::with_capacity(count);
+        for index in 0..count {
+            match super::trait_dictionaries::initializer_call_arguments(
+                self,
+                InitializerId::from_index(index),
+            ) {
+                Ok(arguments) => self.initializer_dictionary_calls.push(arguments),
+                Err(mut errors) => {
+                    diagnostics.append(&mut errors);
+                    self.initializer_dictionary_calls.push(BTreeMap::new());
+                }
+            }
+        }
+
         diagnostics
     }
 
@@ -69,6 +103,12 @@ impl LoweredProgram {
             )];
         }
         let mut diagnostics = Vec::new();
+        if self.initializer_dictionary_calls.len() != count {
+            diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                "initializer dictionary tables do not cover every initializer",
+            ));
+        }
         for index in 0..count {
             let initializer = InitializerId::from_index(index);
             let validator = InitializerBindingValidator {
@@ -81,6 +121,18 @@ impl LoweredProgram {
             };
             diagnostics.append(&mut validator.run());
             diagnostics.append(&mut self.check_initializer_binding_fixed_point(initializer));
+            match super::trait_dictionaries::initializer_call_arguments(self, initializer) {
+                Ok(arguments)
+                    if self.initializer_dictionary_calls.get(index) != Some(&arguments) =>
+                {
+                    diagnostics.push(Diagnostic::new(
+                        Span::Compiler,
+                        "initializer call dictionary recipes disagree with its callee bounds",
+                    ))
+                }
+                Ok(_) => {}
+                Err(mut errors) => diagnostics.append(&mut errors),
+            }
         }
         diagnostics
     }
@@ -176,6 +228,31 @@ impl<'a> InitializerBinder<'a> {
         function_type: CheckedFunctionType,
         substitutions: CallSubstitutions,
         evidence: Option<TraitEvidence>,
+        differential: bool,
+    ) -> Option<FunctionInstanceId> {
+        self.bind_instance_with(
+            site,
+            origin,
+            function,
+            function_type,
+            substitutions,
+            evidence,
+            differential,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_instance_with(
+        &mut self,
+        site: LoweredBindingSite,
+        origin: &Origin,
+        function: FunctionId,
+        function_type: CheckedFunctionType,
+        substitutions: CallSubstitutions,
+        evidence: Option<TraitEvidence>,
+        differential: bool,
+        polymorphic: bool,
     ) -> Option<FunctionInstanceId> {
         // A function with no relevant template parameters has exactly one
         // instance; the site's callable type may be a coerced view of the
@@ -193,6 +270,8 @@ impl<'a> InitializerBinder<'a> {
             } else {
                 (function_type, substitutions, evidence)
             };
+        let call_function_type = function_type.clone();
+        let call_substitutions = substitutions.clone();
         let request = InstanceResolutionRequest {
             function,
             origin: origin.clone(),
@@ -201,7 +280,27 @@ impl<'a> InitializerBinder<'a> {
             evidence,
             target: InstanceResolutionTarget::Root,
         };
-        let resolved = match self.program.resolve_instance_request(&request) {
+        let runtime = if polymorphic {
+            Some(self.program.scheme_runtime_scope(function))
+        } else if differential {
+            self.program
+                .differential_call_runtime(
+                    function,
+                    &BTreeSet::new(),
+                    false,
+                    &call_function_type,
+                    &call_substitutions,
+                )
+        } else {
+            None
+        };
+        let resolved = match runtime {
+            Some(runtime) => self
+                .program
+                .resolve_instance_request_in_scope(&request, &runtime),
+            None => self.program.resolve_instance_request(&request),
+        };
+        let resolved = match resolved {
             Ok(resolved) => resolved,
             Err(diagnostic) => {
                 self.diagnostics.push(diagnostic);
@@ -248,6 +347,7 @@ impl<'a> InitializerBinder<'a> {
             function_type,
             CallSubstitutions::default(),
             None,
+            false,
         );
     }
 
@@ -262,6 +362,7 @@ impl<'a> InitializerBinder<'a> {
                     call.function_type.clone(),
                     call.substitutions.clone(),
                     call.evidence.clone(),
+                    true,
                 );
             }
             LoweredCallableTarget::TraitImplementation {
@@ -310,13 +411,15 @@ impl<'a> InitializerBinder<'a> {
         let site = LoweredBindingSite::CallableValue(id);
         match &value.target {
             LoweredCallableTarget::DirectFunction { function, .. } => {
-                self.bind_instance(
+                self.bind_instance_with(
                     site,
                     &value.origin,
                     *function,
                     value.function_type.clone(),
                     value.substitutions.clone(),
                     value.evidence.clone(),
+                    false,
+                    value.scheme.is_some(),
                 );
             }
             LoweredCallableTarget::TraitImplementation {
@@ -325,6 +428,18 @@ impl<'a> InitializerBinder<'a> {
             | LoweredCallableTarget::StructuralTraitMethod {
                 trait_id, method, ..
             } => {
+                if value.scheme.is_some() {
+                    let (key, _) =
+                        super::trait_dictionaries::member_value_entry(self.program, *method);
+                    match self.program.specializations.artifact_ordinal(&key) {
+                        Some(ordinal) => {
+                            self.bindings
+                                .insert(site, LoweredBoundTarget::Artifact(ordinal));
+                        }
+                        None => self.report(&value.origin, "trait member entry was not reserved"),
+                    }
+                    return;
+                }
                 let Some(evidence) = &value.evidence else {
                     self.report(&value.origin, "trait-method value has no evidence recipe");
                     return;
@@ -349,6 +464,7 @@ impl<'a> InitializerBinder<'a> {
                     value.adapter,
                     &value.function_type,
                     &value.origin,
+                    value.scheme.as_ref(),
                 );
             }
             LoweredCallableTarget::IndirectClosure { .. }
@@ -431,6 +547,7 @@ impl<'a> InitializerBinder<'a> {
                         function_type,
                         substitutions,
                         evidence,
+                        false,
                     )
                     .is_some()
                 {
@@ -515,6 +632,7 @@ impl<'a> InitializerBinder<'a> {
         adapter: super::LoweredCallableAdapter,
         callable_type: &CheckedFunctionType,
         origin: &Origin,
+        scheme: Option<&crate::CheckedScheme>,
     ) {
         let concrete = match concretize_function_type(callable_type, None, origin) {
             Ok(concrete) => concrete,
@@ -523,7 +641,22 @@ impl<'a> InitializerBinder<'a> {
                 return;
             }
         };
-        match ConstructorAdapterKey::new(symbol, type_id, adapter, &concrete, origin) {
+        let scheme = scheme.map(|scheme| {
+            let map = None::<&super::SubstitutionEnvironment>
+                .map(|environment| environment.substitution_map())
+                .unwrap_or_default();
+            match crate::substitute_type(crate::CheckedType::Forall(Box::new(scheme.clone())), &map)
+            {
+                crate::CheckedType::Forall(scheme) => *scheme,
+                _ => unreachable!(),
+            }
+        });
+        let key = if let Some(scheme) = &scheme {
+            ConstructorAdapterKey::polymorphic(symbol, type_id, adapter, scheme, origin)
+        } else {
+            ConstructorAdapterKey::shape(symbol, type_id, adapter, &concrete, origin)
+        };
+        match key {
             Ok(key) => {
                 let key = ArtifactRequestKey::ConstructorAdapter(key);
                 match self.program.specializations.artifact_ordinal(&key) {
@@ -602,6 +735,7 @@ impl<'a> InitializerBinder<'a> {
                 function_type,
                 CallSubstitutions::default(),
                 None,
+                false,
             );
         }
         for (part_index, part) in template.parts.iter().enumerate() {
@@ -675,6 +809,7 @@ impl<'a> InitializerBinder<'a> {
                     function_type.clone(),
                     CallSubstitutions::default(),
                     None,
+                    false,
                 );
                 None
             }
@@ -732,6 +867,7 @@ impl<'a> InitializerBinder<'a> {
             function_type,
             CallSubstitutions::default(),
             None,
+            false,
         );
     }
 
@@ -962,6 +1098,13 @@ impl<'a> InitializerBindingValidator<'a> {
                 ));
                 false
             }
+            Some(LoweredBoundTarget::Dictionary(_)) => {
+                self.report(format!(
+                    "initializer {} dispatch site {site:?} reads a dictionary",
+                    self.initializer.index()
+                ));
+                false
+            }
             Some(LoweredBoundTarget::Route(_)) if needs_target => {
                 self.report(format!(
                     "initializer {} dispatch site {site:?} is bound to a route instead of an instance or artifact",
@@ -1076,6 +1219,18 @@ impl<'a> InitializerBindingValidator<'a> {
     /// bound at one of its sites.
     fn check_request_root_coverage(&mut self) {
         let initializer = self.initializer;
+        // Members of dictionaries a scheme adapter builds are bound by their
+        // recipes rather than at a site.
+        let members = super::trait_dictionaries::initializer_builder_uses(
+            self.program,
+            initializer,
+        )
+        .into_iter()
+        .filter_map(|(_, use_)| match use_ {
+            super::trait_dictionaries::BuilderUse::Entry(member, _) => Some(member.instance),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
         let missing = self
             .program
             .instances
@@ -1088,10 +1243,11 @@ impl<'a> InitializerBindingValidator<'a> {
                 )
             })
             .filter(|(id, _)| {
-                !self
-                    .bindings
-                    .values()
-                    .any(|target| target.instance_id() == Some(*id))
+                !members.contains(id)
+                    && !self
+                        .bindings
+                        .values()
+                        .any(|target| target.instance_id() == Some(*id))
             })
             .map(|(id, instance)| {
                 let template = self

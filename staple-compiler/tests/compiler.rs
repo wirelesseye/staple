@@ -191,6 +191,28 @@ fn implicitly_thunks_call_arguments_and_preserves_callback_effects() {
     assert!(llvm.contains("implicit_thunk"));
 }
 
+/// A generic `def` whose type parameter never appears in its signature has no
+/// binding storage, like every `<…>` binding, so its calls and values must
+/// route through instances rather than a stored closure.
+#[test]
+fn phantom_type_parameter_generics_route_through_instances() {
+    let module = type_check(concat!(
+        "def phantom_top: <U where Copy U> () -> I32 = () => 4\n",
+        "def captured: I32 -> I32 = value => { def phantom: <U where Copy U> I32 -> I32 = item => item + value; phantom.<Bool> 2 }\n",
+        "def generic_outer: <T where Copy T> T -> I32 = value => { def phantom: <U where Copy U> () -> I32 = () => 4; phantom.<T> () }\n",
+        "let direct = phantom_top.<I32> ()\n",
+        "let callable: () -> I32 = phantom_top.<Bool>\n",
+        "let through_value = callable ()\n",
+        "let local = captured 5\n",
+        "let nested = generic_outer 0\n",
+    ));
+
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("phantom-parameter generic calls and values should emit");
+}
+
 #[test]
 fn signals_and_scoped_reactions_type_check_and_lower() {
     let module = type_check(concat!(
@@ -388,6 +410,68 @@ fn specializes_generic_effect_parameters() {
     CodeGenerator::new(&context)
         .compile_module(&lower(&module))
         .expect("effect-polymorphic calls should monomorphize");
+}
+
+/// A generic parameter used in a tuple argument beside a function over the
+/// same parameter infers from both slots, with and without an effect
+/// parameter, from concrete and generic bodies.
+#[test]
+fn infers_type_parameters_through_function_typed_tuple_slots() {
+    let module = type_check(concat!(
+        "use std.io.(IO, println)\n",
+        "def show: I32 ->{IO} () = x => println \"${x}\"\n",
+        "def apply: <T, effect E> (T, T ->{E} ()) ->{E} () = (x, f) => f x\n",
+        "def run: <A where Copy A> (A, A ->{IO} ()) ->{IO} () =\n",
+        "    (a, g) => apply (a, g)\n",
+        "def explicit: <A where Copy A> (A, A ->{IO} ()) ->{IO} () =\n",
+        "    (a, g) => apply.<A, _> (a, g)\n",
+        "apply (1, show)\nrun (2, show)\nexplicit (3, show)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("type-and-effect generic calls should compile");
+}
+
+/// Reachability: effect parameters that only ever receive concrete rows build
+/// no bundles, and a polymorphic effect value that is never used builds no
+/// dynamic code.
+#[test]
+fn effect_bundles_exist_only_for_run_time_rows() {
+    let emit = |source: &str| {
+        let module = type_check(source);
+        let context = Context::create();
+        CodeGenerator::new(&context)
+            .compile_module(&lower(&module))
+            .expect("effect programs should compile")
+    };
+    let direct = emit(concat!(
+        "use std.io.(IO, println)\n",
+        "def apply: <T, effect E> (T, T ->{E} ()) ->{E} () = (x, f) => f x\n",
+        "def show: I32 ->{IO} () = x => println \"${x}\"\n",
+        "apply (1, show)\n",
+    ));
+    assert!(!direct.contains("effect.bundle"), "concrete rows need no bundle");
+    assert!(!direct.contains("_dynamic"), "no dynamic instance is built");
+
+    let unused = emit(concat!(
+        "def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\n",
+        "def never: <T> [T] -> () = x => {\n",
+        "    let stored: <effect E> (() ->{E} ()) ->{E} () = twice\n",
+        "    ()\n",
+        "}\n",
+    ));
+    assert!(!unused.contains("_dynamic"), "an unused value builds no entry");
+    assert!(!unused.contains("effect.bundle"));
+
+    let used = emit(concat!(
+        "use std.io.(IO, println)\n",
+        "def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\n",
+        "let stored: <effect E> (() ->{E} ()) ->{E} () = twice\n",
+        "def hello: () ->{IO} () = () => println \"hello\"\n",
+        "stored hello\n",
+    ));
+    assert!(used.contains("_dynamic"), "a used value runs its dynamic entry");
 }
 
 #[test]
@@ -4339,8 +4423,8 @@ fn destructures_nested_product_patterns() {
         .compile_module(&lower(&module))
         .expect("nested product pattern should compile");
 
-    assert!(llvm.contains("define i32 @add_nested(ptr %0, i32 %x, <{ i32, i32 }>"));
-    assert!(llvm.contains("extractvalue <{ i32, i32 }>"));
+    assert!(llvm.contains("define i32 @add_nested(ptr %0, i32 %x, { i32, i32 }"));
+    assert!(llvm.contains("extractvalue { i32, i32 }"));
 }
 
 #[test]
@@ -4355,7 +4439,7 @@ fn binds_a_product_without_destructuring_it() {
         .expect("a product binding pattern should compile");
 
     assert!(llvm.contains("define i32 @sum(ptr %0, i32 %1, i32 %2)"));
-    assert!(llvm.contains("extractvalue <{ i32, i32 }>"));
+    assert!(llvm.contains("extractvalue { i32, i32 }"));
 }
 
 #[test]
@@ -4376,7 +4460,7 @@ fn binds_whole_copy_values_while_destructuring_them() {
         .expect("at-patterns over Copy products should compile");
 
     assert!(llvm.contains("define i32 @parameter(ptr %0, i32 %1, i32 %2)"));
-    assert!(!llvm.contains("define i32 @parameter(ptr %0, <{ i32, i32 }>"));
+    assert!(!llvm.contains("define i32 @parameter(ptr %0, { i32, i32 }"));
     assert!(llvm.contains("%args"));
 }
 
@@ -5198,6 +5282,34 @@ fn list_supports_bracket_indexing_mutation_and_iteration() {
     CodeGenerator::new(&context)
         .compile_module(&lower(&module))
         .expect("List Index/MutateIndex/Iterator/IntoIterator should compile");
+}
+
+#[test]
+fn polymorphic_value_naming_an_associated_type_is_a_restriction() {
+    // The scheme annotation checks (its projection links to the bound), but a
+    // polymorphic entry cannot carry the associated type yet.
+    let module = resolve(concat!(
+        "use std.iterator.(Iterator, IterStep)\n",
+        "def step: <Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter) = move iter => Iterator.next iter\n",
+        "let stored: <Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter) = step\n",
+    ));
+    let diagnostics = TypeChecker::new()
+        .check(module)
+        .expect_err_diagnostics("a scheme value naming an associated type is restricted");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].message,
+        "polymorphic values whose type names an associated type (such as `Iterator.Item Iter`) are not supported yet"
+    );
+}
+
+#[test]
+fn nested_list_of_macros_check() {
+    // A speculative parse of the inner expansion used to compute its error
+    // location from a span in the outer file and panic on the slice.
+    type_check(concat!(
+        "let rows: List (List I32) = List.of (List.of (1, 2), List.of (3,))\n",
+    ));
 }
 
 #[test]
@@ -8301,7 +8413,7 @@ fn applies_excess_arguments_to_a_bare_quote_invoked_as_a_top_level_item() {
         .compile_module(&lower(&module))
         .expect("excess arguments after a top-level `quote` expansion should still apply");
     assert!(
-        llvm.contains("call <{}> %closure.code"),
+        llvm.contains("call {} %closure.code"),
         "expected the expanded `println` call to survive expansion:\n{llvm}",
     );
 }
@@ -10254,7 +10366,7 @@ fn rejects_unconstrained_generic_values_and_non_function_schemes() {
         .map(|diagnostic| diagnostic.message.as_str())
         .collect::<Vec<_>>();
     assert!(
-        messages
+        !messages
             .iter()
             .any(|message| message.contains("requires a concrete expected type"))
     );
@@ -12992,7 +13104,7 @@ fn call_site_type_arguments_reject_wrong_arity_and_conflicts() {
         ),
         (
             "def f: I32 -> I32 = x => x\nlet x = f.<I32> 1\n",
-            "expects 0 type arguments",
+            "call-site type arguments require a generic function or constructor",
         ),
         (
             "def f: <T> move T -> T = move x => x\nlet x = f.<I32> \"wrong\"\n",
@@ -13088,4 +13200,882 @@ fn call_site_type_arguments_enforce_sized_and_subtype_bounds() {
         "type Token = opaque\ndef f: <T where ?Sized T> Ref T -> Ref T = x => x\nlet specialized = f.<Token>\n",
     );
     lower(&module);
+}
+
+#[test]
+fn forall_placement_resolves_with_scoped_parameters() {
+    for source in [
+        "def f: (<T> T -> T) -> I32\n",
+        "def f: I32 -> (<T> T -> T)\n",
+        "type Box T = wrap T\ndef f: Box (<T> T -> T)\n",
+        "type Alias = alias <T> T -> T\n",
+    ] {
+        resolve_result(source).unwrap_or_else(|diagnostics| panic!("{source}: {diagnostics:?}"));
+    }
+    resolve_result("trait Test T { apply: <U> (T, U) -> U }\n")
+        .expect("trait member forall resolves");
+}
+
+#[test]
+fn forall_preserves_companion_parameter_order_and_function_annotations() {
+    let resolved = resolve(
+        "type Box T = wrap T\ncompanion<T> Box T { pub def choose: <U> (move Box T, move U) -> U = (move Box x, move y) => y }\nlet result: String = Box.choose.<I32, String> (Box 1, \"yes\")\n",
+    );
+    let function = resolved
+
+        .functions()
+        .iter()
+        .find(|f| f.name.contains("choose"))
+        .unwrap();
+    assert_eq!(
+        function
+            .type_parameters
+            .iter()
+            .flat_map(|p| p.names())
+            .collect::<Vec<_>>(),
+        ["T", "U"]
+    );
+    assert!(matches!(
+        &function.binding_annotation,
+        Some(Type::Function(_))
+    ));
+    TypeChecker::new()
+
+        .check(resolved)
+        .expect("explicit arguments keep merged order");
+}
+
+#[test]
+fn forall_generic_binding_macro_expansion_remains_parseable_and_hygienic() {
+    let source = concat!(
+        "macro emit: Expr -> Item = ignored => parse_quote { def identity: <T> move T -> T = move value => value }\n",
+        "emit 1\n",
+        "let result: I32 = identity 42\n",
+    );
+    let resolved = resolve(source);
+    let expanded = staple_compiler::render_expanded_module(resolved.program()).unwrap();
+    let compact = expanded.split_whitespace().collect::<String>();
+    assert!(compact.contains("identity:<T>"), "{expanded}");
+    assert!(!compact.contains("identity<T>"), "{expanded}");
+    let reparsed = parse(&expanded).unwrap();
+    assert!(reparsed.items.iter().any(|item| matches!(item, Item::Binding(binding) if binding.generics().is_some())));
+    TypeChecker::new().check(resolved).expect("fresh generic annotation must type-check");
+}
+
+#[test]
+fn forall_preserves_generic_compile_time_helpers() {
+    type_check(concat!(
+        "def identity: <T> Expr -> Expr = value => value\n",
+        "macro relay: Expr -> Expr = value => identity value\n",
+        "let answer: I32 = relay 42\n",
+        "def concrete_type: <T> () -> Type = () => parse_quote { I32 }\n",
+        "macro typed: Expr -> Expr = value => { let ty: Type = concrete_type (); parse_quote { $ty :: $value } }\n",
+        "let typed_answer: I32 = typed 7\n",
+    ));
+}
+
+#[test]
+fn checked_schemes_preserve_enclosing_rigid_parameters() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def outer: <T> [move T] -> I32 = move value => {\n",
+            "  def helper: [move T] -> T = move x => x\n",
+            "  helper 5\n",
+            "  0\n",
+            "}\n",
+            "outer 1\n",
+        )))
+        .expect_err_diagnostics("a local nongeneric helper cannot instantiate its enclosing T");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("expected `T`, found `I32`")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn checked_schemes_instantiate_local_generics_independently() {
+    type_check(concat!(
+        "def outer: <T> [move T] -> T = move value => {\n",
+        "  def helper: <U> [move U] -> U = move x => x\n",
+        "  helper value\n",
+        "}\n",
+        "outer 1\n",
+    ));
+}
+
+#[test]
+fn checked_schemes_expose_templates_and_explicit_effect_arguments() {
+    let module = type_check(concat!(
+        "def apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\n",
+        "let value: I32 = apply.<(_ -> _)> (() => 42)\n",
+    ));
+    let binding = module
+        .resolved()
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "apply" => Some(binding),
+            _ => None,
+        })
+        .expect("effect-generic binding");
+    let symbol = module.resolved().symbol_for(binding.syntax.id).unwrap();
+    let scheme = module
+        .scheme_of_symbol(symbol)
+        .expect("effect parameter has a scheme");
+    assert!(matches!(
+        scheme.parameters.as_slice(),
+        [staple_compiler::CheckedSchemeParameter::Effect { .. }]
+    ));
+    assert_eq!(module.type_of_symbol(symbol), Some(scheme.body.as_ref()));
+    assert_eq!(
+        module.declared_type_of_symbol(symbol),
+        Some(scheme.body.as_ref().clone())
+    );
+}
+
+#[test]
+fn checked_schemes_preserve_concrete_constructor_residuals() {
+    type_check(concat!(
+        "use std.slice.Slice\n",
+        "let empty: Slice I32 = Slice.from_ref (Ref ())\n",
+    ));
+}
+
+#[test]
+fn checked_schemes_preserve_invalid_generic_body_diagnostics() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("def bad: <T> I32 -> I32 = 42\n"))
+        .expect_err_diagnostics("a generic def still requires a function body");
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "expected `I32 -> I32`, found `I32`",
+            "a generic `def` requires a function body",
+        ]
+    );
+}
+
+#[test]
+fn checked_schemes_preserve_trait_argument_inference_from_expected_types() {
+    type_check(concat!(
+        "let equals: (I32, I32) -> Bool = Eq.eq.<_>\n",
+        "let same: Bool = equals (1, 1)\n",
+    ));
+}
+
+#[test]
+fn polymorphic_value_examples_check() {
+    for source in [
+        "def identity: <T> move T -> T = move value => value\nlet id = identity\n",
+        "def identity: <T> move T -> T = move value => value\nlet annotated: <U> move U -> U = identity\n",
+        "def identity: <T> move T -> T = move value => value\nlet concrete: I32 -> I32 = identity\n",
+        "type Functions = wrap (identity: <T> move T -> T,)\n",
+        "def consume: (<T> move T -> T) -> (I32, String) = f => (f 42, f \"hello\")\n",
+        "def identity: <T> move T -> T = move value => value\nlet mut selected: <U> move U -> U = identity\nselected = identity\n",
+        "let id: <T> move T -> T = move value => value\nlet a = id 42\nlet b = id \"hello\"\n",
+    ] {
+        TypeChecker::new()
+            .check(resolve(source))
+            .unwrap_or_else(|diagnostics| panic!("{source}: {diagnostics:?}"));
+    }
+}
+
+#[test]
+fn polymorphic_values_check_in_every_value_position() {
+    const ID: &str = "def identity: <T> move T -> T = move value => value\n";
+    for source in [
+        "let id = identity\nlet a = id 42\nlet b = id \"hello\"\n",
+        "let id = identity\nlet a = id.<_> 42\n",
+        "let id = (<U> move U -> U) :: identity\nlet a = id.<I32> 42\n",
+        "let id = (<U> move U -> U) :: (move x => x)\nlet a = id 42\n",
+        "def consume: (<U> move U -> U) -> I32 = f => f 42\nlet a = consume (move x => x)\n",
+        "def consume: (<U where Copy U> U -> U) -> I32 = f => f 42\nlet a = consume (x => x)\n",
+        "let f: <U where Copy U> U -> U = x => x\nlet a = f 42\n",
+        "def consume: (<effect E> (() ->{E} I32) ->{E} I32) -> I32 = f => f (() => 42)\nlet a = consume (f => f ())\n",
+        "def outer: <A where Copy A> A -> I32 = a => { let f: <U where Copy U> U -> U = x => { let saved = a; x }; f 42 }\n",
+        "def consume: (<U> move U -> U) -> (I32, String) = f => (f 42, f \"hello\")\nlet a = consume identity\n",
+        "type Functions = wrap (identity: <U> move U -> U,)\nlet fs = Functions (identity: identity)\nlet a = fs.identity 42\n",
+        "def make: () -> (<U> move U -> U) = () => identity\nlet a = (make ()).<I32> 42\nlet b = (make ()).<_> 42\n",
+        "let mut selected: <U> move U -> U = identity\nselected = (<V> move V -> V) :: identity\nlet a = selected 42\n",
+        "type Box T = wrap T\nlet b: Box (<U> move U -> U) = Box identity\n",
+        "type Box T = wrap T\nlet b = Box.<(<U> move U -> U)> identity\n",
+        "let id: <T> move T -> T = move (x: T) => x\nlet a = id 42\n",
+        "def apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\nlet f = apply\nlet a: I32 = f (() => 42)\n",
+        "let apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\nlet a: I32 = apply (() => 42)\n",
+        "def copied: <T where Copy T> T -> T = x => x\nlet c: <U where Copy U> U -> U = copied\nlet a = c 42\n",
+        "def copied: <T where Copy T> T -> T = x => x\nlet c = copied\nlet a = c.<I32> 42\n",
+        "def apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\nlet alias: <effect F> (() ->{F} I32) ->{F} I32 = apply\nlet a = alias (() => 42)\n",
+        "let pair: (a: <T> move T -> T, b: <U> move U -> U) = (a: identity, b: identity)\n",
+    ] {
+        let source = format!("{ID}{source}");
+        TypeChecker::new()
+            .check(resolve(&source))
+            .unwrap_or_else(|diagnostics| panic!("{source}: {diagnostics:?}"));
+    }
+}
+
+#[test]
+fn rejects_invalid_polymorphic_values() {
+    for (source, message) in [
+        (
+            "trait Test T { apply: (<U> move U -> U) -> I32 }\n",
+            "must mention trait parameter `T`",
+        ),
+        ("let f: <T> T = 42\n", "function body"),
+        (
+            "type Token = wrap I32\nimpl !Copy Token {}\ndef escaping: Token -> (<U> move U -> U) = token => move value => { let n = token.*; value }\nlet token = Token 42\nlet f = escaping token\n",
+            "borrowed closure",
+        ),
+        (
+            "def copied: <T where Copy T> T -> T = x => x\ndef make: () -> (<U where Copy U> U -> U) = () => copied\ntype Token = wrap I32\nimpl !Copy Token {}\nlet f = (make ()).<Token>\n",
+            "trait bound",
+        ),
+        (
+            "let f: <effect E> () ->{E} () = () => std.io.print \"hello\"\n",
+            "declared effect set",
+        ),
+        (
+            "def copied: <T where Copy T> T -> T = x => x\ntype Token = wrap I32\nimpl !Copy Token {}\nlet f = copied\nlet result = f (Token 42)\n",
+            "trait bound",
+        ),
+        (
+            "def id: <T> move T -> T = move x => x\nlet f = id\nlet bad = f.<I32, String> 42\n",
+            "type arguments",
+        ),
+        (
+            "use std.io.IO\ndef apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\nlet bad: (() ->{IO} I32) -> I32 = apply\n",
+            "expected",
+        ),
+        (
+            "def run: <A> (A -> I32) -> I32 = f => 42\nlet f = run\n",
+            "parameter-product-capable",
+        ),
+        (
+            "def consume: (<A> A -> I32) -> I32 = f => 42\n",
+            "parameter-product-capable",
+        ),
+        ("let f: <T> move T -> T = move x => 42\n", "expected"),
+        (
+            "def mono: I32 -> I32 = x => x\nlet f: <T> T -> T = mono\n",
+            "expected",
+        ),
+        (
+            "def id: <T> move T -> T = move x => x\nlet mut f = id\nf = (x: I32) => x\n",
+            "expected",
+        ),
+        (
+            "def copied: <T where Copy T> T -> T = x => x\nlet f: <U> U -> U = copied\n",
+            "trait bound",
+        ),
+        (
+            "def id: <T> move T -> T = move x => x\ntype Box T = wrap T\nlet b = Box id\n",
+            "concrete expected type",
+        ),
+        (
+            "def id: <T> move T -> T = move x => x\nlet signal f = id\n",
+            "signal bindings",
+        ),
+        (
+            "extern \"C\" { f: (<T> T -> T) -> I32 }\n",
+            "external signatures",
+        ),
+        (
+            "def consume: ((<T> T -> T) -> I32) -> I32 = f => 42\ndef mono: (I32 -> I32) -> I32 = f => 42\nlet a = consume mono\n",
+            "expected",
+        ),
+        ("let f = x => x\nlet g: <T> T -> T = f\n", "expected"),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics(source);
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(message)),
+            "{source}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn lowers_instantiation_and_subsumption() {
+    let module = type_check(concat!(
+        "def id: <T> move T -> T = move x => x\n",
+        "def first: <A, B> (move A, move B) -> A = (move a, move b) => a\n",
+        "let f = id\n",
+        "let c: move I32 -> I32 = f\n",
+        "let explicit = f.<I32>\n",
+        "let swapped: <Y, X> (move X, move Y) -> X = first\n",
+        "let pairs: <T> move (T, T) -> (T, T) = id\n",
+    ));
+    lower(&module);
+}
+
+#[test]
+fn instantiation_converts_function_typed_arguments() {
+    // The adapter converts the concrete callback into the scheme body's
+    // dynamic shape; the corpus program
+    // `polymorphic_function_typed_instantiation` runs it.
+    let module = type_check(concat!(
+        "def twice: <T where Copy T> (T -> T, T) -> T = (f, x) => f (f x)\n",
+        "let stored = twice\n",
+        "let concrete: (I32 -> I32, I32) -> I32 = stored\n",
+    ));
+    lower(&module);
+}
+
+#[test]
+fn instantiation_converts_values_mixing_type_parameters_with_functions() {
+    // One argument's instantiated type mixes the surrounding run-time
+    // parameter `A` with a concrete callback; its conversion reads the layout
+    // from a descriptor. The corpus program
+    // `polymorphic_mixed_layout_instantiation` runs this shape.
+    let module = type_check(concat!(
+        "let outer: <A where Copy A> A -> A = a => {\n",
+        "    let poly: <T, U where Copy T, Copy U> ((T -> T, U), I32) -> U = (pair, n) => { let (f, u) = pair; u }\n",
+        "    let mixed: ((I32 -> I32, A), I32) -> A = poly\n",
+        "    mixed ((x => x, a), 1)\n",
+        "}\n",
+    ));
+    lower(&module);
+}
+
+/// The 1-based line of a diagnostic's span.
+fn diagnostic_line(diagnostic: &staple_syntax::Diagnostic) -> usize {
+    match &diagnostic.span {
+        staple_syntax::Span::User {
+            location: Some(location),
+            ..
+        } => location.line,
+        span => panic!("diagnostic has no source line: {span:?}"),
+    }
+}
+
+#[test]
+fn reports_each_polymorphic_value_restriction_at_its_construction() {
+    for (source, message) in [
+        (
+            concat!(
+                "use std.coroutine.*\n",
+                "def launch: <T> move T -> Coroutine{} I32 = move value => coro { 1 }\n",
+                "let stored = launch\n",
+            ),
+            "functions with coroutine bodies cannot be used as polymorphic values yet",
+        ),
+        (
+            concat!(
+                "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
+                "let stored = repeat\n",
+            ),
+            "array lengths cannot depend on a polymorphic value's type parameters yet",
+        ),
+        (
+            concat!(
+                "def read: <T> Ref (T -> T) -> I32 = r => 1\n",
+                "let stored = read\n",
+            ),
+            "function values inside references cannot be passed to a polymorphic value's implementation",
+        ),
+    ] {
+        let module = type_check(source);
+        let diagnostics = Lowerer::new()
+            .lower(&module)
+            .expect_err_diagnostics("a restricted function cannot become a polymorphic value");
+        let line = source.lines().count();
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.message == message)
+            .unwrap_or_else(|| panic!("{message}: {diagnostics:?}"));
+        assert_eq!(
+            diagnostic_line(diagnostic),
+            line,
+            "{message} must point at the construction site"
+        );
+    }
+}
+
+#[test]
+fn bounded_functions_become_polymorphic_values() {
+    // Bounds become hidden dictionaries, so the value constructs and a call
+    // through it passes the dictionary for the instantiation.
+    lower(&type_check(concat!(
+        "trait Named T { name: T -> String }\n",
+        "impl Named I32 { name = value => \"int\" }\n",
+        "def label: <T where Named T> T -> String = value => Named.name value\n",
+        "let stored = label\n",
+        "let answer = stored 3\n",
+    )));
+}
+
+#[test]
+fn structural_dictionaries_cover_index_mutation_and_iteration() {
+    // Indexing, indexed assignment and `for` over tuple shapes of an
+    // abstract element type get structural dictionaries.
+    lower(&type_check(concat!(
+        "def first: <T where Copy T> (T, T) -> T = pair => pair[USize :: 0]\n",
+        "let stored_first: <T where Copy T> (T, T) -> T = first\n",
+        "def put: <T where Copy T> (mut (T, T), T) -> () = (mut pair, value) => { pair[USize :: 1] = value }\n",
+        "let stored_put: <T where Copy T> (mut (T, T), T) -> () = put\n",
+        "def each: <T where Copy T> (T, T, T) -> () = triple => { for item in triple { } }\n",
+        "let stored_each: <T where Copy T> (T, T, T) -> () = each\n",
+    )));
+}
+
+#[test]
+fn restricted_functions_work_when_called_directly() {
+    for source in [
+        concat!(
+            "trait Named T { name: T -> String }\n",
+            "impl Named I32 { name = value => \"int\" }\n",
+            "def label: <T where Named T> T -> String = value => Named.name value\n",
+            "let direct = label 3\n",
+        ),
+        concat!(
+            "def first: <T where Copy T> (T, T) -> T = pair => pair[USize :: 0]\n",
+            "let direct: I32 = first (1, 2)\n",
+        ),
+        concat!(
+            "def apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\n",
+            "let direct = apply (() => 42)\n",
+        ),
+        concat!(
+            "use std.coroutine.*\n",
+            "def launch: <T> move T -> Coroutine{} I32 = move value => coro { 1 }\n",
+            "let direct = launch 3\n",
+        ),
+        concat!(
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
+            "let direct: (I32; 3) = repeat 7 3\n",
+        ),
+    ] {
+        lower(&type_check(source));
+    }
+}
+
+#[test]
+fn schemes_are_visible_on_bindings_and_lambdas() {
+    let module = type_check(
+        "def id: <T> move T -> T = move x => x\nlet alias = id\nlet annotated: <U> move U -> U = move x => x\n",
+    );
+    for item in &module.syntax().items {
+        let Item::Binding(binding) = item else {
+            continue;
+        };
+        if binding.name == "alias" || binding.name == "annotated" {
+            assert!(!binding.is_generic());
+            let symbol = module.symbol_for(binding.syntax.id).unwrap();
+            assert!(matches!(
+                module.type_of_symbol(symbol),
+                Some(CheckedType::Forall(_))
+            ));
+            assert!(module.scheme_of_symbol(symbol).is_some());
+        }
+        if binding.name == "annotated" {
+            let function = module
+                .function_for(binding.value.as_ref().unwrap().syntax().id)
+                .unwrap();
+            assert!(module.scheme_of_function(function).is_some());
+        }
+    }
+}
+
+#[test]
+fn lowering_ignores_unused_generic_bodies_with_polymorphic_locals() {
+    let module = type_check(concat!(
+        "def id: <U> move U -> U = move x => x\n",
+        "def unused: <T> move T -> T = move x => { let f = id; x }\n",
+        "let answer = id 42\n",
+    ));
+    lower(&module);
+}
+
+#[test]
+fn lowering_keeps_explicit_and_expected_instantiations_concrete() {
+    let module = type_check(concat!(
+        "def id: <T> move T -> T = move x => x\n",
+        "let explicit = id.<I32>\n",
+        "let inferred: move I32 -> I32 = id\n",
+        "let answer = explicit 42\n",
+    ));
+    lower(&module);
+}
+
+#[test]
+fn lowering_keeps_generic_capture_dependencies_demand_driven() {
+    let module = type_check(concat!(
+        "def id: <U> move U -> U = move x => x\n",
+        "def unused: <T where Copy T> T -> T = x => {\n",
+        "  let inner = () => { let poly = id; let saved = x; 42 }\n",
+        "  x\n",
+        "}\n",
+        "let answer = id 42\n",
+    ));
+    lower(&module);
+}
+
+#[test]
+fn generic_bodies_check_bounds_on_their_own_parameters() {
+    const COPIED: &str = "def copied: <T where Copy T> T -> T = x => x\n";
+    let source = format!("{COPIED}def outer: <A> A -> A = a => copied a\n");
+    let diagnostics = TypeChecker::new()
+        .check(resolve(&source))
+        .expect_err_diagnostics("an unbounded body cannot satisfy `Copy A`");
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["trait bound is not satisfied for `A`"]
+    );
+    type_check(&format!(
+        "{COPIED}def outer: <A where Copy A> A -> A = a => copied a\nlet answer = outer 42\n"
+    ));
+}
+
+#[test]
+fn effect_parameters_bind_to_rigid_effect_rows() {
+    const APPLY: &str = "def apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\n";
+    type_check(&format!(
+        "{APPLY}let alias: <effect F> (() ->{{F}} I32) ->{{F}} I32 = apply\n"
+    ));
+    let source = format!("{APPLY}let bad: <effect F> (() ->{{F}} I32) -> I32 = apply\n");
+    let diagnostics = TypeChecker::new()
+        .check(resolve(&source))
+        .expect_err_diagnostics("the result row must keep `F`");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message == "generic function conflicts with the expected type"),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn lowering_admits_polymorphic_values_stored_and_called() {
+    let module = type_check(concat!(
+        "def identity: <T> move T -> T = move value => value\n",
+        "def consume: (<T> move T -> T) -> I32 = f => f 1\n",
+        "type Functions = wrap (identity: <T> move T -> T,)\n",
+        "let r = (consume identity) + 1\n",
+        "let fs = Functions (identity: identity)\n",
+        "let s = fs.identity 2\n",
+    ));
+    lower(&module);
+}
+
+#[test]
+fn resolves_independently_generic_trait_member_scopes() {
+    resolve(
+        "trait Visit T { visit: <A> (T, A) -> A = (_, value) => { let item: A = value; item } }\n",
+    );
+}
+
+#[test]
+fn checks_independently_generic_trait_member_declarations() {
+    TypeChecker::new()
+        .check(resolve("trait Visit T { visit: <A> (T, A) -> A }\n"))
+        .expect("member scheme should check");
+    TypeChecker::new()
+        .check(resolve(
+            "trait Apply T { apply: T -> (<A> move A -> A) -> T }\n",
+        ))
+        .expect("nested member scheme should check");
+}
+
+#[test]
+fn checks_generic_trait_member_conformance() {
+    TypeChecker::new().check(resolve("trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => value }\n"))
+        .expect("implementation must work for every member argument");
+    let diagnostics = TypeChecker::new().check(resolve("trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => 42 }\n"))
+        .expect_err_diagnostics("implementation cannot fix A to I32");
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("Visit.visit")
+            && d.message.contains("scheme `<A>")
+            && d.message.contains("expected")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn infers_generic_trait_member_arguments_and_explicit_order() {
+    TypeChecker::new()
+        .check(resolve(include_str!("fixtures/generic_trait_members/static.sta")))
+        .expect("static generic member calls should check");
+    TypeChecker::new().check(resolve("trait Source T { type Element; read: T -> Element }\nimpl Source I32 { type Element = I32; read = x => x }\nlet x = Source.read.<I32> 1\n"))
+        .expect("associated parameters are omitted from explicit argument order");
+}
+
+#[test]
+fn rejects_polymorphic_recursion_through_generic_trait_dispatch() {
+    let diagnostics = TypeChecker::new().check(resolve("trait Grow T { grow: <A where Copy A> (T, A) -> () = (item, value) => Grow.grow (item, (value, value)) }\n"))
+        .expect_err_diagnostics("dispatch cannot recursively expand member arguments");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("polymorphic recursion")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn rejects_polymorphic_recursion_through_indirect_calls_in_lowering() {
+    // Each program keeps wrapping the member argument through a second
+    // function, which the checker's self-use rule cannot see. Lowering used to
+    // request ever deeper instances without end.
+    for source in [
+        concat!(
+            "type Wrap A = wrap A\n",
+            "trait Grow T {\n",
+            "    grow: <A> (T, USize, move A) -> USize\n",
+            "    shrink: <A> (T, USize, move A) -> USize = (item, n, move value) => match n == 0 { True => 0, False => Grow.grow (item, n - 1, Wrap value) }\n",
+            "}\n",
+            "impl Grow I32 { grow = (item, n, move value) => Grow.shrink (item, n, value) }\n",
+            "let total = Grow.grow (1, 3, 1)\n",
+        ),
+        concat!(
+            "type Wrap A = wrap A\n",
+            "trait Grow T { grow: <A> (T, USize, move A) -> USize }\n",
+            "def helper: <T, A where Grow T> (T, USize, move A) -> USize = (item, n, move value) => match n == 0 { True => 0, False => Grow.grow (item, n - 1, Wrap value) }\n",
+            "impl Grow I32 { grow = (item, n, move value) => helper (item, n, value) }\n",
+            "let total = Grow.grow (1, 3, 1)\n",
+        ),
+        concat!(
+            "type Wrap A = wrap A\n",
+            "def first: <A> (USize, move A) -> USize = (n, move value) => match n == 0 { True => 0, False => second (n - 1, Wrap value) }\n",
+            "def second: <A> (USize, move A) -> USize = (n, move value) => first (n, value)\n",
+            "let total = first (3, 1)\n",
+        ),
+    ] {
+        let module = type_check(source);
+        let diagnostics = Lowerer::new()
+            .lower(&module)
+            .expect_err_diagnostics("indirect polymorphic recursion should fail lowering");
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .starts_with("polymorphic recursion is not supported: instantiating `")),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn lowers_dispatch_chains_that_end_at_a_deeper_type() {
+    // A chain that reaches a deeper type and stops there is not recursion.
+    let module = type_check(concat!(
+        "type Box T = wrap T\n",
+        "trait Step T { step: T -> I32 }\n",
+        "def run: <T where Step T> T -> I32 = value => Step.step value\n",
+        "impl Step I32 { step = value => run (Box value) }\n",
+        "impl Step (Box I32) { step = _ => 1 }\n",
+        "let total = run 1\n",
+    ));
+    lower(&module);
+}
+
+#[test]
+fn checks_polymorphic_trait_members_and_keeps_projection_restriction() {
+    TypeChecker::new()
+        .check(resolve(include_str!("fixtures/generic_trait_members/values.sta")))
+        .expect("member values instantiate independently and subsume bounds");
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "trait Source T { type Element; read: T -> Element }\nlet member = Source.read\n",
+        ))
+        .expect_err_diagnostics("associated projections remain unsupported in value schemes");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("associated type")),
+        "{diagnostics:?}"
+    );
+    TypeChecker::new()
+        .check(resolve("trait Source T { type Element; keep: T -> T }\n"))
+        .expect("only explicit trait parameters must occur in each member");
+}
+
+#[test]
+fn trait_member_parameters_cannot_reuse_trait_parameter_names() {
+    for (source, name) in [
+        ("trait Shadow T { shadow: <T> (T, move T) -> T }\n", "T"),
+        (
+            "trait Source T { type Element; read: <Element> (T, move Element) -> Element }\n",
+            "Element",
+        ),
+    ] {
+        let diagnostics = resolve_result(source)
+            .expect_err_diagnostics("a member parameter cannot hide the trait's");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(
+            diagnostics[0].message.ends_with(&format!(
+                "cannot declare parameter `{name}`: the trait already declares `{name}`"
+            )),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn trait_member_parameters_are_single_value() {
+    // Like trait parameters, a member's own parameters never bind to a
+    // parameter product, so a parameter that occurs only as a function's
+    // parameter, or not at all, is accepted.
+    let declarations = concat!(
+        "trait Run T { run: <A> (T, A -> I32) -> I32 }\n",
+        "impl Run I32 { run = (_, f) => 1 }\n",
+        "trait Measure T { measure: <A> T -> USize }\n",
+        "impl Measure I32 { measure = _ => 4 }\n",
+    );
+    lower(&type_check(&format!(
+        "{declarations}let ran = Run.run (1, (value: I32) => value)\nlet size = Measure.measure.<_, String> 1\nlet member = Measure.measure\n"
+    )));
+    let diagnostics = TypeChecker::new()
+        .check(resolve(&format!(
+            "{declarations}def add: [I32, I32] -> I32 = [left, right] => left + right\nlet ran = Run.run (1, add)\n"
+        )))
+        .expect_err_diagnostics("a member parameter cannot bind to a parameter product");
+    assert!(!diagnostics.is_empty());
+}
+
+#[test]
+fn plans_generic_trait_member_entries_only_when_reachable() {
+    let declarations = "trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => value }\n";
+    for use_site in [
+        "let answer = Visit.visit (1, 42)\n",
+        "def unused: <T where Visit T> T -> () = item => { let member = Visit.visit; () }\nlet answer = 42\n",
+    ] {
+        let lowered = lower(&type_check(&format!("{declarations}{use_site}")));
+        assert!(
+            lowered
+                .planned_artifact_names(PlannedArtifactFamily::TraitMemberEntry)
+                .is_empty(),
+            "static calls and unreachable templates must not request member entries"
+        );
+    }
+    let lowered = lower(&type_check(&format!(
+        "{declarations}let member = Visit.visit\nlet answer = member (1, 42)\n"
+    )));
+    assert!(
+        !lowered
+            .planned_artifact_names(PlannedArtifactFamily::TraitMemberEntry)
+            .is_empty()
+    );
+}
+
+#[test]
+fn implementation_bodies_do_not_inherit_member_parameter_names() {
+    let diagnostics = resolve_result("trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => { let saved: A = value; saved } }\n")
+        .expect_err_diagnostics("member parameter names are private to the declaration");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("A") && d.message.contains("unknown")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn generic_trait_members_infer_skipped_own_arguments_and_keep_phantom_arguments() {
+    let declarations = "trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => value }\ntrait Read T { read: <A where Copy A> T -> T }\nimpl Read I32 { read = value => value }\n";
+    let source = format!(
+        "{declarations}let answer = Visit.visit.<I32, _> (1, 42)\nlet phantom = Read.read.<I32, String> 1\n"
+    );
+    lower(&type_check(&source));
+    let stored = lower(&type_check(&format!(
+        "{declarations}let member = Read.read\nlet valid = member.<I32, String> 1\nlet instantiated: I32 -> I32 = member.<I32, String>\nlet result = instantiated 2\n"
+    )));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&stored)
+        .expect("explicit phantom arguments reach instantiation adapters");
+    for use_site in [
+        "let result = Read.read 1\n",
+        "let result = Read.read.<I32, _> 1\n",
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(&format!("{declarations}{use_site}")))
+            .expect_err_diagnostics("phantom member parameters need explicit arguments");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("could not infer all")),
+            "{diagnostics:?}"
+        );
+    }
+    for use_site in [
+        "let member = Read.read\nlet invalid = member 1\n",
+        "let member = Read.read\nlet invalid = member.<I32, _> 1\n",
+        "let member = Read.read\nlet invalid: I32 -> I32 = member\n",
+        "let member: <U, B where Read U, Copy B> U -> U = Read.read\nlet invalid = member 1\n",
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(&format!("{declarations}{use_site}")))
+            .expect_err_diagnostics("stored phantom parameters also require explicit arguments");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("could not infer all")),
+            "{diagnostics:?}"
+        );
+    }
+    let bounded = "trait Bound T {}\nimpl Bound I32 {}\ntrait Read T { read: <A where Bound A> T -> T }\nimpl Read I32 { read = value => value }\n";
+    for use_site in [
+        "let invalid = Read.read.<I32, Bool> 1\n",
+        "let member = Read.read\nlet invalid = member.<I32, Bool> 1\n",
+        "let member = Read.read\nlet invalid: I32 -> I32 = member.<I32, Bool>\n",
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(&format!("{bounded}{use_site}")))
+            .expect_err_diagnostics("explicit phantom arguments still discharge member bounds");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("trait bound")),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn generic_trait_member_bounds_check_completed_associated_arguments() {
+    let declarations = "trait Bound T {}\nimpl Bound I32 {}\ntrait Source T { type Element; check: <A where Copy A, Bound Element> T -> T }\nimpl Source I32 { type Element = I32; check = value => value }\nimpl Source Bool { type Element = String; check = value => value }\n";
+    lower(&type_check(&format!(
+        "{declarations}let valid = Source.check.<I32, I32> 1\n"
+    )));
+    let diagnostics = TypeChecker::new()
+        .check(resolve(&format!(
+            "{declarations}let invalid = Source.check.<Bool, I32> (Bool :: True)\n"
+        )))
+        .expect_err_diagnostics("member bounds must use completed associated types");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("trait bound")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn generic_trait_members_preserve_product_trait_parameters() {
+    let module = type_check(concat!(
+        "trait Pair (Left, Right) { carry: <A> (Left, Right, move A) -> A = (_, _, move value) => value }\n",
+        "impl Pair (I32, String) {}\n",
+        "let direct = Pair.carry.<(I32, String), I32> (1, \"right\", 42)\n",
+        "let member = Pair.carry\n",
+        "let stored = member.<(I32, String), Bool> (1, \"right\", (Bool :: True))\n",
+        "def relay: <L, R, A where Pair (L, R)> (L, R, move A) -> A = (left, right, move value) => Pair.carry.<(L, R), A> (left, right, value)\n",
+        "let generic = relay\n",
+        "let result = generic (1, \"right\", 7)\n",
+        "trait AssociatedPair (Left, Right) { type Output; carry: <A> (Left, Right, move A) -> (Output, A) }\n",
+        "impl AssociatedPair (I32, String) { type Output = Bool; carry = (_, _, move value) => ((Bool :: True), value) }\n",
+        "let associated = AssociatedPair.carry.<(I32, String), I32> (1, \"right\", 8)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("product trait parameters remain grouped before member arguments");
 }

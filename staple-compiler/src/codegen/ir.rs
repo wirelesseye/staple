@@ -191,7 +191,7 @@ impl<'program, 'context> Backend<'program, 'context> {
 
     pub(crate) fn unit_value(&self) -> inkwell::values::AnyValueEnum<'context> {
         self.context
-            .struct_type(&[], true)
+            .struct_type(&[], false)
             .const_zero()
             .as_any_value_enum()
     }
@@ -667,15 +667,19 @@ impl<'program, 'context> Backend<'program, 'context> {
         code: inkwell::values::FunctionValue<'context>,
         environment: inkwell::values::PointerValue<'context>,
     ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+        self.build_closure_value_at(code.as_global_value().as_pointer_value(), environment)
+    }
+
+    /// A closure over code known only as a pointer, such as a dictionary slot.
+    pub(crate) fn build_closure_value_at(
+        &self,
+        code: inkwell::values::PointerValue<'context>,
+        environment: inkwell::values::PointerValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
         let mut closure = self.closure_type().const_zero();
         closure = self
             .builder
-            .build_insert_value(
-                closure,
-                code.as_global_value().as_pointer_value(),
-                0,
-                "closure.code",
-            )
+            .build_insert_value(closure, code, 0, "closure.code")
             .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?
             .into_struct_value();
         self.builder
@@ -742,7 +746,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .iter()
             .map(inkwell::values::BasicValueEnum::get_type)
             .collect::<Vec<_>>();
-        let mut product = self.context.struct_type(&types, true).const_zero();
+        let mut product = self.context.struct_type(&types, false).const_zero();
         for (index, value) in values.iter().copied().enumerate() {
             product = self
                 .builder

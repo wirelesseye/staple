@@ -31,6 +31,25 @@ pub(crate) enum LoweredArtifactPlan {
     /// Drop glue for one concrete value type. Expansion records the selected
     /// `Drop` method and the ordered representation cleanup steps.
     DropGlue(DropGluePlan),
+    TypeDescriptor(TypeDescriptorPlan),
+    TraitDictionary(TraitDictionaryPlan),
+    DescriptorDrop(DescriptorDropPlan),
+    CompoundDescriptorDrop(crate::specialization::CompoundDescriptorDropKey),
+    /// A dynamic-shape closure's forwarding entry. The entry loads the
+    /// instance's descriptors from its environment and forwards the call.
+    DescriptorBoundEntry(DescriptorBoundEntryPlan),
+    TraitMemberEntry(TraitMemberEntryPlan),
+    /// A structural trait member at run-time component types: the dictionary
+    /// slot of a product or sum, reading its components from the dictionary.
+    DynamicStructural(DynamicStructuralPlan),
+    /// A closure that forwards to a polymorphic closure: at an instantiated
+    /// function type's ABI with the instantiation's descriptors, or at
+    /// another scheme's dynamic ABI with descriptors rebuilt from its own.
+    InstantiationAdapter(InstantiationAdapterPlan),
+    /// A reabstraction thunk: converts a closure between the concrete and
+    /// dynamic ABIs.
+    ReabstractionThunk(ReabstractionThunkPlan),
+    ValueConversion(ValueConversionPlan),
     /// A garbage-collector finalizer. Expansion records the referenced drop glue.
     GcFinalizer(GcFinalizerPlan),
     /// A coroutine `resume`/`cleanup` pair. Expansion records the frame layout
@@ -47,6 +66,119 @@ pub(crate) enum LoweredArtifactPlan {
     /// foreign-symbol declaration parity facts; the callable sites that use
     /// the adapter live on their owners' use records.
     ExternAdapter(ExternAdapterPlan),
+}
+
+/// A static dictionary's ordered pointers and concrete closure tail.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TraitDictionaryPlan {
+    pub trait_id: TraitId,
+    pub arguments: Vec<CheckedType>,
+    pub implementation: super::LoweredTraitImplementationId,
+    pub layout: super::TraitDictionaryLayout,
+    pub slots: Vec<PlannedArtifact>,
+    /// Marker prerequisites have no dictionary; their prefix slot is null.
+    pub prerequisites: Vec<Option<PlannedArtifact>>,
+    pub associated: Vec<PlannedArtifact>,
+    pub methods: Vec<PlannedInstance>,
+    pub expanded: bool,
+}
+
+/// A descriptor-bound entry: the forwarding function a dynamic-shape
+/// closure points at. Its signature receives the descriptors not bound by the
+/// environment; the body loads the leading bound descriptors from the closure
+/// environment and forwards them followed by the caller's descriptors.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DescriptorBoundEntryPlan {
+    /// Number of leading descriptors supplied by the closure environment.
+    pub bound: usize,
+    /// Descriptor slots before bound dictionaries: the full reserved prefix
+    /// for closure environments, or the compact header prefix for slot tails.
+    pub dictionary_prefix: usize,
+    /// Dictionaries in the full instance ABI and its bound lexical prefix.
+    pub dictionary_count: usize,
+    pub bound_dictionaries: usize,
+    /// Pointer slots before the first bound word in the environment.
+    pub environment_offset: usize,
+    /// The dynamic instance the entry forwards to.
+    pub instance: FunctionInstanceId,
+    /// The instance's run-time parameters in descriptor ABI order.
+    pub runtime: Vec<crate::TypeParameterId>,
+    /// The closure's function type: the dynamic shape without descriptors.
+    pub function_type: CheckedFunctionType,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TraitMemberEntryPlan {
+    pub method: crate::TraitMethodId,
+    pub callee: Option<PlannedInstance>,
+    pub function_type: CheckedFunctionType,
+    pub descriptors: usize,
+    pub dictionaries: usize,
+    pub slot: usize,
+    pub own_descriptors: usize,
+}
+
+/// A structural dictionary slot at run-time component types. Products write
+/// their literals through `Formatter.write`; sums write nothing themselves.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DynamicStructuralPlan {
+    pub shape: crate::specialization::DynamicStructuralShape,
+    /// The trait whose dictionary prefix the slot's tail follows.
+    pub trait_id: crate::TraitId,
+    pub write: Option<PlannedInstance>,
+}
+
+/// A polymorphic-value adapter. Its environment holds the
+/// polymorphic closure's code and environment; an instantiation adapter
+/// follows them with one descriptor per type parameter of the scheme, in
+/// scheme order.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InstantiationAdapterPlan {
+    pub scheme: crate::CheckedScheme,
+    /// The type the adapter exposes: an instantiated function type, whose ABI
+    /// is the dynamic shape when it mentions run-time parameters and the
+    /// concrete closure ABI otherwise, or another scheme.
+    pub target: CheckedType,
+    /// The scheme's instantiation, one type per type parameter. For a scheme
+    /// target the types mention the target's own parameters.
+    pub types: Vec<CheckedType>,
+    /// Dictionaries the quantified entry receives: the scheme's non-marker
+    /// bounds. An instantiation adapter stores them beside its descriptors.
+    pub dictionaries: usize,
+    /// A scheme target's own dictionaries, which the adapter receives.
+    pub target_dictionaries: usize,
+    /// For a scheme target: recipes producing the source's dictionaries from
+    /// the target's, in the source's bound order (bound entailment).
+    pub entailment: Vec<crate::lower::DictionaryCallArgument>,
+    /// Value conversions for function-typed arguments and results, in
+    /// `value_conversions::adapter_conversions` order: per argument slot the
+    /// concrete-to-dynamic conversion and, for a mutated slot, the
+    /// dynamic-to-concrete writeback, then the result's dynamic-to-concrete
+    /// conversion. Codegen finds each by its key.
+    pub children: Vec<PlannedArtifact>,
+}
+
+/// A reabstraction thunk. The concrete side uses the concrete closure
+/// ABI; the dynamic side uses the dynamic shape without descriptor parameters.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ReabstractionThunkPlan {
+    pub dictionary_slot: Option<crate::specialization::StaticDictionarySlot>,
+    pub concrete: CheckedFunctionType,
+    pub dynamic: CheckedFunctionType,
+    pub direction: crate::specialization::ReabstractionDirection,
+    /// Parameter conversion, result conversion, and mutable parameter writeback,
+    /// in that order.
+    pub children: Vec<PlannedArtifact>,
+}
+
+/// A by-value conversion. Children are field converters or the leaf closure
+/// thunk; every dependency is closed and bound before emission.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ValueConversionPlan {
+    pub concrete: CheckedType,
+    pub dynamic: CheckedType,
+    pub direction: crate::specialization::ReabstractionDirection,
+    pub children: Vec<PlannedArtifact>,
 }
 
 /// One type a plan carries, as `LoweredArtifactPlan::visit_types` yields it.
@@ -114,6 +246,16 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::ConstructorAdapter(_) => "constructor-adapter",
             LoweredArtifactPlan::StructuralMethod(_) => "structural-method",
             LoweredArtifactPlan::DropGlue(_) => "drop-glue",
+            LoweredArtifactPlan::TypeDescriptor(_) => "type-descriptor",
+            LoweredArtifactPlan::TraitDictionary(_) => "trait-dictionary",
+            LoweredArtifactPlan::DescriptorDrop(_) => "descriptor-drop",
+            LoweredArtifactPlan::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
+            LoweredArtifactPlan::DescriptorBoundEntry(_) => "descriptor-bound-entry",
+            LoweredArtifactPlan::TraitMemberEntry(_) => "trait-member-entry",
+            LoweredArtifactPlan::DynamicStructural(_) => "dynamic-structural",
+            LoweredArtifactPlan::InstantiationAdapter(_) => "instantiation-adapter",
+            LoweredArtifactPlan::ReabstractionThunk(_) => "reabstraction-thunk",
+            LoweredArtifactPlan::ValueConversion(_) => "value-conversion",
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload { .. }) => {
                 "gc-finalizer-payload"
             }
@@ -123,6 +265,15 @@ impl LoweredArtifactPlan {
             }
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Buffer { .. }) => {
                 "gc-finalizer-buffer"
+            }
+            LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::DynamicClosureEnvironment {
+                ..
+            }) => "gc-finalizer-dynamic-closure-environment",
+            LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::DynamicBuffer) => {
+                "gc-finalizer-dynamic-buffer"
+            }
+            LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::DynamicCell) => {
+                "gc-finalizer-dynamic-cell"
             }
             LoweredArtifactPlan::CoroutineCodes(_) => "coroutine-codes",
             LoweredArtifactPlan::ReactionRunner(_) => "reaction-runner",
@@ -159,7 +310,20 @@ impl LoweredArtifactPlan {
                 plan.symbol == key.symbol
                     && plan.type_id == key.type_id
                     && CanonicalAdapterKind::from(plan.adapter) == key.adapter
-                    && same_function(&plan.callable_type, &key.callable_type)
+                    && if let Some(scheme) = &plan.scheme {
+                        crate::specialization::ConstructorAdapterKey::polymorphic(
+                            plan.symbol,
+                            plan.type_id,
+                            plan.adapter,
+                            scheme,
+                            origin,
+                        )
+                        .is_ok_and(|expected| expected == *key)
+                    } else {
+                        key.scheme.is_none()
+                            && CanonicalFunctionType::dynamic(&plan.callable_type, origin)
+                                .is_ok_and(|shape| shape == key.callable_type)
+                    }
             }
             (
                 LoweredArtifactPlan::StructuralMethod(plan),
@@ -175,6 +339,89 @@ impl LoweredArtifactPlan {
                         .zip(&key.arguments)
                         .all(|(argument, expected)| same_type(argument, expected))
                     && same_function(&plan.callable_type, &key.callable_type)
+            }
+            (
+                LoweredArtifactPlan::TraitDictionary(plan),
+                ArtifactRequestKey::TraitDictionary(key),
+            ) => {
+                plan.trait_id == key.trait_id
+                    && plan.implementation == key.implementation
+                    && plan.arguments.len() == key.arguments.len()
+                    && plan
+                        .arguments
+                        .iter()
+                        .zip(&key.arguments)
+                        .all(|(argument, expected)| same_type(argument, expected))
+            }
+            (
+                LoweredArtifactPlan::TypeDescriptor(plan),
+                ArtifactRequestKey::TypeDescriptor(key),
+            ) => same_type(&plan.value_type, key),
+            (
+                LoweredArtifactPlan::DescriptorDrop(plan),
+                ArtifactRequestKey::DescriptorDrop(key),
+            ) => same_type(&plan.value_type, key),
+            (
+                LoweredArtifactPlan::CompoundDescriptorDrop(plan),
+                ArtifactRequestKey::CompoundDescriptorDrop(key),
+            ) => plan == key,
+            (
+                LoweredArtifactPlan::TraitMemberEntry(plan),
+                ArtifactRequestKey::TraitMemberEntry(key),
+            ) => match key {
+                crate::specialization::TraitMemberEntryKey::Member(method) => {
+                    plan.method == *method && plan.callee.is_none()
+                }
+                crate::specialization::TraitMemberEntryKey::Slot(key) => plan
+                    .callee
+                    .as_ref()
+                    .is_some_and(|callee| &callee.key == key),
+            },
+            (
+                LoweredArtifactPlan::DescriptorBoundEntry(plan),
+                ArtifactRequestKey::DescriptorBoundEntry(key),
+            ) => {
+                plan.instance.index() == key.instance.index()
+                    && plan.bound == key.bound
+                    && plan.environment_offset == key.offset
+                    && plan.bound <= plan.runtime.len()
+                    && plan.bound_dictionaries <= plan.dictionary_count
+            }
+            (
+                LoweredArtifactPlan::DynamicStructural(plan),
+                ArtifactRequestKey::DynamicStructural(key),
+            ) => plan.shape == key.shape,
+            (
+                LoweredArtifactPlan::InstantiationAdapter(plan),
+                ArtifactRequestKey::InstantiationAdapter(key),
+            ) => {
+                CanonicalType::dynamic(&CheckedType::Forall(Box::new(plan.scheme.clone())), origin)
+                    .is_ok_and(|scheme| scheme == key.scheme)
+                    && CanonicalType::dynamic(&plan.target, origin)
+                        .is_ok_and(|target| target == key.target)
+            }
+            (
+                LoweredArtifactPlan::ReabstractionThunk(plan),
+                ArtifactRequestKey::ReabstractionThunk(key),
+            ) => {
+                same_function(&plan.concrete, &key.concrete)
+                    && CanonicalFunctionType::dynamic(&plan.dynamic, origin)
+                        .is_ok_and(|shape| shape == key.dynamic)
+                    && plan.direction == key.direction
+                    && plan.dictionary_slot == key.dictionary_slot
+                    && (plan.dictionary_slot.is_none()
+                        || plan.direction
+                            == crate::specialization::ReabstractionDirection::ConcreteToDynamic)
+            }
+            (
+                LoweredArtifactPlan::ValueConversion(plan),
+                ArtifactRequestKey::ValueConversion(key),
+            ) => {
+                super::value_conversions::concrete_key(&plan.concrete, origin)
+                    .is_ok_and(|shape| shape == key.concrete)
+                    && CanonicalType::dynamic(&plan.dynamic, origin)
+                        .is_ok_and(|shape| shape == key.dynamic)
+                    && plan.direction == key.direction
             }
             (LoweredArtifactPlan::DropGlue(plan), ArtifactRequestKey::DropGlue(key)) => {
                 same_type(&plan.value_type, key)
@@ -209,6 +456,14 @@ impl LoweredArtifactPlan {
                                 .zip(expected_captures)
                                 .all(|(capture, expected)| same_type(capture, expected))
                     }
+                    (
+                        GcFinalizerPlan::DynamicClosureEnvironment { closure, .. },
+                        GcFinalizerKey::DynamicClosureEnvironment {
+                            closure: expected_closure,
+                        },
+                    ) => closure.index() == expected_closure.index(),
+                    (GcFinalizerPlan::DynamicBuffer, GcFinalizerKey::DynamicBuffer) => true,
+                    (GcFinalizerPlan::DynamicCell, GcFinalizerKey::DynamicCell) => true,
                     _ => false,
                 }
             }
@@ -260,8 +515,15 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::ConstructorAdapter(_)
                 | LoweredArtifactPlan::StructuralMethod(_)
                 | LoweredArtifactPlan::DropGlue(_)
+                | LoweredArtifactPlan::TypeDescriptor(_)
+                | LoweredArtifactPlan::TraitDictionary(_)
+                | LoweredArtifactPlan::TraitMemberEntry(_)
+                | LoweredArtifactPlan::DescriptorDrop(_)
+                | LoweredArtifactPlan::CompoundDescriptorDrop(_)
                 | LoweredArtifactPlan::GcFinalizer(_)
                 | LoweredArtifactPlan::CoroutineCodes(_)
+                | LoweredArtifactPlan::ValueConversion(_)
+                | LoweredArtifactPlan::ReabstractionThunk(_)
         )
     }
 
@@ -275,12 +537,25 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::StructuralMethod(plan) => {
                 !matches!(plan.body, StructuralBody::Unexpanded)
             }
+            LoweredArtifactPlan::TypeDescriptor(plan) => plan.expanded,
+            LoweredArtifactPlan::TraitDictionary(plan) => plan.expanded,
+            LoweredArtifactPlan::DescriptorDrop(plan) => plan.glue.is_some(),
+            LoweredArtifactPlan::DescriptorBoundEntry(_) => true,
+            LoweredArtifactPlan::TraitMemberEntry(_) => true,
+            LoweredArtifactPlan::DynamicStructural(_) => true,
+            LoweredArtifactPlan::InstantiationAdapter(_) => true,
+            LoweredArtifactPlan::ReabstractionThunk(_) => true,
+            LoweredArtifactPlan::ValueConversion(_) => true,
+            LoweredArtifactPlan::CompoundDescriptorDrop(_) => true,
             LoweredArtifactPlan::DropGlue(plan) => !matches!(plan.body, DropGlueBody::Unexpanded),
             LoweredArtifactPlan::GcFinalizer(plan) => match plan {
                 GcFinalizerPlan::Payload { glue, .. }
                 | GcFinalizerPlan::Cell { glue, .. }
                 | GcFinalizerPlan::Buffer { glue, .. } => glue.is_some(),
                 GcFinalizerPlan::ClosureEnvironment { drops, .. } => drops.is_some(),
+                GcFinalizerPlan::DynamicClosureEnvironment { .. } => true,
+                GcFinalizerPlan::DynamicBuffer => true,
+                GcFinalizerPlan::DynamicCell => true,
             },
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.frame.is_some(),
             LoweredArtifactPlan::ReactionRunner(plan)
@@ -349,11 +624,13 @@ impl LoweredArtifactPlan {
         }
         match self {
             LoweredArtifactPlan::ConstructorAdapter(ConstructorAdapterPlan {
+                scheme: _,
                 symbol: _,
                 type_id: _,
                 adapter: _,
                 callable_type,
                 construction,
+                layout: _,
             }) => {
                 visit(Function(callable_type));
                 match construction {
@@ -465,6 +742,10 @@ impl LoweredArtifactPlan {
                     }
                 }
             }
+            LoweredArtifactPlan::TypeDescriptor(plan) => visit(Value(&plan.value_type)),
+            LoweredArtifactPlan::TraitDictionary(plan) => values(&plan.arguments, visit),
+            LoweredArtifactPlan::DescriptorDrop(plan) => visit(Value(&plan.value_type)),
+            LoweredArtifactPlan::CompoundDescriptorDrop(_) => {}
             LoweredArtifactPlan::DropGlue(DropGluePlan { value_type, body }) => {
                 visit(Value(value_type));
                 match body {
@@ -509,6 +790,14 @@ impl LoweredArtifactPlan {
                     element: value_type,
                     glue: _,
                 } => visit(Value(value_type)),
+                GcFinalizerPlan::DynamicClosureEnvironment {
+                    closure: _,
+                    runtime: _,
+                    dictionaries: _,
+                    captures: _,
+                } => {}
+                GcFinalizerPlan::DynamicBuffer => {}
+                GcFinalizerPlan::DynamicCell => {}
                 GcFinalizerPlan::ClosureEnvironment {
                     closure: _,
                     captures,
@@ -603,17 +892,110 @@ impl LoweredArtifactPlan {
                 indirect_parameters: _,
                 declaration: _,
             }) => visit(Function(callable_type)),
+            // The function type mentions the instance's run-time parameters by
+            // design; the plan is not part of the concrete closed catalog.
+            LoweredArtifactPlan::TraitMemberEntry(_) => {}
+            LoweredArtifactPlan::DescriptorBoundEntry(DescriptorBoundEntryPlan {
+                bound: _,
+                dictionary_prefix: _,
+                dictionary_count: _,
+                bound_dictionaries: _,
+                environment_offset: _,
+                instance: _,
+                runtime: _,
+                function_type: _,
+            }) => {}
+            // A structural slot is keyed by shape alone; its component types
+            // arrive through the dictionary at run time.
+            LoweredArtifactPlan::DynamicStructural(DynamicStructuralPlan {
+                shape: _,
+                trait_id: _,
+                write: _,
+            }) => {}
+            // The scheme and target mention the caller's run-time parameters by
+            // design, like the descriptor-bound entry above.
+            LoweredArtifactPlan::InstantiationAdapter(InstantiationAdapterPlan {
+                scheme: _,
+                target: _,
+                types: _,
+                dictionaries: _,
+                target_dictionaries: _,
+                entailment: _,
+                children: _,
+            }) => {}
+            LoweredArtifactPlan::ReabstractionThunk(ReabstractionThunkPlan {
+                dictionary_slot: _,
+                concrete: _,
+                dynamic: _,
+                direction: _,
+                children: _,
+            }) => {}
+            LoweredArtifactPlan::ValueConversion(_) => {}
         }
     }
 
     fn visit_callees<'a>(&'a self, visit: &mut impl FnMut(PlannedCalleeRef<'a>)) {
         match self {
             LoweredArtifactPlan::ConstructorAdapter(plan) => plan.visit_callees(visit),
+            LoweredArtifactPlan::ValueConversion(plan) => {
+                for child in &plan.children {
+                    visit(PlannedCalleeRef::Artifact(child));
+                }
+            }
+            LoweredArtifactPlan::ReabstractionThunk(plan) => {
+                for child in &plan.children {
+                    visit(PlannedCalleeRef::Artifact(child));
+                }
+            }
+            LoweredArtifactPlan::InstantiationAdapter(plan) => {
+                for child in &plan.children {
+                    visit(PlannedCalleeRef::Artifact(child));
+                }
+            }
             LoweredArtifactPlan::StructuralMethod(plan) => plan.visit_callees(visit),
+            LoweredArtifactPlan::TraitDictionary(plan) => {
+                for slot in &plan.slots {
+                    visit(PlannedCalleeRef::Artifact(slot));
+                }
+                for prerequisite in plan.prerequisites.iter().flatten() {
+                    visit(PlannedCalleeRef::Artifact(prerequisite));
+                }
+                for associated in &plan.associated {
+                    visit(PlannedCalleeRef::Artifact(associated));
+                }
+                for method in &plan.methods {
+                    visit(PlannedCalleeRef::Instance(method));
+                }
+            }
+            LoweredArtifactPlan::TypeDescriptor(plan) => {
+                for component in &plan.components {
+                    visit(PlannedCalleeRef::Artifact(component));
+                }
+                if let Some(drop) = &plan.drop {
+                    visit(PlannedCalleeRef::Artifact(drop));
+                }
+            }
+            LoweredArtifactPlan::DescriptorDrop(plan) => {
+                if let Some(glue) = &plan.glue {
+                    visit(PlannedCalleeRef::Artifact(glue));
+                }
+            }
             LoweredArtifactPlan::DropGlue(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::GcFinalizer(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees(visit),
-            LoweredArtifactPlan::ReactionRunner(_)
+            LoweredArtifactPlan::TraitMemberEntry(plan) => {
+                if let Some(callee) = &plan.callee {
+                    visit(PlannedCalleeRef::Instance(callee));
+                }
+            }
+            LoweredArtifactPlan::DynamicStructural(plan) => {
+                if let Some(write) = &plan.write {
+                    visit(PlannedCalleeRef::Instance(write));
+                }
+            }
+            LoweredArtifactPlan::CompoundDescriptorDrop(_)
+            | LoweredArtifactPlan::DescriptorBoundEntry(_)
+            | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)
             | LoweredArtifactPlan::ExternAdapter(_) => {}
@@ -623,11 +1005,65 @@ impl LoweredArtifactPlan {
     fn visit_callees_mut<'a>(&'a mut self, visit: &mut impl FnMut(PlannedCalleeRefMut<'a>)) {
         match self {
             LoweredArtifactPlan::ConstructorAdapter(plan) => plan.visit_callees_mut(visit),
+            LoweredArtifactPlan::ValueConversion(plan) => {
+                for child in &mut plan.children {
+                    visit(PlannedCalleeRefMut::Artifact(child));
+                }
+            }
+            LoweredArtifactPlan::ReabstractionThunk(plan) => {
+                for child in &mut plan.children {
+                    visit(PlannedCalleeRefMut::Artifact(child));
+                }
+            }
+            LoweredArtifactPlan::InstantiationAdapter(plan) => {
+                for child in &mut plan.children {
+                    visit(PlannedCalleeRefMut::Artifact(child));
+                }
+            }
             LoweredArtifactPlan::StructuralMethod(plan) => plan.visit_callees_mut(visit),
+            LoweredArtifactPlan::TraitDictionary(plan) => {
+                for slot in &mut plan.slots {
+                    visit(PlannedCalleeRefMut::Artifact(slot));
+                }
+                for prerequisite in plan.prerequisites.iter_mut().flatten() {
+                    visit(PlannedCalleeRefMut::Artifact(prerequisite));
+                }
+                for associated in &mut plan.associated {
+                    visit(PlannedCalleeRefMut::Artifact(associated));
+                }
+                for method in &mut plan.methods {
+                    visit(PlannedCalleeRefMut::Instance(method));
+                }
+            }
+            LoweredArtifactPlan::TypeDescriptor(plan) => {
+                for component in &mut plan.components {
+                    visit(PlannedCalleeRefMut::Artifact(component));
+                }
+                if let Some(drop) = &mut plan.drop {
+                    visit(PlannedCalleeRefMut::Artifact(drop));
+                }
+            }
+            LoweredArtifactPlan::DescriptorDrop(plan) => {
+                if let Some(glue) = &mut plan.glue {
+                    visit(PlannedCalleeRefMut::Artifact(glue));
+                }
+            }
             LoweredArtifactPlan::DropGlue(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::GcFinalizer(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees_mut(visit),
-            LoweredArtifactPlan::ReactionRunner(_)
+            LoweredArtifactPlan::TraitMemberEntry(plan) => {
+                if let Some(callee) = &mut plan.callee {
+                    visit(PlannedCalleeRefMut::Instance(callee));
+                }
+            }
+            LoweredArtifactPlan::DynamicStructural(plan) => {
+                if let Some(write) = &mut plan.write {
+                    visit(PlannedCalleeRefMut::Instance(write));
+                }
+            }
+            LoweredArtifactPlan::CompoundDescriptorDrop(_)
+            | LoweredArtifactPlan::DescriptorBoundEntry(_)
+            | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)
             | LoweredArtifactPlan::ExternAdapter(_) => {}
@@ -638,6 +1074,7 @@ impl LoweredArtifactPlan {
 /// The plan shape of a constructor value's adapter.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ConstructorAdapterPlan {
+    pub scheme: Option<crate::CheckedScheme>,
     /// The constructor's semantic symbol; part of the artifact key.
     pub symbol: SymbolId,
     /// The constructor's nominal type; part of the artifact key.
@@ -650,6 +1087,8 @@ pub(crate) struct ConstructorAdapterPlan {
     pub callable_type: CheckedFunctionType,
     /// The construction the adapter performs. `Unexpanded` at request time.
     pub construction: ConstructorConstruction,
+    /// Descriptor and compound-drop dependencies of a dynamic representation.
+    pub layout: Vec<PlannedArtifact>,
 }
 
 /// How a constructor adapter turns its flattened parameters into its result.
@@ -680,7 +1119,67 @@ pub(crate) enum ConstructorConstruction {
 }
 
 impl ConstructorAdapterPlan {
+    /// Private environment order for descriptors captured by a dynamic constructor.
+    pub(crate) fn runtime_parameters(&self) -> Vec<crate::TypeParameterId> {
+        if let Some(scheme) = &self.scheme {
+            fn collect(
+                parameters: &[crate::CheckedSchemeParameter],
+                ids: &mut Vec<crate::TypeParameterId>,
+            ) {
+                for parameter in parameters {
+                    match parameter {
+                        crate::CheckedSchemeParameter::Type { id, .. } => ids.push(*id),
+                        crate::CheckedSchemeParameter::Product(parameters) => {
+                            collect(parameters, ids)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut ids = Vec::new();
+            collect(&scheme.parameters, &mut ids);
+            return ids;
+        }
+
+        fn collect(ty: &CheckedType, ids: &mut std::collections::BTreeSet<crate::TypeParameterId>) {
+            match ty {
+                CheckedType::Parameter { id, .. } => {
+                    ids.insert(*id);
+                }
+                CheckedType::Product(product) => {
+                    for field in &product.elements {
+                        collect(&field.value_type, ids);
+                    }
+                }
+                CheckedType::Sum(sum) => {
+                    for alternative in &sum.alternatives {
+                        collect(alternative, ids);
+                    }
+                }
+                CheckedType::Wrapper { representation, .. } => collect(representation, ids),
+                CheckedType::Ref(ty) | CheckedType::Slice(ty) | CheckedType::Buffer(ty) => {
+                    collect(ty, ids)
+                }
+                CheckedType::Array { element, count } => {
+                    collect(element, ids);
+                    collect(count, ids);
+                }
+                CheckedType::Function(function) => {
+                    collect(&function.parameter, ids);
+                    collect(&function.result, ids);
+                }
+                _ => {}
+            }
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        collect(&self.callable_type.parameter, &mut ids);
+        collect(&self.callable_type.result, &mut ids);
+        ids.into_iter().collect()
+    }
     fn visit_callees<'a>(&'a self, visit: &mut impl FnMut(PlannedCalleeRef<'a>)) {
+        for layout in &self.layout {
+            visit(PlannedCalleeRef::Artifact(layout));
+        }
         if let ConstructorConstruction::ManagedRef {
             finalizer: Some(finalizer),
             ..
@@ -691,6 +1190,9 @@ impl ConstructorAdapterPlan {
     }
 
     fn visit_callees_mut<'a>(&'a mut self, visit: &mut impl FnMut(PlannedCalleeRefMut<'a>)) {
+        for layout in &mut self.layout {
+            visit(PlannedCalleeRefMut::Artifact(layout));
+        }
         if let ConstructorConstruction::ManagedRef {
             finalizer: Some(finalizer),
             ..
@@ -1119,6 +1621,35 @@ pub(crate) enum GcFinalizerPlan {
         /// The element's drop glue, absent only in the request-time marker.
         glue: Option<PlannedArtifact>,
     },
+    /// A dynamic buffer: drops the elements through the element
+    /// descriptor in the allocation's trailing word.
+    DynamicBuffer,
+    /// A dynamic shared cell: drops the value through the descriptor in
+    /// the allocation's trailing word.
+    DynamicCell,
+    /// A dynamic closure environment: drops each owned capture through
+    /// the descriptors the environment holds.
+    DynamicClosureEnvironment {
+        /// The closure's own function instance; its position is the key's
+        /// instance ordinal.
+        closure: FunctionInstanceId,
+        /// The instance's run-time parameters in descriptor ABI order.
+        runtime: Vec<crate::TypeParameterId>,
+        /// Dictionaries stored after the descriptors, before the
+        /// capture descriptors.
+        dictionaries: usize,
+        /// The captures in environment order.
+        captures: Vec<DynamicCapture>,
+    },
+}
+
+/// One capture of a dynamic closure environment.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DynamicCapture {
+    pub value_type: CheckedType,
+    pub access: crate::LoweredCaptureAccess,
+    /// The finalizer drops the capture.
+    pub owns: bool,
 }
 
 /// One capture dropped by a closure-environment finalizer.
@@ -1145,6 +1676,9 @@ impl GcFinalizerPlan {
                     visit(PlannedCalleeRef::Artifact(&drop.glue));
                 }
             }
+            GcFinalizerPlan::DynamicClosureEnvironment { .. }
+            | GcFinalizerPlan::DynamicBuffer
+            | GcFinalizerPlan::DynamicCell => {}
         }
     }
 
@@ -1162,6 +1696,9 @@ impl GcFinalizerPlan {
                     visit(PlannedCalleeRefMut::Artifact(&mut drop.glue));
                 }
             }
+            GcFinalizerPlan::DynamicClosureEnvironment { .. }
+            | GcFinalizerPlan::DynamicBuffer
+            | GcFinalizerPlan::DynamicCell => {}
         }
     }
 }
@@ -1317,4 +1854,19 @@ pub(crate) struct ExternDeclaration {
     /// every non-variadic extern binding, used or not. The artifact records
     /// which adapters a callable-value site actually reaches.
     pub eagerly_declared: bool,
+}
+
+/// A demand-driven static descriptor. Layout is target-specific and stays in codegen.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TypeDescriptorPlan {
+    pub value_type: CheckedType,
+    pub components: Vec<PlannedArtifact>,
+    pub drop: Option<PlannedArtifact>,
+    pub expanded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DescriptorDropPlan {
+    pub value_type: CheckedType,
+    pub glue: Option<PlannedArtifact>,
 }

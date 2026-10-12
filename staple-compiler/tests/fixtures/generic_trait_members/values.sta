@@ -1,0 +1,31 @@
+use std.io.println
+trait Visit T { visit: <A> (T, move A) -> A }
+impl Visit I32 { visit = (_, move value) => value }
+def relay: <T, A where Visit T> (T, move A) -> A = (item, move value) => Visit.visit (item, value)
+let stored = relay
+println "${stored (1, "dynamic")}"
+let member = Visit.visit
+println "${member (1, 42)}"
+let text = ToString.to_string
+println "${text (Bool :: True)}"
+def consume: (<T where ToString T> T -> String) -> String = f => f 7
+println "${consume ToString.to_string}"
+type Box T = wrap T
+impl <T> Visit (Box T) { visit = (_, move value) => value }
+def capture_member: <T where Visit T, Copy T> T -> (() -> I32) = item => {
+    let f: (T, move I32) -> I32 = Visit.visit
+    () => f (item, 13)
+}
+let stored_capture = capture_member
+let escaped = stored_capture (Box 1)
+println "${escaped ()}"
+trait Action T { act: <effect E> (T, (() ->{E} I32)) ->{E} I32 }
+impl Action I32 { act = (_, f) => f () }
+let action = Action.act
+println "${action (1, () => 14)}"
+println "${action (1, () => { println "member effect"; 15 })}"
+let equals: <T where Ord T> (T, T) -> Bool = Eq.eq
+println "${equals (1, 1)}"
+impl <T> Action (Box T) { act = (_, f) => f () }
+let boxed_action: <T, effect E> (Box T, (() ->{E} I32)) ->{E} I32 = Action.act
+println "${boxed_action (Box 1, () => 16)}"

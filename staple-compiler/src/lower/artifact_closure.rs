@@ -85,6 +85,28 @@ pub(super) enum ClosureRequest {
 /// Matches stay exhaustive and IDs resolve in the owning body's arenas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ArtifactUseSite {
+    /// Index into the dynamic body's deterministic concrete descriptor list.
+    InstanceTypeDescriptor(usize),
+    /// A static dictionary supplied to a direct dynamic call.
+    CallDictionary {
+        call: LoweredCallId,
+        argument: usize,
+    },
+    /// The n-th artifact a body's dictionary builders need (slot entries and
+    /// nested static dictionaries), in `body_builder_uses` order.
+    DictionaryBuilder(usize),
+    /// A static dictionary stored in an instantiation adapter's environment.
+    CoercionDictionary {
+        expression: ExpressionId,
+        argument: usize,
+    },
+    /// A static dictionary stored in a callable value's closure environment.
+    ValueDictionary {
+        value: LoweredCallableValueId,
+        argument: usize,
+    },
+    /// Index into the dynamic body's structural cleanup shape list.
+    InstanceCompoundDrop(usize),
     /// A scripted test site identified by its position in the hook table.
     #[cfg(test)]
     Test(u32),
@@ -107,8 +129,33 @@ pub(crate) enum ArtifactUseSite {
     OwnedBinding(SymbolId),
     /// A captured binding cell's finalizer.
     CellFinalizer(SymbolId),
+    /// A captured binding cell's dynamic finalizer: one shared finalizer
+    /// reads the value descriptor from the cell's trailing word.
+    DynamicCellFinalizer(SymbolId),
     /// A closure environment's finalizer.
     ClosureEnvironment(LoweredCallableValueId),
+    /// A dynamic-shape closure's descriptor-bound entry.
+    DescriptorBoundEntry(LoweredCallableValueId),
+    /// Adapt a descriptor-bound closure with a concrete signature.
+    ConcreteCapturedClosure(LoweredCallableValueId),
+    /// The instantiation adapter a polymorphic value's use-site coercion
+    /// builds its closure from.
+    InstantiationAdapter(ExpressionId),
+    /// Descriptor-bound entry for an implicit thunk argument.
+    DescriptorBoundThunk {
+        call: LoweredCallId,
+        argument: usize,
+    },
+    /// A reabstraction conversion at a call boundary.
+    ReabstractionThunk {
+        call: LoweredCallId,
+        argument: Option<usize>,
+    },
+    /// Inverse conversion of a mutable argument after a boundary call.
+    ReabstractionWriteback {
+        call: LoweredCallId,
+        argument: usize,
+    },
     /// An `Index` call's operand temporary dropped after the call: `operand` is
     /// the flattened parameter index, or `None` for the whole-argument
     /// temporary.
@@ -230,6 +277,14 @@ impl ArtifactFamilyHooks for ProductionHooks {
             program,
             initializer,
         )?);
+        requests.extend(super::descriptor_artifacts::scan_initializer(
+            program,
+            initializer,
+        )?);
+        requests.extend(super::trait_dictionaries::scan_initializer(
+            program,
+            initializer,
+        )?);
         Ok(requests)
     }
 
@@ -239,6 +294,10 @@ impl ArtifactFamilyHooks for ProductionHooks {
             program, instance,
         )?);
         requests.extend(super::extern_artifacts::scan_instance(program, instance)?);
+        requests.extend(super::descriptor_artifacts::scan_instance(
+            program, instance,
+        )?);
+        requests.extend(super::trait_dictionaries::scan_instance(program, instance)?);
         Ok(requests)
     }
     fn expand(
@@ -295,6 +354,23 @@ impl ArtifactFamilyHooks for ProductionHooks {
                     )]);
                 };
                 super::structural_artifacts::expand_structural_method(program, artifact, plan)
+            }
+            ArtifactRequestKey::TraitDictionary(_) => {
+                super::trait_dictionaries::expand(program, artifact, plan)
+            }
+            ArtifactRequestKey::DynamicStructural(_) => {
+                super::trait_dictionaries::expand_dynamic_structural(program, artifact, plan)
+            }
+            ArtifactRequestKey::TypeDescriptor(_)
+            | ArtifactRequestKey::DescriptorDrop(_)
+            | ArtifactRequestKey::CompoundDescriptorDrop(_)
+            | ArtifactRequestKey::DescriptorBoundEntry(_)
+            | ArtifactRequestKey::TraitMemberEntry(_)
+            | ArtifactRequestKey::InstantiationAdapter(_) => {
+                super::descriptor_artifacts::expand(program, artifact, plan)
+            }
+            ArtifactRequestKey::ReabstractionThunk(_) | ArtifactRequestKey::ValueConversion(_) => {
+                super::value_conversions::expand(plan, &record.origin)
             }
             ArtifactRequestKey::DropGlue(_) => {
                 let LoweredArtifactPlan::DropGlue(plan) = plan else {
@@ -383,6 +459,16 @@ impl ArtifactFamilyHooks for ProductionHooks {
             ArtifactRequestKey::ConstructorAdapter(_)
                 | ArtifactRequestKey::StructuralMethod(_)
                 | ArtifactRequestKey::DropGlue(_)
+                | ArtifactRequestKey::TypeDescriptor(_)
+                | ArtifactRequestKey::TraitDictionary(_)
+                | ArtifactRequestKey::DynamicStructural(_)
+                | ArtifactRequestKey::DescriptorDrop(_)
+                | ArtifactRequestKey::CompoundDescriptorDrop(_)
+                | ArtifactRequestKey::DescriptorBoundEntry(_)
+                | ArtifactRequestKey::TraitMemberEntry(_)
+                | ArtifactRequestKey::InstantiationAdapter(_)
+                | ArtifactRequestKey::ReabstractionThunk(_)
+                | ArtifactRequestKey::ValueConversion(_)
                 | ArtifactRequestKey::GcFinalizer(_)
                 | ArtifactRequestKey::CoroutineCodes(_)
                 | ArtifactRequestKey::ReactionRunner(_)
@@ -638,7 +724,7 @@ impl LoweredProgram {
 
         vec![self.non_convergence(
             &last_request,
-            format!("artifact closure did not converge after {MAX_CLOSURE_ROUNDS} rounds"),
+            format!("artifact closure did not converge after {MAX_CLOSURE_ROUNDS} rounds (possible polymorphic recursion)"),
         )]
     }
 
@@ -724,6 +810,10 @@ impl LoweredProgram {
                     origin,
                     use_site,
                 } => {
+                    if let Some(diagnostic) = self.runaway_instance_diagnostic(&resolved, &origin) {
+                        diagnostics.push(diagnostic);
+                        continue;
+                    }
                     if matches!(owner, AppliedOwner::Artifact(_)) && use_site.is_some() {
                         diagnostics.push(Diagnostic::new(
                             origin.span.clone(),
@@ -1095,7 +1185,7 @@ impl<'a> UseEdge<'a> {
 #[derive(Clone, Copy)]
 enum UseSiteOwner<'a> {
     Instance(&'a LoweredInstanceBody),
-    Initializer,
+    Initializer(InitializerId),
 }
 
 /// The request-root walk node used by the acyclicity check.
@@ -1505,7 +1595,7 @@ impl LoweredProgram {
                 .iter()
                 .map(UseEdge::instance_edge)
                 .collect::<Vec<_>>();
-            let site_owner = UseSiteOwner::Initializer;
+            let site_owner = UseSiteOwner::Initializer(id);
             self.agree_uses_with_edges(
                 &owner,
                 site_owner,
@@ -1556,6 +1646,26 @@ impl LoweredProgram {
         }
     }
 
+    fn dictionary_site_has_argument(
+        &self,
+        site_owner: &UseSiteOwner<'_>,
+        site: super::trait_dictionaries::DictionarySite,
+        argument: usize,
+    ) -> bool {
+        match site_owner {
+            UseSiteOwner::Instance(body) => body
+                .dictionary_calls
+                .get(&site)
+                .is_some_and(|arguments| argument < arguments.len()),
+            UseSiteOwner::Initializer(id) => {
+                super::trait_dictionaries::initializer_call_arguments(self, *id)
+                    .ok()
+                    .and_then(|sites| sites.get(&site).map(|arguments| argument < arguments.len()))
+                    .unwrap_or(false)
+            }
+        }
+    }
+
     /// Every use site's ID must resolve inside the owning body's own arenas, so
     /// a scanner cannot tie an edge to a site that emission could not emit from.
     fn check_use_site(
@@ -1574,37 +1684,111 @@ impl LoweredProgram {
         };
         let item = |id: ItemId| match site_owner {
             UseSiteOwner::Instance(body) => body.item(id).is_some(),
-            UseSiteOwner::Initializer => self.items.get(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.items.get(id).is_some(),
         };
         let expression = |id: ExpressionId| match site_owner {
             UseSiteOwner::Instance(body) => body.expression(id).is_some(),
-            UseSiteOwner::Initializer => self.expressions.get(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.expressions.get(id).is_some(),
         };
         let pattern = |id: PatternId| match site_owner {
             UseSiteOwner::Instance(body) => body.pattern(id).is_some(),
-            UseSiteOwner::Initializer => self.patterns.get(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.patterns.get(id).is_some(),
         };
         let call = |id: LoweredCallId| match site_owner {
             UseSiteOwner::Instance(body) => body.call(id).is_some(),
-            UseSiteOwner::Initializer => self.calls.get(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.calls.get(id).is_some(),
         };
         let callable_value = |id: LoweredCallableValueId| match site_owner {
             UseSiteOwner::Instance(body) => body.callable_value(id).is_some(),
-            UseSiteOwner::Initializer => self.callable_values.get(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.callable_values.get(id).is_some(),
         };
         let coro = |id: LoweredCoroId| match site_owner {
             UseSiteOwner::Instance(body) => body.coro(id).is_some(),
-            UseSiteOwner::Initializer => self.coros.get(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.coros.get(id).is_some(),
         };
         let reactive_operation = |id: LoweredReactiveOperationId| match site_owner {
             UseSiteOwner::Instance(body) => body.reactive_operation(id).is_some(),
-            UseSiteOwner::Initializer => self.reactive_operations.get(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.reactive_operations.get(id).is_some(),
         };
         let reactive_callback = |id: LoweredReactiveCallbackId| match site_owner {
             UseSiteOwner::Instance(body) => body.reactive_callback(id).is_some(),
-            UseSiteOwner::Initializer => self.reactive_callbacks.get(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.reactive_callbacks.get(id).is_some(),
         };
         match site {
+            ArtifactUseSite::InstanceCompoundDrop(index) => {
+                let valid = match site_owner {
+                    UseSiteOwner::Instance(body) => {
+                        index < super::descriptor_artifacts::compound_body_shapes(body).len()
+                    }
+                    UseSiteOwner::Initializer(_) => false,
+                };
+                if !valid {
+                    report("compound cleanup", index);
+                }
+            }
+            ArtifactUseSite::CallDictionary { call, argument } => {
+                let valid = self.dictionary_site_has_argument(
+                    &site_owner,
+                    super::trait_dictionaries::DictionarySite::Call(call),
+                    argument,
+                );
+                if !valid {
+                    report("call dictionary", call.index());
+                }
+            }
+            ArtifactUseSite::CoercionDictionary {
+                expression,
+                argument,
+            } => {
+                let valid = self.dictionary_site_has_argument(
+                    &site_owner,
+                    super::trait_dictionaries::DictionarySite::Coercion(expression),
+                    argument,
+                );
+                if !valid {
+                    report("coercion dictionary", expression.index());
+                }
+            }
+            ArtifactUseSite::DictionaryBuilder(index) => {
+                let valid = match site_owner {
+                    UseSiteOwner::Instance(body) => {
+                        index < super::trait_dictionaries::body_builder_uses(self, body).len()
+                    }
+                    UseSiteOwner::Initializer(id) => {
+                        index < super::trait_dictionaries::initializer_builder_uses(self, id).len()
+                    }
+                };
+                if !valid {
+                    report("dictionary builder", index);
+                }
+            }
+            ArtifactUseSite::ValueDictionary { value, argument } => {
+                let valid = match site_owner {
+                    UseSiteOwner::Instance(body) => body
+                        .dictionary_values
+                        .get(&value)
+                        .is_some_and(|arguments| argument < arguments.len()),
+                    UseSiteOwner::Initializer(_) => false,
+                };
+                if !valid {
+                    report("value dictionary", value.index());
+                }
+            }
+            ArtifactUseSite::InstanceTypeDescriptor(index) => {
+                let valid = match site_owner {
+                    UseSiteOwner::Instance(body) => {
+                        index < super::descriptor_artifacts::concrete_body_types(body).len()
+                    }
+                    UseSiteOwner::Initializer(id) => {
+                        index
+                            < super::descriptor_artifacts::concrete_initializer_types(self, id)
+                                .len()
+                    }
+                };
+                if !valid {
+                    report("instance descriptor", index);
+                }
+            }
             #[cfg(test)]
             ArtifactUseSite::Test(_) => {}
             ArtifactUseSite::DiscardedResult(id) => {
@@ -1615,6 +1799,11 @@ impl LoweredProgram {
             ArtifactUseSite::ReplacedValue(id) => {
                 if !item(id) {
                     report("item", id.index());
+                }
+            }
+            ArtifactUseSite::InstantiationAdapter(id) => {
+                if !expression(id) {
+                    report("expression", id.index());
                 }
             }
             ArtifactUseSite::LoopBodyResult(id) => {
@@ -1640,7 +1829,7 @@ impl LoweredProgram {
             ArtifactUseSite::ThunkArgumentEnvironment { call: id, argument } => {
                 let thunk_argument = match site_owner {
                     UseSiteOwner::Instance(body) => body.call(id),
-                    UseSiteOwner::Initializer => self.calls.get(id),
+                    UseSiteOwner::Initializer(_) => self.calls.get(id),
                 }
                 .and_then(|record| record.arguments.get(argument))
                 .is_some_and(|record| record.thunk.is_some());
@@ -1653,7 +1842,9 @@ impl LoweredProgram {
                     report("pattern", id.index());
                 }
             }
-            ArtifactUseSite::OwnedBinding(symbol) | ArtifactUseSite::CellFinalizer(symbol) => {
+            ArtifactUseSite::OwnedBinding(symbol)
+            | ArtifactUseSite::CellFinalizer(symbol)
+            | ArtifactUseSite::DynamicCellFinalizer(symbol) => {
                 // A module-scoped symbol without real module storage (a `let`
                 // inside a top-level `with`/block) is owned like a local; only
                 // an actual global, function binding, or extern is never
@@ -1673,6 +1864,29 @@ impl LoweredProgram {
             ArtifactUseSite::ClosureEnvironment(id) => {
                 if !callable_value(id) {
                     report("callable value", id.index());
+                }
+            }
+            ArtifactUseSite::DescriptorBoundEntry(id)
+            | ArtifactUseSite::ConcreteCapturedClosure(id) => {
+                if !callable_value(id) {
+                    report("callable value", id.index());
+                }
+            }
+            ArtifactUseSite::DescriptorBoundThunk { call: id, argument } => {
+                let thunk = match site_owner {
+                    UseSiteOwner::Instance(body) => body.call(id),
+                    UseSiteOwner::Initializer(_) => self.calls.get(id),
+                }
+                .and_then(|record| record.arguments.get(argument))
+                .is_some_and(|record| record.thunk.is_some());
+                if !thunk {
+                    report("thunk argument of call", id.index());
+                }
+            }
+            ArtifactUseSite::ReabstractionThunk { call: id, .. }
+            | ArtifactUseSite::ReabstractionWriteback { call: id, .. } => {
+                if !call(id) {
+                    report("call", id.index());
                 }
             }
             ArtifactUseSite::RefConstruction(id) => {

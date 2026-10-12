@@ -258,7 +258,7 @@ impl DeclarationCollector<'_> {
 
     fn binding(&mut self, binding: &Binding) {
         self.declaration(&binding.syntax, &binding.name);
-        for parameter in &binding.type_parameters {
+        for parameter in &binding.all_type_parameters() {
             self.type_parameter(parameter);
         }
         if let Some(value) = &binding.value {
@@ -804,13 +804,13 @@ impl Collector<'_> {
 
     fn binding(&mut self, binding: &Binding) {
         self.add_resolved(&binding.syntax, &binding.name, false);
-        for parameter in &binding.type_parameters {
+        for parameter in &binding.all_type_parameters() {
             self.type_parameter(parameter);
         }
-        for bound in &binding.trait_bounds {
+        for bound in &binding.all_trait_bounds() {
             self.trait_bound(bound);
         }
-        if let Some(annotation) = &binding.annotation {
+        if let Some(annotation) = binding.annotation_body() {
             self.ty(annotation);
         }
         if let Some(value) = &binding.value {
@@ -1007,6 +1007,19 @@ impl Collector<'_> {
 
     fn ty(&mut self, ty: &Type) {
         match ty {
+            Type::Forall(ty) => {
+                for parameter in &ty.generics.parameters {
+                    self.type_parameter(parameter);
+                }
+                for bound in &ty.generics.trait_bounds {
+                    self.trait_bound(bound);
+                }
+                for bound in &ty.generics.subtype_bounds {
+                    self.ty(&bound.supertype);
+                }
+                self.ty(&ty.body);
+            }
+
             Type::Named(value) => self.named_type(value),
             Type::Product(value) | Type::ParameterProduct(value) => {
                 for element in &value.elements {
@@ -2028,5 +2041,45 @@ mod tests {
             }),
             "missing {origin} -> {target}: {entries:?}"
         );
+    }
+    #[test]
+    fn forall_companion_parameters_keep_lsp_signatures_and_targets() {
+        let source = r#"pub type Box T = pub wrap T
+companion<T> Box T { pub def choose: <U> (move Box T, move U) -> U = (move Box x, move y) => y }
+let result: String = Box.choose.<I32, String> (Box 1, "yes")
+"#;
+        let path = std::env::temp_dir().join("staple-forall-companion-lsp.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, typed.resolved(), Some(&typed));
+        let header = source.find("companion<T>").unwrap() + "companion<".len();
+        let own = source.find("<U>").unwrap() + 1;
+        let start = source.find("(move Box T, move U)").unwrap();
+        for (offset, target) in [
+            (start + "(move Box ".len(), header),
+            (start + "(move Box T, move ".len(), own),
+        ] {
+            let entry = entries
+                .iter()
+                .find(|entry| entry.range.start == offset)
+                .unwrap();
+            assert!(
+                entry
+                    .targets
+                    .iter()
+                    .any(|entry| entry.selection_range.start == target),
+                "{entry:?}"
+            );
+        }
     }
 }

@@ -16,6 +16,7 @@ use crate::{
 };
 
 use super::instance_body::LoweredInstanceBody;
+use super::instance_resolution::contains_parameter_outside_scope;
 use super::{ArenaId, LoweredFunctionInstance, LoweredItemKind, LoweredProgram};
 
 impl LoweredProgram {
@@ -147,6 +148,16 @@ impl<'a> GraphValidator<'a> {
         };
         let mut substitutions = Vec::new();
         let mut complete = true;
+        if !key
+            .runtime()
+            .is_subset(&instance.relevant.type_parameters().collect())
+        {
+            self.report(
+                &instance.origin,
+                "instance run-time set includes a non-relevant type parameter",
+            );
+            complete = false;
+        }
         for parameter in instance.relevant.type_parameters() {
             let Some(value_type) = instance.environment.type_value(parameter) else {
                 self.report(
@@ -160,6 +171,17 @@ impl<'a> GraphValidator<'a> {
                 complete = false;
                 continue;
             };
+            if key.runtime().contains(&parameter) {
+                if !matches!(value_type, crate::CheckedType::Parameter { id, .. } if *id == parameter)
+                {
+                    self.report(
+                        &instance.origin,
+                        "run-time parameter does not retain its own identity",
+                    );
+                    complete = false;
+                }
+                continue;
+            }
             if contains_type_parameter(value_type) {
                 self.report(
                     &instance.origin,
@@ -179,7 +201,32 @@ impl<'a> GraphValidator<'a> {
                 }
             }
         }
+        if !key
+            .runtime_effects()
+            .is_subset(&instance.relevant.effect_parameters().collect())
+        {
+            self.report(
+                &instance.origin,
+                "instance run-time set includes a non-relevant effect parameter",
+            );
+            complete = false;
+        }
         for parameter in instance.relevant.effect_parameters() {
+            if key.runtime_effects().contains(&parameter) {
+                let own = instance
+                    .environment
+                    .effect_value(parameter)
+                    .and_then(|effects| effects.variable.as_ref())
+                    .is_some_and(|variable| variable.id == parameter);
+                if !own {
+                    self.report(
+                        &instance.origin,
+                        "run-time effect parameter does not retain its own identity",
+                    );
+                    complete = false;
+                }
+                continue;
+            }
             let Some(effects) = instance.environment.effect_value(parameter) else {
                 self.report(
                     &instance.origin,
@@ -213,7 +260,12 @@ impl<'a> GraphValidator<'a> {
                 }
             }
         }
-        let evidence = match &instance.evidence {
+        // Evidence over run-time parameters is not part of the key.
+        let keyed = instance.evidence.as_ref().filter(|evidence| {
+            let (_, arguments, _) = super::trait_dictionaries::evidence_obligation(evidence);
+            !arguments.iter().any(contains_type_parameter)
+        });
+        let evidence = match keyed {
             Some(evidence) => match canonical_evidence(evidence, &instance.origin) {
                 Ok(evidence) => Some(evidence),
                 Err(diagnostic) => {
@@ -227,7 +279,13 @@ impl<'a> GraphValidator<'a> {
         if !complete {
             return;
         }
-        match InstanceKey::new(instance.template, substitutions, evidence) {
+        match InstanceKey::with_runtime_effects(
+            instance.template,
+            substitutions,
+            evidence,
+            key.runtime().clone(),
+            key.runtime_effects().clone(),
+        ) {
             Ok(rebuilt) if &rebuilt == key => {}
             Ok(_) => self.report(
                 &instance.origin,
@@ -311,15 +369,66 @@ impl<'a> GraphValidator<'a> {
             );
             return;
         }
-        for (_, call) in body.calls.iter() {
-            self.check_substitutions(&call.origin, &call.substitutions, "call");
-            if let Some(evidence) = &call.evidence {
+        let runtime = self
+            .program
+            .specializations
+            .instance(record.ordinal)
+            .map(|key| key.runtime_ids())
+            .unwrap_or_default();
+        let dictionary_site = |site| {
+            matches!(
+                body.binding(site),
+                Some(super::LoweredBoundTarget::Dictionary(_))
+            )
+        };
+        for (call_id, call) in body.calls.iter() {
+            let bound = call
+                .scheme
+                .as_ref()
+                .map(|scheme| scheme.bound_ids())
+                .unwrap_or_default();
+            self.check_substitutions(&call.origin, &call.substitutions, "call", &runtime, &bound);
+            // A dictionary dispatch keeps its declared obligation: the
+            // dictionary, not an implementation, answers it.
+            if let Some(evidence) = &call.evidence
+                && !dictionary_site(super::LoweredBindingSite::Call(call_id))
+            {
                 self.check_evidence(&call.origin, evidence);
             }
         }
-        for (_, value) in body.callable_values.iter() {
-            self.check_substitutions(&value.origin, &value.substitutions, "callable value");
-            if let Some(evidence) = &value.evidence {
+        for (value_id, value) in body.callable_values.iter() {
+            let mut bound = value
+                .scheme
+                .as_ref()
+                .map(|scheme| scheme.bound_ids())
+                .unwrap_or_default();
+            if value.scheme.is_some() {
+                // The entry's own scheme parameters, which a generic `def`
+                // declares separately from the written scheme's binders.
+                let function = match &value.closure {
+                    Some(closure) => Some(closure.function),
+                    None => match &value.target {
+                        crate::LoweredCallableTarget::DirectFunction { function, .. } => {
+                            Some(*function)
+                        }
+                        _ => None,
+                    },
+                };
+                if let Some(template) = function.and_then(|id| self.program.functions.get(id)) {
+                    bound.extend(template.scheme_type_parameters.iter().copied());
+                    bound.extend(template.scheme_effect_parameters.iter().copied());
+                }
+            }
+            self.check_substitutions(
+                &value.origin,
+                &value.substitutions,
+                "callable value",
+                &runtime,
+                &bound,
+            );
+            if let Some(evidence) = &value.evidence
+                && !dictionary_site(super::LoweredBindingSite::CallableValue(value_id))
+            {
                 self.check_evidence(&value.origin, evidence);
             }
             let Some(closure) = &value.closure else {
@@ -329,9 +438,11 @@ impl<'a> GraphValidator<'a> {
                 &value.origin,
                 &closure.substitutions,
                 "closure construction",
+                &runtime,
+                &bound,
             );
             for capture in &closure.captures {
-                if contains_type_parameter(&capture.value_type) {
+                if contains_parameter_outside_scope(&capture.value_type, &runtime) {
                     self.report(
                         &value.origin,
                         format!(
@@ -360,9 +471,10 @@ impl<'a> GraphValidator<'a> {
                 }
             }
         }
-        for (_, item) in body.items.iter() {
+        for (item_id, item) in body.items.iter() {
             if let LoweredItemKind::Assignment(assignment) = &item.kind
                 && let Some(evidence) = &assignment.evidence
+                && !dictionary_site(super::LoweredBindingSite::IndexedAssignment(item_id))
             {
                 self.check_evidence(&item.origin, evidence);
             }
@@ -378,9 +490,14 @@ impl<'a> GraphValidator<'a> {
         origin: &Origin,
         substitutions: &CallSubstitutions,
         what: &str,
+        runtime: &BTreeSet<crate::TypeParameterId>,
+        bound: &std::collections::HashSet<crate::TypeParameterId>,
     ) {
+        // A quantified value's own scheme parameters stay symbolic: callers
+        // supply their descriptors.
         for entry in &substitutions.types {
-            if contains_type_parameter(&entry.value_type) {
+            if !bound.contains(&entry.parameter)
+                && contains_parameter_outside_scope(&entry.value_type, runtime) {
                 self.report(
                     origin,
                     format!(
@@ -391,7 +508,9 @@ impl<'a> GraphValidator<'a> {
             }
         }
         for entry in &substitutions.effects {
-            if entry.effects.variable.is_some() {
+            if entry.effects.variable.as_ref().is_some_and(|variable| {
+                !runtime.contains(&variable.id) && !bound.contains(&entry.parameter)
+            }) {
                 self.report(
                     origin,
                     format!(

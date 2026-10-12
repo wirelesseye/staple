@@ -26,6 +26,7 @@ use std::marker::PhantomData;
 use staple_syntax::{Diagnostic, Expression, Item, Pattern, Span, SyntaxId};
 
 use crate::specialization::SpecializationCatalog;
+use crate::types_equivalent;
 use crate::{
     BuiltinType, CheckedAccess, CheckedCoercion, CheckedEffectSet, CheckedFunctionType,
     CheckedMutation, CheckedProductType, CheckedPropagation, CheckedResource, CheckedTraitBound,
@@ -33,7 +34,7 @@ use crate::{
     IntegerType, IntrinsicFunction, ModuleId, RecursiveConstruction, ResolvedFunction,
     ResolvedModule, SourceModule, StructuralTraitMethod, SymbolId, TraitId, TraitMethodId, TypeId,
     TypeParameterId, TypedModule, contains_type_parameter, implicit_wrapper_representation,
-    infer_type_parameters, select_sum_alternative_with,
+    infer_type_parameters, infer_type_parameters_with_schemes, select_sum_alternative_with,
     sum_through_implicit_wrapper,
 };
 
@@ -44,6 +45,9 @@ mod artifact_validation;
 pub(crate) mod census;
 mod cleanup_artifacts;
 mod coroutine_artifacts;
+mod descriptor_artifacts;
+mod dynamic_support;
+pub(crate) mod trait_dictionaries;
 mod emission;
 mod extern_artifacts;
 pub(crate) mod graph_validation;
@@ -53,9 +57,18 @@ mod instance_resolution;
 mod runtime_call_facts;
 mod runtime_requirements;
 mod structural_artifacts;
+mod value_conversions;
 mod worklist;
 
 pub(crate) use runtime_call_facts::LoweredRuntimeCallFacts;
+pub(crate) use trait_dictionaries::{
+    BuilderRecipe, DictionaryCallArgument, DictionaryRecipe, DictionarySlotCall, MemberDictionary,
+    StructuralRecipe, TraitDictionaryLayout,
+};
+pub(crate) use value_conversions::{
+    AdapterConversion, adapter_conversions, concrete_key as conversion_concrete_key,
+    takes_descriptor as conversion_takes_descriptor,
+};
 
 // Read-only emission view. `LoweredModule::program` returns this
 // type; `codegen::layout::LayoutContext` stores it so the shared
@@ -70,6 +83,7 @@ pub(crate) use emission::EmissionView;
 #[allow(unused_imports)]
 // Re-exported handoff types are also used within the lowering subtree.
 pub(crate) use instance_resolution::{
+    RuntimeScope,
     InstanceResolutionRequest, InstanceResolutionTarget, RelevantParameters,
     ResolvedInstanceRequest, SubstitutionEntry, SubstitutionEnvironment, SubstitutionSource,
     SubstitutionValue,
@@ -105,12 +119,14 @@ pub(crate) use artifact_closure::{ArtifactUseSite, LoweredArtifactUse, LoweredIn
 // Family-specific plan types are also used within the lowering subtree.
 pub(crate) use artifact_plan::{
     ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, CoroutineFrameBinding,
-    CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DropGlueBody,
-    DropGluePlan, DroppedAlternative, DroppedCapture, DroppedElement, ExternAdapterPlan,
-    ExternDeclaration, GcFinalizerPlan, IndexedElement, LoweredArtifactPlan, PlanType,
+    CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DescriptorBoundEntryPlan,
+    DescriptorDropPlan, DropGlueBody, DropGluePlan, DroppedAlternative, DroppedCapture,
+    DroppedElement, DynamicCapture, DynamicStructuralPlan, ExternAdapterPlan, ExternDeclaration,
+    GcFinalizerPlan, IndexedElement, InstantiationAdapterPlan, LoweredArtifactPlan, PlanType,
     PlannedArtifact, PlannedCallee, PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance,
-    ReactiveRunnerBody, ReactiveRunnerPlan, RunnerResourceSlot, RuntimeRelease, StructuralBody,
-    StructuralMethodPlan, SumAlternative, TraitDelegate,
+    ReabstractionThunkPlan, ReactiveRunnerBody, ReactiveRunnerPlan, RunnerResourceSlot,
+    RuntimeRelease, StructuralBody, StructuralMethodPlan, SumAlternative, TraitDelegate,
+    TraitDictionaryPlan, TraitMemberEntryPlan, TypeDescriptorPlan, ValueConversionPlan,
 };
 
 // Runtime requirements. Fixed-named runtime surfaces are not an
@@ -554,6 +570,8 @@ pub(crate) struct LoweredExpression {
     /// types still contain declared parameters leaves the plan absent, and
     /// materialization recomputes it from the substituted types.
     pub coercion_plan: Option<LoweredCoercionPlan>,
+    /// Explicit arguments also solve parameters absent from the function body.
+    pub instantiation_substitutions: std::collections::BTreeMap<TypeParameterId, CheckedType>,
     pub moved_symbols: Vec<SymbolId>,
     pub kind: LoweredExpressionKind,
 }
@@ -582,6 +600,15 @@ pub(crate) enum LoweredCoercionPlan {
     /// Implicitly introduce a `from` wrapper: coerce the value to the
     /// wrapper's representation, which is also the wrapper's runtime value.
     Wrap { payload: Box<LoweredCoercionPlan> },
+    /// Instantiate a polymorphic value at a function type: a closure of the
+    /// target's ABI forwarding to the quantified closure. `types` holds one
+    /// instantiation per type parameter of the source scheme, in scheme order.
+    Instantiate { types: Vec<CheckedType> },
+    /// Subsume a polymorphic value into another scheme that is not an
+    /// alpha-renaming of it: a closure at the target's dynamic ABI that
+    /// rebuilds the source's descriptors from its own. `types` holds the
+    /// source scheme's instantiation over the target's parameters.
+    AdaptScheme { types: Vec<CheckedType> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -599,6 +626,9 @@ impl LoweredCoercionPlan {
         match self {
             LoweredCoercionPlan::Identity => false,
             LoweredCoercionPlan::Wrap { .. } => true,
+            LoweredCoercionPlan::Instantiate { .. } | LoweredCoercionPlan::AdaptScheme { .. } => {
+                false
+            }
             LoweredCoercionPlan::SumInject { payload, .. } => payload.introduces_wrapper(),
             LoweredCoercionPlan::SumWiden { arms } => arms
                 .iter()
@@ -607,14 +637,143 @@ impl LoweredCoercionPlan {
         }
     }
 
+    /// Splits off a polymorphic value's instantiation or scheme adaptation
+    /// that this plan applies first, possibly under a wrapper introduction or
+    /// sum injection. Returns the instantiating plan, the type it produces
+    /// (`target` narrowed to the leaf), and the rest of the plan with an
+    /// identity leaf, which applies to that produced value.
+    pub(crate) fn split_instantiation(
+        &self,
+        target: &CheckedType,
+    ) -> Option<(&LoweredCoercionPlan, CheckedType, LoweredCoercionPlan)> {
+        match self {
+            LoweredCoercionPlan::Instantiate { .. } | LoweredCoercionPlan::AdaptScheme { .. } => {
+                Some((self, target.clone(), LoweredCoercionPlan::Identity))
+            }
+            LoweredCoercionPlan::Wrap { payload } => {
+                let representation = crate::implicit_wrapper_representation(target)?;
+                let (leaf, produced, inner) = payload.split_instantiation(representation)?;
+                Some((
+                    leaf,
+                    produced,
+                    LoweredCoercionPlan::Wrap {
+                        payload: Box::new(inner),
+                    },
+                ))
+            }
+            LoweredCoercionPlan::SumInject {
+                alternative,
+                payload,
+            } => {
+                let CheckedType::Sum(sum) = target else {
+                    return None;
+                };
+                let (leaf, produced, inner) =
+                    payload.split_instantiation(sum.alternatives.get(*alternative)?)?;
+                Some((
+                    leaf,
+                    produced,
+                    LoweredCoercionPlan::SumInject {
+                        alternative: *alternative,
+                        payload: Box::new(inner),
+                    },
+                ))
+            }
+            LoweredCoercionPlan::Identity | LoweredCoercionPlan::SumWiden { .. } => None,
+        }
+    }
+
+    /// The instantiation types of the polymorphic value this plan instantiates,
+    /// wherever the instantiation sits.
+    pub(crate) fn instantiation_types(&self) -> &[CheckedType] {
+        match self {
+            LoweredCoercionPlan::Instantiate { types } => types,
+            LoweredCoercionPlan::Wrap { payload }
+            | LoweredCoercionPlan::SumInject { payload, .. } => payload.instantiation_types(),
+            _ => &[],
+        }
+    }
+
+    /// Matches a scheme's body against the function type it is used at,
+    /// recovering one instantiation per quantified type parameter.
+    fn instantiate(
+        scheme: &crate::CheckedScheme,
+        target: &CheckedFunctionType,
+        substitutions: &std::collections::BTreeMap<TypeParameterId, CheckedType>,
+    ) -> Result<Self, String> {
+        let CheckedType::Function(body) = scheme.body.as_ref() else {
+            return Err(format!("`{scheme}` is not a function scheme"));
+        };
+        let mut inferred: HashMap<_, _> = substitutions
+            .iter()
+            .map(|(id, value)| (*id, value.clone()))
+            .collect();
+        let _ = infer_type_parameters_with_schemes(
+            &CheckedType::Function(body.clone()),
+            &CheckedType::Function(target.clone()),
+            &mut inferred,
+        );
+        // The adapter converts concrete function values reaching the quantified
+        // body; the two signatures must pair up slot by slot.
+        value_conversions::adapter_conversions(target, body)?;
+        let types = scheme
+            .type_parameter_ids()
+            .into_iter()
+            .map(|parameter| {
+                inferred.get(&parameter).cloned().ok_or_else(|| {
+                    "internal invariant violated: a polymorphic value's instantiation leaves a type parameter unsolved".to_owned()
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(LoweredCoercionPlan::Instantiate { types })
+    }
+
+    /// Matches a scheme's body against another scheme's, whose parameters
+    /// stay rigid, recovering the source's instantiation over them.
+    fn adapt(
+        scheme: &crate::CheckedScheme,
+        target: &crate::CheckedScheme,
+    ) -> Result<Self, String> {
+        let (CheckedType::Function(body), CheckedType::Function(expected)) =
+            (scheme.body.as_ref(), target.body.as_ref())
+        else {
+            return Err(format!("`{scheme}` is not a function scheme"));
+        };
+        let mut inferred = HashMap::new();
+        let _ = infer_type_parameters_with_schemes(
+            &CheckedType::Function(body.clone()),
+            &CheckedType::Function(expected.clone()),
+            &mut inferred,
+        );
+        let types = scheme
+            .type_parameter_ids()
+            .into_iter()
+            .map(|parameter| {
+                inferred.get(&parameter).cloned().ok_or_else(|| {
+                    "internal invariant violated: a polymorphic value's instantiation leaves a type parameter unsolved".to_owned()
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(LoweredCoercionPlan::AdaptScheme { types })
+    }
+
     pub(crate) fn plan(source: &CheckedType, target: &CheckedType) -> Result<Self, String> {
-        Self::plan_with(source, target, FromCoercion::Allowed)
+        Self::plan_seeded(source, target, &Default::default())
+    }
+
+    pub(crate) fn plan_seeded(
+        source: &CheckedType,
+        target: &CheckedType,
+        substitutions: &std::collections::BTreeMap<TypeParameterId, CheckedType>,
+    ) -> Result<Self, String> {
+        Self::plan_with(source, target, FromCoercion::Allowed, substitutions)
     }
 
     fn plan_with(
         source: &CheckedType,
         target: &CheckedType,
         from: FromCoercion,
+        substitutions: &std::collections::BTreeMap<TypeParameterId, CheckedType>,
     ) -> Result<Self, String> {
         // Emission ends the block with `unreachable` for a `Never` source
         // before any coercion runs, so the plan is never executed.
@@ -634,6 +793,38 @@ impl LoweredCoercionPlan {
         {
             return Ok(LoweredCoercionPlan::Identity);
         }
+        if let (CheckedType::Forall(scheme), CheckedType::Function(function)) = (source, target) {
+            return Self::instantiate(scheme, function, substitutions);
+        }
+        if let (CheckedType::Forall(value), CheckedType::Forall(expected)) = (source, target) {
+            if types_equivalent(source, target) {
+                return Ok(LoweredCoercionPlan::Identity);
+            }
+            return Self::adapt(value, expected);
+        }
+        // A polymorphic value reaches a sum through its instantiation: inject
+        // into the one alternative the scheme can be used at.
+        if let (CheckedType::Forall(_), CheckedType::Sum(target_sum)) = (source, target) {
+            let candidates = target_sum
+                .alternatives
+                .iter()
+                .enumerate()
+                .filter_map(|(index, alternative)| {
+                    Self::plan_with(source, alternative, from, substitutions)
+                        .ok()
+                        .map(|plan| (index, plan))
+                })
+                .collect::<Vec<_>>();
+            return match candidates.as_slice() {
+                [(alternative, payload)] => Ok(LoweredCoercionPlan::SumInject {
+                    alternative: *alternative,
+                    payload: Box::new(payload.clone()),
+                }),
+                _ => Err(format!(
+                    "polymorphic value `{source}` does not match exactly one alternative of `{target}`"
+                )),
+            };
+        }
         let CheckedType::Sum(target_sum) = target else {
             if from == FromCoercion::Allowed
                 && let Some(representation) = implicit_wrapper_representation(target)
@@ -643,6 +834,7 @@ impl LoweredCoercionPlan {
                         source,
                         representation,
                         FromCoercion::Forbidden,
+                        substitutions,
                     )?),
                 });
             }
@@ -671,6 +863,7 @@ impl LoweredCoercionPlan {
                                     alternative,
                                     target_alternative,
                                     from,
+                                    substitutions,
                                 )?),
                             }));
                         }
@@ -694,11 +887,74 @@ impl LoweredCoercionPlan {
                 let target_alternative = &target_sum.alternatives[index];
                 Ok(LoweredCoercionPlan::SumInject {
                     alternative: index,
-                    payload: Box::new(Self::plan_with(source, target_alternative, from)?),
+                    payload: Box::new(Self::plan_with(
+                        source,
+                        target_alternative,
+                        from,
+                        substitutions,
+                    )?),
                 })
             }
         }
     }
+}
+
+/// Whether a concrete function type in `actual` meets a dynamic-shape function
+/// type in `expected`, so values crossing between them need a reabstraction.
+fn needs_concrete_function_conversion(actual: &CheckedType, expected: &CheckedType) -> bool {
+    match (actual, expected) {
+        (CheckedType::Function(actual), CheckedType::Function(expected)) => {
+            !contains_type_parameter(&CheckedType::Function(actual.clone()))
+                && contains_type_parameter(&CheckedType::Function(expected.clone()))
+        }
+        (CheckedType::Product(actual), CheckedType::Product(expected)) => actual
+            .elements
+            .iter()
+            .zip(&expected.elements)
+            .any(|(actual, expected)| {
+                needs_concrete_function_conversion(&actual.value_type, &expected.value_type)
+            }),
+        (CheckedType::Sum(actual), CheckedType::Sum(expected)) => actual
+            .alternatives
+            .iter()
+            .zip(&expected.alternatives)
+            .any(|(actual, expected)| needs_concrete_function_conversion(actual, expected)),
+        (
+            CheckedType::Wrapper {
+                representation: actual,
+                ..
+            },
+            CheckedType::Wrapper {
+                representation: expected,
+                ..
+            },
+        ) => needs_concrete_function_conversion(actual, expected),
+        (CheckedType::Array { element: actual, .. }, CheckedType::Array { element: expected, .. }) => {
+            needs_concrete_function_conversion(actual, expected)
+        }
+        _ => false,
+    }
+}
+
+/// A reabstraction at a concrete-to-dynamic call boundary. Lowering
+/// records one for every function-typed argument or result whose dynamic type
+/// mentions run-time parameters.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LoweredReabstraction {
+    pub direction: LoweredReabstractionDirection,
+    /// Convert a mutable argument back into the caller's storage after the call.
+    pub writeback: bool,
+    /// The materialized value type on the concrete side.
+    pub concrete: CheckedType,
+    /// The dynamic value type on the dynamic side, which mentions the
+    /// run-time parameters the closure's type does.
+    pub dynamic: CheckedType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoweredReabstractionDirection {
+    ConcreteToDynamic,
+    DynamicToConcrete,
 }
 
 #[derive(Debug, Clone)]
@@ -1076,6 +1332,8 @@ pub(crate) enum LoweredCallStep {
 /// requirements, and the site-specific substitution/evidence recipe.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredCall {
+    /// Source scheme for an indirect polymorphic call, before instantiation.
+    pub scheme: Option<crate::CheckedScheme>,
     pub origin: Origin,
     pub target: LoweredCallableTarget,
     /// The callee occurrence for an indirect call; direct targets reference
@@ -1156,6 +1414,8 @@ impl LoweredOptionAlternatives {
 /// plan.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredCallableValue {
+    /// A construction retaining its quantified calling convention.
+    pub scheme: Option<crate::CheckedScheme>,
     pub origin: Origin,
     pub target: LoweredCallableTarget,
     /// The checked function type of the value after call-site inference.
@@ -2504,11 +2764,24 @@ pub(crate) struct LoweredFunction {
     pub binding_symbol: Option<SymbolId>,
     pub signature: CheckedFunctionType,
     pub bounds: Vec<CheckedTraitBound>,
+    /// Lexical ancestors' declarations followed by this function's own bounds.
+    pub declared_bounds: Vec<CheckedTraitBound>,
+    /// Own declarations, excluding lexical ancestors, for bound-entry partitioning.
+    pub own_declared_bounds: Vec<CheckedTraitBound>,
     pub parameter_style: staple_syntax::FunctionParameterStyle,
     /// The lowered parameter pattern, with bound symbols in source order.
     pub parameter_pattern: PatternId,
     pub parameters: Vec<SymbolId>,
     pub captures: Vec<LoweredCapture>,
+    /// The template's declared type parameters in scheme order (companion
+    /// parameters first, hidden projection parameters last). Descriptor ABI
+    /// order follows this order.
+    pub scheme_type_parameters: Vec<TypeParameterId>,
+    /// The template's quantified effect parameters in scheme order. They
+    /// carry no descriptors, so they stay out of the descriptor ABI order.
+    pub scheme_effect_parameters: Vec<TypeParameterId>,
+    /// The scheme the template is checked against, when it has one.
+    pub scheme: Option<crate::CheckedScheme>,
     pub body_origin: Origin,
     pub body_syntax: SyntaxId,
     pub body: Option<BlockId>,
@@ -2592,6 +2865,10 @@ pub(crate) struct LoweredSymbol {
     /// Checked symbol type used for initialization-state layout specialization.
     pub initialization_state_type: CheckedType,
     pub initialization_state_only: bool,
+    /// The symbol is bound by its own declared scheme (a generic `def`), so
+    /// it stays initialization-state-only in every instance, including the
+    /// instances of its own function, which substitute its parameters.
+    pub declared_scheme: bool,
     pub origin: Origin,
     pub semantic_id: SymbolId,
     pub module: ModuleId,
@@ -2653,6 +2930,10 @@ pub(crate) struct LoweredTraitMetadata {
     pub prerequisites: Vec<CheckedTraitBound>,
     /// Declared method order.
     pub methods: Vec<TraitMethodId>,
+    /// Hidden associated-type arguments, in declaration order. These become
+    /// the descriptors in the dictionary prefix.
+    pub associated_types: Vec<CheckedType>,
+    pub dictionary_layout: TraitDictionaryLayout,
     /// Default implementations, in declared method order.
     pub default_methods: Vec<(TraitMethodId, FunctionId)>,
 }
@@ -2664,6 +2945,8 @@ pub(crate) struct LoweredTraitMethodMetadata {
     pub name: String,
     pub trait_id: TraitId,
     pub value_type: CheckedType,
+    pub scheme: crate::CheckedScheme,
+    pub own_parameters: Vec<crate::typecheck::CheckedSchemeParameter>,
     pub default_function: Option<FunctionId>,
 }
 
@@ -2784,6 +3067,16 @@ pub(crate) struct LoweredProgram {
     /// `InitializerId`. Built at the closure fixed point; instance bodies carry
     /// the same table per body.
     initializer_bindings: Vec<std::collections::BTreeMap<LoweredBindingSite, LoweredBoundTarget>>,
+    initializer_dictionary_calls: Vec<
+        std::collections::BTreeMap<
+            trait_dictionaries::DictionarySite,
+            Vec<trait_dictionaries::DictionaryCallArgument>,
+        >,
+    >,
+    /// Reabstraction plans at concrete-to-dynamic boundaries in module
+    /// initializers, indexed by `InitializerId`.
+    initializer_conversions:
+        Vec<std::collections::BTreeMap<(LoweredCallId, Option<usize>), LoweredReabstraction>>,
     /// Resolved trait evidence for the initializer sites that need it, indexed
     /// by `InitializerId`.
     initializer_evidence: Vec<std::collections::BTreeMap<LoweredBindingSite, TraitEvidence>>,
@@ -2793,6 +3086,21 @@ pub(crate) struct LoweredProgram {
     specializations: SpecializationCatalog,
     semantic_ids: LoweredSemanticIds,
     string_formatting: LoweredStringFormatting,
+    /// The hidden differential lowering option: route direct
+    /// generic calls from concrete owners through dynamic implementations.
+    dictionary_pass_generic_calls: bool,
+    /// The effect-row variant of the differential option: make every
+    /// effect parameter of a routed generic call a run-time bundle.
+    dictionary_pass_effect_rows: bool,
+    /// Per-template transitive dynamic support, computed once per lowering.
+    dynamic_support: std::collections::HashMap<FunctionId, dynamic_support::DynamicSupport>,
+    /// Every exclusion reason per template, including the transitive reason.
+    pub(crate) dynamic_support_reasons: std::collections::HashMap<
+        FunctionId,
+        std::collections::BTreeSet<dynamic_support::RejectionReason>,
+    >,
+    /// Whether each excluded template's reasons include an in-scope one.
+    pub(crate) dynamic_support_in_scope: std::collections::HashMap<FunctionId, bool>,
     /// The ordered, deduplicated runtime surfaces the closed catalog needs.
     /// Recorded after the closure fixed point; emission installs each surface
     /// only when present.
@@ -2804,6 +3112,10 @@ pub(crate) struct LoweredProgram {
     /// Transient lowering state: inner call syntaxes consumed by an outer
     /// juxtaposed call's checked plan. They are never lowered on their own.
     consumed_calls: HashSet<SyntaxId>,
+    /// Transient lowering state: callee occurrences of calls lowered so far.
+    /// A polymorphic value in callee position is applied directly rather than
+    /// instantiated into a closure of the instantiated type.
+    callee_expressions: HashSet<SyntaxId>,
     /// Transient lowering state: the active lexical provider stack while one
     /// function body or module initializer lowers. The last matching provider
     /// by checked value type agrees with the recorded cleanup selection.
@@ -2987,6 +3299,18 @@ impl LoweredProgram {
                     .get(&trait_id)
                     .cloned()
                     .unwrap_or_default(),
+                associated_types: parameter_arguments
+                    .get(&trait_id)
+                    .map(|parameters| {
+                        parameters[parameters.len() - trait_.declaration.associated_types.len()..]
+                            .to_vec()
+                    })
+                    .unwrap_or_default(),
+                dictionary_layout: trait_dictionaries::TraitDictionaryLayout::new(
+                    trait_.methods.len(),
+                    module.trait_prerequisites(trait_id).len(),
+                    trait_.declaration.associated_types.len(),
+                ),
                 prerequisites: module.trait_prerequisites(trait_id).to_vec(),
                 methods: trait_.methods.clone(),
                 default_methods,
@@ -3017,6 +3341,16 @@ impl LoweredProgram {
                     name,
                     trait_id,
                     value_type,
+                    scheme: module
+                        .scheme_of_trait_member(*method)
+                        .expect("checked member scheme")
+                        .clone(),
+                    own_parameters: module
+                        .scheme_of_trait_member(*method)
+                        .expect("checked member scheme")
+                        .parameters[trait_.declaration.type_parameters.len()
+                        - trait_.declaration.associated_types.len()..]
+                        .to_vec(),
                     default_function: trait_.default_methods.get(method).copied(),
                 };
                 if let Err(diagnostic) =
@@ -3193,6 +3527,7 @@ impl LoweredProgram {
             initialization_state_only: module
                 .type_of_symbol(symbol)
                 .is_some_and(contains_type_parameter),
+            declared_scheme: module.has_declared_scheme(symbol),
             origin: origin.clone(),
             semantic_id: symbol,
             module: module_id,
@@ -3409,6 +3744,78 @@ impl LoweredProgram {
                 requires_cell: capture_requires_cell(module, *symbol),
             })
             .collect();
+        let scheme = module
+            .scheme_of_function(function.id)
+            .or_else(|| binding_symbol.and_then(|symbol| module.scheme_of_symbol(symbol)))
+            .cloned();
+        let scheme_type_parameters = module
+            .scheme_of_function(function.id)
+            .or_else(|| binding_symbol.and_then(|symbol| module.scheme_of_symbol(symbol)))
+            .map(|scheme| {
+                scheme
+                    .parameters
+                    .iter()
+                    .filter_map(|parameter| match parameter {
+                        crate::typecheck::CheckedSchemeParameter::Type { id, .. } => Some(*id),
+                        crate::typecheck::CheckedSchemeParameter::Effect { .. }
+                        | crate::typecheck::CheckedSchemeParameter::Product(_) => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let scheme_effect_parameters = module
+            .scheme_of_function(function.id)
+            .or_else(|| binding_symbol.and_then(|symbol| module.scheme_of_symbol(symbol)))
+            .map(|scheme| {
+                fn effects(
+                    parameters: &[crate::typecheck::CheckedSchemeParameter],
+                    out: &mut Vec<TypeParameterId>,
+                ) {
+                    for parameter in parameters {
+                        match parameter {
+                            crate::typecheck::CheckedSchemeParameter::Effect { id, .. } => {
+                                out.push(*id)
+                            }
+                            crate::typecheck::CheckedSchemeParameter::Product(parameters) => {
+                                effects(parameters, out)
+                            }
+                            crate::typecheck::CheckedSchemeParameter::Type { .. } => {}
+                        }
+                    }
+                }
+                let mut out = Vec::new();
+                effects(&scheme.parameters, &mut out);
+                out
+            })
+            .unwrap_or_default();
+        let is_default_member = self
+            .trait_methods
+            .iter()
+            .any(|(_, _, method)| method.default_function == Some(function.id));
+        let is_implementation_member =
+            self.trait_implementations
+                .iter()
+                .any(|(_, implementation)| {
+                    implementation
+                        .methods
+                        .iter()
+                        .any(|(_, member)| *member == function.id)
+                });
+        let own_declared_bounds = if is_default_member || is_implementation_member {
+            scheme
+                .as_ref()
+                .map(|scheme| {
+                    scheme
+                        .trait_bounds
+                        .iter()
+                        .skip(usize::from(is_default_member))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            module.own_declared_bounds_of_function(function.id).to_vec()
+        };
         let value = LoweredFunction {
             origin: origin.clone(),
             semantic_id: function.id,
@@ -3416,7 +3823,12 @@ impl LoweredProgram {
             module: module_id,
             binding_symbol,
             signature,
+            scheme_type_parameters,
+            scheme_effect_parameters,
+            scheme,
             bounds: module.bounds_of_function(function.id).to_vec(),
+            declared_bounds: module.declared_bounds_of_function(function.id),
+            own_declared_bounds,
             parameter_style: function.parameter_style,
             parameter_pattern,
             parameters: pattern_symbols(resolved, &function.pattern),
@@ -3760,7 +4172,7 @@ impl LoweredProgram {
             symbol: Some(symbol),
             value,
             compile_time_only: compile_time_only_symbol(module, symbol),
-            generic: !binding.type_parameters.is_empty(),
+            generic: binding.is_generic(),
             derived: module.is_derived_symbol(symbol),
             signal: resolved.is_signal_symbol(symbol),
             reactive,
@@ -4147,7 +4559,7 @@ impl LoweredProgram {
         binding: &staple_syntax::Binding,
         symbol: SymbolId,
     ) -> Result<Option<LoweredReactiveOperationId>, Diagnostic> {
-        if !binding.type_parameters.is_empty() {
+        if binding.is_generic() {
             return Ok(None);
         }
         let origin = Origin {
@@ -4933,6 +5345,48 @@ impl LoweredProgram {
         self.lower_expression_occurrence(module, owner, context, expression, None)
     }
 
+    /// The source scheme of a polymorphic value this expression instantiates
+    /// at a non-scheme type, or `None` when it is not an instantiation: a
+    /// callee applied directly, a declared generic `def`, constructor, or
+    /// intrinsic (which instantiates by monomorphization), or an expression
+    /// that carries no retained scheme.
+    fn instantiated_scheme(
+        &self,
+        module: &TypedModule,
+        syntax: SyntaxId,
+        value_type: &CheckedType,
+    ) -> Option<crate::CheckedScheme> {
+        let scheme = module.scheme_of_expression(syntax)?;
+        if module.trait_dispatch_for(syntax).is_some_and(|dispatch| {
+            self.trait_methods
+                .get(dispatch.method)
+                .is_some_and(|method| method.own_parameters.is_empty())
+        }) && matches!(value_type, CheckedType::Function(_))
+        {
+            return None;
+        }
+        match value_type {
+            CheckedType::Function(_) => {
+                if self.callee_expressions.contains(&syntax)
+                    || module
+                        .symbol_for(syntax)
+                        .is_some_and(|symbol| module.is_declared_generic(symbol))
+                {
+                    return None;
+                }
+                Some(scheme.clone())
+            }
+            // Subsumption into a different scheme: an alpha-renaming of the
+            // same scheme reuses the closure.
+            CheckedType::Forall(_) => (!types_equivalent(
+                &CheckedType::Forall(Box::new(scheme.clone())),
+                value_type,
+            ))
+            .then(|| scheme.clone()),
+            _ => None,
+        }
+    }
+
     /// Lowers one expression occurrence with an optional root type override.
     /// Contextual product defaults use it because the shared default syntax
     /// node may have been checked last for a different instantiation; the
@@ -4962,6 +5416,7 @@ impl LoweredProgram {
                 "compile-time-only expression reached lowering",
             ));
         }
+        let type_override_absent = type_override.is_none();
         let value_type = match type_override {
             Some(value_type) => value_type,
             None => match module.type_of_expression(syntax.id).cloned() {
@@ -4977,9 +5432,39 @@ impl LoweredProgram {
             .effects_of_expression(syntax.id)
             .cloned()
             .unwrap_or_default();
-        let coercion = module.coercion_for(syntax.id).cloned();
+        let mut coercion = module.coercion_for(syntax.id).cloned();
+        let mut value_type = value_type;
+        // A polymorphic value used at an instantiated function type holds its
+        // quantified closure: the instantiation is an explicit coercion into a
+        // closure of the instantiated type's ABI.
+        // When the checker also coerced the instantiated value (into a `from`
+        // wrapper or a sum), the instantiation is the first step of that
+        // coercion: the plan instantiates, then wraps or injects.
+        let natural = coercion
+            .as_ref()
+            .map_or_else(|| value_type.clone(), |coercion| coercion.source.clone());
+        if type_override_absent
+            && let Some(scheme) = self.instantiated_scheme(module, syntax.id, &natural)
+        {
+            let source = CheckedType::Forall(Box::new(scheme));
+            let target = match coercion.take() {
+                Some(existing) => existing.target,
+                None => value_type.clone(),
+            };
+            value_type = source.clone();
+            coercion = Some(crate::CheckedCoercion { source, target });
+        }
+        let instantiation_substitutions = module
+            .explicit_value_substitutions(syntax.id)
+            .into_iter()
+            .flat_map(|map| map.iter().map(|(id, value)| (*id, value.clone())))
+            .collect();
         let coercion_plan = match &coercion {
-            Some(coercion) => match LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
+            Some(coercion) => match LoweredCoercionPlan::plan_seeded(
+                &coercion.source,
+                &coercion.target,
+                &instantiation_substitutions,
+            ) {
                 Ok(plan) => Some(plan),
                 Err(message) => {
                     if instance_resolution::unresolved_type_problem(&coercion.source).is_some()
@@ -5019,6 +5504,7 @@ impl LoweredProgram {
             effects,
             coercion,
             coercion_plan,
+            instantiation_substitutions,
             moved_symbols,
             kind,
         });
@@ -6389,11 +6875,7 @@ impl LoweredProgram {
                     .functions
                     .get(function)
                     .is_some_and(|function| function.captures.is_empty())
-                && module
-                    .type_of_function(function)
-                    .is_some_and(|function_type| {
-                        contains_type_parameter(&CheckedType::Function(function_type.clone()))
-                    })
+                && self.function_is_generic(module, function)
             {
                 return Ok(CallRoute::GenericDirect);
             }
@@ -6438,6 +6920,23 @@ impl LoweredProgram {
         Ok(CallRoute::DeclaredTraitBound)
     }
 
+    /// Whether a function is a generic template: its checked type mentions a
+    /// type parameter, or its scheme declares one. A phantom parameter (one
+    /// its signature never mentions) still makes the binding generic, so it
+    /// has no module or local storage and must route through instances, like
+    /// every binding written with `<…>`.
+    fn function_is_generic(&self, module: &TypedModule, function: FunctionId) -> bool {
+        module
+            .type_of_function(function)
+            .is_some_and(|function_type| {
+                contains_type_parameter(&CheckedType::Function(function_type.clone()))
+            })
+            || self
+                .functions
+                .get(function)
+                .is_some_and(|function| !function.scheme_type_parameters.is_empty())
+    }
+
     /// Classifies a callable construction as a trait method, constructor, intrinsic,
     /// extern, declared or generic function, anonymous function, or stored read.
     fn classify_callable_value_route(
@@ -6463,12 +6962,7 @@ impl LoweredProgram {
             return CallableValueRoute::External;
         }
         if let Some(function) = module.function_for_symbol(symbol) {
-            let generic = module
-                .type_of_function(function)
-                .is_some_and(|function_type| {
-                    contains_type_parameter(&CheckedType::Function(function_type.clone()))
-                });
-            return if generic {
+            return if self.function_is_generic(module, function) {
                 CallableValueRoute::GenericFunction
             } else {
                 CallableValueRoute::DeclaredFunction
@@ -6497,8 +6991,25 @@ impl LoweredProgram {
         // A callable value can be checked as a sum alternative or another
         // coercible type; its underlying callable type comes from the
         // semantic target in that case.
-        let checked_function_type = match module.type_of_expression(syntax) {
-            Some(CheckedType::Function(function_type)) => Some(function_type.clone()),
+        // The construction keeps the value's own scheme. A use at an
+        // instantiated type or at a different scheme still constructs the
+        // quantified closure; the expression's coercion adapts it.
+        let natural = natural_expression_type(module, syntax);
+        let scheme = natural
+            .as_ref()
+            .and_then(|ty| match self.instantiated_scheme(module, syntax, ty) {
+                Some(source) => Some(source),
+                None => match ty {
+                    CheckedType::Forall(scheme) => Some(scheme.as_ref().clone()),
+                    _ => None,
+                },
+            });
+        let checked_function_type = match (&scheme, natural) {
+            (Some(scheme), _) => match scheme.body.as_ref() {
+                CheckedType::Function(function_type) => Some(function_type.clone()),
+                _ => None,
+            },
+            (None, Some(CheckedType::Function(function_type))) => Some(function_type),
             _ => None,
         };
         let resolved = module.resolved();
@@ -6511,8 +7022,34 @@ impl LoweredProgram {
                         "trait-method value has no checked dispatch",
                     )
                 })?;
-                let (target, adapter, closure, evidence) =
-                    self.lower_trait_method_value(module, owner, &origin, &dispatch)?;
+                let (target, adapter, closure, evidence) = self.lower_trait_method_value(
+                    module,
+                    owner,
+                    &origin,
+                    &dispatch,
+                    scheme.is_some(),
+                )?;
+                let trait_id = resolved
+                    .trait_for_method(dispatch.method)
+                    .expect("member owner");
+                substitutions = trait_call_substitutions(
+                    &self
+                        .traits
+                        .get(trait_id)
+                        .expect("trait metadata")
+                        .parameters,
+                    &dispatch.arguments,
+                );
+                let member = self
+                    .trait_methods
+                    .get(dispatch.method)
+                    .expect("member metadata");
+                let own = substitutions_from_map(member_substitution_map(
+                    member,
+                    &dispatch.member_arguments,
+                ));
+                substitutions.types.extend(own.types);
+                substitutions.effects.extend(own.effects);
                 let function_type = checked_function_type
                     .or_else(|| {
                         match self
@@ -6663,6 +7200,7 @@ impl LoweredProgram {
         };
         let requires_initialization_check = resolved.requires_initialization_check(syntax);
         Ok(self.callable_values.push(LoweredCallableValue {
+            scheme,
             origin,
             target,
             function_type,
@@ -6684,6 +7222,7 @@ impl LoweredProgram {
         owner: ExpressionOwner,
         origin: &Origin,
         dispatch: &CheckedTraitDispatch,
+        polymorphic: bool,
     ) -> Result<
         (
             LoweredCallableTarget,
@@ -6699,6 +7238,18 @@ impl LoweredProgram {
                 format!("trait method {} has no owning trait", dispatch.method.0),
             ));
         };
+        if polymorphic {
+            return Ok((
+                LoweredCallableTarget::TraitImplementation {
+                    trait_id,
+                    method: dispatch.method,
+                    function: None,
+                },
+                LoweredCallableAdapter::None,
+                None,
+                None,
+            ));
+        }
         let evidence = self.trait_evidence_for(
             module,
             owner,
@@ -6948,6 +7499,7 @@ impl LoweredProgram {
         context: ExpressionContext,
         call: &staple_syntax::CallExpression,
     ) -> Result<LoweredExpressionKind, Diagnostic> {
+        self.callee_expressions.insert(call.callee.syntax().id);
         let route = self.classify_call_route(module, owner, call)?;
         if self.consumed_calls.contains(&call.syntax.id) {
             return Err(Diagnostic::new(
@@ -7146,6 +7698,17 @@ impl LoweredProgram {
                 };
                 let function_type = module
                     .instantiated_trait_method_type(trait_id, &completed, dispatch.method)
+                    .map(|function| {
+                        let member = self
+                            .trait_methods
+                            .get(dispatch.method)
+                            .expect("member metadata");
+                        let map = member_substitution_map(member, &dispatch.member_arguments);
+                        match crate::substitute_type(CheckedType::Function(function), &map) {
+                            CheckedType::Function(function) => function,
+                            _ => unreachable!("function substitution"),
+                        }
+                    })
                     .or_else(|| {
                         match self
                             .trait_methods
@@ -7189,6 +7752,16 @@ impl LoweredProgram {
                     .map(|trait_| trait_.parameters.clone())
                     .unwrap_or_default();
                 substitutions = trait_call_substitutions(&parameters, &completed);
+                let member = self
+                    .trait_methods
+                    .get(dispatch.method)
+                    .expect("member metadata");
+                let own = substitutions_from_map(member_substitution_map(
+                    member,
+                    &dispatch.member_arguments,
+                ));
+                substitutions.types.extend(own.types);
+                substitutions.effects.extend(own.effects);
                 evidence = Some(recipe);
                 (target, None, function_type)
             }
@@ -7257,7 +7830,15 @@ impl LoweredProgram {
             },
             |value_type| module.type_needs_drop(value_type),
         );
+        let scheme = callee.and_then(|id| self.indirect_call_scheme(module, callee_syntax, id));
+        if let Some(scheme) = &scheme
+            && let CheckedType::Function(template) = scheme.body.as_ref()
+        {
+            substitutions =
+                polymorphic_call_substitutions(module, callee_syntax, template, &function_type);
+        }
         let call_id = self.calls.push(LoweredCall {
+            scheme,
             origin,
             target,
             callee,
@@ -7274,6 +7855,41 @@ impl LoweredProgram {
             runtime,
         });
         Ok(LoweredExpressionKind::Call(call_id))
+    }
+
+    fn indirect_call_scheme(
+        &self,
+        module: &TypedModule,
+        syntax: SyntaxId,
+        callee: ExpressionId,
+    ) -> Option<crate::CheckedScheme> {
+        if let Some(LoweredExpression {
+            kind: LoweredExpressionKind::CallableValue(id),
+            ..
+        }) = self.expressions.get(callee)
+            && let Some(value) = self.callable_values.get(*id)
+            && value.scheme.is_none()
+            && !matches!(value.target, LoweredCallableTarget::IndirectClosure { .. })
+        {
+            // An instantiated known generic function/constructor still has a
+            // concrete closure entry. Source scheme metadata alone does not
+            // turn that existing route into a call through a Forall value.
+            return None;
+        }
+        // A call's value is polymorphic only when the call itself returns a
+        // quantified type. A partially applied generic function returns its
+        // already-instantiated remainder, whatever scheme the checker
+        // retained for the occurrence.
+        if let Some(LoweredExpression {
+            kind: LoweredExpressionKind::Call(id),
+            ..
+        }) = self.expressions.get(callee)
+            && let Some(inner) = self.calls.get(*id)
+            && !matches!(inner.function_type.result.as_ref(), CheckedType::Forall(_))
+        {
+            return None;
+        }
+        module.scheme_of_expression(syntax).cloned()
     }
 
     /// Lowers a complete juxtaposed call chain from its checked plan. The
@@ -7400,7 +8016,10 @@ impl LoweredProgram {
             },
             |value_type| module.type_needs_drop(value_type),
         );
+        let scheme =
+            callee_field.and_then(|id| self.indirect_call_scheme(module, callee.syntax().id, id));
         let call_id = self.calls.push(LoweredCall {
+            scheme: scheme.clone(),
             origin,
             target,
             callee: callee_field,
@@ -7410,9 +8029,25 @@ impl LoweredProgram {
             initialization_checks: Vec::new(),
             steps,
             result_type: function_type.result.as_ref().clone(),
-            substitutions: symbol
-                .and_then(|symbol| symbol_function_type(module, symbol))
-                .map(|template| call_substitutions(&template, &function_type))
+            substitutions: scheme
+                .as_ref()
+                .and_then(|scheme| match scheme.body.as_ref() {
+                    CheckedType::Function(function) => Some(function.clone()),
+                    _ => None,
+                })
+                .or_else(|| symbol.and_then(|symbol| symbol_function_type(module, symbol)))
+                .map(|template| {
+                    if scheme.is_some() {
+                        polymorphic_call_substitutions(
+                            module,
+                            callee.syntax().id,
+                            &template,
+                            &function_type,
+                        )
+                    } else {
+                        call_substitutions(&template, &function_type)
+                    }
+                })
                 .unwrap_or_default(),
             evidence: None,
             reactive,
@@ -11631,7 +12266,11 @@ impl LoweredProgram {
         // Templates whose types still contain declared parameters may leave it
         // absent until materialization.
         match &expression.coercion_plan {
-            Some(plan) => match LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
+            Some(plan) => match LoweredCoercionPlan::plan_seeded(
+                &coercion.source,
+                &coercion.target,
+                &expression.instantiation_substitutions,
+            ) {
                 Ok(expected) if *plan == expected => {}
                 Ok(_) => diagnostics.push(Diagnostic::new(
                     expression.origin.span.clone(),
@@ -12446,6 +13085,19 @@ impl LoweredProgram {
                     ),
                 ));
             }
+            if info.dictionary_layout
+                != trait_dictionaries::TraitDictionaryLayout::new(
+                    info.methods.len(),
+                    info.prerequisites.len(),
+                    info.associated_types.len(),
+                )
+                || !info.parameters.ends_with(&info.associated_types)
+            {
+                diagnostics.push(Diagnostic::new(
+                    info.origin.span.clone(),
+                    format!("trait {key:?} has an inconsistent dictionary prefix"),
+                ));
+            }
             if self.modules.get(info.module).is_none() {
                 diagnostics.push(invalid_reference(
                     &info.origin,
@@ -13148,9 +13800,7 @@ impl SymbolDeclarationFacts {
                         // The emitter skips generic bindings (no storage global) and
                         // symbols that already have a declaration global
                         // (externs are predeclared before storage runs).
-                        if binding.type_parameters.is_empty()
-                            && !resolved.is_external_symbol(symbol)
-                        {
+                        if !binding.is_generic() && !resolved.is_external_symbol(symbol) {
                             globals.insert(symbol);
                         }
                     }
@@ -13208,6 +13858,16 @@ fn collect_pattern_facts(
 /// Whether one checked type contains a garbage-collector-managed reference.
 /// Records `checked_type_contains_ref` so
 /// `LoweredSymbol::global_root` records the decision lowering-side.
+///
+/// FIXME(gc-roots): this misses GC pointers other than `Ref` and `Buffer`,
+/// so a module global holding one is never registered as a root and its data
+/// can be freed while still live. Known cases: `String` and `Slice` values,
+/// and function values, whose closure environment is a GC allocation whatever
+/// their parameter and result types. For example, a top-level
+/// `let mut cell = "a"` assigned through a closure, or
+/// `let reader = make_reader "text"` where `make_reader` returns a capturing
+/// closure, reads freed memory after a collection. Root every global whose
+/// layout can hold a GC pointer, runtime handle types included.
 fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Ref(_) | CheckedType::Buffer(_) => true,
@@ -13547,12 +14207,60 @@ fn mutation_slot_mask(count: usize, mutations: &[CheckedMutation]) -> Vec<bool> 
 /// Compile-time substitutions from a function template to the concrete type
 /// recorded at a use site. Effect variables are inferred by the checker as
 /// error-shaped function types and are split back into effect substitutions.
+fn polymorphic_call_substitutions(
+    module: &TypedModule,
+    syntax: SyntaxId,
+    template: &CheckedFunctionType,
+    actual: &CheckedFunctionType,
+) -> CallSubstitutions {
+    let mut inferred = module
+        .explicit_value_substitutions(syntax)
+        .cloned()
+        .unwrap_or_default();
+    let _ = infer_type_parameters_with_schemes(
+        &CheckedType::Function(template.clone()),
+        &CheckedType::Function(actual.clone()),
+        &mut inferred,
+    );
+    // Lowering re-infers the instantiation instead of reading the checker's,
+    // so the descriptors it passes must rebuild the type the checker recorded
+    // at this call.
+    debug_assert!(
+        {
+            // Effect rows are checked too: a template with an effect variable
+            // keeps it in the comparison otherwise.
+            let map = inferred
+                .iter()
+                .map(|(parameter, value)| (*parameter, value.clone()))
+                .collect::<HashMap<_, _>>();
+            types_equivalent(
+                &crate::substitute_type(CheckedType::Function(template.clone()), &map),
+                &CheckedType::Function(actual.clone()),
+            )
+        },
+        "re-inferred instantiation disagrees with the checked call type: `{}` against `{}`",
+        CheckedType::Function(template.clone()),
+        CheckedType::Function(actual.clone()),
+    );
+    substitutions_from_map(inferred)
+}
+
+/// The type an expression has before the checker's own coercion (into a
+/// `from` wrapper or a sum) applies: the coercion's source, or the recorded
+/// type when nothing coerced it.
+fn natural_expression_type(module: &TypedModule, syntax: SyntaxId) -> Option<CheckedType> {
+    module
+        .coercion_for(syntax)
+        .map(|coercion| coercion.source.clone())
+        .or_else(|| module.type_of_expression(syntax).cloned())
+}
+
 fn call_substitutions(
     template: &CheckedFunctionType,
     actual: &CheckedFunctionType,
 ) -> CallSubstitutions {
     let mut inferred = HashMap::new();
-    let _ = infer_type_parameters(
+    let _ = infer_type_parameters_with_schemes(
         &CheckedType::Function(template.clone()),
         &CheckedType::Function(actual.clone()),
         &mut inferred,
@@ -13562,6 +14270,17 @@ fn call_substitutions(
 
 /// Trait-call substitutions: the trait's declared parameter templates mapped
 /// onto the completed call-site arguments.
+fn member_substitution_map(
+    member: &LoweredTraitMethodMetadata,
+    arguments: &[CheckedType],
+) -> HashMap<TypeParameterId, CheckedType> {
+    let mut map = HashMap::new();
+    for (parameter, argument) in member.own_parameters.iter().zip(arguments) {
+        let _ = infer_type_parameters(&parameter.substitution_pattern(), argument, &mut map);
+    }
+    map
+}
+
 fn trait_call_substitutions(
     parameters: &[CheckedType],
     arguments: &[CheckedType],
@@ -14105,7 +14824,13 @@ impl<'a> SourceCoverage<'a> {
     /// operands are the lowered occurrences in the decomposed case; implicit
     /// thunks are skipped by `visit_expression`.
     fn visit_call_argument(&mut self, owner: ExpressionOwner, argument: &Expression) {
-        if let Expression::Product(product) = argument {
+        // A parenthesized argument such as `(g ())` may itself be the thunk.
+        if let Expression::Product(product) = argument
+            && self
+                .module
+                .implicit_thunk_for(argument.syntax().id)
+                .is_none()
+        {
             for element in &product.elements {
                 self.visit_expression(owner, &element.value);
             }
@@ -14207,6 +14932,10 @@ pub enum PlannedArtifactFamily {
     GcBufferFinalizer,
     ExternAdapter,
     CoroutineCodes,
+    TypeDescriptor,
+    DescriptorDrop,
+    CompoundDescriptorDrop,
+    TraitMemberEntry,
 }
 
 impl LoweredModule {
@@ -14242,6 +14971,7 @@ impl LoweredModule {
                 continue;
             };
             let selected = match (family, key) {
+                (TraitMemberEntry, ArtifactRequestKey::TraitMemberEntry(_)) => true,
                 (StructuralDebug, ArtifactRequestKey::StructuralMethod(method)) => {
                     method.structural == StructuralTraitMethod::Debug
                 }
@@ -14265,7 +14995,10 @@ impl LoweredModule {
                 )
                 | (GcBufferFinalizer, ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Buffer(_)))
                 | (ExternAdapter, ArtifactRequestKey::ExternAdapter(_))
-                | (CoroutineCodes, ArtifactRequestKey::CoroutineCodes(_)) => true,
+                | (CoroutineCodes, ArtifactRequestKey::CoroutineCodes(_))
+                | (TypeDescriptor, ArtifactRequestKey::TypeDescriptor(_))
+                | (DescriptorDrop, ArtifactRequestKey::DescriptorDrop(_))
+                | (CompoundDescriptorDrop, ArtifactRequestKey::CompoundDescriptorDrop(_)) => true,
                 _ => false,
             };
             if !selected {
@@ -14284,6 +15017,42 @@ impl LoweredModule {
     /// The read-only backend view of the owned lowered program.
     pub(crate) fn program(&self) -> emission::EmissionView<'_> {
         self.program.emission_view()
+    }
+
+    /// The number of call sites the hidden differential option redirected
+    /// from a concrete owner into a dynamic implementation. Used by the
+    /// differential tests; never part of normal compilation.
+    #[doc(hidden)]
+    pub fn differential_dynamic_call_count(&self) -> usize {
+        let view = self.program();
+        let mut count = 0;
+        for (id, _) in view.instances() {
+            if view.instance_is_dynamic(id) {
+                continue;
+            }
+            let Some(bindings) = view.instance_bindings(id) else {
+                continue;
+            };
+            count += bindings
+                .values()
+                .filter(|target| match target {
+                    LoweredBoundTarget::Instance(callee) => view.instance_is_dynamic(*callee),
+                    _ => false,
+                })
+                .count();
+        }
+        for (id, _) in view.initializers() {
+            if let Some(bindings) = view.initializer_bindings(id) {
+                count += bindings
+                    .values()
+                    .filter(|target| match target {
+                        LoweredBoundTarget::Instance(callee) => view.instance_is_dynamic(*callee),
+                        _ => false,
+                    })
+                    .count();
+            }
+        }
+        count
     }
 }
 
@@ -14338,18 +15107,53 @@ impl LoweredProgram {
 
 /// Converts checked compiler state into the code-generation input.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct Lowerer;
+pub struct Lowerer {
+    /// The hidden differential option: route direct generic
+    /// calls from concrete owners through dynamic implementations. Never
+    /// exposed through the CLI.
+    dictionary_pass_generic_calls: bool,
+    /// The effect-row variant: route direct calls of effect-generic
+    /// functions through dynamic implementations whose effect parameters
+    /// arrive as run-time bundles. Never exposed through the CLI.
+    dictionary_pass_effect_rows: bool,
+}
 
 impl Lowerer {
     pub fn new() -> Self {
-        Self
+        Self {
+            dictionary_pass_generic_calls: false,
+            dictionary_pass_effect_rows: false,
+        }
+    }
+
+    /// Enables the effect-row differential option used by the differential
+    /// tests.
+    #[doc(hidden)]
+    pub fn with_dictionary_pass_effect_rows(mut self, enabled: bool) -> Self {
+        self.dictionary_pass_effect_rows = enabled;
+        self
+    }
+
+    /// Enables the hidden differential lowering option used by the
+    /// differential tests.
+    #[doc(hidden)]
+    pub fn with_dictionary_pass_generic_calls(mut self, enabled: bool) -> Self {
+        self.dictionary_pass_generic_calls = enabled;
+        self
     }
 
     pub fn lower(&self, module: &TypedModule) -> Result<LoweredModule, Vec<Diagnostic>> {
         let mut program = LoweredProgram::default();
+        program.dictionary_pass_generic_calls = self.dictionary_pass_generic_calls;
+        program.dictionary_pass_effect_rows = self.dictionary_pass_effect_rows;
         let mut diagnostics = validate_checked_module(module);
         if diagnostics.is_empty() {
             diagnostics.extend(program.snapshot(module));
+        }
+        if diagnostics.is_empty()
+            && (program.dictionary_pass_generic_calls || program.dictionary_pass_effect_rows)
+        {
+            program.compute_dynamic_support();
         }
         diagnostics.extend(program.validate());
         if diagnostics.is_empty() {
@@ -14357,6 +15161,9 @@ impl Lowerer {
         }
         if diagnostics.is_empty() {
             diagnostics.extend(program.materialize_instance_bodies());
+        }
+        if diagnostics.is_empty() {
+            program.record_reabstractions();
         }
         if diagnostics.is_empty() {
             diagnostics.extend(program.close_artifact_catalog(&ProductionHooks));
@@ -15605,6 +16412,11 @@ mod tests {
 
         let convert = lowered_trait(&program, "TestConvert");
         assert_eq!(convert.parameters.len(), 3);
+        assert_eq!(convert.associated_types, convert.parameters[2..]);
+        assert_eq!(convert.dictionary_layout.slots, 0..1);
+        assert_eq!(convert.dictionary_layout.prerequisites, 1..1);
+        assert_eq!(convert.dictionary_layout.associated, 1..2);
+        assert_eq!(convert.dictionary_layout.environment, 2);
         assert_eq!(convert.methods.len(), 1);
         let method = program
             .trait_methods
@@ -15617,6 +16429,10 @@ mod tests {
         let ordered = lowered_trait(&program, "TestOrdered");
         assert!(!ordered.prerequisites.is_empty());
         assert_eq!(ordered.methods.len(), 2);
+        assert_eq!(ordered.dictionary_layout.slots, 0..2);
+        assert_eq!(ordered.dictionary_layout.prerequisites, 2..3);
+        assert_eq!(ordered.dictionary_layout.associated, 3..3);
+        assert_eq!(ordered.dictionary_layout.environment, 3);
         assert_eq!(ordered.default_methods.len(), 1);
         assert_eq!(ordered.default_methods[0].0, ordered.methods[1]);
         let names = ordered
@@ -15644,6 +16460,487 @@ mod tests {
                 .get(ordered.default_methods[0].1)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn hidden_dictionary_declarations_preserve_lexical_order_without_prerequisites() {
+        let module = checked_program(concat!(
+            "trait OuterA T {}\n",
+            "trait OuterB T where OuterA T {}\n",
+            "trait Own U {}\n",
+            "def enclosing: <T where OuterB T, Copy T> T -> (<U where Own U> move U -> U) = value => {\n",
+            "  let inner: <U where Own U> move U -> U = move item => { let ignored = value; item }\n",
+            "  inner\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let enclosing = program
+            .functions
+            .iter()
+            .find_map(|(_, _, function)| (function.name == "enclosing").then_some(function))
+            .unwrap();
+        let inner = program
+            .functions
+            .iter()
+            .find_map(|(_, _, function)| {
+                (module.resolved().function_parent(function.semantic_id)
+                    == Some(enclosing.semantic_id))
+                .then_some(function)
+            })
+            .unwrap();
+        let names = |bounds: &[CheckedTraitBound]| {
+            bounds
+                .iter()
+                .map(|bound| program.traits.get(bound.trait_id).unwrap().name.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&enclosing.declared_bounds), ["OuterB", "Copy"]);
+        assert!(
+            names(&enclosing.bounds).contains(&"OuterA"),
+            "checker retains expanded prerequisites"
+        );
+        assert_eq!(names(&inner.declared_bounds), ["OuterB", "Copy", "Own"]);
+        assert_eq!(names(&inner.own_declared_bounds), ["Own"]);
+        assert_eq!(names(&enclosing.own_declared_bounds), ["OuterB", "Copy"]);
+        let parameters = inner
+            .declared_bounds
+            .iter()
+            .flat_map(|bound| bound.arguments.iter())
+            .filter_map(|argument| match argument {
+                CheckedType::Parameter { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let hidden = trait_dictionaries::runtime_obligations(
+            &program.semantic_ids,
+            &inner.declared_bounds,
+            &HashMap::new(),
+            &parameters,
+        );
+        assert_eq!(
+            names(&hidden),
+            ["OuterB", "Own"],
+            "prerequisites use slots; Copy uses a descriptor"
+        );
+        let enclosing_symbol = enclosing.binding_symbol.unwrap();
+        let scheme = module
+            .scheme_of_symbol(enclosing_symbol)
+            .expect("enclosing has a scheme");
+        assert_eq!(names(&scheme.trait_bounds), ["OuterB", "Copy"]);
+        let CheckedType::Function(function) = scheme.body.as_ref() else {
+            unreachable!()
+        };
+        let CheckedType::Forall(result) = function.result.as_ref() else {
+            unreachable!()
+        };
+        assert_eq!(names(&result.trait_bounds), ["Own"]);
+    }
+
+    #[test]
+    fn direct_dictionary_calls_demand_static_roots_and_forward_prerequisites() {
+        let module = checked_program(concat!(
+            "trait CallProbe T {}\n",
+            "trait CallRoot T where CallProbe T {}\n",
+            "impl CallProbe I32 {}\n",
+            "impl CallRoot I32 {}\n",
+            "def inner: <T where Copy T> T -> I32 = value => 42\n",
+            "def outer: <T where Copy T> T -> I32 = value => inner value\n",
+            "def run: () -> I32 = () => outer 7\n",
+            "let answer = run ()\n",
+            "let direct_answer = outer 7\n",
+        ));
+        let mut lowered = Lowerer::new()
+            .with_dictionary_pass_generic_calls(true)
+            .lower(&module)
+            .unwrap();
+        let probe = lowered
+            .program
+            .traits
+            .iter()
+            .find_map(|(_, _, t)| (t.name == "CallProbe").then_some(t.semantic_id))
+            .unwrap();
+        let root = lowered
+            .program
+            .traits
+            .iter()
+            .find_map(|(_, _, t)| (t.name == "CallRoot").then_some(t.semantic_id))
+            .unwrap();
+        // Supply the bounded template metadata after the existing support gate
+        // has chosen the dynamic keys. The gate opens with trait operations.
+        let functions = lowered
+            .program
+            .functions
+            .iter()
+            .map(|(_, id, _)| id)
+            .collect::<Vec<_>>();
+        for id in functions {
+            let function = lowered.program.functions.get_mut(id).unwrap();
+            let trait_id = match function.name.as_str() {
+                "inner" => probe,
+                "outer" => root,
+                _ => continue,
+            };
+            let arguments = function.declared_bounds[0].arguments.clone();
+            let bound = CheckedTraitBound {
+                trait_id,
+                arguments,
+            };
+            function.declared_bounds.push(bound.clone());
+            function.own_declared_bounds.push(bound);
+        }
+        for (_, instance) in lowered.program.instances.iter_mut() {
+            instance.body = None;
+        }
+        let diagnostics = lowered.program.materialize_instance_bodies();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let arguments = lowered
+            .program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (lowered
+                    .program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "outer")
+                    .then(|| {
+                        instance
+                            .body
+                            .as_ref()
+                            .unwrap()
+                            .dictionary_calls
+                            .values()
+                            .next()
+                            .unwrap()
+                            .clone()
+                    })
+            })
+            .unwrap();
+        assert_eq!(arguments.len(), 1);
+        assert!(
+            matches!(&arguments[0].recipe, DictionaryRecipe::Environment(recipe)
+            if recipe.argument == 0 && recipe.prerequisites == [0])
+        );
+        let diagnostics = lowered
+            .program
+            .close_artifact_catalog(&artifact_closure::ProductionHooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        lowered.program.assign_initializer_names();
+        assert!(
+            lowered
+                .program
+                .initializer_dictionary_calls
+                .iter()
+                .any(|calls| !calls.is_empty())
+        );
+        let diagnostics = lowered.program.validate_initializer_bindings();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let diagnostics = lowered.program.validate_instance_bodies();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let diagnostics = lowered.program.validate_closed_catalog();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            lowered
+                .program
+                .artifacts
+                .iter()
+                .filter(|(_, artifact)| matches!(
+                    artifact.plan,
+                    Some(LoweredArtifactPlan::TraitDictionary(_))
+                ))
+                .count(),
+            2
+        );
+        let run = lowered
+            .program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (lowered
+                    .program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "run")
+                    .then(|| instance.name.clone())
+            })
+            .unwrap();
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .unwrap();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dictionary-call-recipes",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        assert!(text.contains("dictionary.prerequisite"), "{text}");
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Run = unsafe extern "C" fn(*const usize) -> i32;
+        let run = unsafe { engine.get_function::<Run>(&run).unwrap() };
+        assert_eq!(unsafe { run.call(std::ptr::null()) }, 42);
+        let outer = lowered
+            .program
+            .instances
+            .iter()
+            .find_map(|(id, instance)| {
+                (lowered
+                    .program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "outer")
+                    .then_some(id)
+            })
+            .unwrap();
+        lowered
+            .program
+            .instances
+            .get_mut(outer)
+            .unwrap()
+            .body
+            .as_mut()
+            .unwrap()
+            .dictionary_calls
+            .clear();
+        let diagnostics = lowered.program.validate_instance_bodies();
+        assert!(
+            diagnostics.iter().any(|error| error.message
+                == "instance call dictionary recipes disagree with its callee bounds"),
+            "{diagnostics:?}"
+        );
+        let body = lowered
+            .program
+            .instances
+            .get_mut(outer)
+            .unwrap()
+            .body
+            .as_mut()
+            .unwrap();
+        let (_, target) = body
+            .bindings
+            .iter_mut()
+            .find(|(site, _)| matches!(site, LoweredBindingSite::Call(_)))
+            .unwrap();
+        *target = LoweredBoundTarget::Instance(FunctionInstanceId::from_index(usize::MAX));
+        let diagnostics = lowered.program.validate_instance_bodies();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|error| error.message == "dictionary call has no callee instance"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_entries_place_dictionaries_before_results_resources_and_values() {
+        for resources in [false, true] {
+            let source = if resources {
+                "use std.io.IO\ndef pick: <T where Copy T> T ->{IO} I32 = value => 42\nlet stored = pick\nlet answer = stored 7\n"
+            } else {
+                "def pick: <T where Copy T> T -> I32 = value => 42\nlet stored = pick\nlet answer = stored 7\n"
+            };
+            let module = checked_program(source);
+            let mut lowered = Lowerer::new().lower(&module).unwrap();
+            let id = lowered
+                .program
+                .instances
+                .iter()
+                .find_map(|(id, instance)| {
+                    (lowered
+                        .program
+                        .functions
+                        .get(instance.template)
+                        .unwrap()
+                        .name
+                        == "pick"
+                        && lowered.program.instance_is_dynamic(id))
+                    .then_some(id)
+                })
+                .expect("dynamic instance");
+            let context = inkwell::context::Context::create();
+            let baseline =
+                crate::codegen::lowered_instance_body_ir(&context, &lowered, id).unwrap();
+            assert!(
+                baseline
+                    .lines()
+                    .any(|line| line.contains("llvm.memcpy") && line.contains("%2,")),
+                "{baseline}"
+            );
+            let body = lowered
+                .program
+                .instances
+                .get_mut(id)
+                .unwrap()
+                .body
+                .as_mut()
+                .unwrap();
+            body.dictionary_bounds = vec![
+                CheckedTraitBound {
+                    trait_id: TraitId(usize::MAX - 1),
+                    arguments: Vec::new(),
+                },
+                CheckedTraitBound {
+                    trait_id: TraitId(usize::MAX),
+                    arguments: Vec::new(),
+                },
+            ];
+            let ir = crate::codegen::lowered_instance_body_ir(&context, &lowered, id).unwrap();
+            let declaration = ir.lines().find(|line| line.starts_with("define ")).unwrap();
+            assert_eq!(
+                declaration.matches("ptr ").count(),
+                6 + usize::from(resources),
+                "{ir}"
+            );
+            assert!(
+                ir.lines()
+                    .any(|line| line.contains("llvm.memcpy") && line.contains("%4,")),
+                "{ir}"
+            );
+        }
+    }
+
+    #[test]
+    fn dictionary_environment_recipes_follow_transitive_and_associated_prefixes() {
+        let module = checked_program(concat!(
+            "trait RecipeBase T { base: T -> Bool }\n",
+            "trait RecipeMiddle T where RecipeBase (List T) { middle: T -> Bool }\n",
+            "trait RecipeRoot T where RecipeMiddle T {\n",
+            "  type Item where RecipeBase Item\n",
+            "  root: (T, Item) -> Bool\n",
+            "}\n",
+            "def inspect: <T where RecipeRoot T> T -> I32 = value => 42\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let function = program
+            .functions
+            .iter()
+            .find_map(|(_, _, f)| (f.name == "inspect").then_some(f))
+            .unwrap();
+        let environment = &function.declared_bounds;
+        let root = program.traits.get(environment[0].trait_id).unwrap();
+        let base = function
+            .bounds
+            .iter()
+            .find(|bound| program.traits.get(bound.trait_id).unwrap().name == "RecipeBase")
+            .unwrap();
+        let recipe = trait_dictionaries::environment_recipe(&program, environment, base)
+            .expect("transitive prerequisite");
+        let middle = program
+            .traits
+            .iter()
+            .find_map(|(_, _, t)| (t.name == "RecipeMiddle").then_some(t))
+            .unwrap();
+        assert_eq!(recipe.argument, 0);
+        assert_eq!(
+            recipe.prerequisites,
+            [
+                root.dictionary_layout.prerequisites.start,
+                middle.dictionary_layout.prerequisites.start
+            ]
+        );
+        assert_eq!(
+            trait_dictionaries::environment_recipe_bound(&program, environment, &recipe).as_ref(),
+            Some(base)
+        );
+        let mut direct = environment.clone();
+        direct.push(base.clone());
+        let preferred = trait_dictionaries::environment_recipe(&program, &direct, base).unwrap();
+        assert_eq!(preferred.argument, 1);
+        assert!(preferred.prerequisites.is_empty());
+        let associated = trait_dictionaries::EnvironmentDictionaryRecipe {
+            argument: 0,
+            prerequisites: vec![root.dictionary_layout.prerequisites.start + 1],
+        };
+        let associated_bound =
+            trait_dictionaries::environment_recipe_bound(&program, environment, &associated)
+                .unwrap();
+        assert_eq!(
+            associated_bound.arguments,
+            vec![environment[0].arguments.last().unwrap().clone()]
+        );
+        assert_eq!(
+            trait_dictionaries::environment_recipe(&program, environment, &associated_bound),
+            Some(associated)
+        );
+        let bad_slot = trait_dictionaries::EnvironmentDictionaryRecipe {
+            argument: 0,
+            prerequisites: vec![root.dictionary_layout.associated.start],
+        };
+        assert!(
+            trait_dictionaries::environment_recipe_bound(&program, environment, &bad_slot)
+                .is_none()
+        );
+        let mut unrelated = base.clone();
+        unrelated.arguments = vec![CheckedType::String];
+        assert!(
+            trait_dictionaries::environment_recipe(&program, environment, &unrelated).is_none()
+        );
+    }
+
+    #[test]
+    fn implicit_thunks_inherit_declared_dictionary_bounds() {
+        let module = checked_program(concat!(
+            "def evaluate: (() -> String) -> String = callback => callback ()\n",
+            "def describe: <T where Display T> T -> String = value => evaluate \"text\"\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let thunk = module
+            .implicit_thunks_in_id_order()
+            .into_iter()
+            .next()
+            .expect("implicit callback");
+        let lowered = program.functions.get(thunk.id).unwrap();
+        assert_eq!(lowered.declared_bounds.len(), 1);
+        assert_eq!(
+            program
+                .traits
+                .get(lowered.declared_bounds[0].trait_id)
+                .unwrap()
+                .name,
+            "Display"
+        );
+    }
+
+    #[test]
+    fn dictionary_prefix_preserves_associated_prerequisites_and_default_slots() {
+        let module = checked_program(concat!(
+            "trait DictBase T { base: T -> Bool }\n",
+            "trait DictOther T { other: T -> Bool }\n",
+            "trait DictFull T where DictBase T {\n",
+            "  type First where DictBase First\n",
+            "  type Second where DictOther Second\n",
+            "  required: (T, First, Second) -> Bool\n",
+            "  defaulted: (T, First, Second) -> Bool = value => required value\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+        let full = lowered_trait(&program, "DictFull");
+        assert_eq!(full.associated_types, full.parameters[1..]);
+        let prerequisite_names = full
+            .prerequisites
+            .iter()
+            .map(|bound| program.traits.get(bound.trait_id).unwrap().name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(prerequisite_names, ["DictBase", "DictBase", "DictOther"]);
+        assert_eq!(full.dictionary_layout.slots, 0..2);
+        assert_eq!(full.dictionary_layout.prerequisites, 2..5);
+        assert_eq!(full.dictionary_layout.associated, 5..7);
+        assert_eq!(full.dictionary_layout.environment, 7);
+        assert_eq!(full.default_methods[0].0, full.methods[1]);
     }
 
     #[test]
@@ -16432,6 +17729,7 @@ mod tests {
             effects: CheckedEffectSet::default(),
             coercion: None,
             coercion_plan: None,
+            instantiation_substitutions: Default::default(),
             moved_symbols: Vec::new(),
             kind: LoweredExpressionKind::Block(BlockId::from_index(4)),
         });
@@ -17235,7 +18533,7 @@ mod tests {
             "  let maker = make_borrower\n",
             "  let cell = cell_capture\n",
             "  let recursive_value = recursive\n",
-            "  let method = test_show\n",
+            "  let method: I32 -> Bool = test_show\n",
             "  anonymous 1\n",
             "}\n",
         )
@@ -18014,8 +19312,10 @@ mod tests {
             ));
         }
         assert!(
-            indirect_chains.iter().any(|lowered| lowered.arguments[0].pass_mode
-                == LoweredArgumentPassMode::MutablePlace),
+            indirect_chains
+                .iter()
+                .any(|lowered| lowered.arguments[0].pass_mode
+                    == LoweredArgumentPassMode::MutablePlace),
             "`Ref.replace` mutates its reference in place"
         );
     }
@@ -18607,6 +19907,7 @@ mod tests {
             effects: CheckedEffectSet::default(),
             coercion: None,
             coercion_plan: None,
+            instantiation_substitutions: Default::default(),
             moved_symbols: Vec::new(),
             kind: LoweredExpressionKind::Deferred(DeferredExpressionFamily::Callable),
         });
@@ -20937,6 +22238,7 @@ mod tests {
             effects: CheckedEffectSet::default(),
             coercion: None,
             coercion_plan: None,
+            instantiation_substitutions: Default::default(),
             moved_symbols: Vec::new(),
             kind: LoweredExpressionKind::Name(LoweredName {
                 symbol: SymbolId(0),
@@ -22081,6 +23383,1547 @@ mod tests {
     }
 
     #[test]
+    fn callable_snapshot_retains_quantified_schemes_and_descriptor_order() {
+        let module = checked_program(concat!(
+            "def identity: <T> move T -> T = move value => value\n",
+            "let stored = identity\n",
+            "let concrete: I32 -> I32 = identity\n",
+            "let swap: <A, B> (move B, move A) -> (A, B) = (move b, move a) => (a, b)\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let schemes = program
+            .callable_values
+            .iter()
+            .filter_map(|(_, value)| value.scheme.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(schemes.len(), 2);
+        let swap = program
+            .callable_values
+            .iter()
+            .find_map(|(_, value)| {
+                let scheme = value.scheme.as_ref()?;
+                (scheme.parameters.len() == 2).then_some(value)
+            })
+            .unwrap();
+        let LoweredCallableTarget::DirectFunction { function, .. } = swap.target else {
+            panic!("lambda instance target")
+        };
+        let expected = swap
+            .scheme
+            .as_ref()
+            .unwrap()
+            .parameters
+            .iter()
+            .map(|p| match p {
+                crate::CheckedSchemeParameter::Type { id, .. } => *id,
+                _ => panic!("type quantifier"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            program
+                .functions
+                .get(function)
+                .unwrap()
+                .scheme_type_parameters,
+            expected
+        );
+        assert!(
+            program
+                .callable_values
+                .iter()
+                .any(|(_, value)| value.scheme.is_none()
+                    && !contains_type_parameter(&CheckedType::Function(
+                        value.function_type.clone()
+                    )))
+        );
+        let diagnostics = program.build_specialization_worklist();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let diagnostics = program.materialize_instance_bodies();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let identity = program
+            .functions
+            .iter()
+            .find_map(|(_, id, f)| (f.name == "identity").then_some(id))
+            .unwrap();
+        let orders = program
+            .instances
+            .iter()
+            .filter_map(|(id, instance)| {
+                (instance.template == identity).then(|| program.instance_runtime_order(id).unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            orders.iter().any(Vec::is_empty),
+            "concrete instantiation remains monomorphized"
+        );
+        assert!(
+            orders.iter().any(|order| order.len() == 1),
+            "retained scheme requests a dynamic entry"
+        );
+    }
+
+    #[test]
+    fn polymorphic_construction_returns_an_executable_dynamic_closure() {
+        for dictionary in [false, true] {
+            let module = checked_program(concat!(
+                "def identity: <T> move T -> T = move value => value\n",
+                "def make: <A> move A -> (<T> move T -> T) = move ignored => identity\n",
+                "def build: () -> (<T> move T -> T) = () => make 42\n",
+                "let stored = build ()\n",
+            ));
+            let mut program = LoweredProgram::default();
+            program.dictionary_pass_generic_calls = dictionary;
+            assert!(program.snapshot(&module).is_empty());
+            if dictionary {
+                program.compute_dynamic_support();
+            }
+            let diagnostics = program.build_specialization_worklist();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let diagnostics = program.materialize_instance_bodies();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let dynamic_make = program.instances.iter().any(|(id, instance)| {
+                program.functions.get(instance.template).unwrap().name == "make"
+                    && !program.instance_runtime_order(id).unwrap().is_empty()
+            });
+            assert_eq!(
+                dynamic_make, dictionary,
+                "construction must exercise the selected owner ABI"
+            );
+            program.record_reabstractions();
+            let diagnostics = program.close_artifact_catalog(&artifact_closure::ProductionHooks);
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            assert!(
+                !program.artifacts.iter().any(|(_, artifact)| matches!(
+                    artifact.plan,
+                    Some(LoweredArtifactPlan::DescriptorBoundEntry(_))
+                )),
+                "top-level polymorphic values need no forwarding entry"
+            );
+            program.assign_initializer_names();
+            let name = program
+                .instances
+                .iter()
+                .find_map(|(_, instance)| {
+                    (program.functions.get(instance.template).unwrap().name == "build")
+                        .then(|| instance.name.clone())
+                })
+                .unwrap();
+            let context = inkwell::context::Context::create();
+            let text = crate::CodeGenerator::new(&context)
+                .compile_module(&LoweredModule { program })
+                .unwrap();
+            let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+                text.as_bytes(),
+                "polymorphic-construction",
+            );
+            let llvm = context.create_module_from_ir(buffer).unwrap();
+            llvm.verify().unwrap();
+            let engine = llvm
+                .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+                .unwrap();
+            #[repr(C)]
+            struct Closure {
+                code: *const (),
+                environment: *const u8,
+            }
+            #[repr(C)]
+            struct Descriptor {
+                size: usize,
+                stride: usize,
+                align: usize,
+                flags: u32,
+                drop: usize,
+                count: u32,
+            }
+            type Make = unsafe extern "C" fn(*const u8) -> Closure;
+            let make = unsafe { engine.get_function::<Make>(&name) }.unwrap();
+            let closure = unsafe { make.call(std::ptr::null()) };
+            assert!(closure.environment.is_null());
+            type Identity = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *mut u8);
+            let identity: Identity = unsafe { std::mem::transmute(closure.code) };
+            for (size, mut value) in [(1usize, 17u32), (4, 0x11223344)] {
+                let descriptor = Descriptor {
+                    size,
+                    stride: size,
+                    align: size,
+                    flags: 1,
+                    drop: 0,
+                    count: 0,
+                };
+                let mut result = 0u32;
+                unsafe {
+                    identity(
+                        closure.environment,
+                        &descriptor,
+                        (&mut result as *mut u32).cast(),
+                        (&mut value as *mut u32).cast(),
+                    );
+                }
+                assert_eq!(result, value);
+            }
+        }
+    }
+
+    #[test]
+    fn polymorphic_uses_preserve_their_original_schemes() {
+        let module = checked_program(concat!(
+            "def identity: <T> move T -> T = move value => value\n",
+            "let stored = identity\n",
+            "let implicit = stored 42\n",
+            "let written = stored.<I32> 42\n",
+            "let fields = (callable: stored, extra: 42)\n",
+            "let field = fields.callable \"hello\"\n",
+            "def returned: () -> (<T> move T -> T) = () => stored\n",
+            "let result = (returned ()) 42\n",
+            "let instantiated: move I32 -> I32 = stored\n",
+            "let compound: <U> move (U, U) -> (U, U) = stored\n",
+        ));
+        let mut tested = 0;
+        for item in &module.syntax().items {
+            let Item::Binding(binding) = item else {
+                continue;
+            };
+            if ![
+                "implicit",
+                "written",
+                "field",
+                "result",
+                "instantiated",
+                "compound",
+            ]
+            .contains(&binding.name.as_str())
+            {
+                continue;
+            }
+            let value = binding.value.as_ref().unwrap();
+            let occurrence = if let Expression::Call(call) = value {
+                call.callee.as_ref()
+            } else {
+                value
+            };
+            let scheme = module
+                .scheme_of_expression(occurrence.syntax().id)
+                .unwrap_or_else(|| panic!("{} lost its source scheme", binding.name));
+            assert_eq!(scheme.parameters.len(), 1);
+            let CheckedType::Function(body) = scheme.body.as_ref() else {
+                panic!("function scheme");
+            };
+            assert_eq!(body.parameter, body.result);
+            assert!(
+                matches!(body.parameter.as_ref(), CheckedType::Parameter { .. }),
+                "{} retained an instantiated body instead of the source scheme",
+                binding.name
+            );
+            tested += 1;
+        }
+        assert_eq!(tested, 6);
+    }
+
+    #[test]
+    fn polymorphic_calls_recover_scheme_substitutions() {
+        let module = checked_program(concat!(
+            "def identity: <T> move T -> T = move value => value\n",
+            "let stored = identity\n",
+            "let integer = stored 42\n",
+            "let string = stored \"hello\"\n",
+            "let explicit = stored.<I32> 42\n",
+            "def apply: <A> move A -> A = move value => { let local = identity; local value }\n",
+            "let generic = apply 42\n",
+        ));
+        for dictionary in [false, true] {
+            let mut program = LoweredProgram::default();
+            program.dictionary_pass_generic_calls = dictionary;
+            assert!(program.snapshot(&module).is_empty());
+            let calls = program
+                .calls
+                .iter()
+                .filter(|(_, call)| call.scheme.is_some())
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 4);
+            for (_, call) in calls {
+                let scheme = call.scheme.as_ref().unwrap();
+                assert_eq!(call.substitutions.types.len(), 1);
+                let substitution = &call.substitutions.types[0];
+                assert!(scheme.bound_ids().contains(&substitution.parameter));
+                assert_eq!(
+                    &substitution.value_type,
+                    call.function_type.parameter.as_ref()
+                );
+            }
+            if dictionary {
+                program.compute_dynamic_support();
+            }
+            let diagnostics = program.build_specialization_worklist();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let diagnostics = program.materialize_instance_bodies();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            for (_, instance) in program.instances.iter() {
+                let Some(body) = &instance.body else {
+                    continue;
+                };
+                for (_, call) in body.calls.iter() {
+                    let Some(scheme) = &call.scheme else {
+                        continue;
+                    };
+                    assert_eq!(call.substitutions.types.len(), 1);
+                    assert!(
+                        scheme
+                            .bound_ids()
+                            .contains(&call.substitutions.types[0].parameter)
+                    );
+                    assert_eq!(
+                        &call.substitutions.types[0].value_type,
+                        call.function_type.parameter.as_ref()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn polymorphic_calls_preserve_explicit_phantom_arguments() {
+        let module = checked_program(concat!(
+            "def ignore: <T where Sized T> () -> I32 = () => 42\n",
+            "let stored = ignore\n",
+            "let result = stored.<String> ()\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let call = program
+            .calls
+            .iter()
+            .find_map(|(_, call)| call.scheme.as_ref().map(|_| call))
+            .unwrap();
+        assert_eq!(call.substitutions.types.len(), 1);
+        assert_eq!(call.substitutions.types[0].value_type, CheckedType::String);
+        assert!(
+            call.scheme
+                .as_ref()
+                .unwrap()
+                .bound_ids()
+                .contains(&call.substitutions.types[0].parameter)
+        );
+    }
+
+    #[test]
+    fn polymorphic_calls_plan_phantom_and_compound_descriptors() {
+        let module = checked_program(concat!(
+            "def ignore: <T where Sized T> () -> I32 = () => 42\n",
+            "let stored = ignore\n",
+            "let result = stored.<String> ()\n",
+            "def run: () -> I32 = () => stored.<(I32, I32)> ()\n",
+            "def apply: <A> move A -> I32 = move value => stored.<(A, A)> ()\n",
+            "let nested = apply 42\n",
+        ));
+        for dictionary in [false, true] {
+            let mut program = LoweredProgram::default();
+            program.dictionary_pass_generic_calls = dictionary;
+            assert!(program.snapshot(&module).is_empty());
+            if dictionary {
+                program.compute_dynamic_support();
+            }
+            let diagnostics = program.build_specialization_worklist();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let diagnostics = program.materialize_instance_bodies();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            program.record_reabstractions();
+            let diagnostics = program.close_artifact_catalog(&artifact_closure::ProductionHooks);
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            for diagnostics in [
+                program.validate_instance_bodies(),
+                program.validate_specializations(),
+                program.validate_specialization_graph(),
+                program.validate_artifact_closure(&artifact_closure::ProductionHooks),
+            ] {
+                assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            }
+            assert!(
+                program.artifacts.iter().any(|(_, artifact)| matches!(
+                    &artifact.plan, Some(LoweredArtifactPlan::TypeDescriptor(plan))
+                    if plan.value_type == CheckedType::String
+                )),
+                "initializer phantom argument needs its own descriptor"
+            );
+            assert!(program.artifacts.iter().any(|(_, artifact)| matches!(
+                &artifact.plan, Some(LoweredArtifactPlan::TypeDescriptor(plan))
+                if matches!(&plan.value_type, CheckedType::Product(product)
+                    if product.elements.len() == 2 && product.elements.iter().all(|field| field.value_type == CheckedType::I32))
+            )), "concrete owner needs a compound descriptor");
+            if dictionary {
+                assert!(
+                    program.artifacts.iter().any(|(_, artifact)| matches!(
+                        &artifact.plan,
+                        Some(LoweredArtifactPlan::CompoundDescriptorDrop(_))
+                    )),
+                    "dynamic owner needs the compound descriptor shape"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn polymorphic_values_survive_storage_positions() {
+        for dictionary in [false, true] {
+            let module = checked_program(concat!(
+                "type Holder = wrap (<T> move T -> T)\n",
+                "def identity: <T> move T -> T = move value => value\n",
+                "def forward: (<T> move T -> T) -> (<U> move U -> U) = value => value\n",
+                "def store: <A where Copy A> A -> (<T> move T -> T) = ignored => {\n",
+                "  let mut value: <T> move T -> T = identity\n",
+                "  value = identity\n",
+                "  let product = (callable: value, extra: 42)\n",
+                "  let wrapped = Holder product.callable\n",
+                "  match wrapped { Holder recovered => forward recovered }\n",
+                "}\n",
+                "let stored = store 42\n",
+            ));
+            let mut program = LoweredProgram::default();
+            program.dictionary_pass_generic_calls = dictionary;
+            assert!(program.snapshot(&module).is_empty());
+            if dictionary {
+                program.compute_dynamic_support();
+            }
+            let diagnostics = program.build_specialization_worklist();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let diagnostics = program.materialize_instance_bodies();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            program.record_reabstractions();
+            let diagnostics = program.close_artifact_catalog(&artifact_closure::ProductionHooks);
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            program.assign_initializer_names();
+            let context = inkwell::context::Context::create();
+            let text = crate::CodeGenerator::new(&context)
+                .compile_module(&LoweredModule { program })
+                .unwrap();
+            let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+                text.as_bytes(),
+                "polymorphic-storage",
+            );
+            context
+                .create_module_from_ir(buffer)
+                .unwrap()
+                .verify()
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn polymorphic_constructors_accept_callers_descriptors() {
+        for dictionary in [false, true] {
+            let module = checked_program(concat!(
+                "type Box T = wrap T\n",
+                "def make: <A> move A -> (<T> move T -> Box T) = move ignored => Box\n",
+                "def build: () -> (<T> move T -> Box T) = () => make 42\n",
+                "let stored = build ()\n",
+            ));
+            let mut program = LoweredProgram::default();
+            program.dictionary_pass_generic_calls = dictionary;
+            assert!(program.snapshot(&module).is_empty());
+            if dictionary {
+                program.compute_dynamic_support();
+            }
+            let diagnostics = program.build_specialization_worklist();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let diagnostics = program.materialize_instance_bodies();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let dynamic_make = program.instances.iter().any(|(id, instance)| {
+                program.functions.get(instance.template).unwrap().name == "make"
+                    && !program.instance_runtime_order(id).unwrap().is_empty()
+            });
+            assert_eq!(
+                dynamic_make, dictionary,
+                "construction must exercise the selected owner ABI"
+            );
+            program.record_reabstractions();
+            let diagnostics = program.close_artifact_catalog(&artifact_closure::ProductionHooks);
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            assert!(
+                !program.artifacts.iter().any(|(_, artifact)| matches!(
+                    artifact.plan,
+                    Some(LoweredArtifactPlan::DescriptorBoundEntry(_))
+                )),
+                "top-level polymorphic values need no forwarding entry"
+            );
+            program.assign_initializer_names();
+            let name = program
+                .instances
+                .iter()
+                .find_map(|(_, instance)| {
+                    (program.functions.get(instance.template).unwrap().name == "build")
+                        .then(|| instance.name.clone())
+                })
+                .unwrap();
+            let context = inkwell::context::Context::create();
+            let text = crate::CodeGenerator::new(&context)
+                .compile_module(&LoweredModule { program })
+                .unwrap();
+            let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+                text.as_bytes(),
+                "polymorphic-construction",
+            );
+            let llvm = context.create_module_from_ir(buffer).unwrap();
+            llvm.verify().unwrap();
+            let engine = llvm
+                .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+                .unwrap();
+            #[repr(C)]
+            struct Closure {
+                code: *const (),
+                environment: *const u8,
+            }
+            #[repr(C)]
+            struct Descriptor {
+                size: usize,
+                stride: usize,
+                align: usize,
+                flags: u32,
+                drop: usize,
+                count: u32,
+            }
+            type Make = unsafe extern "C" fn(*const u8) -> Closure;
+            let make = unsafe { engine.get_function::<Make>(&name) }.unwrap();
+            let closure = unsafe { make.call(std::ptr::null()) };
+            assert!(closure.environment.is_null());
+            type Identity = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *mut u8);
+            let identity: Identity = unsafe { std::mem::transmute(closure.code) };
+            for (size, mut value) in [(1usize, 17u32), (4, 0x11223344)] {
+                let descriptor = Descriptor {
+                    size,
+                    stride: size,
+                    align: size,
+                    flags: 1,
+                    drop: 0,
+                    count: 0,
+                };
+                let mut result = 0u32;
+                unsafe {
+                    identity(
+                        closure.environment,
+                        &descriptor,
+                        (&mut result as *mut u32).cast(),
+                        (&mut value as *mut u32).cast(),
+                    );
+                }
+                assert_eq!(result, value);
+            }
+        }
+    }
+
+    #[test]
+    fn polymorphic_closures_capture_enclosing_values_after_return() {
+        for (shared_cell, dictionary) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let make_source = if shared_cell {
+                "def make: <A where Copy A> A -> (<T> move T ->{state} (I32, T)) = ignored => { let mut count: I32 = 41; move value => { count = count + 1; (count, value) } }\n"
+            } else {
+                "def make: <A where Copy A> A -> (<T> move T -> (A, T)) = captured => move value => (captured, value)\n"
+            };
+            let state = if shared_cell { "{state}" } else { "" };
+            let module = checked_program(&format!(
+                "{make_source}def build: () -> (<T> move T ->{state} (I32, T)) = () => make 42\nlet stored = build ()\n"
+            ));
+            let mut program = LoweredProgram::default();
+            program.dictionary_pass_generic_calls = dictionary;
+            assert!(program.snapshot(&module).is_empty());
+            if dictionary {
+                program.compute_dynamic_support();
+            }
+            let diagnostics = program.build_specialization_worklist();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let diagnostics = program.materialize_instance_bodies();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let dynamic_make = program.instances.iter().any(|(id, instance)| {
+                program.functions.get(instance.template).unwrap().name == "make"
+                    && !program.instance_runtime_order(id).unwrap().is_empty()
+            });
+            assert_eq!(
+                dynamic_make, dictionary,
+                "construction must exercise the selected owner ABI"
+            );
+            program.record_reabstractions();
+            let diagnostics = program.close_artifact_catalog(&artifact_closure::ProductionHooks);
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            program.assign_initializer_names();
+            let name = program
+                .instances
+                .iter()
+                .find_map(|(_, instance)| {
+                    (program.functions.get(instance.template).unwrap().name == "build")
+                        .then(|| instance.name.clone())
+                })
+                .unwrap();
+            let context = inkwell::context::Context::create();
+            let text = crate::CodeGenerator::new(&context)
+                .compile_module(&LoweredModule { program })
+                .unwrap();
+            let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+                text.as_bytes(),
+                "polymorphic-construction",
+            );
+            let llvm = context.create_module_from_ir(buffer).unwrap();
+            llvm.verify().unwrap();
+            let engine = llvm
+                .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+                .unwrap();
+            #[repr(C)]
+            struct Closure {
+                code: *const (),
+                environment: *const u8,
+            }
+            #[repr(C)]
+            struct Descriptor {
+                size: usize,
+                stride: usize,
+                align: usize,
+                flags: u32,
+                drop: usize,
+                count: u32,
+            }
+            type Make = unsafe extern "C" fn(*const u8) -> Closure;
+            let make = unsafe { engine.get_function::<Make>(&name) }.unwrap();
+            let closure = unsafe { make.call(std::ptr::null()) };
+            assert!(!closure.environment.is_null());
+            type Identity = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *mut u8);
+            let identity: Identity = unsafe { std::mem::transmute(closure.code) };
+            for (invocation, (size, mut value)) in
+                [(1usize, 17u32), (4, 0x11223344)].into_iter().enumerate()
+            {
+                let descriptor = Descriptor {
+                    size,
+                    stride: size,
+                    align: size,
+                    flags: 1,
+                    drop: 0,
+                    count: 0,
+                };
+                let mut result = [0u32; 2];
+                unsafe {
+                    identity(
+                        closure.environment,
+                        &descriptor,
+                        result.as_mut_ptr().cast(),
+                        (&mut value as *mut u32).cast(),
+                    );
+                }
+                assert_eq!(
+                    result,
+                    [42 + if shared_cell { invocation as u32 } else { 0 }, value]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn polymorphic_closure_environments_store_dictionaries_before_capture_descriptors() {
+        let module = checked_program(concat!(
+            "trait EnvProbe T {}\n",
+            "impl EnvProbe I32 {}\n",
+            "def make: <A where Copy A> A -> (<T> move T -> (A, T)) = captured => move value => (captured, value)\n",
+            "def build: () -> (<T> move T -> (I32, T)) = () => make 42\n",
+            "let stored = build ()\n",
+        ));
+        let mut program = LoweredProgram::default();
+        program.dictionary_pass_generic_calls = true;
+        assert!(program.snapshot(&module).is_empty());
+        program.compute_dynamic_support();
+        let probe = program
+            .traits
+            .iter()
+            .find_map(|(_, _, t)| (t.name == "EnvProbe").then_some(t.semantic_id))
+            .unwrap();
+        // The support gate opens with trait operations, so supply the bound
+        // after it has chosen the dynamic keys.
+        let functions = program
+            .functions
+            .iter()
+            .map(|(_, id, _)| id)
+            .collect::<Vec<_>>();
+        for id in functions {
+            let function = program.functions.get_mut(id).unwrap();
+            let Some(first) = function.declared_bounds.first().cloned() else {
+                continue;
+            };
+            let bound = CheckedTraitBound {
+                trait_id: probe,
+                arguments: first.arguments,
+            };
+            if function.name == "make" {
+                function.declared_bounds.push(bound.clone());
+                function.own_declared_bounds.push(bound);
+            } else if function.own_declared_bounds.is_empty() {
+                // The lambda inherits its enclosing function's bounds.
+                function.declared_bounds.push(bound);
+            }
+        }
+        let diagnostics = program.build_specialization_worklist();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let diagnostics = program.materialize_instance_bodies();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let (make_body, stored) = program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                let function = program.functions.get(instance.template).unwrap();
+                (function.name == "make").then(|| {
+                    let body = instance.body.as_ref().unwrap();
+                    (body.dictionary_values.clone(), body.dictionary_bounds.len())
+                })
+            })
+            .unwrap();
+        assert_eq!(stored, 1);
+        assert_eq!(make_body.len(), 1, "{make_body:?}");
+        let recipes = make_body.values().next().unwrap();
+        assert!(
+            matches!(&recipes[0].recipe, DictionaryRecipe::Environment(recipe)
+                if recipe.argument == 0 && recipe.prerequisites.is_empty()),
+            "{recipes:?}"
+        );
+        program.record_reabstractions();
+        let diagnostics = program
+            .close_artifact_catalog(&artifact_closure::ProductionHooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        program.assign_initializer_names();
+        let diagnostics = program.validate_instance_bodies();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let diagnostics = program.validate_closed_catalog();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let dictionary = program
+            .artifacts
+            .iter()
+            .find_map(|(_, artifact)| {
+                matches!(artifact.plan, Some(LoweredArtifactPlan::TraitDictionary(_)))
+                    .then(|| artifact.name.clone())
+            })
+            .expect("the concrete caller demands a static dictionary");
+        let finalizer = program
+            .artifacts
+            .iter()
+            .find_map(|(id, artifact)| match &artifact.plan {
+                Some(LoweredArtifactPlan::GcFinalizer(
+                    GcFinalizerPlan::DynamicClosureEnvironment { dictionaries, .. },
+                )) => Some((id, *dictionaries)),
+                _ => None,
+            });
+        if let Some((id, dictionaries)) = finalizer {
+            assert_eq!(dictionaries, 1);
+            let GcFinalizerPlan::DynamicClosureEnvironment { dictionaries, .. } = program
+                .artifacts
+                .get_mut(id)
+                .and_then(|artifact| artifact.plan.as_mut())
+                .and_then(|plan| match plan {
+                    LoweredArtifactPlan::GcFinalizer(plan) => Some(plan),
+                    _ => None,
+                })
+                .unwrap()
+            else {
+                unreachable!()
+            };
+            *dictionaries += 1;
+            let diagnostics = program.validate_closed_catalog();
+            assert!(
+                diagnostics.iter().any(|error| error.message
+                    == "closure environment dictionary count disagrees with its instance"),
+                "{diagnostics:?}"
+            );
+            let GcFinalizerPlan::DynamicClosureEnvironment { dictionaries, .. } = program
+                .artifacts
+                .get_mut(id)
+                .and_then(|artifact| artifact.plan.as_mut())
+                .and_then(|plan| match plan {
+                    LoweredArtifactPlan::GcFinalizer(plan) => Some(plan),
+                    _ => None,
+                })
+                .unwrap()
+            else {
+                unreachable!()
+            };
+            *dictionaries -= 1;
+        }
+        let build = program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "build")
+                    .then(|| instance.name.clone())
+            })
+            .unwrap();
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&LoweredModule { program })
+            .unwrap();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "closure-environment-dictionaries",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let pointer = context.ptr_type(inkwell::AddressSpace::default());
+        let getter =
+            llvm.add_function("test_dictionary_address", pointer.fn_type(&[], false), None);
+        let builder = context.create_builder();
+        builder.position_at_end(context.append_basic_block(getter, "entry"));
+        builder
+            .build_return(Some(
+                &llvm.get_global(&dictionary).unwrap().as_pointer_value(),
+            ))
+            .unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Closure {
+            code: *const (),
+            environment: *const usize,
+        }
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type Address = unsafe extern "C" fn() -> *const usize;
+        type Build = unsafe extern "C" fn(*const u8) -> Closure;
+        let address = unsafe {
+            engine
+                .get_function::<Address>("test_dictionary_address")
+                .unwrap()
+                .call()
+        };
+        let build = unsafe { engine.get_function::<Build>(&build) }.unwrap();
+        let closure = unsafe { build.call(std::ptr::null()) };
+        assert!(!closure.environment.is_null());
+        // Environment: [captured descriptor A, reserved descriptor T, dictionary, ...].
+        let dictionary_word = unsafe { *closure.environment.add(2) };
+        assert_eq!(dictionary_word, address as usize);
+        type Entry = unsafe extern "C" fn(*const usize, *const Descriptor, *mut u8, *mut u8);
+        let entry: Entry = unsafe { std::mem::transmute(closure.code) };
+        let descriptor = Descriptor {
+            size: 4,
+            stride: 4,
+            align: 4,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let mut result = [0u32; 2];
+        let mut value = 0x11223344u32;
+        unsafe {
+            entry(
+                closure.environment,
+                &descriptor,
+                result.as_mut_ptr().cast(),
+                (&mut value as *mut u32).cast(),
+            );
+        }
+        assert_eq!(result, [42, 0x11223344]);
+    }
+
+    #[test]
+    fn bounded_generics_call_trait_members_through_environment_dictionaries() {
+        let module = checked_program(concat!(
+            "trait Measure T { measure: T -> I32 }\n",
+            "impl Measure I32 { measure = value => value + 1 }\n",
+            "trait Weigh T where Measure T { weigh: T -> I32 }\n",
+            "impl Weigh I32 { weigh = value => value * 2 }\n",
+            "def measured: <T where Measure T> T -> I32 = value => Measure.measure value\n",
+            "def weighed: <T where Weigh T> T -> I32 = value => Weigh.weigh value + Measure.measure value\n",
+            "def run: () -> I32 = () => measured 20 + weighed 5\n",
+            "let answer = run ()\n",
+        ));
+        let lowered = Lowerer::new()
+            .with_dictionary_pass_generic_calls(true)
+            .lower(&module)
+            .unwrap();
+        let mut slots = Vec::new();
+        for (_, instance) in lowered.program.instances.iter() {
+            let function = lowered.program.functions.get(instance.template).unwrap();
+            let body = instance.body.as_ref().unwrap();
+            for (_, target) in body.bindings.iter() {
+                if let LoweredBoundTarget::Dictionary(dispatch) = target {
+                    slots.push((function.name.clone(), dispatch.clone()));
+                }
+            }
+        }
+        assert_eq!(slots.len(), 3, "{slots:?}");
+        let weighed = slots
+            .iter()
+            .filter(|(name, _)| name == "weighed")
+            .collect::<Vec<_>>();
+        assert_eq!(weighed.len(), 2);
+        assert!(weighed.iter().any(|(_, dispatch)| matches!(
+            &dispatch.recipe,
+            DictionaryRecipe::Environment(recipe) if recipe.prerequisites.len() == 1
+        )));
+        let run = lowered
+            .program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (lowered
+                    .program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "run")
+                    .then(|| instance.name.clone())
+            })
+            .unwrap();
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .unwrap();
+        assert!(text.contains("dictionary.slot"), "{text}");
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "environment-dictionaries",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Run = unsafe extern "C" fn(*const usize) -> i32;
+        let run = unsafe { engine.get_function::<Run>(&run).unwrap() };
+        assert_eq!(unsafe { run.call(std::ptr::null()) }, 21 + 10 + 6);
+    }
+
+    #[test]
+    fn bounded_generics_build_dictionaries_from_generic_implementations() {
+        let module = checked_program(concat!(
+            "trait Measure T { measure: T -> I32 }\n",
+            "type MeasuredBox T = wrap T\n",
+            "impl Measure I32 { measure = value => value + 1 }\n",
+            "impl<T where Measure T> Measure (MeasuredBox T) { measure = MeasuredBox value => Measure.measure value * 2 }\n",
+            "def measured: <T where Measure T> T -> I32 = value => Measure.measure value\n",
+            "def boxed: <T where Measure T> move T -> I32 = move value => measured (MeasuredBox value)\n",
+            "def twice: <T where Measure T> move T -> I32 = move value => measured (MeasuredBox (MeasuredBox value))\n",
+            "def run: () -> I32 = () => boxed 20 + twice 1\n",
+            "let answer = run ()\n",
+        ));
+        let lowered = Lowerer::new()
+            .with_dictionary_pass_generic_calls(true)
+            .lower(&module)
+            .unwrap();
+        let mut builders = Vec::new();
+        for (_, instance) in lowered.program.instances.iter() {
+            let function = lowered.program.functions.get(instance.template).unwrap();
+            let body = instance.body.as_ref().unwrap();
+            for arguments in body.dictionary_calls.values() {
+                for argument in arguments {
+                    if let DictionaryRecipe::Builder(build) = &argument.recipe {
+                        builders.push((function.name.clone(), build.members.len()));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            builders,
+            [("boxed".to_owned(), 1), ("twice".to_owned(), 1)],
+            "one builder per bounded call over a boxed run-time type"
+        );
+        let run = lowered
+            .program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (lowered
+                    .program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "run")
+                    .then(|| instance.name.clone())
+            })
+            .unwrap();
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .unwrap();
+        assert!(text.contains("dictionary.built"), "{text}");
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "built-dictionaries",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Run = unsafe extern "C" fn(*const usize) -> i32;
+        let run = unsafe { engine.get_function::<Run>(&run).unwrap() };
+        // boxed 20: (20 + 1) * 2; twice 1: ((1 + 1) * 2) * 2.
+        assert_eq!(unsafe { run.call(std::ptr::null()) }, 42 + 8);
+    }
+
+    #[test]
+    fn structural_debug_dictionaries_apply_the_shape_slot_to_component_dictionaries() {
+        let module = checked_program(concat!(
+            "use std.fmt.(Debug, Formatter)\n",
+            "def pair: <T where Debug T> move T -> String = move value => Formatter.debug (value, 1)\n",
+            "def either: <T where Debug T> move T -> String = move value => {\n",
+            "    let sum: T | String = value\n",
+            "    Formatter.debug sum\n",
+            "}\n",
+            "let first = pair 5\n",
+            "let second = either 6\n",
+        ));
+        let lowered = Lowerer::new()
+            .with_dictionary_pass_generic_calls(true)
+            .lower(&module)
+            .unwrap();
+        let mut shapes = Vec::new();
+        for (_, instance) in lowered.program.instances.iter() {
+            let body = instance.body.as_ref().unwrap();
+            for arguments in body.dictionary_calls.values() {
+                for argument in arguments {
+                    if let DictionaryRecipe::Structural(structural) = &argument.recipe {
+                        shapes.push(structural.shape.clone());
+                    }
+                }
+            }
+        }
+        shapes.sort_by_key(|shape| format!("{shape:?}"));
+        assert_eq!(
+            shapes,
+            [
+                crate::specialization::DynamicStructuralShape::DebugProduct {
+                    names: vec![None, None]
+                },
+                crate::specialization::DynamicStructuralShape::DebugSum { alternatives: 2 },
+            ]
+        );
+        let slots = lowered
+            .program
+            .artifacts
+            .iter()
+            .filter(|(_, artifact)| {
+                matches!(artifact.plan, Some(LoweredArtifactPlan::DynamicStructural(_)))
+            })
+            .count();
+        assert_eq!(slots, 2, "one shared slot per shape");
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .unwrap();
+        assert!(text.contains("dictionary.structural"), "{text}");
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "structural-dictionaries",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+    }
+
+    #[test]
+    fn dictionary_selection_at_unknown_types_is_unique_or_rejected() {
+        let module = checked_program(concat!(
+            "trait Pick T { pick: T -> I32 }\n",
+            "impl Pick I32 { pick = value => 1 }\n",
+            "impl Pick Bool { pick = value => 2 }\n",
+            "type Holder T = wrap T\n",
+            "impl<T where Pick T> Pick (Holder T) { pick = Holder value => Pick.pick value }\n",
+            "let answer = Pick.pick 1\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let pick = program
+            .traits
+            .iter()
+            .find_map(|(_, id, t)| (t.name == "Pick").then_some(id))
+            .unwrap();
+        let unknown = CheckedType::Parameter {
+            id: TypeParameterId(900_000),
+            name: "T".to_owned(),
+            sized: true,
+            parameter_product_capable: false,
+        };
+        let origin = Origin::compiler();
+        let select = |environment: &[CheckedTraitBound], arguments: Vec<CheckedType>| {
+            trait_dictionaries::select_dictionary(
+                &program,
+                environment,
+                &CheckedTraitBound {
+                    trait_id: pick,
+                    arguments,
+                },
+                &origin,
+            )
+        };
+        // Two concrete implementations could both apply to an unknown type.
+        let error = select(&[], vec![unknown.clone()]).unwrap_err();
+        assert!(error.message.contains("ambiguous"), "{error:?}");
+        // A bound in scope wins whatever else could match.
+        let bound = CheckedTraitBound {
+            trait_id: pick,
+            arguments: vec![unknown.clone()],
+        };
+        assert!(matches!(
+            select(std::slice::from_ref(&bound), vec![unknown.clone()]),
+            Ok(trait_dictionaries::DictionarySelection::Environment(_))
+        ));
+        // A generic implementation over the unknown type is the one candidate,
+        // and its `where` clause must be provable from the environment.
+        let holder = program
+            .types
+            .iter()
+            .find_map(|(_, _, t)| (t.name == "Holder").then_some(t.semantic_id))
+            .unwrap();
+        let boxed = CheckedType::Wrapper {
+            id: holder,
+            name: "Holder".to_owned(),
+            arguments: vec![unknown.clone()],
+            representation: Box::new(unknown.clone()),
+            introduction: crate::WrapperIntroduction::Explicit,
+        };
+        assert!(select(&[], vec![boxed.clone()]).is_err());
+        assert!(matches!(
+            select(std::slice::from_ref(&bound), vec![boxed]),
+            Ok(trait_dictionaries::DictionarySelection::Build(_))
+        ));
+    }
+
+    /// Dictionary-related artifacts and dynamic instances a program builds.
+    fn dictionary_census(source: &str) -> (usize, usize, usize) {
+        let module = checked_program(source);
+        let lowered = Lowerer::new().lower(&module).expect("source should lower");
+        let dynamic = lowered
+            .program()
+            .instances()
+            .filter(|(id, _)| {
+                lowered
+                    .program()
+                    .instance_runtime_parameters(*id)
+                    .is_some_and(|runtime| !runtime.is_empty())
+            })
+            .count();
+        let (mut dictionaries, mut entries) = (0, 0);
+        for (_, artifact) in lowered.program().artifacts() {
+            match &artifact.plan {
+                Some(LoweredArtifactPlan::TraitDictionary(_))
+                | Some(LoweredArtifactPlan::DynamicStructural(_)) => dictionaries += 1,
+                Some(LoweredArtifactPlan::DescriptorBoundEntry(_)) => entries += 1,
+                _ => {}
+            }
+        }
+        (dynamic, dictionaries, entries)
+    }
+
+    #[test]
+    fn bounded_functions_build_dictionaries_only_where_needed() {
+        const SHOW: &str = concat!(
+            "use std.io.(IO, println)\n",
+            "use std.fmt.Display\n",
+            "def show: <T where Display T> move T ->{IO} () = move value => println \"${value}\"\n",
+        );
+        // A bounded `def` that is only called concretely is monomorphized: no
+        // dynamic code, dictionary, or entry.
+        assert_eq!(
+            dictionary_census(&format!("{SHOW}def run: () ->{{IO}} () = () => show 42\nrun ()\n")),
+            (0, 0, 0)
+        );
+        // A polymorphic value built only in an unreachable function yields
+        // nothing either.
+        assert_eq!(
+            dictionary_census(&format!(
+                concat!(
+                    "{}",
+                    "def unused: <A where Display A> move A ->{{IO}} () = move a => {{\n",
+                    "    let f: <U where Display U> move U ->{{IO}} () = show\n",
+                    "    f a\n",
+                    "}}\n",
+                    "def run: () ->{{IO}} () = () => show 42\n",
+                    "run ()\n",
+                ),
+                SHOW
+            )),
+            (0, 0, 0)
+        );
+        // Using the value builds its dynamic instance, a static dictionary
+        // for the instantiation, and no more.
+        let (dynamic, dictionaries, _) = dictionary_census(&format!(
+            "{SHOW}let stored: <T where Display T> move T ->{{IO}} () = show\nstored 42\n"
+        ));
+        assert!(dynamic > 0, "the stored value keeps its dynamic instance");
+        assert_eq!(dictionaries, 1, "one static dictionary for `Display I32`");
+    }
+
+    #[test]
+    fn polymorphic_lambdas_enforce_declared_effect_rows() {
+        for row in ["", "{state.read}"] {
+            let source = format!(
+                "def make: () -> (<T> move T ->{row} (I32, T)) = () => {{ let mut count: I32 = 41; move value => {{ count = count + 1; (count, value) }} }}\nlet stored = make ()\n"
+            );
+            let diagnostics = checked_program_diagnostics(&source).unwrap_err();
+            assert!(
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic
+                        .message
+                        .contains("function body requires effects {state}")
+                        && diagnostic.message.contains("declared effect set")
+                        && diagnostic.span != Span::Compiler
+                }),
+                "{diagnostics:?}"
+            );
+        }
+    }
+
+    /// The artifact families and dynamic instances a lowered program
+    /// contains, for the reachability assertions.
+    fn polymorphic_census(source: &str) -> (usize, usize, usize) {
+        let module = checked_program(source);
+        let lowered = Lowerer::new().lower(&module).expect("source should lower");
+        let dynamic_instances = lowered
+            .program()
+            .instances()
+            .filter(|(id, _)| {
+                lowered
+                    .program()
+                    .instance_runtime_parameters(*id)
+                    .is_some_and(|runtime| !runtime.is_empty())
+            })
+            .count();
+        let artifacts = lowered.program().artifacts();
+        let mut descriptors = 0;
+        let mut adapters = 0;
+        for (_, artifact) in artifacts {
+            match &artifact.plan {
+                Some(LoweredArtifactPlan::TypeDescriptor(_)) => descriptors += 1,
+                Some(LoweredArtifactPlan::InstantiationAdapter(_)) => adapters += 1,
+                _ => {}
+            }
+        }
+        (dynamic_instances, descriptors, adapters)
+    }
+
+    #[test]
+    fn unused_polymorphism_builds_no_dynamic_code() {
+        const IDENTITY: &str = "def identity: <T> move T -> T = move value => value\n";
+        // A generic `def` that is only called concretely is monomorphized.
+        assert_eq!(
+            polymorphic_census(&format!("{IDENTITY}let answer = identity 42\n")),
+            (0, 0, 0)
+        );
+        // A polymorphic value built only in an unreachable generic function
+        // yields no dynamic instance, descriptor, or adapter.
+        assert_eq!(
+            polymorphic_census(&format!(
+                concat!(
+                    "{}",
+                    "def unused: <A> move A -> A = move a => {{\n",
+                    "    let f: <U> move U -> U = identity\n",
+                    "    let c: move I32 -> I32 = f\n",
+                    "    f a\n",
+                    "}}\n",
+                    "let answer = identity 42\n",
+                ),
+                IDENTITY
+            )),
+            (0, 0, 0)
+        );
+        // Instantiating a generic `def` at a concrete function type
+        // monomorphizes it and builds no adapter.
+        assert_eq!(
+            polymorphic_census(&format!(
+                "{IDENTITY}let concrete: move I32 -> I32 = identity\nlet answer = concrete 42\n"
+            )),
+            (0, 0, 0)
+        );
+        // An alpha-renaming reuses the closure: the value needs its dynamic
+        // instance, but no adapter.
+        let (dynamic, _, adapters) = polymorphic_census(&format!(
+            "{IDENTITY}let stored = identity\nlet renamed: <V> move V -> V = stored\nlet answer = renamed 42\n"
+        ));
+        assert!(dynamic > 0, "the stored value keeps its dynamic instance");
+        assert_eq!(adapters, 0);
+        // A reordering is not an alpha-renaming and does build an adapter.
+        let (_, _, adapters) = polymorphic_census(concat!(
+            "def first: <A, B> (move A, move B) -> A = (move a, move b) => a\n",
+            "let swapped: <Y, X> (move X, move Y) -> X = first\n",
+            "let answer: I32 = swapped (1, \"x\")\n",
+        ));
+        assert_eq!(adapters, 1);
+    }
+
+    #[test]
+    fn static_dictionaries_close_emit_and_run_default_slots_with_associated_prerequisites() {
+        use artifact_closure::{ClosureRequest, ProductionHooks};
+        let module = checked_program(concat!(
+            "trait TestDictionary T where Eq T {\n",
+            "  type Item where Eq Item\n",
+            "  evaluate: (T, Item) -> I32\n",
+            "  next: (T, Item) -> I32 = pair => evaluate pair + 1\n",
+            "}\n",
+            "impl TestDictionary I32 { type Item = I32; evaluate = (a, b) => a + b }\n",
+            "let answer = TestDictionary.evaluate (20, 21)\n",
+        ));
+        let mut lowered = Lowerer::new().lower(&module).unwrap();
+        assert!(
+            !lowered
+                .program
+                .artifacts
+                .iter()
+                .any(|(_, artifact)| matches!(
+                    artifact.plan,
+                    Some(LoweredArtifactPlan::TraitDictionary(_))
+                )),
+            "concrete calls build no dictionaries"
+        );
+        let trait_id = lowered_trait(&lowered.program, "TestDictionary").semantic_id;
+        let owner = lowered.program.initializers.iter().next().unwrap().0;
+        let bound = CheckedTraitBound {
+            trait_id,
+            arguments: vec![CheckedType::I32, CheckedType::I32],
+        };
+        let origin = Origin::compiler();
+        let ClosureRequest::Artifact { key, plan, .. } =
+            trait_dictionaries::static_request(&lowered.program, &bound, &origin).unwrap()
+        else {
+            unreachable!()
+        };
+        let ordinal = lowered.program.specializations.reserve_artifact(key);
+        lowered
+            .program
+            .artifacts
+            .push(worklist::LoweredArtifactRequest {
+                ordinal,
+                name: String::new(),
+                origin,
+                request: worklist::LoweredArtifactRequestRoot::Initializer { initializer: owner },
+                plan: Some(plan),
+                artifacts: Vec::new(),
+                instances: Vec::new(),
+                expanded: false,
+            });
+        let diagnostics = lowered.program.close_artifact_catalog(&ProductionHooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(lowered.program.validate_instance_bodies().is_empty());
+        assert!(lowered.program.validate_specialization_graph().is_empty());
+        let diagnostics = lowered.program.validate_artifact_closure(&ProductionHooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(lowered.program.record_runtime_requirements().is_empty());
+        let dictionary = lowered
+            .program
+            .artifacts
+            .iter()
+            .find_map(|(_, artifact)| match &artifact.plan {
+                Some(LoweredArtifactPlan::TraitDictionary(plan)) if plan.trait_id == trait_id => {
+                    Some((artifact.name.clone(), plan.clone()))
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            dictionary.1.prerequisites[0], dictionary.1.prerequisites[1],
+            "equal prerequisite obligations share a dictionary"
+        );
+        assert_eq!(dictionary.1.associated.len(), 1);
+        assert_eq!(dictionary.1.slots.len(), 2);
+        let diagnostics = lowered.program.validate_closed_catalog();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let dictionary_id = lowered
+            .program
+            .artifacts
+            .iter()
+            .find_map(|(id, artifact)| (artifact.name == dictionary.0).then_some(id))
+            .unwrap();
+        if let Some(LoweredArtifactPlan::TraitDictionary(plan)) = &mut lowered
+            .program
+            .artifacts
+            .get_mut(dictionary_id)
+            .unwrap()
+            .plan
+        {
+            plan.slots.swap(0, 1);
+        }
+        assert!(lowered.program.validate_closed_catalog().iter().any(
+            |diagnostic| diagnostic.message == "dictionary slot order disagrees with its trait"
+        ));
+        if let Some(LoweredArtifactPlan::TraitDictionary(plan)) = &mut lowered
+            .program
+            .artifacts
+            .get_mut(dictionary_id)
+            .unwrap()
+            .plan
+        {
+            plan.slots.swap(0, 1);
+        }
+        let context = inkwell::context::Context::create();
+        let emitted = crate::codegen::lowered_emissions(&context, &lowered).unwrap();
+        census::assert_catalog_census("static trait dictionaries", &lowered, &emitted);
+        census::assert_entry_block_allocas("static trait dictionaries", &emitted);
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .unwrap();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "static-dictionary",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let pointer = context.ptr_type(inkwell::AddressSpace::default());
+        let getter =
+            llvm.add_function("test_dictionary_address", pointer.fn_type(&[], false), None);
+        let builder = context.create_builder();
+        builder.position_at_end(context.append_basic_block(getter, "entry"));
+        builder
+            .build_return(Some(
+                &llvm.get_global(&dictionary.0).unwrap().as_pointer_value(),
+            ))
+            .unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Address = unsafe extern "C" fn() -> *const usize;
+        type Slot = unsafe extern "C" fn(*const usize, *mut i32, *const i32, *const i32);
+        let address = unsafe {
+            engine
+                .get_function::<Address>("test_dictionary_address")
+                .unwrap()
+                .call()
+        };
+        unsafe {
+            let fields = std::slice::from_raw_parts(address, 9);
+            assert_ne!(fields[2], 0);
+            assert_eq!(fields[2], fields[3]);
+            assert_ne!(fields[4], 0, "associated descriptor is present");
+            for (index, expected) in [(0, 41), (1, 42)] {
+                let entry: Slot = std::mem::transmute(fields[index]);
+                let mut result = 0;
+                entry(address, &mut result, &20, &21);
+                assert_eq!(result, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn static_dictionary_slot_calls_a_concrete_method_from_the_dictionary_tail() {
+        use crate::specialization::{ReabstractionDirection, StaticDictionarySlot};
+        let module = checked_program(concat!(
+            "def apply: <T where Copy T> (T -> T, T) -> T = (f, x) => f x\n",
+            "def increment: I32 -> I32 = x => x + 1\n",
+            "let stored = apply\n",
+            "let answer = stored (increment, 40)\n",
+        ));
+        let mut lowered = Lowerer::new().lower(&module).unwrap();
+        let method_name = lowered
+            .program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (lowered
+                    .program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "increment")
+                    .then(|| instance.name.clone())
+            })
+            .expect("concrete method instance");
+        let catalog = &lowered.program.specializations;
+        let slot_name = lowered
+            .program
+            .artifacts
+            .iter_mut()
+            .find_map(|(_, artifact)| {
+                let Some(LoweredArtifactPlan::ReabstractionThunk(plan)) = &mut artifact.plan else {
+                    return None;
+                };
+                if plan.direction != ReabstractionDirection::ConcreteToDynamic {
+                    return None;
+                }
+                plan.dictionary_slot = Some(StaticDictionarySlot {
+                    implementation: LoweredTraitImplementationId::from_index(0),
+                    method: TraitMethodId(0),
+                    closure_offset: 3,
+                });
+                let mut key = catalog.artifact(artifact.ordinal).unwrap().clone();
+                assert!(
+                    !LoweredArtifactPlan::ReabstractionThunk(plan.clone())
+                        .matches_key(&key, &artifact.origin)
+                );
+                let crate::specialization::ArtifactRequestKey::ReabstractionThunk(key_plan) =
+                    &mut key
+                else {
+                    panic!("slot has a reabstraction key");
+                };
+                key_plan.dictionary_slot = plan.dictionary_slot.clone();
+                assert!(
+                    LoweredArtifactPlan::ReabstractionThunk(plan.clone())
+                        .matches_key(&key, &artifact.origin)
+                );
+                Some(artifact.name.clone())
+            })
+            .expect("concrete-to-dynamic slot entry");
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .unwrap();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "static-dictionary-slot",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        let code = engine.get_function_address(&method_name).unwrap();
+        // Three prefix slots precede the concrete closure pair. A slot receives
+        // the dictionary start, never a pointer to that pair.
+        let dictionary = [0usize, 0, 0, code, 0];
+        type Slot = unsafe extern "C" fn(*const usize, *mut i32, *const i32);
+        let slot = unsafe { engine.get_function::<Slot>(&slot_name).unwrap() };
+        let mut result = 0;
+        unsafe { slot.call(dictionary.as_ptr(), &mut result, &41) };
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn polymorphic_support_checks_reject_at_the_construction_site() {
+        let module = checked_program(concat!(
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
+            "def outer: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => repeat value n\n",
+            "let stored = outer\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let origin = program
+            .callable_values
+            .iter()
+            .find_map(|(_, value)| value.scheme.as_ref().map(|_| value.origin.clone()))
+            .unwrap();
+        let diagnostics = program.build_specialization_worklist();
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(
+            diagnostics[0].message,
+            "array lengths cannot depend on a polymorphic value's type parameters yet"
+        );
+        assert_eq!(diagnostics[0].span, origin.span);
+        let direct = checked_program(concat!(
+            "use std.clone.Clone\n",
+            "def inner: <T where Clone T> move T -> T = move value => value\n",
+            "def outer: <T where Clone T> move T -> T = move value => inner value\n",
+            "let result = outer 42\n",
+            "let stored = outer\n",
+        ));
+        assert!(Lowerer::new().lower(&direct).is_ok());
+    }
+
+    #[test]
     fn validator_rejects_misclassified_awaits() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
@@ -22724,4 +25567,98 @@ mod tests {
         assert!(!first_snapshot.is_empty());
         assert_eq!(first_snapshot, normalized_program_snapshot(&second));
     }
+    #[test]
+    fn generic_trait_dictionary_slot_keeps_own_hidden_arguments_in_order() {
+        let module = checked_program(concat!(
+            "trait Visit T { visit: <A where ToString A> (T, A) -> String }\n",
+            "impl Visit I32 { visit = (_, value) => ToString.to_string value }\n",
+            "def relay: <T, A where Visit T, ToString A> (T, A) -> String = (item, value) => Visit.visit (item, value)\n",
+            "let stored = relay\nlet result = stored (1, 42)\n",
+        ));
+        let lowered = Lowerer::new().lower(&module).unwrap();
+        let program = &lowered.program;
+        let metadata = lowered_trait(program, "Visit");
+        assert_eq!(metadata.dictionary_layout.slots, 0..1);
+        let method = metadata.methods[0];
+        let member = program.trait_methods.get(method).unwrap();
+        assert_eq!(member.scheme.parameters.len(), 2);
+        assert_eq!(member.own_parameters.len(), 1);
+        let entry = program
+            .artifacts
+            .iter()
+            .find_map(|(_, artifact)| match &artifact.plan {
+                Some(LoweredArtifactPlan::TraitMemberEntry(plan))
+                    if plan.method == method && plan.callee.is_some() =>
+                {
+                    Some(plan)
+                }
+                _ => None,
+            })
+            .expect("reachable generic slot entry");
+        assert_eq!(entry.descriptors, 1);
+        assert_eq!(entry.dictionaries, 1);
+        assert_eq!(entry.slot, 0);
+        let callee = entry.callee.as_ref().unwrap();
+        assert_eq!(callee.key.runtime().len(), 1);
+    }
+
+    #[test]
+    fn descriptor_bound_entries_preserve_closure_prefixes_and_compact_slot_tails() {
+        let nested = crate::codegen::corpus::codegen_corpus()
+            .iter()
+            .find(|program| program.name == "trait_dictionary_nested_lambdas")
+            .unwrap();
+        let crate::codegen::corpus::CorpusSource::Inline(source) = nested.source else {
+            panic!("nested-lambda fixture is inline");
+        };
+        for (source, tail) in [
+            (source, false),
+            (
+                concat!(
+                    "trait Visit T { visit: <A> (T, move A) -> A }\n",
+                    "type Box T = wrap T\n",
+                    "impl <T where ToString T> Visit (Box T) { visit = (_, move value) => value }\n",
+                    "def relay: <T, A where ToString T> (Box T, move A) -> A = (item, move value) => Visit.visit (item, value)\n",
+                    "let stored = relay\nlet result = stored (Box 1, 42)\n",
+                ),
+                true,
+            ),
+        ] {
+            let module = checked_program(source);
+            let lowered = Lowerer::new().lower(&module).unwrap();
+            let entries = lowered
+                .program
+                .artifacts
+                .iter()
+                .filter_map(|(_, artifact)| match &artifact.plan {
+                    Some(LoweredArtifactPlan::DescriptorBoundEntry(plan))
+                        if (plan.environment_offset > 0) == tail
+                            && plan.bound < plan.runtime.len()
+                            && plan.bound_dictionaries > 0 =>
+                    {
+                        Some(plan)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                !entries.is_empty(),
+                "fixture must exercise a partially bound entry (tail={tail})"
+            );
+            for entry in entries {
+                assert_eq!(
+                    entry.dictionary_prefix,
+                    if tail {
+                        entry.bound
+                    } else {
+                        entry.runtime.len()
+                    }
+                );
+            }
+        }
+    }
 }
+
+
+
+

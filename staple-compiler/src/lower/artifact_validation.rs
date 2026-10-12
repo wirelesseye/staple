@@ -14,6 +14,9 @@ impl LoweredProgram {
     pub(super) fn validate_closed_catalog(&self) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
         self.check_plan_types(&mut diagnostics);
+        self.check_dictionary_layouts(&mut diagnostics);
+        self.check_bound_entry_dictionary_partitions(&mut diagnostics);
+        self.check_closure_environment_dictionaries(&mut diagnostics);
         for (id, expected) in self.planned_initializer_names() {
             let initializer = self
                 .initializers
@@ -29,6 +32,210 @@ impl LoweredProgram {
         diagnostics
     }
 
+    fn check_bound_entry_dictionary_partitions(&self, diagnostics: &mut Vec<Diagnostic>) {
+        for (_, artifact) in self.artifacts.iter() {
+            let Some(crate::LoweredArtifactPlan::DescriptorBoundEntry(plan)) = &artifact.plan
+            else {
+                continue;
+            };
+            let prefix = if plan.environment_offset == 0 {
+                plan.runtime.len()
+            } else {
+                plan.bound
+            };
+            if plan.dictionary_prefix != prefix {
+                diagnostics.push(Diagnostic::new(
+                    artifact.origin.span.clone(),
+                    "bound entry dictionary offset disagrees with its environment layout",
+                ));
+            }
+            let partition = if plan.environment_offset == 0 {
+                super::trait_dictionaries::entry_dictionary_partition(
+                    self,
+                    plan.instance,
+                    plan.bound,
+                )
+            } else {
+                super::trait_dictionaries::slot_dictionary_partition(self, plan.instance)
+            };
+            if partition != Some((plan.dictionary_count, plan.bound_dictionaries)) {
+                diagnostics.push(Diagnostic::new(
+                    artifact.origin.span.clone(),
+                    "bound entry dictionary partition disagrees with its instance",
+                ));
+            }
+        }
+    }
+
+    fn check_closure_environment_dictionaries(&self, diagnostics: &mut Vec<Diagnostic>) {
+        for (_, artifact) in self.artifacts.iter() {
+            let Some(crate::LoweredArtifactPlan::GcFinalizer(
+                crate::GcFinalizerPlan::DynamicClosureEnvironment {
+                    closure,
+                    dictionaries,
+                    ..
+                },
+            )) = &artifact.plan
+            else {
+                continue;
+            };
+            if super::trait_dictionaries::stored_dictionary_count(self, *closure)
+                != Some(*dictionaries)
+            {
+                diagnostics.push(Diagnostic::new(
+                    artifact.origin.span.clone(),
+                    "closure environment dictionary count disagrees with its instance",
+                ));
+            }
+        }
+    }
+
+    fn check_dictionary_layouts(&self, diagnostics: &mut Vec<Diagnostic>) {
+        for (_, artifact) in self.artifacts.iter() {
+            let Some(crate::LoweredArtifactPlan::TraitDictionary(plan)) = &artifact.plan else {
+                continue;
+            };
+            let Some(metadata) = self.traits.get(plan.trait_id) else {
+                diagnostics.push(Diagnostic::new(
+                    artifact.origin.span.clone(),
+                    "dictionary trait is absent",
+                ));
+                continue;
+            };
+            let shape_valid = plan.expanded
+                && plan.layout == metadata.dictionary_layout
+                && plan.arguments.len() == metadata.parameters.len()
+                && plan.slots.len() == metadata.methods.len()
+                && plan.methods.len() == metadata.methods.len()
+                && plan.prerequisites.len() == metadata.prerequisites.len()
+                && plan.associated.len() == metadata.associated_types.len();
+            if !shape_valid {
+                diagnostics.push(Diagnostic::new(
+                    artifact.origin.span.clone(),
+                    "dictionary prefix disagrees with its trait",
+                ));
+                continue;
+            }
+            let bound = crate::CheckedTraitBound {
+                trait_id: plan.trait_id,
+                arguments: plan.arguments.clone(),
+            };
+            if !self
+                .concrete_dictionary_implementation(&bound, &artifact.origin)
+                .is_ok_and(|implementation| implementation == plan.implementation)
+            {
+                diagnostics.push(Diagnostic::new(
+                    artifact.origin.span.clone(),
+                    "dictionary implementation disagrees with static selection",
+                ));
+            }
+            for (index, slot) in plan.slots.iter().enumerate() {
+                let expected = crate::specialization::StaticDictionarySlot {
+                    implementation: plan.implementation,
+                    method: metadata.methods[index],
+                    closure_offset: plan.layout.environment + 2 * index,
+                };
+                let valid = match &slot.key {
+                    crate::specialization::ArtifactRequestKey::ReabstractionThunk(key) => {
+                        key.dictionary_slot.as_ref() == Some(&expected)
+                            && key.direction
+                                == crate::specialization::ReabstractionDirection::ConcreteToDynamic
+                    }
+                    crate::specialization::ArtifactRequestKey::TraitMemberEntry(
+                        crate::specialization::TraitMemberEntryKey::Slot(key),
+                    ) => {
+                        key == &plan.methods[index].key
+                            && !super::trait_dictionaries::method_runtime_scope(
+                                self,
+                                metadata.methods[index],
+                            )
+                            .is_empty()
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    diagnostics.push(Diagnostic::new(
+                        artifact.origin.span.clone(),
+                        "dictionary slot order disagrees with its trait",
+                    ));
+                }
+                let method = plan.methods[index]
+                    .instance
+                    .and_then(|id| self.instances.get(id));
+                if !matches!(method.and_then(|method| method.evidence.as_ref()),
+                    Some(crate::TraitEvidence::ExplicitImplementation { trait_id, implementation, method, .. })
+                        if *trait_id == plan.trait_id && *implementation == plan.implementation
+                            && *method == metadata.methods[index])
+                {
+                    diagnostics.push(Diagnostic::new(
+                        artifact.origin.span.clone(),
+                        "dictionary method order disagrees with its trait",
+                    ));
+                }
+            }
+            let substitution = metadata
+                .parameters
+                .iter()
+                .zip(&plan.arguments)
+                .filter_map(|(parameter, argument)| {
+                    let crate::CheckedType::Parameter { id, .. } = parameter else {
+                        return None;
+                    };
+                    Some((*id, argument.clone()))
+                })
+                .collect();
+            for (pointer, prerequisite) in plan.prerequisites.iter().zip(&metadata.prerequisites) {
+                let ids = &self.semantic_ids;
+                let marker = [
+                    ids.copy_trait,
+                    ids.sized_trait,
+                    ids.drop_trait,
+                    ids.natural_trait,
+                ]
+                .contains(&Some(prerequisite.trait_id));
+                let arguments = prerequisite
+                    .arguments
+                    .iter()
+                    .map(|argument| {
+                        let argument = crate::substitute_type(argument.clone(), &substitution);
+                        CanonicalType::concrete(&argument, &artifact.origin)
+                    })
+                    .collect::<Result<Vec<_>, _>>();
+                let valid = match pointer {
+                    None => marker,
+                    Some(pointer) => {
+                        !marker
+                            && matches!(&pointer.key,
+                        crate::specialization::ArtifactRequestKey::TraitDictionary(key)
+                            if key.trait_id == prerequisite.trait_id
+                                && arguments.as_ref().is_ok_and(|arguments| *arguments == key.arguments))
+                    }
+                };
+                if !valid {
+                    diagnostics.push(Diagnostic::new(
+                        artifact.origin.span.clone(),
+                        "dictionary prerequisite order disagrees with its trait",
+                    ));
+                }
+            }
+            for (associated, argument) in plan
+                .associated
+                .iter()
+                .zip(&plan.arguments[plan.arguments.len() - plan.associated.len()..])
+            {
+                let expected = CanonicalType::concrete(argument, &artifact.origin);
+                if !matches!(&associated.key, crate::specialization::ArtifactRequestKey::TypeDescriptor(key)
+                    if expected.as_ref().is_ok_and(|expected| expected == key))
+                {
+                    diagnostics.push(Diagnostic::new(
+                        artifact.origin.span.clone(),
+                        "dictionary associated descriptor order disagrees with its trait",
+                    ));
+                }
+            }
+        }
+    }
+
     /// Every type in every plan canonicalizes concretely: no declared type
     /// parameter, effect variable, `Inferred`, or `Error` placeholder. The
     /// canonical converter is the one keys use, so it accepts the one
@@ -40,22 +247,30 @@ impl LoweredProgram {
                 continue; // `validate_specializations` reports a missing plan.
             };
             let origin = &artifact.origin;
+            let symbolic_constructor =
+                matches!(plan, crate::LoweredArtifactPlan::ConstructorAdapter(_));
             let mut problems = Vec::new();
             plan.visit_types(&mut |value| {
                 let result = match value {
-                    PlanType::Value(value_type) => CanonicalType::concrete(value_type, origin)
-                        .map(|_| ())
-                        .map_err(|diagnostic| (value_type.to_string(), diagnostic)),
-                    PlanType::Function(function_type) => {
+                    PlanType::Value(value_type) => (if symbolic_constructor {
+                        CanonicalType::dynamic(value_type, origin)
+                    } else {
+                        CanonicalType::concrete(value_type, origin)
+                    })
+                    .map(|_| ())
+                    .map_err(|diagnostic| (value_type.to_string(), diagnostic)),
+                    PlanType::Function(function_type) => (if symbolic_constructor {
+                        CanonicalFunctionType::dynamic(function_type, origin)
+                    } else {
                         CanonicalFunctionType::concrete(function_type, origin)
-                            .map(|_| ())
-                            .map_err(|diagnostic| {
-                                (
-                                    crate::CheckedType::Function(function_type.clone()).to_string(),
-                                    diagnostic,
-                                )
-                            })
-                    }
+                    })
+                    .map(|_| ())
+                    .map_err(|diagnostic| {
+                        (
+                            crate::CheckedType::Function(function_type.clone()).to_string(),
+                            diagnostic,
+                        )
+                    }),
                     PlanType::Resource(resource) => {
                         CanonicalType::concrete(&resource.value_type, origin)
                             .map(|_| ())

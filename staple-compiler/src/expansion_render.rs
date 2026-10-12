@@ -181,27 +181,6 @@ fn render_binding(program: &Program, binding: &staple_syntax::Binding) -> String
         }
     }
     out.push_str(&binding.name);
-    if !binding.type_parameters.is_empty() {
-        out.push('<');
-        out.push_str(
-            &binding
-                .type_parameters
-                .iter()
-                .map(render_type_parameter)
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        let constraints = render_constraints(
-            &binding.type_parameters,
-            &binding.trait_bounds,
-            &binding.subtype_bounds,
-        );
-        if !constraints.is_empty() {
-            out.push_str(" where ");
-            out.push_str(&constraints);
-        }
-        out.push('>');
-    }
     if let Some(annotation) = &binding.annotation {
         out.push_str(": ");
         out.push_str(&annotation.to_string());

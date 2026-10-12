@@ -47,6 +47,7 @@ impl<'program, 'context> Backend<'program, 'context> {
 
     pub(crate) fn install_gc_runtime(&self) -> CodeGenerationResult<()> {
         let pointer_bytes = self.target_data.get_pointer_byte_size(None) as u64;
+        let header_bytes = gc_header_bytes(self.context, &self.target_data);
         let pointer_shift = pointer_bytes.trailing_zeros();
         let bits = pointer_bytes * 8;
         let size = format!("i{bits}");
@@ -61,15 +62,15 @@ impl<'program, 'context> Backend<'program, 'context> {
             (((1_u64 << bits) - 1) / 2).to_string()
         };
         let maximum_allocation = if bits == 64 {
-            (u64::MAX - pointer_bytes * 5).to_string()
+            (u64::MAX - header_bytes).to_string()
         } else {
-            (((1_u64 << bits) - 1) - pointer_bytes * 5).to_string()
+            (((1_u64 << bits) - 1) - header_bytes).to_string()
         };
         let runtime = include_str!("../gc.ll")
             .replace("{{SIZE}}", &size)
             .replace("{{PTR_BYTES}}", &pointer_bytes.to_string())
             .replace("{{PTR_SHIFT}}", &pointer_shift.to_string())
-            .replace("{{HEADER_BYTES}}", &(pointer_bytes * 5).to_string())
+            .replace("{{HEADER_BYTES}}", &header_bytes.to_string())
             .replace("{{ROOT_BYTES}}", &(pointer_bytes * 3).to_string())
             .replace("{{REGISTER_BYTES}}", &(pointer_bytes * 64).to_string())
             .replace("{{MAX_HALF}}", &maximum_half)
@@ -459,5 +460,99 @@ impl<'program, 'context> Backend<'program, 'context> {
             .build_return(Some(&self.context.bool_type().const_zero()))
             .map_err(compiler_diagnostic)?;
         Ok(function)
+    }
+}
+
+/// Keep the payload aligned for every scalar from which supported layouts compose.
+fn gc_header_bytes(
+    context: &inkwell::context::Context,
+    target: &inkwell::targets::TargetData,
+) -> u64 {
+    let pointer_bytes = target.get_pointer_byte_size(None) as u64;
+    let alignment = pointer_bytes
+        .max(target.get_abi_alignment(&context.i64_type()) as u64)
+        .max(target.get_abi_alignment(&context.f64_type()) as u64);
+    (pointer_bytes * 5).div_ceil(alignment) * alignment
+}
+
+#[cfg(test)]
+mod payload_alignment_tests {
+    #[test]
+    fn gc_header_preserves_scalar_alignment_on_32_and_64_bit_targets() {
+        let context = inkwell::context::Context::create();
+        for (layout, expected) in [
+            ("e-p:32:32-i64:64-f64:64", 24),
+            ("e-p:64:64-i64:64-f64:64", 40),
+        ] {
+            let target = inkwell::targets::TargetData::create(layout);
+            assert_eq!(super::gc_header_bytes(&context, &target), expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn gc_scanner_visits_only_complete_aligned_words() {
+        use inkwell::{OptimizationLevel, context::Context, memory_buffer::MemoryBuffer};
+        static SEEN: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+        unsafe extern "C" fn record(value: usize) {
+            SEEN.lock().unwrap().push(value);
+        }
+        // Execute the scanner from the shipped runtime, replacing only its marking callback.
+        let runtime = include_str!("../gc.ll");
+        let start = runtime
+            .find("define internal void @__staple_gc_scan_region(")
+            .unwrap();
+        let length = runtime[start..].find("\n}\n").unwrap() + 3;
+        let word = std::mem::size_of::<usize>();
+        let integer = format!("i{}", word * 8);
+        let scanner = runtime[start..start + length]
+            .replace(
+                "define internal void @__staple_gc_scan_region",
+                "define void @scan",
+            )
+            .replace("@__staple_gc_mark_candidate", "@record")
+            .replace("{{SIZE}}", &integer)
+            .replace("{{PTR_BYTES}}", &word.to_string());
+        let context = Context::create();
+        let ir = format!("declare void @record({integer})\n{scanner}");
+        let module = context
+            .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+                ir.as_bytes(),
+                "gc-scanner",
+            ))
+            .unwrap();
+        module.verify().unwrap();
+        let callback = module.get_function("record").unwrap();
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        engine.add_global_mapping(&callback, record as *const () as usize);
+        type Scan = unsafe extern "C" fn(*const u8, usize);
+        let scan = unsafe { engine.get_function::<Scan>("scan") }.unwrap();
+        let words = [11usize, 22, 33, 44];
+        for (offset, size, expected) in [
+            (0, 0, vec![]),
+            (0, 1, vec![]),
+            (0, word - 1, vec![]),
+            (0, word, vec![11]),
+            (0, 4 * word, vec![11, 22, 33, 44]),
+            (1, word - 2, vec![]),
+            (1, word - 1, vec![]),
+            (1, 2 * word - 1, vec![22]),
+            (1, 3 * word - 1, vec![22, 33]),
+            (word - 1, word + 1, vec![22]),
+        ] {
+            SEEN.lock().unwrap().clear();
+            unsafe {
+                scan.call(words.as_ptr().cast::<u8>().add(offset), size);
+            }
+            assert_eq!(
+                *SEEN.lock().unwrap(),
+                expected,
+                "offset={offset}, size={size}"
+            );
+        }
     }
 }

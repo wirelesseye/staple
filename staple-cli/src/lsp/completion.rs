@@ -628,9 +628,9 @@ impl Collector<'_> {
     }
 
     fn binding(&mut self, binding: &Binding, module_index: usize) {
-        if !binding.type_parameters.is_empty() {
+        if binding.is_generic() {
             let mut candidates = Vec::new();
-            for parameter in &binding.type_parameters {
+            for parameter in &binding.all_type_parameters() {
                 self.type_parameter_candidates(parameter, &mut candidates);
             }
             self.index.modules[module_index].scopes.push(Scope {
@@ -996,7 +996,10 @@ impl Collector<'_> {
                     Some(format!(
                         "{}: {}",
                         method.name,
-                        method.annotation.syntax().text().trim()
+                        self.typed
+                            .scheme_of_trait_member(id)
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| method.annotation.syntax().text().trim().to_owned())
                     )),
                 )
             }
@@ -1606,6 +1609,28 @@ mod tests {
                 "missing {expected} in {items:?}"
             );
         }
+    }
+
+    #[test]
+    fn generic_trait_member_completion_shows_the_full_scheme() {
+        let source = "trait Visit T { visit: <A> (T, move A) -> A }\n";
+        let path = std::env::temp_dir().join("staple-completion-generic-member.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let items = index(&module, &typed).named_qualifier_items("Visit", 0);
+        let member = items.iter().find(|item| item.label == "visit").unwrap();
+        let detail = member.detail.as_deref().unwrap();
+        assert!(detail.contains("<T, A where Visit T>"), "{detail}");
     }
 
     #[test]

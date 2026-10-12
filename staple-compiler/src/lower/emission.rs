@@ -78,6 +78,19 @@ impl<'a> EmissionView<'a> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn initializer_layout_value_types(
+        &self,
+    ) -> impl Iterator<Item = &'a crate::CheckedType> + 'a {
+        self.program
+            .expressions
+            .iter()
+            .filter(|(_, expression)| {
+                matches!(expression.key.owner, super::ExpressionOwner::Module(_))
+            })
+            .map(|(_, expression)| &expression.value_type)
+    }
+
     /// Every interned source-function instance in catalog order.
     pub(crate) fn instances(
         &self,
@@ -87,6 +100,86 @@ impl<'a> EmissionView<'a> {
 
     pub(crate) fn instance(&self, id: FunctionInstanceId) -> Option<&'a LoweredFunctionInstance> {
         self.program.instances.get(id)
+    }
+
+    /// Runtime descriptor parameters, in the key's canonical ABI order.
+    pub(crate) fn instance_runtime_parameters(
+        &self,
+        id: FunctionInstanceId,
+    ) -> Option<&'a std::collections::BTreeSet<crate::TypeParameterId>> {
+        let instance = self.program.instances.get(id)?;
+        Some(
+            self.program
+                .specializations
+                .instance(instance.ordinal)?
+                .runtime(),
+        )
+    }
+
+    /// Hidden dictionaries in lexical declaration order, after descriptors.
+    pub(crate) fn instance_dictionary_bounds(
+        &self,
+        id: FunctionInstanceId,
+    ) -> Option<&'a [crate::CheckedTraitBound]> {
+        Some(
+            &self
+                .program
+                .instances
+                .get(id)?
+                .body
+                .as_ref()?
+                .dictionary_bounds,
+        )
+    }
+
+    /// Hidden dictionaries a scheme's entry takes: its non-marker bounds.
+    pub(crate) fn scheme_dictionary_count(&self, scheme: &crate::CheckedScheme) -> usize {
+        super::trait_dictionaries::scheme_obligations(self.program, scheme, &Default::default())
+            .len()
+    }
+
+    /// The fixed dictionary prefix of one trait.
+    pub(crate) fn trait_dictionary_layout(
+        &self,
+        id: crate::TraitId,
+    ) -> Option<&'a super::TraitDictionaryLayout> {
+        Some(&self.program.traits.get(id)?.dictionary_layout)
+    }
+
+    /// Dictionaries a closure environment of this instance stores after its
+    /// descriptors.
+    pub(crate) fn instance_stored_dictionaries(&self, id: FunctionInstanceId) -> Option<usize> {
+        super::trait_dictionaries::stored_dictionary_count(self.program, id)
+    }
+
+    pub(crate) fn dictionary_value_arguments(
+        &self,
+        owner: EmissionOwner,
+        value: super::LoweredCallableValueId,
+    ) -> &'a [super::trait_dictionaries::DictionaryCallArgument] {
+        match owner {
+            EmissionOwner::Instance(instance) => self
+                .program
+                .instances
+                .get(instance)
+                .and_then(|record| record.body.as_ref())
+                .and_then(|body| body.dictionary_values.get(&value))
+                .map_or(&[], Vec::as_slice),
+            EmissionOwner::Initializer(_) => &[],
+        }
+    }
+
+    /// Whether the instance uses the dynamic ABI.
+    pub(crate) fn instance_is_dynamic(&self, id: FunctionInstanceId) -> bool {
+        self.program.instance_is_dynamic(id)
+    }
+
+    /// Runtime descriptor parameters in descriptor ABI order.
+    pub(crate) fn instance_runtime_order(
+        &self,
+        id: FunctionInstanceId,
+    ) -> Option<Vec<crate::TypeParameterId>> {
+        self.program.instance_runtime_order(id)
     }
 
     /// Every interned generated artifact in ordinal order.
@@ -331,6 +424,55 @@ impl<'a> EmissionView<'a> {
         &self.program.runtime_requirements
     }
 
+    pub(crate) fn dictionary_call_arguments(
+        &self,
+        owner: EmissionOwner,
+        call: super::LoweredCallId,
+    ) -> &'a [super::trait_dictionaries::DictionaryCallArgument] {
+        self.dictionary_site_arguments(owner, super::trait_dictionaries::DictionarySite::Call(call))
+    }
+
+    /// Dictionaries an instantiation adapter stores for a coerced expression.
+    pub(crate) fn dictionary_coercion_arguments(
+        &self,
+        owner: EmissionOwner,
+        expression: super::ExpressionId,
+    ) -> &'a [super::trait_dictionaries::DictionaryCallArgument] {
+        self.dictionary_site_arguments(
+            owner,
+            super::trait_dictionaries::DictionarySite::Coercion(expression),
+        )
+    }
+
+    fn dictionary_site_arguments(
+        &self,
+        owner: EmissionOwner,
+        site: super::trait_dictionaries::DictionarySite,
+    ) -> &'a [super::trait_dictionaries::DictionaryCallArgument] {
+        match owner {
+            EmissionOwner::Instance(instance) => self
+                .program
+                .instances
+                .get(instance)
+                .and_then(|record| record.body.as_ref())
+                .and_then(|body| body.dictionary_calls.get(&site))
+                .map_or(&[], Vec::as_slice),
+            EmissionOwner::Initializer(initializer) => self
+                .program
+                .initializer_dictionary_calls
+                .get(initializer.index())
+                .and_then(|calls| calls.get(&site))
+                .map_or(&[], Vec::as_slice),
+        }
+    }
+
+    pub(crate) fn artifact_ordinal(
+        &self,
+        key: &crate::specialization::ArtifactRequestKey,
+    ) -> Option<ArtifactOrdinal> {
+        self.program.specializations.artifact_ordinal(key)
+    }
+
     /// The planned emitted name of one interned source-function instance.
     pub(crate) fn planned_name(&self, instance: FunctionInstanceId) -> Option<&'a str> {
         self.program.planned_name(instance)
@@ -349,6 +491,24 @@ impl<'a> EmissionView<'a> {
         ordinal: ArtifactOrdinal,
     ) -> Option<(String, String)> {
         self.program.planned_coroutine_pair_names(ordinal)
+    }
+
+    /// Reabstraction plans at one owner's concrete-to-dynamic boundaries.
+    pub(crate) fn conversions(
+        &self,
+        owner: EmissionOwner,
+    ) -> Option<&'a std::collections::BTreeMap<(super::LoweredCallId, Option<usize>), super::LoweredReabstraction>> {
+        match owner {
+            EmissionOwner::Instance(id) => self
+                .program
+                .instances
+                .get(id)
+                .and_then(|record| record.body.as_ref())
+                .map(|body| &body.conversions),
+            EmissionOwner::Initializer(id) => {
+                self.program.initializer_conversions.get(id.index())
+            }
+        }
     }
 
     /// The concrete dispatch bindings of one instance body.
@@ -472,7 +632,7 @@ impl<'a> EmissionView<'a> {
             .map(|body| body.parameters.as_slice())
     }
 
-    /// The concrete signature of one instance body.
+    /// The specialized signature of one instance body.
     pub(crate) fn instance_signature(
         &self,
         instance: FunctionInstanceId,

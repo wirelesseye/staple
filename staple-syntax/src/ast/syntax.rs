@@ -12,6 +12,16 @@ pub struct SyntaxId(pub usize);
 
 impl SyntaxId {
     pub const COMPILER: Self = Self(usize::MAX);
+
+    /// Annotation wrappers use a separate namespace so introducing them does
+    /// not renumber the IDs of the nodes around them; every other node keeps
+    /// the ID it had before `Forall` existed. `kind` distinguishes a generic
+    /// header (1) from a forall wrapper (2).
+    pub fn annotation_node(base: usize, kind: usize) -> Self {
+        let shift = usize::BITS - 2;
+        assert!(base < (1usize << shift) && matches!(kind, 1 | 2));
+        Self(base | (kind << shift))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

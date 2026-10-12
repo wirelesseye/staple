@@ -8,14 +8,15 @@
 
 use staple_syntax::Diagnostic;
 
+use super::ArenaId;
 use super::cleanup_artifacts::{LoweredOwnerVisitor, walk_owner};
 use super::emission::OwnerArenas;
 use super::{
     ConstructorConstruction, DropGlueBody, IntrinsicFunction, LoweredArtifactPlan,
-    LoweredAwaitKind, LoweredBindingItem, LoweredCall, LoweredCallableTarget, LoweredCallableValue,
-    LoweredCallableValueId, LoweredClosureEnvironment, LoweredPattern, LoweredPatternKind,
-    LoweredProgram, LoweredStringTemplate, LoweredStringTemplatePart, Origin, RuntimeRelease,
-    StructuralBody, SymbolId, SymbolStorage,
+    LoweredAwaitKind, LoweredBindingItem, LoweredBindingSite, LoweredBoundTarget, LoweredCall,
+    LoweredCallableTarget, LoweredCallableValue, LoweredCallableValueId, LoweredClosureEnvironment,
+    LoweredPattern, LoweredPatternKind, LoweredProgram, LoweredStringTemplate,
+    LoweredStringTemplatePart, Origin, RuntimeRelease, StructuralBody, SymbolId, SymbolStorage,
 };
 
 /// One runtime surface a lowered program needs. The declaration order is the
@@ -356,7 +357,18 @@ fn record_plan_requirements(
                 requirements.record(RuntimeRequirement::GarbageCollector);
             }
         }
-        LoweredArtifactPlan::ExternAdapter(_) => {}
+        LoweredArtifactPlan::TraitMemberEntry(_)
+        | LoweredArtifactPlan::ExternAdapter(_)
+        | LoweredArtifactPlan::TypeDescriptor(_)
+        | LoweredArtifactPlan::TraitDictionary(_)
+        | LoweredArtifactPlan::DescriptorDrop(_)
+        | LoweredArtifactPlan::CompoundDescriptorDrop(_)
+        | LoweredArtifactPlan::DescriptorBoundEntry(_)
+        | LoweredArtifactPlan::DynamicStructural(_)
+        | LoweredArtifactPlan::InstantiationAdapter(_) => {}
+        LoweredArtifactPlan::ReabstractionThunk(_) | LoweredArtifactPlan::ValueConversion(_) => {
+            requirements.record(RuntimeRequirement::GarbageCollector)
+        }
     }
 }
 
@@ -481,13 +493,30 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
 
     fn callable_value_site(
         &mut self,
-        _id: LoweredCallableValueId,
+        id: LoweredCallableValueId,
         value: &LoweredCallableValue,
         _origin: &Origin,
     ) -> Result<(), Vec<Diagnostic>> {
         if let Some(closure) = &value.closure
             && closure.environment == LoweredClosureEnvironment::Fresh
             && !closure.captures.is_empty()
+        {
+            self.gc();
+        }
+        // A dynamic-shape closure allocates its descriptor environment in the
+        // collector.
+        let binding = match self.owner {
+            OwnerArenas::Instance(body) => {
+                body.bindings.get(&LoweredBindingSite::CallableValue(id))
+            }
+            OwnerArenas::Initializer(initializer) => self
+                .program
+                .initializer_bindings
+                .get(initializer.index())
+                .and_then(|bindings| bindings.get(&LoweredBindingSite::CallableValue(id))),
+        };
+        if let Some(LoweredBoundTarget::Instance(callee)) = binding
+            && self.program.instance_is_dynamic(*callee)
         {
             self.gc();
         }

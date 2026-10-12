@@ -1,4 +1,7 @@
-; Every allocation is stored as [GcHeader | payload]. The header fields are:
+; Every allocation is stored as [GcHeader | payload]. malloc supplies fundamental
+; alignment and HEADER_BYTES is rounded to the target scalar alignment, at least
+; PTR_BYTES, so every GC payload preserves natural alignment. Pointer-holding fields must preserve that alignment.
+; The header fields are:
 ; next allocation, requested payload size, mark bit, finalizer, finalized bit.
 %GcHeader = type { ptr, {{SIZE}}, {{SIZE}}, ptr, {{SIZE}} }
 ; Explicit roots form a linked list of byte ranges: start, size, next root.
@@ -9,6 +12,11 @@
 @__staple_gc_head = internal global ptr null
 @__staple_gc_roots = internal global ptr null
 @__staple_gc_bytes = internal global {{SIZE}} 0
+; FIXME(gc-stress): collection starts only after 1 MiB of allocation, so most
+; corpus programs and tests never collect and cannot detect a missed root or
+; pointer (see FIXME(gc-roots) in lower.rs). Add a test-only stress setting
+; that lowers this threshold so the corpus runs with frequent collections, and
+; a corpus program that checks retained values' contents after collections.
 @__staple_gc_threshold = internal global {{SIZE}} 1048576
 @__staple_gc_stack_bottom = internal global ptr null
 @__staple_gc_table = internal global ptr null
@@ -418,24 +426,29 @@ return:
   ret void
 }
 
-; Conservatively inspect every possibly unaligned pointer-sized window.
-; Advancing one byte at a time catches pointers stored at arbitrary alignment.
+; Pointer-holding storage is naturally aligned. Inspect only complete aligned
+; words, including when an explicit root or stack range starts between words.
+; Short state-byte roots contain no pointer and are skipped.
 define internal void @__staple_gc_scan_region(ptr %start, {{SIZE}} %size) {
 entry:
-  %large.enough = icmp uge {{SIZE}} %size, {{PTR_BYTES}}
-  br i1 %large.enough, label %loop, label %return
+  %address = ptrtoint ptr %start to {{SIZE}}
+  %misalignment = urem {{SIZE}} %address, {{PTR_BYTES}}
+  %padding = sub {{SIZE}} {{PTR_BYTES}}, %misalignment
+  %offset.first = urem {{SIZE}} %padding, {{PTR_BYTES}}
+  %fits = icmp ule {{SIZE}} %offset.first, %size
+  br i1 %fits, label %loop, label %return
 
 loop:
-  %offset = phi {{SIZE}} [ 0, %entry ], [ %next, %body ]
+  %offset = phi {{SIZE}} [ %offset.first, %entry ], [ %next, %body ]
   %remaining = sub {{SIZE}} %size, %offset
   %has.word = icmp uge {{SIZE}} %remaining, {{PTR_BYTES}}
   br i1 %has.word, label %body, label %return
 
 body:
   %slot = getelementptr i8, ptr %start, {{SIZE}} %offset
-  %candidate = load {{SIZE}}, ptr %slot, align 1
+  %candidate = load {{SIZE}}, ptr %slot, align {{PTR_BYTES}}
   call void @__staple_gc_mark_candidate({{SIZE}} %candidate)
-  %next = add {{SIZE}} %offset, 1
+  %next = add {{SIZE}} %offset, {{PTR_BYTES}}
   br label %loop
 
 return:

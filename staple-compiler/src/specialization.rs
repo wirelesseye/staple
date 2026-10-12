@@ -1,4 +1,4 @@
-//! Canonical structural identities for concrete specialization.
+//! Canonical structural identities for concrete and dynamic specialization.
 //!
 //! Instance and artifact keys contain semantic IDs and concrete structural types
 //! and evidence. Display names, spans, contextual defaults, and expanded nominal
@@ -7,7 +7,7 @@
 //! names with collision checks. Runtime surfaces with fixed names are recorded
 //! separately from generated artifacts.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use staple_syntax::Diagnostic;
 
@@ -23,6 +23,16 @@ use crate::{
 /// nothing is re-sorted or normalized here.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum CanonicalType {
+    RuntimeParameter(TypeParameterId),
+    BoundParameter {
+        depth: usize,
+        index: usize,
+    },
+    Forall {
+        parameters: Vec<CanonicalSchemeParameter>,
+        bounds: Vec<CanonicalSchemeBound>,
+        body: Box<CanonicalType>,
+    },
     Never,
     I8,
     I16,
@@ -70,6 +80,19 @@ pub(crate) enum CanonicalType {
         alternatives: Vec<CanonicalType>,
     },
     Function(Box<CanonicalFunctionType>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum CanonicalSchemeParameter {
+    Type { sized: bool, capable: bool },
+    Effect,
+    Product(Vec<CanonicalSchemeParameter>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum CanonicalSchemeBound {
+    Trait(TraitId, Vec<CanonicalType>),
+    Subtype(CanonicalType, CanonicalType),
 }
 
 /// The declared nominal form. Kept distinct for the same `TypeId` because the
@@ -120,6 +143,10 @@ pub(crate) enum CanonicalMutation {
 /// effect variable, so a key's row is always fully resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CanonicalEffectSet {
+    pub variable: Option<(usize, usize)>,
+    /// An effect variable that is unknown until run time: the bundle a
+    /// dynamic instance receives for its row.
+    pub runtime_variable: Option<TypeParameterId>,
     pub resources: Vec<CanonicalResource>,
     pub state: Option<CanonicalStateEffect>,
 }
@@ -138,15 +165,118 @@ pub(crate) enum CanonicalStateEffect {
 }
 
 impl CanonicalType {
+    /// The deepest nesting of type constructors in this type. Polymorphic
+    /// recursion that the checker cannot see (mutual recursion through trait
+    /// dispatch or helper functions) shows up as instance keys whose depth
+    /// grows without bound.
+    pub(crate) fn nesting_depth(&self) -> usize {
+        let deepest = |types: &mut dyn Iterator<Item = &CanonicalType>| {
+            types.map(CanonicalType::nesting_depth).max().unwrap_or(0)
+        };
+        1 + match self {
+            CanonicalType::Forall { body, .. } => body.nesting_depth(),
+            CanonicalType::Ref(inner)
+            | CanonicalType::Slice(inner)
+            | CanonicalType::Buffer(inner)
+            | CanonicalType::CPointer { pointee: inner } => inner.nesting_depth(),
+            CanonicalType::Array { element, count } => {
+                deepest(&mut [element.as_ref(), count.as_ref()].into_iter())
+            }
+            CanonicalType::Nominal { arguments, .. }
+            | CanonicalType::Sum {
+                alternatives: arguments,
+            } => deepest(&mut arguments.iter()),
+            CanonicalType::Product { elements, .. }
+            | CanonicalType::ParameterProduct { elements, .. } => {
+                deepest(&mut elements.iter().map(|element| &element.value_type))
+            }
+            CanonicalType::Function(function) => {
+                deepest(&mut [function.parameter.as_ref(), function.result.as_ref()].into_iter())
+            }
+            _ => 0,
+        }
+    }
+
     /// Converts a checked type into a concrete key, rejecting unresolved
     /// parameters and checker placeholders with a diagnostic at the
     /// requesting record's origin.
     pub(crate) fn concrete(value_type: &CheckedType, origin: &Origin) -> Result<Self, Diagnostic> {
-        Self::convert(value_type, origin)
+        Self::convert(value_type, origin, false, &[])
     }
 
-    fn convert(value_type: &CheckedType, origin: &Origin) -> Result<Self, Diagnostic> {
+    fn convert(
+        value_type: &CheckedType,
+        origin: &Origin,
+        runtime: bool,
+        binders: &[Vec<TypeParameterId>],
+    ) -> Result<Self, Diagnostic> {
         let key = match value_type {
+            CheckedType::Forall(scheme) => {
+                fn parameter(
+                    p: &crate::CheckedSchemeParameter,
+                    ids: &mut Vec<TypeParameterId>,
+                ) -> CanonicalSchemeParameter {
+                    match p {
+                        crate::CheckedSchemeParameter::Type {
+                            id,
+                            sized,
+                            parameter_product_capable,
+                            ..
+                        } => {
+                            ids.push(*id);
+                            CanonicalSchemeParameter::Type {
+                                sized: *sized,
+                                capable: *parameter_product_capable,
+                            }
+                        }
+                        crate::CheckedSchemeParameter::Effect { id, .. } => {
+                            ids.push(*id);
+                            CanonicalSchemeParameter::Effect
+                        }
+                        crate::CheckedSchemeParameter::Product(ps) => {
+                            CanonicalSchemeParameter::Product(
+                                ps.iter().map(|p| parameter(p, ids)).collect(),
+                            )
+                        }
+                    }
+                }
+                let mut ids = Vec::new();
+                let parameters = scheme
+                    .parameters
+                    .iter()
+                    .map(|p| parameter(p, &mut ids))
+                    .collect();
+                let mut nested = binders.to_vec();
+                nested.push(ids);
+                let mut bounds = Vec::new();
+                for bound in &scheme.trait_bounds {
+                    bounds.push(CanonicalSchemeBound::Trait(
+                        bound.trait_id,
+                        Self::convert_arguments(&bound.arguments, origin, runtime, &nested)?,
+                    ));
+                }
+                for bound in &scheme.subtype_bounds {
+                    let parameter = CheckedType::Parameter {
+                        id: bound.parameter,
+                        name: String::new(),
+                        sized: true,
+                        parameter_product_capable: false,
+                    };
+                    bounds.push(CanonicalSchemeBound::Subtype(
+                        Self::convert(&parameter, origin, runtime, &nested)?,
+                        Self::convert(&bound.supertype, origin, runtime, &nested)?,
+                    ));
+                }
+                // Bound order is semantically irrelevant; structural debug output
+                // contains only canonical IDs and shapes, never source names.
+                bounds.sort_by_key(|bound| format!("{bound:?}"));
+                bounds.dedup();
+                CanonicalType::Forall {
+                    parameters,
+                    bounds,
+                    body: Box::new(Self::convert(&scheme.body, origin, runtime, &nested)?),
+                }
+            }
             CheckedType::Inferred => {
                 return Err(origin_diagnostic(
                     origin,
@@ -178,21 +308,35 @@ impl CanonicalType {
                 CanonicalType::StringLiteralSet(values.clone())
             }
             CheckedType::Ref(payload) => {
-                CanonicalType::Ref(Box::new(Self::convert(payload, origin)?))
+                CanonicalType::Ref(Box::new(Self::convert(payload, origin, runtime, binders)?))
             }
             CheckedType::Slice(payload) => {
-                CanonicalType::Slice(Box::new(Self::convert(payload, origin)?))
+                CanonicalType::Slice(Box::new(Self::convert(payload, origin, runtime, binders)?))
             }
             CheckedType::Buffer(payload) => {
-                CanonicalType::Buffer(Box::new(Self::convert(payload, origin)?))
+                CanonicalType::Buffer(Box::new(Self::convert(payload, origin, runtime, binders)?))
             }
             CheckedType::Array { element, count } => CanonicalType::Array {
-                element: Box::new(Self::convert(element, origin)?),
-                count: Box::new(Self::convert(count, origin)?),
+                element: Box::new(Self::convert(element, origin, runtime, binders)?),
+                count: Box::new(Self::convert(count, origin, runtime, binders)?),
             },
             CheckedType::CString => CanonicalType::CString,
             CheckedType::CChar => CanonicalType::CChar,
             CheckedType::COpaquePointer => CanonicalType::COpaquePointer,
+            CheckedType::Parameter { id, .. } if binders.iter().any(|ids| ids.contains(id)) => {
+                let (depth, index) = binders
+                    .iter()
+                    .rev()
+                    .enumerate()
+                    .find_map(|(depth, ids)| {
+                        ids.iter()
+                            .position(|bound| bound == id)
+                            .map(|index| (depth, index))
+                    })
+                    .unwrap();
+                CanonicalType::BoundParameter { depth, index }
+            }
+            CheckedType::Parameter { id, .. } if runtime => CanonicalType::RuntimeParameter(*id),
             CheckedType::Parameter { name, .. } => {
                 return Err(origin_diagnostic(
                     origin,
@@ -202,15 +346,15 @@ impl CanonicalType {
             CheckedType::TypeConstructor { id, arguments, .. } => CanonicalType::Nominal {
                 kind: CanonicalNominalKind::TypeConstructor,
                 id: *id,
-                arguments: Self::convert_arguments(arguments, origin)?,
+                arguments: Self::convert_arguments(arguments, origin, runtime, binders)?,
             },
             CheckedType::Opaque { id, arguments, .. } => CanonicalType::Nominal {
                 kind: CanonicalNominalKind::Opaque,
                 id: *id,
-                arguments: Self::convert_arguments(arguments, origin)?,
+                arguments: Self::convert_arguments(arguments, origin, runtime, binders)?,
             },
             CheckedType::CPointer { pointee } => CanonicalType::CPointer {
-                pointee: Box::new(Self::convert(pointee, origin)?),
+                pointee: Box::new(Self::convert(pointee, origin, runtime, binders)?),
             },
             CheckedType::ParameterProduct(product) => CanonicalType::ParameterProduct {
                 elements: product
@@ -219,7 +363,12 @@ impl CanonicalType {
                     .map(|element| {
                         Ok(CanonicalProductElement {
                             name: element.name.clone(),
-                            value_type: Self::convert(&element.value_type, origin)?,
+                            value_type: Self::convert(
+                                &element.value_type,
+                                origin,
+                                runtime,
+                                binders,
+                            )?,
                         })
                     })
                     .collect::<Result<Vec<_>, Diagnostic>>()?,
@@ -233,14 +382,19 @@ impl CanonicalType {
                     .map(|element| {
                         Ok(CanonicalProductElement {
                             name: element.name.clone(),
-                            value_type: Self::convert(&element.value_type, origin)?,
+                            value_type: Self::convert(
+                                &element.value_type,
+                                origin,
+                                runtime,
+                                binders,
+                            )?,
                         })
                     })
                     .collect::<Result<Vec<_>, Diagnostic>>()?,
                 variadic: product.variadic,
             },
             CheckedType::Sum(sum) => CanonicalType::Sum {
-                alternatives: Self::convert_arguments(&sum.alternatives, origin)?,
+                alternatives: Self::convert_arguments(&sum.alternatives, origin, runtime, binders)?,
             },
             CheckedType::Function(function) => {
                 // A concrete effect row is encoded as a function type with
@@ -259,11 +413,11 @@ impl CanonicalType {
                         ..function.clone()
                     };
                     CanonicalType::Function(Box::new(CanonicalFunctionType::convert(
-                        &marker, origin,
+                        &marker, origin, runtime, binders,
                     )?))
                 } else {
                     CanonicalType::Function(Box::new(CanonicalFunctionType::convert(
-                        function, origin,
+                        function, origin, runtime, binders,
                     )?))
                 }
             }
@@ -275,7 +429,7 @@ impl CanonicalType {
             } => CanonicalType::Nominal {
                 kind: CanonicalNominalKind::Wrapper,
                 id: *id,
-                arguments: Self::convert_arguments(arguments, origin)?,
+                arguments: Self::convert_arguments(arguments, origin, runtime, binders)?,
             },
         };
         Ok(key)
@@ -284,27 +438,50 @@ impl CanonicalType {
     fn convert_arguments(
         arguments: &[CheckedType],
         origin: &Origin,
+        runtime: bool,
+        binders: &[Vec<TypeParameterId>],
     ) -> Result<Vec<CanonicalType>, Diagnostic> {
         arguments
             .iter()
-            .map(|argument| Self::convert(argument, origin))
+            .map(|argument| Self::convert(argument, origin, runtime, binders))
             .collect()
     }
 }
 
-impl CanonicalType {}
+impl CanonicalType {
+    pub(crate) fn dynamic(value_type: &CheckedType, origin: &Origin) -> Result<Self, Diagnostic> {
+        Self::convert(value_type, origin, true, &[])
+    }
+}
 
 impl CanonicalFunctionType {
+    pub(crate) fn dynamic(
+        function: &CheckedFunctionType,
+        origin: &Origin,
+    ) -> Result<Self, Diagnostic> {
+        Self::convert(function, origin, true, &[])
+    }
+
     pub(crate) fn concrete(
         function: &CheckedFunctionType,
         origin: &Origin,
     ) -> Result<Self, Diagnostic> {
-        Self::convert(function, origin)
+        Self::convert(function, origin, false, &[])
     }
 
-    fn convert(function: &CheckedFunctionType, origin: &Origin) -> Result<Self, Diagnostic> {
+    fn convert(
+        function: &CheckedFunctionType,
+        origin: &Origin,
+        runtime: bool,
+        binders: &[Vec<TypeParameterId>],
+    ) -> Result<Self, Diagnostic> {
         Ok(CanonicalFunctionType {
-            parameter: Box::new(CanonicalType::convert(&function.parameter, origin)?),
+            parameter: Box::new(CanonicalType::convert(
+                &function.parameter,
+                origin,
+                runtime,
+                binders,
+            )?),
             parameter_style: match function.parameter_style {
                 staple_syntax::FunctionParameterStyle::Single => CanonicalParameterStyle::Single,
                 staple_syntax::FunctionParameterStyle::Juxtaposed => {
@@ -313,8 +490,13 @@ impl CanonicalFunctionType {
             },
             mutations: function.mutations.iter().cloned().map(Into::into).collect(),
             moves: function.moves.iter().cloned().map(Into::into).collect(),
-            effects: CanonicalEffectSet::convert(&function.effects, origin)?,
-            result: Box::new(CanonicalType::convert(&function.result, origin)?),
+            effects: CanonicalEffectSet::convert(&function.effects, origin, runtime, binders)?,
+            result: Box::new(CanonicalType::convert(
+                &function.result,
+                origin,
+                runtime,
+                binders,
+            )?),
         })
     }
 }
@@ -324,24 +506,49 @@ impl CanonicalEffectSet {
         effects: &CheckedEffectSet,
         origin: &Origin,
     ) -> Result<Self, Diagnostic> {
-        Self::convert(effects, origin)
+        Self::convert(effects, origin, false, &[])
     }
 
-    fn convert(effects: &CheckedEffectSet, origin: &Origin) -> Result<Self, Diagnostic> {
-        if let Some(variable) = &effects.variable {
-            return Err(origin_diagnostic(
-                origin,
-                format!(
-                    "effect variable `{}` is not resolved for a concrete key",
-                    variable.name
-                ),
-            ));
-        }
+    fn convert(
+        effects: &CheckedEffectSet,
+        origin: &Origin,
+        runtime: bool,
+        binders: &[Vec<TypeParameterId>],
+    ) -> Result<Self, Diagnostic> {
+        let mut runtime_variable = None;
+        let variable = match effects.variable.as_ref() {
+            None => None,
+            Some(variable) => {
+                let bound = binders.iter().rev().enumerate().find_map(|(depth, ids)| {
+                    ids.iter()
+                        .position(|id| *id == variable.id)
+                        .map(|index| (depth, index))
+                });
+                match bound {
+                    Some(bound) => Some(bound),
+                    None if runtime => {
+                        runtime_variable = Some(variable.id);
+                        None
+                    }
+                    None => {
+                        return Err(origin_diagnostic(
+                            origin,
+                            format!(
+                                "effect variable `{}` is not resolved for a concrete key",
+                                variable.name
+                            ),
+                        ));
+                    }
+                }
+            }
+        };
         Ok(CanonicalEffectSet {
+            variable,
+            runtime_variable,
             resources: effects
                 .resources
                 .iter()
-                .map(|resource| CanonicalResource::convert(resource, origin))
+                .map(|resource| CanonicalResource::convert(resource, origin, runtime, binders))
                 .collect::<Result<Vec<_>, Diagnostic>>()?,
             state: effects.state.map(Into::into),
         })
@@ -349,9 +556,14 @@ impl CanonicalEffectSet {
 }
 
 impl CanonicalResource {
-    fn convert(resource: &CheckedResource, origin: &Origin) -> Result<Self, Diagnostic> {
+    fn convert(
+        resource: &CheckedResource,
+        origin: &Origin,
+        runtime: bool,
+        binders: &[Vec<TypeParameterId>],
+    ) -> Result<Self, Diagnostic> {
         Ok(CanonicalResource {
-            value_type: CanonicalType::convert(&resource.value_type, origin)?,
+            value_type: CanonicalType::convert(&resource.value_type, origin, runtime, binders)?,
             mutable: resource.mutable,
         })
     }
@@ -409,6 +621,11 @@ impl InstanceSubstitution {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct InstanceKey {
     function: FunctionId,
+    runtime: BTreeSet<TypeParameterId>,
+    /// Effect parameters unknown until run time. Unlike `runtime`, these
+    /// have no descriptors: a row passes its resources by address and, when
+    /// it names a variable, one bundle pointer.
+    runtime_effects: BTreeSet<TypeParameterId>,
     substitutions: Vec<InstanceSubstitution>,
     evidence: Option<CanonicalEvidence>,
 }
@@ -419,11 +636,17 @@ pub(crate) enum InstanceKeyError {
     DuplicateParameter(TypeParameterId),
     /// A parameter appeared as both a type and an effect entry.
     ConflictingParameter(TypeParameterId),
+    /// A run-time parameter also has a compile-time substitution.
+    RuntimeSubstitution(TypeParameterId),
 }
 
 impl InstanceKeyError {
     pub(crate) fn message(self) -> String {
         match self {
+            InstanceKeyError::RuntimeSubstitution(parameter) => format!(
+                "instance key gives run-time parameter {} a compile-time substitution",
+                parameter.0
+            ),
             InstanceKeyError::DuplicateParameter(parameter) => format!(
                 "instance key repeats the substitution for parameter {}",
                 parameter.0
@@ -442,9 +665,41 @@ impl InstanceKey {
     /// unresolved request never masquerades as a concrete key.
     pub(crate) fn new(
         function: FunctionId,
-        mut substitutions: Vec<InstanceSubstitution>,
+        substitutions: Vec<InstanceSubstitution>,
         evidence: Option<CanonicalEvidence>,
     ) -> Result<Self, InstanceKeyError> {
+        Self::with_runtime(function, substitutions, evidence, BTreeSet::new())
+    }
+
+    /// Runtime parameters are identified by their template IDs and never carry
+    /// concrete substitutions. Descriptor values belong to call sites, so two
+    /// concrete callers can share the same dynamic implementation key.
+    pub(crate) fn with_runtime(
+        function: FunctionId,
+        substitutions: Vec<InstanceSubstitution>,
+        evidence: Option<CanonicalEvidence>,
+        runtime: BTreeSet<TypeParameterId>,
+    ) -> Result<Self, InstanceKeyError> {
+        Self::with_runtime_effects(function, substitutions, evidence, runtime, BTreeSet::new())
+    }
+
+    /// A key whose run-time set also names effect parameters.
+    pub(crate) fn with_runtime_effects(
+        function: FunctionId,
+        mut substitutions: Vec<InstanceSubstitution>,
+        evidence: Option<CanonicalEvidence>,
+        runtime: BTreeSet<TypeParameterId>,
+        runtime_effects: BTreeSet<TypeParameterId>,
+    ) -> Result<Self, InstanceKeyError> {
+        for substitution in &substitutions {
+            if runtime.contains(&substitution.parameter())
+                || runtime_effects.contains(&substitution.parameter())
+            {
+                return Err(InstanceKeyError::RuntimeSubstitution(
+                    substitution.parameter(),
+                ));
+            }
+        }
         substitutions.sort_by_key(|substitution| substitution.parameter().0);
         for pair in substitutions.windows(2) {
             if pair[0].parameter() == pair[1].parameter() {
@@ -467,9 +722,34 @@ impl InstanceKey {
         }
         Ok(InstanceKey {
             function,
+            runtime,
+            runtime_effects,
             substitutions,
             evidence,
         })
+    }
+
+    pub(crate) fn runtime(&self) -> &BTreeSet<TypeParameterId> {
+        &self.runtime
+    }
+
+    /// Every run-time parameter id, types and effects together.
+    pub(crate) fn runtime_ids(&self) -> BTreeSet<TypeParameterId> {
+        self.runtime
+            .iter()
+            .chain(&self.runtime_effects)
+            .copied()
+            .collect()
+    }
+
+    pub(crate) fn runtime_effects(&self) -> &BTreeSet<TypeParameterId> {
+        &self.runtime_effects
+    }
+
+    /// Whether this instance takes run-time parameters of either kind and so
+    /// uses the dynamic ABI.
+    pub(crate) fn is_dynamic(&self) -> bool {
+        !self.runtime.is_empty() || !self.runtime_effects.is_empty()
     }
 
     pub(crate) fn function(&self) -> FunctionId {
@@ -478,6 +758,19 @@ impl InstanceKey {
 
     pub(crate) fn substitutions(&self) -> &[InstanceSubstitution] {
         &self.substitutions
+    }
+
+    /// The deepest type substituted into this instance (see
+    /// [`CanonicalType::nesting_depth`]).
+    pub(crate) fn substitution_depth(&self) -> usize {
+        self.substitutions
+            .iter()
+            .map(|substitution| match substitution {
+                InstanceSubstitution::Type { value, .. } => value.nesting_depth(),
+                InstanceSubstitution::Effect { .. } => 0,
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     pub(crate) fn evidence(&self) -> Option<&CanonicalEvidence> {
@@ -587,6 +880,7 @@ impl From<LoweredCallableAdapter> for CanonicalAdapterKind {
 /// callable type the adapter must expose.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ConstructorAdapterKey {
+    pub scheme: Option<CanonicalType>,
     pub symbol: SymbolId,
     pub type_id: TypeId,
     pub adapter: CanonicalAdapterKind,
@@ -594,6 +888,51 @@ pub(crate) struct ConstructorAdapterKey {
 }
 
 impl ConstructorAdapterKey {
+    pub(crate) fn polymorphic(
+        symbol: SymbolId,
+        type_id: TypeId,
+        adapter: LoweredCallableAdapter,
+        scheme: &crate::CheckedScheme,
+        origin: &Origin,
+    ) -> Result<Self, Diagnostic> {
+        let canonical =
+            CanonicalType::dynamic(&CheckedType::Forall(Box::new(scheme.clone())), origin)?;
+        let CanonicalType::Forall { body, .. } = &canonical else {
+            unreachable!()
+        };
+        let CanonicalType::Function(function) = body.as_ref() else {
+            return Err(origin_diagnostic(
+                origin,
+                "constructor scheme has no function body",
+            ));
+        };
+        Ok(Self {
+            symbol,
+            type_id,
+            adapter: adapter.into(),
+            callable_type: *function.clone(),
+            scheme: Some(canonical),
+        })
+    }
+
+    pub(crate) fn shape(
+        symbol: SymbolId,
+        type_id: TypeId,
+        adapter: LoweredCallableAdapter,
+        callable_type: &CheckedFunctionType,
+        origin: &Origin,
+    ) -> Result<Self, Diagnostic> {
+        if !crate::contains_type_parameter(&CheckedType::Function(callable_type.clone())) {
+            return Self::new(symbol, type_id, adapter, callable_type, origin);
+        }
+        Ok(Self {
+            scheme: None,
+            symbol,
+            type_id,
+            adapter: adapter.into(),
+            callable_type: CanonicalFunctionType::dynamic(callable_type, origin)?,
+        })
+    }
     pub(crate) fn new(
         symbol: SymbolId,
         type_id: TypeId,
@@ -602,6 +941,7 @@ impl ConstructorAdapterKey {
         origin: &Origin,
     ) -> Result<Self, Diagnostic> {
         Ok(ConstructorAdapterKey {
+            scheme: None,
             symbol,
             type_id,
             adapter: adapter.into(),
@@ -677,6 +1017,15 @@ pub(crate) enum GcFinalizerKey {
     },
     /// A buffer keyed by its element type.
     Buffer(CanonicalType),
+    /// A dynamic closure environment keyed by the closure's function instance.
+    /// Its captures are dropped through the descriptors the environment holds.
+    DynamicClosureEnvironment { closure: InstanceOrdinal },
+    /// A dynamic buffer. One shared finalizer reads the element descriptor
+    /// from the allocation's trailing word.
+    DynamicBuffer,
+    /// A dynamic shared cell. One shared finalizer reads the value descriptor
+    /// from the allocation's trailing word.
+    DynamicCell,
 }
 
 /// The identity of one coroutine body's `resume`/`cleanup` pair, keyed by the
@@ -715,6 +1064,132 @@ pub(crate) struct ExternAdapterKey {
     pub callable_type: CanonicalFunctionType,
 }
 
+/// Structural cleanup uses component descriptors, so its identity depends on
+/// the aggregate shape and arity rather than the caller's type parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CompoundDescriptorShape {
+    Product,
+    Sum,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct CompoundDescriptorDropKey {
+    pub shape: CompoundDescriptorShape,
+    pub count: u32,
+}
+
+/// The identity of one descriptor-bound entry: a dynamic-shape closure's
+/// forwarding function, keyed by its instance and number of bound descriptors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct DescriptorBoundEntryKey {
+    pub instance: InstanceOrdinal,
+    pub bound: usize,
+    /// Pointer slots the bound words start after: zero for a closure
+    /// environment, a dictionary's tail offset for a built dictionary's slot.
+    pub offset: usize,
+}
+
+/// The identity of one polymorphic-value adapter: a closure forwarding to a
+/// polymorphic closure, keyed by the alpha-canonical source scheme and the
+/// canonical target. A function-type target is an instantiation: the
+/// instantiation's descriptors travel in the adapter's environment. A scheme
+/// target is a subsumption: the adapter receives the target's
+/// descriptors and builds the source's. The mapping is recomputed from the
+/// pair, so it is not part of the key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum TraitMemberEntryKey {
+    Member(TraitMethodId),
+    Slot(InstanceKey),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct InstantiationAdapterKey {
+    pub scheme: CanonicalType,
+    pub target: CanonicalType,
+}
+
+/// The direction of a reabstraction conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ReabstractionDirection {
+    ConcreteToDynamic,
+    DynamicToConcrete,
+}
+
+/// The identity of one reabstraction thunk, keyed by the concrete
+/// function type and the conversion direction.
+/// A static dictionary slot reuses the concrete-to-dynamic reabstraction
+/// machinery, loading its concrete closure from the dictionary's tail.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct StaticDictionarySlot {
+    pub implementation: crate::LoweredTraitImplementationId,
+    pub method: TraitMethodId,
+    /// Pointer-slot offset of this method's `{code, environment}` pair.
+    pub closure_offset: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ReabstractionThunkKey {
+    pub dictionary_slot: Option<StaticDictionarySlot>,
+    pub concrete: CanonicalFunctionType,
+    pub dynamic: CanonicalFunctionType,
+    pub direction: ReabstractionDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ValueConversionKey {
+    pub concrete: CanonicalType,
+    pub dynamic: CanonicalType,
+    pub direction: ReabstractionDirection,
+}
+
+/// A static dictionary identifies the complete concrete obligation and the
+/// implementation chosen by lowering; codegen never performs trait selection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct TraitDictionaryKey {
+    pub trait_id: TraitId,
+    pub arguments: Vec<CanonicalType>,
+    pub implementation: crate::LoweredTraitImplementationId,
+}
+
+/// The shape of a structural dictionary slot at run-time types. The slot
+/// reads its component descriptors and dictionaries from the dictionary tail,
+/// so only the shape, not the component types, identifies it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum DynamicStructuralShape {
+    /// `Debug` for a product: one optional field name per element.
+    DebugProduct { names: Vec<Option<String>> },
+    /// `Debug` for a sum with this many alternatives.
+    DebugSum { alternatives: usize },
+    /// `Index` of a product by a bounds-checked position. `injections` gives,
+    /// per element, its alternative in the output sum, or none when the output
+    /// is the element type itself.
+    IndexProduct {
+        injections: Vec<Option<usize>>,
+        output_alternatives: usize,
+    },
+    /// `MutateIndex` of a homogeneous product with this many elements.
+    MutateProduct { length: usize },
+    /// `Index` or `MutateIndex` through a `Ref`, delegating to the payload.
+    DerefIndex,
+    DerefMutateIndex,
+    /// `IntoIterator` of a product: the source paired with cursor zero.
+    IntoIterProduct,
+    /// `Iterator.next` over a `(product, USize)` pair. `injections` is as for
+    /// `IndexProduct`; `done` and `yield_` are the result sum's alternatives.
+    NextProduct {
+        injections: Vec<Option<usize>>,
+        item_alternatives: usize,
+        result_alternatives: usize,
+        done: usize,
+        yield_: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct DynamicStructuralKey {
+    pub shape: DynamicStructuralShape,
+}
+
 /// Generated-artifact request keys. The variant is the namespace: keys from
 /// different families can never compare or hash equal, even when their numeric
 /// IDs coincide. `RuntimeHelper` is deliberately absent: runtime symbols have
@@ -725,6 +1200,16 @@ pub(crate) enum ArtifactRequestKey {
     ConstructorAdapter(ConstructorAdapterKey),
     StructuralMethod(StructuralMethodKey),
     DropGlue(DropGlueKey),
+    TypeDescriptor(CanonicalType),
+    TraitDictionary(TraitDictionaryKey),
+    DynamicStructural(DynamicStructuralKey),
+    DescriptorDrop(CanonicalType),
+    CompoundDescriptorDrop(CompoundDescriptorDropKey),
+    DescriptorBoundEntry(DescriptorBoundEntryKey),
+    TraitMemberEntry(TraitMemberEntryKey),
+    InstantiationAdapter(InstantiationAdapterKey),
+    ReabstractionThunk(ReabstractionThunkKey),
+    ValueConversion(ValueConversionKey),
     GcFinalizer(GcFinalizerKey),
     CoroutineCodes(CoroutineCodesKey),
     ReactionRunner(ReactiveRunnerKey),
@@ -741,12 +1226,31 @@ impl ArtifactRequestKey {
             ArtifactRequestKey::ConstructorAdapter(_) => "constructor-adapter",
             ArtifactRequestKey::StructuralMethod(_) => "structural-method",
             ArtifactRequestKey::DropGlue(_) => "drop-glue",
+            ArtifactRequestKey::TypeDescriptor(_) => "type-descriptor",
+            ArtifactRequestKey::TraitDictionary(_) => "trait-dictionary",
+            ArtifactRequestKey::DynamicStructural(_) => "dynamic-structural",
+            ArtifactRequestKey::DescriptorDrop(_) => "descriptor-drop",
+            ArtifactRequestKey::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
+            ArtifactRequestKey::DescriptorBoundEntry(_) => "descriptor-bound-entry",
+            ArtifactRequestKey::TraitMemberEntry(_) => "trait-member-entry",
+            ArtifactRequestKey::InstantiationAdapter(_) => "instantiation-adapter",
+            ArtifactRequestKey::ReabstractionThunk(_) => "reabstraction-thunk",
+            ArtifactRequestKey::ValueConversion(_) => "value-conversion",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => "gc-finalizer-payload",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Cell(_)) => "gc-finalizer-cell",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment { .. }) => {
                 "gc-finalizer-closure-environment"
             }
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Buffer(_)) => "gc-finalizer-buffer",
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::DynamicClosureEnvironment {
+                ..
+            }) => "gc-finalizer-dynamic-closure-environment",
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::DynamicBuffer) => {
+                "gc-finalizer-dynamic-buffer"
+            }
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::DynamicCell) => {
+                "gc-finalizer-dynamic-cell"
+            }
             ArtifactRequestKey::CoroutineCodes(_) => "coroutine-codes",
             ArtifactRequestKey::ReactionRunner(_) => "reaction-runner",
             ArtifactRequestKey::UntilRunner(_) => "until-runner",
@@ -921,6 +1425,9 @@ impl SpecializationCatalog {
         declared: &impl Fn(&InstanceKey) -> Option<String>,
         seen: &HashSet<String>,
     ) -> String {
+        if key.is_dynamic() {
+            return format!("{}_dynamic", instance_ordinal_name(ordinal));
+        }
         if key.substitutions().is_empty() && key.evidence().is_none() {
             if let Some(candidate) = declared(key) {
                 if !candidate.is_empty() && !seen.contains(&candidate) {
@@ -949,6 +1456,18 @@ fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
             format!("__staple_structural_{}", structural_name(method.structural))
         }
         ArtifactRequestKey::DropGlue(_) => "__staple_drop_glue".to_owned(),
+        ArtifactRequestKey::TypeDescriptor(_) => "__staple_type_descriptor".to_owned(),
+        ArtifactRequestKey::TraitDictionary(_) => "__staple_trait_dictionary".to_owned(),
+        ArtifactRequestKey::DynamicStructural(_) => "__staple_dynamic_structural".to_owned(),
+        ArtifactRequestKey::DescriptorDrop(_) => "__staple_descriptor_drop".to_owned(),
+        ArtifactRequestKey::CompoundDescriptorDrop(_) => {
+            "__staple_compound_descriptor_drop".to_owned()
+        }
+        ArtifactRequestKey::DescriptorBoundEntry(_) => "__staple_descriptor_bound_entry".to_owned(),
+        ArtifactRequestKey::TraitMemberEntry(_) => "__staple_trait_member_entry".to_owned(),
+        ArtifactRequestKey::InstantiationAdapter(_) => "__staple_instantiation_adapter".to_owned(),
+        ArtifactRequestKey::ReabstractionThunk(_) => "__staple_reabstraction".to_owned(),
+        ArtifactRequestKey::ValueConversion(_) => "__staple_value_conversion".to_owned(),
         ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => {
             "__staple_gc_finalizer_payload".to_owned()
         }
@@ -960,6 +1479,15 @@ fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
         }
         ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Buffer(_)) => {
             "__staple_gc_finalizer_buffer".to_owned()
+        }
+        ArtifactRequestKey::GcFinalizer(GcFinalizerKey::DynamicClosureEnvironment { .. }) => {
+            "__staple_gc_finalizer_dynamic_closure".to_owned()
+        }
+        ArtifactRequestKey::GcFinalizer(GcFinalizerKey::DynamicBuffer) => {
+            "__staple_gc_finalizer_dynamic_buffer".to_owned()
+        }
+        ArtifactRequestKey::GcFinalizer(GcFinalizerKey::DynamicCell) => {
+            "__staple_gc_finalizer_dynamic_cell".to_owned()
         }
         ArtifactRequestKey::CoroutineCodes(_) => "__staple_coroutine_codes".to_owned(),
         ArtifactRequestKey::ReactionRunner(_) => "__staple_reaction_runner".to_owned(),
@@ -995,6 +1523,73 @@ mod tests {
     use crate::{
         CheckedFunctionParameterDefault, CheckedProductType, CheckedSumType, CheckedTypeElement,
     };
+
+    #[test]
+    fn scheme_keys_preserve_parameter_order_and_alpha_equivalence() {
+        fn scheme(first: usize, second: usize, reverse: bool) -> CheckedType {
+            let parameter = |id| CheckedType::Parameter {
+                id: TypeParameterId(id),
+                name: format!("P{id}"),
+                sized: true,
+                parameter_product_capable: false,
+            };
+            let order = if reverse {
+                [second, first]
+            } else {
+                [first, second]
+            };
+            CheckedType::Forall(Box::new(crate::CheckedScheme {
+                parameters: order
+                    .into_iter()
+                    .map(|id| crate::CheckedSchemeParameter::Type {
+                        id: TypeParameterId(id),
+                        name: format!("P{id}"),
+                        sized: true,
+                        parameter_product_capable: false,
+                    })
+                    .collect(),
+                trait_bounds: vec![],
+                trait_bound_names: vec![],
+                subtype_bounds: vec![],
+                body: Box::new(CheckedType::Function(CheckedFunctionType {
+                    parameter: Box::new(parameter(first)),
+                    result: Box::new(parameter(second)),
+                    parameter_style: staple_syntax::FunctionParameterStyle::Single,
+                    mutations: vec![],
+                    moves: vec![],
+                    default: None,
+                    effects: CheckedEffectSet::default(),
+                })),
+            }))
+        }
+        let key = |ty| CanonicalType::concrete(&ty, &requesting_origin()).unwrap();
+        assert_eq!(key(scheme(10, 11, false)), key(scheme(20, 21, false)));
+        assert_ne!(key(scheme(10, 11, false)), key(scheme(20, 21, true)));
+        let mut a = scheme(10, 11, false);
+        let mut b = scheme(20, 21, false);
+        for (ty, ids, traits) in [(&mut a, [10, 11], [1, 2]), (&mut b, [20, 21], [2, 1])] {
+            let CheckedType::Forall(scheme) = ty else {
+                unreachable!()
+            };
+            for trait_id in traits {
+                scheme.trait_bounds.push(crate::CheckedTraitBound {
+                    trait_id: TraitId(trait_id),
+                    arguments: vec![CheckedType::Parameter {
+                        id: TypeParameterId(ids[0]),
+                        name: "Bound".into(),
+                        sized: true,
+                        parameter_product_capable: false,
+                    }],
+                });
+            }
+        }
+        assert_eq!(key(a.clone()), key(b.clone()));
+        let CheckedType::Forall(scheme) = &mut b else {
+            unreachable!()
+        };
+        scheme.trait_bounds.pop();
+        assert_ne!(key(a), key(b));
+    }
 
     fn requesting_origin() -> Origin {
         Origin {
@@ -1489,6 +2084,25 @@ mod tests {
             .expect_err("an unresolved parameter never forms a concrete key");
         assert_eq!(diagnostic.span, requesting_origin().span);
         assert!(diagnostic.message.contains("`First`"));
+        let symbolic = CanonicalType::dynamic(&first, &requesting_origin()).unwrap();
+        assert_eq!(
+            symbolic,
+            CanonicalType::RuntimeParameter(TypeParameterId(5))
+        );
+        assert_ne!(
+            symbolic,
+            CanonicalType::dynamic(
+                &CheckedType::Parameter {
+                    id: TypeParameterId(6),
+                    name: "First".to_owned(),
+                    sized: false,
+                    parameter_product_capable: false,
+                },
+                &requesting_origin()
+            )
+            .unwrap()
+        );
+
         assert!(
             CanonicalType::concrete(
                 &CheckedType::Ref(Box::new(CheckedType::Parameter {
@@ -1551,6 +2165,48 @@ mod tests {
     ) -> InstanceKey {
         InstanceKey::new(FunctionId(function), substitutions, evidence)
             .expect("well-formed instance key")
+    }
+
+    #[test]
+    fn runtime_instance_keys_are_distinct_and_keep_concrete_names() {
+        let concrete = instance_key(1, vec![], None);
+        let dynamic = InstanceKey::with_runtime(
+            FunctionId(1),
+            vec![],
+            None,
+            BTreeSet::from([TypeParameterId(2), TypeParameterId(1)]),
+        )
+        .unwrap();
+        let reordered = InstanceKey::with_runtime(
+            FunctionId(1),
+            vec![],
+            None,
+            [TypeParameterId(1), TypeParameterId(2)]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(dynamic, reordered);
+        assert_ne!(concrete, dynamic);
+        let mut catalog = SpecializationCatalog::default();
+        catalog.reserve_instance(concrete);
+        catalog.reserve_instance(dynamic);
+        assert_eq!(
+            catalog
+                .planned_names_with(|_| Some("identity".to_owned()))
+                .unwrap(),
+            vec!["identity", "__staple_instance_1_dynamic"]
+        );
+        assert_eq!(
+            InstanceKey::with_runtime(
+                FunctionId(1),
+                vec![type_substitution(1, CheckedType::I32)],
+                None,
+                BTreeSet::from([TypeParameterId(1)])
+            )
+            .unwrap_err(),
+            InstanceKeyError::RuntimeSubstitution(TypeParameterId(1))
+        );
     }
 
     #[test]
@@ -2077,6 +2733,12 @@ mod tests {
                 symbol: SymbolId(1),
                 callable_type: canonical_function(&simple_callable()),
             }),
+            ArtifactRequestKey::TraitDictionary(TraitDictionaryKey {
+                trait_id: TraitId(3),
+                arguments: vec![concrete(&CheckedType::I32)],
+                implementation: crate::LoweredTraitImplementationId::for_test(0),
+            }),
+            ArtifactRequestKey::TraitMemberEntry(TraitMemberEntryKey::Member(TraitMethodId(4))),
         ]
     }
 
@@ -2085,7 +2747,7 @@ mod tests {
         let families = artifact_families();
         assert_eq!(
             families.len(),
-            12,
+            14,
             "every artifact family has a representative key"
         );
         let mut names = HashSet::new();
@@ -2258,11 +2920,13 @@ mod tests {
         };
         let plans = vec![
             LoweredArtifactPlan::ConstructorAdapter(ConstructorAdapterPlan {
+                scheme: None,
                 symbol: SymbolId(1),
                 type_id: TypeId(7),
                 adapter: LoweredCallableAdapter::Constructor,
                 callable_type: simple_callable(),
                 construction: ConstructorConstruction::Unexpanded,
+                layout: Vec::new(),
             }),
             LoweredArtifactPlan::StructuralMethod(StructuralMethodPlan {
                 structural: StructuralTraitMethod::Index,
@@ -2305,6 +2969,26 @@ mod tests {
                 callable_type: simple_callable(),
                 indirect_parameters: Vec::new(),
                 declaration: None,
+            }),
+            LoweredArtifactPlan::TraitDictionary(crate::TraitDictionaryPlan {
+                trait_id: TraitId(3),
+                arguments: vec![CheckedType::I32],
+                implementation: crate::LoweredTraitImplementationId::for_test(0),
+                layout: crate::lower::TraitDictionaryLayout::new(0, 0, 0),
+                slots: Vec::new(),
+                prerequisites: Vec::new(),
+                associated: Vec::new(),
+                methods: Vec::new(),
+                expanded: false,
+            }),
+            LoweredArtifactPlan::TraitMemberEntry(crate::lower::TraitMemberEntryPlan {
+                method: TraitMethodId(4),
+                callee: None,
+                function_type: simple_callable(),
+                descriptors: 1,
+                dictionaries: 1,
+                slot: 0,
+                own_descriptors: 0,
             }),
         ];
         assert_eq!(plans.len(), keys.len());

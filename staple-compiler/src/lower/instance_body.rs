@@ -22,8 +22,8 @@ use crate::specialization::{
 use crate::{
     CheckedCoercion, CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedProductType,
     CheckedPropagation, CheckedResource, CheckedTraitBound, CheckedTraitDispatch, CheckedType,
-    FunctionId, SymbolId, TypeId, TypeParameterId, contains_type_parameter, substitute_effect_set,
-    substitute_type,
+    FunctionId, InitializerId, SymbolId, TypeId, TypeParameterId, contains_type_parameter,
+    substitute_effect_set, substitute_type,
 };
 
 use super::instance_resolution::{
@@ -121,6 +121,8 @@ pub(crate) enum LoweredBoundTarget {
     /// The site keeps its non-source route (indirect closure, external,
     /// intrinsic, or ordinary constructor call).
     Route(LoweredCallableCategory),
+    /// A trait member read from a dictionary at a run-time obligation.
+    Dictionary(super::trait_dictionaries::DictionarySlotCall),
 }
 
 impl LoweredBoundTarget {
@@ -163,10 +165,28 @@ pub(crate) struct LoweredInstanceBody {
     pub template: FunctionId,
     /// The template declaration origin.
     pub origin: Origin,
-    /// The concrete function signature; every checked value is substituted.
+    /// The instance signature, retaining the parameters supplied at runtime.
     pub signature: CheckedFunctionType,
     /// Substituted bounds used by the body.
     pub bounds: Vec<CheckedTraitBound>,
+    /// Runtime dictionary obligations after substitution, in checked bound
+    /// order, including prerequisites. Concrete and descriptor marker bounds
+    /// are absent. Recipe planning consumes these; they are not an ABI count.
+    pub dictionary_obligations: Vec<CheckedTraitBound>,
+    /// Hidden dictionary arguments in lexical declaration order.
+    pub dictionary_bounds: Vec<CheckedTraitBound>,
+    pub dictionary_calls: BTreeMap<
+        super::trait_dictionaries::DictionarySite,
+        Vec<super::trait_dictionaries::DictionaryCallArgument>,
+    >,
+    /// Dictionaries a callable value stores in its closure environment.
+    pub dictionary_values: BTreeMap<
+        super::LoweredCallableValueId,
+        Vec<super::trait_dictionaries::DictionaryCallArgument>,
+    >,
+    /// Available environment/prerequisite routes for expanded obligations.
+    pub dictionary_environment_recipes:
+        Vec<Option<super::trait_dictionaries::EnvironmentDictionaryRecipe>>,
     pub parameter_style: FunctionParameterStyle,
     /// The instance-local parameter pattern.
     pub parameter_pattern: PatternId,
@@ -202,6 +222,9 @@ pub(crate) struct LoweredInstanceBody {
     /// The symbols emission tracks for scope-exit cleanup, in registration
     /// order (pattern traversal order).
     pub owned_bindings: Vec<LoweredOwnedBinding>,
+    /// Reabstraction plans at concrete-to-dynamic boundaries, keyed by
+    /// the call site and the argument index (`None` for the result).
+    pub conversions: BTreeMap<(LoweredCallId, Option<usize>), super::LoweredReabstraction>,
     // Instance-local arenas. IDs are meaningful only inside this body.
     pub(super) blocks: Arena<LoweredBlock, BlockId>,
     pub(super) items: Arena<LoweredItem, ItemId>,
@@ -242,6 +265,11 @@ impl LoweredInstanceBody {
                 result: Box::new(CheckedType::Never),
             },
             bounds: Vec::new(),
+            dictionary_obligations: Vec::new(),
+            dictionary_bounds: Vec::new(),
+            dictionary_calls: BTreeMap::new(),
+            dictionary_values: BTreeMap::new(),
+            dictionary_environment_recipes: Vec::new(),
             parameter_style: FunctionParameterStyle::Single,
             parameter_pattern: PatternId::from_index(0),
             parameters: Vec::new(),
@@ -257,6 +285,7 @@ impl LoweredInstanceBody {
             artifact_uses: Vec::new(),
             instance_uses: Vec::new(),
             owned_bindings: Vec::new(),
+            conversions: BTreeMap::new(),
             blocks: Arena::default(),
             items: Arena::default(),
             expressions: Arena::default(),
@@ -275,7 +304,15 @@ impl LoweredInstanceBody {
         }
     }
 
-    /// The body's concrete signature.
+    #[cfg(test)]
+    pub(crate) fn layout_value_types(&self) -> impl Iterator<Item = &CheckedType> {
+        self.expressions
+            .iter()
+            .map(|(_, expression)| &expression.value_type)
+            .chain(self.places.iter().map(|(_, place)| &place.value_type))
+    }
+
+    /// The specialized body signature.
     pub(crate) fn signature(&self) -> &CheckedFunctionType {
         &self.signature
     }
@@ -286,6 +323,14 @@ impl LoweredInstanceBody {
 
     pub(crate) fn item(&self, id: ItemId) -> Option<&LoweredItem> {
         self.items.get(id)
+    }
+
+    pub(crate) fn expressions(&self) -> impl Iterator<Item = (ExpressionId, &LoweredExpression)> {
+        self.expressions.iter()
+    }
+
+    pub(crate) fn items(&self) -> impl Iterator<Item = (ItemId, &LoweredItem)> {
+        self.items.iter()
     }
 
     pub(crate) fn expression(&self, id: ExpressionId) -> Option<&LoweredExpression> {
@@ -604,6 +649,31 @@ impl<'a> BodyCloner<'a> {
         };
         self.body.origin = function.origin.clone();
         self.body.signature = self.function_type(&function.signature);
+        self.body.dictionary_bounds = super::trait_dictionaries::declared_runtime_obligations(
+            self.program,
+            &function,
+            &self.substitution,
+            self.enclosing.key.runtime(),
+            self.enclosing.key.runtime_effects(),
+        );
+        self.body.dictionary_obligations = super::trait_dictionaries::runtime_obligations(
+            &self.program.semantic_ids,
+            &function.bounds,
+            &self.substitution,
+            self.enclosing.key.runtime(),
+        );
+        self.body.dictionary_environment_recipes = self
+            .body
+            .dictionary_obligations
+            .iter()
+            .map(|bound| {
+                super::trait_dictionaries::environment_recipe(
+                    self.program,
+                    &self.body.dictionary_bounds,
+                    bound,
+                )
+            })
+            .collect();
         self.body.bounds = function
             .bounds
             .iter()
@@ -617,6 +687,27 @@ impl<'a> BodyCloner<'a> {
                     .iter()
                     .any(|argument| contains_type_parameter(&self.ty(argument)))
                 {
+                    let marker = Some(bound.trait_id) == self.program.semantic_ids.copy_trait
+                        || Some(bound.trait_id) == self.program.semantic_ids.sized_trait;
+                    let runtime = self.enclosing.key.runtime();
+                    if marker
+                        && !runtime.is_empty()
+                        && bound.arguments.iter().all(|argument| {
+                            !super::instance_resolution::contains_parameter_outside_scope(
+                                &self.ty(argument),
+                                runtime,
+                            )
+                        })
+                    {
+                        return Some(CheckedTraitBound {
+                            trait_id: bound.trait_id,
+                            arguments: bound
+                                .arguments
+                                .iter()
+                                .map(|argument| self.ty(argument))
+                                .collect(),
+                        });
+                    }
                     return None;
                 }
                 match self.program.complete_declared_bound(
@@ -672,6 +763,98 @@ impl<'a> BodyCloner<'a> {
             .as_ref()
             .map(|coercion| self.coercion(coercion));
         self.body.body_moved_symbols = function.body_moved_symbols.clone();
+        self.route_runtime_scheme_instantiations();
+        for (call_id, call) in self.body.calls.iter() {
+            if let Some(super::LoweredBoundTarget::Instance(callee)) = self
+                .body
+                .bindings
+                .get(&super::LoweredBindingSite::Call(call_id))
+            {
+                match super::trait_dictionaries::plan_direct_call(
+                    self.program,
+                    Some(&self.enclosing),
+                    &self.body.dictionary_bounds,
+                    call,
+                    *callee,
+                ) {
+                    Ok(arguments) if !arguments.is_empty() => {
+                        self.body
+                            .dictionary_calls
+                            .insert(super::trait_dictionaries::DictionarySite::Call(call_id), arguments);
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.diagnostics.push(error),
+                }
+            }
+        }
+        for (call_id, call) in self.body.calls.iter() {
+            if let Some(LoweredBoundTarget::Dictionary(dispatch)) =
+                self.body.bindings.get(&LoweredBindingSite::Call(call_id))
+                && !dispatch.dictionaries.is_empty()
+            {
+                self.body.dictionary_calls.insert(
+                    super::trait_dictionaries::DictionarySite::Call(call_id),
+                    dispatch.dictionaries.clone(),
+                );
+            }
+            if call.scheme.is_some() {
+                match super::trait_dictionaries::plan_scheme_call(
+                    self.program,
+                    Some(&self.enclosing),
+                    &self.body.dictionary_bounds,
+                    call,
+                ) {
+                    Ok(arguments) if !arguments.is_empty() => {
+                        self.body
+                            .dictionary_calls
+                            .insert(super::trait_dictionaries::DictionarySite::Call(call_id), arguments);
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.diagnostics.push(error),
+                }
+            }
+        }
+        let mut coercions = Vec::new();
+        for (expression_id, expression) in self.body.expressions() {
+            match super::trait_dictionaries::plan_instantiation(
+                self.program,
+                Some(&self.enclosing),
+                &self.body.dictionary_bounds,
+                expression,
+            ) {
+                Ok(arguments) if !arguments.is_empty() => {
+                    coercions.push((
+                        super::trait_dictionaries::DictionarySite::Coercion(expression_id),
+                        arguments,
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) => self.diagnostics.push(error),
+            }
+        }
+        self.body.dictionary_calls.extend(coercions);
+        for (value_id, value) in self.body.callable_values.iter() {
+            if let Some(super::LoweredBoundTarget::Instance(callee)) = self
+                .body
+                .bindings
+                .get(&super::LoweredBindingSite::CallableValue(value_id))
+            {
+                match super::trait_dictionaries::plan_callable_value(
+                    self.program,
+                    Some(&self.enclosing),
+                    &self.body.dictionary_bounds,
+                    value,
+                    *callee,
+                ) {
+                    Ok(arguments) if !arguments.is_empty() => {
+                        self.body.dictionary_values.insert(value_id, arguments);
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.diagnostics.push(error),
+                }
+            }
+        }
+
         self.body.body_coercion_plan = self.body.body_coercion.as_ref().and_then(|coercion| {
             super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target).ok()
         });
@@ -740,6 +923,11 @@ impl<'a> BodyCloner<'a> {
     fn dispatch(&self, dispatch: &CheckedTraitDispatch) -> CheckedTraitDispatch {
         CheckedTraitDispatch {
             method: dispatch.method,
+            member_arguments: dispatch
+                .member_arguments
+                .iter()
+                .map(|argument| self.ty(argument))
+                .collect(),
             arguments: dispatch
                 .arguments
                 .iter()
@@ -831,9 +1019,13 @@ impl<'a> BodyCloner<'a> {
         }
     }
 
+    /// A generic `def`'s binding stays state-only even where this instance
+    /// substitutes its own parameters, so every owner agrees on its cell
+    /// layout with the owner that allocated it.
     fn symbol_initialization_state_only(&self, symbol: SymbolId) -> bool {
         self.program.symbols.get(symbol).is_some_and(|record| {
-            contains_type_parameter(&self.ty(&record.initialization_state_type))
+            record.declared_scheme
+                || contains_type_parameter(&self.ty(&record.initialization_state_type))
         })
     }
 
@@ -1244,9 +1436,18 @@ impl<'a> BodyCloner<'a> {
         // Recompute the coercion plan from the substituted types, like the
         // other concrete-sensitive derived facts. A concrete pair unsupported
         // by lowering produces a diagnostic rather than a missing plan.
+        let instantiation_substitutions = expression
+            .instantiation_substitutions
+            .iter()
+            .map(|(id, value)| (*id, self.ty(value)))
+            .collect();
         let coercion_plan = match &coercion {
             Some(coercion) => {
-                match super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
+                match super::LoweredCoercionPlan::plan_seeded(
+                    &coercion.source,
+                    &coercion.target,
+                    &instantiation_substitutions,
+                ) {
                     Ok(plan) => Some(plan),
                     Err(message) => {
                         self.diagnostics
@@ -1264,6 +1465,7 @@ impl<'a> BodyCloner<'a> {
             effects: self.effects(&expression.effects),
             coercion,
             coercion_plan,
+            instantiation_substitutions,
             moved_symbols: expression.moved_symbols,
             kind,
         });
@@ -1538,6 +1740,7 @@ impl<'a> BodyCloner<'a> {
             effects: CheckedEffectSet::default(),
             coercion: None,
             coercion_plan: None,
+            instantiation_substitutions: Default::default(),
             moved_symbols: Vec::new(),
             kind: LoweredExpressionKind::Deferred(super::DeferredExpressionFamily::Callable),
         })
@@ -2012,6 +2215,38 @@ fn enclosing_request(
     }
 }
 
+/// Member instances of every builder in a recipe, with the requesting origin.
+fn recipe_member_instances(
+    recipe: &super::DictionaryRecipe,
+    origin: &Origin,
+    members: &mut Vec<(FunctionInstanceId, Origin)>,
+) {
+    let build = match recipe {
+        super::DictionaryRecipe::Builder(build) => build,
+        super::DictionaryRecipe::Structural(structural) => {
+            for component in &structural.components {
+                recipe_member_instances(&component.recipe, origin, members);
+            }
+            for prerequisite in structural.prerequisites.iter().flatten() {
+                recipe_member_instances(&prerequisite.recipe, origin, members);
+            }
+            return;
+        }
+        _ => return,
+    };
+    for member in &build.members {
+        members.push((member.instance, origin.clone()));
+        for dictionary in &member.dictionaries {
+            if let super::MemberDictionary::Recipe(argument) = dictionary {
+                recipe_member_instances(&argument.recipe, origin, members);
+            }
+        }
+    }
+    for argument in build.prerequisites.iter().flatten() {
+        recipe_member_instances(&argument.recipe, origin, members);
+    }
+}
+
 /// The trait a recipe selects, used by evidence-only sites.
 fn evidence_trait_id(evidence: &TraitEvidence) -> crate::TraitId {
     match evidence {
@@ -2033,6 +2268,12 @@ impl<'a> BodyCloner<'a> {
         let mut call = original.clone();
         call.callee = call.callee.map(|callee| self.clone_expression(callee));
         call.function_type = self.function_type(&call.function_type);
+        call.scheme = call.scheme.take().and_then(|scheme| {
+            match self.ty(&CheckedType::Forall(Box::new(scheme))) {
+                CheckedType::Forall(scheme) => Some(*scheme),
+                _ => None,
+            }
+        });
         for argument in &mut call.arguments {
             argument.expression = argument
                 .expression
@@ -2155,6 +2396,17 @@ impl<'a> BodyCloner<'a> {
             return error_callable_value(self);
         };
         let mut value = original.clone();
+        if let LoweredCallableTarget::IndirectClosure { callee } = &value.target {
+            let callee = self.clone_expression(*callee);
+            value.target = LoweredCallableTarget::IndirectClosure { callee };
+        }
+        value.scheme =
+            value.scheme.map(
+                |scheme| match self.ty(&CheckedType::Forall(Box::new(scheme))) {
+                    CheckedType::Forall(scheme) => *scheme,
+                    _ => unreachable!("substitution preserves quantified callable schemes"),
+                },
+            );
         value.function_type = self.function_type(&value.function_type);
         let concrete_function_type = value.function_type.clone();
         value.closure = value
@@ -2372,6 +2624,8 @@ impl<'a> BodyCloner<'a> {
                 CallSubstitutions::default(),
                 None,
                 false,
+                false,
+                false,
             ) {
                 self.body.bindings.insert(
                     LoweredBindingSite::DerivedEvaluator(new),
@@ -2486,6 +2740,8 @@ impl<'a> BodyCloner<'a> {
                 function_type,
                 CallSubstitutions::default(),
                 None,
+                false,
+                false,
                 false,
             ) {
                 self.body.bindings.insert(
@@ -2621,6 +2877,8 @@ impl<'a> BodyCloner<'a> {
         substitutions: CallSubstitutions,
         evidence: Option<TraitEvidence>,
         current: bool,
+        differential: bool,
+        polymorphic: bool,
     ) -> Option<FunctionInstanceId> {
         let (function_type, substitutions, evidence) =
             if self.program.relevant_parameters(function).is_empty() {
@@ -2635,6 +2893,8 @@ impl<'a> BodyCloner<'a> {
             } else {
                 (function_type, substitutions, evidence)
             };
+        let call_function_type = function_type.clone();
+        let call_substitutions = substitutions.clone();
         let request = InstanceResolutionRequest {
             function,
             origin: origin.clone(),
@@ -2656,7 +2916,27 @@ impl<'a> BodyCloner<'a> {
                 }
             }
         } else {
-            match self.program.resolve_instance_request(&request) {
+            let runtime = if polymorphic {
+                Some(self.program.scheme_runtime_scope(function))
+            } else if differential {
+                self.program
+                    .differential_call_runtime(
+                        function,
+                        &self.enclosing.key.runtime_ids(),
+                        false,
+                        &call_function_type,
+                        &call_substitutions,
+                    )
+            } else {
+                None
+            };
+            let resolved = match runtime {
+                Some(runtime) => self
+                    .program
+                    .resolve_instance_request_in_scope(&request, &runtime),
+                None => self.program.resolve_instance_request(&request),
+            };
+            match resolved {
                 Ok(resolved) => resolved,
                 Err(diagnostic) => {
                     self.diagnostics.push(diagnostic);
@@ -2707,6 +2987,8 @@ impl<'a> BodyCloner<'a> {
             function_type,
             CallSubstitutions::default(),
             None,
+            false,
+            false,
             false,
         ) {
             self.body
@@ -2761,6 +3043,8 @@ impl<'a> BodyCloner<'a> {
                 CallSubstitutions::default(),
                 None,
                 false,
+                false,
+                false,
             ) {
                 self.body
                     .bindings
@@ -2784,6 +3068,8 @@ impl<'a> BodyCloner<'a> {
                     original.substitutions.clone(),
                     original.evidence.clone(),
                     current,
+                    true,
+                    false,
                 ) {
                     self.body
                         .bindings
@@ -2813,6 +3099,45 @@ impl<'a> BodyCloner<'a> {
                     original.substitutions.clone(),
                 );
             }
+            LoweredCallableTarget::Intrinsic {
+                intrinsic: crate::IntrinsicFunction::BufferClone,
+                ..
+            } if self.buffer_clone_element(original).is_some() => {
+                // Elements of a run-time type clone through its dictionary.
+                let element = self.buffer_clone_element(original).expect("checked above");
+                let program = self.program;
+                let clone = program.semantic_ids.clone_trait.and_then(|trait_id| {
+                    let method = program.traits.get(trait_id)?.methods.first().copied()?;
+                    Some((trait_id, method))
+                });
+                match clone {
+                    Some((trait_id, method)) => {
+                        let obligation = CheckedTraitBound {
+                            trait_id,
+                            arguments: vec![element],
+                        };
+                        match super::trait_dictionaries::plan_slot_call(
+                            program,
+                            Some(&self.enclosing),
+                            &self.body.dictionary_bounds,
+                            &obligation,
+                            method,
+                            &original.origin,
+                        ) {
+                            Ok(dispatch) => {
+                                self.body
+                                    .bindings
+                                    .insert(site, LoweredBoundTarget::Dictionary(dispatch));
+                            }
+                            Err(diagnostic) => self.diagnostics.push(diagnostic),
+                        }
+                    }
+                    None => self.diagnostics.push(Diagnostic::new(
+                        original.origin.span.clone(),
+                        "buffer clone has no Clone trait",
+                    )),
+                }
+            }
             LoweredCallableTarget::IndirectClosure { .. }
             | LoweredCallableTarget::ExternalFunction { .. }
             | LoweredCallableTarget::Intrinsic { .. }
@@ -2821,6 +3146,121 @@ impl<'a> BodyCloner<'a> {
                     .bindings
                     .insert(site, LoweredBoundTarget::Route(original.target.category()));
             }
+        }
+    }
+
+    /// A capturing scheme lambda used at instantiated types binds the instance
+    /// for those types. When an instantiation mentions this body's run-time
+    /// parameters, that instance keeps the scheme's own parameters at run
+    /// time: it is the polymorphic entry, whose closure stores
+    /// only the enclosing dictionaries before its captures. The occurrence is then a polymorphic
+    /// value and the call through it a polymorphic call, which passes the
+    /// scheme's descriptors and dictionaries, instead of a closure call
+    /// that would expect an instantiated closure.
+    fn route_runtime_scheme_instantiations(&mut self) {
+        let mut routed = Vec::new();
+        for (value_id, value) in self.body.callable_values.iter() {
+            if value.scheme.is_some() {
+                continue;
+            }
+            let LoweredCallableTarget::DirectFunction { function, .. } = &value.target else {
+                continue;
+            };
+            let Some(template) = self.program.functions.get(*function) else {
+                continue;
+            };
+            let Some(scheme) = &template.scheme else {
+                continue;
+            };
+            // Only a capturing closure has an environment tail after its
+            // dictionaries, which every closure of one instance must lay out
+            // alike. A capture-free template's instantiated closure simply
+            // stores every dictionary its entry binds.
+            if template.captures.is_empty() {
+                continue;
+            }
+            let Some(LoweredBoundTarget::Instance(instance)) = self
+                .body
+                .bindings
+                .get(&LoweredBindingSite::CallableValue(value_id))
+            else {
+                continue;
+            };
+            let keeps_scheme = self
+                .program
+                .instances
+                .get(*instance)
+                .and_then(|record| self.program.specializations.instance(record.ordinal))
+                .is_some_and(|key| {
+                    template
+                        .scheme_type_parameters
+                        .iter()
+                        .any(|parameter| key.runtime().contains(parameter))
+                });
+            if !keeps_scheme {
+                continue;
+            }
+            let scheme = match self.ty(&CheckedType::Forall(Box::new(scheme.clone()))) {
+                CheckedType::Forall(scheme) => *scheme,
+                _ => continue,
+            };
+            routed.push((value_id, scheme, template.scheme_type_parameters.clone()));
+        }
+        for (value_id, scheme, parameters) in routed {
+            let entries = match self.body.callable_values.get_mut(value_id) {
+                Some(value) => {
+                    value.scheme = Some(scheme.clone());
+                    value
+                        .substitutions
+                        .types
+                        .iter()
+                        .filter(|entry| parameters.contains(&entry.parameter))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                }
+                None => continue,
+            };
+            let calls = self
+                .body
+                .calls
+                .iter()
+                .filter_map(|(call_id, call)| match &call.target {
+                    LoweredCallableTarget::IndirectClosure { callee }
+                        if call.scheme.is_none()
+                            && matches!(
+                                self.body.expression(*callee).map(|expression| &expression.kind),
+                                Some(LoweredExpressionKind::CallableValue(id)) if *id == value_id
+                            ) =>
+                    {
+                        Some(call_id)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for call_id in calls {
+                if let Some(call) = self.body.calls.get_mut(call_id) {
+                    call.scheme = Some(scheme.clone());
+                    for entry in &entries {
+                        if !call
+                            .substitutions
+                            .types
+                            .iter()
+                            .any(|existing| existing.parameter == entry.parameter)
+                        {
+                            call.substitutions.types.push(entry.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The element type of a `__buffer_clone` whose elements mention run-time
+    /// parameters of this instance.
+    fn buffer_clone_element(&self, call: &LoweredCall) -> Option<CheckedType> {
+        match self.ty(&call.result_type) {
+            CheckedType::Buffer(element) if contains_type_parameter(&element) => Some(*element),
+            _ => None,
         }
     }
 
@@ -2846,6 +3286,8 @@ impl<'a> BodyCloner<'a> {
                     original.substitutions.clone(),
                     original.evidence.clone(),
                     current,
+                    false,
+                    original.scheme.is_some(),
                 ) {
                     self.body
                         .bindings
@@ -2858,6 +3300,22 @@ impl<'a> BodyCloner<'a> {
             | LoweredCallableTarget::StructuralTraitMethod {
                 trait_id, method, ..
             } => {
+                if original.scheme.is_some() {
+                    let (key, _) =
+                        super::trait_dictionaries::member_value_entry(self.program, *method);
+                    match self.artifacts_by_key.get(&key) {
+                        Some(ordinal) => {
+                            self.body
+                                .bindings
+                                .insert(site, LoweredBoundTarget::Artifact(*ordinal));
+                        }
+                        None => self.diagnostics.push(Diagnostic::new(
+                            original.origin.span.clone(),
+                            "trait member entry was not reserved",
+                        )),
+                    }
+                    return;
+                }
                 let Some(evidence) = &original.evidence else {
                     self.diagnostics.push(Diagnostic::new(
                         original.origin.span.clone(),
@@ -2885,6 +3343,7 @@ impl<'a> BodyCloner<'a> {
                     original.adapter,
                     &original.function_type,
                     &original.origin,
+                    original.scheme.as_ref(),
                 );
             }
             LoweredCallableTarget::IndirectClosure { .. }
@@ -2919,6 +3378,42 @@ impl<'a> BodyCloner<'a> {
                 return;
             }
         };
+        if let Some(obligation) = super::trait_dictionaries::site_runtime_obligation(
+            &self.program.semantic_ids,
+            evidence,
+            &site_environment,
+            self.enclosing.key.runtime(),
+        ) {
+            match super::trait_dictionaries::plan_slot_call(
+                self.program,
+                Some(&self.enclosing),
+                &self.body.dictionary_bounds,
+                &obligation,
+                method,
+                origin,
+            ) {
+                Ok(mut dispatch) => {
+                    if let Err(error) = super::trait_dictionaries::instantiate_slot_call(
+                        self.program,
+                        &self.enclosing,
+                        &self.body.dictionary_bounds,
+                        &mut dispatch,
+                        method,
+                        recorded_type.as_ref(),
+                        &substitutions,
+                        origin,
+                    ) {
+                        self.diagnostics.push(error);
+                        return;
+                    }
+                    self.body
+                        .bindings
+                        .insert(site, LoweredBoundTarget::Dictionary(dispatch));
+                }
+                Err(diagnostic) => self.diagnostics.push(diagnostic),
+            }
+            return;
+        }
         let resolved =
             match self
                 .program
@@ -2966,6 +3461,8 @@ impl<'a> BodyCloner<'a> {
                     function_type,
                     substitutions,
                     evidence,
+                    false,
+                    false,
                     false,
                 ) {
                     self.store_resolved_evidence(site, &resolved);
@@ -3096,6 +3593,7 @@ impl<'a> BodyCloner<'a> {
         adapter: super::LoweredCallableAdapter,
         callable_type: &CheckedFunctionType,
         origin: &Origin,
+        scheme: Option<&crate::CheckedScheme>,
     ) {
         let concrete = match concretize_function_type(
             callable_type,
@@ -3108,7 +3606,21 @@ impl<'a> BodyCloner<'a> {
                 return;
             }
         };
-        match ConstructorAdapterKey::new(symbol, type_id, adapter, &concrete, origin) {
+        let scheme = scheme.map(|scheme| {
+            let map = Some(&self.enclosing.environment)
+                .map(|environment| environment.substitution_map())
+                .unwrap_or_default();
+            match crate::substitute_type(CheckedType::Forall(Box::new(scheme.clone())), &map) {
+                CheckedType::Forall(scheme) => *scheme,
+                _ => unreachable!(),
+            }
+        });
+        let key = if let Some(scheme) = &scheme {
+            ConstructorAdapterKey::polymorphic(symbol, type_id, adapter, scheme, origin)
+        } else {
+            ConstructorAdapterKey::shape(symbol, type_id, adapter, &concrete, origin)
+        };
+        match key {
             Ok(key) => {
                 let key = ArtifactRequestKey::ConstructorAdapter(key);
                 match self.artifacts_by_key.get(&key) {
@@ -3130,6 +3642,7 @@ impl<'a> BodyCloner<'a> {
     fn error_call(&mut self) -> LoweredCallId {
         let callee = self.error_expression();
         self.body.calls.push(LoweredCall {
+            scheme: None,
             origin: Origin::compiler(),
             target: LoweredCallableTarget::IndirectClosure { callee },
             callee: Some(callee),
@@ -3170,6 +3683,7 @@ fn error_callable_value(cloner: &mut BodyCloner<'_>) -> LoweredCallableValueId {
     let callee = cloner.error_expression();
     let function_type = cloner.error_signature();
     cloner.body.callable_values.push(LoweredCallableValue {
+        scheme: None,
         origin: Origin::compiler(),
         target: LoweredCallableTarget::IndirectClosure { callee },
         function_type,
@@ -3193,6 +3707,355 @@ fn error_with(cloner: &mut BodyCloner<'_>) -> LoweredWithId {
         body,
         scope_exit: super::LoweredScopeExit::Ordinary,
     })
+}
+
+impl LoweredProgram {
+    /// Records the reabstraction plan at every concrete-to-dynamic call
+    /// boundary. Runs after every instance body is materialized, so each
+    /// callee's dynamic signature is available.
+    pub(super) fn record_reabstractions(&mut self) {
+        let instances = self.instances.iter().map(|(id, _)| id).collect::<Vec<_>>();
+        for id in instances {
+            let caller_runtime_empty = self
+                .specializations
+                .instance(self.instances.get(id).expect("instance").ordinal)
+                .is_some_and(|key| !key.is_dynamic());
+            let Some(body) = self
+                .instances
+                .get(id)
+                .and_then(|record| record.body.as_ref())
+            else {
+                continue;
+            };
+            let calls = body
+                .bindings
+                .iter()
+                .filter_map(|(site, target)| {
+                    let super::LoweredBindingSite::Call(call) = site else {
+                        return None;
+                    };
+                    let super::LoweredBoundTarget::Instance(callee) = target else {
+                        return None;
+                    };
+                    Some((*call, *callee))
+                })
+                .collect::<Vec<_>>();
+            let mut conversions = BTreeMap::new();
+            // Polymorphic values and dictionary slots reach their entry ABI,
+            // including a generic member's quantified callback effect row.
+            let polymorphic = body
+                .calls
+                .iter()
+                .filter_map(|(call, record)| {
+                    if let Some(super::LoweredBoundTarget::Dictionary(dispatch)) =
+                        body.bindings.get(&super::LoweredBindingSite::Call(call))
+                    {
+                        return Some((call, dispatch.entry_type.clone()));
+                    }
+                    let signature = match record.scheme.as_ref()?.body.as_ref() {
+                        CheckedType::Function(signature) => signature.clone(),
+                        _ => return None,
+                    };
+                    matches!(
+                        record.target,
+                        super::LoweredCallableTarget::IndirectClosure { .. }
+                    )
+                    .then_some((call, signature))
+                })
+                .collect::<Vec<_>>();
+            for (call, signature) in polymorphic {
+                let Some(record) = body.call(call) else {
+                    continue;
+                };
+                let argument_type = |index: usize| {
+                    let expression = record.arguments.get(index)?.expression?;
+                    let expression = body.expression(expression)?;
+                    let value_type = expression
+                        .coercion
+                        .as_ref()
+                        .map_or(&expression.value_type, |coercion| &coercion.target);
+                    Some(value_type.clone())
+                };
+                Self::reabstraction_across(
+                    call,
+                    record,
+                    argument_type,
+                    &signature,
+                    false,
+                    caller_runtime_empty,
+                    !caller_runtime_empty,
+                    &mut conversions,
+                );
+            }
+            for (call, callee) in calls {
+                let Some(record) = body.call(call) else {
+                    continue;
+                };
+                let argument_type = |index: usize| {
+                    let expression = record.arguments.get(index)?.expression?;
+                    let expression = body.expression(expression)?;
+                    let value_type = expression
+                        .coercion
+                        .as_ref()
+                        .map_or(&expression.value_type, |coercion| &coercion.target);
+                    Some(value_type.clone())
+                };
+                self.reabstraction_into(
+                    call,
+                    record,
+                    argument_type,
+                    callee,
+                    caller_runtime_empty,
+                    &mut conversions,
+                );
+            }
+            if let Some(record) = self.instances.get_mut(id)
+                && let Some(body) = record.body.as_mut()
+            {
+                body.conversions = conversions;
+            }
+        }
+        // Module initializers use the program arenas. Their binding tables are
+        // built later (inside the artifact closure), so each direct call is
+        // resolved here to find its callee instance.
+        let count = self.initializers.len();
+        self.initializer_conversions = vec![BTreeMap::new(); count];
+        for index in 0..count {
+            let initializer = InitializerId::from_index(index);
+            let calls = self.initializer_direct_calls(initializer);
+            let mut conversions = BTreeMap::new();
+            for call in calls {
+                let Some(record) = self.calls.get(call) else {
+                    continue;
+                };
+                if let (Some(scheme), super::LoweredCallableTarget::IndirectClosure { .. }) =
+                    (&record.scheme, &record.target)
+                    && let CheckedType::Function(signature) = scheme.body.as_ref()
+                {
+                    let argument_type = |argument_index: usize| {
+                        let expression = record.arguments.get(argument_index)?.expression?;
+                        let expression = self.expressions.get(expression)?;
+                        let value_type = expression
+                            .coercion
+                            .as_ref()
+                            .map_or(&expression.value_type, |coercion| &coercion.target);
+                        Some(value_type.clone())
+                    };
+                    Self::reabstraction_across(
+                        call,
+                        record,
+                        argument_type,
+                        signature,
+                        false,
+                        true,
+                        false,
+                        &mut conversions,
+                    );
+                    continue;
+                }
+                let super::LoweredCallableTarget::DirectFunction { function, .. } = &record.target
+                else {
+                    continue;
+                };
+                let request = InstanceResolutionRequest {
+                    function: *function,
+                    origin: record.origin.clone(),
+                    function_type: record.function_type.clone(),
+                    substitutions: record.substitutions.clone(),
+                    evidence: record.evidence.clone(),
+                    target: InstanceResolutionTarget::Root,
+                };
+                // The initializer is a concrete owner, so the differential
+                // option selects the dynamic instance the binder will use.
+                let runtime = self.differential_call_runtime(
+                    *function,
+                    &std::collections::BTreeSet::new(),
+                    false,
+                    &record.function_type,
+                    &record.substitutions,
+                );
+                let resolved = match runtime {
+                    Some(runtime) => self.resolve_instance_request_in_scope(&request, &runtime),
+                    None => self.resolve_instance_request(&request),
+                };
+                let Ok(resolved) = resolved else {
+                    continue;
+                };
+                let Some(ordinal) = self.specializations.instance_ordinal(&resolved.key) else {
+                    continue;
+                };
+                let callee = FunctionInstanceId::from_index(ordinal.index());
+                let argument_type = |argument_index: usize| {
+                    let expression = record.arguments.get(argument_index)?.expression?;
+                    let expression = self.expressions.get(expression)?;
+                    let value_type = expression
+                        .coercion
+                        .as_ref()
+                        .map_or(&expression.value_type, |coercion| &coercion.target);
+                    Some(value_type.clone())
+                };
+                self.reabstraction_into(
+                    call,
+                    record,
+                    argument_type,
+                    callee,
+                    true,
+                    &mut conversions,
+                );
+            }
+            self.initializer_conversions[index] = conversions;
+        }
+    }
+
+    /// Every direct call expression reachable from one module initializer.
+    fn initializer_direct_calls(&self, initializer: InitializerId) -> Vec<LoweredCallId> {
+        struct Collector {
+            calls: Vec<LoweredCallId>,
+        }
+        impl super::cleanup_artifacts::LoweredOwnerVisitor for Collector {
+            fn call_id_site(
+                &mut self,
+                id: LoweredCallId,
+                _call: &LoweredCall,
+            ) -> Result<(), Vec<Diagnostic>> {
+                self.calls.push(id);
+                Ok(())
+            }
+        }
+        let mut collector = Collector { calls: Vec::new() };
+        let _ = super::cleanup_artifacts::walk_owner(
+            self,
+            super::emission::OwnerArenas::Initializer(initializer),
+            &mut collector,
+        );
+        collector.calls
+    }
+
+    /// Records one boundary's conversions from a call's materialized types and
+    /// the callee's dynamic signature. `caller_runtime_empty` is the calling
+    /// instance's or initializer's run-time set being empty.
+    fn reabstraction_into(
+        &self,
+        call_id: LoweredCallId,
+        call: &LoweredCall,
+        argument_type: impl Fn(usize) -> Option<CheckedType>,
+        callee: FunctionInstanceId,
+        caller_runtime_empty: bool,
+        conversions: &mut BTreeMap<(LoweredCallId, Option<usize>), super::LoweredReabstraction>,
+    ) {
+        let Some(instance) = self.instances.get(callee) else {
+            return;
+        };
+        let Some(key) = self.specializations.instance(instance.ordinal) else {
+            return;
+        };
+        let callee_runtime_empty = !key.is_dynamic();
+        if caller_runtime_empty == callee_runtime_empty {
+            return;
+        }
+        let Some(signature) = instance.body.as_ref().map(|body| body.signature.clone()) else {
+            return;
+        };
+        Self::reabstraction_across(
+            call_id,
+            call,
+            argument_type,
+            &signature,
+            callee_runtime_empty,
+            caller_runtime_empty,
+            false,
+            conversions,
+        );
+    }
+
+    /// Records the conversions between a caller and a callee whose ABIs
+    /// differ: `signature` is the callee's own (dynamic-shape) function type.
+    fn reabstraction_across(
+        call_id: LoweredCallId,
+        call: &LoweredCall,
+        argument_type: impl Fn(usize) -> Option<CheckedType>,
+        signature: &CheckedFunctionType,
+        callee_runtime_empty: bool,
+        caller_runtime_empty: bool,
+        dynamic_caller_of_scheme: bool,
+        conversions: &mut BTreeMap<(LoweredCallId, Option<usize>), super::LoweredReabstraction>,
+    ) {
+        // A dynamic caller of a polymorphic value still holds concrete
+        // function values whose ABI differs from the quantified body's.
+        if !dynamic_caller_of_scheme && caller_runtime_empty == callee_runtime_empty {
+            return;
+        }
+        let concrete_to_dynamic = !callee_runtime_empty;
+        let whole = signature.mutations.contains(&crate::CheckedMutation::Whole);
+        let parameter_types = if whole {
+            vec![signature.parameter.as_ref().clone()]
+        } else {
+            super::flattened_parameter_types(&signature.parameter)
+        };
+        let actual_types = if whole {
+            vec![call.function_type.parameter.as_ref().clone()]
+        } else {
+            super::flattened_parameter_types(&call.function_type.parameter)
+        };
+        for (slot, parameter) in parameter_types.iter().enumerate() {
+            let actual = if caller_runtime_empty {
+                actual_types.get(slot).cloned()
+            } else {
+                call.arguments
+                    .iter()
+                    .enumerate()
+                    .find(|(index, argument)| argument.slot.unwrap_or(*index) == slot)
+                    .and_then(|(index, _)| argument_type(index))
+                    .or_else(|| actual_types.get(slot).cloned())
+            };
+            let Some(actual) = actual else {
+                continue;
+            };
+            let (concrete, dynamic) = if concrete_to_dynamic {
+                (actual, parameter.clone())
+            } else {
+                (parameter.clone(), actual)
+            };
+            if super::value_conversions::needs_conversion(&concrete, &dynamic) {
+                conversions.insert(
+                    (call_id, Some(slot)),
+                    super::LoweredReabstraction {
+                        writeback: whole
+                            || signature
+                                .mutations
+                                .contains(&crate::CheckedMutation::Element(slot)),
+                        direction: if concrete_to_dynamic {
+                            super::LoweredReabstractionDirection::ConcreteToDynamic
+                        } else {
+                            super::LoweredReabstractionDirection::DynamicToConcrete
+                        },
+                        concrete,
+                        dynamic,
+                    },
+                );
+            }
+        }
+        let (concrete, dynamic) = if concrete_to_dynamic {
+            (call.result_type.clone(), signature.result.as_ref().clone())
+        } else {
+            (signature.result.as_ref().clone(), call.result_type.clone())
+        };
+        if super::value_conversions::needs_conversion(&concrete, &dynamic) {
+            conversions.insert(
+                (call_id, None),
+                super::LoweredReabstraction {
+                    writeback: false,
+                    direction: if concrete_to_dynamic {
+                        super::LoweredReabstractionDirection::DynamicToConcrete
+                    } else {
+                        super::LoweredReabstractionDirection::ConcreteToDynamic
+                    },
+                    concrete,
+                    dynamic,
+                },
+            );
+        }
+    }
 }
 
 /// Walks one instance body and verifies its local invariants: every local ID
@@ -3254,10 +4117,11 @@ impl<'a> BodyValidator<'a> {
     fn check_state_layout(&mut self, symbol: SymbolId, state_only: bool, origin: &Origin) {
         let substitutions = self.instance.environment.substitution_map();
         let expected = self.program.symbols.get(symbol).is_some_and(|record| {
-            contains_type_parameter(&substitute_type(
-                record.initialization_state_type.clone(),
-                &substitutions,
-            ))
+            record.declared_scheme
+                || contains_type_parameter(&substitute_type(
+                    record.initialization_state_type.clone(),
+                    &substitutions,
+                ))
         });
         if state_only != expected {
             self.report(
@@ -3318,6 +4182,66 @@ impl<'a> BodyValidator<'a> {
                     self.body.origin.span.clone(),
                     "instance body capture order disagrees with its template",
                 );
+            }
+            if let Some(key) = self.program.specializations.instance(self.instance.ordinal) {
+                let expected = super::trait_dictionaries::runtime_obligations(
+                    &self.program.semantic_ids,
+                    &template.bounds,
+                    &self.instance.environment.substitution_map(),
+                    key.runtime(),
+                );
+                let declared = super::trait_dictionaries::declared_runtime_obligations(
+                    self.program,
+                    template,
+                    &self.instance.environment.substitution_map(),
+                    key.runtime(),
+                    key.runtime_effects(),
+                );
+                if self.body.dictionary_bounds != declared {
+                    self.report(
+                        self.body.origin.span.clone(),
+                        "instance hidden dictionary order disagrees with its declarations",
+                    );
+                }
+                let recipes = expected
+                    .iter()
+                    .map(|bound| {
+                        super::trait_dictionaries::environment_recipe(
+                            self.program,
+                            &declared,
+                            bound,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if self.body.dictionary_environment_recipes != recipes {
+                    self.report(
+                        self.body.origin.span.clone(),
+                        "instance dictionary environment recipes disagree with its bounds",
+                    );
+                }
+                for (bound, recipe) in expected
+                    .iter()
+                    .zip(&self.body.dictionary_environment_recipes)
+                {
+                    if let Some(recipe) = recipe {
+                        if super::trait_dictionaries::environment_recipe_bound(
+                            self.program,
+                            &declared,
+                            recipe,
+                        )
+                        .as_ref()
+                            != Some(bound)
+                        {
+                            self.report(self.body.origin.span.clone(), "instance dictionary prerequisite recipe carries the wrong obligation");
+                        }
+                    }
+                }
+                if self.body.dictionary_obligations != expected {
+                    self.report(
+                        self.body.origin.span.clone(),
+                        "instance dictionary obligations disagree with its runtime substitution",
+                    );
+                }
             }
             if template.body.is_some() != self.body.root.is_some() {
                 self.report(
@@ -3403,6 +4327,120 @@ impl<'a> BodyValidator<'a> {
             self.visit_plan(plan);
         }
         self.check_arena_density();
+        let enclosing = self
+            .program
+            .specializations
+            .instance(self.instance.ordinal)
+            .map(|key| ResolvedInstanceRequest {
+                key: key.clone(),
+                environment: self.instance.environment.clone(),
+                relevant: self.instance.relevant.clone(),
+                evidence: self.instance.evidence.clone(),
+            });
+        let mut expected_dictionary_calls = BTreeMap::new();
+        for (call_id, call) in self.body.calls.iter() {
+            if let Some(super::LoweredBoundTarget::Instance(callee)) = self
+                .body
+                .bindings
+                .get(&super::LoweredBindingSite::Call(call_id))
+            {
+                match super::trait_dictionaries::plan_direct_call(
+                    self.program,
+                    enclosing.as_ref(),
+                    &self.body.dictionary_bounds,
+                    call,
+                    *callee,
+                ) {
+                    Ok(arguments) if !arguments.is_empty() => {
+                        expected_dictionary_calls.insert(
+                            super::trait_dictionaries::DictionarySite::Call(call_id),
+                            arguments,
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.diagnostics.push(error),
+                }
+            }
+        }
+        for (call_id, call) in self.body.calls.iter() {
+            if let Some(LoweredBoundTarget::Dictionary(dispatch)) =
+                self.body.bindings.get(&LoweredBindingSite::Call(call_id))
+                && !dispatch.dictionaries.is_empty()
+            {
+                expected_dictionary_calls.insert(
+                    super::trait_dictionaries::DictionarySite::Call(call_id),
+                    dispatch.dictionaries.clone(),
+                );
+            }
+            if call.scheme.is_some() {
+                match super::trait_dictionaries::plan_scheme_call(
+                    self.program,
+                    enclosing.as_ref(),
+                    &self.body.dictionary_bounds,
+                    call,
+                ) {
+                    Ok(arguments) if !arguments.is_empty() => {
+                        expected_dictionary_calls.insert(
+                            super::trait_dictionaries::DictionarySite::Call(call_id),
+                            arguments,
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.diagnostics.push(error),
+                }
+            }
+        }
+        for (expression_id, expression) in self.body.expressions() {
+            match super::trait_dictionaries::plan_instantiation(
+                self.program,
+                enclosing.as_ref(),
+                &self.body.dictionary_bounds,
+                expression,
+            ) {
+                Ok(arguments) if !arguments.is_empty() => {
+                    expected_dictionary_calls.insert(
+                        super::trait_dictionaries::DictionarySite::Coercion(expression_id),
+                        arguments,
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => self.diagnostics.push(error),
+            }
+        }
+        let mut expected_dictionary_values = BTreeMap::new();
+        for (value_id, value) in self.body.callable_values.iter() {
+            if let Some(super::LoweredBoundTarget::Instance(callee)) = self
+                .body
+                .bindings
+                .get(&super::LoweredBindingSite::CallableValue(value_id))
+            {
+                match super::trait_dictionaries::plan_callable_value(
+                    self.program,
+                    enclosing.as_ref(),
+                    &self.body.dictionary_bounds,
+                    value,
+                    *callee,
+                ) {
+                    Ok(arguments) if !arguments.is_empty() => {
+                        expected_dictionary_values.insert(value_id, arguments);
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.diagnostics.push(error),
+                }
+            }
+        }
+        if self.body.dictionary_values != expected_dictionary_values {
+            self.report(
+                self.body.origin.span.clone(),
+                "instance value dictionary recipes disagree with its callee bounds",
+            );
+        }
+        if self.body.dictionary_calls != expected_dictionary_calls {
+            self.report(
+                self.body.origin.span.clone(),
+                "instance call dictionary recipes disagree with its callee bounds",
+            );
+        }
         self.check_bindings();
     }
 
@@ -3412,7 +4450,13 @@ impl<'a> BodyValidator<'a> {
     }
 
     fn check_concrete_type(&mut self, origin: &Origin, value_type: &CheckedType, what: &str) {
-        if contains_type_parameter(value_type) {
+        let runtime = self
+            .program
+            .specializations
+            .instance(self.instance.ordinal)
+            .map(|key| key.runtime_ids())
+            .unwrap_or_default();
+        if super::instance_resolution::contains_parameter_outside_scope(value_type, &runtime) {
             self.report(
                 origin.span.clone(),
                 format!(
@@ -3423,7 +4467,13 @@ impl<'a> BodyValidator<'a> {
     }
 
     fn check_effects(&mut self, origin: &Origin, effects: &CheckedEffectSet, what: &str) {
-        if let Some(variable) = &effects.variable {
+        if let Some(variable) = &effects.variable
+            && !self
+                .program
+                .specializations
+                .instance(self.instance.ordinal)
+                .is_some_and(|key| key.runtime_effects().contains(&variable.id))
+        {
             self.report(
                 origin.span.clone(),
                 format!(
@@ -3575,7 +4625,11 @@ impl<'a> BodyValidator<'a> {
             // recomputed, and it must agree with a fresh computation.
             match &expression.coercion_plan {
                 Some(plan) => {
-                    match super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
+                    match super::LoweredCoercionPlan::plan_seeded(
+                        &coercion.source,
+                        &coercion.target,
+                        &expression.instantiation_substitutions,
+                    ) {
                         Ok(expected) if *plan == expected => {}
                         Ok(_) | Err(_) => self.report(
                             origin.span.clone(),
@@ -3955,7 +5009,24 @@ impl<'a> BodyValidator<'a> {
         // Concrete ABI argument records must all have an evaluation step.
         // A spread evaluates its operand once and supplies every mapped slot.
         let mut supplied = std::collections::HashSet::new();
+        let dynamic_instance = self
+            .program
+            .specializations
+            .instance(self.instance.ordinal)
+            .is_some_and(|key| key.is_dynamic());
         for step in &call.steps {
+            // A whole-product operand borrowed as several parameters is one
+            // evaluation shared by every record that names it.
+            if dynamic_instance
+                && let LoweredCallStep::Argument { argument } = step
+                && let Some(expression) = call.arguments[*argument].expression
+            {
+                for (index, other) in call.arguments.iter().enumerate() {
+                    if other.expression == Some(expression) && other.slot.is_some() {
+                        supplied.insert(index);
+                    }
+                }
+            }
             match step {
                 LoweredCallStep::Argument { argument }
                 | LoweredCallStep::ProductElement { argument, .. }
@@ -4038,11 +5109,13 @@ impl<'a> BodyValidator<'a> {
         let Some(value) = self.body.callable_values.get(id) else {
             return;
         };
-        self.check_concrete_type(
-            &value.origin,
-            &CheckedType::Function(value.function_type.clone()),
-            "callable function type",
-        );
+        // A quantified value's function type mentions its own bound
+        // parameters; only the scheme's free parameters must be in scope.
+        let checked = match &value.scheme {
+            Some(scheme) => CheckedType::Forall(Box::new(scheme.clone())),
+            None => CheckedType::Function(value.function_type.clone()),
+        };
+        self.check_concrete_type(&value.origin, &checked, "callable function type");
         if let Some(closure) = &value.closure {
             for capture in &closure.captures {
                 self.check_concrete_type(&value.origin, &capture.value_type, "capture type");
@@ -4124,6 +5197,10 @@ impl<'a> BodyValidator<'a> {
         };
         self.visit_provider(with.provider);
         self.visit_expression(with.value);
+        // A `mut` provider borrows its value through a place.
+        if let Some(place) = with.place {
+            self.visit_place(place);
+        }
         self.visit_block(with.body);
     }
 
@@ -4446,6 +5523,34 @@ impl<'a> BodyValidator<'a> {
                         );
                     }
                 }
+                LoweredBoundTarget::Dictionary(dispatch) => {
+                    let enclosing = self
+                        .program
+                        .specializations
+                        .instance(self.instance.ordinal)
+                        .map(|key| ResolvedInstanceRequest {
+                            key: key.clone(),
+                            environment: self.instance.environment.clone(),
+                            relevant: self.instance.relevant.clone(),
+                            evidence: self.instance.evidence.clone(),
+                        });
+                    let span = origin
+                        .map(|origin| origin.span.clone())
+                        .unwrap_or(Span::Compiler);
+                    let fresh = super::trait_dictionaries::plan_recipe(
+                        self.program,
+                        enclosing.as_ref(),
+                        &self.body.dictionary_bounds,
+                        &dispatch.obligation,
+                        origin.unwrap_or(&self.body.origin),
+                    );
+                    if fresh.as_ref().ok() != Some(&dispatch.recipe) {
+                        self.report(
+                            span,
+                            "instance body dictionary dispatch disagrees with its bounds",
+                        );
+                    }
+                }
                 LoweredBoundTarget::Route(category) => {
                     if let Some(actual) = self.site_category(site)
                         && actual != *category
@@ -4459,6 +5564,67 @@ impl<'a> BodyValidator<'a> {
                         );
                     }
                 }
+            }
+        }
+        // Members of built dictionaries are requested by the site that needs
+        // the dictionary and bound inside its recipe.
+        let mut members = Vec::new();
+        for (site, arguments) in &self.body.dictionary_calls {
+            let origin = match site {
+                super::trait_dictionaries::DictionarySite::Call(call) => {
+                    self.body.calls.get(*call).map(|call| call.origin.clone())
+                }
+                super::trait_dictionaries::DictionarySite::Coercion(expression) => self
+                    .body
+                    .expression(*expression)
+                    .map(|expression| expression.origin.clone()),
+            };
+            if let Some(origin) = origin {
+                for argument in arguments {
+                    recipe_member_instances(&argument.recipe, &origin, &mut members);
+                }
+            }
+        }
+        for (_, expression) in self.body.expressions() {
+            for argument in super::trait_dictionaries::adapter_entailment_recipes(
+                self.program,
+                expression,
+            ) {
+                recipe_member_instances(&argument.recipe, &expression.origin, &mut members);
+            }
+        }
+        for (value, arguments) in &self.body.dictionary_values {
+            if let Some(value) = self.body.callable_values.get(*value) {
+                for argument in arguments {
+                    recipe_member_instances(&argument.recipe, &value.origin, &mut members);
+                }
+            }
+        }
+        for (site, target) in &self.body.bindings {
+            if let LoweredBoundTarget::Dictionary(dispatch) = target
+                && let Some(origin) = self.site_origin(*site)
+            {
+                recipe_member_instances(&dispatch.recipe, &origin, &mut members);
+            }
+        }
+        for (instance, origin) in members {
+            // The graph may record one edge per request of the same member.
+            let mut found = false;
+            for (index, dependency) in self.instance.dependencies.iter().enumerate() {
+                if !dependency.closure_phase
+                    && dependency.instance == instance
+                    && dependency.kind == LoweredInstanceDependencyKind::TraitMethod
+                    && dependency.origin.syntax == origin.syntax
+                {
+                    matched_dependencies.insert(index);
+                    found = true;
+                }
+            }
+            if !found {
+                self.report(
+                    origin.span.clone(),
+                    "dictionary member has no specialization dependency",
+                );
             }
         }
         for (index, dependency) in self.instance.dependencies.iter().enumerate() {
@@ -4602,6 +5768,18 @@ impl<'a> BodyValidator<'a> {
         &self,
         site: LoweredBindingSite,
     ) -> Option<LoweredArtifactDependencyKind> {
+        if let LoweredBindingSite::CallableValue(id) = site
+            && self.body.callable_values.get(id).is_some_and(|value| {
+                value.scheme.is_some()
+                    && matches!(
+                        value.target,
+                        LoweredCallableTarget::TraitImplementation { .. }
+                            | LoweredCallableTarget::StructuralTraitMethod { .. }
+                    )
+            })
+        {
+            return Some(LoweredArtifactDependencyKind::TraitMemberEntry);
+        }
         match site {
             LoweredBindingSite::Call(_) | LoweredBindingSite::CallableValue(_) => {
                 match self.site_category(site) {
@@ -4927,6 +6105,43 @@ mod tests {
                 "{diagnostics:?}"
             );
         }
+    }
+
+    #[test]
+    fn runtime_dictionary_obligations_are_revalidated_against_the_instance() {
+        let module = checked_program(concat!(
+            "def pick: <T where Copy T> T -> T = value => value\n",
+            "let stored = pick\n",
+            "let answer = stored 42\n",
+        ));
+        let mut lowered = crate::Lowerer::new()
+            .lower(&module)
+            .expect("marker-bound value lowers");
+        let pick = function_id(&lowered.program, "pick");
+        let body = lowered
+            .program
+            .instances
+            .iter_mut()
+            .find_map(|(_, instance)| {
+                (instance.template == pick)
+                    .then_some(instance.body.as_mut())
+                    .flatten()
+            })
+            .expect("dynamic pick body");
+        assert!(
+            body.dictionary_obligations.is_empty(),
+            "Copy uses its descriptor"
+        );
+        body.dictionary_obligations.push(CheckedTraitBound {
+            trait_id: crate::TraitId(usize::MAX),
+            arguments: vec![CheckedType::I32],
+        });
+        let diagnostics = lowered.program.validate_instance_bodies();
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic.message
+                == "instance dictionary obligations disagree with its runtime substitution"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]

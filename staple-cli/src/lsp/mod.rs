@@ -2,6 +2,7 @@ pub mod completion;
 pub mod definition;
 pub mod hover;
 pub mod semantic;
+mod signature;
 pub mod source_projection;
 
 use std::collections::{HashMap, HashSet};
@@ -15,7 +16,7 @@ use lsp_types::notification::{
 };
 use lsp_types::request::{
     CodeActionRequest, Completion, GotoDefinition, HoverRequest, Request as _,
-    ResolveCompletionItem, SemanticTokensFullRequest,
+    ResolveCompletionItem, SemanticTokensFullRequest, SignatureHelpRequest,
 };
 use lsp_types::*;
 use staple_compiler::{NameResolver, ProgramLoader, TypeChecker};
@@ -168,6 +169,16 @@ fn initialize(connection: &Connection) -> Result<(), String> {
             },
         )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec![
+                " ".to_owned(),
+                "(".to_owned(),
+                "<".to_owned(),
+                ",".to_owned(),
+            ]),
+            retrigger_characters: Some(vec![",".to_owned()]),
+            work_done_progress_options: WorkDoneProgressOptions::default(),
+        }),
         definition_provider: Some(OneOf::Left(true)),
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         completion_provider: Some(CompletionOptions {
@@ -415,6 +426,24 @@ impl Server {
                     .collect::<Vec<_>>();
                 (!links.is_empty()).then_some(GotoDefinitionResponse::Link(links))
             });
+            self.connection
+                .sender
+                .send(Message::Response(Response::new_ok(
+                    request.id,
+                    serde_json::to_value(result).unwrap(),
+                )))
+                .map_err(|error| error.to_string())?;
+        } else if request.method == SignatureHelpRequest::METHOD {
+            let params: SignatureHelpParams =
+                serde_json::from_value(request.params).map_err(|error| error.to_string())?;
+            let position = params.text_document_position_params;
+            let result = self
+                .documents
+                .get(&position.text_document.uri)
+                .and_then(|document| {
+                    let offset = semantic::offset(&document.text, position.position)?;
+                    signature::help(&document.text, &document.hover_entries, offset)
+                });
             self.connection
                 .sender
                 .send(Message::Response(Response::new_ok(
@@ -1849,6 +1878,7 @@ mod tests {
             Some(OneOf::Left(true))
         );
         assert!(result.capabilities.completion_provider.is_some());
+        assert!(result.capabilities.signature_help_provider.is_some());
         client
             .sender
             .send(Message::Notification(Notification::new(

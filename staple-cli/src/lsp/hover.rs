@@ -236,9 +236,9 @@ impl Collector<'_> {
                 binding.docs.clone()
             };
             let generics = self.bracketed_generic_prefix(
-                &binding.type_parameters,
-                &binding.trait_bounds,
-                &binding.subtype_bounds,
+                &binding.all_type_parameters(),
+                &binding.all_trait_bounds(),
+                &binding.all_subtype_bounds(),
             );
             self.declarations.insert(
                 symbol,
@@ -600,12 +600,36 @@ impl Collector<'_> {
                     self.named_with_docs(
                         &member.syntax,
                         &member.name,
-                        format!(
-                            "{}.{}: {}",
-                            declaration.name,
-                            member.name,
-                            member.annotation.syntax().text().trim()
-                        ),
+                        self.typed
+                            .resolved()
+                            .traits()
+                            .values()
+                            .find(|resolved| {
+                                resolved.declaration.syntax.id == declaration.syntax.id
+                            })
+                            .and_then(|resolved| {
+                                resolved.methods.iter().find(|method| {
+                                    self.typed
+                                        .resolved()
+                                        .trait_method(**method)
+                                        .is_some_and(|resolved| resolved.name == member.name)
+                                })
+                            })
+                            .map(|method| {
+                                self.trait_member_signature(
+                                    *method,
+                                    &member.name,
+                                    member.annotation.syntax().text().trim(),
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "{}.{}: {}",
+                                    declaration.name,
+                                    member.name,
+                                    member.annotation.syntax().text().trim()
+                                )
+                            }),
                         member.docs.clone(),
                         module,
                     );
@@ -1263,9 +1287,9 @@ impl Collector<'_> {
         if let Some(value_type) = value_type {
             let prefix = binding.declaration_prefix();
             let generics = self.bracketed_generic_prefix(
-                &binding.type_parameters,
-                &binding.trait_bounds,
-                &binding.subtype_bounds,
+                &binding.all_type_parameters(),
+                &binding.all_trait_bounds(),
+                &binding.all_subtype_bounds(),
             );
             let docs = self
                 .typed
@@ -1282,13 +1306,13 @@ impl Collector<'_> {
                 module,
             );
         }
-        for parameter in &binding.type_parameters {
+        for parameter in &binding.all_type_parameters() {
             self.type_parameter(parameter);
         }
-        for bound in &binding.trait_bounds {
+        for bound in &binding.all_trait_bounds() {
             self.trait_bound(bound);
         }
-        if let Some(annotation) = &binding.annotation {
+        if let Some(annotation) = binding.annotation_body() {
             self.ty(annotation);
         }
         if let Some(value) = &binding.value {
@@ -1355,6 +1379,10 @@ impl Collector<'_> {
         // never gets a `type_of_expression` entry even though the name it
         // refers to resolves fine. Fall back to the referenced symbol's own
         // declared type so hover still has something to show.
+        let method_syntax = match expression {
+            Expression::TypeApplication(application) => application.value.syntax().id,
+            _ => expression.syntax().id,
+        };
         let expression_type = self
             .typed
             .type_of_expression(expression.syntax().id)
@@ -1363,6 +1391,15 @@ impl Collector<'_> {
                 self.typed
                     .symbol_for(expression.syntax().id)
                     .and_then(|symbol| self.typed.declared_type_of_symbol(symbol))
+            })
+            .or_else(|| {
+                self.typed
+                    .resolved()
+                    .trait_methods_for_expression(method_syntax)
+                    .first()
+                    .and_then(|method| self.typed.scheme_of_trait_member(*method))
+                    .cloned()
+                    .map(|scheme| CheckedType::Forall(Box::new(scheme)))
             });
         if let Some(value_type) = expression_type.as_ref() {
             let value_type = self.display_type(value_type);
@@ -1384,7 +1421,7 @@ impl Collector<'_> {
             let trait_member = self
                 .typed
                 .resolved()
-                .trait_methods_for_expression(expression.syntax().id)
+                .trait_methods_for_expression(method_syntax)
                 .first()
                 .and_then(|method| {
                     self.typed
@@ -1393,6 +1430,9 @@ impl Collector<'_> {
                         .map(|member| (*method, member))
                 });
             let instantiation = declaration.as_ref().and_then(|declaration| {
+                if matches!(expression_type, Some(CheckedType::Forall(_))) {
+                    return None;
+                }
                 let declared = declared_type.as_deref()?;
                 declaration
                     .is_instantiation(declared, &value_type)
@@ -1420,7 +1460,7 @@ impl Collector<'_> {
             let module = self.module_label(expression.syntax().id).or_else(|| {
                 self.typed
                     .resolved()
-                    .trait_methods_for_expression(expression.syntax().id)
+                    .trait_methods_for_expression(method_syntax)
                     .first()
                     .and_then(|method| self.typed.resolved().trait_for_method(*method))
                     .and_then(|trait_id| {
@@ -1685,6 +1725,11 @@ impl Collector<'_> {
         member_name: &str,
         annotation: &str,
     ) -> String {
+        let scheme = self
+            .typed
+            .scheme_of_trait_member(method)
+            .map(ToString::to_string);
+        let annotation = scheme.as_deref().unwrap_or(annotation);
         if let Some(resolved) = self
             .typed
             .resolved()
@@ -1699,6 +1744,19 @@ impl Collector<'_> {
 
     fn ty(&mut self, ty: &Type) {
         match ty {
+            Type::Forall(ty) => {
+                for parameter in &ty.generics.parameters {
+                    self.type_parameter(parameter);
+                }
+                for bound in &ty.generics.trait_bounds {
+                    self.trait_bound(bound);
+                }
+                for bound in &ty.generics.subtype_bounds {
+                    self.ty(&bound.supertype);
+                }
+                self.ty(&ty.body);
+            }
+
             Type::Named(named) => {
                 if let Some(id) = self.typed.resolved().type_for(named.syntax.id)
                     && let Some(signature) = self.type_signature(id, named.syntax.id)
@@ -1727,6 +1785,11 @@ impl Collector<'_> {
             }
             Type::Product(product) | Type::ParameterProduct(product) => {
                 for element in &product.elements {
+                    if matches!(element.ty, Type::Forall(_))
+                        && let Some(name) = &element.name
+                    {
+                        self.named(&element.syntax, name, format!("{name}: {}", element.ty));
+                    }
                     self.ty(&element.ty);
                 }
             }
@@ -2706,6 +2769,47 @@ mod tests {
                     &source[entry.range.clone()] == name && entry.signature == signature
                 }),
                 "missing {name}: {signature} in {entries:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn first_class_schemes_hover_on_storage_parameters_and_fields() {
+        let source = concat!(
+            "def identity: <T> move T -> T = move value => value\n",
+            "let id = identity\n",
+            "let annotated: <U> move U -> U = identity\n",
+            "let mut selected: <V> move V -> V = identity\n",
+            "def consume: (<W> move W -> W) -> I32 = f => 42\n",
+            "type Functions = wrap (identity: <X> move X -> X,)\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-first-class-schemes.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+        for (name, signature) in [
+            ("id", "let id: <T> move T -> T"),
+            ("annotated", "let annotated: <U> move U -> U"),
+            ("selected", "let mut selected: <V> move V -> V"),
+            ("f", "f: <W> move W -> W"),
+            ("identity", "identity: <X> move X -> X"),
+        ] {
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| &source[entry.range.clone()] == name
+                        && entry.signature == signature),
+                "missing {signature}: {entries:?}"
             );
         }
     }
@@ -3849,6 +3953,43 @@ mod tests {
                 .any(|entry| entry.1.contains("<compile-time")
                     || entry.1.contains("<macro parameter>")
                     || entry.1.contains("<syntax category>"))
+        );
+    }
+    #[test]
+    fn forall_companion_parameters_keep_lsp_signatures_and_targets() {
+        let source = r#"pub type Box T = pub wrap T
+companion<T> Box T { pub def choose: <U> (move Box T, move U) -> U = (move Box x, move y) => y }
+let result: String = Box.choose.<I32, String> (Box 1, "yes")
+"#;
+        let path = std::env::temp_dir().join("staple-forall-companion-lsp.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+        let member = source.find("def choose").unwrap() + "def ".len();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.range.start == member)
+            .unwrap();
+        assert_eq!(
+            entry.signature,
+            "def choose: <T, U> (move Box T, move U) -> U"
+        );
+        let parameter = source.find("<U>").unwrap() + 1;
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.range.start == parameter
+                    && entry.signature == "<type parameter> U")
         );
     }
 }

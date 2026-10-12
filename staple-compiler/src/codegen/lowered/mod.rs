@@ -1,7 +1,11 @@
 //! LLVM emitter over the read-only lowered program view.
 
+mod conversions;
 mod coroutines;
+mod dictionaries;
+mod dynamic;
 mod reactive;
+mod rows;
 mod structural;
 
 use crate::lower::internal_invariant;
@@ -231,6 +235,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     #[cfg(test)]
+    pub(super) fn instance_body_ir(
+        mut self,
+        target_machine: &TargetMachine,
+        id: FunctionInstanceId,
+    ) -> CodeGenerationResult<String> {
+        self.declare_program(target_machine)?;
+        self.emit_instance_body(id)?;
+        let function = self.instances.get(&id).expect("declared test instance");
+        if !function.verify(false) {
+            return Err(internal_invariant(
+                staple_syntax::Span::Compiler,
+                "test instance failed LLVM verification",
+            ));
+        }
+        Ok(function.print_to_string().to_string())
+    }
+
+    #[cfg(test)]
     pub(super) fn declared_catalog_types(
         mut self,
         target_machine: &TargetMachine,
@@ -290,7 +312,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     "missing planned instance name",
                 )
             })?;
-            let function_type = self.backend.compile_closure_function_type(signature)?;
+            let runtime = self.view.instance_runtime_parameters(id).ok_or_else(|| {
+                Diagnostic::new(instance.origin.span.clone(), "missing instance key")
+            })?;
+            let function_type = if !self.view.instance_is_dynamic(id) {
+                self.backend.compile_closure_function_type(signature)?
+            } else {
+                self.backend
+                    .compile_dynamic_function_type_with_dictionaries(
+                        signature,
+                        runtime.len(),
+                        self.view
+                            .instance_dictionary_bounds(id)
+                            .map_or(0, <[_]>::len),
+                    )?
+            };
             let linkage = instance
                 .requires_internal_linkage
                 .then_some(Linkage::Internal);
@@ -427,9 +463,22 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 })?;
             let functions = match plan {
                 LoweredArtifactPlan::ConstructorAdapter(plan) => {
-                    let ty = self
-                        .backend
-                        .compile_closure_function_type(&plan.callable_type)?;
+                    let ty = if plan.scheme.is_none() && plan.runtime_parameters().is_empty() {
+                        self.backend
+                            .compile_closure_function_type(&plan.callable_type)?
+                    } else {
+                        self.backend.compile_dynamic_function_type_with_dictionaries(
+                            &plan.callable_type,
+                            if plan.scheme.is_some() {
+                                plan.runtime_parameters().len()
+                            } else {
+                                0
+                            },
+                            plan.scheme
+                                .as_ref()
+                                .map_or(0, |scheme| self.view.scheme_dictionary_count(scheme)),
+                        )?
+                    };
                     vec![
                         self.backend
                             .llvm_module
@@ -441,6 +490,158 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .backend
                         .compile_closure_function_type(&plan.callable_type)?;
                     vec![self.backend.llvm_module.add_function(name, ty, None)]
+                }
+                LoweredArtifactPlan::TraitDictionary(plan) => {
+                    let count = plan.layout.environment + 2 * plan.methods.len();
+                    let global = self.backend.llvm_module.add_global(
+                        pointer.array_type(count as u32),
+                        None,
+                        name,
+                    );
+                    global.set_linkage(Linkage::Internal);
+                    global.set_constant(true);
+                    Vec::new()
+                }
+                LoweredArtifactPlan::TypeDescriptor(plan) => {
+                    let ty = self
+                        .backend
+                        .type_descriptor_type(plan.components.len() as u32);
+                    let global = self.backend.llvm_module.add_global(ty, None, name);
+                    global.set_linkage(Linkage::Internal);
+                    global.set_constant(true);
+                    Vec::new()
+                }
+                LoweredArtifactPlan::DescriptorDrop(_)
+                | LoweredArtifactPlan::CompoundDescriptorDrop(_) => {
+                    let ty = self
+                        .backend
+                        .context
+                        .void_type()
+                        .fn_type(&[pointer.into(), pointer.into()], false);
+                    vec![
+                        self.backend
+                            .llvm_module
+                            .add_function(name, ty, Some(Linkage::Internal)),
+                    ]
+                }
+                LoweredArtifactPlan::DynamicStructural(plan) => {
+                    use crate::specialization::DynamicStructuralShape as Shape;
+                    // (dictionary, result, arguments…): the dynamic ABI.
+                    let count = match &plan.shape {
+                        Shape::IntoIterProduct | Shape::NextProduct { .. } => 3,
+                        Shape::MutateProduct { .. } | Shape::DerefMutateIndex => 5,
+                        _ => 4,
+                    };
+                    let ty = self
+                        .backend
+                        .context
+                        .void_type()
+                        .fn_type(&vec![pointer.into(); count], false);
+                    vec![
+                        self.backend
+                            .llvm_module
+                            .add_function(name, ty, Some(Linkage::Internal)),
+                    ]
+                }
+                LoweredArtifactPlan::TraitMemberEntry(plan) => {
+                    let ty = self
+                        .backend
+                        .compile_dynamic_function_type_with_dictionaries(
+                            &plan.function_type,
+                            plan.descriptors,
+                            plan.dictionaries,
+                        )?;
+                    vec![
+                        self.backend
+                            .llvm_module
+                            .add_function(name, ty, Some(Linkage::Internal)),
+                    ]
+                }
+                LoweredArtifactPlan::DescriptorBoundEntry(plan) => {
+                    // Only descriptors bound by the environment are omitted.
+                    let ty = self
+                        .backend
+                        .compile_dynamic_function_type_with_dictionaries(
+                            &plan.function_type,
+                            plan.runtime.len() - plan.bound,
+                            plan.dictionary_count - plan.bound_dictionaries,
+                        )?;
+                    vec![
+                        self.backend
+                            .llvm_module
+                            .add_function(name, ty, Some(Linkage::Internal)),
+                    ]
+                }
+                LoweredArtifactPlan::InstantiationAdapter(plan) => {
+                    let ty = match &plan.target {
+                        CheckedType::Forall(scheme) => {
+                            let CheckedType::Function(target) = scheme.body.as_ref() else {
+                                return Err(Diagnostic::new(
+                                    artifact.origin.span.clone(),
+                                    "scheme adapter target is not a function",
+                                ));
+                            };
+                            self.backend.compile_dynamic_function_type_with_dictionaries(
+                                target,
+                                scheme.type_parameter_ids().len(),
+                                plan.target_dictionaries,
+                            )?
+                        }
+                        CheckedType::Function(target)
+                            if crate::contains_type_parameter(&plan.target) =>
+                        {
+                            self.backend.compile_dynamic_function_type(target, 0)?
+                        }
+                        CheckedType::Function(target) => {
+                            self.backend.compile_closure_function_type(target)?
+                        }
+                        _ => {
+                            return Err(Diagnostic::new(
+                                artifact.origin.span.clone(),
+                                "instantiation adapter target is not a function",
+                            ));
+                        }
+                    };
+                    vec![
+                        self.backend
+                            .llvm_module
+                            .add_function(name, ty, Some(Linkage::Internal)),
+                    ]
+                }
+                LoweredArtifactPlan::ValueConversion(plan) => {
+                    let pointer = self.backend.context.ptr_type(AddressSpace::default());
+                    // `(destination, source)`, then the value's descriptor
+                    // when its layout depends on run-time parameters.
+                    let count = if crate::lower::conversion_takes_descriptor(&plan.concrete) {
+                        3
+                    } else {
+                        2
+                    };
+                    let ty = self
+                        .backend
+                        .context
+                        .void_type()
+                        .fn_type(&vec![pointer.into(); count], false);
+                    vec![
+                        self.backend
+                            .llvm_module
+                            .add_function(name, ty, Some(Linkage::Internal)),
+                    ]
+                }
+                LoweredArtifactPlan::ReabstractionThunk(plan) => {
+                    let ty = match plan.direction {
+                        crate::specialization::ReabstractionDirection::ConcreteToDynamic => self
+                            .backend
+                            .compile_dynamic_function_type(&plan.dynamic, 0)?,
+                        crate::specialization::ReabstractionDirection::DynamicToConcrete => {
+                            self.backend.compile_closure_function_type(&plan.concrete)?
+                        }
+                    };
+                    vec![
+                        self.backend
+                            .llvm_module
+                            .add_function(name, ty, Some(Linkage::Internal)),
+                    ]
                 }
                 LoweredArtifactPlan::DropGlue(_) => Vec::new(),
                 LoweredArtifactPlan::GcFinalizer(_) => {
@@ -866,6 +1067,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let Some(root) = body.root else {
             return Ok(());
         };
+        if self.view.instance_is_dynamic(id) {
+            return self.emit_dynamic_instance_body(id, function, body, root);
+        }
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
         let mut environment = FunctionEnvironment::default();
@@ -1751,6 +1955,62 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredArtifactPlan::GcFinalizer(plan) => {
                 self.emit_gc_finalizer_body(ordinal, plan, &artifact.origin.span)
             }
+            LoweredArtifactPlan::TraitDictionary(plan) => {
+                self.emit_trait_dictionary(ordinal, plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::TypeDescriptor(plan) => {
+                self.emit_type_descriptor(ordinal, plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::CompoundDescriptorDrop(plan) => {
+                self.emit_compound_descriptor_drop(ordinal, *plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::TraitMemberEntry(plan) => {
+                self.emit_trait_member_entry(ordinal, plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::DescriptorBoundEntry(plan) => {
+                self.emit_descriptor_bound_entry(ordinal, plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::DynamicStructural(plan) => {
+                self.emit_dynamic_structural(ordinal, plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::InstantiationAdapter(plan) => {
+                self.emit_instantiation_adapter(ordinal, plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::ValueConversion(plan) => {
+                self.emit_value_conversion(ordinal, plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::ReabstractionThunk(plan) => {
+                self.emit_reabstraction_thunk(ordinal, plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::DescriptorDrop(plan) => {
+                let function = self
+                    .artifacts
+                    .get(&ordinal)
+                    .and_then(|functions| functions.first())
+                    .copied()
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            artifact.origin.span.clone(),
+                            "missing descriptor drop declaration",
+                        )
+                    })?;
+                let body = self
+                    .backend
+                    .enter_finalizer_function(function, artifact.origin.span.clone())?;
+                let payload = function
+                    .get_nth_param(1)
+                    .expect("descriptor drop has two parameters")
+                    .into_pointer_value();
+                let ty = self.backend.compile_type(&plan.value_type)?;
+                let value = self
+                    .backend
+                    .builder
+                    .build_load(ty, payload, "descriptor.drop.value")
+                    .map_err(compiler_diagnostic)?;
+                let glue = self.finalizer_glue(&plan.glue, &artifact.origin.span)?;
+                self.emit_drop_glue(value, glue, &artifact.origin.span)?;
+                self.backend.finish_finalizer_function(&body)
+            }
             // Drop glue expands inline at recorded use sites.
             LoweredArtifactPlan::DropGlue(_) => Ok(()),
             LoweredArtifactPlan::CoroutineCodes(plan) => {
@@ -1762,6 +2022,85 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.emit_runner_body(ordinal, plan, &artifact.origin.span)
             }
         }
+    }
+
+    fn descriptor_global(
+        &self,
+        ordinal: ArtifactOrdinal,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<GlobalValue<'context>> {
+        let name = self
+            .view
+            .planned_artifact_name(ordinal)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing descriptor name"))?;
+        self.backend
+            .llvm_module
+            .get_global(name)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing descriptor declaration"))
+    }
+
+    fn emit_type_descriptor(
+        &self,
+        ordinal: ArtifactOrdinal,
+        plan: &crate::TypeDescriptorPlan,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let layout = self.backend.descriptor_layout(&plan.value_type)?;
+        let pointer = self.backend.context.ptr_type(AddressSpace::default());
+        let mut components = Vec::new();
+        for component in &plan.components {
+            let ordinal = component
+                .artifact
+                .ok_or_else(|| Diagnostic::new(span.clone(), "unbound component descriptor"))?;
+            components.push(self.descriptor_global(ordinal, span)?.as_pointer_value());
+        }
+        let drop = match &plan.drop {
+            Some(drop) => {
+                let ordinal = drop
+                    .artifact
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "unbound descriptor drop"))?;
+                self.artifacts
+                    .get(&ordinal)
+                    .and_then(|functions| functions.first())
+                    .copied()
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "missing descriptor drop entry"))?
+                    .as_global_value()
+                    .as_pointer_value()
+            }
+            None => pointer.const_null(),
+        };
+        let descriptor = self
+            .backend
+            .type_descriptor_type(components.len() as u32)
+            .const_named_struct(&[
+                self.backend
+                    .size_type
+                    .const_int(layout.store_size, false)
+                    .into(),
+                self.backend
+                    .size_type
+                    .const_int(layout.stride, false)
+                    .into(),
+                self.backend
+                    .size_type
+                    .const_int(layout.align as u64, false)
+                    .into(),
+                self.backend
+                    .context
+                    .i32_type()
+                    .const_int(u64::from(plan.drop.is_none()), false)
+                    .into(),
+                drop.into(),
+                self.backend
+                    .context
+                    .i32_type()
+                    .const_int(components.len() as u64, false)
+                    .into(),
+                pointer.const_array(&components).into(),
+            ]);
+        self.descriptor_global(ordinal, span)?
+            .set_initializer(&descriptor);
+        Ok(())
     }
 
     /// Emits the recorded payload, cell, closure-environment, or buffer finalizer.
@@ -1844,6 +2183,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let drop_plan = self.planned_drop_glue(&capture.glue, span)?;
                     self.emit_drop_glue(value, drop_plan, span)?;
                 }
+            }
+            GcFinalizerPlan::DynamicClosureEnvironment { .. } => {
+                self.emit_dynamic_closure_finalizer(plan, body.payload, span)?;
+            }
+            GcFinalizerPlan::DynamicBuffer => {
+                self.emit_dynamic_buffer_finalizer(body.payload, span)?;
+            }
+            GcFinalizerPlan::DynamicCell => {
+                self.emit_dynamic_cell_finalizer(body.payload, span)?;
             }
             GcFinalizerPlan::Buffer { element, glue } => {
                 let drop_plan = self.finalizer_glue(glue, span)?;
@@ -1981,6 +2329,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .ok_or_else(|| {
                 Diagnostic::new(span.clone(), "missing constructor adapter declaration")
             })?;
+        if plan.scheme.is_some() || !plan.runtime_parameters().is_empty() {
+            return self.emit_dynamic_constructor_adapter(function, plan, span);
+        }
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
         let parameters = function.get_params();
@@ -2878,10 +3229,34 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         // Apply the recorded coercion plan. Lowering already selected the
         // alternatives, so emission never re-selects one.
-        let value = match (&expression.coercion, &expression.coercion_plan) {
+        let instantiation = match (&expression.coercion, &expression.coercion_plan) {
+            (Some(coercion), Some(plan)) => plan.split_instantiation(&coercion.target),
+            _ => None,
+        };
+        // A polymorphic value is instantiated (or adapted) first; any wrapper
+        // introduction or sum injection then applies to the produced closure.
+        let (value, coercion_plan) = match (&expression.coercion, instantiation) {
+            (Some(_), Some((leaf, _, rest))) => {
+                let types = match leaf {
+                    crate::LoweredCoercionPlan::Instantiate { types } => types.as_slice(),
+                    _ => &[],
+                };
+                let instantiated =
+                    self.emit_instantiation(owner, id, value, types, &expression.origin.span)?;
+                (instantiated, Some(rest))
+            }
+            _ => (value, expression.coercion_plan.clone()),
+        };
+        let produced = match (&expression.coercion, &expression.coercion_plan) {
+            (Some(coercion), Some(plan)) => plan
+                .split_instantiation(&coercion.target)
+                .map(|(_, produced, _)| produced),
+            _ => None,
+        };
+        let value = match (&expression.coercion, &coercion_plan) {
             (Some(coercion), Some(plan)) => self.emit_coercion(
                 value,
-                &coercion.source,
+                produced.as_ref().unwrap_or(&coercion.source),
                 &coercion.target,
                 plan,
                 &expression.origin.span,
@@ -2954,6 +3329,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         match plan {
             crate::LoweredCoercionPlan::Identity => Ok(value),
+            crate::LoweredCoercionPlan::Instantiate { .. }
+            | crate::LoweredCoercionPlan::AdaptScheme { .. } => Err(Diagnostic::new(
+                span.clone(),
+                "polymorphic value adapters are emitted with their expression",
+            )),
             crate::LoweredCoercionPlan::Wrap { payload } => {
                 // A wrapper shares its representation's runtime value.
                 let Some(representation) =
@@ -3597,10 +3977,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .and_then(|functions| functions.first())
                 .copied()
                 .ok_or_else(|| Diagnostic::new(span.clone(), "bound artifact is not declared")),
-            LoweredBoundTarget::Route(_) => Err(Diagnostic::new(
-                span.clone(),
-                "bound site is not a function",
-            )),
+            LoweredBoundTarget::Route(_) | LoweredBoundTarget::Dictionary(_) => Err(
+                Diagnostic::new(span.clone(), "bound site is not a function"),
+            ),
         }
     }
 
@@ -4469,6 +4848,29 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let binding = self
             .view
             .binding(owner, LoweredBindingSite::CallableValue(id));
+        if callable.scheme.is_some()
+            && matches!(
+                callable.target,
+                LoweredCallableTarget::TraitImplementation { .. }
+                    | LoweredCallableTarget::StructuralTraitMethod { .. }
+            )
+        {
+            let code = self.callable_artifact_code(
+                binding,
+                &callable.origin.span,
+                "trait member entry binding",
+            )?;
+            return self
+                .backend
+                .build_closure_value(
+                    code,
+                    self.backend
+                        .context
+                        .ptr_type(AddressSpace::default())
+                        .const_null(),
+                )
+                .map(|closure| closure.as_any_value_enum());
+        }
         // Constructor and extern adapter values use the declared adapter
         // artifact; both carry a null environment.
         if matches!(
@@ -4546,6 +4948,28 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 ));
             }
         };
+        if callable.scheme.is_some()
+            && callable
+                .closure
+                .as_ref()
+                .is_some_and(|closure| !closure.captures.is_empty())
+        {
+            let Some(LoweredBoundTarget::Instance(instance)) = binding else {
+                return Err(unsupported("polymorphic capture instance"));
+            };
+            let callable = callable.clone();
+            let pointer = self.build_polymorphic_capture_environment(
+                owner,
+                *instance,
+                &callable,
+                environment,
+                &callable.origin.span,
+            )?;
+            return self
+                .backend
+                .build_closure_value(code, pointer)
+                .map(|closure| closure.as_any_value_enum());
+        }
         let pointer = match &callable.closure {
             Some(closure) => match closure.environment {
                 LoweredClosureEnvironment::Fresh => {
@@ -5089,6 +5513,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             }
         }
+        // A single argument whose expected type is the whole product parameter
+        // (a `T` instantiated at a tuple) was placed in the first slot; treat it
+        // as the whole product.
+        if parameter_count > 1
+            && unplaced.is_empty()
+            && call.arguments.len() == 1
+            && slots[0].is_some()
+            && slots[1..].iter().all(Option::is_none)
+            && crate::types_equivalent(
+                &call.arguments[0].expected,
+                call.function_type.parameter.as_ref(),
+            )
+        {
+            unplaced.push(slots[0].take().expect("checked above"));
+        }
         // Whole-product fallback: one argument value against a flattened
         // multi-element parameter unpacks the struct, and against a single slot
         // it is that slot's value.
@@ -5107,6 +5546,43 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .map_err(compiler_diagnostic)?
                             .into(),
                     );
+                }
+            } else if let BasicMetadataValueEnum::PointerValue(pointer) = value
+                && let CheckedType::Product(product) = call.function_type.parameter.as_ref()
+                && product.elements.len() == parameter_count
+            {
+                // The whole product arrived by pointer (a borrowed or
+                // materialized argument, such as a `T` parameter instantiated
+                // at a tuple): pass each element in its own mode.
+                let product_type = self.backend.compile_product_type(product)?;
+                let indirect = self.backend.indirect_parameter_mask(&call.function_type);
+                for (index, element) in product.elements.iter().enumerate() {
+                    let field = self
+                        .backend
+                        .builder
+                        .build_struct_gep(product_type, pointer, index as u32, "argument.element")
+                        .map_err(compiler_diagnostic)?;
+                    slots[index] = Some(if indirect.get(index).copied().unwrap_or(false) {
+                        field.into()
+                    } else {
+                        let element_type = self.backend.compile_type(&element.value_type)?;
+                        let loaded = self
+                            .backend
+                            .builder
+                            .build_load(element_type, field, "argument.element.value")
+                            .map_err(compiler_diagnostic)?;
+                        use inkwell::values::BasicValue;
+                        loaded
+                            .as_instruction_value()
+                            .expect("a load is an instruction")
+                            .set_alignment(
+                                self.backend.target_data.get_abi_alignment(&element_type),
+                            )
+                            .map_err(|error| {
+                                Diagnostic::new(call.origin.span.clone(), error.to_string())
+                            })?;
+                        loaded.into()
+                    });
                 }
             }
         }
@@ -5142,6 +5618,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .closure_environment
                         .ok_or_else(|| unsupported("current closure environment"))?,
                 };
+                if self.view.instance_is_dynamic(*instance) {
+                    let value = self.emit_concrete_dynamic_call(
+                        owner, id, *instance, &call, pointer, &values,
+                    )?;
+                    self.emit_call_cleanup(owner, id, cleanups, &call.origin.span)?;
+                    return Ok(value);
+                }
                 let mut arguments = vec![pointer.into()];
                 arguments.extend(values);
                 let result = self
@@ -5165,6 +5648,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     return Err(unsupported("indirect call binding"));
                 }
                 let (code, pointer) = callee_parts.ok_or_else(|| unsupported("indirect callee"))?;
+                if call.scheme.is_some() {
+                    let value = self.emit_concrete_polymorphic_call(
+                        owner, id, &call, code, pointer, &values,
+                    )?;
+                    self.emit_call_cleanup(owner, id, cleanups, &call.origin.span)?;
+                    return Ok(value);
+                }
                 let mut arguments = vec![pointer.into()];
                 arguments.extend(values);
                 let signature = self
@@ -5404,6 +5894,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 LoweredArgumentPassMode::BorrowedPointer | LoweredArgumentPassMode::MutablePlace
             )
             && let Some(place) = record.place
+            // A borrowed argument rooted in a plain `let` local passes a
+            // copy of the value below, as it always has; only index reads
+            // need the local's stack copy as a place.
+            && !(record.pass_mode == LoweredArgumentPassMode::BorrowedPointer
+                && self.place_rooted_in_plain_local(owner, place, environment))
         {
             match self.emit_place_pointer(owner, place, environment) {
                 Ok(pointer) => return Ok(pointer.into()),
@@ -5650,6 +6145,32 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
     /// Emits a place pointer using recorded projections and resource providers.
     /// Symbol lookup prefers parameter pointers, then cells, then module globals.
+    /// Whether a place's root is a plain `let` local: an SSA value with no
+    /// parameter pointer, binding cell, or module global behind it.
+    fn place_rooted_in_plain_local(
+        &self,
+        owner: EmissionOwner,
+        id: crate::PlaceId,
+        environment: &FunctionEnvironment<'context>,
+    ) -> bool {
+        let Some(place) = self.view.place(owner, id) else {
+            return false;
+        };
+        match &place.kind {
+            crate::LoweredPlaceKind::Symbol { symbol } => {
+                environment.locals.contains_key(symbol)
+                    && !environment.parameter_pointers.contains_key(symbol)
+                    && !environment.binding_cells.contains_key(symbol)
+                    && !self.storage.contains_key(symbol)
+            }
+            crate::LoweredPlaceKind::ProductElement { base, .. }
+            | crate::LoweredPlaceKind::Representation { base } => {
+                self.place_rooted_in_plain_local(owner, *base, environment)
+            }
+            _ => false,
+        }
+    }
+
     fn emit_place_pointer(
         &mut self,
         owner: EmissionOwner,
@@ -5682,6 +6203,23 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 if let Some(global) = self.storage.get(symbol).copied() {
                     return Ok(global.as_pointer_value());
+                }
+                // A plain `let` local is an SSA value. It cannot be assigned
+                // through a place, so a read-only place (the target of an
+                // index read) is a stack copy of it.
+                if let Some(value) = environment.locals.get(symbol).copied()
+                    && let Ok(value) = BasicValueEnum::try_from(value)
+                {
+                    let slot = self
+                        .backend
+                        .entry_builder()
+                        .build_alloca(value.get_type(), "borrow.temporary")
+                        .map_err(compiler_diagnostic)?;
+                    self.backend
+                        .builder
+                        .build_store(slot, value)
+                        .map_err(compiler_diagnostic)?;
+                    return Ok(slot);
                 }
                 Err(unsupported("place"))
             }
@@ -6685,6 +7223,118 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.backend.build_bool_value(condition, sum_type, span)
     }
 
+    /// Concrete string kernels shared by both ABI emitters.
+    fn emit_string_intrinsic(
+        &mut self,
+        owner: EmissionOwner,
+        call: &crate::LoweredCall,
+        call_id: LoweredCallId,
+        intrinsic: IntrinsicFunction,
+        arguments: &[BasicMetadataValueEnum<'context>],
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = call.origin.span.clone();
+        let unsupported = |family| Diagnostic::new(span.clone(), format!("malformed {family}"));
+        match intrinsic {
+            IntrinsicFunction::ParseNumber { to } => {
+                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
+                    return Err(unsupported("numeric parsing operand"));
+                };
+                Ok(self
+                    .backend
+                    .build_parse_number(to, *string, span)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::ValidateUtf8 => {
+                let [BasicMetadataValueEnum::StructValue(bytes)] = arguments else {
+                    return Err(unsupported("UTF-8 operand"));
+                };
+                Ok(self
+                    .backend
+                    .build_validate_utf8(*bytes)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::StringHasNul => {
+                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
+                    return Err(unsupported("interior-NUL operand"));
+                };
+                Ok(self
+                    .backend
+                    .build_string_has_nul(*string)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::CStringBytes => {
+                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
+                    return Err(unsupported("CString bytes operand"));
+                };
+                Ok(self
+                    .backend
+                    .build_c_string_bytes(*pointer, span)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::ToString { value: numeric } => {
+                let [argument] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "numeric conversion needs one argument",
+                    ));
+                };
+                // Use the common String conversion helper.
+                let argument = BasicValueEnum::try_from(*argument).map_err(|_| {
+                    Diagnostic::new(span.clone(), "numeric conversion requires a numeric value")
+                })?;
+                self.backend
+                    .build_numeric_to_string(numeric, argument, span)
+            }
+            IntrinsicFunction::StringFromCString => {
+                let [BasicMetadataValueEnum::PointerValue(source)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "CString conversion requires a pointer",
+                    ));
+                };
+                // The shared conversion core; the CString release expands the
+                // recorded `CStringConversion` glue.
+                let result = self
+                    .backend
+                    .build_string_from_c_string(*source, span.clone())?;
+                self.emit_drop_site(
+                    owner,
+                    crate::ArtifactUseSite::CStringConversion(call_id),
+                    DropSource::Value((*source).into()),
+                    &span,
+                )?;
+                Ok(result.as_any_value_enum())
+            }
+            IntrinsicFunction::StringToCString => {
+                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "String conversion requires a String value",
+                    ));
+                };
+                // Use the common runtime helper.
+                Ok(self
+                    .backend
+                    .build_string_to_c_string(*string, span)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::StringAdd => {
+                let [
+                    BasicMetadataValueEnum::StructValue(left),
+                    BasicMetadataValueEnum::StructValue(right),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "string concatenation requires two String values",
+                    ));
+                };
+                self.backend.build_string_add(*left, *right, span)
+            }
+            _ => Err(unsupported("string intrinsic")),
+        }
+    }
+
     fn emit_intrinsic(
         &mut self,
         owner: EmissionOwner,
@@ -6705,6 +7355,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )
         };
         match intrinsic {
+            IntrinsicFunction::ParseNumber { .. }
+            | IntrinsicFunction::ValidateUtf8
+            | IntrinsicFunction::StringHasNul
+            | IntrinsicFunction::CStringBytes
+            | IntrinsicFunction::ToString { .. }
+            | IntrinsicFunction::StringFromCString
+            | IntrinsicFunction::StringToCString
+            | IntrinsicFunction::StringAdd => {
+                self.emit_string_intrinsic(owner, call, call_id, intrinsic, arguments)
+            }
             IntrinsicFunction::NumericConvert { from, to } => {
                 let [argument] = arguments else {
                     return Err(unsupported("numeric conversion"));
@@ -6716,15 +7376,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_numeric_conversion(from, to, value)?
                     .as_any_value_enum())
             }
-            IntrinsicFunction::ParseNumber { to } => {
-                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
-                    return Err(unsupported("numeric parsing operand"));
-                };
-                Ok(self
-                    .backend
-                    .build_parse_number(to, *string, span)?
-                    .as_any_value_enum())
-            }
+
             IntrinsicFunction::PointerCast => {
                 let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
                     return Err(unsupported("pointer cast operand"));
@@ -6757,33 +7409,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?
                     .as_any_value_enum())
             }
-            IntrinsicFunction::ValidateUtf8 => {
-                let [BasicMetadataValueEnum::StructValue(bytes)] = arguments else {
-                    return Err(unsupported("UTF-8 operand"));
-                };
-                Ok(self
-                    .backend
-                    .build_validate_utf8(*bytes)?
-                    .as_any_value_enum())
-            }
-            IntrinsicFunction::StringHasNul => {
-                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
-                    return Err(unsupported("interior-NUL operand"));
-                };
-                Ok(self
-                    .backend
-                    .build_string_has_nul(*string)?
-                    .as_any_value_enum())
-            }
-            IntrinsicFunction::CStringBytes => {
-                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
-                    return Err(unsupported("CString bytes operand"));
-                };
-                Ok(self
-                    .backend
-                    .build_c_string_bytes(*pointer, span)?
-                    .as_any_value_enum())
-            }
+
             IntrinsicFunction::IntegerBinary { integer, operation } => {
                 let [
                     BasicMetadataValueEnum::IntValue(left),
@@ -6801,20 +7427,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_integer_binary(integer, operation, *left, *right)?;
                 Ok(value.as_any_value_enum())
             }
-            IntrinsicFunction::ToString { value: numeric } => {
-                let [argument] = arguments else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "numeric conversion needs one argument",
-                    ));
-                };
-                // Use the common String conversion helper.
-                let argument = BasicValueEnum::try_from(*argument).map_err(|_| {
-                    Diagnostic::new(span.clone(), "numeric conversion requires a numeric value")
-                })?;
-                self.backend
-                    .build_numeric_to_string(numeric, argument, span)
-            }
+
             IntrinsicFunction::IntegerCompare { integer, operation } => {
                 let [
                     BasicMetadataValueEnum::IntValue(left),
@@ -6863,52 +7476,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_float_compare(float, operation, *left, *right)?;
                 self.build_intrinsic_bool(condition, result_type, span)
             }
-            IntrinsicFunction::StringFromCString => {
-                let [BasicMetadataValueEnum::PointerValue(source)] = arguments else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "CString conversion requires a pointer",
-                    ));
-                };
-                // The shared conversion core; the CString release expands the
-                // recorded `CStringConversion` glue.
-                let result = self
-                    .backend
-                    .build_string_from_c_string(*source, span.clone())?;
-                self.emit_drop_site(
-                    owner,
-                    crate::ArtifactUseSite::CStringConversion(call_id),
-                    DropSource::Value((*source).into()),
-                    &span,
-                )?;
-                Ok(result.as_any_value_enum())
-            }
-            IntrinsicFunction::StringToCString => {
-                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "String conversion requires a String value",
-                    ));
-                };
-                // Use the common runtime helper.
-                Ok(self
-                    .backend
-                    .build_string_to_c_string(*string, span)?
-                    .as_any_value_enum())
-            }
-            IntrinsicFunction::StringAdd => {
-                let [
-                    BasicMetadataValueEnum::StructValue(left),
-                    BasicMetadataValueEnum::StructValue(right),
-                ] = arguments
-                else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "string concatenation requires two String values",
-                    ));
-                };
-                self.backend.build_string_add(*left, *right, span)
-            }
+
             IntrinsicFunction::SliceLength => {
                 let [BasicMetadataValueEnum::StructValue(slice)] = arguments else {
                     return Err(Diagnostic::new(span, "length requires a slice"));

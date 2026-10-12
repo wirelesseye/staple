@@ -52,6 +52,22 @@ impl RelevantParameters {
             .or_insert_with(|| name.to_owned());
     }
 
+    /// Merges the parameters noticed inside a scheme, except the scheme's own.
+    fn absorb_free(&mut self, inner: Self, bound: &HashSet<TypeParameterId>) {
+        for parameter in inner.types {
+            if !bound.contains(&parameter) {
+                let name = inner.names.get(&parameter).map_or("", String::as_str);
+                self.notice_type(parameter, name);
+            }
+        }
+        for parameter in inner.effects {
+            if !bound.contains(&parameter) {
+                let name = inner.names.get(&parameter).map_or("", String::as_str);
+                self.notice_effect(parameter, name);
+            }
+        }
+    }
+
     /// The declared name of a relevant parameter, when it was observed.
     pub(crate) fn name(&self, parameter: TypeParameterId) -> Option<&str> {
         self.names.get(&parameter).map(String::as_str)
@@ -82,6 +98,33 @@ impl RelevantParameters {
         self.effects.iter().copied()
     }
 }
+
+/// The name a diagnostic shows for a lowered function. Implementation members
+/// and trait defaults are mangled (`impl.<…>.member`, hex-encoded); they are
+/// shown by their member name.
+fn source_function_name(name: &str) -> String {
+    let decoded = name
+        .strip_prefix("operator.")
+        .filter(|encoded| encoded.len() % 2 == 0)
+        .and_then(|encoded| {
+            (0..encoded.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16).ok())
+                .collect::<Option<Vec<_>>>()
+        })
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_else(|| name.to_owned());
+    if decoded.starts_with("impl.") || decoded.starts_with("trait.default.") {
+        decoded.rsplit('.').next().unwrap_or(&decoded).to_owned()
+    } else {
+        decoded
+    }
+}
+
+/// How deeply an instance's substituted types may nest before the instance is
+/// treated as runaway polymorphic recursion. Far above what written types
+/// reach (see `runaway_instance_diagnostic`).
+const MAX_INSTANCE_TYPE_DEPTH: usize = 16;
 
 #[cfg(test)]
 /// Every record family the parameter collector visits. The collector's
@@ -322,8 +365,27 @@ impl SubstitutionEnvironment {
     }
 }
 
-fn collect_referenced_parameters(value_type: &CheckedType, out: &mut BTreeSet<TypeParameterId>) {
+pub(super) fn collect_referenced_parameters(
+    value_type: &CheckedType,
+    out: &mut BTreeSet<TypeParameterId>,
+) {
     match value_type {
+        // Scheme-bound parameters are supplied at invocation, not by the
+        // enclosing instance; collect only free parameters.
+        CheckedType::Forall(scheme) => {
+            let mut inner = BTreeSet::new();
+            collect_referenced_parameters(&scheme.body, &mut inner);
+            for bound in &scheme.trait_bounds {
+                for argument in &bound.arguments {
+                    collect_referenced_parameters(argument, &mut inner);
+                }
+            }
+            for bound in &scheme.subtype_bounds {
+                collect_referenced_parameters(&bound.supertype, &mut inner);
+            }
+            let bound = scheme.bound_ids();
+            out.extend(inner.into_iter().filter(|id| !bound.contains(id)));
+        }
         CheckedType::Parameter { id, .. } => {
             out.insert(*id);
         }
@@ -886,6 +948,33 @@ pub(crate) fn unresolved_type_problem(value_type: &CheckedType) -> Option<&'stat
     None
 }
 
+/// True when a type refers to a parameter without a descriptor in this scope.
+pub(super) fn contains_parameter_outside_scope(
+    value_type: &CheckedType,
+    runtime: &BTreeSet<TypeParameterId>,
+) -> bool {
+    if runtime.is_empty() {
+        return contains_type_parameter(value_type);
+    }
+    let mut referenced = BTreeSet::new();
+    collect_referenced_parameters(value_type, &mut referenced);
+    !referenced.is_subset(runtime)
+}
+
+/// Parameters are legal only in the owning dynamic instance's descriptor scope.
+/// Replace those parameters before using the normal concrete validator, which
+/// still rejects placeholders and any parameter outside the scope.
+pub(super) fn unresolved_type_problem_in_scope(
+    value_type: &CheckedType,
+    runtime: &BTreeSet<TypeParameterId>,
+) -> Option<&'static str> {
+    if runtime.is_empty() {
+        return unresolved_type_problem(value_type);
+    }
+    let map = runtime.iter().map(|id| (*id, CheckedType::Never)).collect();
+    unresolved_type_problem(&substitute_type(value_type.clone(), &map))
+}
+
 fn contains_placeholder(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Inferred | CheckedType::Error => true,
@@ -936,6 +1025,9 @@ struct TraitSelectionContext<'a> {
     cycle_hit: Cell<bool>,
     /// A matching implementation header failed its conditional bounds.
     prerequisite_failed: Cell<bool>,
+    /// Run-time parameters of the requesting scope: a bound over only these
+    /// is checked where the dictionary is built, so it holds here.
+    runtime: BTreeSet<TypeParameterId>,
 }
 
 impl<'a> TraitSelectionContext<'a> {
@@ -962,7 +1054,13 @@ impl<'a> TraitSelectionContext<'a> {
             visited: RefCell::new(Vec::new()),
             cycle_hit: Cell::new(false),
             prerequisite_failed: Cell::new(false),
+            runtime: BTreeSet::new(),
         }
+    }
+
+    fn with_runtime(mut self, runtime: &BTreeSet<TypeParameterId>) -> Self {
+        self.runtime = runtime.clone();
+        self
     }
 
     /// Expands declared bounds through the owned trait prerequisite catalog,
@@ -1199,6 +1297,13 @@ impl<'a> TraitSelectionContext<'a> {
                 .iter()
                 .any(|argument| contains_type_parameter(argument))
             {
+                if !self.runtime.is_empty()
+                    && !bound_arguments
+                        .iter()
+                        .any(|argument| contains_parameter_outside_scope(argument, &self.runtime))
+                {
+                    return true;
+                }
                 self.prerequisite_failed.set(true);
                 return false;
             }
@@ -1512,11 +1617,213 @@ impl LoweredProgram {
     /// unification, conditional-bound, negative-implementation, functional
     /// dependency, and structural-derivation rules. A `method: None` recipe
     /// proves an obligation but returns no target evidence.
+    /// Concrete dictionary selection follows the existing static dispatch order.
+    /// Selection at run-time types has a separate uniqueness rule
+    /// (`select_runtime_implementation`).
+    pub(super) fn concrete_dictionary_implementation(
+        &self,
+        bound: &CheckedTraitBound,
+        origin: &Origin,
+    ) -> Result<LoweredTraitImplementationId, Diagnostic> {
+        let context = TraitSelectionContext::new(self, Vec::new());
+        context.prove_obligation(bound.trait_id, &bound.arguments, origin)?;
+        let index = context
+            .matching_implementations(bound.trait_id, &bound.arguments)
+            .first()
+            .copied()
+            .ok_or_else(|| {
+                no_match_diagnostic(&context, origin, bound.trait_id, &bound.arguments, false)
+            })?;
+        Ok(context.implementation_ids[index])
+    }
+
+    /// Selects the implementation a run-time obligation names. Every
+    /// implementation whose header could unify with the obligation, taking
+    /// its run-time parameters as unknowns, is a candidate; those whose
+    /// `where` clause is definitely false are dropped, and exactly one may
+    /// remain. When it does, every instantiation selects it too.
+    pub(super) fn select_runtime_implementation(
+        &self,
+        bound: &CheckedTraitBound,
+        origin: &Origin,
+    ) -> Result<Option<RuntimeImplementation>, Diagnostic> {
+        let context = TraitSelectionContext::new(self, Vec::new());
+        let ids = &self.semantic_ids;
+        let markers = [
+            ids.copy_trait,
+            ids.sized_trait,
+            ids.drop_trait,
+            ids.natural_trait,
+        ];
+        let mut definite = Vec::new();
+        let mut possible = Vec::new();
+        for (index, implementation) in context.implementations.iter().enumerate() {
+            if implementation.trait_id != bound.trait_id
+                || implementation.negative
+                || implementation.arguments.len() != bound.arguments.len()
+            {
+                continue;
+            }
+            let mut substitution = HashMap::new();
+            let forward = implementation
+                .arguments
+                .iter()
+                .zip(&bound.arguments)
+                .all(|(template, actual)| {
+                    infer_type_parameters(template, actual, &mut substitution)
+                });
+            if forward {
+                // A `where` clause over concrete types that fails excludes the
+                // candidate; one over run-time types stays unknown.
+                let false_clause = implementation.bounds.iter().any(|clause| {
+                    let arguments = clause
+                        .arguments
+                        .iter()
+                        .map(|argument| substitute_type(argument.clone(), &substitution))
+                        .collect::<Vec<_>>();
+                    if Some(clause.trait_id) == ids.copy_trait {
+                        // Copy is false for every instantiation when it fails
+                        // with all unknowns standing for Copy types.
+                        return arguments.first().is_some_and(|argument| {
+                            let mut referenced = BTreeSet::new();
+                            collect_referenced_parameters(argument, &mut referenced);
+                            let assumed = referenced
+                                .into_iter()
+                                .map(|parameter| (parameter, CheckedType::I32))
+                                .collect();
+                            !context.is_copy(&substitute_type(argument.clone(), &assumed))
+                        });
+                    }
+                    if markers.contains(&Some(clause.trait_id)) {
+                        return false;
+                    }
+                    !arguments.iter().any(contains_type_parameter)
+                        && !context.obligation_available(clause.trait_id, &arguments)
+                });
+                if !false_clause {
+                    definite.push((index, substitution));
+                }
+                continue;
+            }
+            // The run-time side may be the more general one: an obligation on
+            // an unknown `T` overlaps an implementation for one type.
+            let mut reverse = HashMap::new();
+            let overlaps = bound
+                .arguments
+                .iter()
+                .zip(&implementation.arguments)
+                .all(|(actual, template)| infer_type_parameters(actual, template, &mut reverse));
+            if overlaps {
+                possible.push(index);
+            }
+        }
+        let describe = |index: usize| {
+            context
+                .program
+                .trait_implementations
+                .get(context.implementation_ids[index])
+                .map(|metadata| format!("{:?}", metadata.origin.span))
+                .unwrap_or_default()
+        };
+        let trait_name = context.trait_name(bound.trait_id);
+        match (definite.len(), possible.len()) {
+            (1, 0) => {
+                let (index, substitution) = definite.remove(0);
+                let implementation = &context.implementations[index];
+                let completed = implementation
+                    .arguments
+                    .iter()
+                    .map(|argument| substitute_type(argument.clone(), &substitution))
+                    .collect::<Vec<_>>();
+                let clauses = implementation
+                    .bounds
+                    .iter()
+                    .map(|clause| CheckedTraitBound {
+                        trait_id: clause.trait_id,
+                        arguments: clause
+                            .arguments
+                            .iter()
+                            .map(|argument| substitute_type(argument.clone(), &substitution))
+                            .collect(),
+                    })
+                    .collect();
+                Ok(Some(RuntimeImplementation {
+                    implementation: context.implementation_ids[index],
+                    completed,
+                    substitution,
+                    clauses,
+                }))
+            }
+            (0, 0) => Ok(None),
+            // A structural `Debug` shape leaves the compound's own header to
+            // its components; overlaps in the unknown ones do not matter.
+            (0, _)
+                if Some(bound.trait_id) == ids.debug_trait
+                    && matches!(
+                        bound.arguments.first(),
+                        Some(CheckedType::Product(_) | CheckedType::Sum(_))
+                    ) =>
+            {
+                Ok(None)
+            }
+            _ => Err(Diagnostic::new(
+                origin.span.clone(),
+                format!(
+                    "trait `{trait_name}` for `{}` is ambiguous at run-time types: candidates {}",
+                    describe_arguments(&bound.arguments),
+                    definite
+                        .iter()
+                        .map(|(index, _)| *index)
+                        .chain(possible.iter().copied())
+                        .map(describe)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )),
+        }
+    }
+
+    /// The method function an implementation (or the trait's default)
+    /// provides, for building a dictionary.
+    pub(super) fn implementation_method_function(
+        &self,
+        implementation: LoweredTraitImplementationId,
+        trait_id: TraitId,
+        method: TraitMethodId,
+    ) -> Option<FunctionId> {
+        self.trait_implementations
+            .get(implementation)?
+            .methods
+            .iter()
+            .find(|(candidate, _)| *candidate == method)
+            .map(|(_, function)| *function)
+            .or_else(|| {
+                self.traits
+                    .get(trait_id)?
+                    .default_methods
+                    .iter()
+                    .find(|(candidate, _)| *candidate == method)
+                    .map(|(_, function)| *function)
+            })
+    }
+
     pub(crate) fn resolve_trait_evidence(
         &self,
         origin: &Origin,
         evidence: Option<&TraitEvidence>,
         environment: &SubstitutionEnvironment,
+    ) -> Result<Option<TraitEvidence>, Diagnostic> {
+        self.resolve_trait_evidence_with_runtime(origin, evidence, environment, &BTreeSet::new())
+    }
+
+    /// Like [`Self::resolve_trait_evidence`] for an explicit selection whose
+    /// arguments may name the requesting instance's run-time parameters.
+    pub(crate) fn resolve_trait_evidence_with_runtime(
+        &self,
+        origin: &Origin,
+        evidence: Option<&TraitEvidence>,
+        environment: &SubstitutionEnvironment,
+        runtime: &BTreeSet<TypeParameterId>,
     ) -> Result<Option<TraitEvidence>, Diagnostic> {
         let Some(evidence) = evidence else {
             return Ok(None);
@@ -1530,8 +1837,8 @@ impl LoweredProgram {
                 function,
                 arguments,
             } => {
-                let arguments = substitute_concrete_arguments(arguments, &map, origin)?;
-                let context = TraitSelectionContext::new(self, Vec::new());
+                let arguments = substitute_concrete_arguments(arguments, &map, origin, runtime)?;
+                let context = TraitSelectionContext::new(self, Vec::new()).with_runtime(runtime);
                 let metadata = self
                     .trait_implementations
                     .get(*implementation)
@@ -1923,11 +2230,12 @@ fn substitute_concrete_arguments(
     arguments: &[CheckedType],
     map: &HashMap<TypeParameterId, CheckedType>,
     origin: &Origin,
+    runtime: &BTreeSet<TypeParameterId>,
 ) -> Result<Vec<CheckedType>, Diagnostic> {
     let mut substituted = Vec::with_capacity(arguments.len());
     for argument in arguments {
         let value = substitute_type(argument.clone(), map);
-        if let Some(problem) = unresolved_type_problem(&value) {
+        if let Some(problem) = unresolved_type_problem_in_scope(&value, runtime) {
             return Err(Diagnostic::new(
                 origin.span.clone(),
                 format!("trait evidence argument `{value}` is not concrete: {problem}"),
@@ -1950,6 +2258,18 @@ pub(crate) struct ResolvedInstanceRequest {
     pub evidence: Option<TraitEvidence>,
 }
 
+/// The implementation a run-time obligation selects.
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeImplementation {
+    pub implementation: LoweredTraitImplementationId,
+    /// The implementation header at the obligation's types.
+    pub completed: Vec<CheckedType>,
+    /// Implementation parameter to the obligation's type.
+    pub substitution: HashMap<TypeParameterId, CheckedType>,
+    /// The implementation's `where` clause at the obligation's types.
+    pub clauses: Vec<CheckedTraitBound>,
+}
+
 /// How a request relates to the enclosing instance.
 #[derive(Clone, Copy)]
 pub(crate) enum InstanceResolutionTarget<'a> {
@@ -1965,6 +2285,34 @@ pub(crate) enum InstanceResolutionTarget<'a> {
 /// One specialization resolver input: the target function, the requesting origin,
 /// the complete checked callable type at the site, the raw lowering recipe, and
 /// the enclosing-instance relationship.
+/// The run-time parameters of one scope: type parameters (which carry
+/// descriptors) and effect parameters (which carry only bundles).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RuntimeScope {
+    pub types: BTreeSet<TypeParameterId>,
+    pub effects: BTreeSet<TypeParameterId>,
+}
+
+impl RuntimeScope {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.types.is_empty() && self.effects.is_empty()
+    }
+
+    /// Replaces run-time types by `Never` and run-time effect variables by the
+    /// empty row, the way a descriptor-free check sees them.
+    fn erasure_map(&self) -> HashMap<TypeParameterId, CheckedType> {
+        let mut map = self
+            .types
+            .iter()
+            .map(|id| (*id, CheckedType::Never))
+            .collect::<HashMap<_, _>>();
+        for id in &self.effects {
+            map.insert(*id, effect_substitution_type(CheckedEffectSet::default()));
+        }
+        map
+    }
+}
+
 pub(crate) struct InstanceResolutionRequest<'a> {
     pub function: FunctionId,
     pub origin: Origin,
@@ -1975,6 +2323,59 @@ pub(crate) struct InstanceResolutionRequest<'a> {
 }
 
 impl LoweredProgram {
+    /// Whether an instance uses the dynamic ABI: it has run-time type or
+    /// effect parameters.
+    pub(crate) fn instance_is_dynamic(&self, id: FunctionInstanceId) -> bool {
+        self.instances
+            .get(id)
+            .and_then(|instance| self.specializations.instance(instance.ordinal))
+            .is_some_and(|key| key.is_dynamic())
+    }
+
+    /// The run-time scope of a polymorphic value's entry: every quantified
+    /// type parameter (with a descriptor) and effect parameter (with a bundle).
+    pub(crate) fn scheme_runtime_scope(&self, function: FunctionId) -> RuntimeScope {
+        self.functions
+            .get(function)
+            .map(|template| RuntimeScope {
+                types: template.scheme_type_parameters.iter().copied().collect(),
+                effects: template.scheme_effect_parameters.iter().copied().collect(),
+            })
+            .unwrap_or_default()
+    }
+
+    /// Runtime descriptor parameters in descriptor ABI order: the
+    /// template's declared scheme order, with parameters the template does
+    /// not declare (an enclosing instance's) first, in id order.
+    pub(crate) fn instance_runtime_order(
+        &self,
+        id: FunctionInstanceId,
+    ) -> Option<Vec<TypeParameterId>> {
+        let instance = self.instances.get(id)?;
+        let key = self.specializations.instance(instance.ordinal)?;
+        let runtime = key.runtime();
+        if runtime.is_empty() {
+            return Some(Vec::new());
+        }
+        let scheme = self
+            .functions
+            .get(key.function())
+            .map(|function| function.scheme_type_parameters.as_slice())
+            .unwrap_or(&[]);
+        let mut order = Vec::with_capacity(runtime.len());
+        for parameter in runtime {
+            if !scheme.contains(parameter) {
+                order.push(*parameter);
+            }
+        }
+        for parameter in scheme {
+            if runtime.contains(parameter) {
+                order.push(*parameter);
+            }
+        }
+        Some(order)
+    }
+
     /// Resolves one request end to end: composed environment, selected
     /// evidence, concrete key, and the relevant environment for specialization.
     ///
@@ -1986,30 +2387,174 @@ impl LoweredProgram {
         &self,
         request: &InstanceResolutionRequest<'_>,
     ) -> Result<ResolvedInstanceRequest, Diagnostic> {
+        self.resolve_instance_request_with_runtime(request, &BTreeSet::new())
+    }
+
+    /// Requests an implementation whose selected parameters arrive as descriptors.
+    /// Nested requests infer their run-time set from the caller's descriptor scope.
+    pub(crate) fn resolve_instance_request_with_runtime(
+        &self,
+        request: &InstanceResolutionRequest<'_>,
+        requested_runtime: &BTreeSet<TypeParameterId>,
+    ) -> Result<ResolvedInstanceRequest, Diagnostic> {
+        self.resolve_instance_request_in_scope(
+            request,
+            &RuntimeScope {
+                types: requested_runtime.clone(),
+                effects: BTreeSet::new(),
+            },
+        )
+    }
+
+    /// Like [`Self::resolve_instance_request_with_runtime`], with run-time
+    /// effect parameters beside the run-time types.
+    pub(crate) fn resolve_instance_request_in_scope(
+        &self,
+        request: &InstanceResolutionRequest<'_>,
+        requested: &RuntimeScope,
+    ) -> Result<ResolvedInstanceRequest, Diagnostic> {
         let enclosing = match request.target {
             InstanceResolutionTarget::Root => None,
             InstanceResolutionTarget::Nested(enclosing)
             | InstanceResolutionTarget::Current(enclosing) => Some(enclosing),
         };
         let resolved = (|| {
-            let (environment, relevant) = self.resolve_substitutions(
-                request.function,
-                &request.origin,
-                &request.function_type,
-                &request.substitutions,
-                enclosing.map(|enclosing| &enclosing.environment),
-            )?;
-            let evidence = self.resolve_trait_evidence(
+            let caller = enclosing
+                .map(|owner| RuntimeScope {
+                    types: owner.key.runtime().clone(),
+                    effects: owner.key.runtime_effects().clone(),
+                })
+                .unwrap_or_default();
+            let (mut environment, relevant) = if caller.is_empty() && requested.is_empty() {
+                self.resolve_substitutions(
+                    request.function,
+                    &request.origin,
+                    &request.function_type,
+                    &request.substitutions,
+                    enclosing.map(|owner| &owner.environment),
+                )?
+            } else {
+                self.resolve_substitutions_in_scope(
+                    request.function,
+                    &request.origin,
+                    &request.function_type,
+                    &request.substitutions,
+                    enclosing.map(|enclosing| &enclosing.environment),
+                    &caller,
+                    requested,
+                )?
+            };
+            let mut runtime = requested.types.clone();
+            let mut runtime_effects = requested.effects.clone();
+            if !caller.is_empty() {
+                let caller_ids = caller
+                    .types
+                    .iter()
+                    .chain(&caller.effects)
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                for parameter in relevant.type_parameters() {
+                    if let Some(value) = environment.type_value(parameter) {
+                        let mut referenced = BTreeSet::new();
+                        collect_referenced_parameters(value, &mut referenced);
+                        if !referenced.is_disjoint(&caller_ids) {
+                            runtime.insert(parameter);
+                        }
+                    } else if caller.types.contains(&parameter) {
+                        runtime.insert(parameter);
+                    }
+                }
+                for parameter in relevant.effect_parameters() {
+                    if let Some(value) = environment.effect_value(parameter) {
+                        let mut referenced = BTreeSet::new();
+                        SubstitutionValue::Effects(value.clone())
+                            .referenced_parameters(&mut referenced);
+                        if !referenced.is_disjoint(&caller_ids) {
+                            runtime_effects.insert(parameter);
+                        }
+                    } else if caller.effects.contains(&parameter) {
+                        runtime_effects.insert(parameter);
+                    }
+                }
+            }
+            for parameter in &runtime {
+                if !relevant.types.contains(parameter) {
+                    return Err(Diagnostic::new(
+                        request.origin.span.clone(),
+                        format!(
+                            "run-time parameter {} is not a relevant type parameter",
+                            parameter.0
+                        ),
+                    ));
+                }
+                // Never retain a caller's parameter identity in a callee body.
+                // The call site supplies the descriptor for the original argument.
+                environment.entries.insert(
+                    *parameter,
+                    SubstitutionEntry {
+                        source: SubstitutionSource::Site,
+                        value: SubstitutionValue::Type(CheckedType::Parameter {
+                            id: *parameter,
+                            name: relevant.name(*parameter).unwrap_or("").to_owned(),
+                            sized: true,
+                            parameter_product_capable: false,
+                        }),
+                    },
+                );
+            }
+            for parameter in &runtime_effects {
+                if !relevant.effects.contains(parameter) {
+                    return Err(Diagnostic::new(
+                        request.origin.span.clone(),
+                        format!(
+                            "run-time parameter {} is not a relevant effect parameter",
+                            parameter.0
+                        ),
+                    ));
+                }
+                // The body keeps the variable itself; its bundle arrives as an
+                // argument.
+                environment.entries.insert(
+                    *parameter,
+                    SubstitutionEntry {
+                        source: SubstitutionSource::Site,
+                        value: SubstitutionValue::Effects(CheckedEffectSet {
+                            variable: Some(crate::CheckedEffectVariable {
+                                id: *parameter,
+                                name: relevant.name(*parameter).unwrap_or("").to_owned(),
+                            }),
+                            resources: Vec::new(),
+                            state: None,
+                        }),
+                    },
+                );
+            }
+            // Evidence at the caller's types may name its run-time parameters.
+            let evidence_scope = runtime
+                .iter()
+                .chain(&caller.types)
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let evidence = self.resolve_trait_evidence_with_runtime(
                 &request.origin,
                 request.evidence.as_ref(),
                 &environment,
+                &evidence_scope,
             )?;
+            // Evidence over run-time parameters adds nothing to the key: its
+            // parameters are the instance's own, and the rest are keyed.
+            let keyed_evidence = evidence.as_ref().filter(|evidence| {
+                let (_, arguments, _) = super::trait_dictionaries::evidence_obligation(evidence);
+                !arguments.iter().any(contains_type_parameter)
+            });
             let key = build_instance_key(
                 request.function,
                 &environment,
                 &relevant,
-                evidence.as_ref(),
+                keyed_evidence,
                 &request.origin,
+                &runtime,
+                &runtime_effects,
             )?;
             Ok::<_, Diagnostic>((environment, relevant, evidence, key))
         })();
@@ -2039,6 +2584,33 @@ impl LoweredProgram {
             relevant,
             evidence,
         })
+    }
+
+    /// Rejects an instance whose substituted types nest deeper than any
+    /// program writes. Direct polymorphic recursion is rejected by the
+    /// checker; recursion through trait dispatch or a helper function only
+    /// shows up here, as a chain of instances whose type arguments keep
+    /// growing, and would otherwise never finish.
+    pub(crate) fn runaway_instance_diagnostic(
+        &self,
+        resolved: &ResolvedInstanceRequest,
+        origin: &Origin,
+    ) -> Option<Diagnostic> {
+        if resolved.key.substitution_depth() <= MAX_INSTANCE_TYPE_DEPTH {
+            return None;
+        }
+        let function = resolved.key.function();
+        let name = self
+            .functions
+            .get(function)
+            .map(|function| source_function_name(&function.name))
+            .unwrap_or_else(|| format!("function {}", function.0));
+        Some(Diagnostic::new(
+            origin.span.clone(),
+            format!(
+                "polymorphic recursion is not supported: instantiating `{name}` here nests its type arguments more than {MAX_INSTANCE_TYPE_DEPTH} levels deep"
+            ),
+        ))
     }
 
     fn polymorphic_recursion_diagnostic(
@@ -2074,9 +2646,14 @@ fn build_instance_key(
     relevant: &RelevantParameters,
     evidence: Option<&TraitEvidence>,
     origin: &Origin,
+    runtime: &BTreeSet<TypeParameterId>,
+    runtime_effects: &BTreeSet<TypeParameterId>,
 ) -> Result<InstanceKey, Diagnostic> {
     let mut substitutions = Vec::new();
     for parameter in relevant.type_parameters() {
+        if runtime.contains(&parameter) {
+            continue;
+        }
         let Some(value_type) = environment.type_value(parameter) else {
             return Err(Diagnostic::new(
                 origin.span.clone(),
@@ -2092,6 +2669,9 @@ fn build_instance_key(
         });
     }
     for parameter in relevant.effect_parameters() {
+        if runtime_effects.contains(&parameter) {
+            continue;
+        }
         let Some(effects) = environment.effect_value(parameter) else {
             return Err(Diagnostic::new(
                 origin.span.clone(),
@@ -2109,8 +2689,18 @@ fn build_instance_key(
     let evidence = evidence
         .map(|evidence| canonical_evidence(evidence, origin))
         .transpose()?;
-    InstanceKey::new(function, substitutions, evidence)
-        .map_err(|error| Diagnostic::new(origin.span.clone(), error.message()))
+    let key = if runtime.is_empty() && runtime_effects.is_empty() {
+        InstanceKey::new(function, substitutions, evidence)
+    } else {
+        InstanceKey::with_runtime_effects(
+            function,
+            substitutions,
+            evidence,
+            runtime.clone(),
+            runtime_effects.clone(),
+        )
+    };
+    key.map_err(|error| Diagnostic::new(origin.span.clone(), error.message()))
 }
 
 struct ParameterCollector<'a> {
@@ -2243,6 +2833,20 @@ impl<'a> ParameterCollector<'a> {
     /// carried by the nominal ID plus arguments, matching canonical keys.
     fn collect_type(&mut self, value_type: &CheckedType) {
         match value_type {
+            // Quantified parameters belong to the value's descriptor ABI;
+            // only free parameters belong to the enclosing instance.
+            CheckedType::Forall(scheme) => {
+                let outer = std::mem::take(&mut self.relevant);
+                self.collect_type(&scheme.body);
+                for bound in &scheme.trait_bounds {
+                    self.collect_bound(bound);
+                }
+                for bound in &scheme.subtype_bounds {
+                    self.collect_type(&bound.supertype);
+                }
+                let inner = std::mem::replace(&mut self.relevant, outer);
+                self.relevant.absorb_free(inner, &scheme.bound_ids());
+            }
             CheckedType::Inferred | CheckedType::Error => {}
             CheckedType::Never
             | CheckedType::I32
@@ -2640,6 +3244,12 @@ impl<'a> ParameterCollector<'a> {
         let Some(value) = self.program.callable_values.get(value) else {
             return;
         };
+        // A retained scheme binds these parameters at the value boundary;
+        // they must not make its enclosing function a generic template.
+        let quantified = value.scheme.as_ref().map(|scheme| scheme.bound_ids());
+        let outer = quantified
+            .as_ref()
+            .map(|_| std::mem::take(&mut self.relevant));
         self.collect_function_type(&value.function_type);
         if let Some(closure) = &value.closure {
             for capture in &closure.captures {
@@ -2663,6 +3273,10 @@ impl<'a> ParameterCollector<'a> {
         }
         if let Some(evidence) = &value.evidence {
             self.collect_evidence(evidence);
+        }
+        if let (Some(outer), Some(quantified)) = (outer, quantified) {
+            let inner = std::mem::replace(&mut self.relevant, outer);
+            self.relevant.absorb_free(inner, &quantified);
         }
     }
 
@@ -2929,13 +3543,50 @@ impl LoweredProgram {
         substitutions: &CallSubstitutions,
         enclosing: Option<&SubstitutionEnvironment>,
     ) -> Result<(SubstitutionEnvironment, RelevantParameters), Diagnostic> {
+        self.resolve_substitutions_in_scope(
+            function,
+            origin,
+            function_type,
+            substitutions,
+            enclosing,
+            &RuntimeScope::default(),
+            &RuntimeScope::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_substitutions_in_scope(
+        &self,
+        function: FunctionId,
+        origin: &Origin,
+        function_type: &CheckedFunctionType,
+        substitutions: &CallSubstitutions,
+        enclosing: Option<&SubstitutionEnvironment>,
+        caller: &RuntimeScope,
+        requested: &RuntimeScope,
+    ) -> Result<(SubstitutionEnvironment, RelevantParameters), Diagnostic> {
+        let caller_runtime = &caller.types;
+        let requested_runtime = &requested.types;
         let Some(template) = self.functions.get(function) else {
             return Err(Diagnostic::new(
                 origin.span.clone(),
                 format!("function {} has no lowered template", function.0),
             ));
         };
-        let relevant = self.relevant_parameters(function);
+        let mut relevant = self.relevant_parameters(function);
+        // A Forall entry accepts every declared scheme descriptor, including
+        // phantom parameters absent from the signature and implementation.
+        // Ordinary monomorphized requests keep their existing relevance set.
+        for parameter in &template.scheme_type_parameters {
+            if requested_runtime.contains(parameter) {
+                relevant.notice_type(*parameter, "");
+            }
+        }
+        for parameter in &template.scheme_effect_parameters {
+            if requested.effects.contains(parameter) {
+                relevant.notice_effect(*parameter, "");
+            }
+        }
         let signature = template.signature.clone();
         let mut builder = EnvironmentBuilder::new(origin);
         let enclosing_map = enclosing
@@ -2966,7 +3617,51 @@ impl LoweredProgram {
         }
         builder.add_inferred(inferred);
         let environment = builder.resolve()?;
-        require_concrete_substitutions(&environment, &relevant, origin)?;
+        let mut concrete = environment.clone();
+        let mut scope = caller.clone();
+        scope.types.extend(requested_runtime);
+        scope.effects.extend(&requested.effects);
+        let scope_map = scope.erasure_map();
+        for parameter in relevant.type_parameters() {
+            if requested_runtime.contains(&parameter) || caller_runtime.contains(&parameter) {
+                concrete.entries.insert(
+                    parameter,
+                    SubstitutionEntry {
+                        source: SubstitutionSource::Site,
+                        value: SubstitutionValue::Type(CheckedType::Never),
+                    },
+                );
+            } else if let Some(entry) = concrete.entries.get_mut(&parameter) {
+                if let SubstitutionValue::Type(value) = &entry.value {
+                    if let Some(problem) = unresolved_type_problem_in_scope(value, &scope.types) {
+                        return Err(unresolved_parameter_diagnostic(
+                            origin, &relevant, parameter, "type", problem,
+                        ));
+                    }
+                    entry.value =
+                        SubstitutionValue::Type(substitute_type(value.clone(), &scope_map));
+                }
+            }
+        }
+        for parameter in relevant.effect_parameters() {
+            if requested.effects.contains(&parameter) || caller.effects.contains(&parameter) {
+                concrete.entries.insert(
+                    parameter,
+                    SubstitutionEntry {
+                        source: SubstitutionSource::Site,
+                        value: SubstitutionValue::Effects(CheckedEffectSet::default()),
+                    },
+                );
+            } else if let Some(entry) = concrete.entries.get_mut(&parameter) {
+                if let SubstitutionValue::Effects(value) = &entry.value {
+                    entry.value = SubstitutionValue::Effects(substitute_effect_set(
+                        value.clone(),
+                        &scope_map,
+                    ));
+                }
+            }
+        }
+        require_concrete_substitutions(&concrete, &relevant, origin)?;
         Ok((environment, relevant))
     }
 
@@ -4666,6 +5361,118 @@ mod tests {
             keys[0], keys[1],
             "different captured outer arguments separate the closure instances"
         );
+    }
+
+    #[test]
+    fn runtime_requests_deduplicate_concrete_call_sites() {
+        let (_, program) = lower(concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let first: I32 = identity 1\n",
+            "let second: U8 = identity (U8 :: 2)\n",
+        ));
+        let function = function_id(&program, "identity");
+        let runtime = program
+            .relevant_parameters(function)
+            .type_parameters()
+            .collect();
+        let requests = direct_calls(&program, "identity")
+            .into_iter()
+            .map(|(function, call)| {
+                program
+                    .resolve_instance_request_with_runtime(
+                        &InstanceResolutionRequest {
+                            function,
+                            origin: call.origin.clone(),
+                            function_type: call.function_type.clone(),
+                            substitutions: call.substitutions.clone(),
+                            evidence: call.evidence.clone(),
+                            target: InstanceResolutionTarget::Root,
+                        },
+                        &runtime,
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].key, requests[1].key);
+        let parameter = *runtime.iter().next().unwrap();
+        assert!(matches!(requests[0].environment.type_value(parameter),
+            Some(CheckedType::Parameter { id, .. }) if *id == parameter));
+        let (function, call) = direct_call(&program, "identity");
+        let error = program
+            .resolve_instance_request_with_runtime(
+                &InstanceResolutionRequest {
+                    function,
+                    origin: call.origin.clone(),
+                    function_type: call.function_type.clone(),
+                    substitutions: call.substitutions.clone(),
+                    evidence: call.evidence.clone(),
+                    target: InstanceResolutionTarget::Root,
+                },
+                &BTreeSet::from([TypeParameterId(999999)]),
+            )
+            .unwrap_err();
+        assert!(error.message.contains("not a relevant type parameter"));
+    }
+
+    #[test]
+    fn runtime_recursion_reuses_the_current_instance() {
+        let (_, program) = lower(concat!(
+            "def recursive: <T where Copy T> T -> T = value => recursive value\n",
+            "let result: I32 = recursive 1\n",
+        ));
+        let (function, call) = direct_calls(&program, "recursive")
+            .into_iter()
+            .find(|(_, call)| {
+                !matches!(
+                    call.target,
+                    LoweredCallableTarget::DirectFunction {
+                        environment: LoweredCallEnvironment::Current,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let runtime = program
+            .relevant_parameters(function)
+            .type_parameters()
+            .collect();
+        let outer = program
+            .resolve_instance_request_with_runtime(
+                &InstanceResolutionRequest {
+                    function,
+                    origin: call.origin.clone(),
+                    function_type: call.function_type.clone(),
+                    substitutions: call.substitutions.clone(),
+                    evidence: call.evidence.clone(),
+                    target: InstanceResolutionTarget::Root,
+                },
+                &runtime,
+            )
+            .unwrap();
+        let (_, inner) = direct_calls(&program, "recursive")
+            .into_iter()
+            .find(|(_, call)| {
+                matches!(
+                    call.target,
+                    LoweredCallableTarget::DirectFunction {
+                        environment: LoweredCallEnvironment::Current,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let recursive = program
+            .resolve_instance_request(&InstanceResolutionRequest {
+                function,
+                origin: inner.origin.clone(),
+                function_type: inner.function_type.clone(),
+                substitutions: inner.substitutions.clone(),
+                evidence: inner.evidence.clone(),
+                target: InstanceResolutionTarget::Current(&outer),
+            })
+            .unwrap();
+        assert_eq!(recursive.key, outer.key);
     }
 
     #[test]
