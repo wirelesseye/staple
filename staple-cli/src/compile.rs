@@ -1142,7 +1142,7 @@ mod tests {
             "--manifest-path".into(),
             "staple.kdl".into(),
         ])
-        .expect("manifest mode should derive its input from Binder");
+        .expect("manifest mode should derive its input from the package manifest");
         assert_eq!(options.manifest_path, Some(PathBuf::from("staple.kdl")));
         assert!(options.input.is_empty());
         assert!(

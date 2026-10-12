@@ -2487,7 +2487,7 @@ fn rejects_package_visibility_without_a_manifest() {
     let error = fixture
         .compile()
         .expect_err("standalone package visibility must fail");
-    assert!(error.contains("package visibility requires a Binder manifest"));
+    assert!(error.contains("package visibility requires a package manifest"));
 }
 
 #[test]

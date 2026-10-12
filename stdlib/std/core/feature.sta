@@ -2,7 +2,7 @@ pub mod
 
 use std.syntax.(Expr, Item, Parenthesized)
 
-/// Includes an item only when the named Binder package feature is enabled.
+/// Includes an item only when the named package feature is enabled.
 ///
 /// # Example
 ///

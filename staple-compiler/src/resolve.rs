@@ -1362,7 +1362,7 @@ impl NameResolver {
                 if item_uses_package_visibility(item) && program.package_of(module.id).is_none() {
                     self.diagnostics.push(Diagnostic::new(
                         item.syntax().span.clone(),
-                        "package visibility requires a Binder manifest",
+                        "package visibility requires a package manifest",
                     ));
                 }
             }

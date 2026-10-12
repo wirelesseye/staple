@@ -3420,7 +3420,7 @@ impl MacroExpander {
             let Some(package) = self.module_packages[module.0] else {
                 self.diagnostics.push(Diagnostic::new(
                     invocation.syntax.span,
-                    "`@feature` requires a Binder manifest",
+                    "`@feature` requires a package manifest",
                 ));
                 return None;
             };

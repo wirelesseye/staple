@@ -1493,7 +1493,7 @@ impl ProgramLoader {
             return Err(LoadDiagnostic::source(
                 path.clone(),
                 None,
-                "`@feature` requires a Binder manifest",
+                "`@feature` requires a package manifest",
             ));
         }
         let id = ModuleId(self.modules.len());
@@ -2690,9 +2690,9 @@ fn initialization_order(
         edges[module.id.0].sort();
         edges[module.id.0].dedup();
     }
-    // Binder dependency aliases can feed this same logical-root map in the
-    // future; initialization should depend on resolved package identities, not
-    // on how their source directories happen to be laid out.
+    // Dependency aliases loaded by staple-cli can feed this same logical-root
+    // map in the future; initialization should depend on resolved package
+    // identities, not on how their source directories happen to be laid out.
     for ((source, _), target) in root_qualified_modules {
         edges[source.0].push(*target);
         edges[source.0].sort();
