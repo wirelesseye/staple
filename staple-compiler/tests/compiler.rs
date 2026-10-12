@@ -13899,6 +13899,27 @@ fn checks_polymorphic_trait_members_and_keeps_projection_restriction() {
 }
 
 #[test]
+fn trait_member_parameters_cannot_reuse_trait_parameter_names() {
+    for (source, name) in [
+        ("trait Shadow T { shadow: <T> (T, move T) -> T }\n", "T"),
+        (
+            "trait Source T { type Element; read: <Element> (T, move Element) -> Element }\n",
+            "Element",
+        ),
+    ] {
+        let diagnostics = resolve_result(source)
+            .expect_err_diagnostics("a member parameter cannot hide the trait's");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(
+            diagnostics[0].message.ends_with(&format!(
+                "cannot declare parameter `{name}`: the trait already declares `{name}`"
+            )),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
 fn trait_member_parameters_are_single_value() {
     // Like trait parameters, a member's own parameters never bind to a
     // parameter product, so a parameter that occurs only as a function's

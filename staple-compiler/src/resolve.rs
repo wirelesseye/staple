@@ -3638,6 +3638,22 @@ impl NameResolver {
                     self.push_type_parameter_scope();
                     let mut parameters = declaration.type_parameters.clone();
                     if let Type::Forall(ty) = &member.annotation {
+                        // A member parameter named like a trait parameter or
+                        // associated type would hide it for the whole member,
+                        // which then could not mention the trait's own.
+                        for parameter in &ty.generics.parameters {
+                            for name in parameter.names() {
+                                if self.lookup_type_parameter(name).is_some() {
+                                    self.diagnostics.push(Diagnostic::new(
+                                        parameter.syntax().span.clone(),
+                                        format!(
+                                            "trait member `{}` cannot declare parameter `{name}`: the trait already declares `{name}`",
+                                            member.name
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
                         for parameter in &ty.generics.parameters {
                             self.declare_type_parameter_pattern(parameter);
                         }

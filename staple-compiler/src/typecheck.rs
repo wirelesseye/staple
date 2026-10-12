@@ -3212,7 +3212,11 @@ impl TypeChecker {
                     .take(explicit_parameters)
                     .zip(parameter_names)
                 {
-                    if !contains_type_parameter_id(&value_type, *parameter) {
+                    // A member parameter with the trait parameter's name is
+                    // reported by the resolver.
+                    let shadowed = matches!(&member.annotation, Type::Forall(ty)
+                        if ty.generics.parameters.iter().any(|own| own.names().contains(&name)));
+                    if !shadowed && !contains_type_parameter_id(&value_type, *parameter) {
                         self.diagnostics.push(Diagnostic::new(
                             member.syntax.span.clone(),
                             format!(
