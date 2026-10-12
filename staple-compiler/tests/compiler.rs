@@ -13370,7 +13370,7 @@ fn checked_schemes_preserve_trait_argument_inference_from_expected_types() {
 }
 
 #[test]
-fn stage3_goal_programs_check() {
+fn polymorphic_value_examples_check() {
     for source in [
         "def identity: <T> move T -> T = move value => value\nlet id = identity\n",
         "def identity: <T> move T -> T = move value => value\nlet annotated: <U> move U -> U = identity\n",
@@ -13387,7 +13387,7 @@ fn stage3_goal_programs_check() {
 }
 
 #[test]
-fn stage3_polymorphic_values_check_in_every_value_position() {
+fn polymorphic_values_check_in_every_value_position() {
     const ID: &str = "def identity: <T> move T -> T = move value => value\n";
     for source in [
         "let id = identity\nlet a = id 42\nlet b = id \"hello\"\n",
@@ -13421,7 +13421,7 @@ fn stage3_polymorphic_values_check_in_every_value_position() {
 }
 
 #[test]
-fn stage3_rejects_invalid_polymorphic_values() {
+fn rejects_invalid_polymorphic_values() {
     for (source, message) in [
         (
             "trait Test T { apply: (<U> move U -> U) -> I32 }\n",
@@ -13502,7 +13502,7 @@ fn stage3_rejects_invalid_polymorphic_values() {
 }
 
 #[test]
-fn stage4b_lowers_instantiation_and_subsumption() {
+fn lowers_instantiation_and_subsumption() {
     let module = type_check(concat!(
         "def id: <T> move T -> T = move x => x\n",
         "def first: <A, B> (move A, move B) -> A = (move a, move b) => a\n",
@@ -13516,9 +13516,9 @@ fn stage4b_lowers_instantiation_and_subsumption() {
 }
 
 #[test]
-fn stage4b_instantiation_converts_function_typed_arguments() {
+fn instantiation_converts_function_typed_arguments() {
     // The adapter converts the concrete callback into the scheme body's
-    // dynamic shape (R5); the corpus program
+    // dynamic shape; the corpus program
     // `polymorphic_function_typed_instantiation` runs it.
     let module = type_check(concat!(
         "def twice: <T where Copy T> (T -> T, T) -> T = (f, x) => f (f x)\n",
@@ -13529,7 +13529,7 @@ fn stage4b_instantiation_converts_function_typed_arguments() {
 }
 
 #[test]
-fn stage4b_instantiation_converts_values_mixing_type_parameters_with_functions() {
+fn instantiation_converts_values_mixing_type_parameters_with_functions() {
     // One argument's instantiated type mixes the surrounding run-time
     // parameter `A` with a concrete callback; its conversion reads the layout
     // from a descriptor. The corpus program
@@ -13556,7 +13556,7 @@ fn diagnostic_line(diagnostic: &staple_syntax::Diagnostic) -> usize {
 }
 
 #[test]
-fn stage4b_reports_each_polymorphic_value_restriction_at_its_construction() {
+fn reports_each_polymorphic_value_restriction_at_its_construction() {
     for (source, message) in [
         (
             concat!(
@@ -13599,7 +13599,7 @@ fn stage4b_reports_each_polymorphic_value_restriction_at_its_construction() {
 }
 
 #[test]
-fn stage6_bounded_functions_become_polymorphic_values() {
+fn bounded_functions_become_polymorphic_values() {
     // Bounds become hidden dictionaries, so the value constructs and a call
     // through it passes the dictionary for the instantiation.
     lower(&type_check(concat!(
@@ -13612,7 +13612,7 @@ fn stage6_bounded_functions_become_polymorphic_values() {
 }
 
 #[test]
-fn stage6_structural_dictionaries_cover_index_mutation_and_iteration() {
+fn structural_dictionaries_cover_index_mutation_and_iteration() {
     // Indexing, indexed assignment and `for` over tuple shapes of an
     // abstract element type get structural dictionaries.
     lower(&type_check(concat!(
@@ -13626,7 +13626,7 @@ fn stage6_structural_dictionaries_cover_index_mutation_and_iteration() {
 }
 
 #[test]
-fn stage4b_restricted_functions_work_when_called_directly() {
+fn restricted_functions_work_when_called_directly() {
     for source in [
         concat!(
             "trait Named T { name: T -> String }\n",
@@ -13657,7 +13657,7 @@ fn stage4b_restricted_functions_work_when_called_directly() {
 }
 
 #[test]
-fn stage3_schemes_are_visible_on_bindings_and_lambdas() {
+fn schemes_are_visible_on_bindings_and_lambdas() {
     let module = type_check(
         "def id: <T> move T -> T = move x => x\nlet alias = id\nlet annotated: <U> move U -> U = move x => x\n",
     );
@@ -13684,7 +13684,7 @@ fn stage3_schemes_are_visible_on_bindings_and_lambdas() {
 }
 
 #[test]
-fn stage3_lowering_ignores_unused_generic_bodies_with_polymorphic_locals() {
+fn lowering_ignores_unused_generic_bodies_with_polymorphic_locals() {
     let module = type_check(concat!(
         "def id: <U> move U -> U = move x => x\n",
         "def unused: <T> move T -> T = move x => { let f = id; x }\n",
@@ -13694,7 +13694,7 @@ fn stage3_lowering_ignores_unused_generic_bodies_with_polymorphic_locals() {
 }
 
 #[test]
-fn stage3_lowering_keeps_explicit_and_expected_instantiations_concrete() {
+fn lowering_keeps_explicit_and_expected_instantiations_concrete() {
     let module = type_check(concat!(
         "def id: <T> move T -> T = move x => x\n",
         "let explicit = id.<I32>\n",
@@ -13705,7 +13705,7 @@ fn stage3_lowering_keeps_explicit_and_expected_instantiations_concrete() {
 }
 
 #[test]
-fn stage3_lowering_keeps_generic_capture_dependencies_demand_driven() {
+fn lowering_keeps_generic_capture_dependencies_demand_driven() {
     let module = type_check(concat!(
         "def id: <U> move U -> U = move x => x\n",
         "def unused: <T where Copy T> T -> T = x => {\n",
@@ -13718,7 +13718,7 @@ fn stage3_lowering_keeps_generic_capture_dependencies_demand_driven() {
 }
 
 #[test]
-fn stage3_generic_bodies_check_bounds_on_their_own_parameters() {
+fn generic_bodies_check_bounds_on_their_own_parameters() {
     const COPIED: &str = "def copied: <T where Copy T> T -> T = x => x\n";
     let source = format!("{COPIED}def outer: <A> A -> A = a => copied a\n");
     let diagnostics = TypeChecker::new()
@@ -13737,7 +13737,7 @@ fn stage3_generic_bodies_check_bounds_on_their_own_parameters() {
 }
 
 #[test]
-fn stage3_effect_parameters_bind_to_rigid_effect_rows() {
+fn effect_parameters_bind_to_rigid_effect_rows() {
     const APPLY: &str = "def apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\n";
     type_check(&format!(
         "{APPLY}let alias: <effect F> (() ->{{F}} I32) ->{{F}} I32 = apply\n"
@@ -13755,7 +13755,7 @@ fn stage3_effect_parameters_bind_to_rigid_effect_rows() {
 }
 
 #[test]
-fn stage3_lowering_admits_polymorphic_values_stored_and_called() {
+fn lowering_admits_polymorphic_values_stored_and_called() {
     let module = type_check(concat!(
         "def identity: <T> move T -> T = move value => value\n",
         "def consume: (<T> move T -> T) -> I32 = f => f 1\n",
@@ -13803,7 +13803,7 @@ fn checks_generic_trait_member_conformance() {
 #[test]
 fn infers_generic_trait_member_arguments_and_explicit_order() {
     TypeChecker::new()
-        .check(resolve(include_str!("fixtures/stage7/static.sta")))
+        .check(resolve(include_str!("fixtures/generic_trait_members/static.sta")))
         .expect("static generic member calls should check");
     TypeChecker::new().check(resolve("trait Source T { type Element; read: T -> Element }\nimpl Source I32 { type Element = I32; read = x => x }\nlet x = Source.read.<I32> 1\n"))
         .expect("associated parameters are omitted from explicit argument order");
@@ -13880,7 +13880,7 @@ fn lowers_dispatch_chains_that_end_at_a_deeper_type() {
 #[test]
 fn checks_polymorphic_trait_members_and_keeps_projection_restriction() {
     TypeChecker::new()
-        .check(resolve(include_str!("fixtures/stage7/values.sta")))
+        .check(resolve(include_str!("fixtures/generic_trait_members/values.sta")))
         .expect("member values instantiate independently and subsume bounds");
     let diagnostics = TypeChecker::new()
         .check(resolve(

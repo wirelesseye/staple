@@ -157,7 +157,7 @@ static CORPUS: [CorpusProgram; 156] = [
     expect_stdout(
         file(
             "generic_trait_members_values",
-            "staple-compiler/tests/fixtures/stage7/values.sta",
+            "staple-compiler/tests/fixtures/generic_trait_members/values.sta",
             "generic-trait-members",
         ),
         "dynamic\n42\nTrue\n7\n13\n14\nmember effect\n15\nTrue\n16\n",
@@ -165,7 +165,7 @@ static CORPUS: [CorpusProgram; 156] = [
     expect_stdout(
         file(
             "generic_trait_members_dictionaries",
-            "staple-compiler/tests/fixtures/stage7/dictionaries.sta",
+            "staple-compiler/tests/fixtures/generic_trait_members/dictionaries.sta",
             "generic-trait-members",
         ),
         "42\nbuilder\ndefault\n9\n7\nbound\n12\n3\neffect\n4\nTrue\nFalse\n5\n6\n21\n22\n23\n24\n25\neffect\n26\n27\n28\n29\nTrue\n5\neffect\n4\n30\n1\neffect\n1\n31\nTrue\n27\n28\n29\nFalse\n5\neffect\n4\n30\n1\neffect\n1\n31\nTrue\n40\nTrue\nTrue\n41\n42\n",
@@ -173,7 +173,7 @@ static CORPUS: [CorpusProgram; 156] = [
     expect_stdout(
         file(
             "generic_trait_members_static",
-            "staple-compiler/tests/fixtures/stage7/static.sta",
+            "staple-compiler/tests/fixtures/generic_trait_members/static.sta",
             "generic-trait-members",
         ),
         "42\ngeneric\nTrue\ndefault\n7\n",
@@ -2421,7 +2421,7 @@ let value = at (Ref (1, 2), (USize :: 5))
         ),
         "hello\nhello\n",
     )),
-    // Stage 5 baseline: effect-generic functions, with and without type
+    // Effect-generic functions, with and without type
     // parameters, over IO, user and `mut` resources, an open row, an empty row,
     // and state effects, called concretely and from generic bodies. Lambdas
     // whose effects are inferred after the call is instantiated must still
@@ -2494,7 +2494,7 @@ let value = at (Ref (1, 2), (USize :: 5))
         ),
         "task\n5\n1\n",
     )),
-    // The Stage 5 goal: an effect-polymorphic value stored and passed as a parameter, with resource and empty instantiations.
+    // An effect-polymorphic value stored and passed as a parameter, with resource and empty instantiations.
     must_run(expect_stdout(
         inline(
             "effect_polymorphic_goal",
@@ -2684,7 +2684,7 @@ let value = at (Ref (1, 2), (USize :: 5))
         "five\nfive\n10\n",
     )),
     // Closures and implicit thunks whose rows name a run-time effect variable
-    // capture values; their environments follow the dynamic layout (R-D).
+    // capture values; their environments follow the dynamic layout.
     must_run(expect_stdout(
         inline(
             "effect_polymorphic_captures",
@@ -3700,7 +3700,7 @@ let value = at (Ref (1, 2), (USize :: 5))
         "100000\n",
     )),
     // A map-style higher-order generic called from concrete code: the
-    // concrete closure is reabstracted into a dynamic one (R5).
+    // concrete closure is reabstracted into a dynamic one.
     expect_stdout(
         must_run(emits(
             inline(
@@ -3719,7 +3719,7 @@ let value = at (Ref (1, 2), (USize :: 5))
         "2 3 4\n",
     ),
     // A generic that returns a function: the dynamic result is reabstracted
-    // back into a concrete closure (R5).
+    // back into a concrete closure.
     expect_stdout(
         must_run(emits(
             inline(
@@ -3739,7 +3739,7 @@ let value = at (Ref (1, 2), (USize :: 5))
     ),
     // A generic body with a resource effect and a resource-binding call: the
     // dynamic instance receives the provider as a pointer and passes it to the
-    // concrete callee (R7).
+    // concrete callee.
     expect_stdout(
         must_run(inline(
             "generic_resource_effect",
@@ -3756,8 +3756,7 @@ let value = at (Ref (1, 2), (USize :: 5))
         "announced\nannounced\n",
     ),
     // A string template inside a generic body: the interpolations have
-    // concrete types, so the dynamic body calls the concrete formatter ABI
-    // (R7).
+    // concrete types, so the dynamic body calls the concrete formatter ABI.
     expect_stdout(
         must_run(inline(
             "generic_string_template",
@@ -4035,8 +4034,8 @@ let value = at (Ref (1, 2), (USize :: 5))
         )),
         "1 s xy 3 9 6\n",
     ),
-    // B-G: instantiating at concrete function types converts callbacks and
-    // results between the concrete and dynamic closure ABIs (R5), including a
+    // Instantiating at concrete function types converts callbacks and
+    // results between the concrete and dynamic closure ABIs, including a
     // mutated callback written back. `inside` instantiates at a dynamic shape
     // when the differential run dictionary-passes it.
     expect_stdout(

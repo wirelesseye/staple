@@ -714,7 +714,7 @@ impl LoweredCoercionPlan {
             &mut inferred,
         );
         // The adapter converts concrete function values reaching the quantified
-        // body (R5); the two signatures must pair up slot by slot.
+        // body; the two signatures must pair up slot by slot.
         value_conversions::adapter_conversions(target, body)?;
         let types = scheme
             .type_parameter_ids()
@@ -936,7 +936,7 @@ fn needs_concrete_function_conversion(actual: &CheckedType, expected: &CheckedTy
     }
 }
 
-/// A reabstraction at a concrete-to-dynamic call boundary (R-E). Lowering
+/// A reabstraction at a concrete-to-dynamic call boundary. Lowering
 /// records one for every function-typed argument or result whose dynamic type
 /// mentions run-time parameters.
 #[derive(Debug, Clone, PartialEq)]
@@ -2775,7 +2775,7 @@ pub(crate) struct LoweredFunction {
     pub captures: Vec<LoweredCapture>,
     /// The template's declared type parameters in scheme order (companion
     /// parameters first, hidden projection parameters last). Descriptor ABI
-    /// order follows this order (R-A).
+    /// order follows this order.
     pub scheme_type_parameters: Vec<TypeParameterId>,
     /// The template's quantified effect parameters in scheme order. They
     /// carry no descriptors, so they stay out of the descriptor ABI order.
@@ -3074,7 +3074,7 @@ pub(crate) struct LoweredProgram {
         >,
     >,
     /// Reabstraction plans at concrete-to-dynamic boundaries in module
-    /// initializers, indexed by `InitializerId` (R-E).
+    /// initializers, indexed by `InitializerId`.
     initializer_conversions:
         Vec<std::collections::BTreeMap<(LoweredCallId, Option<usize>), LoweredReabstraction>>,
     /// Resolved trait evidence for the initializer sites that need it, indexed
@@ -3086,10 +3086,10 @@ pub(crate) struct LoweredProgram {
     specializations: SpecializationCatalog,
     semantic_ids: LoweredSemanticIds,
     string_formatting: LoweredStringFormatting,
-    /// The hidden differential lowering option (Decision 11): route direct
+    /// The hidden differential lowering option: route direct
     /// generic calls from concrete owners through dynamic implementations.
     dictionary_pass_generic_calls: bool,
-    /// The effect-row variant of the differential option (E-H): make every
+    /// The effect-row variant of the differential option: make every
     /// effect parameter of a routed generic call a run-time bundle.
     dictionary_pass_effect_rows: bool,
     /// Per-template transitive dynamic support, computed once per lowering.
@@ -15021,7 +15021,7 @@ impl LoweredModule {
 
     /// The number of call sites the hidden differential option redirected
     /// from a concrete owner into a dynamic implementation. Used by the
-    /// Stage 4a exit gate; never part of normal compilation.
+    /// differential tests; never part of normal compilation.
     #[doc(hidden)]
     pub fn differential_dynamic_call_count(&self) -> usize {
         let view = self.program();
@@ -15108,11 +15108,11 @@ impl LoweredProgram {
 /// Converts checked compiler state into the code-generation input.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Lowerer {
-    /// The hidden differential option (Decision 11): route direct generic
+    /// The hidden differential option: route direct generic
     /// calls from concrete owners through dynamic implementations. Never
     /// exposed through the CLI.
     dictionary_pass_generic_calls: bool,
-    /// The effect-row variant (E-H): route direct calls of effect-generic
+    /// The effect-row variant: route direct calls of effect-generic
     /// functions through dynamic implementations whose effect parameters
     /// arrive as run-time bundles. Never exposed through the CLI.
     dictionary_pass_effect_rows: bool,
@@ -15126,16 +15126,16 @@ impl Lowerer {
         }
     }
 
-    /// Enables the effect-row differential option used by the Stage 5 exit
-    /// gate.
+    /// Enables the effect-row differential option used by the differential
+    /// tests.
     #[doc(hidden)]
     pub fn with_dictionary_pass_effect_rows(mut self, enabled: bool) -> Self {
         self.dictionary_pass_effect_rows = enabled;
         self
     }
 
-    /// Enables the hidden differential lowering option used by the Stage 4a
-    /// exit gate.
+    /// Enables the hidden differential lowering option used by the
+    /// differential tests.
     #[doc(hidden)]
     pub fn with_dictionary_pass_generic_calls(mut self, enabled: bool) -> Self {
         self.dictionary_pass_generic_calls = enabled;

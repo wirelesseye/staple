@@ -108,9 +108,9 @@ pub(crate) enum LoweredInstanceRequest {
         kind: LoweredInstanceDependencyKind,
         origin: Origin,
     },
-    /// First requested by a closure-phase scanner reading an owner body
-    /// . The owner is the materialized instance or module
-    /// initializer whose scan requested the instance.
+    /// First requested by a closure-phase scanner reading an owner body. The
+    /// owner is the materialized instance or module initializer whose scan
+    /// requested the instance.
     Scan {
         owner: LoweredScanOwner,
         kind: LoweredInstanceDependencyKind,
@@ -1933,7 +1933,7 @@ impl<'a> WorklistBuilder<'a> {
     }
 
     /// Requests every member instance of the dictionaries a run-time
-    /// obligation is built from (T-F), so bodies can name them.
+    /// obligation is built from, so bodies can name them.
     fn request_dictionary_members(
         &mut self,
         obligation: &crate::CheckedTraitBound,
@@ -2012,7 +2012,7 @@ impl<'a> WorklistBuilder<'a> {
             }
         };
         // A run-time obligation dispatches through a dictionary and depends on
-        // no implementation instance (T-K).
+        // no implementation instance.
         if let Some(enclosing) = enclosing
             && let Some(obligation) = super::trait_dictionaries::site_runtime_obligation(
                 &program.semantic_ids,

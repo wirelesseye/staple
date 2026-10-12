@@ -97,7 +97,7 @@ pub(crate) fn assert_catalog_census(
     allowed.insert("__staple_is_valid_utf8".to_owned());
     // The backend defines this helper on first use for run-time descriptors.
     allowed.insert("__staple_copy_descriptor".to_owned());
-    // Likewise the effect-row bundle lookup (Stage 5, `rows.rs`).
+    // Likewise the effect-row bundle lookup (`rows.rs`).
     allowed.insert("__staple_effect_row_lookup".to_owned());
     let mut unexplained = defined.difference(&allowed).cloned().collect::<Vec<_>>();
     unexplained.sort();

@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn generic_trait_member_signature_help_keeps_explicit_argument_order() {
         let source = "trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => value }\nlet answer = Visit.visit.<I32, String> (1, \"value\")\n";
-        let path = std::env::temp_dir().join("staple-stage7-signature.sta");
+        let path = std::env::temp_dir().join("staple-trait-member-signature.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))

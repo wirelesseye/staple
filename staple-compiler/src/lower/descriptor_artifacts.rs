@@ -238,7 +238,7 @@ pub(super) fn compound_body_shapes(
 }
 
 /// Reabstraction-thunk requests for one owner's recorded boundary
-/// conversions (R5).
+/// conversions.
 fn reabstraction_requests(
     conversions: &std::collections::BTreeMap<
         (super::LoweredCallId, Option<usize>),
@@ -360,7 +360,7 @@ pub(super) fn scan_instance(
             use_site: Some(super::artifact_closure::ArtifactUseSite::InstanceCompoundDrop(index)),
         });
     }
-    // A dynamic-shape closure points at a descriptor-bound entry (R-C).
+    // A dynamic-shape closure points at a descriptor-bound entry.
     for (_, record) in body.expressions() {
         let super::LoweredExpressionKind::CallableValue(value_id) = &record.kind else {
             continue;
@@ -399,7 +399,7 @@ pub(super) fn scan_instance(
             runtime.len()
         };
         // Without enclosing descriptors, the polymorphic closure points
-        // straight at the dynamic instance (B-C), without a forwarding entry.
+        // straight at the dynamic instance, without a forwarding entry.
         if bound == 0
             && callable
                 .closure
@@ -487,7 +487,7 @@ pub(super) fn scan_instance(
                 ),
             });
         }
-        // Captured dynamic closures install a descriptor-based finalizer (R-D).
+        // Captured dynamic closures install a descriptor-based finalizer.
         if let Some(closure) = &callable.closure
             && !closure.captures.is_empty()
         {
@@ -634,7 +634,7 @@ pub(super) fn scan_instance(
         }
     }
     // A dynamic buffer allocation installs the shared dynamic buffer
-    // finalizer (R6). `__buffer_clone` allocates its copy the same way.
+    // finalizer. `__buffer_clone` allocates its copy the same way.
     if let Some((call_id, _)) = body.calls.iter().find(|(_, call)| {
         matches!(
             &call.target,
@@ -680,7 +680,7 @@ pub(super) fn scan_instance(
         });
     }
     // A captured mutable local allocates a dynamic shared cell and installs
-    // the shared dynamic cell finalizer (R-D).
+    // the shared dynamic cell finalizer.
     for (_, item) in body.items() {
         let super::LoweredItemKind::Binding(binding) = &item.kind else {
             continue;
@@ -948,7 +948,7 @@ pub(super) fn expand(
         }
         Plan::InstantiationAdapter(mut plan) => {
             // An adapter converts function-typed arguments and results
-            // between the target's ABI and the scheme body's (R5). A scheme
+            // between the target's ABI and the scheme body's. A scheme
             // target converts at its own body.
             plan.children.clear();
             let target = match &plan.target {

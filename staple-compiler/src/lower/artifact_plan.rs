@@ -35,7 +35,7 @@ pub(crate) enum LoweredArtifactPlan {
     TraitDictionary(TraitDictionaryPlan),
     DescriptorDrop(DescriptorDropPlan),
     CompoundDescriptorDrop(crate::specialization::CompoundDescriptorDropKey),
-    /// A dynamic-shape closure's forwarding entry (R-C). The entry loads the
+    /// A dynamic-shape closure's forwarding entry. The entry loads the
     /// instance's descriptors from its environment and forwards the call.
     DescriptorBoundEntry(DescriptorBoundEntryPlan),
     TraitMemberEntry(TraitMemberEntryPlan),
@@ -43,11 +43,10 @@ pub(crate) enum LoweredArtifactPlan {
     /// slot of a product or sum, reading its components from the dictionary.
     DynamicStructural(DynamicStructuralPlan),
     /// A closure that forwards to a polymorphic closure: at an instantiated
-    /// function type's ABI with the instantiation's descriptors (B-G), or at
-    /// another scheme's dynamic ABI with descriptors rebuilt from its own
-    /// (B-H).
+    /// function type's ABI with the instantiation's descriptors, or at
+    /// another scheme's dynamic ABI with descriptors rebuilt from its own.
     InstantiationAdapter(InstantiationAdapterPlan),
-    /// A reabstraction thunk (R5): converts a closure between the concrete and
+    /// A reabstraction thunk: converts a closure between the concrete and
     /// dynamic ABIs.
     ReabstractionThunk(ReabstractionThunkPlan),
     ValueConversion(ValueConversionPlan),
@@ -84,7 +83,7 @@ pub(crate) struct TraitDictionaryPlan {
     pub expanded: bool,
 }
 
-/// A descriptor-bound entry (R-C): the forwarding function a dynamic-shape
+/// A descriptor-bound entry: the forwarding function a dynamic-shape
 /// closure points at. Its signature receives the descriptors not bound by the
 /// environment; the body loads the leading bound descriptors from the closure
 /// environment and forwards them followed by the caller's descriptors.
@@ -102,7 +101,7 @@ pub(crate) struct DescriptorBoundEntryPlan {
     pub environment_offset: usize,
     /// The dynamic instance the entry forwards to.
     pub instance: FunctionInstanceId,
-    /// The instance's run-time parameters in descriptor ABI order (R-A).
+    /// The instance's run-time parameters in descriptor ABI order.
     pub runtime: Vec<crate::TypeParameterId>,
     /// The closure's function type: the dynamic shape without descriptors.
     pub function_type: CheckedFunctionType,
@@ -129,7 +128,7 @@ pub(crate) struct DynamicStructuralPlan {
     pub write: Option<PlannedInstance>,
 }
 
-/// A polymorphic-value adapter (B-G, B-H). Its environment holds the
+/// A polymorphic-value adapter. Its environment holds the
 /// polymorphic closure's code and environment; an instantiation adapter
 /// follows them with one descriptor per type parameter of the scheme, in
 /// scheme order.
@@ -149,9 +148,9 @@ pub(crate) struct InstantiationAdapterPlan {
     /// A scheme target's own dictionaries, which the adapter receives.
     pub target_dictionaries: usize,
     /// For a scheme target: recipes producing the source's dictionaries from
-    /// the target's, in the source's bound order (bound entailment, T-M).
+    /// the target's, in the source's bound order (bound entailment).
     pub entailment: Vec<crate::lower::DictionaryCallArgument>,
-    /// Value conversions for function-typed arguments and results (R5), in
+    /// Value conversions for function-typed arguments and results, in
     /// `value_conversions::adapter_conversions` order: per argument slot the
     /// concrete-to-dynamic conversion and, for a mutated slot, the
     /// dynamic-to-concrete writeback, then the result's dynamic-to-concrete
@@ -159,7 +158,7 @@ pub(crate) struct InstantiationAdapterPlan {
     pub children: Vec<PlannedArtifact>,
 }
 
-/// A reabstraction thunk (R5). The concrete side uses the concrete closure
+/// A reabstraction thunk. The concrete side uses the concrete closure
 /// ABI; the dynamic side uses the dynamic shape without descriptor parameters.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ReabstractionThunkPlan {
@@ -1622,21 +1621,21 @@ pub(crate) enum GcFinalizerPlan {
         /// The element's drop glue, absent only in the request-time marker.
         glue: Option<PlannedArtifact>,
     },
-    /// A dynamic buffer (R6): drops the elements through the element
+    /// A dynamic buffer: drops the elements through the element
     /// descriptor in the allocation's trailing word.
     DynamicBuffer,
-    /// A dynamic shared cell (R-D): drops the value through the descriptor in
+    /// A dynamic shared cell: drops the value through the descriptor in
     /// the allocation's trailing word.
     DynamicCell,
-    /// A dynamic closure environment (R-D): drops each owned capture through
+    /// A dynamic closure environment: drops each owned capture through
     /// the descriptors the environment holds.
     DynamicClosureEnvironment {
         /// The closure's own function instance; its position is the key's
         /// instance ordinal.
         closure: FunctionInstanceId,
-        /// The instance's run-time parameters in descriptor ABI order (R-A).
+        /// The instance's run-time parameters in descriptor ABI order.
         runtime: Vec<crate::TypeParameterId>,
-        /// Dictionaries stored after the descriptors (T-C), before the
+        /// Dictionaries stored after the descriptors, before the
         /// capture descriptors.
         dictionaries: usize,
         /// The captures in environment order.

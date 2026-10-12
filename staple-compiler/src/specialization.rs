@@ -145,7 +145,7 @@ pub(crate) enum CanonicalMutation {
 pub(crate) struct CanonicalEffectSet {
     pub variable: Option<(usize, usize)>,
     /// An effect variable that is unknown until run time: the bundle a
-    /// dynamic instance receives for its row (Stage 5b).
+    /// dynamic instance receives for its row.
     pub runtime_variable: Option<TypeParameterId>,
     pub resources: Vec<CanonicalResource>,
     pub state: Option<CanonicalStateEffect>,
@@ -1018,14 +1018,13 @@ pub(crate) enum GcFinalizerKey {
     /// A buffer keyed by its element type.
     Buffer(CanonicalType),
     /// A dynamic closure environment keyed by the closure's function instance.
-    /// Its captures are dropped through the descriptors the environment holds
-    /// (R-D).
+    /// Its captures are dropped through the descriptors the environment holds.
     DynamicClosureEnvironment { closure: InstanceOrdinal },
     /// A dynamic buffer. One shared finalizer reads the element descriptor
-    /// from the allocation's trailing word (R6).
+    /// from the allocation's trailing word.
     DynamicBuffer,
     /// A dynamic shared cell. One shared finalizer reads the value descriptor
-    /// from the allocation's trailing word (R-D).
+    /// from the allocation's trailing word.
     DynamicCell,
 }
 
@@ -1079,7 +1078,7 @@ pub(crate) struct CompoundDescriptorDropKey {
     pub count: u32,
 }
 
-/// The identity of one descriptor-bound entry (R-C): a dynamic-shape closure's
+/// The identity of one descriptor-bound entry: a dynamic-shape closure's
 /// forwarding function, keyed by its instance and number of bound descriptors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct DescriptorBoundEntryKey {
@@ -1092,9 +1091,9 @@ pub(crate) struct DescriptorBoundEntryKey {
 
 /// The identity of one polymorphic-value adapter: a closure forwarding to a
 /// polymorphic closure, keyed by the alpha-canonical source scheme and the
-/// canonical target. A function-type target is an instantiation (B-G): the
+/// canonical target. A function-type target is an instantiation: the
 /// instantiation's descriptors travel in the adapter's environment. A scheme
-/// target is a subsumption (B-H): the adapter receives the target's
+/// target is a subsumption: the adapter receives the target's
 /// descriptors and builds the source's. The mapping is recomputed from the
 /// pair, so it is not part of the key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1109,14 +1108,14 @@ pub(crate) struct InstantiationAdapterKey {
     pub target: CanonicalType,
 }
 
-/// The direction of a reabstraction conversion (R5).
+/// The direction of a reabstraction conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ReabstractionDirection {
     ConcreteToDynamic,
     DynamicToConcrete,
 }
 
-/// The identity of one reabstraction thunk (R5), keyed by the concrete
+/// The identity of one reabstraction thunk, keyed by the concrete
 /// function type and the conversion direction.
 /// A static dictionary slot reuses the concrete-to-dynamic reabstraction
 /// machinery, loading its concrete closure from the dictionary's tail.

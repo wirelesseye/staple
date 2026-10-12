@@ -129,24 +129,24 @@ pub(crate) enum ArtifactUseSite {
     OwnedBinding(SymbolId),
     /// A captured binding cell's finalizer.
     CellFinalizer(SymbolId),
-    /// A captured binding cell's dynamic finalizer (R-D): one shared finalizer
+    /// A captured binding cell's dynamic finalizer: one shared finalizer
     /// reads the value descriptor from the cell's trailing word.
     DynamicCellFinalizer(SymbolId),
     /// A closure environment's finalizer.
     ClosureEnvironment(LoweredCallableValueId),
-    /// A dynamic-shape closure's descriptor-bound entry (R-C).
+    /// A dynamic-shape closure's descriptor-bound entry.
     DescriptorBoundEntry(LoweredCallableValueId),
     /// Adapt a descriptor-bound closure with a concrete signature.
     ConcreteCapturedClosure(LoweredCallableValueId),
     /// The instantiation adapter a polymorphic value's use-site coercion
-    /// builds its closure from (B-G).
+    /// builds its closure from.
     InstantiationAdapter(ExpressionId),
     /// Descriptor-bound entry for an implicit thunk argument.
     DescriptorBoundThunk {
         call: LoweredCallId,
         argument: usize,
     },
-    /// A reabstraction conversion at a call boundary (R5).
+    /// A reabstraction conversion at a call boundary.
     ReabstractionThunk {
         call: LoweredCallId,
         argument: Option<usize>,

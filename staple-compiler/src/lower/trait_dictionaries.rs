@@ -1,4 +1,4 @@
-//! Trait dictionary prefix layout (T-D).
+//! Trait dictionary prefix layout.
 //!
 //! Every prefix field is a pointer. Offsets are measured in pointer slots,
 //! leaving target pointer width and alignment to codegen. The implementation's
@@ -31,10 +31,10 @@ impl TraitDictionaryLayout {
     }
 }
 
-/// Runtime dictionary obligations (T-B), in checked bound order.
+/// Runtime dictionary obligations, in checked bound order.
 /// Marker traits are supplied by descriptors or remain compile-time facts.
 /// Checked bounds include prerequisites; this list is for recipe planning,
-/// not the hidden ABI count, which uses the declared bounds (T-C).
+/// not the hidden ABI count, which uses the declared bounds.
 pub(super) fn runtime_obligations(
     ids: &super::LoweredSemanticIds,
     bounds: &[crate::CheckedTraitBound],
@@ -274,11 +274,11 @@ pub(crate) enum DictionaryRecipe {
     Environment(EnvironmentDictionaryRecipe),
     Static(crate::specialization::ArtifactRequestKey),
     /// A generic implementation selected at abstract types, applied to the
-    /// caller's descriptors and recipes (T-E). The dictionary is built in GC
-    /// memory so it may outlive the frame (T-G).
+    /// caller's descriptors and recipes. The dictionary is built in GC
+    /// memory so it may outlive the frame.
     Builder(Box<BuilderRecipe>),
     /// A structural trait member for a compound shape, applied to its
-    /// components' recipes (T-E).
+    /// components' recipes.
     Structural(Box<StructuralRecipe>),
 }
 
@@ -319,7 +319,7 @@ pub(crate) struct BuilderMember {
     /// First pointer slot of this member's region in the dictionary tail.
     pub region: usize,
     /// The caller's type of each descriptor the instance takes, in its
-    /// descriptor ABI order (R-A).
+    /// descriptor ABI order.
     pub descriptors: Vec<crate::CheckedType>,
     pub dictionaries: Vec<MemberDictionary>,
 }
@@ -337,7 +337,7 @@ pub(crate) struct DictionaryCallArgument {
     pub recipe: DictionaryRecipe,
 }
 
-/// A dictionary choice at abstract types (T-F), made before any member
+/// A dictionary choice at abstract types, made before any member
 /// instance exists. The worklist requests its members; bodies pair it with
 /// the interned instances to form a recipe.
 #[derive(Debug, Clone)]
@@ -1073,7 +1073,7 @@ pub(super) fn materialize_recipe(
     }
 }
 
-/// The dictionaries an instance receives (T-C), in its declared-bound order.
+/// The dictionaries an instance receives, in its declared-bound order.
 pub(super) fn enclosing_dictionary_bounds(
     program: &super::LoweredProgram,
     enclosing: &super::instance_resolution::ResolvedInstanceRequest,
@@ -1161,7 +1161,7 @@ pub(crate) enum DictionarySite {
     Coercion(super::ExpressionId),
 }
 
-/// A trait-member call through a dictionary at a run-time obligation (T-K).
+/// A trait-member call through a dictionary at a run-time obligation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DictionarySlotCall {
     pub obligation: crate::CheckedTraitBound,
@@ -1206,7 +1206,7 @@ pub(super) fn evidence_obligation(
 }
 
 /// The obligation of a trait site when, after the site's substitution, it
-/// mentions a run-time parameter of the enclosing instance (T-B). Other sites
+/// mentions a run-time parameter of the enclosing instance. Other sites
 /// keep static dispatch.
 pub(super) fn site_runtime_obligation(
     ids: &super::LoweredSemanticIds,
@@ -1561,7 +1561,7 @@ fn plan_obligations(
 }
 
 /// What an adapter between a scheme and its instantiation or subsumption
-/// needs (T-M): the number of dictionaries the source scheme's entry takes,
+/// needs: the number of dictionaries the source scheme's entry takes,
 /// the number the target scheme passes in, and, for a scheme target, recipes
 /// that derive the source's from the target's.
 pub(super) fn adapter_dictionaries(
@@ -1760,7 +1760,7 @@ pub(super) fn initializer_builder_uses(
     visitor.found
 }
 
-/// Dictionaries a call through a polymorphic value passes (T-M): the scheme's
+/// Dictionaries a call through a polymorphic value passes: the scheme's
 /// bounds at the call's instantiation, in scheme order.
 pub(super) fn plan_scheme_call(
     program: &super::LoweredProgram,
@@ -1786,8 +1786,8 @@ pub(super) fn plan_scheme_call(
     )
 }
 
-/// Dictionaries an instantiation adapter stores beside its descriptors
-/// (T-M): the source scheme's bounds at the instantiation types.
+/// Dictionaries an instantiation adapter stores beside its descriptors:
+/// the source scheme's bounds at the instantiation types.
 pub(super) fn plan_instantiation(
     program: &super::LoweredProgram,
     enclosing: Option<&super::instance_resolution::ResolvedInstanceRequest>,
@@ -1822,7 +1822,7 @@ pub(super) fn plan_instantiation(
 
 /// Dictionaries a callable value stores in its closure environment: the
 /// callee's lexical prefix, which its descriptor-bound entry forwards. A
-/// scheme value's own dictionaries arrive from its caller (T-C).
+/// scheme value's own dictionaries arrive from its caller.
 pub(super) fn plan_callable_value(
     program: &super::LoweredProgram,
     enclosing: Option<&super::instance_resolution::ResolvedInstanceRequest>,

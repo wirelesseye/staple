@@ -1,4 +1,4 @@
-//! The run-time representation of effect rows in the dynamic ABI (Stage 5).
+//! The run-time representation of effect rows in the dynamic ABI.
 //!
 //! A row without a variable passes each of its resources by address, in
 //! canonical order. A row that names a variable passes one *bundle* instead:

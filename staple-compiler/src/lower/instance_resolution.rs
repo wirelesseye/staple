@@ -1618,7 +1618,8 @@ impl LoweredProgram {
     /// dependency, and structural-derivation rules. A `method: None` recipe
     /// proves an obligation but returns no target evidence.
     /// Concrete dictionary selection follows the existing static dispatch order.
-    /// Abstract selection has the separate Stage 6 uniqueness rule.
+    /// Selection at run-time types has a separate uniqueness rule
+    /// (`select_runtime_implementation`).
     pub(super) fn concrete_dictionary_implementation(
         &self,
         bound: &CheckedTraitBound,
@@ -1636,7 +1637,7 @@ impl LoweredProgram {
         Ok(context.implementation_ids[index])
     }
 
-    /// Selects the implementation a run-time obligation names (T-F). Every
+    /// Selects the implementation a run-time obligation names. Every
     /// implementation whose header could unify with the obligation, taking
     /// its run-time parameters as unknowns, is a candidate; those whose
     /// `where` clause is definitely false are dropped, and exactly one may
@@ -2257,7 +2258,7 @@ pub(crate) struct ResolvedInstanceRequest {
     pub evidence: Option<TraitEvidence>,
 }
 
-/// The implementation a run-time obligation selects (T-F).
+/// The implementation a run-time obligation selects.
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeImplementation {
     pub implementation: LoweredTraitImplementationId,
@@ -2343,7 +2344,7 @@ impl LoweredProgram {
             .unwrap_or_default()
     }
 
-    /// Runtime descriptor parameters in descriptor ABI order (R-A): the
+    /// Runtime descriptor parameters in descriptor ABI order: the
     /// template's declared scheme order, with parameters the template does
     /// not declare (an enclosing instance's) first, in id order.
     pub(crate) fn instance_runtime_order(

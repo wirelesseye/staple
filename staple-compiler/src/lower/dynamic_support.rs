@@ -1,6 +1,6 @@
 //! Transitive support analysis for the hidden differential lowering option.
 //!
-//! Decision 11 lowers direct generic calls from concrete owners through
+//! The option lowers direct generic calls from concrete owners through
 //! dynamic implementations. A dynamic implementation is only selected when
 //! the callee's body, and every generic callee it would call with run-time
 //! type arguments, can be emitted by the dynamic emitter. This module computes
@@ -8,8 +8,8 @@
 //! supported and is excluded when its body uses a construct the dynamic
 //! emitter does not handle, or when it depends on an excluded function.
 //!
-//! The same analysis produces the transitive restriction reports Stage 4b's
-//! gate needs; until then it only gates the option.
+//! The same analysis produces the transitive restriction reports for
+//! polymorphic values.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -35,8 +35,8 @@ impl DynamicSupport {
 }
 
 /// Why one template cannot be lowered through a dynamic implementation.
-/// Every reason is classified against R0.1's allowed list: a template is
-/// in scope for 4a when it has at least one in-scope reason.
+/// Every reason is either in scope, meaning the dynamic emitter should
+/// handle it, or allowed: a known restriction or an unsupported feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum RejectionReason {
     /// A callable value expression (`CallableValue`).
@@ -55,42 +55,40 @@ pub(crate) enum RejectionReason {
     Malformed,
     /// A template excluded only because it calls an excluded template.
     CallsExcludedTemplate,
-    // Allowed reasons (belonging to later stages or documented restrictions).
-    /// A trait obligation at run-time types that no dictionary can satisfy
-    /// (Stage 6).
+    // Allowed reasons (unsupported features or documented restrictions).
+    /// A trait obligation at run-time types that no dictionary can satisfy.
     TraitCallRuntime,
-    /// An async intrinsic: completion, task, resolver (Stage 8).
+    /// An async intrinsic: completion, task, resolver.
     AsyncIntrinsic,
-    /// A reactive intrinsic (Stage 8).
+    /// A reactive intrinsic.
     ReactiveIntrinsic,
-    /// A coroutine or `await` expression (Stage 8).
+    /// A coroutine or `await` expression.
     CoroutineExpression,
-    /// A reactive name read (Stage 8).
+    /// A reactive name read.
     ReactiveNameRead,
-    /// A call with a reactive operation (Stage 8).
+    /// A call with a reactive operation.
     ReactiveCall,
-    /// A signal or derived binding (Stage 8).
+    /// A signal or derived binding.
     SignalBinding,
-    /// A reactive binding record (Stage 8).
+    /// A reactive binding record.
     ReactiveBinding,
-    /// A signal assignment (Stage 8).
+    /// A signal assignment.
     SignalAssignment,
-    /// `__buffer_clone` (Stage 6).
+    /// `__buffer_clone`.
     BufferClone,
     /// A run-time `Natural` count (a restriction).
     RuntimeNaturalCount,
     /// `__slice_from_ref` (a restriction).
     SliceFromRef,
     /// A function value behind a reference, slice, buffer, or shared cell
-    /// (a restriction). Added by R5.
+    /// (a restriction).
     #[allow(dead_code)]
     FunctionBehindReference,
 }
 
 impl RejectionReason {
-    /// Whether this reason is in scope for Stage 4a (R0.1). In-scope reasons
-    /// must eventually reach zero; allowed reasons belong to a later stage or
-    /// to a documented restriction.
+    /// Whether this reason is in scope. In-scope reasons must stay at zero;
+    /// allowed reasons are unsupported features or documented restrictions.
     pub(crate) fn in_scope(self) -> bool {
         !matches!(
             self,
@@ -232,8 +230,8 @@ impl LoweredProgram {
             return None;
         }
         let relevant = self.relevant_parameters(function);
-        // A routed call supplies each run-time bound as a static dictionary
-        // (T-B), so a bound no static dictionary serves keeps the call
+        // A routed call supplies each run-time bound as a static dictionary,
+        // so a bound no static dictionary serves keeps the call
         // monomorphized.
         if self.dictionary_pass_generic_calls
             && !self.static_dictionaries_available(function, &relevant, substitutions)
@@ -411,7 +409,7 @@ impl LoweredProgram {
             )];
         }
         let mut reasons = BTreeSet::new();
-        // Bounds become hidden dictionaries (T-M); only a `Natural` bound,
+        // Bounds become hidden dictionaries; only a `Natural` bound,
         // which constrains compile-time counts, keeps its restriction.
         if scheme
             .trait_bounds
@@ -474,11 +472,11 @@ impl LoweredProgram {
             return (walker.reasons, walker.dependencies);
         };
         // Captures are supported by value, by borrow, or through a shared cell,
-        // for concrete and compound run-time types and function values (R4/R5).
+        // for concrete and compound run-time types and function values.
         // Initialization-state cells are carried as shared cells.
-        // Stage 5a: effect parameters are compile-time in dynamic code, so a
-        // template's own effect variable is substituted by its instance key.
-        // R7: a resource effect row is an ABI fact, not a restriction. The
+        // A template's own effect variables are substituted by its instance
+        // key, or arrive as a run-time bundle, so they are not restrictions.
+        // A resource effect row is an ABI fact, not a restriction. The
         // dynamic ABI passes each resource provider as a pointer.
         if contains_parameter_product(&CheckedType::Function(template.signature.clone())) {
             walker.reject(RejectionReason::ParameterProducts);
@@ -486,7 +484,7 @@ impl LoweredProgram {
         if let Some(reason) = signature_function_restriction(&template.signature) {
             walker.reject(reason);
         }
-        // Stage 6: a bound becomes a hidden dictionary (T-C). What a body does
+        // A bound becomes a hidden dictionary. What a body does
         // with it is checked at each trait-dependent site.
         if let Some(body) = template.body {
             walker.block(body);
@@ -532,8 +530,7 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
 }
 
 /// Whether a type mentions a function type that still contains a run-time
-/// parameter. Reabstraction between the concrete and dynamic ABIs is a later
-/// 4a step, so such functions are excluded from the option until then.
+/// parameter.
 fn contains_polymorphic_function(ty: &CheckedType) -> bool {
     match ty {
         CheckedType::Function(_) => contains_type_parameter(ty),
@@ -608,7 +605,7 @@ fn contains_parameter_product(ty: &CheckedType) -> bool {
 
 /// Whether a type contains a function value behind a reference, slice,
 /// buffer, or shared cell. Converting such a value needs copying shared
-/// storage, so R5 reports it as the allowed restriction instead.
+/// storage, so it is reported as an allowed restriction instead.
 fn contains_function_behind_reference(ty: &CheckedType) -> bool {
     match ty {
         CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
@@ -650,7 +647,7 @@ fn signature_function_restriction(function_type: &CheckedFunctionType) -> Option
 struct SupportWalker<'program> {
     program: &'program LoweredProgram,
     /// The scanned template's declared bounds: the dictionaries its dynamic
-    /// instance receives (T-C).
+    /// instance receives.
     declared: Vec<crate::CheckedTraitBound>,
     /// The `MutateIndex` assignment being walked has a dictionary, so its
     /// indexed target place needs no further justification.
@@ -670,7 +667,7 @@ impl SupportWalker<'_> {
         self.reasons.insert(reason);
     }
 
-    /// Whether a dictionary for an obligation is obtainable here (T-F): from
+    /// Whether a dictionary for an obligation is obtainable here: from
     /// this template's own bounds, as a static dictionary when concrete, or
     /// built from the one implementation it selects. Built members become
     /// dependencies, since each must itself run dynamically.
@@ -880,9 +877,9 @@ impl SupportWalker<'_> {
             LoweredExpressionKind::String(_) | LoweredExpressionKind::CString(_) => {}
             LoweredExpressionKind::Deferred(_) => self.reject(RejectionReason::Deferred),
             LoweredExpressionKind::StringTemplate(template) => {
-                // R7: concrete interpolations use the concrete formatter ABI.
-                // A run-time-typed interpolation needs `Display`/`Debug`
-                // dispatch at run time and is an allowed Stage 6 reason.
+                // Concrete interpolations use the concrete formatter ABI. A
+                // run-time-typed interpolation needs a `Display`/`Debug`
+                // dictionary, and is rejected only when none is available.
                 let origin = expression.origin.clone();
                 for part in &template.parts {
                     if let crate::LoweredStringTemplatePart::Interpolation(interpolation) = part {
@@ -905,9 +902,10 @@ impl SupportWalker<'_> {
                 self.expression(index.index);
             }
             LoweredExpressionKind::CallableValue(value) => {
-                // R2 builds concrete closures; R3 builds dynamic-shape
-                // closures to a descriptor-bound entry for a generic `def` or
-                // trait implementation. Captures are R4.
+                // A closure is built either with the concrete ABI or as a
+                // dynamic-shape closure pointing at a descriptor-bound entry
+                // for a generic `def` or trait implementation, captures
+                // included.
                 let Some(callable) = self.program.callable_values.get(*value) else {
                     self.reject(RejectionReason::Malformed);
                     return;
@@ -930,7 +928,7 @@ impl SupportWalker<'_> {
                 };
                 if captures.iter().any(shared_function) {
                     // Shared storage cannot be copied into an adapted closure's
-                    // ABI without breaking aliasing (Decision 7).
+                    // ABI without breaking aliasing.
                     self.reject(RejectionReason::FunctionBehindReference);
                 }
                 let dynamic_shape =
@@ -972,7 +970,7 @@ impl SupportWalker<'_> {
                     self.reject(RejectionReason::CallableValue);
                 }
                 // A trait member used as a value at a run-time type is a
-                // closure over a dictionary slot (T-L).
+                // closure over a dictionary slot.
                 if matches!(
                     callable.target,
                     LoweredCallableTarget::TraitImplementation { .. }
@@ -1199,7 +1197,7 @@ impl SupportWalker<'_> {
                 }
             }
             // A concrete trait call dispatches to a monomorphized implementation
-            // and needs no dictionary; a parameter-dependent one is Stage 6.
+            // and needs no dictionary; a parameter-dependent one needs one.
             LoweredCallableTarget::TraitImplementation { .. }
             | LoweredCallableTarget::StructuralTraitMethod { .. } => {
                 if mentions_parameters
@@ -1208,7 +1206,7 @@ impl SupportWalker<'_> {
                     self.reject(RejectionReason::TraitCallRuntime);
                 }
             }
-            // R2: a concrete function type uses the concrete ABI. R3: a
+            // A concrete function type uses the concrete ABI, and a
             // dynamic-shape closure uses the dynamic shape without descriptor
             // parameters. Both are supported.
             LoweredCallableTarget::IndirectClosure { .. } => {}
@@ -1268,7 +1266,6 @@ mod tests {
     use crate::{Lowerer, NameResolver, ProgramLoader, TypeChecker};
 
     /// The in-scope rejection count must never rise above this baseline.
-    /// Each remainder-plan step lowers it in the same commit; R8 sets it to 0.
     const IN_SCOPE_BASELINE: usize = 0;
 
     /// Every corpus program with the directory its `use` paths resolve
@@ -1433,7 +1430,7 @@ mod tests {
     fn local_recursive_generic_is_selected_dynamically() {
         // A local generic `def` that calls itself captures its own binding's
         // initialization-state cell. The cell holds no function value, so the
-        // capture is not Decision 7's function-behind-a-reference restriction.
+        // capture is not the function-behind-a-reference restriction.
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let program = codegen_corpus()
             .iter()
@@ -1671,7 +1668,7 @@ mod tests {
         }
     }
 
-    /// The tracked coverage report (R0.2). Every generic template in the
+    /// The tracked coverage report. Every generic template in the
     /// corpus is counted once per program; a template is in scope when any of
     /// its reasons is. Baseline increases require new corpus programs or
     /// corrected classifications and an explanation in the commit message.

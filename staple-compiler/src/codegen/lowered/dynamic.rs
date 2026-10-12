@@ -122,7 +122,7 @@ fn shared_operand_group(call: &crate::LoweredCall, argument: usize) -> Option<Ve
 enum DynamicCalleeSource {
     /// A closure value evaluated at the call.
     Expression(ExpressionId),
-    /// A trait member slot of a dictionary, which is the environment (T-D).
+    /// A trait member slot of a dictionary, which is the environment.
     Slot(crate::lower::DictionarySlotCall),
 }
 
@@ -401,8 +401,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Call a trait member through its dictionary slot with the dynamic ABI
-    /// (T-D): every value by pointer, the result through `result`. The member
+    /// Call a trait member through its dictionary slot with the dynamic ABI:
+    /// every value by pointer, the result through `result`. The member
     /// has no resources, so only value arguments follow.
     fn call_dictionary_slot(
         &self,
@@ -531,7 +531,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(dictionary)
     }
 
-    /// Build a dictionary from a generic implementation in GC memory (T-G).
+    /// Build a dictionary from a generic implementation in GC memory.
     /// The prefix names the member slot entries, prerequisite dictionaries
     /// and associated descriptors; the tail holds, per member, the
     /// descriptors and dictionaries its dynamic instance receives.
@@ -959,7 +959,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .into())
     }
 
-    /// A resource value read in a dynamic body (R7). The provider pointer is
+    /// A resource value read in a dynamic body. The provider pointer is
     /// registered by the function's effect row or a `with` scope; the value is
     /// loaded into the expression's dynamic storage.
     fn emit_dynamic_resource_read(
@@ -1008,9 +1008,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(storage)
     }
 
-    /// A `with` scope in a dynamic body (R7). The provider value is evaluated
+    /// A `with` scope in a dynamic body. The provider value is evaluated
     /// once, registered for the body, and removed after it. Reactive and task
-    /// scopes stay Stage 8.
+    /// scopes are not supported in dynamic bodies.
     fn emit_dynamic_with(
         &mut self,
         owner: EmissionOwner,
@@ -1061,7 +1061,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }))
     }
 
-    /// A string template whose interpolations have concrete types (R7). The
+    /// A string template whose interpolations have concrete types. The
     /// formatter constructor, literal writes, interpolation dispatches, and
     /// finish are concrete functions called with the concrete ABI; each
     /// interpolated value is loaded from dynamic storage as its concrete type
@@ -1587,10 +1587,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Build a closure value in a dynamic body (R-B). A concrete function
-    /// type uses the concrete ABI; a value that reads a function-typed binding
-    /// returns the binding's storage. Captures and dynamic-shape entries are
-    /// later steps (R3, R4).
+    /// An `Index` read in a dynamic body, through a dictionary slot when the
+    /// operand types are only known at run time.
     fn emit_dynamic_index(
         &mut self,
         owner: EmissionOwner,
@@ -1752,6 +1750,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(result)
     }
 
+    /// Build a closure value in a dynamic body. A concrete function type uses
+    /// the concrete ABI, and a value that reads a function-typed binding
+    /// returns the binding's storage.
     fn emit_dynamic_callable_value(
         &mut self,
         owner: EmissionOwner,
@@ -1811,7 +1812,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .binding(owner, LoweredBindingSite::CallableValue(value_id))
         {
             // A trait member at a run-time type is a closure over its slot,
-            // with the dictionary as its environment (T-L).
+            // with the dictionary as its environment.
             let dictionary =
                 self.dictionary_recipe_value(&dispatch.recipe, Some(environment), &span)?;
             let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
@@ -1936,9 +1937,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     Diagnostic::new(span.clone(), "missing callable instance key")
                 })?;
                 // An instance that is dynamic only through its effects has no
-                // descriptors but still reads a dynamic environment (R-D).
+                // descriptors but still reads a dynamic environment.
                 if self.view.instance_is_dynamic(*instance) {
-                    // A dynamic-shape closure (R-C): the environment stores the
+                    // A dynamic-shape closure: the environment stores the
                     // instance's descriptors and the entry forwards the call.
                     let captures = callable
                         .closure
@@ -2132,7 +2133,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// A GC-allocated closure environment holding one deep-copied descriptor
-    /// per run-time parameter, in descriptor ABI order (R-D), then the
+    /// per run-time parameter, in descriptor ABI order, then the
     /// captures at descriptor-computed offsets.
     /// Concrete owners use the same descriptor-layout capture environment as
     /// dynamic owners. Spill by-value captures only for the construction copy.
@@ -2306,9 +2307,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .build_store(slot, copy)
                 .map_err(compiler_diagnostic)?;
         }
-        // Bound dictionaries follow the descriptors (T-C). Without builders
+        // Bound dictionaries follow the descriptors. Without builders
         // they are static constants or prefix slots of those, so they are
-        // stored by pointer; built ones will need GC copies (T-G).
+        // stored by pointer; built ones will need GC copies.
         for (index, dictionary) in dictionaries.iter().enumerate() {
             let offset = self
                 .backend
@@ -2443,7 +2444,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(Some(self.static_dynamic_descriptor(ty, span)?))
             }
             // A function value keeps its static closure layout, and a compound
-            // run-time type uses its prepared descriptor (R4).
+            // run-time type uses its prepared descriptor.
             ty => Ok(Some(self.dynamic_descriptor(ty, environment, span)?)),
         }
     }
@@ -2506,7 +2507,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// The element descriptor of a buffer intrinsic, from its `T` argument.
-    /// A fresh dynamic buffer with the given capacity (R6): its header, the
+    /// A fresh dynamic buffer with the given capacity: its header, the
     /// element area, and the element descriptor in the trailing word. The
     /// descriptor must already be GC-stable.
     fn allocate_dynamic_buffer(
@@ -2672,7 +2673,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         })
     }
 
-    /// The one shared dynamic buffer finalizer (R6): read the element
+    /// The one shared dynamic buffer finalizer: read the element
     /// descriptor from the allocation's trailing word and drop every live
     /// element.
     pub(super) fn emit_dynamic_buffer_finalizer(
@@ -2828,7 +2829,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             })
     }
 
-    /// A dynamic shared cell's finalizer (R-D): drop the value through the
+    /// A dynamic shared cell's finalizer: drop the value through the
     /// descriptor stored in the allocation's trailing word.
     pub(super) fn emit_dynamic_cell_finalizer(
         &mut self,
@@ -2898,7 +2899,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// A mutable local's cell. A captured cell is a dynamic GC payload with a
-    /// trailing descriptor word and the shared dynamic cell finalizer (R-D);
+    /// trailing descriptor word and the shared dynamic cell finalizer;
     /// an uncaptured cell is entry-block stack storage.
     fn allocate_dynamic_cell(
         &self,
@@ -2958,7 +2959,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(cell)
     }
 
-    /// The dynamic closure environment's finalizer (R-D): drop every owned
+    /// The dynamic closure environment's finalizer: drop every owned
     /// capture through the descriptor stored in the environment.
     pub(super) fn emit_dynamic_closure_finalizer(
         &mut self,
@@ -3083,7 +3084,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             })
     }
 
-    /// An indirect call through a concrete closure value (R2). The callee's
+    /// An indirect call through a concrete closure value. The callee's
     /// function type is concrete, so the concrete closure ABI applies; the
     /// arguments and result move between dynamic storage and the concrete ABI.
     fn emit_dynamic_indirect_concrete_call(
@@ -3103,7 +3104,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         } else {
             None
         };
-        // A dictionary slot always has the dynamic ABI (T-D).
+        // A dictionary slot always has the dynamic ABI.
         let dynamic_shape = polymorphic_types.is_some()
             || matches!(callee, DynamicCalleeSource::Slot(_))
             || crate::contains_type_parameter(&CheckedType::Function(call.function_type.clone()));
@@ -3294,7 +3295,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             for ty in types {
                 arguments.push(self.dynamic_descriptor(ty, environment, span)?.into());
             }
-            // The scheme's bounds follow its descriptors (T-C, T-M).
+            // The scheme's bounds follow its descriptors.
             for dictionary in
                 self.dictionary_call_values(owner, call_id, Some(environment), span)?
             {
@@ -3578,9 +3579,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// Scalar intrinsics evaluate their concrete arguments from storage and
-    /// store the SSA result back into the call's reserved slot. The set
-    /// mirrors Decision 9's supported scalar operations; anything needing the
-    /// GC or run-time descriptors stays with the concrete emitter.
+    /// store the SSA result back into the call's reserved slot. Only scalar
+    /// operations are handled here; anything needing the GC or run-time
+    /// descriptors stays with the concrete emitter.
     fn emit_dynamic_intrinsic(
         &mut self,
         owner: EmissionOwner,
@@ -4416,7 +4417,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
     /// Instantiates a polymorphic closure inside a dynamic body. The
     /// descriptors are deep-copied into GC memory so the adapter can outlive
-    /// this frame (R-D).
+    /// this frame.
     fn emit_dynamic_instantiation(
         &mut self,
         owner: EmissionOwner,
@@ -4470,7 +4471,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// The forwarding entry of one polymorphic-value adapter (B-G, B-H). It
+    /// The forwarding entry of one polymorphic-value adapter. It
     /// loads the polymorphic closure from its environment and calls the
     /// quantified entry in the dynamic ABI, packing the arguments when the
     /// scheme's single type parameter was instantiated at a product. An
@@ -4794,7 +4795,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         // Concrete function values reaching the scheme body convert into its
-        // dynamic shape (R5); a mutated slot converts back after the call.
+        // dynamic shape; a mutated slot converts back after the call.
         let conversions = crate::lower::adapter_conversions(target, signature)
             .map_err(|message| Diagnostic::new(span.clone(), message))?;
         // A converted value whose type mentions the caller's run-time
@@ -4947,7 +4948,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             self.call_value_conversion(writeback, concrete, original, converted, descriptor, span)?;
         }
         // A function-typed result comes back in the body's dynamic shape and
-        // converts into the target's (R5).
+        // converts into the target's.
         let result_source = match (&conversions.result, converted_result) {
             (Some(conversion), Some((converted, descriptor))) => {
                 let into_concrete = self.adapter_conversion_function(
@@ -5000,11 +5001,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// The forwarding entry a dynamic-shape closure points at (R-C). Its
+    /// The forwarding entry a dynamic-shape closure points at. Its
     /// parameters include the unbound descriptors. It loads the leading bound
     /// descriptors from the closure environment and forwards both sets to the
     /// instance in ABI order.
-    /// A structural dictionary slot (T-D). The dictionary tail holds the
+    /// A structural dictionary slot. The dictionary tail holds the
     /// shape's descriptors, then its component dictionaries; every value
     /// arrives by pointer.
     pub(super) fn emit_dynamic_structural(
@@ -5689,9 +5690,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             environment.bundle = Some(row_bundle);
         }
-        // Seed capture bindings from the closure environment (R-D). The
+        // Seed capture bindings from the closure environment. The
         // descriptor region holds one descriptor per run-time parameter in
-        // R-A order; captures follow at descriptor-computed offsets.
+        // descriptor ABI order; captures follow at descriptor-computed offsets.
         if !body.captures.is_empty() {
             let accesses = body
                 .captures
@@ -9120,7 +9121,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             // Explicit arms per unsupported kind: a new lowered expression
             // kind must decide its dynamic behavior here and in the support
-            // scanner instead of falling into a catch-all (R-F).
+            // scanner instead of falling into a catch-all.
             LoweredExpressionKind::Name(_) => {
                 return Err(Diagnostic::new(
                     expression.origin.span.clone(),

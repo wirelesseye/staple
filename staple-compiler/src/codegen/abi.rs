@@ -103,7 +103,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         )
     }
 
-    /// T-C: dictionaries follow descriptors, before result storage and rows.
+    /// Dictionaries follow descriptors, before result storage and rows.
     pub(crate) fn compile_dynamic_function_type_with_dictionaries(
         &self,
         function_type: &CheckedFunctionType,

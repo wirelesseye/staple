@@ -173,7 +173,7 @@ pub(crate) struct LoweredInstanceBody {
     /// order, including prerequisites. Concrete and descriptor marker bounds
     /// are absent. Recipe planning consumes these; they are not an ABI count.
     pub dictionary_obligations: Vec<CheckedTraitBound>,
-    /// Hidden dictionary arguments in lexical declaration order (T-C).
+    /// Hidden dictionary arguments in lexical declaration order.
     pub dictionary_bounds: Vec<CheckedTraitBound>,
     pub dictionary_calls: BTreeMap<
         super::trait_dictionaries::DictionarySite,
@@ -222,7 +222,7 @@ pub(crate) struct LoweredInstanceBody {
     /// The symbols emission tracks for scope-exit cleanup, in registration
     /// order (pattern traversal order).
     pub owned_bindings: Vec<LoweredOwnedBinding>,
-    /// Reabstraction plans at concrete-to-dynamic boundaries (R-E), keyed by
+    /// Reabstraction plans at concrete-to-dynamic boundaries, keyed by
     /// the call site and the argument index (`None` for the result).
     pub conversions: BTreeMap<(LoweredCallId, Option<usize>), super::LoweredReabstraction>,
     // Instance-local arenas. IDs are meaningful only inside this body.
@@ -3152,10 +3152,10 @@ impl<'a> BodyCloner<'a> {
     /// A capturing scheme lambda used at instantiated types binds the instance
     /// for those types. When an instantiation mentions this body's run-time
     /// parameters, that instance keeps the scheme's own parameters at run
-    /// time (Decision 2): it is the polymorphic entry, whose closure stores
+    /// time: it is the polymorphic entry, whose closure stores
     /// only the enclosing dictionaries before its captures. The occurrence is then a polymorphic
     /// value and the call through it a polymorphic call, which passes the
-    /// scheme's descriptors and dictionaries (B3), instead of a closure call
+    /// scheme's descriptors and dictionaries, instead of a closure call
     /// that would expect an instantiated closure.
     fn route_runtime_scheme_instantiations(&mut self) {
         let mut routed = Vec::new();
@@ -3711,7 +3711,7 @@ fn error_with(cloner: &mut BodyCloner<'_>) -> LoweredWithId {
 
 impl LoweredProgram {
     /// Records the reabstraction plan at every concrete-to-dynamic call
-    /// boundary (R-E). Runs after every instance body is materialized, so each
+    /// boundary. Runs after every instance body is materialized, so each
     /// callee's dynamic signature is available.
     pub(super) fn record_reabstractions(&mut self) {
         let instances = self.instances.iter().map(|(id, _)| id).collect::<Vec<_>>();

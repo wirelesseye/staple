@@ -504,7 +504,7 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
             self.gc();
         }
         // A dynamic-shape closure allocates its descriptor environment in the
-        // collector (R-D).
+        // collector.
         let binding = match self.owner {
             OwnerArenas::Instance(body) => {
                 body.bindings.get(&LoweredBindingSite::CallableValue(id))

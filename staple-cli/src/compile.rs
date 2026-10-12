@@ -4725,16 +4725,16 @@ mod tests {
         );
     }
 
-    /// The Stage 4a exit gate: run every runnable corpus program in both the
-    /// default and differential modes and require identical stdout and exit
-    /// status. Also reports how many call sites each program sent through
+    /// Run a generic-heavy subset of the corpus in both the default and
+    /// differential modes and require identical stdout and exit status. Also
+    /// reports how many call sites each program sent through
     /// dynamic implementations.
     #[cfg(unix)]
     #[test]
     fn codegen_corpus_differential_run_matches_default_subset() {
         // The default suite runs a fixed, generic-heavy subset so the quick
         // differential gate stays fast; the full run is
-        // `codegen_corpus_differential_run_matches_default` (R0.4).
+        // `codegen_corpus_differential_run_matches_default`.
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let standard_library = workspace_root.join("stdlib");
         let options = parse_options([std::ffi::OsString::from("corpus.sta")])
@@ -4781,10 +4781,10 @@ mod tests {
         assert!(dynamic_calls > 0, "the quick subset must use dynamic calls");
     }
 
-    /// In-scope remainder forms must execute through the descriptor ABI.
+    /// The `dynamic_*` corpus programs must execute through the descriptor ABI.
     #[cfg(unix)]
     #[test]
-    fn stage4a_remainder_differential() {
+    fn dynamic_forms_differential() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let standard_library = root.join("stdlib");
         let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
@@ -4807,10 +4807,10 @@ mod tests {
         assert!(tested > 0);
     }
 
-    /// Bounded generics must run through dictionaries (Stage 6a).
+    /// Bounded generics must run through dictionaries.
     #[cfg(unix)]
     #[test]
-    fn stage6_trait_dictionary_differential() {
+    fn trait_dictionary_differential() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let standard_library = root.join("stdlib");
         let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
@@ -4835,7 +4835,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn stage7_generic_trait_member_differential() {
+    fn generic_trait_member_differential() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let standard_library = root.join("stdlib");
         let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
@@ -4861,11 +4861,11 @@ mod tests {
         assert!(tested >= 2);
     }
 
-    /// Effect-generic programs must run in both modes. From 5a, type-and-effect
+    /// Effect-generic programs must run in both modes. Type-and-effect
     /// generics also go through the descriptor ABI with compile-time rows.
     #[cfg(unix)]
     #[test]
-    fn stage5_effect_generic_differential() {
+    fn effect_generic_differential() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let standard_library = root.join("stdlib");
         let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
@@ -4892,11 +4892,11 @@ mod tests {
         assert!(tested > 0);
     }
 
-    /// The effect-row differential mode (E-H): every effect parameter of a
+    /// The effect-row differential mode: every effect parameter of a
     /// routed call arrives as a run-time bundle.
     #[cfg(unix)]
     #[test]
-    fn stage5_effect_row_differential() {
+    fn effect_row_differential() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let standard_library = root.join("stdlib");
         let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
@@ -4921,12 +4921,12 @@ mod tests {
         assert!(tested > 0);
     }
 
-    /// The Stage 5 exit gate: every runnable corpus program with both type
-    /// descriptors and effect bundles at run time (E-H). Run explicitly with
+    /// The full effect-row differential run: every runnable corpus program with
+    /// both type descriptors and effect bundles at run time. Run explicitly with
     /// `--ignored`.
     #[cfg(unix)]
     #[test]
-    #[ignore = "full differential run: run explicitly for the Stage 5 exit gate"]
+    #[ignore = "full effect-row differential run: run explicitly with --ignored"]
     fn codegen_corpus_effect_row_differential_run_matches_default() {
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let standard_library = workspace_root.join("stdlib");
@@ -4952,12 +4952,12 @@ mod tests {
         eprintln!("effect-row differential run: {runnable} programs");
     }
 
-    /// The full Stage 4a differential exit gate: every runnable corpus program
+    /// The full differential run: every runnable corpus program
     /// and every runnable example, both modes, identical stdout and exit
-    /// status. Run explicitly with `--ignored` (R0.4).
+    /// status. Run explicitly with `--ignored`.
     #[cfg(unix)]
     #[test]
-    #[ignore = "full differential run: run explicitly for the Stage 4a exit gate"]
+    #[ignore = "full differential run: run explicitly with --ignored"]
     fn codegen_corpus_differential_run_matches_default() {
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let standard_library = workspace_root.join("stdlib");
@@ -5038,7 +5038,7 @@ mod tests {
 
     /// Compares the default lowering with a differential one: `types` routes
     /// generic calls through run-time type descriptors, `effects` makes every
-    /// effect parameter of a routed call a run-time bundle (E-H).
+    /// effect parameter of a routed call a run-time bundle.
     #[allow(clippy::too_many_arguments)]
     fn differential_compare_with(
         name: &str,

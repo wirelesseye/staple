@@ -138,7 +138,7 @@ impl<'a> EmissionView<'a> {
             .len()
     }
 
-    /// The fixed dictionary prefix of one trait (T-D).
+    /// The fixed dictionary prefix of one trait.
     pub(crate) fn trait_dictionary_layout(
         &self,
         id: crate::TraitId,
@@ -174,7 +174,7 @@ impl<'a> EmissionView<'a> {
         self.program.instance_is_dynamic(id)
     }
 
-    /// Runtime descriptor parameters in descriptor ABI order (R-A).
+    /// Runtime descriptor parameters in descriptor ABI order.
     pub(crate) fn instance_runtime_order(
         &self,
         id: FunctionInstanceId,
@@ -493,8 +493,7 @@ impl<'a> EmissionView<'a> {
         self.program.planned_coroutine_pair_names(ordinal)
     }
 
-    /// Reabstraction plans at one owner's concrete-to-dynamic boundaries
-    /// (R5).
+    /// Reabstraction plans at one owner's concrete-to-dynamic boundaries.
     pub(crate) fn conversions(
         &self,
         owner: EmissionOwner,
