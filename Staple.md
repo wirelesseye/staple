@@ -1609,172 +1609,213 @@ let add: (x: I32, y: I32) -> I32
 
 ### Generic functions
 
-A function type may be quantified by compile-time type parameters written in
-angle brackets before it, as in `<T> T -> T`. A `def` annotated with such a type
-is a generic function:
+A function type may be quantified by compile-time parameters written in angle
+brackets before it. The quantified type `<T> move T -> T` is a *scheme*: it
+describes a function that works for every `T`. Any function whose type is a
+scheme is generic, whatever declares it:
 
 ```staple
-def identity: <T> T -> T = value => value
-def first: <A, B> (A, B) -> A = (a, b) => a
-def choose: <T> (Bool, T, T) -> T = (condition, a, b) => {
+// A `def`.
+def identity: <T> move T -> T = move value => value
+
+// A `let` whose annotation is a scheme, checked against a lambda.
+let duplicate: <T where Copy T> T -> (T, T) = value => (value, value)
+
+type Box T = wrap T
+
+// A companion member: the companion's parameters, then the member's own.
+companion<T> Box T {
+    pub def map: <U> (move Box T, move T -> U) -> Box U =
+        (move Box value, move f) => Box (f value)
+}
+
+// A trait member, which may also declare parameters of its own.
+trait Visit T { visit: <A> (T, move A) -> A }
+```
+
+The other generic functions are implementation members, which are generic
+over their `impl<…>` parameters (see [Generic trait
+implementations](#generic-trait-implementations)), the constructors of generic
+types (`Box` has the scheme `<T> move T -> Box T`), and generic intrinsics
+(below).
+
+#### Declaring parameters
+
+A parameter list contains type parameters and `effect` parameters, followed by
+an optional `where` clause:
+
+```staple
+def first: <A, B> (move A, B) -> A = (move a, b) => a
+def show_all: <T where Display T> List T ->{IO} () = items => {
     // ...
 }
+def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }
 ```
 
-Product-pattern parameters are not permitted inside the angle brackets
-themselves — `first`'s two type parameters are declared as `<A, B>`, flattened,
-even though its value parameter is the product `(A, B)`.
+Parameters are flattened: `first` declares `<A, B>` even though its value
+parameter is the product `(A, B)`, and product patterns are not permitted
+inside the angle brackets. The `where` clause holds trait bounds (see [Traits
+and bounded generic functions](#traits-and-bounded-generic-functions)),
+subtype bounds (see [Subtype bounds](#subtype-bounds)), and `?Sized`
+relaxations. Effect parameters stand for effect sets and are described with
+effects under [Typed resources](#typed-resources).
 
-Call-site type arguments can be supplied explicitly after `.`:
-
-```staple
-let list = List.new.<I32> ()
-let answer = identity.<I32> 42
-let specialized = identity.<String>
-```
-
-Arguments follow the declaration's parameter order, or the scheme's for a
-polymorphic value, and must match its arity.
-Use `_` for an argument that should still be inferred. Explicit arguments must
-satisfy the declared bounds and agree with value arguments and expected types.
-The `.<...>` suffix binds like member access, before function application.
-
-The compiler infers concrete type arguments from call arguments and the
-expected result or function type. A generic function can therefore be used as
-a first-class value when its context fixes a concrete function type:
-
-```staple
-let int_identity: I32 -> I32 = identity
-```
-
-Compile-time parameters must be declared explicitly; unannotated definitions
-are not generalized. A call or concrete instantiation of a named generic
-function is monomorphized: each reachable concrete use produces its own code,
-unused instantiations produce none, and recursive calls must retain the current
-specialization. A function that is used as a polymorphic
-value, described below, instead keeps its parameters at run time.
-A `let` cannot declare compile-time parameters itself; to bind a
-polymorphic value, annotate it with a quantified type. Generic `extern` bindings are
-allowed only for the reserved `"staple-intrinsic"` ABI; ordinary external ABIs
-cannot declare compile-time parameters. Intrinsic calls infer concrete type and
-effect arguments at the call site. An `extern` block may appear inside a
-companion, where its bindings inherit the companion’s parameters and bounds.
-Intrinsics must be called directly and cannot be used as values. A local `let` inside a generic `def`'s body may mention that def's own
-compile-time parameters, since it is specialized along with the rest of the
-body at each concrete use:
-
-```staple
-def make_list: <T where Default T> () -> (T; 32) = () => {
-    let list: (T; 32) = default ()
-    list
-}
-```
-
-Every compile-time type parameter has an implicit `Sized` bound. It may
-therefore appear in by-value parameters, results, products, and represented
-types. A declaration that only stores or forwards a type behind a constructor
-which accepts unsized arguments can relax that default after introducing the
-parameter:
+Every type parameter has an implicit `Sized` bound, so it may appear in by-value
+parameters, results, products, and represented types. A function that only
+stores or forwards a type behind a constructor that accepts unsized arguments
+can relax that default:
 
 ```staple
 def preserve_ref: <T where ?Sized T> Ref T -> Ref T = value => value
 ```
 
-The `?Sized T` relaxation must name an already introduced parameter and may
-appear only once for that parameter within the `where` clause. It is a
-relaxation, not a trait bound: `where Sized T` remains the ordinary
-bounded-generic spelling. A relaxed parameter cannot itself be passed or
-returned by value. `Sized` is compiler-derived, so explicit `impl Sized`
-declarations are rejected.
+`?Sized T` must name a parameter of the same list and may appear once per
+parameter. It is a relaxation, not a trait bound: `where Sized T` remains an
+ordinary bound. A relaxed parameter cannot be passed or returned by value.
+`Sized` is compiler-derived, so explicit `impl Sized` declarations are
+rejected.
 
-**Polymorphic function values.** A quantified type is an ordinary type: it
-describes a value that can be called at any `T`, so it may appear in a binding
-annotation, a parameter, a result, a product or `wrap`
-field, or as a type argument:
+When a binding's annotation is a scheme, its parameters are in scope in the
+binding's value, including the types of local bindings:
 
 ```staple
-def identity: <T> move T -> T = move value => value
+def singleton: <T> move T -> List T = move value => {
+    let mut items: List T = List.new ()
+    List.push items value
+    items
+}
+```
 
-def consume: (<T> move T -> T) -> (I32, String) =
-    f => (f 42, f "hello")
+Parameters must be declared: an unannotated definition is never generalized,
+and a `let` gets parameters only through a scheme annotation, which makes it a
+polymorphic value (below). Parameters of an enclosing companion, implementation,
+or trait are in scope in its members, and an `extern` block inside a companion
+inherits the companion's parameters and bounds.
+
+Generic `extern` bindings are allowed only for the reserved
+`"staple-intrinsic"` ABI; ordinary external ABIs cannot declare compile-time
+parameters. Intrinsics must be called directly, and their type and effect
+arguments are inferred at the call.
+
+#### Using a generic function
+
+Each use of a generic function infers its type arguments from the value
+arguments and from the expected type. A use where an ordinary function type is
+expected is an *instantiation*, which produces an ordinary function value:
+
+```staple
+let answer = identity 42
+let int_identity: I32 -> I32 = identity
+```
+
+Type arguments can also be supplied explicitly with `.<…>`, which binds like
+member access, before function application. `_` leaves one to inference.
+Without a value argument, the result is the instantiated function:
+
+```staple
+let list = List.new.<I32> ()
+let text = identity.<String> "hello"
+let specialized = identity.<String>
+let mapped = Box.map.<I32, String> (Box 1, value => "${value}")
+let visited = Visit.visit.<_, I32> (1, 42)
+```
+
+Arguments follow the scheme's parameter order and must match its arity. For a
+companion member that is the companion's parameters followed by the member's
+own; for a trait member, the trait's explicit parameters (without associated
+types) followed by the member's own. Explicit arguments must satisfy the
+bounds and agree with the value arguments and the expected type.
+
+A use of a generic function by name at known types is *monomorphized*: each
+reachable instantiation produces its own code, and an instantiation that is
+never reached produces none. This covers `def`s, companion and implementation
+members, trait members whose trait arguments are known (static dispatch), and a
+scheme-annotated `let` called by name. A function used as a polymorphic value
+instead keeps its parameters at run time (below), and calls through such a value
+are not monomorphized.
+
+Monomorphization needs a finite set of instantiations. A recursive call must
+use the current instantiation; a call to itself at a type that contains its own
+parameter is *polymorphic recursion* and is rejected. Recursion that reaches a
+deeper instantiation through other functions or trait members, such as two
+functions that call each other with `Wrap value`, is reported as polymorphic
+recursion when an instantiation's type arguments nest more than 16 levels deep.
+
+#### Polymorphic values
+
+A scheme is an ordinary type. It may appear in a binding annotation, a
+parameter, a result, a product or `wrap` field, and as a type argument when an
+annotation spells it out:
+
+```staple
+def consume: (<T> move T -> T) -> (I32, String) = f => (f 42, f "hello")
 
 type Functions = wrap (identity: <T> move T -> T,)
 
 let mut selected: <T> move T -> T = identity
-let fs = Functions (identity: selected)
-let pair = consume fs.identity
+let functions = Functions (identity: selected)
+let pair = consume functions.identity
+let inline = consume (move value => value)
 ```
 
-A generic `def`, a generic constructor, or a lambda checked against a scheme
-becomes a polymorphic value when its context expects a scheme; a binding
-without an annotation takes the scheme of its initializer (`let id = identity`).
-The type parameters of a scheme are scoped to it: they are not visible outside
-the scheme, and two schemes that differ only in the names of their parameters
-are the same type.
+A generic function becomes a *polymorphic value* when its context expects a
+scheme, as `identity` does above. A lambda checked against a scheme is one, and
+a binding without an annotation takes the scheme of its initializer
+(`let id = identity`). A scheme's parameters are scoped to it, so two schemes
+that differ only in parameter names are the same type.
 
-**Calls.** Each call of a polymorphic value infers its own instantiation from
-the arguments and the expected result, so one value may be called at several
-types. `.<...>` supplies type arguments explicitly, in the scheme's parameter
-order, with `_` for an argument that is still inferred: `id.<I32> 42`.
+- **Calls.** Each call infers its own type arguments, so one value may be
+  called at several types, and `.<…>` works as for any generic function.
+- **Instantiation.** Where an ordinary function type is expected, the value is
+  instantiated as described above. The instantiated type may take and return
+  functions, including `mut` function parameters and values that combine a
+  function with a surrounding type parameter, such as
+  `(callback: I32 -> I32, state: A)`, and the result may be stored directly into
+  a `from` wrapper or a sum.
+- **Subsumption.** A polymorphic value may be used where another scheme is
+  expected when its own scheme can be instantiated to the expected body with
+  the expected scheme's parameters held abstract. Parameters may be reordered
+  or instantiated to compound types:
 
-**Instantiation.** Used where an ordinary function type is expected, a
-polymorphic value is instantiated: `let increment: I32 -> I32 = id`. The result
-is an ordinary function value of the instantiated type. `id.<I32>` without an
-argument does the same. The instantiated type may take and return functions,
-including `mut` function parameters and values that combine a function with
-a surrounding type parameter, such as `(callback: I32 -> I32, state: A)`. The
-instantiated value may be stored directly into a `from` wrapper or a sum:
+  ```staple
+  def pick_first: <A, B> (move A, move B) -> A = (move a, move b) => a
+  let swapped: <Y, X> (move X, move Y) -> X = pick_first
+  let pairs: <T> move (T, T) -> (T, T) = identity
+  ```
 
-```staple
-def apply: <T> (T -> T) -> T -> T = f => x => f x
-let poly: <T> (T -> T) -> T -> T = apply
-let concrete: (I32 -> I32) -> I32 -> I32 = poly
-```
+  Matching is shallow: only the outermost scheme of a value is instantiated,
+  never one nested in an argument or result. An explicit argument such as
+  `f.<(<U> move U -> U)>` may name a scheme.
+- **Bounds.** A scheme may carry trait bounds, as in
+  `<T where Display T> move T ->{IO} ()`. Each call or instantiation supplies a
+  dictionary for every bound at the types it uses (see [Traits and bounded
+  generic functions](#traits-and-bounded-generic-functions)). A value used at
+  another scheme obtains its dictionaries from that scheme's bounds and their
+  prerequisites.
+- **Effects.** A scheme with `effect` parameters may be called with a different
+  effect set each time (see [Typed resources](#typed-resources)).
+- **Storage.** A polymorphic value is a closure and is `Copy`. A `let mut`
+  binding keeps the scheme it was declared with, and an assignment must supply
+  a value of that scheme.
 
-**Subsumption.** A polymorphic value may be used where another scheme is
-expected when the value's scheme can be instantiated to the expected body with
-the expected scheme's parameters held abstract. Reordering the parameters or
-instantiating one of them to a compound type is allowed:
-
-```staple
-def first: <A, B> (move A, move B) -> A = (move a, move b) => a
-let swapped: <Y, X> (move X, move Y) -> X = first
-let pairs: <T> move (T, T) -> (T, T) = identity
-```
-
-Inference is shallow. Only the outermost quantifier of a value is solved, so a
-scheme nested in an argument is never instantiated implicitly; an explicit
-argument such as `f.<(<U> move U -> U)>` may name one.
-
-**Bounds.** A scheme may carry trait bounds, as in
-`<T where Display T> move T ->{IO} ()`. Each call or instantiation of the value
-supplies a dictionary for every bound at the types it uses, from a bound in
-scope or an implementation, and a value subsumed into another scheme obtains
-its dictionaries from the target's bounds and their prerequisites.
-
-**Storage.** A polymorphic value is a closure and is `Copy`. A `let mut`
-binding keeps the scheme it was declared with, and an assignment must supply a
-value of that scheme.
-
-**Restrictions.** A function can be used as a polymorphic value only when its
-implementation can run without knowing its type arguments at compile time.
-The compiler reports the following at the place the value is built, and the
-same function still works when it is called directly:
+A function can become a polymorphic value only when its implementation can run
+without knowing its type arguments at compile time. The compiler reports the
+following where the value is built; the same function still works when it is
+called directly:
 
 * a trait obligation in the implementation that no dictionary can satisfy: it
   must come from a bound in scope or match exactly one implementation;
 * a `Natural` bound or an array length that depends on a type parameter;
 * a scheme that names an associated type of its parameters, such as
-  `<Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter)`
-  (a generic function with such a type can still be called directly, at
-  concrete or generic types);
+  `<Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter)`;
 * a coroutine, async, or reactive body;
 * a function value behind `Ref`, `Slice`, `Buffer`, or a shared cell that
   crosses into the implementation.
 
-The checker separately rejects signals, ordinary `extern` declarations,
-parameter-product-capable type parameters, and polymorphic recursion in
-polymorphic values.
+The checker also rejects schemes in signals and in ordinary `extern`
+signatures, intrinsics used as values, and polymorphic values whose type
+parameters are parameter-product capable (see [Capable type
+parameters](#capable-type-parameters)).
 
 ### Typed resources
 
