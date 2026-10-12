@@ -63,6 +63,33 @@ editor signatures are implemented and documented. The workspace and both
 full differential runs pass; all 153 existing corpus inputs and 11 examples
 retain identical IR. Reachability and expanded execution fixtures pass.
 
+**Review of `258d903`.** About 30 probes found no miscompilation. Two
+checker shapes and one gap in G-K were fixed, each with a test:
+
+- **Runaway polymorphic recursion** (`b0d1cfb`). Mutual recursion at a
+  growing type through a generic member and a default, or through a helper
+  `def`, never finished lowering; two plain generic `def`s did the same
+  before this stage. The planned lowering guard (G-K) now exists as an
+  instance-depth limit.
+- **Unmentioned member parameters** (`c87bbc7`). `<A> T -> USize` counted
+  `A` as parameter-product capable and rejected the trait. Member parameters
+  now follow trait parameters (G-C).
+- **Shadowing** (`b069a5f`). A member parameter named like a trait
+  parameter reported only "must mention trait parameter". The resolver now
+  names the clash.
+
+Problems found during the review that predate this stage and remain: a
+lambda parameter whose type is an associated type must be annotated (an
+unannotated `_` crashes lowering with an inference placeholder); a generic
+function whose parameter type names a projection is rejected at concrete
+calls; and interpolating a borrowed generic value reports a move.
+
+Verified after the review fixes: `cargo test --workspace` (1,549 passed,
+3 ignored); the full type differential run (153 of 154 programs with dynamic
+calls, 18,035 call sites), the effect-row run (153 programs), and the Stage 7
+differential test; and IR against the `258d903` release build: all 156 corpus
+programs and 11 examples identical.
+
 ## Decisions
 
 - **G-A. Two substages.** 7a is checker plus static dispatch: member
@@ -89,11 +116,14 @@ retain identical IR. Reachability and expanded execution fixtures pass.
 - **G-C. Member rules.**
   - A member still must mention every explicit trait parameter. Its own
     parameters follow the `def` rule: one that the type does not mention
-    needs explicit arguments.
+    needs explicit arguments. A member parameter cannot reuse the name of a
+    trait parameter or associated type.
   - The body of a member scheme must be a function type.
-  - Parameter-product-capable member parameters are rejected: dictionary
-    slots and polymorphic values cannot adapt an unknown arity (main plan
-    §3).
+  - Member parameters, like trait parameters, are never parameter-product
+    capable: dictionary slots and polymorphic values cannot adapt an
+    unknown arity (main plan §3). This is a capability rule, not a
+    rejection, so a parameter that occurs only as a function's parameter, or
+    not at all, is accepted and stays single-value.
   - Nested `Forall`s in member types (`T -> (<A> A -> A) -> T`) are allowed
     and need no new ABI: a scheme-typed parameter is an ordinary polymorphic
     closure argument (Stage 4b).
@@ -163,10 +193,13 @@ retain identical IR. Reachability and expanded execution fixtures pass.
   strictly contains the member's own parameter (`A` to `(A, A)`) would
   monomorphize without end. The existing check extends to trait dispatch:
   a call that reaches the same trait member, through the trait bound or a
-  concrete implementation, is a self-use. If lowering has no instance-depth
-  guard, one is added with a "polymorphic recursion" diagnostic, as a
-  backstop for routes the checker cannot see (a default calling an
-  implementation member that calls back).
+  concrete implementation, is a self-use. Lowering rejects routes the
+  checker cannot see (a default calling an implementation member that calls
+  back, or a helper `def` in between): an instance whose substituted types
+  nest more than 16 levels deep is reported as polymorphic recursion. Corpus
+  programs and examples reach depth 3. A precise rule (the same template
+  reached again at a deeper type) would wrongly reject chains that trait
+  dispatch ends, such as `I32` to `Box I32` with no further implementation.
 
 ## Steps
 
@@ -306,9 +339,9 @@ After Stage 7:
 | Restriction | Message | Lifted in |
 |---|---|---|
 | A trait member whose scheme names an associated type, used as a polymorphic value (T-H) | the Stage 6 associated-type message | Not planned yet: needs projection placeholders as run-time parameters of polymorphic entries |
-| Parameter-product-capable member parameters (G-C) | "trait member parameters cannot be parameter-product capable" | Not planned |
+| A member parameter named like a trait parameter or associated type (G-C) | "trait member `m` cannot declare parameter `T`: the trait already declares `T`" | Not planned |
 | Implementation members naming the member's own parameters (G-D) | the ordinary unknown-type error | Not planned: needs implementation member annotations |
-| Polymorphic recursion through dispatch (G-K) | "polymorphic recursion is not supported" | Not planned (main plan Decision 4) |
+| Polymorphic recursion through dispatch (G-K) | "polymorphic recursion is not supported" from the checker; "polymorphic recursion is not supported: instantiating `f` here nests its type arguments more than 16 levels deep" from lowering for indirect routes | Not planned (main plan Decision 4) |
 | Stage 6 restrictions (T-F ambiguity, missing dictionaries, `Natural`) | unchanged | as in Stage 6 |
 | Coroutine, async, or reactive body, transitively | the existing messages | Stage 8 |
 
@@ -339,7 +372,9 @@ After Stage 7:
   substitute both lists.
 - **Termination.** Polymorphic recursion through dispatch is easy to write
   by accident in generic members. G-K's checker rule and the lowering guard
-  must both exist before generic members reach the corpus.
+  must both exist before generic members reach the corpus. The guard was
+  missing at the exit gate and added in review; each step toward the limit
+  costs more than the last, so the limit stays low (16, a few seconds).
 - **Corpus blind spots.** Stages 5 and 6 each shipped three defects in
   shapes the corpus did not exercise. Every S0 program is reached from
   concrete owners, dynamic bodies, and nested closures before its step is
