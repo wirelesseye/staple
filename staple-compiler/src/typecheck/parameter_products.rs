@@ -20,6 +20,17 @@ impl TypeChecker {
         let mut forced_values = HashSet::new();
         for trait_ in module.traits().values() {
             forced_values.extend(trait_.parameters.iter().copied());
+            // A member's own parameters are never capable either: dictionary
+            // slots and member values pass them at run time, which needs a
+            // known arity.
+            for method in &trait_.methods {
+                if let Some(Type::Forall(scheme)) = module
+                    .trait_method(*method)
+                    .map(|member| &member.annotation)
+                {
+                    forced_values.extend(scheme_binding_ids(module, scheme));
+                }
+            }
         }
         for (id, declaration) in module.type_declarations() {
             let builtin_value = matches!(module.builtin_type(*id), Some(BuiltinType::Buffer))
@@ -473,11 +484,11 @@ pub(super) fn single_value_conflict<'a>(
 }
 
 /// A scheme used as a closure must have a fixed parameter arity.
-pub(super) fn scheme_has_capable_parameters(
+/// The type parameter ids a scheme's parameter list binds.
+fn scheme_binding_ids(
     module: &ResolvedModule,
     scheme: &staple_syntax::ForallType,
-    capable: &HashSet<TypeParameterId>,
-) -> bool {
+) -> Vec<TypeParameterId> {
     fn bindings<'a>(
         p: &'a TypeParameterPattern,
         out: &mut Vec<&'a staple_syntax::TypeParameterBinding>,
@@ -496,21 +507,29 @@ pub(super) fn scheme_has_capable_parameters(
     for p in &scheme.generics.parameters {
         bindings(p, &mut parameters);
     }
-    parameters.into_iter().any(|binding| {
-        module
-            .type_parameter_for(binding.syntax.id)
-            .is_some_and(|id| {
-                capability_violation(module, &scheme.body, id, false, capable).is_none()
-                    && !scheme
-                        .generics
-                        .subtype_bounds
-                        .iter()
-                        .any(|bound| module.type_parameter_for(bound.syntax.id) == Some(id))
-                    && !scheme.generics.trait_bounds.iter().any(|bound| {
-                        bound.arguments.iter().any(|ty| {
-                            capability_violation(module, ty, id, false, capable).is_some()
-                        })
-                    })
+    parameters
+        .into_iter()
+        .filter_map(|binding| module.type_parameter_for(binding.syntax.id))
+        .collect()
+}
+
+pub(super) fn scheme_has_capable_parameters(
+    module: &ResolvedModule,
+    scheme: &staple_syntax::ForallType,
+    capable: &HashSet<TypeParameterId>,
+) -> bool {
+    scheme_binding_ids(module, scheme).into_iter().any(|id| {
+        capability_violation(module, &scheme.body, id, false, capable).is_none()
+            && !scheme
+                .generics
+                .subtype_bounds
+                .iter()
+                .any(|bound| module.type_parameter_for(bound.syntax.id) == Some(id))
+            && !scheme.generics.trait_bounds.iter().any(|bound| {
+                bound
+                    .arguments
+                    .iter()
+                    .any(|ty| capability_violation(module, ty, id, false, capable).is_some())
             })
     })
 }

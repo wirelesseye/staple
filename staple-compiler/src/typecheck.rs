@@ -3087,14 +3087,17 @@ impl TypeChecker {
                 let diagnostic_start = self.diagnostics.len();
                 let declared = self.resolve_source_type(module, &member.annotation);
                 if let Type::Forall(ty) = &member.annotation {
-                    self.diagnostics[diagnostic_start..].iter_mut().for_each(|diagnostic| {
-                        if diagnostic.message == "functions with parameter-product-capable parameters cannot be used as polymorphic values" {
-                            diagnostic.message = "trait member parameters cannot be parameter-product capable".to_owned();
-                        }
-                    });
+                    // Member parameters are never capable (see
+                    // `collect_parameter_product_capabilities`), and the
+                    // projection restriction applies only where a member is
+                    // used as a value.
+                    let mut index = 0;
                     self.diagnostics.retain(|diagnostic| {
-                        diagnostic.message != PROJECTION_VALUE_RESTRICTION
+                        index += 1;
+                        index <= diagnostic_start
                             || diagnostic.span != ty.syntax.span
+                            || (diagnostic.message != PROJECTION_VALUE_RESTRICTION
+                                && diagnostic.message != "functions with parameter-product-capable parameters cannot be used as polymorphic values")
                     });
                 }
                 let (value_type, own) = match declared {

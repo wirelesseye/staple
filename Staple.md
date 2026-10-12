@@ -2459,8 +2459,11 @@ The implementation must work for every member argument; its body is checked
 with those parameters held abstract. The member's parameter names are in
 scope in its default body, along with the trait's parameters. An `impl` body
 uses its own header's parameter names and does not inherit the member's names.
-Member parameters cannot be parameter-product capable (see [Generic
-functions](#generic-functions)). Each member must mention every explicit trait
+Like trait parameters, member parameters are never capable (see [Capable type
+parameters](#capable-type-parameters)), so they never bind to a parameter
+product. A member parameter that the function type does not mention is
+allowed; its argument must then be given explicitly, as in
+`Measure.measure.<_, String>`. Each member must mention every explicit trait
 parameter in its function type.
 
 As a polymorphic value, `Visit.visit` has the scheme
@@ -2759,8 +2762,8 @@ The signature that is inspected depends on the declaration:
   while another, which uses the parameter as a value, does not.
 * **`impl<…>` blocks:** the impl header (target, trait arguments and `where`
   clause).
-* Trait parameters, singleton types and the compiler built-ins (`Ref`,
-  `Slice`, `Buffer`, `Syntax`, …) are never capable.
+* Trait parameters, a trait member's own parameters, singleton types and the
+  compiler built-ins (`Ref`, `Slice`, `Buffer`, `Syntax`, …) are never capable.
 
 Capability depends only on signatures, never on bodies, so editing a body
 cannot change which arguments a caller may pass. Supplying a parameter product

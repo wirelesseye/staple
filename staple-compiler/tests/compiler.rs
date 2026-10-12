@@ -13899,16 +13899,25 @@ fn checks_polymorphic_trait_members_and_keeps_projection_restriction() {
 }
 
 #[test]
-fn rejects_parameter_product_capable_trait_members() {
-    let diagnostics = TypeChecker::new()
-        .check(resolve("trait Run T { run: <A> (T, A -> I32) -> I32 }\n"))
-        .expect_err_diagnostics("member parameters cannot depend on unknown function arity");
-    assert!(
-        diagnostics.iter().any(|d| d
-            .message
-            .contains("trait member parameters cannot be parameter-product capable")),
-        "{diagnostics:?}"
+fn trait_member_parameters_are_single_value() {
+    // Like trait parameters, a member's own parameters never bind to a
+    // parameter product, so a parameter that occurs only as a function's
+    // parameter, or not at all, is accepted.
+    let declarations = concat!(
+        "trait Run T { run: <A> (T, A -> I32) -> I32 }\n",
+        "impl Run I32 { run = (_, f) => 1 }\n",
+        "trait Measure T { measure: <A> T -> USize }\n",
+        "impl Measure I32 { measure = _ => 4 }\n",
     );
+    lower(&type_check(&format!(
+        "{declarations}let ran = Run.run (1, (value: I32) => value)\nlet size = Measure.measure.<_, String> 1\nlet member = Measure.measure\n"
+    )));
+    let diagnostics = TypeChecker::new()
+        .check(resolve(&format!(
+            "{declarations}def add: [I32, I32] -> I32 = [left, right] => left + right\nlet ran = Run.run (1, add)\n"
+        )))
+        .expect_err_diagnostics("a member parameter cannot bind to a parameter product");
+    assert!(!diagnostics.is_empty());
 }
 
 #[test]
