@@ -2022,8 +2022,9 @@ impl Grammar {
         } else {
             None
         };
+        let directly_generic_body = self.at_operator("<");
         let body = Box::new(self.parse_expression()?);
-        if let Expression::Function(inner) = body.as_ref() {
+        if directly_generic_body && let Expression::Function(inner) = body.as_ref() {
             if inner.generics.is_some() {
                 return Err(
                     self.error("compile-time parameters must be on the outermost function value")

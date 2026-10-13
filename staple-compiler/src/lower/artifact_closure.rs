@@ -2608,7 +2608,7 @@ mod tests {
     }
 
     const IDENTITY_FIXTURE: &str = concat!(
-        "def identity: <T where Copy T> T -> T = value => value\n",
+        "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
         "let first: I32 = identity 1\n",
     );
 
@@ -2897,7 +2897,7 @@ mod tests {
     #[test]
     fn closure_dedups_type_keyed_artifacts_across_owners() {
         let source = concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first: I32 = identity 1\n",
             "let second: U8 = identity (U8 :: 1)\n",
         );
@@ -2965,7 +2965,7 @@ mod tests {
     #[test]
     fn closure_per_owner_sites_produce_distinct_keys() {
         let source = concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first: I32 = identity 1\n",
             "let second: U8 = identity (U8 :: 1)\n",
         );
@@ -3030,7 +3030,7 @@ mod tests {
     #[test]
     fn closure_never_renumbers_or_renames_lowered_fixture_entries() {
         let source = concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first: I32 = identity 1\n",
             "type Point = wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
@@ -3171,7 +3171,7 @@ mod tests {
     #[test]
     fn closure_is_deterministic_across_repeated_runs() {
         let source = concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first: I32 = identity 1\n",
             "let second: U8 = identity (U8 :: 1)\n",
         );
@@ -3327,7 +3327,7 @@ mod tests {
     #[test]
     fn closure_corruption_is_diagnosed() {
         let source = concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first: I32 = identity 1\n",
         );
         let mut program = lowered_fixture(source);
@@ -3473,7 +3473,7 @@ mod tests {
     #[test]
     fn closure_use_site_outside_the_owner_arenas_is_diagnosed() {
         let source = concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first: I32 = identity 1\n",
         );
         let mut program = lowered_fixture(source);
@@ -3505,7 +3505,7 @@ mod tests {
     #[test]
     fn closure_coroutine_use_sites_outside_the_owner_arenas_are_diagnosed() {
         let source = concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first: I32 = identity 1\n",
         );
         // Each request carries a distinct drop-glue key so every use is

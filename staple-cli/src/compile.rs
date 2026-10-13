@@ -3549,7 +3549,7 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { exit: I32 -> () }\n",
-                "def ignore: <effect E> (() ->{E} I32) -> I32 = callback => 0\n",
+                "def ignore: <effect E> (() ->{E} I32) -> I32 = <effect E> callback => 0\n",
                 "def twice: (() ->{state} I32) ->{state} I32 = callback => { callback (); callback () }\n",
                 "def test = () => {\n",
                 "  let mut count = 0\n",

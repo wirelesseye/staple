@@ -386,6 +386,7 @@ pub struct ResolvedFunction {
     pub name: String,
     pub binding_syntax: Option<SyntaxId>,
     pub pattern: Pattern,
+    pub generics: Option<staple_syntax::GenericParameters>,
     pub effect_lower_bound: Option<staple_syntax::EffectSet>,
     pub result_annotation: Option<Type>,
     pub binding_annotation: Option<Type>,
@@ -1207,6 +1208,7 @@ pub struct NameResolver {
     private_glob_traits: HashMap<String, Vec<String>>,
     visible_trait_methods: HashMap<String, Vec<TraitMethodId>>,
     type_parameter_scopes: Vec<HashMap<String, TypeParameterId>>,
+    annotation_parameter_hints: Vec<Vec<(String, Option<String>)>>,
     prelude_values: HashMap<String, SymbolId>,
     prelude_types: HashMap<String, TypeId>,
     prelude_macros: HashMap<String, Vec<MacroId>>,
@@ -3687,6 +3689,18 @@ impl NameResolver {
                         self.pop_type_parameter_scope();
                         continue;
                     };
+                    self.pop_type_parameter_scope();
+                    self.push_type_parameter_scope();
+                    parameters = declaration.type_parameters.clone();
+                    if let Expression::Function(f) = default {
+                        if let Some(g) = &f.generics {
+                            parameters.extend(g.parameters.clone());
+                            self.binding_trait_bounds
+                                .insert(member.syntax.id, g.trait_bounds.clone());
+                            self.binding_subtype_bounds
+                                .insert(member.syntax.id, g.subtype_bounds.clone());
+                        }
+                    }
                     self.binding_type_parameters
                         .insert(member.syntax.id, parameters);
                     let function_name = format!("trait.default.{}.{}", trait_id.0, member.name);
@@ -3961,75 +3975,55 @@ impl NameResolver {
             .entry(binding.syntax.id)
             .or_insert_with(|| binding.all_subtype_bounds());
         self.push_type_parameter_scope();
-        for parameter in &binding.all_type_parameters() {
-            self.declare_type_parameter_pattern(parameter);
+        if let Some(generics) = &binding.companion_generics {
+            self.resolve_value_generics(generics, true);
         }
         if let Some(target) = &binding.companion_target {
             self.resolve_type(target);
             self.binding_companion_targets
                 .insert(binding.syntax.id, target.clone());
         }
-        if let Some(Type::Forall(ty)) = &binding.annotation
-            && binding.kind == BindingKind::Let
-        {
-            self.binding_type_parameters
-                .insert(binding.syntax.id, ty.generics.parameters.clone());
-            self.binding_trait_bounds
-                .insert(binding.syntax.id, ty.generics.trait_bounds.clone());
-            self.binding_subtype_bounds
-                .insert(binding.syntax.id, ty.generics.subtype_bounds.clone());
-            for parameter in &ty.generics.parameters {
-                self.declare_type_parameter_pattern(parameter);
-            }
-            for bound in &ty.generics.trait_bounds {
-                if let Some(id) = self.resolve_trait_name(&bound.trait_name) {
-                    self.trait_references.insert(bound.syntax.id, id);
-                }
-                for argument in &bound.arguments {
-                    self.resolve_type(argument);
-                }
-            }
-            for bound in &ty.generics.subtype_bounds {
-                if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
-                    self.type_parameters.insert(bound.syntax.id, id);
-                }
-                self.resolve_type(&bound.supertype);
-            }
-            self.resolve_type(&ty.body);
-        } else if let Some(annotation) = binding.annotation_body() {
+        if let Some(annotation) = &binding.annotation {
             self.resolve_type(annotation);
         }
-        for bound in &binding.all_trait_bounds() {
-            if let Some(trait_id) = self.resolve_trait_name(&bound.trait_name) {
-                self.trait_references.insert(bound.syntax.id, trait_id);
-            }
-            for argument in &bound.arguments {
-                self.resolve_type(argument);
-            }
-        }
-        for bound in &binding.all_subtype_bounds() {
-            if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
-                self.type_parameters.insert(bound.syntax.id, id);
-            } else {
-                self.diagnostics.push(Diagnostic::new(
-                    bound.parameter.syntax.span.clone(),
-                    format!(
-                        "unknown compile-time parameter `{}` in subtype bound",
-                        bound.parameter.name
-                    ),
-                ));
-            }
-            self.resolve_type(&bound.supertype);
-        }
         if let Some(value) = &binding.value {
+            let annotation_names = binding
+                .annotation_generics()
+                .map(|g| {
+                    g.parameters
+                        .iter()
+                        .flat_map(|p| p.names())
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let value_names = match value {
+                Expression::Function(f) => f
+                    .generics
+                    .as_ref()
+                    .map(|g| {
+                        g.parameters
+                            .iter()
+                            .flat_map(|p| p.names())
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            self.annotation_parameter_hints.push(
+                annotation_names
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, name)| (name, value_names.get(i).cloned()))
+                    .collect(),
+            );
             self.resolve_expression(
                 value,
-                binding.annotation_body().map(|ty| match ty {
-                    Type::Forall(ty) if binding.kind == BindingKind::Let => ty.body.as_ref(),
-                    ty => ty,
-                }),
+                binding.annotation.as_ref(),
                 Some((&binding.name, binding.syntax.id)),
             );
+            self.annotation_parameter_hints.pop();
         }
         if binding.kind == BindingKind::Let {
             self.declare_allocated(binding, Some(binding.visibility == Visibility::Public));
@@ -4053,11 +4047,6 @@ impl NameResolver {
                 self.resolve_type_lenient(argument);
             }
         }
-        let mut current = declaration.value.as_ref();
-        while let Some(Expression::Function(function)) = current {
-            self.resolve_pattern_types_lenient(&function.pattern);
-            current = Some(function.body.as_ref());
-        }
         if let Some(value) = &declaration.value {
             self.resolve_compile_time_expression_annotations(value);
             // The macro's body is never resolved as ordinary code (it is
@@ -4077,19 +4066,11 @@ impl NameResolver {
 
     fn resolve_compile_time_helper_annotations(&mut self, binding: &Binding) {
         self.push_type_parameter_scope();
-        for parameter in &binding.all_type_parameters() {
-            self.declare_type_parameter_pattern(parameter);
+        if let Some(generics) = &binding.companion_generics {
+            self.resolve_value_generics(generics, false);
         }
-        if let Some(annotation) = binding.annotation_body() {
+        if let Some(annotation) = &binding.annotation {
             self.resolve_type_lenient(annotation);
-        }
-        for bound in &binding.all_trait_bounds() {
-            if let Some(trait_id) = self.resolve_trait_name(&bound.trait_name) {
-                self.trait_references.insert(bound.syntax.id, trait_id);
-            }
-            for argument in &bound.arguments {
-                self.resolve_type_lenient(argument);
-            }
         }
         if let Some(value) = &binding.value {
             self.resolve_compile_time_expression_annotations(value);
@@ -4100,6 +4081,10 @@ impl NameResolver {
     fn resolve_compile_time_expression_annotations(&mut self, expression: &Expression) {
         match expression {
             Expression::Function(value) => {
+                self.push_type_parameter_scope();
+                if let Some(generics) = &value.generics {
+                    self.resolve_value_generics(generics, false);
+                }
                 if pattern_contains_mutable_marker(&value.pattern) {
                     self.diagnostics.push(Diagnostic::new(
                         value.pattern.syntax().span.clone(),
@@ -4113,6 +4098,7 @@ impl NameResolver {
                     }
                 }
                 self.resolve_compile_time_expression_annotations(&value.body);
+                self.pop_type_parameter_scope();
             }
             Expression::TypeApplication(application) => {
                 self.resolve_compile_time_expression_annotations(&application.value);
@@ -4648,6 +4634,32 @@ impl NameResolver {
             .insert(expression.syntax().id, self.function_stack.last().copied());
         match expression {
             Expression::Function(function) => {
+                self.push_type_parameter_scope();
+                if let Some(generics) = &function.generics {
+                    self.resolve_value_generics(generics, true);
+                }
+                if let Some((_, syntax)) = suggested_function
+                    && let Some(g) = &function.generics
+                {
+                    let parameters = self.binding_type_parameters.entry(syntax).or_default();
+                    for p in &g.parameters {
+                        if !parameters.contains(p) {
+                            parameters.push(p.clone());
+                        }
+                    }
+                    let bounds = self.binding_trait_bounds.entry(syntax).or_default();
+                    for b in &g.trait_bounds {
+                        if !bounds.contains(b) {
+                            bounds.push(b.clone());
+                        }
+                    }
+                    let bounds = self.binding_subtype_bounds.entry(syntax).or_default();
+                    for b in &g.subtype_bounds {
+                        if !bounds.contains(b) {
+                            bounds.push(b.clone());
+                        }
+                    }
+                }
                 let function_id = FunctionId(self.next_function_id);
                 self.next_function_id += 1;
                 self.function_expressions
@@ -4708,6 +4720,7 @@ impl NameResolver {
                     name,
                     binding_syntax: suggested_function.map(|(_, syntax)| syntax),
                     pattern: function.pattern.clone(),
+                    generics: function.generics.clone(),
                     effect_lower_bound: function.effect_lower_bound.clone(),
                     result_annotation: match function.body.as_ref() {
                         Expression::TypeAscription(ascription) => Some(ascription.ty.clone()),
@@ -4729,6 +4742,7 @@ impl NameResolver {
                     captures,
                     body: (*function.body).clone(),
                 });
+                self.pop_type_parameter_scope();
             }
             Expression::TypeApplication(application) => {
                 self.resolve_expression(&application.value, None, None);
@@ -5058,6 +5072,30 @@ impl NameResolver {
 
     /// Resolve rejected generic types in their own scope so the placement
     /// diagnostic does not turn into spurious unknown-parameter errors.
+    fn resolve_value_generics(
+        &mut self,
+        generics: &staple_syntax::GenericParameters,
+        strict: bool,
+    ) {
+        for parameter in &generics.parameters {
+            self.declare_type_parameter_pattern(parameter);
+        }
+        for bound in &generics.trait_bounds {
+            if let Some(id) = self.resolve_trait_name(&bound.trait_name) {
+                self.trait_references.insert(bound.syntax.id, id);
+            }
+            for argument in &bound.arguments {
+                self.resolve_type_with(argument, strict);
+            }
+        }
+        for bound in &generics.subtype_bounds {
+            if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
+                self.type_parameters.insert(bound.syntax.id, id);
+            }
+            self.resolve_type_with(&bound.supertype, strict);
+        }
+    }
+
     fn resolve_forall_type(&mut self, ty: &staple_syntax::ForallType, strict: bool, message: &str) {
         if !message.is_empty() {
             self.diagnostics
@@ -5147,8 +5185,23 @@ impl NameResolver {
                     self.associated_type_references
                         .insert(named.syntax.id, reference);
                 } else if strict && named.name != "int" {
-                    let message =
+                    let mut message =
                         unknown_item_message("type", &named.name, &self.private_glob_types);
+                    if named.namespace.is_none()
+                        && let Some((_, replacement)) = self
+                            .annotation_parameter_hints
+                            .iter()
+                            .rev()
+                            .flat_map(|h| h.iter())
+                            .find(|(name, _)| name == &named.name)
+                    {
+                        message.push_str(&format!("; `{}` is a compile-time parameter of the type annotation, which is not in scope in the function value", named.name));
+                        if let Some(replacement) = replacement {
+                            message.push_str(&format!(
+                                "; use `{replacement}`, the value's own parameter"
+                            ));
+                        }
+                    }
                     self.diagnostics
                         .push(Diagnostic::new(named.syntax.span.clone(), message));
                 }

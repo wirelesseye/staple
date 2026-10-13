@@ -1113,6 +1113,14 @@ fn returned_closure_ids(module: &TypedModule, expression: &Expression) -> Option
         Expression::Function(function) => module
             .function_for(function.syntax.id)
             .map(|function| vec![function]),
+        Expression::Product(product)
+            if !product.slotted
+                && product.elements.len() == 1
+                && product.elements[0].name.is_none()
+                && !product.elements[0].spread =>
+        {
+            returned_closure_ids(module, &product.elements[0].value)
+        }
         Expression::TypeApplication(value) => returned_closure_ids(module, &value.value),
         Expression::TypeAscription(value) => returned_closure_ids(module, &value.value),
         Expression::Block(block) => match block.items.last()? {

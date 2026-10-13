@@ -2,15 +2,15 @@ use std.io.println
 trait Visit T {
     visit: <A> (T, move A) -> A
 }
-impl Visit I32 { visit = (_, move value) => value }
+impl Visit I32 { visit = <A> (_, move value) => value }
 type Box T = wrap T
-impl<T> Visit (Box T) { visit = (_, move value) => value }
+impl<T> Visit (Box T) { visit = <A> (_, move value) => value }
 trait DefaultVisit T {
-    visit_default: <A> (T, move A) -> A = (_, move value) => value
+    visit_default: <A> (T, move A) -> A = <A> (_, move value) => value
 }
 impl DefaultVisit I32 {}
-impl DefaultVisit Bool { visit_default = (_, move value) => value }
-def relay: <T, A where Visit T> (T, move A) -> A = (item, move value) => Visit.visit (item, value)
+impl DefaultVisit Bool { visit_default = <A> (_, move value) => value }
+def relay: <T, A where Visit T> (T, move A) -> A = <T, A where Visit T> (item, move value) => Visit.visit (item, value)
 println "${Visit.visit (1, 42)}"
 println "${Visit.visit.<_, String> (Box (Bool :: True), "generic")}"
 println "${relay (1, Bool :: True)}"

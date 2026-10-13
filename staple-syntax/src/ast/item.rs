@@ -487,16 +487,16 @@ impl Binding {
         {
             return Some(generics);
         }
-        self.annotation_generics()
+        if matches!(self.kind, BindingKind::Def | BindingKind::Extern) {
+            self.annotation_generics()
+        } else {
+            None
+        }
     }
     /// Parameters scoped only to the binding annotation.
     pub fn annotation_generics(&self) -> Option<&super::GenericParameters> {
         match self.annotation.as_ref() {
-            Some(Type::Forall(ty))
-                if matches!(self.kind, BindingKind::Def | BindingKind::Extern) =>
-            {
-                Some(&ty.generics)
-            }
+            Some(Type::Forall(ty)) => Some(&ty.generics),
             _ => None,
         }
     }

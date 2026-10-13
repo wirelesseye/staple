@@ -712,7 +712,7 @@ pub(crate) mod tests {
     // ------------------------------------------------------------------
 
     const TWO_SUBSTITUTIONS: &str = concat!(
-        "def identity: <T where Copy T> T -> T = value => value\n",
+        "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
         "let first: I32 = identity 1\n",
         "let second: U8 = identity (U8 :: 1)\n",
     );
@@ -827,7 +827,7 @@ pub(crate) mod tests {
     #[test]
     fn graph_validator_reports_template_only_body_substitutions() {
         let module = checked_program(concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let applied: I32 = identity 1\n",
         ));
         let mut program = LoweredProgram::default();
@@ -877,7 +877,7 @@ pub(crate) mod tests {
         let mut program = lower(concat!(
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
-            "def show: <T where TestShow T> T -> Bool = value => test_show value\n",
+            "def show: <T where TestShow T> T -> Bool = <T where TestShow T> value => test_show value\n",
             "let shown: Bool = show 1\n",
         ))
         .program;
@@ -982,8 +982,8 @@ pub(crate) mod tests {
     #[test]
     fn materialization_is_a_fixed_point() {
         let module = checked_program(concat!(
-            "def inner: <T where Copy T> T -> T = value => value\n",
-            "def outer: <T where Copy T> T -> T = value => inner value\n",
+            "def inner: <T where Copy T> T -> T = <T where Copy T> value => value\n",
+            "def outer: <T where Copy T> T -> T = <T where Copy T> value => inner value\n",
             "let applied: I32 = outer 1\n",
         ));
         let mut program = LoweredProgram::default();
@@ -1021,7 +1021,7 @@ pub(crate) mod tests {
     #[test]
     fn direct_and_indirect_calls_keep_distinct_routes() {
         let lowered = lower(concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "def apply: (I32 -> I32) -> I32 -> I32 = f => value => f value\n",
             "let applied: I32 = apply identity 1\n",
         ));
@@ -1076,7 +1076,7 @@ pub(crate) mod tests {
     fn result_only_generics_infer_from_the_complete_callable_type() {
         let lowered = lower(concat!(
             "type Phantom T = wrap ()\n",
-            "def phantom_result: <T> () -> Phantom T = () => Phantom ()\n",
+            "def phantom_result: <T> () -> Phantom T = <T> () => Phantom ()\n",
             "let hidden: Phantom I32 = phantom_result ()\n",
         ));
         let program = &lowered.program;
@@ -1101,7 +1101,7 @@ pub(crate) mod tests {
     #[test]
     fn curried_layers_and_repeated_products_produce_one_concrete_body() {
         let lowered = lower(concat!(
-            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => (value ^ N)\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = <T, N where Copy T, Natural N> value => n => (value ^ N)\n",
             "let repeated: (I32 ^ 3) = repeat 7 3\n",
         ));
         let program = &lowered.program;
@@ -1151,7 +1151,7 @@ pub(crate) mod tests {
     #[test]
     fn same_signature_generic_captures_stay_distinct() {
         let lowered = lower(concat!(
-            "def show_thunk: <T where Copy T, Display T> move T -> (() -> String) = move value => () => \"value=$value\"\n",
+            "def show_thunk: <T where Copy T, Display T> move T -> (() -> String) = <T where Copy T, Display T> move value => () => \"value=$value\"\n",
             "let shown_number = show_thunk 1\n",
             "let shown_byte = show_thunk (U8 :: 1)\n",
         ));
@@ -1365,7 +1365,7 @@ pub(crate) mod tests {
             "impl TestShow I32 { test_show = _ => True }\n",
             "trait TestGuarded T { guarded: T -> Bool }\n",
             "impl<T where TestShow T> TestGuarded T { guarded = value => test_show value }\n",
-            "def use_guarded: <T where TestGuarded T> T -> Bool = value => guarded value\n",
+            "def use_guarded: <T where TestGuarded T> T -> Bool = <T where TestGuarded T> value => guarded value\n",
             "let ok: Bool = use_guarded 1\n",
         );
         let module = checked_program(source);
@@ -1424,7 +1424,7 @@ pub(crate) mod tests {
     fn effect_polymorphic_callbacks_resolve_a_concrete_row() {
         let lowered = lower(concat!(
             "use std.io.IO\n",
-            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = <T, effect E> callback => callback ()\n",
             "def with_io: () ->{IO} () = () => ()\n",
             "def call_io: () ->{IO} I32 = () => evaluate { with_io (); 0 }\n",
             "let result: I32 = call_io ()\n",
@@ -1458,8 +1458,8 @@ pub(crate) mod tests {
         // is part of an emitted instance body.
         let lowered = lower(concat!(
             "type Fill T = wrap (T, x: I32 = 7)\n",
-            "def fill: <T where Copy T> Fill T -> T = Fill (value, x) => value\n",
-            "def call_fill: <T where Copy T> T -> T = value => fill (Fill (value))\n",
+            "def fill: <T where Copy T> Fill T -> T = <T where Copy T> Fill (value, x) => value\n",
+            "def call_fill: <T where Copy T> T -> T = <T where Copy T> value => fill (Fill (value))\n",
             "let filled: I32 = call_fill 1\n",
         ));
         let program = &lowered.program;
@@ -1489,7 +1489,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&root).expect("temp root");
         std::fs::write(
             root.join("tools.sta"),
-            "pub mod\npub def identity: <T where Copy T> T -> T = value => value\n",
+            "pub mod\npub def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
         )
         .expect("write module");
         let entry = root.join("main.sta");
@@ -1536,7 +1536,7 @@ pub(crate) mod tests {
         let lowered = lower(concat!(
             "use std.coroutine.*\n",
             "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
-            "def unused_task: <T where Copy T> T -> Coroutine{} T = value => coro { value }\n",
+            "def unused_task: <T where Copy T> T -> Coroutine{} T = <T where Copy T> value => coro { value }\n",
             "let created = task ()\n",
         ));
         let program = &lowered.program;
@@ -2628,7 +2628,7 @@ pub(crate) mod tests {
         let source = concat!(
             "use std.cinterop.(CString, c_string)\n",
             "def plain: I32 -> I32 = value => value\n",
-            "def generic: <T where Copy T> T -> T = value => value\n",
+            "def generic: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first = plain (1)\n",
             "let second = generic 2\n",
             "let owned = c_string \"x\"\n",

@@ -2,7 +2,7 @@
 
 ## Current state
 
-Generic bracket formatting, value-generic AST/parser support, macro freshening/splices, and expansion rendering are implemented. Compiler scoping, checking, LSP, and migration remain pending.
+Syntax, macros, isolated scopes, canonical value schemes, generic contracts, result/effect inference, specialization, stored generic closures, and LSP support are implemented. Required parameter restatements are migrated. Workspace tests and stored-value effect regressions pass. Value-only stdlib/example/fixture and reference migration is prepared for the next commit.
 
 ## Goal
 

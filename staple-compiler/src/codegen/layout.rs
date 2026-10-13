@@ -1531,14 +1531,14 @@ mod tests {
     fn layout_context_agrees_with_checker_predicates() {
         for source in [
             concat!(
-                "def identity: <T where Copy T> T -> T = value => value\n",
+                "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
                 "def apply: (I32 -> I32) -> I32 -> I32 = f => value => f value\n",
                 "let direct: I32 = identity 1\n",
                 "let indirect: I32 = apply identity 1\n",
             ),
             concat!(
                 "type Point = wrap (I32, I32)\n",
-                "def render: <T where Display T> move T -> String = move value => \"value=$value\"\n",
+                "def render: <T where Display T> move T -> String = <T where Display T> move value => \"value=$value\"\n",
                 "let text: String = render 1\n",
                 "let make: () -> ((I32, I32) -> Point) = () => Point\n",
                 "let point = make () (1, 2)\n",
@@ -1590,7 +1590,7 @@ mod tests {
                 "def take_i32: Box I32 -> I32 = value => 1\n",
                 "def take_cstring: Box CString -> I32 = value => 1\n",
                 "def take_nested: Box (Box I32) -> I32 = value => 1\n",
-                "def take_template: <T where Copy T> Box T -> I32 = value => 1\n",
+                "def take_template: <T where Copy T> Box T -> I32 = <T where Copy T> value => 1\n",
                 "let first = take_i32 (Box 1)\n",
                 "let second = take_cstring (Box (c_string \"x\"))\n",
                 "let third = take_nested (Box (Box 2))\n",

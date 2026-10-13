@@ -22,7 +22,7 @@ companion<T> Slice T {
     /// Returns the number of elements in the slice.
     pub def length: Slice T -> USize = value => __slice_length value
     /// Makes a slice from a fixed reference to a homogeneous array.
-    pub def from_ref: <N where Natural N> Ref (T ^ N) -> Slice T = value => __slice_from_ref value
+    pub def from_ref: <N where Natural N> Ref (T ^ N) -> Slice T = <N where Natural N> value => __slice_from_ref value
     /// Borrows an element by position, or `None` if out of bounds.
     pub def get_ref: (Slice T; USize) -> Option (Ref T) = (slice; position) => {
         if (position < Slice.length slice) {

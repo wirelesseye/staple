@@ -17,13 +17,13 @@ pub type RangeInclusive T = pub wrap (
 )
 
 /// Creates a half-open range from `start` to `end`.
-pub def range : <T where Copy T> T -> T -> Range T = start => end => Range (
+pub def range : <T where Copy T> T -> T -> Range T = <T where Copy T> start => end => Range (
     current: start,
     end: end,
 )
 
 /// Creates an inclusive range from `start` to `end`.
-pub def range_inclusive : <T where Copy T> T -> T -> RangeInclusive T = start => end => RangeInclusive (
+pub def range_inclusive : <T where Copy T> T -> T -> RangeInclusive T = <T where Copy T> start => end => RangeInclusive (
     current: start,
     end: end,
     finished: False,

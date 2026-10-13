@@ -47,7 +47,6 @@ mod cleanup_artifacts;
 mod coroutine_artifacts;
 mod descriptor_artifacts;
 mod dynamic_support;
-pub(crate) mod trait_dictionaries;
 mod emission;
 mod extern_artifacts;
 pub(crate) mod graph_validation;
@@ -57,6 +56,7 @@ mod instance_resolution;
 mod runtime_call_facts;
 mod runtime_requirements;
 mod structural_artifacts;
+pub(crate) mod trait_dictionaries;
 mod value_conversions;
 mod worklist;
 
@@ -83,10 +83,9 @@ pub(crate) use emission::EmissionView;
 #[allow(unused_imports)]
 // Re-exported handoff types are also used within the lowering subtree.
 pub(crate) use instance_resolution::{
-    RuntimeScope,
     InstanceResolutionRequest, InstanceResolutionTarget, RelevantParameters,
-    ResolvedInstanceRequest, SubstitutionEntry, SubstitutionEnvironment, SubstitutionSource,
-    SubstitutionValue,
+    ResolvedInstanceRequest, RuntimeScope, SubstitutionEntry, SubstitutionEnvironment,
+    SubstitutionSource, SubstitutionValue,
 };
 
 // Specialization worklist. The graph records identity, roots, dependency edges,
@@ -929,9 +928,14 @@ fn needs_concrete_function_conversion(actual: &CheckedType, expected: &CheckedTy
                 ..
             },
         ) => needs_concrete_function_conversion(actual, expected),
-        (CheckedType::Array { element: actual, .. }, CheckedType::Array { element: expected, .. }) => {
-            needs_concrete_function_conversion(actual, expected)
-        }
+        (
+            CheckedType::Array {
+                element: actual, ..
+            },
+            CheckedType::Array {
+                element: expected, ..
+            },
+        ) => needs_concrete_function_conversion(actual, expected),
         _ => false,
     }
 }
@@ -3811,7 +3815,9 @@ impl LoweredProgram {
                     scheme
                         .trait_bounds
                         .iter()
-                        .skip(usize::from(is_default_member))
+                        .skip(usize::from(
+                            is_default_member && function.generics.is_none(),
+                        ))
                         .cloned()
                         .collect()
                 })
@@ -4174,7 +4180,7 @@ impl LoweredProgram {
             symbol: Some(symbol),
             value,
             compile_time_only: compile_time_only_symbol(module, symbol),
-            generic: binding.is_generic(),
+            generic: module.has_declared_scheme(symbol),
             derived: module.is_derived_symbol(symbol),
             signal: resolved.is_signal_symbol(symbol),
             reactive,
@@ -4561,7 +4567,7 @@ impl LoweredProgram {
         binding: &staple_syntax::Binding,
         symbol: SymbolId,
     ) -> Result<Option<LoweredReactiveOperationId>, Diagnostic> {
-        if binding.is_generic() {
+        if module.has_declared_scheme(symbol) {
             return Ok(None);
         }
         let origin = Origin {
@@ -5380,11 +5386,10 @@ impl LoweredProgram {
             }
             // Subsumption into a different scheme: an alpha-renaming of the
             // same scheme reuses the closure.
-            CheckedType::Forall(_) => (!types_equivalent(
-                &CheckedType::Forall(Box::new(scheme.clone())),
-                value_type,
-            ))
-            .then(|| scheme.clone()),
+            CheckedType::Forall(_) => {
+                (!types_equivalent(&CheckedType::Forall(Box::new(scheme.clone())), value_type))
+                    .then(|| scheme.clone())
+            }
             _ => None,
         }
     }
@@ -7053,6 +7058,12 @@ impl LoweredProgram {
                 let own = substitutions_from_map(member_substitution_map(
                     member,
                     &dispatch.member_arguments,
+                    evidence.as_ref().and_then(|evidence| match evidence {
+                        TraitEvidence::ExplicitImplementation { function, .. } => {
+                            module.scheme_of_function(*function)
+                        }
+                        _ => None,
+                    }),
                 ));
                 substitutions.types.extend(own.types);
                 substitutions.effects.extend(own.effects);
@@ -7709,7 +7720,7 @@ impl LoweredProgram {
                             .trait_methods
                             .get(dispatch.method)
                             .expect("member metadata");
-                        let map = member_substitution_map(member, &dispatch.member_arguments);
+                        let map = member_substitution_map(member, &dispatch.member_arguments, None);
                         match crate::substitute_type(CheckedType::Function(function), &map) {
                             CheckedType::Function(function) => function,
                             _ => unreachable!("function substitution"),
@@ -7765,6 +7776,12 @@ impl LoweredProgram {
                 let own = substitutions_from_map(member_substitution_map(
                     member,
                     &dispatch.member_arguments,
+                    match &recipe {
+                        TraitEvidence::ExplicitImplementation { function, .. } => {
+                            module.scheme_of_function(*function)
+                        }
+                        _ => None,
+                    },
                 ));
                 substitutions.types.extend(own.types);
                 substitutions.effects.extend(own.effects);
@@ -13960,7 +13977,7 @@ impl SymbolDeclarationFacts {
                         // The emitter skips generic bindings (no storage global) and
                         // symbols that already have a declaration global
                         // (externs are predeclared before storage runs).
-                        if !binding.is_generic() && !resolved.is_external_symbol(symbol) {
+                        if !module.has_declared_scheme(symbol) && !resolved.is_external_symbol(symbol) {
                             globals.insert(symbol);
                         }
                     }
@@ -14433,9 +14450,13 @@ fn call_substitutions(
 fn member_substitution_map(
     member: &LoweredTraitMethodMetadata,
     arguments: &[CheckedType],
+    implementation: Option<&crate::CheckedScheme>,
 ) -> HashMap<TypeParameterId, CheckedType> {
     let mut map = HashMap::new();
-    for (parameter, argument) in member.own_parameters.iter().zip(arguments) {
+    let parameters = implementation.map_or(member.own_parameters.as_slice(), |scheme| {
+        scheme.parameters.as_slice()
+    });
+    for (parameter, argument) in parameters.iter().zip(arguments) {
         let _ = infer_type_parameters(&parameter.substitution_pattern(), argument, &mut map);
     }
     map
@@ -15587,11 +15608,11 @@ mod tests {
         let module = checked_program(concat!(
             "type Slots = alias (I32; I32)\n",
             "def direct: Slots -> Slots = (a; b) => (a; b)\n",
-            "def identity: <A where Copy A> A -> A = value => value\n",
+            "def identity: <A where Copy A> A -> A = <A where Copy A> value => value\n",
             "def combine: Slots -> I32 = (a; b) => a * 10 + b\n",
             "def increment: I32 -> I32 = value => value + 1\n",
-            "def apply: <A, R> (A -> R; A) -> R = (f; value) => f value\n",
-            "def compose: <A, B, C> (B -> C; A -> B) -> A -> C = (f; g) => value => f (g value)\n",
+            "def apply: <A, R> (A -> R; A) -> R = <A, R> (f; value) => f value\n",
+            "def compose: <A, B, C> (B -> C; A -> B) -> A -> C = <A, B, C> (f; g) => value => f (g value)\n",
             "type Callback = wrap (call: Slots -> I32)\n",
             "def run: () -> I32 = () => {\n",
             "    let specialized: Slots -> Slots = identity.<Slots>\n",
@@ -16245,7 +16266,7 @@ mod tests {
     #[test]
     fn function_catalog_lists_declared_functions_before_implicit_thunks() {
         let module = checked_program(concat!(
-            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = <T, effect E> callback => callback ()\n",
             "let mut count = 0\n",
             "let first = evaluate { count = count + 1; count }\n",
         ));
@@ -16302,7 +16323,7 @@ mod tests {
         let module = checked_program(concat!(
             "trait Increment T { increment: T -> T }\n",
             "impl Increment I32 { increment = value => value + 1 }\n",
-            "def increment_twice: <T where Increment T> T -> T = value => increment (increment value)\n",
+            "def increment_twice: <T where Increment T> T -> T = <T where Increment T> value => increment (increment value)\n",
         ));
         let mut program = LoweredProgram::default();
         assert!(program.snapshot(&module).is_empty());
@@ -16356,7 +16377,7 @@ mod tests {
     #[test]
     fn implicit_thunk_captures_match_transition_ownership_facts() {
         let module = checked_program(concat!(
-            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = <T, effect E> callback => callback ()\n",
             "def run: () ->{state} I32 = () => {\n",
             "  let mut count = 0\n",
             "  evaluate { count = count + 1; count }\n",
@@ -16511,7 +16532,7 @@ mod tests {
         assert!(lowered.signature.effects.state.is_some());
 
         let module = checked_program(concat!(
-            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = <T, effect E> callback => callback ()\n",
             "let answer = evaluate { 42 }\n",
         ));
         let mut program = LoweredProgram::default();
@@ -16982,8 +17003,8 @@ mod tests {
             "trait OuterA T {}\n",
             "trait OuterB T where OuterA T {}\n",
             "trait Own U {}\n",
-            "def enclosing: <T where OuterB T, Copy T> T -> (<U where Own U> move U -> U) = value => {\n",
-            "  let inner: <U where Own U> move U -> U = move item => { let ignored = value; item }\n",
+            "def enclosing: <T where OuterB T, Copy T> T -> (<U where Own U> move U -> U) = <T where OuterB T, Copy T> value => {\n",
+            "  let inner: <U where Own U> move U -> U = <U where Own U> move item => { let ignored = value; item }\n",
             "  inner\n",
             "}\n",
         ));
@@ -17059,8 +17080,8 @@ mod tests {
             "trait CallRoot T where CallProbe T {}\n",
             "impl CallProbe I32 {}\n",
             "impl CallRoot I32 {}\n",
-            "def inner: <T where Copy T> T -> I32 = value => 42\n",
-            "def outer: <T where Copy T> T -> I32 = value => inner value\n",
+            "def inner: <T where Copy T> T -> I32 = <T where Copy T> value => 42\n",
+            "def outer: <T where Copy T> T -> I32 = <T where Copy T> value => inner value\n",
             "def run: () -> I32 = () => outer 7\n",
             "let answer = run ()\n",
             "let direct_answer = outer 7\n",
@@ -17259,9 +17280,9 @@ mod tests {
     fn dynamic_entries_place_dictionaries_before_results_resources_and_values() {
         for resources in [false, true] {
             let source = if resources {
-                "use std.io.IO\ndef pick: <T where Copy T> T ->{IO} I32 = value => 42\nlet stored = pick\nlet answer = stored 7\n"
+                "use std.io.IO\ndef pick: <T where Copy T> T ->{IO} I32 = <T where Copy T> value => 42\nlet stored = pick\nlet answer = stored 7\n"
             } else {
-                "def pick: <T where Copy T> T -> I32 = value => 42\nlet stored = pick\nlet answer = stored 7\n"
+                "def pick: <T where Copy T> T -> I32 = <T where Copy T> value => 42\nlet stored = pick\nlet answer = stored 7\n"
             };
             let module = checked_program(source);
             let mut lowered = Lowerer::new().lower(&module).unwrap();
@@ -17332,7 +17353,7 @@ mod tests {
             "  type Item where RecipeBase Item\n",
             "  root: (T, Item) -> Bool\n",
             "}\n",
-            "def inspect: <T where RecipeRoot T> T -> I32 = value => 42\n",
+            "def inspect: <T where RecipeRoot T> T -> I32 = <T where RecipeRoot T> value => 42\n",
         ));
         let mut program = LoweredProgram::default();
         assert!(program.snapshot(&module).is_empty());
@@ -17406,7 +17427,7 @@ mod tests {
     fn implicit_thunks_inherit_declared_dictionary_bounds() {
         let module = checked_program(concat!(
             "def evaluate: (() -> String) -> String = callback => callback ()\n",
-            "def describe: <T where Display T> T -> String = value => evaluate \"text\"\n",
+            "def describe: <T where Display T> T -> String = <T where Display T> value => evaluate \"text\"\n",
         ));
         let mut program = LoweredProgram::default();
         assert!(program.snapshot(&module).is_empty());
@@ -17834,8 +17855,8 @@ mod tests {
     fn closure_with_production_hooks_preserves_specialization_identity() {
         let source = concat!(
             "use std.coroutine.*\n",
-            "def identity: <T where Copy T> T -> T = value => value\n",
-            "def forward: <T where Copy T> T -> T = value => identity value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
+            "def forward: <T where Copy T> T -> T = <T where Copy T> value => identity value\n",
             "let first: I32 = forward 1\n",
             "type Point = wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
@@ -18808,7 +18829,7 @@ mod tests {
             "extern \"c\" { external_identity: I32 -> I32 }\n",
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
-            "def generic_identity: <T where Copy T> T -> T = value => value\n",
+            "def generic_identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let juxtaposed: (x: I32; y: I32) -> I32 = (x; y) => x + y\n",
             "type TestBox = wrap (value: I32)\n",
             "def sum_product: (I32, I32) -> I32 = pair => {\n",
@@ -19016,7 +19037,7 @@ mod tests {
             "extern \"c\" { external_identity: I32 -> I32 }\n",
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
-            "def generic_identity: <T where Copy T> T -> T = value => value\n",
+            "def generic_identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "def declared: I32 -> I32 = value => value\n",
             "type TestBox = wrap (value: I32)\n",
             "def make_borrower: String -> () -> Slice U8 = value => () => String.bytes value\n",
@@ -19033,7 +19054,7 @@ mod tests {
             "  let self_ref = recursive\n",
             "  self_ref value\n",
             "}\n",
-            "def show_bound: <T where TestShow T> T -> Bool = value => {\n",
+            "def show_bound: <T where TestShow T> T -> Bool = <T where TestShow T> value => {\n",
             "  let method: T -> Bool = test_show\n",
             "  method value\n",
             "}\n",
@@ -19238,12 +19259,12 @@ mod tests {
             "}\n",
             "type MoveOnly = wrap String\n",
             "impl !Copy MoveOnly {}\n",
-            "def generic_identity: <T where Copy T> T -> T = value => value\n",
+            "def generic_identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "def declared: I32 -> I32 = value => value\n",
             "def mutate = (mut target: I32) => { target = 1 }\n",
             "def take: MoveOnly -> I32 = value => 1\n",
-            "def generic_recursive: <T where Copy T> T -> T = value => generic_recursive value\n",
-            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "def generic_recursive: <T where Copy T> T -> T = <T where Copy T> value => generic_recursive value\n",
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = <T, effect E> callback => callback ()\n",
             "def with_io: () ->{IO} () = () => ()\n",
             "def call_samples: () ->{state} I32 = () => {\n",
             "  let closure = (value: I32) => value\n",
@@ -19537,7 +19558,7 @@ mod tests {
 
         // A generic effect variable substitutes later; no provider is invented.
         let module = checked_program(concat!(
-            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = <T, effect E> callback => callback ()\n",
             "let answer = evaluate { 42 }\n",
         ));
         let mut program = LoweredProgram::default();
@@ -20113,7 +20134,7 @@ mod tests {
         let module = checked_program(concat!(
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
-            "def show_bound: <T where TestShow T> T -> Bool = value => test_show value\n",
+            "def show_bound: <T where TestShow T> T -> Bool = <T where TestShow T> value => test_show value\n",
             "def evidence_samples: () -> Bool = () => {\n",
             "  let arithmetic: I32 = 1 + 2\n",
             "  let pair = (1, 2)\n",
@@ -20234,7 +20255,7 @@ mod tests {
             "extern \"c\" { external_identity: I32 -> I32 }\n",
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
-            "def generic_identity: <T where Copy T> T -> T = value => value\n",
+            "def generic_identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let pair_add: (x: I32; y: I32) -> I32 = (x; y) => x + y\n",
             "def trait_sample: () -> Bool = () => test_show 1\n",
             "def transition_samples: () -> I32 = () => {\n",
@@ -21146,7 +21167,7 @@ mod tests {
     #[test]
     fn generic_repeated_product_retains_symbolic_count() {
         let module = checked_program(concat!(
-            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => (value ^ N)\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = <T, N where Copy T, Natural N> value => n => (value ^ N)\n",
             "let repeated: (I32 ^ 3) = repeat 7 3\n",
         ));
         let mut program = LoweredProgram::default();
@@ -21935,7 +21956,7 @@ mod tests {
             "impl Display Label {\n",
             "  fmt = (Label value, mut formatter) => Formatter.write formatter value\n",
             "}\n",
-            "def render: <T where Display T> move T -> String = move value => \"value=$value\"\n",
+            "def render: <T where Display T> move T -> String = <T where Display T> move value => \"value=$value\"\n",
             "let name: String = \"world\"\n",
             "let answer: I32 = 42\n",
             "let product = (answer, name)\n",
@@ -23902,10 +23923,10 @@ mod tests {
     #[test]
     fn callable_snapshot_retains_quantified_schemes_and_descriptor_order() {
         let module = checked_program(concat!(
-            "def identity: <T> move T -> T = move value => value\n",
+            "def identity: <T> move T -> T = <T> move value => value\n",
             "let stored = identity\n",
             "let concrete: I32 -> I32 = identity\n",
-            "let swap: <A, B> (move B, move A) -> (A, B) = (move b, move a) => (a, b)\n",
+            "let swap: <A, B> (move B, move A) -> (A, B) = <A, B> (move b, move a) => (a, b)\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -23985,8 +24006,8 @@ mod tests {
     fn polymorphic_construction_returns_an_executable_dynamic_closure() {
         for dictionary in [false, true] {
             let module = checked_program(concat!(
-                "def identity: <T> move T -> T = move value => value\n",
-                "def make: <A> move A -> (<T> move T -> T) = move ignored => identity\n",
+                "def identity: <T> move T -> T = <T> move value => value\n",
+                "def make: <A> move A -> (<T> move T -> T) = <A> move ignored => identity\n",
                 "def build: () -> (<T> move T -> T) = () => make 42\n",
                 "let stored = build ()\n",
             ));
@@ -24086,7 +24107,7 @@ mod tests {
     #[test]
     fn polymorphic_uses_preserve_their_original_schemes() {
         let module = checked_program(concat!(
-            "def identity: <T> move T -> T = move value => value\n",
+            "def identity: <T> move T -> T = <T> move value => value\n",
             "let stored = identity\n",
             "let implicit = stored 42\n",
             "let written = stored.<I32> 42\n",
@@ -24141,12 +24162,12 @@ mod tests {
     #[test]
     fn polymorphic_calls_recover_scheme_substitutions() {
         let module = checked_program(concat!(
-            "def identity: <T> move T -> T = move value => value\n",
+            "def identity: <T> move T -> T = <T> move value => value\n",
             "let stored = identity\n",
             "let integer = stored 42\n",
             "let string = stored \"hello\"\n",
             "let explicit = stored.<I32> 42\n",
-            "def apply: <A> move A -> A = move value => { let local = identity; local value }\n",
+            "def apply: <A> move A -> A = <A> move value => { let local = identity; local value }\n",
             "let generic = apply 42\n",
         ));
         for dictionary in [false, true] {
@@ -24202,7 +24223,7 @@ mod tests {
     #[test]
     fn polymorphic_calls_preserve_explicit_phantom_arguments() {
         let module = checked_program(concat!(
-            "def ignore: <T where Sized T> () -> I32 = () => 42\n",
+            "def ignore: <T where Sized T> () -> I32 = <T where Sized T> () => 42\n",
             "let stored = ignore\n",
             "let result = stored.<String> ()\n",
         ));
@@ -24227,11 +24248,11 @@ mod tests {
     #[test]
     fn polymorphic_calls_plan_phantom_and_compound_descriptors() {
         let module = checked_program(concat!(
-            "def ignore: <T where Sized T> () -> I32 = () => 42\n",
+            "def ignore: <T where Sized T> () -> I32 = <T where Sized T> () => 42\n",
             "let stored = ignore\n",
             "let result = stored.<String> ()\n",
             "def run: () -> I32 = () => stored.<(I32, I32)> ()\n",
-            "def apply: <A> move A -> I32 = move value => stored.<(A, A)> ()\n",
+            "def apply: <A> move A -> I32 = <A> move value => stored.<(A, A)> ()\n",
             "let nested = apply 42\n",
         ));
         for dictionary in [false, true] {
@@ -24285,9 +24306,9 @@ mod tests {
         for dictionary in [false, true] {
             let module = checked_program(concat!(
                 "type Holder = wrap (<T> move T -> T)\n",
-                "def identity: <T> move T -> T = move value => value\n",
+                "def identity: <T> move T -> T = <T> move value => value\n",
                 "def forward: (<T> move T -> T) -> (<U> move U -> U) = value => value\n",
-                "def store: <A where Copy A> A -> (<T> move T -> T) = ignored => {\n",
+                "def store: <A where Copy A> A -> (<T> move T -> T) = <A where Copy A> ignored => {\n",
                 "  let mut value: <T> move T -> T = identity\n",
                 "  value = identity\n",
                 "  let product = (callable: value, extra: 42)\n",
@@ -24331,7 +24352,7 @@ mod tests {
         for dictionary in [false, true] {
             let module = checked_program(concat!(
                 "type Box T = wrap T\n",
-                "def make: <A> move A -> (<T> move T -> Box T) = move ignored => Box\n",
+                "def make: <A> move A -> (<T> move T -> Box T) = <A> move ignored => Box\n",
                 "def build: () -> (<T> move T -> Box T) = () => make 42\n",
                 "let stored = build ()\n",
             ));
@@ -24434,9 +24455,9 @@ mod tests {
             [(false, false), (false, true), (true, false), (true, true)]
         {
             let make_source = if shared_cell {
-                "def make: <A where Copy A> A -> (<T> move T ->{state} (I32, T)) = ignored => { let mut count: I32 = 41; move value => { count = count + 1; (count, value) } }\n"
+                "def make: <A where Copy A> A -> (<T> move T ->{state} (I32, T)) = <A where Copy A> ignored => { let mut count: I32 = 41; <T> move value: T => { count = count + 1; (count, value) } }\n"
             } else {
-                "def make: <A where Copy A> A -> (<T> move T -> (A, T)) = captured => move value => (captured, value)\n"
+                "def make: <A where Copy A> A -> (<T> move T -> (A, T)) = <A where Copy A> captured => { <T> move value: T => (captured, value) }\n"
             };
             let state = if shared_cell { "{state}" } else { "" };
             let module = checked_program(&format!(
@@ -24538,7 +24559,7 @@ mod tests {
         let module = checked_program(concat!(
             "trait EnvProbe T {}\n",
             "impl EnvProbe I32 {}\n",
-            "def make: <A where Copy A> A -> (<T> move T -> (A, T)) = captured => move value => (captured, value)\n",
+            "def make: <A where Copy A> A -> (<T> move T -> (A, T)) = <A where Copy A> captured => { <T> move value: T => (captured, value) }\n",
             "def build: () -> (<T> move T -> (I32, T)) = () => make 42\n",
             "let stored = build ()\n",
         ));
@@ -24753,8 +24774,8 @@ mod tests {
             "impl Measure I32 { measure = value => value + 1 }\n",
             "trait Weigh T where Measure T { weigh: T -> I32 }\n",
             "impl Weigh I32 { weigh = value => value * 2 }\n",
-            "def measured: <T where Measure T> T -> I32 = value => Measure.measure value\n",
-            "def weighed: <T where Weigh T> T -> I32 = value => Weigh.weigh value + Measure.measure value\n",
+            "def measured: <T where Measure T> T -> I32 = <T where Measure T> value => Measure.measure value\n",
+            "def weighed: <T where Weigh T> T -> I32 = <T where Weigh T> value => Weigh.weigh value + Measure.measure value\n",
             "def run: () -> I32 = () => measured 20 + weighed 5\n",
             "let answer = run ()\n",
         ));
@@ -24823,9 +24844,9 @@ mod tests {
             "type MeasuredBox T = wrap T\n",
             "impl Measure I32 { measure = value => value + 1 }\n",
             "impl<T where Measure T> Measure (MeasuredBox T) { measure = MeasuredBox value => Measure.measure value * 2 }\n",
-            "def measured: <T where Measure T> T -> I32 = value => Measure.measure value\n",
-            "def boxed: <T where Measure T> move T -> I32 = move value => measured (MeasuredBox value)\n",
-            "def twice: <T where Measure T> move T -> I32 = move value => measured (MeasuredBox (MeasuredBox value))\n",
+            "def measured: <T where Measure T> T -> I32 = <T where Measure T> value => Measure.measure value\n",
+            "def boxed: <T where Measure T> move T -> I32 = <T where Measure T> move value => measured (MeasuredBox value)\n",
+            "def twice: <T where Measure T> move T -> I32 = <T where Measure T> move value => measured (MeasuredBox (MeasuredBox value))\n",
             "def run: () -> I32 = () => boxed 20 + twice 1\n",
             "let answer = run ()\n",
         ));
@@ -24889,8 +24910,8 @@ mod tests {
     fn structural_debug_dictionaries_apply_the_shape_slot_to_component_dictionaries() {
         let module = checked_program(concat!(
             "use std.fmt.(Debug, Formatter)\n",
-            "def pair: <T where Debug T> move T -> String = move value => Formatter.debug (value, 1)\n",
-            "def either: <T where Debug T> move T -> String = move value => {\n",
+            "def pair: <T where Debug T> move T -> String = <T where Debug T> move value => Formatter.debug (value, 1)\n",
+            "def either: <T where Debug T> move T -> String = <T where Debug T> move value => {\n",
             "    let sum: T | String = value\n",
             "    Formatter.debug sum\n",
             "}\n",
@@ -25042,12 +25063,14 @@ mod tests {
         const SHOW: &str = concat!(
             "use std.io.(IO, println)\n",
             "use std.fmt.Display\n",
-            "def show: <T where Display T> move T ->{IO} () = move value => println \"${value}\"\n",
+            "def show: <T where Display T> move T ->{IO} () = <T where Display T> move value => println \"${value}\"\n",
         );
         // A bounded `def` that is only called concretely is monomorphized: no
         // dynamic code, dictionary, or entry.
         assert_eq!(
-            dictionary_census(&format!("{SHOW}def run: () ->{{IO}} () = () => show 42\nrun ()\n")),
+            dictionary_census(&format!(
+                "{SHOW}def run: () ->{{IO}} () = () => show 42\nrun ()\n"
+            )),
             (0, 0, 0)
         );
         // A polymorphic value built only in an unreachable function yields
@@ -25056,7 +25079,7 @@ mod tests {
             dictionary_census(&format!(
                 concat!(
                     "{}",
-                    "def unused: <A where Display A> move A ->{{IO}} () = move a => {{\n",
+                    "def unused: <A where Display A> move A ->{{IO}} () = <A where Display A> move a => {{\n",
                     "    let f: <U where Display U> move U ->{{IO}} () = show\n",
                     "    f a\n",
                     "}}\n",
@@ -25080,7 +25103,7 @@ mod tests {
     fn polymorphic_lambdas_enforce_declared_effect_rows() {
         for row in ["", "{state.read}"] {
             let source = format!(
-                "def make: () -> (<T> move T ->{row} (I32, T)) = () => {{ let mut count: I32 = 41; move value => {{ count = count + 1; (count, value) }} }}\nlet stored = make ()\n"
+                "def make: () -> (<T> move T ->{row} (I32, T)) = () => {{ let mut count: I32 = 41; <T> move value: T => {{ count = count + 1; (count, value) }} }}\nlet stored = make ()\n"
             );
             let diagnostics = checked_program_diagnostics(&source).unwrap_err();
             assert!(
@@ -25126,7 +25149,7 @@ mod tests {
 
     #[test]
     fn unused_polymorphism_builds_no_dynamic_code() {
-        const IDENTITY: &str = "def identity: <T> move T -> T = move value => value\n";
+        const IDENTITY: &str = "def identity: <T> move T -> T = <T> move value => value\n";
         // A generic `def` that is only called concretely is monomorphized.
         assert_eq!(
             polymorphic_census(&format!("{IDENTITY}let answer = identity 42\n")),
@@ -25138,7 +25161,7 @@ mod tests {
             polymorphic_census(&format!(
                 concat!(
                     "{}",
-                    "def unused: <A> move A -> A = move a => {{\n",
+                    "def unused: <A> move A -> A = <A> move a => {{\n",
                     "    let f: <U> move U -> U = identity\n",
                     "    let c: move I32 -> I32 = f\n",
                     "    f a\n",
@@ -25166,7 +25189,7 @@ mod tests {
         assert_eq!(adapters, 0);
         // A reordering is not an alpha-renaming and does build an adapter.
         let (_, _, adapters) = polymorphic_census(concat!(
-            "def first: <A, B> (move A, move B) -> A = (move a, move b) => a\n",
+            "def first: <A, B> (move A, move B) -> A = <A, B> (move a, move b) => a\n",
             "let swapped: <Y, X> (move X, move Y) -> X = first\n",
             "let answer: I32 = swapped (1, \"x\")\n",
         ));
@@ -25328,7 +25351,7 @@ mod tests {
     fn static_dictionary_slot_calls_a_concrete_method_from_the_dictionary_tail() {
         use crate::specialization::{ReabstractionDirection, StaticDictionarySlot};
         let module = checked_program(concat!(
-            "def apply: <T where Copy T> (T -> T, T) -> T = (f, x) => f x\n",
+            "def apply: <T where Copy T> (T -> T, T) -> T = <T where Copy T> (f, x) => f x\n",
             "def increment: I32 -> I32 = x => x + 1\n",
             "let stored = apply\n",
             "let answer = stored (increment, 40)\n",
@@ -25411,8 +25434,8 @@ mod tests {
     #[test]
     fn polymorphic_support_checks_reject_at_the_construction_site() {
         let module = checked_program(concat!(
-            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => (value ^ N)\n",
-            "def outer: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => repeat value n\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = <T, N where Copy T, Natural N> value => n => (value ^ N)\n",
+            "def outer: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = <T, N where Copy T, Natural N> value => n => repeat value n\n",
             "let stored = outer\n",
         ));
         let mut program = LoweredProgram::default();
@@ -25431,8 +25454,8 @@ mod tests {
         assert_eq!(diagnostics[0].span, origin.span);
         let direct = checked_program(concat!(
             "use std.clone.Clone\n",
-            "def inner: <T where Clone T> move T -> T = move value => value\n",
-            "def outer: <T where Clone T> move T -> T = move value => inner value\n",
+            "def inner: <T where Clone T> move T -> T = <T where Clone T> move value => value\n",
+            "def outer: <T where Clone T> move T -> T = <T where Clone T> move value => inner value\n",
             "let result = outer 42\n",
             "let stored = outer\n",
         ));
@@ -25786,7 +25809,7 @@ mod tests {
             "const answer: I32 = 42\n",
             "let signal count: I32 = 0\n",
             "let doubled: I32 = count + count\n",
-            "def generic: <T> move T -> T = move value => value\n",
+            "def generic: <T> move T -> T = <T> move value => value\n",
             "let mut mutable: I32 = 1\n",
             "mutable = 2\n",
             "count = 1\n",
@@ -26087,8 +26110,8 @@ mod tests {
     fn generic_trait_dictionary_slot_keeps_own_hidden_arguments_in_order() {
         let module = checked_program(concat!(
             "trait Visit T { visit: <A where ToString A> (T, A) -> String }\n",
-            "impl Visit I32 { visit = (_, value) => ToString.to_string value }\n",
-            "def relay: <T, A where Visit T, ToString A> (T, A) -> String = (item, value) => Visit.visit (item, value)\n",
+            "impl Visit I32 { visit = <A where ToString A> (_, value) => ToString.to_string value }\n",
+            "def relay: <T, A where Visit T, ToString A> (T, A) -> String = <T, A where Visit T, ToString A> (item, value) => Visit.visit (item, value)\n",
             "let stored = relay\nlet result = stored (1, 42)\n",
         ));
         let lowered = Lowerer::new().lower(&module).unwrap();
@@ -26133,8 +26156,8 @@ mod tests {
                 concat!(
                     "trait Visit T { visit: <A> (T, move A) -> A }\n",
                     "type Box T = wrap T\n",
-                    "impl <T where ToString T> Visit (Box T) { visit = (_, move value) => value }\n",
-                    "def relay: <T, A where ToString T> (Box T, move A) -> A = (item, move value) => Visit.visit (item, value)\n",
+                    "impl <T where ToString T> Visit (Box T) { visit = <A> (_, move value) => value }\n",
+                    "def relay: <T, A where ToString T> (Box T, move A) -> A = <T, A where ToString T> (item, move value) => Visit.visit (item, value)\n",
                     "let stored = relay\nlet result = stored (Box 1, 42)\n",
                 ),
                 true,

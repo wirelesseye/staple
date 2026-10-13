@@ -258,6 +258,11 @@ impl DeclarationCollector<'_> {
 
     fn binding(&mut self, binding: &Binding) {
         self.declaration(&binding.syntax, &binding.name);
+        if let Some(g) = binding.annotation_generics() {
+            for parameter in &g.parameters {
+                self.type_parameter(parameter);
+            }
+        }
         for parameter in &binding.all_type_parameters() {
             self.type_parameter(parameter);
         }
@@ -269,6 +274,11 @@ impl DeclarationCollector<'_> {
     fn expression(&mut self, expression: &Expression) {
         match expression {
             Expression::Function(value) => {
+                if let Some(g) = &value.generics {
+                    for parameter in &g.parameters {
+                        self.type_parameter(parameter);
+                    }
+                }
                 self.pattern(&value.pattern);
                 self.expression(&value.body);
             }
@@ -810,7 +820,7 @@ impl Collector<'_> {
         for bound in &binding.all_trait_bounds() {
             self.trait_bound(bound);
         }
-        if let Some(annotation) = binding.annotation_body() {
+        if let Some(annotation) = &binding.annotation {
             self.ty(annotation);
         }
         if let Some(value) = &binding.value {
@@ -848,6 +858,19 @@ impl Collector<'_> {
         }
         match expression {
             Expression::Function(value) => {
+                if let Some(g) = &value.generics {
+                    for parameter in &g.parameters {
+                        self.type_parameter(parameter);
+                    }
+                }
+                if let Some(g) = &value.generics {
+                    for bound in &g.trait_bounds {
+                        self.trait_bound(bound);
+                    }
+                    for bound in &g.subtype_bounds {
+                        self.ty(&bound.supertype);
+                    }
+                }
                 self.pattern(&value.pattern);
                 if let Some(effects) = &value.effect_lower_bound {
                     for resource in &effects.resources {
@@ -1245,7 +1268,7 @@ mod tests {
             "type Wrapper T = wrap (value: T)\n",
             "trait Identity T { identity: T -> T }\n",
             "impl Identity I32 { identity = value => value }\n",
-            "def wrap: <T> move T -> Wrapper T = move value => Wrapper (value: value)\n",
+            "def wrap: <T> move T -> Wrapper T = <T> move value => Wrapper (value: value)\n",
             "def apply = () => identity 1\n",
             "let (first, second) = (1, 2)\n",
             "first\n",
@@ -2078,7 +2101,7 @@ mod tests {
     #[test]
     fn forall_companion_parameters_keep_lsp_signatures_and_targets() {
         let source = r#"pub type Box T = pub wrap T
-companion<T> Box T { pub def choose: <U> (move Box T, move U) -> U = (move Box x, move y) => y }
+companion<T> Box T { pub def choose: <U> (move Box T, move U) -> U = <U> (move Box x, move y) => y }
 let result: String = Box.choose.<I32, String> (Box 1, "yes")
 "#;
         let path = std::env::temp_dir().join("staple-forall-companion-lsp.sta");
@@ -2114,5 +2137,52 @@ let result: String = Box.choose.<I32, String> (Box 1, "yes")
                 "{entry:?}"
             );
         }
+    }
+    #[test]
+    fn value_generics_have_definition_hover_and_completion_in_their_own_scope() {
+        let source = "def identity: <T where Copy T> T -> T = <U where Copy U> x: U => U :: x\n";
+        let path = std::env::temp_dir().join("staple-value-generics-lsp.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let typed = TypeChecker::new()
+            .check(NameResolver::new().resolve_program(program).unwrap())
+            .unwrap();
+        let module = parse(source).unwrap();
+        let definitions = entries(&module, typed.resolved(), Some(&typed));
+        let target = source.find("<U").unwrap() + 1;
+        let reference = source.find("x: U").unwrap() + 3;
+        let entry = definitions
+            .iter()
+            .find(|entry| entry.range.start == reference)
+            .unwrap();
+        assert!(
+            entry
+                .targets
+                .iter()
+                .any(|target_entry| target_entry.selection_range.start == target)
+        );
+        let hovers = super::super::hover::entries(&module, &typed);
+        assert!(
+            hovers.iter().any(|entry| entry.range.start == reference
+                && entry.signature == "<type parameter> U where Copy U"),
+            "{hovers:?}"
+        );
+        assert!(
+            hovers
+                .iter()
+                .any(|entry| entry.signature == "def identity: <U where Copy U> U -> U"),
+            "{hovers:?}"
+        );
+        let index = super::super::completion::index(&module, &typed);
+        let items = index.items(source.rfind('x').unwrap());
+        assert!(items.iter().any(|item| item.label == "U"));
+        assert!(!items.iter().any(|item| item.label == "T"));
     }
 }

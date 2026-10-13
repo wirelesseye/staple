@@ -689,13 +689,28 @@ impl Collector<'_> {
     }
 
     fn binding(&mut self, binding: &Binding, module_index: usize) {
+        if let (Some(generics), Some(annotation)) =
+            (binding.annotation_generics(), &binding.annotation)
+        {
+            let mut candidates = Vec::new();
+            for parameter in &generics.parameters {
+                self.type_parameter_candidates(parameter, &mut candidates);
+            }
+            self.index.modules[module_index].scopes.push(Scope {
+                range: syntax_range(annotation.syntax()),
+                candidates,
+            });
+        }
         if binding.is_generic() {
             let mut candidates = Vec::new();
             for parameter in &binding.all_type_parameters() {
                 self.type_parameter_candidates(parameter, &mut candidates);
             }
             self.index.modules[module_index].scopes.push(Scope {
-                range: syntax_range(&binding.syntax),
+                range: binding.value.as_ref().map_or_else(
+                    || syntax_range(&binding.syntax),
+                    |value| syntax_range(value.syntax()),
+                ),
                 candidates,
             });
         }
@@ -755,6 +770,11 @@ impl Collector<'_> {
         match expression {
             Expression::Function(value) => {
                 let mut candidates = Vec::new();
+                if let Some(generics) = &value.generics {
+                    for parameter in &generics.parameters {
+                        self.type_parameter_candidates(parameter, &mut candidates);
+                    }
+                }
                 self.pattern_candidates(
                     &value.pattern,
                     syntax_range(value.body.syntax()).start,
@@ -984,7 +1004,16 @@ impl Collector<'_> {
                     ..CompletionItem::default()
                 },
             }),
-            TypeParameterPattern::Effect(_) => {}
+            TypeParameterPattern::Effect(value) => candidates.push(Candidate {
+                available_from: syntax_range(&value.syntax).end,
+                namespace: Namespace::Type,
+                item: CompletionItem {
+                    label: value.name.clone(),
+                    kind: Some(CompletionItemKind::TYPE_PARAMETER),
+                    detail: Some(format!("effect parameter {}", value.name)),
+                    ..CompletionItem::default()
+                },
+            }),
             TypeParameterPattern::Product(value) => {
                 for element in &value.elements {
                     self.type_parameter_candidates(element, candidates);
@@ -2194,7 +2223,7 @@ mod tests {
             "impl First I32 { choose = value => value }\n",
             "impl Second I32 { choose = value => value }\n",
             "impl Wrong String { unavailable = _ => 0 }\n",
-            "def bounded: <T where First T> T -> I32 = value => value |> choose\n",
+            "def bounded: <T where First T> T -> I32 = <T where First T> value => value |> choose\n",
             "let value = 3\n",
             "(value)\n",
         );

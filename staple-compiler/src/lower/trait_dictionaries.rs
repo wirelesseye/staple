@@ -965,7 +965,9 @@ pub(super) fn materialize_recipe(
     origin: &crate::Origin,
 ) -> Result<DictionaryRecipe, staple_syntax::Diagnostic> {
     match selection {
-        DictionarySelection::Environment(recipe) => Ok(DictionaryRecipe::Environment(recipe.clone())),
+        DictionarySelection::Environment(recipe) => {
+            Ok(DictionaryRecipe::Environment(recipe.clone()))
+        }
         DictionarySelection::Static(key) => Ok(DictionaryRecipe::Static(key.clone())),
         DictionarySelection::Structural(structural) => {
             let components = structural
@@ -1015,7 +1017,9 @@ pub(super) fn materialize_recipe(
                 let id = instance(member).ok_or_else(missing)?;
                 let (_, _, method) = evidence_obligation(&member.evidence);
                 let own_scope = method
-                    .map(|method| method_runtime_scope(program, method))
+                    .map(|method| {
+                        implementation_method_runtime_scope(program, method, member.function)
+                    })
                     .unwrap_or_default();
                 let descriptors = program
                     .instance_runtime_order(id)
@@ -1141,7 +1145,12 @@ pub(super) fn callee_runtime_obligations(
             .map(|argument| crate::substitute_type(argument, &enclosing_map))
             .collect(),
     })
-    .filter(|obligation| obligation.arguments.iter().any(crate::contains_type_parameter))
+    .filter(|obligation| {
+        obligation
+            .arguments
+            .iter()
+            .any(crate::contains_type_parameter)
+    })
     // A scheme value's own dictionaries come from its caller.
     .filter(|obligation| {
         let mut referenced = std::collections::BTreeSet::new();
@@ -1253,7 +1262,7 @@ fn member_instance(
     };
     let (_, _, method) = evidence_obligation(&member.evidence);
     let scope = method
-        .map(|method| method_runtime_scope(program, method))
+        .map(|method| implementation_method_runtime_scope(program, method, member.function))
         .unwrap_or_default();
     let resolved = program
         .resolve_instance_request_in_scope(&request, &scope)
@@ -1344,6 +1353,24 @@ pub(super) fn member_value_entry(
         own_descriptors: method_runtime_scope(program, method).types.len(),
     });
     (key, plan)
+}
+
+/// Implementation values bind their own ids, independently of the trait member.
+pub(super) fn implementation_method_runtime_scope(
+    program: &super::LoweredProgram,
+    method: crate::TraitMethodId,
+    function: crate::FunctionId,
+) -> super::instance_resolution::RuntimeScope {
+    if method_runtime_scope(program, method).is_empty() {
+        return Default::default();
+    }
+    let Some(template) = program.functions.get(function) else {
+        return Default::default();
+    };
+    super::instance_resolution::RuntimeScope {
+        types: template.scheme_type_parameters.iter().copied().collect(),
+        effects: template.scheme_effect_parameters.iter().copied().collect(),
+    }
 }
 
 pub(super) fn method_runtime_scope(
@@ -2253,10 +2280,12 @@ pub(super) fn scan_instance(
                 member_entry_request(program, &member, environment, &origin)
             }
             BuilderUse::Static(obligation) => static_request(program, &obligation, &origin),
-            BuilderUse::Structural(shape, trait_id) => Ok(structural_slot_request(
-                shape, trait_id, &origin,
-            )),
-            BuilderUse::Descriptor(ty) => super::descriptor_artifacts::descriptor_request(&ty, &origin),
+            BuilderUse::Structural(shape, trait_id) => {
+                Ok(structural_slot_request(shape, trait_id, &origin))
+            }
+            BuilderUse::Descriptor(ty) => {
+                super::descriptor_artifacts::descriptor_request(&ty, &origin)
+            }
         }
         .map_err(|error| vec![error])?;
         let super::artifact_closure::ClosureRequest::Artifact { use_site, .. } = &mut request
@@ -2387,7 +2416,9 @@ pub(super) fn scan_initializer(
             BuilderUse::Structural(shape, trait_id) => {
                 Ok(structural_slot_request(shape, trait_id, &origin))
             }
-            BuilderUse::Descriptor(ty) => super::descriptor_artifacts::descriptor_request(&ty, &origin),
+            BuilderUse::Descriptor(ty) => {
+                super::descriptor_artifacts::descriptor_request(&ty, &origin)
+            }
         }
         .map_err(|error| vec![error])?;
         let super::artifact_closure::ClosureRequest::Artifact { use_site, .. } = &mut request
@@ -2685,7 +2716,7 @@ pub(super) fn expand(
             evidence: Some(evidence.clone()),
             target: InstanceResolutionTarget::Root,
         };
-        let own_scope = method_runtime_scope(program, *method);
+        let own_scope = implementation_method_runtime_scope(program, *method, *function);
         let resolved = program
             .resolve_instance_request_in_scope(&request, &own_scope)
             .map_err(|error| vec![error])?;
@@ -2757,7 +2788,12 @@ pub(super) fn expand(
         // concrete implementation accepts a flattened slotted product.
         let dynamic_type = match &program.trait_methods.get(*method).expect("catalogued method").value_type {
             CheckedType::Function(function) => function.clone(),
-            _ => return Err(vec![Diagnostic::new(origin.span.clone(), "dictionary method has no dynamic function signature")]),
+            _ => {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    "dictionary method has no dynamic function signature",
+                )]);
+            }
         };
         let key = ArtifactRequestKey::ReabstractionThunk(ReabstractionThunkKey {
             dictionary_slot: dictionary_slot.clone(),

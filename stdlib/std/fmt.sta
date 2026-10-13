@@ -176,14 +176,14 @@ companion Formatter {
     pub def finish: move Formatter -> String = move formatter => formatter_finish formatter
 
     /// Formats a value using its Display implementation.
-    pub def display: <T where Display T> T -> String = value => {
+    pub def display: <T where Display T> T -> String = <T where Display T> value => {
         let mut formatter = Formatter.new ()
         Display.fmt (value, formatter)
         Formatter.finish formatter
     }
 
     /// Formats a value using its Debug implementation.
-    pub def debug: <T where Debug T> T -> String = value => {
+    pub def debug: <T where Debug T> T -> String = <T where Debug T> value => {
         let mut formatter = Formatter.new ()
         Debug.fmt (value, formatter)
         Formatter.finish formatter

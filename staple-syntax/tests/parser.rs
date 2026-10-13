@@ -3681,6 +3681,7 @@ fn formats_slotted_products_and_call_spreads_idempotently() {
         "let p = (\n // first slot\n 1;\n // second slot\n 2;\n)\n",
     ] {
         let formatted = staple_syntax::format_source(source).unwrap();
+        assert!(!formatted.contains("< "));
         assert_eq!(staple_syntax::format_source(&formatted).unwrap(), formatted);
         assert_eq!(
             staple_syntax::lex(source)
@@ -3782,6 +3783,7 @@ fn function_value_compile_time_parameters() {
         let parsed = staple_syntax::parse(source).unwrap();
         assert_eq!(parsed.syntax.text(), source);
         let formatted = staple_syntax::format_source(source).unwrap();
+        assert!(!formatted.contains("< "));
         assert_eq!(staple_syntax::format_source(&formatted).unwrap(), formatted);
     }
     let error = staple_syntax::parse("def bad = x => <T> y: T => y").unwrap_err();

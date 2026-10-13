@@ -35,6 +35,7 @@ pub fn entries_at_path(path: &Path, module: &Module, typed: &TypedModule) -> Vec
         declarations: HashMap::new(),
         path,
         macro_result: None,
+        parameter_bounds: HashMap::new(),
     };
     for source_module in typed.resolved().program().modules() {
         collector.collect_module_declarations(&source_module.syntax);
@@ -102,6 +103,7 @@ struct Collector<'a> {
     /// syntax constructor used in that body (`Sequence (…)`) show what it was
     /// instantiated to, since macro bodies carry no checked types.
     macro_result: Option<Type>,
+    parameter_bounds: HashMap<TypeParameterId, String>,
 }
 
 #[derive(Clone)]
@@ -258,6 +260,53 @@ impl Collector<'_> {
     fn collect_expression_declarations(&mut self, expression: &Expression) {
         match expression {
             Expression::Function(function) => {
+                if let Some(generics) = &function.generics {
+                    for parameter in &generics.parameters {
+                        if let Some(id) = self
+                            .typed
+                            .resolved()
+                            .type_parameter_for(parameter.syntax().id)
+                        {
+                            let names = parameter.names();
+                            let mut bounds = generics
+                                .trait_bounds
+                                .iter()
+                                .filter(|bound| {
+                                    bound.arguments.iter().any(|ty| {
+                                        ty.to_string()
+                                            .split(|c: char| !c.is_alphanumeric() && c != '_')
+                                            .any(|name| names.contains(&name))
+                                    })
+                                })
+                                .map(|bound| {
+                                    format!(
+                                        "{} {}",
+                                        bound.trait_name.name,
+                                        bound
+                                            .arguments
+                                            .iter()
+                                            .map(ToString::to_string)
+                                            .collect::<Vec<_>>()
+                                            .join(" ")
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            bounds.extend(
+                                generics
+                                    .subtype_bounds
+                                    .iter()
+                                    .filter(|bound| names.contains(&bound.parameter.name.as_str()))
+                                    .map(|bound| {
+                                        format!("{} <: {}", bound.parameter.name, bound.supertype)
+                                    }),
+                            );
+                            if !bounds.is_empty() {
+                                self.parameter_bounds
+                                    .insert(id, format!(" where {}", bounds.join(", ")));
+                            }
+                        }
+                    }
+                }
                 self.collect_pattern_declarations(&function.pattern, false);
                 self.collect_expression_declarations(&function.body);
             }
@@ -1312,7 +1361,7 @@ impl Collector<'_> {
         for bound in &binding.all_trait_bounds() {
             self.trait_bound(bound);
         }
-        if let Some(annotation) = binding.annotation_body() {
+        if let Some(annotation) = &binding.annotation {
             self.ty(annotation);
         }
         if let Some(value) = &binding.value {
@@ -1481,6 +1530,17 @@ impl Collector<'_> {
         }
         match expression {
             Expression::Function(function) => {
+                if let Some(g) = &function.generics {
+                    for parameter in &g.parameters {
+                        self.type_parameter(parameter);
+                    }
+                    for bound in &g.trait_bounds {
+                        self.trait_bound(bound);
+                    }
+                    for bound in &g.subtype_bounds {
+                        self.ty(&bound.supertype);
+                    }
+                }
                 self.pattern(&function.pattern);
                 if let Some(effects) = &function.effect_lower_bound {
                     for resource in &effects.resources {
@@ -1687,7 +1747,15 @@ impl Collector<'_> {
             TypeParameterPattern::Binding(binding) => self.named(
                 &binding.syntax,
                 &binding.name,
-                format!("<type parameter> {}", binding.name),
+                format!(
+                    "<type parameter> {}{}",
+                    binding.name,
+                    self.typed
+                        .resolved()
+                        .type_parameter_for(binding.syntax.id)
+                        .and_then(|id| self.parameter_bounds.get(&id))
+                        .map_or("", String::as_str)
+                ),
             ),
             TypeParameterPattern::Effect(binding) => self.named(
                 &binding.syntax,
@@ -1794,7 +1862,15 @@ impl Collector<'_> {
                     self.named(
                         &named.syntax,
                         &named.name,
-                        format!("<type parameter> {}", named.name),
+                        format!(
+                            "<type parameter> {}{}",
+                            named.name,
+                            self.typed
+                                .resolved()
+                                .type_parameter_for(named.syntax.id)
+                                .and_then(|id| self.parameter_bounds.get(&id))
+                                .map_or("", String::as_str)
+                        ),
                     );
                 }
             }
@@ -2791,7 +2867,7 @@ mod tests {
 
     #[test]
     fn generic_def_and_type_signatures_use_the_new_syntax() {
-        let source = "pub type Box T = pub wrap (value: T)\ndef unbox: <T> move Box T -> T = move Box value => value\n";
+        let source = "pub type Box T = pub wrap (value: T)\ndef unbox: <T> move Box T -> T = <T> move Box value => value\n";
         let path = std::env::temp_dir().join("staple-hover-generic-signatures.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(
@@ -2823,7 +2899,7 @@ mod tests {
     #[test]
     fn first_class_schemes_hover_on_storage_parameters_and_fields() {
         let source = concat!(
-            "def identity: <T> move T -> T = move value => value\n",
+            "def identity: <T> move T -> T = <T> move value => value\n",
             "let id = identity\n",
             "let annotated: <U> move U -> U = identity\n",
             "let mut selected: <V> move V -> V = identity\n",
@@ -2865,7 +2941,7 @@ mod tests {
     fn generic_function_use_site_leads_with_the_declared_type() {
         let source = concat!(
             "pub type Box T = pub wrap (value: T)\n",
-            "def unbox: <T> move Box T -> T = move Box value => value\n",
+            "def unbox: <T> move Box T -> T = <T> move Box value => value\n",
             "unbox (Box (value: 1))\n",
         );
         let path = std::env::temp_dir().join("staple-hover-generic-use-site.sta");
@@ -4005,7 +4081,7 @@ mod tests {
     #[test]
     fn forall_companion_parameters_keep_lsp_signatures_and_targets() {
         let source = r#"pub type Box T = pub wrap T
-companion<T> Box T { pub def choose: <U> (move Box T, move U) -> U = (move Box x, move y) => y }
+companion<T> Box T { pub def choose: <U> (move Box T, move U) -> U = <U> (move Box x, move y) => y }
 let result: String = Box.choose.<I32, String> (Box 1, "yes")
 "#;
         let path = std::env::temp_dir().join("staple-forall-companion-lsp.sta");

@@ -386,8 +386,37 @@ mod tests {
     }
 
     #[test]
+    fn function_value_generics_show_the_inferred_signature() {
+        let source = "def identity = <T> move value: T => T :: value\nlet answer = identity 42\n";
+        let path = std::env::temp_dir().join("staple-value-generic-signature.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let typed = TypeChecker::new()
+            .check(NameResolver::new().resolve_program(program).unwrap())
+            .unwrap();
+        let surface = staple_syntax::parse(source).unwrap();
+        let surface = super::super::rebased_surface(typed.resolved(), &path, &surface, source)
+            .unwrap_or(surface);
+        let entries = super::super::hover::entries_at_path(&path, &surface, &typed);
+        let result = help(source, &entries, source.rfind("42").unwrap() + 1).unwrap();
+        assert!(
+            result.signatures[0]
+                .label
+                .contains("identity: <T> move T -> T"),
+            "{result:?}"
+        );
+    }
+
+    #[test]
     fn generic_trait_member_signature_help_keeps_explicit_argument_order() {
-        let source = "trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => value }\nlet answer = Visit.visit.<I32, String> (1, \"value\")\n";
+        let source = "trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = <A> (_, move value) => value }\nlet answer = Visit.visit.<I32, String> (1, \"value\")\n";
         let path = std::env::temp_dir().join("staple-trait-member-signature.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(

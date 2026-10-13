@@ -10,12 +10,12 @@ def error_code: ConversionError -> I32 = error => match error {
     ConversionError.InvalidNumber => 4,
 }
 
-def expect_error: <T where Copy T> (Ok T | ConversionError, I32) -> () = (result, expected) => match result {
+def expect_error: <T where Copy T> (Ok T | ConversionError, I32) -> () = <T where Copy T> (result, expected) => match result {
     Ok _ => panic "expected a conversion error",
     error: ConversionError => if (error_code error == expected) { () } else { panic "wrong conversion error" },
 }
 
-def expect_success: <T where Copy T, Eq T> (Ok T | ConversionError, T) -> () = (result, expected) => match result {
+def expect_success: <T where Copy T, Eq T> (Ok T | ConversionError, T) -> () = <T where Copy T, Eq T> (result, expected) => match result {
     Ok value => if (value == expected) { () } else { panic "wrong converted value" },
     _ => panic "unexpected conversion error",
 }

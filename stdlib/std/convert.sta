@@ -36,7 +36,7 @@ pub typegroup ConversionError {
     InvalidNumber,
 }
 
-pub(package) def checked_conversion: <T> move (U8, T) -> Ok T | ConversionError = move (status, value) => when {
+pub(package) def checked_conversion: <T> move (U8, T) -> Ok T | ConversionError = <T> move (status, value) => when {
     status == 0 => Ok value,
     status == 1 => ConversionError.OutOfRange,
     status == 2 => ConversionError.PrecisionLoss,

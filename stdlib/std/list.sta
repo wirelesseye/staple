@@ -16,7 +16,7 @@ impl<T where Clone T> Clone (List T) {
 
 // Doubles capacity (minimum 4 on first growth) and moves every element
 // across in one Buffer.transfer call.
-def grow: <T> mut List T -> () = mut list => {
+def grow: <T> mut List T -> () = <T> mut list => {
     let List(mut source) = list
     let old_capacity = Buffer.capacity source
     let new_capacity: USize = if (old_capacity == 0) { 4 } else { old_capacity * 2 }

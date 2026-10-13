@@ -1207,7 +1207,7 @@ mod tests {
     #[test]
     fn generic_constructor_values_produce_one_adapter_per_instantiation() {
         let (_, lowered) = lower(concat!(
-            "def ref_maker: <T where Copy T> () -> (T -> Ref T) = () => Ref\n",
+            "def ref_maker: <T where Copy T> () -> (T -> Ref T) = <T where Copy T> () => Ref\n",
             "let maker_i32: I32 -> Ref I32 = ref_maker ()\n",
             "let maker_u8: U8 -> Ref U8 = ref_maker ()\n",
         ));
@@ -1908,7 +1908,7 @@ mod tests {
             "impl Drop Resource { cleanup = Resource value => () }\n",
             "type Held T = wrap (T)\n",
             "impl<T where Debug T> Debug (Held T) { fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }\n",
-            "def index_pair: <T where Copy T> ((T, T), USize) -> T = (pair, position) => pair[position]\n",
+            "def index_pair: <T where Copy T> ((T, T), USize) -> T = <T where Copy T> (pair, position) => pair[position]\n",
             "def show_nested: ((I32, I32), (I32, I32)) -> String = nested => \"${nested:?}\"\n",
             "def show_mixed: (Held I32, I32) -> String = pair => \"${pair:?}\"\n",
             "def count_held: (Held I32, I32) -> I32 = pair => {\n",
@@ -1944,7 +1944,7 @@ mod tests {
     #[test]
     fn structural_kinds_expand_for_each_generic_instantiation() {
         let (_, lowered) = lower(concat!(
-            "def use_pair: <T where Copy T> (T, T) -> T = pair => {\n",
+            "def use_pair: <T where Copy T> (T, T) -> T = <T where Copy T> pair => {\n",
             "  let mut copy = pair\n",
             "  copy[0] = pair[1]\n",
             "  let mut last = copy[0]\n",

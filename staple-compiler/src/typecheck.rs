@@ -1048,9 +1048,19 @@ fn whole_argument_hint(call: &staple_syntax::CallExpression) -> String {
 }
 
 fn spread_overrun_message(filled: usize, remaining: usize) -> String {
-    let slots = |count: usize| if count == 1 { "1 slot".to_owned() } else { format!("{count} slots") };
+    let slots = |count: usize| {
+        if count == 1 {
+            "1 slot".to_owned()
+        } else {
+            format!("{count} slots")
+        }
+    };
     let verb = if remaining == 1 { "remains" } else { "remain" };
-    format!("spread fills {} but only {} {verb}", slots(filled), slots(remaining))
+    format!(
+        "spread fills {} but only {} {verb}",
+        slots(filled),
+        slots(remaining)
+    )
 }
 
 fn format_mutable_checked_parameter(
@@ -1234,10 +1244,13 @@ impl CheckedType {
             Self::CPointer { pointee } => pointee.is_fully_known(),
             Self::Ref(value) | Self::Slice(value) | Self::Buffer(value) => value.is_fully_known(),
             Self::Array { element, count } => element.is_fully_known() && count.is_fully_known(),
-            Self::Product(product) => product.spreads.is_empty() && product
-                .elements
-                .iter()
-                .all(|element| element.value_type.is_fully_known()),
+            Self::Product(product) => {
+                product.spreads.is_empty()
+                    && product
+                        .elements
+                        .iter()
+                        .all(|element| element.value_type.is_fully_known())
+            }
             Self::Sum(sum) => sum.alternatives.iter().all(CheckedType::is_fully_known),
             Self::Function(function) => {
                 function.parameter.is_fully_known()
@@ -1756,13 +1769,12 @@ impl TypedModule {
         self.function_symbols.get(&symbol).copied()
     }
 
-    /// The scheme a function implements: its binding's written `<…>`
-    /// annotation (a generic `def` or a scheme-annotated `let`), or the
-    /// expected scheme a lambda was checked against.
+    /// The callable scheme declared by a trait member.
     pub fn scheme_of_trait_member(&self, method: TraitMethodId) -> Option<&CheckedScheme> {
         self.trait_member_schemes.get(&method)
     }
 
+    /// The function value's own scheme, including any contextual contract.
     pub fn scheme_of_function(&self, function: FunctionId) -> Option<&CheckedScheme> {
         self.function_schemes.get(&function)
     }
@@ -2639,6 +2651,16 @@ enum PipeTarget {
     Trait(TraitMethodId),
 }
 
+#[derive(Clone)]
+struct DeferredSchemeContract {
+    initial: CheckedScheme,
+    target: CheckedType,
+    span: Span,
+    generic_parameters: Vec<HashSet<TypeParameterId>>,
+    trait_bounds: Vec<Vec<CheckedTraitBound>>,
+    subtype_bounds: Vec<Vec<CheckedSubtypeBound>>,
+}
+
 #[derive(Default, Clone)]
 pub struct TypeChecker {
     pipe_targets: HashMap<SyntaxId, PipeTarget>,
@@ -2660,7 +2682,10 @@ pub struct TypeChecker {
     function_effect_lower_bounds: HashMap<FunctionId, CheckedEffectSet>,
     conflicting_lower_bound_variables: HashSet<FunctionId>,
     function_schemes: HashMap<FunctionId, CheckedScheme>,
+    /// Value-only schemes infer effects; annotation and contextual schemes constrain them.
+    inferred_value_schemes: HashSet<FunctionId>,
     expression_schemes: HashMap<SyntaxId, CheckedScheme>,
+    deferred_scheme_contracts: HashMap<SyntaxId, DeferredSchemeContract>,
     explicit_value_substitutions: HashMap<SyntaxId, HashMap<TypeParameterId, CheckedType>>,
     type_representations: HashMap<TypeId, CheckedType>,
     type_parameter_templates: HashMap<TypeId, Vec<CheckedType>>,
@@ -2921,6 +2946,7 @@ impl TypeChecker {
             self.ensure_function_checked(&module, function_id);
         }
         self.infer_effects(&module);
+        self.validate_inferred_scheme_contracts();
         self.validate_product_default_effects(&module);
         self.infer_derived_bindings(&module);
 
@@ -4461,7 +4487,9 @@ impl TypeChecker {
 
     fn symbol_value_type(&self, symbol: SymbolId) -> Option<&CheckedType> {
         self.symbol_types.get(&symbol).map(|ty| {
-            if self.declared_scheme_symbols.contains(&symbol) {
+            if self.declared_scheme_symbols.contains(&symbol)
+                && !self.polymorphic_storage_symbols.contains(&symbol)
+            {
                 ty.scheme_body()
             } else {
                 ty
@@ -5083,18 +5111,214 @@ impl TypeChecker {
             })
     }
 
+    fn value_scheme(
+        &mut self,
+        module: &ResolvedModule,
+        generics: &staple_syntax::GenericParameters,
+        body: CheckedType,
+    ) -> CheckedScheme {
+        let parameters = generics
+            .parameters
+            .iter()
+            .map(|p| {
+                CheckedSchemeParameter::from_pattern(self.checked_type_parameter_pattern(module, p))
+            })
+            .collect();
+        let trait_bounds = generics
+            .trait_bounds
+            .iter()
+            .filter_map(|b| self.resolve_trait_bound(module, b))
+            .collect::<Vec<_>>();
+        let subtype_bounds = generics
+            .subtype_bounds
+            .iter()
+            .filter_map(|b| self.resolve_subtype_bound(module, b))
+            .collect();
+        CheckedScheme {
+            parameters,
+            trait_bound_names: self.trait_bound_names(&trait_bounds),
+            trait_bounds,
+            subtype_bounds,
+            body: Box::new(body),
+        }
+    }
+
+    fn match_value_scheme(
+        &mut self,
+        module: &ResolvedModule,
+        generics: &staple_syntax::GenericParameters,
+        expected: &CheckedScheme,
+    ) -> CheckedScheme {
+        let mut actual = self.value_scheme(module, generics, CheckedType::Error);
+        let Some(mut renaming) = alpha_renaming(&expected.parameters, &actual.parameters) else {
+            self.diagnostics.push(Diagnostic::new(generics.syntax.span.clone(), "function value compile-time parameters differ in count, kind, or sizedness from the function type"));
+            return actual;
+        };
+        // Re-intern annotation projections at the value's parameter ids before
+        // linking its bounds. Hidden associated slots otherwise remain inferred.
+        let referenced = type_parameter_ids(&expected.body);
+        let projections = self
+            .projection_parameters
+            .iter()
+            .filter(|projection| referenced.contains(&projection.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for projection in projections {
+            let arguments = canonical_projection_arguments(
+                &projection
+                    .arguments
+                    .iter()
+                    .map(|argument| substitute_type(argument.clone(), &renaming))
+                    .collect::<Vec<_>>(),
+            );
+            let id = if let Some(existing) = self.projection_parameters.iter().find(|existing| {
+                existing.trait_id == projection.trait_id
+                    && existing.associated == projection.associated
+                    && types_equivalent_list(&existing.arguments, &arguments)
+            }) {
+                existing.id
+            } else {
+                let id =
+                    TypeParameterId(PROJECTION_PARAMETER_BASE + self.projection_parameters.len());
+                self.projection_parameters.push(ProjectionParameter {
+                    id,
+                    arguments,
+                    span: generics.syntax.span.clone(),
+                    linked: false,
+                    ..projection.clone()
+                });
+                id
+            };
+            renaming.insert(
+                projection.id,
+                CheckedType::Parameter {
+                    id,
+                    name: projection.name,
+                    sized: true,
+                },
+            );
+        }
+        actual = self.value_scheme(module, generics, CheckedType::Error);
+        // Associated-type projections are determined by the renamed bounds.
+        for bound in &expected.trait_bounds {
+            if let Some(other) = actual.trait_bounds.iter().find(|other| {
+                bound.trait_id == other.trait_id && bound.arguments.len() == other.arguments.len()
+                    && bound.arguments.iter().zip(&other.arguments).all(|(a, b)| {
+                        matches!(a, CheckedType::Parameter { id, .. } if id.0 >= PROJECTION_PARAMETER_BASE)
+                            || types_equivalent(&substitute_type(a.clone(), &renaming), b)
+                    })
+            }) {
+                for (a, b) in bound.arguments.iter().zip(&other.arguments) {
+                    if let CheckedType::Parameter { id, .. } = a && id.0 >= PROJECTION_PARAMETER_BASE {
+                        renaming.insert(*id, b.clone());
+                    }
+                }
+            }
+        }
+        actual.body = Box::new(substitute_type(*expected.body.clone(), &renaming));
+        let mut contract = expected.clone();
+        contract.parameters = actual.parameters.clone();
+        contract.body = actual.body.clone();
+        for bound in &mut contract.trait_bounds {
+            for argument in &mut bound.arguments {
+                *argument = substitute_type(argument.clone(), &renaming);
+            }
+        }
+        for bound in &mut contract.subtype_bounds {
+            if let Some(CheckedType::Parameter { id, .. }) = renaming.get(&bound.parameter) {
+                bound.parameter = *id;
+            }
+            bound.supertype = substitute_type(bound.supertype.clone(), &renaming);
+        }
+        if !schemes_alpha_equivalent(&contract, &actual) {
+            let mut message =
+                "function value compile-time parameter bounds differ from the function type"
+                    .to_owned();
+            if let Some((index, _)) = contract
+                .trait_bounds
+                .iter()
+                .enumerate()
+                .find(|(_, b)| !actual.trait_bounds.contains(b))
+            {
+                let required = &expected.trait_bounds[index];
+                message.push_str(&format!("; the function type requires `{} {}`, but the function value has no matching bound", expected.trait_bound_names[index], required.arguments.iter().map(ToString::to_string).collect::<Vec<_>>().join(" ")));
+            }
+            self.diagnostics
+                .push(Diagnostic::new(generics.syntax.span.clone(), message));
+        }
+        actual
+    }
+
+    fn function_annotation_type(
+        &mut self,
+        module: &ResolvedModule,
+        function: &ResolvedFunction,
+        annotation: &Type,
+    ) -> CheckedType {
+        self.function_schemes
+            .get(&function.id)
+            .map(|s| *s.body.clone())
+            .unwrap_or_else(|| {
+                self.resolve_source_type(module, annotation)
+                    .scheme_body()
+                    .clone()
+            })
+    }
+
     fn seed_function_types(&mut self, module: &ResolvedModule) {
         for function in module.functions() {
             if let Some(source) = &function.effect_lower_bound {
                 let effects = self.resolve_effect_set(module, source);
-                self.function_effect_lower_bounds.insert(function.id, effects);
+                self.function_effect_lower_bounds
+                    .insert(function.id, effects);
             }
         }
         for function in module.functions() {
-            if let Some(annotation) = &function.binding_annotation
-                && let CheckedType::Forall(scheme) = self.resolve_source_type(module, annotation)
-            {
-                self.function_schemes.entry(function.id).or_insert(*scheme);
+            let expected_scheme = if let Some(annotation) = &function.binding_annotation {
+                match annotation {
+                    Type::Forall(ty) => {
+                        let body = self.resolve_source_type(module, &ty.body);
+                        Some(self.value_scheme(module, &ty.generics, body))
+                    }
+                    _ => match self.resolve_source_type(module, annotation) {
+                        CheckedType::Forall(scheme) => Some(*scheme),
+                        _ => None,
+                    },
+                }
+            } else {
+                self.function_schemes.get(&function.id).cloned()
+            };
+            let has_contract = expected_scheme.is_some();
+            if let Some(expected) = expected_scheme {
+                let diagnostics_start = self.diagnostics.len();
+                if let Some(generics) = &function.generics {
+                    let scheme = self.match_value_scheme(module, generics, &expected);
+                    if let CheckedType::Function(ty) = scheme.body.as_ref() {
+                        if self.impl_function_types.contains_key(&function.id) {
+                            self.impl_function_types.insert(function.id, ty.clone());
+                        }
+                    }
+                    self.function_declared_bounds
+                        .insert(function.id, scheme.trait_bounds.clone());
+                    self.function_bounds.insert(
+                        function.id,
+                        self.expand_trait_bounds(scheme.trait_bounds.clone()),
+                    );
+                    self.function_subtype_bounds
+                        .insert(function.id, scheme.subtype_bounds.clone());
+                    self.function_schemes.insert(function.id, scheme);
+                } else {
+                    self.diagnostics.push(Diagnostic::new(function.pattern.syntax().span.clone(), "the function type declares compile-time parameters, but the function value declares none; write `<T> move x: T => …`"));
+                    self.function_schemes.insert(function.id, expected);
+                }
+                if let Some(context) = self.generic_member_conformance_context(module, function.id)
+                {
+                    for diagnostic in &mut self.diagnostics[diagnostics_start..] {
+                        diagnostic.message = format!("{context}: {}", diagnostic.message);
+                    }
+                }
+            } else if function.generics.is_some() && function.binding_annotation.is_some() {
+                self.diagnostics.push(Diagnostic::new(function.generics.as_ref().unwrap().syntax.span.clone(), "the function type has no compile-time parameters, but the function value declares parameters"));
             }
             let parameter_symbols = function_parameter_symbols(module, &function.pattern);
             let parameter_mutations = pattern_parameter_mutations(&function.pattern);
@@ -5153,7 +5377,7 @@ impl TypeChecker {
                 }
                 self.function_types.insert(function.id, expected);
                 if let Some(trait_id) = self.default_function_traits.get(&function.id).copied() {
-                    let declared = self
+                    let mut declared = self
                         .function_schemes
                         .get(&function.id)
                         .map(|scheme| scheme.trait_bounds.clone())
@@ -5163,6 +5387,13 @@ impl TypeChecker {
                                 arguments: self.trait_parameter_arguments[&trait_id].clone(),
                             }]
                         });
+                    let owning_trait = CheckedTraitBound {
+                        trait_id,
+                        arguments: self.trait_parameter_arguments[&trait_id].clone(),
+                    };
+                    if !declared.contains(&owning_trait) {
+                        declared.insert(0, owning_trait);
+                    }
                     self.function_declared_bounds
                         .insert(function.id, declared.clone());
                     let bounds = self.expand_trait_bounds(declared);
@@ -5188,6 +5419,13 @@ impl TypeChecker {
                             .remove(&function.id)
                             .unwrap_or_default(),
                     );
+                    let mut unique = Vec::new();
+                    for bound in bounds {
+                        if !unique.contains(&bound) {
+                            unique.push(bound);
+                        }
+                    }
+                    let bounds = unique;
                     self.function_declared_bounds
                         .insert(function.id, bounds.clone());
                     let bounds = self.expand_trait_bounds(bounds);
@@ -5200,10 +5438,12 @@ impl TypeChecker {
                     }
                 }
                 if !subtype_bounds.is_empty() {
-                    self.function_subtype_bounds
-                        .entry(function.id)
-                        .or_default()
-                        .extend(subtype_bounds);
+                    let stored = self.function_subtype_bounds.entry(function.id).or_default();
+                    for bound in subtype_bounds {
+                        if !stored.contains(&bound) {
+                            stored.push(bound);
+                        }
+                    }
                 }
                 continue;
             }
@@ -5212,10 +5452,8 @@ impl TypeChecker {
             self.permit_partial_type_constructor = false;
             if !parameter.is_fully_known()
                 && let Some(annotation) = &function.binding_annotation
-                && let CheckedType::Function(annotation) = self
-                    .resolve_source_type(module, annotation)
-                    .scheme_body()
-                    .clone()
+                && let CheckedType::Function(annotation) =
+                    self.function_annotation_type(module, function, annotation)
             {
                 parameter = *annotation.parameter;
             }
@@ -5229,10 +5467,8 @@ impl TypeChecker {
                 })
                 .or_else(|| {
                     function.binding_annotation.as_ref().and_then(|annotation| {
-                        let CheckedType::Function(function_type) = self
-                            .resolve_source_type(module, annotation)
-                            .scheme_body()
-                            .clone()
+                        let CheckedType::Function(function_type) =
+                            self.function_annotation_type(module, function, annotation)
                         else {
                             return None;
                         };
@@ -5260,11 +5496,7 @@ impl TypeChecker {
                 result = CheckedType::Error;
             }
             let annotated_function = function.binding_annotation.as_ref().and_then(|annotation| {
-                match self
-                    .resolve_source_type(module, annotation)
-                    .scheme_body()
-                    .clone()
-                {
+                match self.function_annotation_type(module, function, annotation) {
                     CheckedType::Function(function) => Some(function),
                     _ => None,
                 }
@@ -5327,10 +5559,7 @@ impl TypeChecker {
             };
 
             if let Some(annotation) = &function.binding_annotation {
-                let binding_type = self
-                    .resolve_source_type(module, annotation)
-                    .scheme_body()
-                    .clone();
+                let binding_type = self.function_annotation_type(module, function, annotation);
                 let actual = CheckedType::Function(function_type.clone());
                 let merged =
                     self.require_compatible(actual, binding_type, annotation.syntax().span.clone());
@@ -5339,6 +5568,17 @@ impl TypeChecker {
                 }
             }
 
+            if let Some(generics) = &function.generics {
+                let scheme = self.value_scheme(
+                    module,
+                    generics,
+                    CheckedType::Function(function_type.clone()),
+                );
+                self.function_schemes.insert(function.id, scheme);
+                if !has_contract {
+                    self.inferred_value_schemes.insert(function.id);
+                }
+            }
             if let Some(binding_syntax) = function.binding_syntax
                 && let Some(symbol) = module.symbol_for(binding_syntax)
             {
@@ -5386,6 +5626,36 @@ impl TypeChecker {
             }
         }
         self.report_unlinked_projections();
+        // Curried arrows inherit the canonical contract of the outer value.
+        // Annotation ids never enter the nested functions' signatures.
+        for function in module.functions() {
+            let mut body = &function.body;
+            let mut result = self
+                .function_types
+                .get(&function.id)
+                .map(|ty| *ty.result.clone());
+            while let (Expression::Function(inner), Some(CheckedType::Function(expected))) =
+                (body, result)
+            {
+                let Some(id) = module.function_for(inner.syntax.id) else {
+                    break;
+                };
+                if inner.generics.is_some() {
+                    break;
+                }
+                let mutations = pattern_parameter_mutations(&inner.pattern);
+                let moves = pattern_parameter_moves(&inner.pattern);
+                if mutations != expected.mutations || moves != expected.moves {
+                    self.diagnostics.push(Diagnostic::new(
+                        inner.pattern.syntax().span.clone(),
+                        "parameter `mut`/`move` markers differ from the function annotation",
+                    ));
+                }
+                result = Some(*expected.result.clone());
+                self.function_types.insert(id, expected);
+                body = &inner.body;
+            }
+        }
     }
 
     fn inherit_and_validate_generic_function_bounds(&mut self, module: &ResolvedModule) {
@@ -5462,6 +5732,19 @@ impl TypeChecker {
     }
 
     fn ensure_function_checked(&mut self, module: &ResolvedModule, function_id: FunctionId) {
+        if self.checking_functions.contains(&function_id)
+            && let Some(f) = module.functions().iter().find(|f| f.id == function_id)
+            && f.generics.is_some()
+            && self
+                .function_types
+                .get(&function_id)
+                .is_some_and(|ty| contains_inferred_type(&ty.result))
+        {
+            self.diagnostics.push(Diagnostic::new(
+                f.pattern.syntax().span.clone(),
+                "a recursive generic function value must ascribe its result type (`R :: …`)",
+            ));
+        }
         if self.checked_functions.contains(&function_id)
             || !self.checking_functions.insert(function_id)
         {
@@ -5571,16 +5854,39 @@ impl TypeChecker {
         }
         self.did_return = outer_did_return;
         self.return_reachable = outer_return_reachable;
+        // Complete known effects before the function's first use, including
+        // dependencies of inferred value schemes. The global fixed point
+        // still handles recursive/transitive updates.
+        let effects = if function.binding_annotation.is_none()
+            && (!self.function_schemes.contains_key(&function.id)
+                || self.inferred_value_schemes.contains(&function.id))
+            && !self.impl_function_types.contains_key(&function.id)
+        {
+            let outer_effect_function = self.current_effect_function.replace(Some(function.id));
+            let outer_accesses = self.current_state_accesses.replace(StateAccesses::default());
+            let target_parameters = self.parameter_positions(function.id);
+            let body = self.expression_effects_now(module, &function.body, &target_parameters);
+            self.current_effect_function.set(outer_effect_function);
+            self.current_state_accesses.replace(outer_accesses);
+            let mut effects = CheckedEffectSet::canonical(body.resources).with_state(body.state);
+            effects.variable = body.variable;
+            self.merge_function_effect_lower_bound(&function, effects)
+        } else {
+            function_type.effects
+        };
         let checked_function_type = CheckedFunctionType {
             default: function_type.default,
             parameter: function_type.parameter,
             mutations: function_type.mutations,
             moves: function_type.moves,
-            effects: function_type.effects,
+            effects,
             result: Box::new(result_type),
         };
         self.function_types
             .insert(function.id, checked_function_type.clone());
+        if let Some(scheme) = self.function_schemes.get_mut(&function.id) {
+            scheme.body = Box::new(CheckedType::Function(checked_function_type.clone()));
+        }
         if let Some(binding_syntax) = function.binding_syntax
             && let Some(symbol) = module.symbol_for(binding_syntax)
         {
@@ -6174,6 +6480,9 @@ impl TypeChecker {
                 })
             })
             .chain(self.function_schemes.iter().filter_map(|(id, scheme)| {
+                if self.inferred_value_schemes.contains(id) {
+                    return None;
+                }
                 let CheckedType::Function(function) = scheme.body.as_ref() else {
                     return None;
                 };
@@ -6225,6 +6534,11 @@ impl TypeChecker {
                     .get_mut(&function)
                     .expect("function type")
                     .effects = resources.clone();
+                if let Some(scheme) = self.function_schemes.get_mut(&function)
+                    && let CheckedType::Function(ty) = scheme.body.as_mut()
+                {
+                    ty.effects = resources.clone();
+                }
                 if let Some(syntax) = binding
                     && let Some(symbol) = module.symbol_for(syntax)
                     && let Some(CheckedType::Function(function_type)) = self
@@ -6472,10 +6786,24 @@ impl TypeChecker {
         expression: &Expression,
     ) -> Option<CheckedType> {
         match expression {
-            Expression::Function(function) => module
-                .function_for(function.syntax.id)
-                .and_then(|id| self.function_types.get(&id).cloned())
-                .map(CheckedType::Function),
+            Expression::Function(function) => {
+                module.function_for(function.syntax.id).and_then(|id| {
+                    if matches!(
+                        self.expression_types.get(&expression.syntax().id),
+                        Some(CheckedType::Forall(_))
+                    ) {
+                        self.function_schemes
+                            .get(&id)
+                            .cloned()
+                            .map(|scheme| CheckedType::Forall(Box::new(scheme)))
+                    } else {
+                        self.function_types
+                            .get(&id)
+                            .cloned()
+                            .map(CheckedType::Function)
+                    }
+                })
+            }
             Expression::TypeApplication(_) | Expression::TypeAscription(_) => {
                 self.expression_types.get(&expression.syntax().id).cloned()
             }
@@ -6492,10 +6820,16 @@ impl TypeChecker {
                 })
                 .or_else(|| self.expression_types.get(&expression.syntax().id).cloned()),
             Expression::Name(_) | Expression::Access(_) => {
+                let existing = self.expression_types.get(&expression.syntax().id).cloned();
                 let refreshed = module
                     .symbol_for(expression.syntax().id)
-                    .and_then(|symbol| self.symbol_value_type(symbol).cloned());
-                let existing = self.expression_types.get(&expression.syntax().id).cloned();
+                    .and_then(|symbol| {
+                        if matches!(existing, Some(CheckedType::Forall(_))) {
+                            self.symbol_types.get(&symbol).cloned()
+                        } else {
+                            self.symbol_value_type(symbol).cloned()
+                        }
+                    });
                 match (refreshed, existing) {
                     (
                         Some(CheckedType::Function(template)),
@@ -6599,11 +6933,14 @@ impl TypeChecker {
                     if let Some(symbol) = module.symbol_for(binding.syntax.id)
                         && !self.function_symbols.contains_key(&symbol)
                         && let Some(value_type) = self.refreshed_expression_type(module, value)
-                        && matches!(&value_type, CheckedType::Function(_))
-                        && matches!(
-                            self.symbol_value_type(symbol),
-                            Some(CheckedType::Function(_))
-                        )
+                        && (matches!(
+                            (self.symbol_value_type(symbol), &value_type),
+                            (Some(CheckedType::Function(_)), CheckedType::Function(_))
+                        ) || (binding.annotation.is_none()
+                            && matches!(
+                                (self.symbol_value_type(symbol), &value_type),
+                                (Some(CheckedType::Forall(_)), CheckedType::Forall(_))
+                            )))
                         && !optional_types_equivalent(
                             self.symbol_value_type(symbol),
                             Some(&value_type),
@@ -6715,11 +7052,26 @@ impl TypeChecker {
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
         };
-        if matches!(
-            self.expression_types.get(&expression.syntax().id),
-            Some(CheckedType::Function(_))
-        ) && let Some(value_type) = self.refreshed_expression_type(module, expression)
-            && matches!(&value_type, CheckedType::Function(_))
+        // Retained schemes are source templates even when this occurrence
+        // has already been instantiated at an ordinary function type.
+        if matches!(expression, Expression::Name(_) | Expression::Access(_))
+            && let Some(symbol) = module.symbol_for(expression.syntax().id)
+            && let Some(CheckedType::Forall(scheme)) = self.symbol_types.get(&symbol)
+            && let Some(retained) = self.expression_schemes.get_mut(&expression.syntax().id)
+            && retained.parameters == scheme.parameters
+            && !schemes_alpha_equivalent(retained, scheme)
+        {
+            *retained = scheme.as_ref().clone();
+            changed = true;
+        }
+        if let Some(value_type) = self.refreshed_expression_type(module, expression)
+            && matches!(
+                (
+                    self.expression_types.get(&expression.syntax().id),
+                    &value_type
+                ),
+                (Some(CheckedType::Function(_)), CheckedType::Function(_))
+                | (Some(CheckedType::Forall(_)), CheckedType::Forall(_)))
             && !optional_types_equivalent(
                 self.expression_types.get(&expression.syntax().id),
                 Some(&value_type),
@@ -7932,16 +8284,33 @@ impl TypeChecker {
                 return;
             }
         }
-        let declared_type = binding
-            .annotation_body()
-            .map(|annotation| self.resolve_source_type(module, annotation));
-        let generic_annotation_is_function =
-            matches!(declared_type, Some(CheckedType::Function(_)));
+        let declared_type = binding.annotation.as_ref().map(|annotation| {
+            if let Some(Expression::Function(f)) = &binding.value
+                && let Some(id) = module.function_for(f.syntax.id)
+                && let Some(scheme) = self.function_schemes.get(&id)
+            {
+                return CheckedType::Forall(Box::new(scheme.clone()));
+            }
+            self.resolve_source_type(module, binding.annotation_body().unwrap_or(annotation))
+        });
+        let generic_annotation_is_function = matches!(
+            declared_type.as_ref().map(CheckedType::scheme_body),
+            Some(CheckedType::Function(_))
+        ) || matches!(&binding.value, Some(Expression::Function(f)) if f.generics.is_some());
         let value_type = binding
             .value
             .as_ref()
             .map(|value| self.check_expression_expected(module, value, declared_type.as_ref()));
 
+        // A declared generic def is specialized at its uses; its declaration
+        // does not construct a stored polymorphic closure.
+        if binding.kind == staple_syntax::BindingKind::Def
+            && let Some(Expression::Function(function)) = &binding.value
+            && let Some(CheckedType::Forall(scheme)) = &value_type
+        {
+            self.expression_types
+                .insert(function.syntax.id, scheme.body.as_ref().clone());
+        }
         let checked_type = if self.did_return {
             declared_type.clone().unwrap_or(CheckedType::Error)
         } else {
@@ -8024,10 +8393,19 @@ impl TypeChecker {
             ));
         }
         if let Some(symbol) = symbol {
-            if !binding.is_generic() && matches!(checked_type, CheckedType::Forall(_)) {
+            if (!binding.is_generic() || binding.kind == staple_syntax::BindingKind::Let)
+                && matches!(checked_type, CheckedType::Forall(_))
+            {
                 self.polymorphic_storage_symbols.insert(symbol);
             }
-            self.replace_symbol_value_type(symbol, checked_type);
+            self.replace_symbol_value_type(
+                symbol,
+                if binding.is_generic() && binding.kind != staple_syntax::BindingKind::Let {
+                    checked_type.scheme_body().clone()
+                } else {
+                    checked_type
+                },
+            );
             if self.top_level_bindings.contains_key(&symbol) {
                 self.checking_bindings.remove(&symbol);
                 self.checked_bindings.insert(symbol);
@@ -8423,6 +8801,68 @@ impl TypeChecker {
         {
             return self.finish_expression_type(expression, actual, expected);
         }
+        if let (Some(CheckedType::Forall(expected)), Expression::Function(function)) =
+            (expected, expression)
+            && let Some(id) = module.function_for(function.syntax.id)
+            && self
+                .function_schemes
+                .get(&id)
+                .is_some_and(|own| own.parameters != expected.parameters)
+        {
+            self.inferred_value_schemes.remove(&id);
+        }
+        let owned_expected = if expected.is_none() {
+            if let Expression::Function(f) = expression {
+                module
+                    .function_for(f.syntax.id)
+                    .and_then(|id| self.function_schemes.get(&id).cloned())
+                    .map(|s| CheckedType::Forall(Box::new(s)))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let (Some(CheckedType::Forall(scheme)), Expression::Function(f)) =
+            (&owned_expected, expression)
+            && let CheckedType::Function(ty) = scheme.body.as_ref()
+            && !ty.parameter.is_fully_known()
+        {
+            let name = match &f.pattern {
+                Pattern::Binding(b) => format!(" `{}`", b.name),
+                _ => String::new(),
+            };
+            self.diagnostics.push(Diagnostic::new(
+                f.pattern.syntax().span.clone(),
+                format!("parameter{name} needs a type annotation in a generic function value"),
+            ));
+        }
+        let expected = expected.or(owned_expected.as_ref());
+        let renamed_expected = if let (Some(CheckedType::Forall(scheme)), Expression::Function(f)) =
+            (expected, expression)
+        {
+            if let Some(generics) = &f.generics {
+                let actual = self.value_scheme(module, generics, CheckedType::Error);
+                if actual.parameters != scheme.parameters {
+                    Some(CheckedType::Forall(Box::new(
+                        self.match_value_scheme(module, generics, scheme),
+                    )))
+                } else {
+                    None
+                }
+            } else {
+                if module
+                    .function_for(f.syntax.id)
+                    .is_none_or(|id| !self.function_schemes.contains_key(&id))
+                {
+                    self.diagnostics.push(Diagnostic::new(f.pattern.syntax().span.clone(), "the function type declares compile-time parameters, but the function value declares none"));
+                }
+                None
+            }
+        } else {
+            None
+        };
+        let expected = renamed_expected.as_ref().or(expected);
         if let Some(CheckedType::Forall(scheme)) = expected {
             self.active_generic_parameters.push(scheme.bound_ids());
             self.active_function_bounds
@@ -8458,9 +8898,24 @@ impl TypeChecker {
                 }
                 // The body reads the scheme while it is checked; a lambda that
                 // fails to check does not implement it.
-                let actual = self.check_expression_expected(module, expression, Some(&scheme.body));
+                let infer_effects = module
+                    .function_for(expression.syntax().id)
+                    .is_some_and(|id| self.inferred_value_schemes.contains(&id));
+                let body_expected = (!infer_effects).then_some(scheme.body.as_ref());
+                let actual = self.check_expression_expected_inner(module, expression, body_expected);
                 if actual != CheckedType::Error {
-                    expected.unwrap().clone()
+                    if let Some(id) = module.function_for(expression.syntax().id) {
+                        if let Some(ty) = self.function_types.get(&id) {
+                            let mut completed = scheme.as_ref().clone();
+                            completed.body = Box::new(CheckedType::Function(ty.clone()));
+                            self.function_schemes.insert(id, completed.clone());
+                            CheckedType::Forall(Box::new(completed))
+                        } else {
+                            expected.unwrap().clone()
+                        }
+                    } else {
+                        expected.unwrap().clone()
+                    }
                 } else {
                     if let Some(id) = module.function_for(expression.syntax().id) {
                         self.function_schemes.remove(&id);
@@ -9263,10 +9718,11 @@ impl TypeChecker {
                                 match &self.trait_method_types[&methods[0]] {
                                     CheckedType::Function(template) => {
                                         match template.parameter.as_ref() {
-                                            CheckedType::Product(parameters) => parameters
-                                                .elements
-                                                .get(argument_types.len())
-                                                .map(|slot| erase_type_parameters(&slot.value_type)),
+                                            CheckedType::Product(parameters) => {
+                                                parameters.elements.get(argument_types.len()).map(
+                                                    |slot| erase_type_parameters(&slot.value_type),
+                                                )
+                                            }
                                             _ => None,
                                         }
                                     }
@@ -12607,6 +13063,60 @@ impl TypeChecker {
         Some(result)
     }
 
+    fn retain_scheme_contract(
+        &mut self,
+        syntax: SyntaxId,
+        span: Span,
+        source: &CheckedScheme,
+        target: &CheckedType,
+    ) {
+        self.deferred_scheme_contracts
+            .entry(syntax)
+            .or_insert_with(|| DeferredSchemeContract {
+                initial: source.clone(),
+                target: target.clone(),
+                span,
+                generic_parameters: self.active_generic_parameters.clone(),
+                trait_bounds: self.active_function_bounds.clone(),
+                subtype_bounds: self.active_subtype_bounds.clone(),
+            });
+    }
+
+    /// Recheck polymorphic value contracts after inferred source effects settle.
+    fn validate_inferred_scheme_contracts(&mut self) {
+        for (syntax, contract) in std::mem::take(&mut self.deferred_scheme_contracts) {
+            let Some(source) = self.expression_schemes.get(&syntax).cloned() else {
+                continue;
+            };
+            if schemes_alpha_equivalent(&contract.initial, &source) {
+                continue;
+            }
+            let generic_parameters = std::mem::replace(
+                &mut self.active_generic_parameters,
+                contract.generic_parameters,
+            );
+            let trait_bounds =
+                std::mem::replace(&mut self.active_function_bounds, contract.trait_bounds);
+            let subtype_bounds =
+                std::mem::replace(&mut self.active_subtype_bounds, contract.subtype_bounds);
+            let source = CheckedType::Forall(Box::new(source));
+            let first_diagnostic = self.diagnostics.len();
+            let actual = self.subsume(source.clone(), &contract.target, contract.span.clone());
+            if actual != CheckedType::Error {
+                self.require_compatible(actual, contract.target.clone(), contract.span);
+            }
+            for diagnostic in &mut self.diagnostics[first_diagnostic..] {
+                diagnostic.message = format!(
+                    "inferred generic value type `{source}` conflicts with expected `{}`: {}",
+                    contract.target, diagnostic.message,
+                );
+            }
+            self.active_generic_parameters = generic_parameters;
+            self.active_function_bounds = trait_bounds;
+            self.active_subtype_bounds = subtype_bounds;
+        }
+    }
+
     fn finish_expression_type(
         &mut self,
         expression: &Expression,
@@ -12617,6 +13127,14 @@ impl TypeChecker {
             self.expression_schemes
                 .entry(expression.syntax().id)
                 .or_insert_with(|| scheme.as_ref().clone());
+        }
+        if let (CheckedType::Forall(source), Some(target)) = (&natural_type, expected) {
+            self.retain_scheme_contract(
+                expression.syntax().id,
+                expression.syntax().span.clone(),
+                source,
+                target,
+            );
         }
         let natural_type = if matches!(natural_type, CheckedType::Forall(_)) && expected.is_some() {
             self.subsume(
@@ -12928,8 +13446,25 @@ impl TypeChecker {
                 .collect::<Vec<_>>();
             for parameter in &scheme.parameters[explicit..] {
                 for id in type_parameter_ids(&parameter.substitution_pattern()) {
-                    if substitutions.get(&id).is_some_and(|replacement| type_contains_parameter(replacement, id)
-                        && !matches!(replacement, CheckedType::Parameter { id: other, .. } if *other == id)) {
+                    let body_id = resolved_trait
+                        .default_methods
+                        .get(method)
+                        .filter(|function| self.checking_functions.contains(function))
+                        .and_then(|function| self.function_schemes.get(function))
+                        .and_then(|own| {
+                            let position = scheme.parameters[explicit..].iter().position(|p| {
+                                type_parameter_ids(&p.substitution_pattern()).contains(&id)
+                            })?;
+                            type_parameter_ids(
+                                &own.parameters.get(position)?.substitution_pattern(),
+                            )
+                            .iter()
+                            .next()
+                            .copied()
+                        })
+                        .unwrap_or(id);
+                    if substitutions.get(&id).is_some_and(|replacement| type_contains_parameter(replacement, body_id)
+                        && !matches!(replacement, CheckedType::Parameter { id: other, .. } if *other == body_id)) {
                         self.diagnostics.push(Diagnostic::new(span, "polymorphic recursion is not supported"));
                         return CheckedType::Error;
                     }
@@ -13920,6 +14455,11 @@ impl TypeChecker {
                 .entry(syntax)
                 .or_insert_with(|| scheme.as_ref().clone());
         }
+        if argument.is_none()
+            && let (Some(syntax), Some(expected)) = (syntax, expected)
+        {
+            self.retain_scheme_contract(syntax, span.clone(), &scheme, expected);
+        }
         if argument.is_none() && expected.is_none() {
             return CheckedType::Forall(scheme);
         }
@@ -14121,9 +14661,9 @@ impl TypeChecker {
                 self.diagnostics.push(Diagnostic::new(
                     span.clone(),
                     if polymorphic_recursion {
-                        "polymorphic recursion is not supported"
+                        "polymorphic recursion is not supported".to_owned()
                     } else {
-                        "generic function conflicts with the expected type"
+                        format!("generic function conflicts with the expected type: expected `{expected}`, found `{template}`")
                     },
                 ));
                 return CheckedType::Error;
@@ -14598,6 +15138,7 @@ impl TypeChecker {
             .insert(id, module.expression_function_owner(expression.syntax().id));
         let captures = implicit_thunk_captures(module, expression);
         let function = ResolvedFunction {
+            generics: None,
             id,
             name: format!("__staple_implicit_thunk_{}", id.0),
             binding_syntax: None,
@@ -14913,31 +15454,8 @@ impl TypeChecker {
                 }
             }
             Type::Forall(ty) => {
-                let parameters = ty
-                    .generics
-                    .parameters
-                    .iter()
-                    .map(|parameter| {
-                        CheckedSchemeParameter::from_pattern(
-                            self.checked_type_parameter_pattern(module, parameter),
-                        )
-                    })
-                    .collect();
-                // The body first: a projection it names (`Iterator.Item Iter`)
-                // must exist before the scheme's bound links it.
+                // Resolve projections in the body before linking generic bounds.
                 let body = self.resolve_source_type_inner(module, &ty.body);
-                let trait_bounds = ty
-                    .generics
-                    .trait_bounds
-                    .iter()
-                    .filter_map(|bound| self.resolve_trait_bound(module, bound))
-                    .collect::<Vec<_>>();
-                let subtype_bounds = ty
-                    .generics
-                    .subtype_bounds
-                    .iter()
-                    .filter_map(|bound| self.resolve_subtype_bound(module, bound))
-                    .collect();
                 if !matches!(body, CheckedType::Function(_) | CheckedType::Error) {
                     self.diagnostics.push(Diagnostic::new(
                         ty.syntax.span.clone(),
@@ -14945,13 +15463,7 @@ impl TypeChecker {
                     ));
                     return CheckedType::Error;
                 }
-                let scheme = CheckedScheme {
-                    parameters,
-                    trait_bound_names: self.trait_bound_names(&trait_bounds),
-                    trait_bounds,
-                    subtype_bounds,
-                    body: Box::new(body),
-                };
+                let scheme = self.value_scheme(module, &ty.generics, body);
                 if scheme_names_projection(&scheme) {
                     self.diagnostics.push(Diagnostic::new(
                         ty.syntax.span.clone(),
@@ -16174,7 +16686,10 @@ fn types_equivalent_list(a: &[CheckedType], b: &[CheckedType]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| types_equivalent(a, b))
 }
 
-fn schemes_alpha_equivalent(actual: &CheckedScheme, expected: &CheckedScheme) -> bool {
+fn alpha_renaming(
+    actual: &[CheckedSchemeParameter],
+    expected: &[CheckedSchemeParameter],
+) -> Option<HashMap<TypeParameterId, CheckedType>> {
     fn rename(
         a: &CheckedSchemeParameter,
         b_param: &CheckedSchemeParameter,
@@ -16199,14 +16714,21 @@ fn schemes_alpha_equivalent(actual: &CheckedScheme, expected: &CheckedScheme) ->
         }
     }
     let mut substitutions = HashMap::new();
-    if actual.parameters.len() != expected.parameters.len() {
-        return false;
+    if actual.len() != expected.len() {
+        return None;
     }
-    for (a, b) in actual.parameters.iter().zip(&expected.parameters) {
+    for (a, b) in actual.iter().zip(expected) {
         if !rename(a, b, &mut substitutions) {
-            return false;
+            return None;
         }
     }
+    Some(substitutions)
+}
+
+fn schemes_alpha_equivalent(actual: &CheckedScheme, expected: &CheckedScheme) -> bool {
+    let Some(substitutions) = alpha_renaming(&actual.parameters, &expected.parameters) else {
+        return false;
+    };
     if !types_equivalent(
         &substitute_type(*actual.body.clone(), &substitutions),
         &expected.body,

@@ -1974,7 +1974,11 @@ impl<'a> WorklistBuilder<'a> {
                     super::trait_dictionaries::evidence_obligation(&member.evidence)
                         .2
                         .map(|method| {
-                            super::trait_dictionaries::method_runtime_scope(program, method)
+                            super::trait_dictionaries::implementation_method_runtime_scope(
+                                program,
+                                method,
+                                member.function,
+                            )
                         })
                         .unwrap_or_default(),
                 ),
@@ -2832,7 +2836,7 @@ mod tests {
     fn planned_names_follow_the_declared_name_rule() {
         let (_, program) = lower(concat!(
             "def plain: I32 -> I32 = value => value\n",
-            "def generic: <T where Copy T> T -> T = value => value\n",
+            "def generic: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first = plain (1)\n",
             "let second = generic 2\n",
         ));
@@ -2939,7 +2943,7 @@ mod tests {
     fn eager_roots_match_the_eager_template_set() {
         let (module, program) = lower(concat!(
             "def plain: I32 -> I32 = value => value\n",
-            "def unused: <T where Copy T> T -> T = value => value\n",
+            "def unused: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let value: I32 = 1\n",
         ));
         let expected = module
@@ -2987,7 +2991,7 @@ mod tests {
     #[test]
     fn concrete_signature_closures_with_enclosing_parameters_stay_demand_driven() {
         let (_, program) = lower(concat!(
-            "def show_thunk: <T where Copy T, Display T> move T -> (() -> String) = move value => () => \"value=$value\"\n",
+            "def show_thunk: <T where Copy T, Display T> move T -> (() -> String) = <T where Copy T, Display T> move value => () => \"value=$value\"\n",
             "let shown = show_thunk 1\n",
         ));
         assert!(
@@ -3025,7 +3029,7 @@ mod tests {
     #[test]
     fn repeated_uses_deduplicate_and_separate_substitutions() {
         let (_, program) = lower(concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first: I32 = identity 1\n",
             "let second: I32 = identity 1\n",
             "let third: U8 = identity (U8 :: 1)\n",
@@ -3058,8 +3062,8 @@ mod tests {
     #[test]
     fn call_arguments_discover_instances_before_the_invoked_target() {
         let (_, program) = lower(concat!(
-            "def outer: <T where Copy T> T -> T = value => value\n",
-            "def inner: <T where Copy T> T -> T = value => value\n",
+            "def outer: <T where Copy T> T -> T = <T where Copy T> value => value\n",
+            "def inner: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let result: I32 = outer (inner 1)\n",
         ));
         let outer = instances_of(&program, function_id(&program, "outer"))[0];
@@ -3116,7 +3120,7 @@ mod tests {
     #[test]
     fn string_templates_record_formatter_calls() {
         let (_, program) = lower(concat!(
-            "def render: <T where Display T> move T -> String = move value => \"value=$value\"\n",
+            "def render: <T where Display T> move T -> String = <T where Display T> move value => \"value=$value\"\n",
             "let result: String = render 1\n",
         ));
         let render = instances_of(&program, function_id(&program, "render"))[0];
@@ -3148,7 +3152,7 @@ mod tests {
     fn generic_local_function_templates_do_not_leak_parameters() {
         let (_, program) = lower(concat!(
             "def outer: () -> I32 = () => {\n",
-            "  def recur: <T> T -> T = value => recur value\n",
+            "  def recur: <T> T -> T = <T> value => recur value\n",
             "  recur 1\n",
             "}\n",
         ));
@@ -3167,8 +3171,8 @@ mod tests {
     #[test]
     fn nested_generic_calls_discover_their_dependencies() {
         let (_, program) = lower(concat!(
-            "def inner: <T where Copy T> T -> T = value => value\n",
-            "def outer: <T where Copy T> T -> T = value => inner value\n",
+            "def inner: <T where Copy T> T -> T = <T where Copy T> value => value\n",
+            "def outer: <T where Copy T> T -> T = <T where Copy T> value => inner value\n",
             "let applied: I32 = outer 1\n",
         ));
         let inner = function_id(&program, "inner");
@@ -3210,7 +3214,7 @@ mod tests {
     #[test]
     fn recursion_terminates_on_the_interned_instance() {
         let (_, program) = lower(concat!(
-            "def recursive: <T where Copy T> T -> T = value => recursive value\n",
+            "def recursive: <T where Copy T> T -> T = <T where Copy T> value => recursive value\n",
             "let result: I32 = recursive 1\n",
         ));
         let recursive = function_id(&program, "recursive");
@@ -3236,8 +3240,8 @@ mod tests {
         );
 
         let (_, program) = lower(concat!(
-            "def ping: <T where Copy T> T -> T = value => pong value\n",
-            "def pong: <T where Copy T> T -> T = value => ping value\n",
+            "def ping: <T where Copy T> T -> T = <T where Copy T> value => pong value\n",
+            "def pong: <T where Copy T> T -> T = <T where Copy T> value => ping value\n",
             "let result: I32 = ping 1\n",
         ));
         let ping = function_id(&program, "ping");
@@ -3263,7 +3267,7 @@ mod tests {
     #[test]
     fn closure_captures_discover_parameterized_thunks() {
         let (_, program) = lower(concat!(
-            "def maker: <T where Copy T> T -> () -> T = value => () => value\n",
+            "def maker: <T where Copy T> T -> () -> T = <T where Copy T> value => () => value\n",
             "let made_i32 = maker 1\n",
             "let made_string = maker \"x\"\n",
         ));
@@ -3290,7 +3294,7 @@ mod tests {
         let (module, program) = lower(concat!(
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
-            "def show_bound: <T where TestShow T> T -> Bool = value => test_show value\n",
+            "def show_bound: <T where TestShow T> T -> Bool = <T where TestShow T> value => test_show value\n",
             "let shown: Bool = show_bound 1\n",
         ));
         let show_bound = function_id(&program, "show_bound");
@@ -3337,7 +3341,7 @@ mod tests {
             "}\n",
             "impl TestShow I32 { test_show = _ => True }\n",
             "impl TestShow U8 { test_show = _ => True }\n",
-            "def use_other: <T where TestShow T> T -> Bool = value => test_other value\n",
+            "def use_other: <T where TestShow T> T -> Bool = <T where TestShow T> value => test_other value\n",
             "let applied: Bool = use_other 1\n",
             "let other: Bool = use_other (U8 :: 1)\n",
         ));
@@ -3529,7 +3533,7 @@ mod tests {
         let (_, program) = lower(concat!(
             "use std.coroutine.*\n",
             "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
-            "def unused_task: <T where Copy T> T -> Coroutine{} T = value => coro { value }\n",
+            "def unused_task: <T where Copy T> T -> Coroutine{} T = <T where Copy T> value => coro { value }\n",
             "let created = task ()\n",
         ));
         let coroutine_instances = program
@@ -3615,8 +3619,8 @@ mod tests {
     #[test]
     fn split_build_and_resume_match_the_full_build() {
         let source = concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
-            "def forward: <T where Copy T> T -> T = value => identity value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
+            "def forward: <T where Copy T> T -> T = <T where Copy T> value => identity value\n",
             "let first: I32 = forward 1\n",
             "type Point = wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
@@ -3648,7 +3652,7 @@ mod tests {
         use crate::CallTypeSubstitution;
 
         let source = concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first: I32 = identity 1\n",
         );
         let module = checked_program(source);
@@ -3761,8 +3765,8 @@ mod tests {
     fn dynamic_callees_keep_independent_arguments_concrete() {
         use std::collections::BTreeSet;
         let (_, mut program) = lower(concat!(
-            "def pair: <A, B where Copy A, Copy B> (A, B) -> (A, B) = value => value\n",
-            "def forward: <T where Copy T> T -> (T, I32) = value => pair (value, 1)\n",
+            "def pair: <A, B where Copy A, Copy B> (A, B) -> (A, B) = <A, B where Copy A, Copy B> value => value\n",
+            "def forward: <T where Copy T> T -> (T, I32) = <T where Copy T> value => pair (value, 1)\n",
             "let first = forward 42\n",
         ));
         let function = function_id(&program, "forward");
@@ -3828,7 +3832,7 @@ mod tests {
         let (text, name) = dynamic_test_module_with_boundary(
             concat!(
                 "type Range T = wrap (current: T, end: T)\n",
-                "def range: <T where Copy T> T -> T -> Range T = start => end => Range (current: start, end: end)\n",
+                "def range: <T where Copy T> T -> T -> Range T = <T where Copy T> start => end => Range (current: start, end: end)\n",
                 "def concrete: I32 -> I32 = x => (range x 3).end\n",
                 "let result = concrete 42\n",
             ),
@@ -3853,7 +3857,7 @@ mod tests {
     fn dynamic_boundaries_reabstract_function_arguments() {
         let (text, name) = dynamic_test_module_with_boundary(
             concat!(
-                "def apply: <T where Copy T> (T -> T, T) -> T = (f, x) => f x\n",
+                "def apply: <T where Copy T> (T -> T, T) -> T = <T where Copy T> (f, x) => f x\n",
                 "def concrete: I32 -> I32 = x => apply.<I32> ((y => y), x)\n",
                 "let result = concrete 41\n",
             ),
@@ -3878,7 +3882,7 @@ mod tests {
     fn dynamic_closures_capture_runtime_values() {
         let (text, name) = dynamic_test_module(
             concat!(
-                "def make: <T where Copy T> T -> (() -> T) = value => () => value\n",
+                "def make: <T where Copy T> T -> (() -> T) = <T where Copy T> value => () => value\n",
                 "let result = make 42\n",
             ),
             "make",
@@ -3939,8 +3943,8 @@ mod tests {
     fn dynamic_bodies_build_and_call_dynamic_closures() {
         let (text, name) = dynamic_test_module(
             concat!(
-                "def id: <U where Copy U> U -> U = value => value\n",
-                "def apply: <T where Copy T> T -> T = value => { let f: T -> T = id; f value }\n",
+                "def id: <U where Copy U> U -> U = <U where Copy U> value => value\n",
+                "def apply: <T where Copy T> T -> T = <T where Copy T> value => { let f: T -> T = id; f value }\n",
                 "let result = apply 42\n",
             ),
             "apply",
@@ -3991,7 +3995,7 @@ mod tests {
         let (text, name) = dynamic_test_module(
             concat!(
                 "def inc: I32 -> I32 = value => value + 1\n",
-                "def apply: <T where Copy T> T -> I32 = value => { let f: I32 -> I32 = inc; f 7 }\n",
+                "def apply: <T where Copy T> T -> I32 = <T where Copy T> value => { let f: I32 -> I32 = inc; f 7 }\n",
                 "let result = apply 42\n",
             ),
             "apply",
@@ -4036,7 +4040,7 @@ mod tests {
     fn dynamic_boundaries_call_concrete_closures() {
         let (text, name) = dynamic_test_module_with_boundary(
             concat!(
-                "def apply: <T where Copy T> (I32 -> I32, T) -> I32 = (f, x) => f 7\n",
+                "def apply: <T where Copy T> (I32 -> I32, T) -> I32 = <T where Copy T> (f, x) => f 7\n",
                 "def concrete: I32 -> I32 = x => apply ((y => y + x), x)\n",
                 "let result = concrete 41\n",
             ),
@@ -4061,8 +4065,8 @@ mod tests {
     fn dynamic_descriptor_order_follows_the_declared_scheme() {
         use std::collections::BTreeSet;
         let (_, mut program) = lower(concat!(
-            "def swap: <A, B where Copy A, Copy B> (B, A) -> (A, B) = (second, first) => (first, second)\n",
-            "def forward: <A, B where Copy A, Copy B> (B, A) -> (A, B) = (second, first) => swap (second, first)\n",
+            "def swap: <A, B where Copy A, Copy B> (B, A) -> (A, B) = <A, B where Copy A, Copy B> (second, first) => (first, second)\n",
+            "def forward: <A, B where Copy A, Copy B> (B, A) -> (A, B) = <A, B where Copy A, Copy B> (second, first) => swap (second, first)\n",
             "let result = forward (1, U8 :: 2)\n",
         ));
         let function = function_id(&program, "forward");
@@ -4345,7 +4349,7 @@ mod tests {
     #[test]
     fn partially_bound_entries_forward_caller_descriptors_in_order() {
         let (text, name) = dynamic_test_module_with_entry(
-            "def second: <A, B where Sized A, Sized B> (move A, move B) -> B = (move a, move b) => b\nlet value = second (U8 :: 1, 42)\n",
+            "def second: <A, B where Sized A, Sized B> (move A, move B) -> B = <A, B where Sized A, Sized B> (move a, move b) => b\nlet value = second (U8 :: 1, 42)\n",
             "second",
             None,
             Some(1),
@@ -4411,8 +4415,8 @@ mod tests {
                 "trait EntryProbe T {}\n",
                 "impl EntryProbe U8 {}\n",
                 "impl EntryProbe I32 {}\n",
-                "def enclosing: <A where Sized A, EntryProbe A> move A -> I32 = move value => {\n",
-                "  def dictionary_entry_value: <B where Sized B, EntryProbe B> (move A, move B) -> B = (move a, move b) => b\n",
+                "def enclosing: <A where Sized A, EntryProbe A> move A -> I32 = <A where Sized A, EntryProbe A> move value => {\n",
+                "  def dictionary_entry_value: <B where Sized B, EntryProbe B> (move A, move B) -> B = <B where Sized B, EntryProbe B> (move a, move b) => b\n",
                 "  dictionary_entry_value (value, 42)\n",
                 "}\n",
                 "let value = enclosing (U8 :: 1)\n",
@@ -4505,7 +4509,7 @@ mod tests {
     #[test]
     fn dynamic_refs_preserve_payload_and_own_their_descriptor() {
         let (text, name) = dynamic_test_module(
-            "def make: <T where Sized T> move T -> Ref T = move value => Ref value\nlet reference = make 42\n",
+            "def make: <T where Sized T> move T -> Ref T = <T where Sized T> move value => Ref value\nlet reference = make 42\n",
             "make",
         );
         let context = inkwell::context::Context::create();
@@ -4654,9 +4658,9 @@ mod tests {
         let word = std::mem::size_of::<usize>();
         for captured in [false, true] {
             let source = if captured {
-                "def make: <T where Copy T> T -> (() -> T) = value => { let mut held = value; () => held }\nlet result = make 42\n"
+                "def make: <T where Copy T> T -> (() -> T) = <T where Copy T> value => { let mut held = value; () => held }\nlet result = make 42\n"
             } else {
-                "use std.buffer.Buffer\ndef make: <T where Copy T> USize -> Buffer T = capacity => Buffer.with_capacity.<T> capacity\nlet result: Buffer I32 = make 3\n"
+                "use std.buffer.Buffer\ndef make: <T where Copy T> USize -> Buffer T = <T where Copy T> capacity => Buffer.with_capacity.<T> capacity\nlet result: Buffer I32 = make 3\n"
             };
             let (text, name) = dynamic_test_module(source, "make");
             let context = inkwell::context::Context::create();
@@ -4756,23 +4760,23 @@ mod tests {
     fn dynamic_boundaries_accept_concrete_callers() {
         for source in [
             concat!(
-                "def identity: <T where Copy T> T -> T = value => value\n",
+                "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
                 "def concrete: I32 -> I32 = value => identity value\n",
                 "let result = concrete 42\n",
             ),
             concat!(
-                "def identity: <T where Copy T> T -> T = value => value\n",
-                "def first: <A, B where Copy A, Copy B> (A, B) -> A = (first, second) => first\n",
+                "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
+                "def first: <A, B where Copy A, Copy B> (A, B) -> A = <A, B where Copy A, Copy B> (first, second) => first\n",
                 "def concrete: I32 -> I32 = value => { let held = identity (value, 7); first held }\n",
                 "let result = concrete 42\n",
             ),
             concat!(
-                "def identity: <T> move T -> T = move value => value\n",
+                "def identity: <T> move T -> T = <T> move value => value\n",
                 "def concrete: I32 -> I32 = value => identity value\n",
                 "let result = concrete 42\n",
             ),
             concat!(
-                "def identity: <A, B where Copy A, Copy B> (A, B) -> A = (first, second) => first\n",
+                "def identity: <A, B where Copy A, Copy B> (A, B) -> A = <A, B where Copy A, Copy B> (first, second) => first\n",
                 "def concrete: I32 -> I32 = value => identity (value, U8 :: 7)\n",
                 "let result = concrete 42\n",
             ),
@@ -4801,8 +4805,8 @@ mod tests {
     fn dynamic_products_preserve_aligned_layout_through_calls() {
         let (text, name) = dynamic_test_module(
             concat!(
-                "def pair: <A, B where Copy A, Copy B> (A, B) -> (A, B) = value => value\n",
-                "def forward: <T where Copy T> T -> (T, I32) = value => pair (value, 1)\n",
+                "def pair: <A, B where Copy A, Copy B> (A, B) -> (A, B) = <A, B where Copy A, Copy B> value => value\n",
+                "def forward: <T where Copy T> T -> (T, I32) = <T where Copy T> value => pair (value, 1)\n",
                 "let first = forward 42\n",
             ),
             "forward",
@@ -4862,7 +4866,7 @@ mod tests {
     fn dynamic_repeated_products_align_components() {
         for count in [0_usize, 1, 3] {
             let source = format!(
-                "def repeat: <T where Copy T> T -> (T ^ {count}) = value => (value ^ {count})\nlet result = repeat 42\n"
+                "def repeat: <T where Copy T> T -> (T ^ {count}) = <T where Copy T> value => (value ^ {count})\nlet result = repeat 42\n"
             );
             let (text, name) = dynamic_test_module(&source, "repeat");
             let context = inkwell::context::Context::create();
@@ -4924,7 +4928,7 @@ mod tests {
     fn dynamic_product_cleanup_matches_concrete_reverse_field_order() {
         let (text, name) = dynamic_test_module(
             concat!(
-                "def consume: <A, B where Sized A, Sized B> move (A, B) -> I32 = move value => { let held = value; 7 }\n",
+                "def consume: <A, B where Sized A, Sized B> move (A, B) -> I32 = <A, B where Sized A, Sized B> move value => { let held = value; 7 }\n",
                 "let result = consume (1, U8 :: 2)\n",
             ),
             "consume",
@@ -4997,7 +5001,7 @@ mod tests {
     fn dynamic_flattened_parameters_use_their_own_descriptors() {
         let (text, name) = dynamic_test_module(
             concat!(
-                "def swap: <A, B where Copy A, Copy B> (A, B) -> (B, A) = (a, b) => (b, a)\n",
+                "def swap: <A, B where Copy A, Copy B> (A, B) -> (B, A) = <A, B where Copy A, Copy B> (a, b) => (b, a)\n",
                 "let result = swap (1, U8 :: 2)\n",
             ),
             "swap",
@@ -5068,7 +5072,7 @@ mod tests {
     fn dynamic_sum_injection_preserves_payload_layout() {
         let (text, name) = dynamic_test_module(
             concat!(
-                "def inject: <T where Sized T> move T -> T | I32 = move value => value\n",
+                "def inject: <T where Sized T> move T -> T | I32 = <T where Sized T> move value => value\n",
                 "let result = inject (U8 :: 42)\n",
             ),
             "inject",
@@ -5139,7 +5143,7 @@ mod tests {
     fn dynamic_sum_widening_remaps_only_the_active_payload() {
         let (text, name) = dynamic_test_module(
             concat!(
-                "def widen: <T where Sized T> move (T | I32) -> T | I32 | F64 = move value => value\n",
+                "def widen: <T where Sized T> move (T | I32) -> T | I32 | F64 = <T where Sized T> move value => value\n",
                 "let input: U8 | I32 = U8 :: 42\n",
                 "let result = widen input\n",
             ),
@@ -5202,8 +5206,8 @@ mod tests {
     fn dynamic_moved_values_transfer_without_cleanup() {
         let (text, name) = dynamic_test_module(
             concat!(
-                "def identity: <T> move T -> T = move value => value\n",
-                "def forward: <T> move T -> T = move value => { let held = identity value; held }\n",
+                "def identity: <T> move T -> T = <T> move value => value\n",
+                "def forward: <T> move T -> T = <T> move value => { let held = identity value; held }\n",
                 "let first = forward 42\n",
             ),
             "forward",
@@ -5262,7 +5266,7 @@ mod tests {
     fn dynamic_mutable_locals_iterate_and_assign() {
         let (text, name) = dynamic_test_module(
             concat!(
-                "def sum_to: <T where Copy T> T -> I32 = value => {\n",
+                "def sum_to: <T where Copy T> T -> I32 = <T where Copy T> value => {\n",
                 "    let mut total: I32 = 0\n",
                 "    let mut index: I32 = 0\n",
                 "    loop {\n",
@@ -5316,7 +5320,7 @@ mod tests {
     fn dynamic_loops_return_break_values() {
         let (text, name) = dynamic_test_module(
             concat!(
-                "def first: <T where Copy T> T -> I32 = value => loop { break 7 }\n",
+                "def first: <T where Copy T> T -> I32 = <T where Copy T> value => loop { break 7 }\n",
                 "let result = first 42\n",
             ),
             "first",
@@ -5362,7 +5366,7 @@ mod tests {
         let (text, name) = dynamic_test_module(
             concat!(
                 "use std.slice.Slice\n",
-                "def head: <T where Copy T> Ref (Slice T) -> T = values => values.0\n",
+                "def head: <T where Copy T> Ref (Slice T) -> T = <T where Copy T> values => values.0\n",
                 "def unused: Ref (Slice I32) -> I32 = values => head values\n",
                 "let result = 0\n",
             ),
@@ -5425,7 +5429,7 @@ mod tests {
         let (text, name) = dynamic_test_module(
             concat!(
                 "use std.cinterop.(CString, c_string)\n",
-                "def label: <T where Copy T> T -> I32 = value => {\n",
+                "def label: <T where Copy T> T -> I32 = <T where Copy T> value => {\n",
                 "    let text = \"hello\"\n",
                 "    let owned = c_string \"world\"\n",
                 "    7\n",
@@ -5474,7 +5478,7 @@ mod tests {
     fn dynamic_conditions_select_runtime_sum_alternatives() {
         let (text, name) = dynamic_test_module(
             concat!(
-                "def choose: <T where Copy T> (T, Bool) -> I32 = (value, flag) => if flag { 1 } else { 0 }\n",
+                "def choose: <T where Copy T> (T, Bool) -> I32 = <T where Copy T> (value, flag) => if flag { 1 } else { 0 }\n",
                 "let result = choose (7, True)\n",
             ),
             "choose",
@@ -5531,7 +5535,7 @@ mod tests {
         let (text, name) = dynamic_test_module(
             concat!(
                 "type Box T = wrap (T)\n",
-                "def pack: <T where Copy T> T -> Box T = value => Box value\n",
+                "def pack: <T where Copy T> T -> Box T = <T where Copy T> value => Box value\n",
                 "let result = pack 42\n",
             ),
             "pack",
@@ -5598,7 +5602,7 @@ mod tests {
         .enumerate()
         {
             let source = format!(
-                "def identity: <U> move U -> U = move value => value\ndef borrow: <U where Sized U> U -> I32 = value => 7\ndef consume: <T where Sized T> move T -> I32 = move value => {body}\nlet result = consume (U8 :: 42)\n"
+                "def identity: <U> move U -> U = <U> move value => value\ndef borrow: <U where Sized U> U -> I32 = <U where Sized U> value => 7\ndef consume: <T where Sized T> move T -> I32 = <T where Sized T> move value => {body}\nlet result = consume (U8 :: 42)\n"
             );
             let (text, name) = dynamic_test_module(&source, "consume");
             let context = inkwell::context::Context::create();
@@ -5653,8 +5657,8 @@ mod tests {
     fn dynamic_instances_discover_and_materialize_runtime_callees() {
         use std::collections::BTreeSet;
         let source = concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
-            "def forward: <T where Copy T> T -> T = value => identity value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
+            "def forward: <T where Copy T> T -> T = <T where Copy T> value => identity value\n",
             "let first: I32 = forward 1\n",
         );
         let (_, mut program) = lower(source);
@@ -5800,8 +5804,8 @@ mod tests {
     #[test]
     fn repeated_lowering_yields_the_same_instance_graph() {
         let source = concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
-            "def constant: <T where Copy T> T -> I32 -> T = value => ignored => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
+            "def constant: <T where Copy T> T -> I32 -> T = <T where Copy T> value => ignored => value\n",
             "let first: I32 = identity 1\n",
             "let second: U8 = identity (U8 :: 1)\n",
             "let held = constant \"x\"\n",

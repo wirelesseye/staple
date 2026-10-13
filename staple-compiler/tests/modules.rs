@@ -590,7 +590,7 @@ fn unknown_names_report_private_glob_candidates() {
         "main.sta",
         concat!(
             "mod submodule {\n",
-            "    def id: <T> T -> T = x => x\n",
+            "    def id: <T> T -> T = <T> x => x\n",
             "}\n",
             "use submodule.*\n",
             "id 42\n",
@@ -910,7 +910,7 @@ fn block_scoped_types_in_generic_functions_monomorphize_per_call_site() {
     fixture.write(
         "main.sta",
         concat!(
-            "def wrap: <T> move T -> T = move value => {\n",
+            "def wrap: <T> move T -> T = <T> move value => {\n",
             "    type Boxed = wrap T\n",
             "    match Boxed value { Boxed inner => inner }\n",
             "}\n",
@@ -1286,7 +1286,7 @@ fn imports_public_traits_and_discovers_loaded_global_implementations() {
         concat!(
             "use traits.(Increment)\n",
             "use implementations\n",
-            "def twice: <T where Increment T> T -> T = value => increment (increment value)\n",
+            "def twice: <T where Increment T> T -> T = <T where Increment T> value => increment (increment value)\n",
             "let answer: I32 = twice 40\n",
             "let qualified: I32 = Increment.increment answer\n",
         ),
@@ -1300,19 +1300,19 @@ fn imports_public_traits_and_discovers_loaded_global_implementations() {
         concat!(
             "use traits\n",
             "use implementations\n",
-            "def apply: <T where traits.Increment T> T -> T = value => traits.Increment.increment value\n",
+            "def apply: <T where traits.Increment T> T -> T = <T where traits.Increment T> value => traits.Increment.increment value\n",
             "let answer: I32 = apply 41\n",
         ),
         concat!(
             "use traits.Increment as Inc\n",
             "use implementations\n",
-            "def apply: <T where Inc T> T -> T = value => Inc.increment value\n",
+            "def apply: <T where Inc T> T -> T = <T where Inc T> value => Inc.increment value\n",
             "let answer: I32 = apply 41\n",
         ),
         concat!(
             "use traits.*\n",
             "use implementations\n",
-            "def apply: <T where Increment T> T -> T = value => increment value\n",
+            "def apply: <T where Increment T> T -> T = <T where Increment T> value => increment value\n",
             "let answer: I32 = apply 41\n",
         ),
     ] {
@@ -1358,7 +1358,7 @@ fn preserves_trait_prerequisites_across_modules() {
         concat!(
             "use traits.(Base, Derived)\n",
             "use implementations\n",
-            "def apply: <T where Derived T> T -> T = value => Base.base (Derived.derived value)\n",
+            "def apply: <T where Derived T> T -> T = <T where Derived T> value => Base.base (Derived.derived value)\n",
             "let answer: I32 = apply 42\n",
         ),
     );
@@ -1436,7 +1436,7 @@ fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
         "values.sta",
         concat!(
             "pub type UserId = wrap I32\n",
-            "pub def identity: <T> move T -> T = move x => x\n",
+            "pub def identity = <T> move x: T => T :: x\n",
         ),
     );
     fixture.write(

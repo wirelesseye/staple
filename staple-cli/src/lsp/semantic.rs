@@ -631,7 +631,7 @@ impl<'a> Classifier<'a> {
         for bound in &binding.all_trait_bounds() {
             self.trait_bound(bound, resolved);
         }
-        if let Some(annotation) = binding.annotation_body() {
+        if let Some(annotation) = &binding.annotation {
             self.ty(annotation, resolved);
         }
         if let Some(value) = &binding.value {
@@ -671,6 +671,17 @@ impl<'a> Classifier<'a> {
     ) {
         match expression {
             Expression::Function(value) => {
+                if let Some(g) = &value.generics {
+                    for parameter in &g.parameters {
+                        self.type_parameter(parameter, resolved);
+                    }
+                    for bound in &g.trait_bounds {
+                        self.trait_bound(bound, resolved);
+                    }
+                    for bound in &g.subtype_bounds {
+                        self.ty(&bound.supertype, resolved);
+                    }
+                }
                 self.pattern(&value.pattern, PARAMETER, resolved);
                 if let Some(effects) = &value.effect_lower_bound {
                     for resource in &effects.resources {
@@ -1521,7 +1532,7 @@ mod tests {
             "type Item = alias I32\n",
             "trait Show T { show: T -> String }\n",
             "macro identity = value => parse_quote { $value }\n",
-            "def project: <T> T -> T = value => (field: value).field\n",
+            "def project: <T> T -> T = <T> value => (field: value).field\n",
             "mod child { def nested = () => 1 }\n",
             "type Clock = wrap I32\n",
             "def read: () ->{Clock} Clock = () => resource Clock\n",
@@ -2366,5 +2377,12 @@ mod tests {
             result.push((text, token.token_type));
         }
         result
+    }
+    #[test]
+    fn classifies_function_value_generic_declarations() {
+        let source = "def identity = <T> move x: T => T :: x\n";
+        let module = parse(source).unwrap();
+        let labels = labels(source, &tokens(source, Some(&module), None, None));
+        assert!(labels.contains(&("T", TYPE_PARAMETER)), "{labels:?}");
     }
 }

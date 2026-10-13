@@ -2410,6 +2410,74 @@ impl LoweredProgram {
         request: &InstanceResolutionRequest<'_>,
         requested: &RuntimeScope,
     ) -> Result<ResolvedInstanceRequest, Diagnostic> {
+        // A trait declaration and its implementing value have independently
+        // scoped parameters. Normalize member arguments at this boundary,
+        // including phantom parameters that cannot be inferred from the ABI.
+        let mut renaming = HashMap::new();
+        let mut identities = HashMap::new();
+        if let Some(TraitEvidence::ExplicitImplementation { method, .. }) = &request.evidence
+            && let Some(member) = self.trait_methods.get(*method)
+            && let Some(scheme) = self
+                .functions
+                .get(request.function)
+                .and_then(|f| f.scheme.as_ref())
+        {
+            for (source, target) in member.own_parameters.iter().zip(&scheme.parameters) {
+                use crate::typecheck::CheckedSchemeParameter;
+                if let (
+                    CheckedSchemeParameter::Type { id: source, .. }
+                    | CheckedSchemeParameter::Effect { id: source, .. },
+                    CheckedSchemeParameter::Type { id: target_id, .. }
+                    | CheckedSchemeParameter::Effect { id: target_id, .. },
+                ) = (source, target)
+                {
+                    identities.insert(*source, *target_id);
+                    renaming.insert(*source, target.substitution_pattern());
+                }
+            }
+        }
+        let mut normalized = InstanceResolutionRequest {
+            function: request.function,
+            origin: request.origin.clone(),
+            function_type: match substitute_type(
+                CheckedType::Function(request.function_type.clone()),
+                &renaming,
+            ) {
+                CheckedType::Function(ty) => ty,
+                _ => unreachable!(),
+            },
+            substitutions: request.substitutions.clone(),
+            evidence: request.evidence.clone(),
+            target: request.target,
+        };
+        for entry in &mut normalized.substitutions.types {
+            entry.parameter = identities
+                .get(&entry.parameter)
+                .copied()
+                .unwrap_or(entry.parameter);
+            entry.value_type = substitute_type(entry.value_type.clone(), &renaming);
+        }
+        for entry in &mut normalized.substitutions.effects {
+            entry.parameter = identities
+                .get(&entry.parameter)
+                .copied()
+                .unwrap_or(entry.parameter);
+            entry.effects = substitute_effect_set(entry.effects.clone(), &renaming);
+        }
+        let normalized_scope = RuntimeScope {
+            types: requested
+                .types
+                .iter()
+                .map(|id| identities.get(id).copied().unwrap_or(*id))
+                .collect(),
+            effects: requested
+                .effects
+                .iter()
+                .map(|id| identities.get(id).copied().unwrap_or(*id))
+                .collect(),
+        };
+        let request = &normalized;
+        let requested = &normalized_scope;
         let enclosing = match request.target {
             InstanceResolutionTarget::Root => None,
             InstanceResolutionTarget::Nested(enclosing)
@@ -3764,7 +3832,7 @@ mod tests {
     #[test]
     fn relevant_parameter_collection_is_deterministic() {
         let (_, program) = lower(concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let applied = identity 1\n",
         ));
         let name = "identity";
@@ -3778,7 +3846,7 @@ mod tests {
     #[test]
     fn signature_only_parameter_is_found() {
         let (_, program) = lower(concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let applied = identity 1\n",
         ));
         let relevant = relevance(&program, "identity");
@@ -3791,8 +3859,8 @@ mod tests {
     fn body_only_parameter_is_found() {
         let (_, program) = lower(concat!(
             "type Phantom T = wrap ()\n",
-            "def phantom: <T> () -> Phantom T = () => Phantom ()\n",
-            "def body_only: <T> I32 -> I32 = value => {\n",
+            "def phantom: <T> () -> Phantom T = <T> () => Phantom ()\n",
+            "def body_only: <T> I32 -> I32 = <T> value => {\n",
             "  let hidden: Phantom T = phantom ()\n",
             "  value\n",
             "}\n",
@@ -3812,7 +3880,7 @@ mod tests {
     #[test]
     fn capture_only_parameter_is_found_under_its_own_function() {
         let (_, program) = lower(concat!(
-            "def capture_only: <T where Copy T> T -> () -> I32 = value => () => {\n",
+            "def capture_only: <T where Copy T> T -> () -> I32 = <T where Copy T> value => () => {\n",
             "  let copied: T = value\n",
             "  0\n",
             "}\n",
@@ -3839,8 +3907,8 @@ mod tests {
         let (_, program) = lower(concat!(
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
-            "def show_bound: <T where TestShow T> T -> Bool = value => test_show value\n",
-            "def effectful: <effect E> () ->{E} () = () => ()\n",
+            "def show_bound: <T where TestShow T> T -> Bool = <T where TestShow T> value => test_show value\n",
+            "def effectful: <effect E> () ->{E} () = <effect E> () => ()\n",
             "let applied = show_bound 1\n",
         ));
         let show_bound = function_id(&program, "show_bound");
@@ -3860,8 +3928,8 @@ mod tests {
     #[test]
     fn irrelevant_outer_parameter_is_excluded() {
         let (_, program) = lower(concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
-            "def irrelevant: <T where Copy T> I32 -> I32 = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
+            "def irrelevant: <T where Copy T> I32 -> I32 = <T where Copy T> value => value\n",
             "let applied = identity 1\n",
             "let concrete = irrelevant 1\n",
         ));
@@ -3895,18 +3963,18 @@ mod tests {
             "type Ok T = wrap T\n",
             "type IOError = wrap String\n",
             "type Phantom T = wrap ()\n",
-            "def identity: <T where Copy T> T -> T = value => value\n",
-            "def body_only: <T> I32 -> I32 = value => {\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
+            "def body_only: <T> I32 -> I32 = <T> value => {\n",
             "  let hidden: Phantom T = Phantom ()\n",
             "  value\n",
             "}\n",
-            "def capture_only: <T where Copy T> T -> () -> I32 = value => () => {\n",
+            "def capture_only: <T where Copy T> T -> () -> I32 = <T where Copy T> value => () => {\n",
             "  let copied: T = value\n",
             "  0\n",
             "}\n",
-            "def effectful: <effect E> () ->{E} () = () => ()\n",
+            "def effectful: <effect E> () ->{E} () = <effect E> () => ()\n",
             "def callable = (value: I32) => value\n",
-            "def show_bound: <T where TestShow T> T -> Bool = value => test_show value\n",
+            "def show_bound: <T where TestShow T> T -> Bool = <T where TestShow T> value => test_show value\n",
             "let integer: I32 = identity 42\n",
             "let shown: Bool = show_bound 1\n",
             "let floated: F64 = 1.5\n",
@@ -4283,7 +4351,7 @@ mod tests {
     fn result_only_parameter_infers_from_the_checked_callable_type() {
         let (_, program) = lower(concat!(
             "type Phantom T = wrap ()\n",
-            "def phantom_result: <T> () -> Phantom T = () => Phantom ()\n",
+            "def phantom_result: <T> () -> Phantom T = <T> () => Phantom ()\n",
             "let hidden: Phantom I32 = phantom_result ()\n",
         ));
         let (environment, relevant) = resolve_named_call(&program, "phantom_result");
@@ -4299,7 +4367,7 @@ mod tests {
     fn nonempty_fixed_effect_rows_infer_from_the_callable_type() {
         let (_, program) = lower(concat!(
             "use std.io.IO\n",
-            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = <T, effect E> callback => callback ()\n",
             "def with_io: () ->{IO} () = () => ()\n",
             "def call_io: () ->{IO} I32 = () => evaluate { with_io (); 0 }\n",
         ));
@@ -4323,7 +4391,7 @@ mod tests {
     #[test]
     fn empty_effect_rows_resolve() {
         let (_, program) = lower(concat!(
-            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = <T, effect E> callback => callback ()\n",
             "let pure: I32 = evaluate { 0 }\n",
         ));
         let (environment, relevant) = resolve_named_call(&program, "evaluate");
@@ -4338,7 +4406,7 @@ mod tests {
     #[test]
     fn state_effects_resolve_into_the_effect_row() {
         let (_, program) = lower(concat!(
-            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = <T, effect E> callback => callback ()\n",
             "let mut count = 0\n",
             "def use_state: () ->{state} I32 = () => evaluate { count = count + 1; count }\n",
         ));
@@ -4357,7 +4425,7 @@ mod tests {
     #[test]
     fn partial_site_substitutions_are_completed_by_inference() {
         let (_, program) = lower(concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let applied: I32 = identity 1\n",
         ));
         let (function, call) = direct_call(&program, "identity");
@@ -4455,7 +4523,7 @@ mod tests {
     #[test]
     fn recorded_and_inferred_sources_conflict_at_the_origin() {
         let (_, program) = lower(concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let applied: I32 = identity 1\n",
         ));
         let (function, call) = direct_call(&program, "identity");
@@ -4510,7 +4578,7 @@ mod tests {
     #[test]
     fn unconstrained_and_mismatched_requests_diagnose_at_the_origin() {
         let (_, program) = lower(concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let applied: I32 = identity 1\n",
         ));
         let (function, call) = direct_call(&program, "identity");
@@ -4698,8 +4766,8 @@ mod tests {
             "  test_fallback: T -> Bool = value => test_primary value\n",
             "}\n",
             "impl TestDefaulted I32 { test_primary = _ => True }\n",
-            "def show_bound: <T where TestShow T> T -> Bool = value => test_show value\n",
-            "def fallback_bound: <T where TestDefaulted T> T -> Bool = value => test_fallback value\n",
+            "def show_bound: <T where TestShow T> T -> Bool = <T where TestShow T> value => test_show value\n",
+            "def fallback_bound: <T where TestDefaulted T> T -> Bool = <T where TestDefaulted T> value => test_fallback value\n",
             "let shown: Bool = show_bound 1\n",
             "let fell: Bool = fallback_bound 1\n",
         ));
@@ -4751,7 +4819,7 @@ mod tests {
             "trait TestTag T { test_tag: T -> I32 }\n",
             "impl TestTag Alpha { test_tag = _ => 1 }\n",
             "impl TestTag Beta { test_tag = _ => 2 }\n",
-            "def use_tag: <T where TestTag T> T -> I32 = value => test_tag value\n",
+            "def use_tag: <T where TestTag T> T -> I32 = <T where TestTag T> value => test_tag value\n",
             "let one: I32 = use_tag (Alpha ())\n",
             "let two: I32 = use_tag (Beta ())\n",
         ));
@@ -4786,7 +4854,7 @@ mod tests {
             "trait TestGuarded T { guarded: T -> Bool }\n",
             "impl<T where TestShow T> TestGuarded T { guarded = value => test_show value }\n",
             "type Plain = wrap ()\n",
-            "def use_guarded: <T where TestGuarded T> T -> Bool = value => guarded value\n",
+            "def use_guarded: <T where TestGuarded T> T -> Bool = <T where TestGuarded T> value => guarded value\n",
             "let ok: Bool = use_guarded 1\n",
         ));
         let use_guarded = function_id(&program, "use_guarded");
@@ -4842,7 +4910,7 @@ mod tests {
             "trait TestDerived T where TestBase T { derived_test: T -> Bool }\n",
             "impl TestBase I32 { base_test = _ => True }\n",
             "impl TestDerived I32 { derived_test = value => base_test value }\n",
-            "def use_derived: <T where TestDerived T> T -> Bool = value => base_test value\n",
+            "def use_derived: <T where TestDerived T> T -> Bool = <T where TestDerived T> value => base_test value\n",
             "let result: Bool = use_derived 1\n",
         ));
         let use_derived = function_id(&program, "use_derived");
@@ -4858,7 +4926,7 @@ mod tests {
             "trait TestOuter T { outer_test: T -> I32 }\n",
             "impl TestInner I32 { inner_test = _ => 1 }\n",
             "impl<T where TestInner T> TestOuter T { outer_test = value => inner_test value }\n",
-            "def use_outer: <T where TestOuter T> T -> I32 = value => outer_test value\n",
+            "def use_outer: <T where TestOuter T> T -> I32 = <T where TestOuter T> value => outer_test value\n",
             "let result: I32 = use_outer 1\n",
         ));
         let use_outer = function_id(&program, "use_outer");
@@ -5077,7 +5145,7 @@ mod tests {
         let (_, program) = lower(concat!(
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
-            "def outer_bound: <T where TestShow T> T -> () -> Bool = value => () => test_show value\n",
+            "def outer_bound: <T where TestShow T> T -> () -> Bool = <T where TestShow T> value => () => test_show value\n",
             "let applied = (outer_bound 1) ()\n",
         ));
         let evidence = declared_bound_evidence(&program, "TestShow");
@@ -5224,7 +5292,7 @@ mod tests {
     #[test]
     fn repeated_equivalent_requests_yield_equal_keys() {
         let (_, program) = lower(concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first: I32 = identity 1\n",
             "let second: I32 = identity 1\n",
         ));
@@ -5250,7 +5318,7 @@ mod tests {
     #[test]
     fn irrelevant_outer_substitutions_deduplicate() {
         let (_, program) = lower(concat!(
-            "def ignore: <T where Copy T> I32 -> I32 = value => value\n",
+            "def ignore: <T where Copy T> I32 -> I32 = <T where Copy T> value => value\n",
             "let applied = ignore 1\n",
         ));
         let function = function_id(&program, "ignore");
@@ -5291,7 +5359,7 @@ mod tests {
     #[test]
     fn capture_dependent_substitutions_separate_instances() {
         let (_, program) = lower(concat!(
-            "def maker: <T where Copy T> T -> () -> I32 = value => () => {\n",
+            "def maker: <T where Copy T> T -> () -> I32 = <T where Copy T> value => () => {\n",
             "  let copied: T = value\n",
             "  0\n",
             "}\n",
@@ -5357,7 +5425,7 @@ mod tests {
     #[test]
     fn runtime_requests_deduplicate_concrete_call_sites() {
         let (_, program) = lower(concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first: I32 = identity 1\n",
             "let second: U8 = identity (U8 :: 2)\n",
         ));
@@ -5409,7 +5477,7 @@ mod tests {
     #[test]
     fn runtime_recursion_reuses_the_current_instance() {
         let (_, program) = lower(concat!(
-            "def recursive: <T where Copy T> T -> T = value => recursive value\n",
+            "def recursive: <T where Copy T> T -> T = <T where Copy T> value => recursive value\n",
             "let result: I32 = recursive 1\n",
         ));
         let (function, call) = direct_calls(&program, "recursive")
@@ -5469,7 +5537,7 @@ mod tests {
     #[test]
     fn same_key_recursion_succeeds_and_changed_keys_diagnose() {
         let (_, program) = lower(concat!(
-            "def recursive: <T where Copy T> T -> T = value => recursive value\n",
+            "def recursive: <T where Copy T> T -> T = <T where Copy T> value => recursive value\n",
             "let result: I32 = recursive 1\n",
         ));
         let outer = resolved_root(&program, "recursive");
@@ -5571,8 +5639,8 @@ mod tests {
     fn unresolved_requests_never_reach_a_key() {
         let (_, program) = lower(concat!(
             "trait TestAbsent T { absent: T -> Bool }\n",
-            "def identity: <T where Copy T> T -> T = value => value\n",
-            "def absent_bound: <T where TestAbsent T> T -> Bool = value => absent value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
+            "def absent_bound: <T where TestAbsent T> T -> Bool = <T where TestAbsent T> value => absent value\n",
             "let applied: I32 = identity 1\n",
         ));
         let identity = function_id(&program, "identity");
@@ -5661,7 +5729,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("temp root");
         std::fs::write(
             root.join("tools.sta"),
-            "pub mod\npub def wrap: <T where Copy T> T -> T = value => value\n",
+            "pub mod\npub def wrap: <T where Copy T> T -> T = <T where Copy T> value => value\n",
         )
         .expect("write module");
         let entry = root.join("main.sta");
@@ -5697,7 +5765,7 @@ mod tests {
     fn coroutine_body_thunks_keep_their_outer_parameters() {
         let (_, program) = lower(concat!(
             "use std.coroutine.*\n",
-            "def make_task: <T where Copy T> T -> Coroutine{} T = value => coro { value }\n",
+            "def make_task: <T where Copy T> T -> Coroutine{} T = <T where Copy T> value => coro { value }\n",
             "let task = make_task 1\n",
         ));
         let thunk = program
@@ -5732,7 +5800,7 @@ mod tests {
     fn coroutine_creation_does_not_collect_child_body_only_parameters() {
         let (_, mut program) = lower(concat!(
             "use std.coroutine.*\n",
-            "def make_task: <T where Copy T> T -> Coroutine{} T = value => coro { value }\n",
+            "def make_task: <T where Copy T> T -> Coroutine{} T = <T where Copy T> value => coro { value }\n",
             "let task = make_task 1\n",
         ));
         let (plan_id, thunk) = program
@@ -5761,9 +5829,9 @@ mod tests {
     fn resolved_values_agree_with_checked_specialization_inference() {
         let (module, program) = lower(concat!(
             "type Phantom T = wrap ()\n",
-            "def identity: <T where Copy T> T -> T = value => value\n",
-            "def phantom_result: <T> () -> Phantom T = () => Phantom ()\n",
-            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => (value ^ N)\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
+            "def phantom_result: <T> () -> Phantom T = <T> () => Phantom ()\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = <T, N where Copy T, Natural N> value => n => (value ^ N)\n",
             "let applied: I32 = identity 1\n",
             "let hidden: Phantom I32 = phantom_result ()\n",
             "let repeated: (I32 ^ 3) = repeat 7 3\n",
@@ -5828,9 +5896,9 @@ mod tests {
             "trait TestOuter T { outer_test: T -> I32 }\n",
             "impl TestInner I32 { inner_test = _ => 1 }\n",
             "impl<T where TestInner T> TestOuter T { outer_test = value => inner_test value }\n",
-            "def show_bound: <T where TestShow T> T -> Bool = value => test_show value\n",
-            "def fallback_bound: <T where TestDefaulted T> T -> Bool = value => test_fallback value\n",
-            "def use_outer: <T where TestOuter T> T -> I32 = value => outer_test value\n",
+            "def show_bound: <T where TestShow T> T -> Bool = <T where TestShow T> value => test_show value\n",
+            "def fallback_bound: <T where TestDefaulted T> T -> Bool = <T where TestDefaulted T> value => test_fallback value\n",
+            "def use_outer: <T where TestOuter T> T -> I32 = <T where TestOuter T> value => outer_test value\n",
             "let shown: Bool = show_bound 1\n",
             "let fell: Bool = fallback_bound 1\n",
             "let out: I32 = use_outer 1\n",
@@ -5867,7 +5935,7 @@ mod tests {
     #[test]
     fn resolved_keys_feed_the_append_only_catalog() {
         let (_, program) = lower(concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first: I32 = identity 1\n",
             "let second: I32 = identity 1\n",
         ));
@@ -5896,7 +5964,7 @@ mod tests {
     #[test]
     fn repeated_product_counts_and_curried_layers_resolve() {
         let (_, program) = lower(concat!(
-            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => (value ^ N)\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = <T, N where Copy T, Natural N> value => n => (value ^ N)\n",
             "let repeated: (I32 ^ 3) = repeat 7 3\n",
         ));
         let (environment, relevant) = resolve_named_call(&program, "repeat");

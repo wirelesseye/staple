@@ -6017,7 +6017,7 @@ mod tests {
     #[test]
     fn recursive_local_storage_layout_corruption_is_rejected() {
         let module = checked_program(
-            "def outer: () -> I32 = () => {\n def recur: <T> T -> T = value => recur value\n recur 1\n}\n",
+            "def outer: () -> I32 = () => {\n def recur: <T> T -> T = <T> value => recur value\n recur 1\n}\n",
         );
         let baseline = crate::Lowerer::new()
             .lower(&module)
@@ -6063,7 +6063,7 @@ mod tests {
     #[test]
     fn concrete_repetition_shape_corruption_is_rejected() {
         let module = checked_program(concat!(
-            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => (value ^ N)\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = <T, N where Copy T, Natural N> value => n => (value ^ N)\n",
             "let repeated: (I32 ^ 3) = repeat 7 3\n",
         ));
         let baseline = crate::Lowerer::new()
@@ -6113,7 +6113,7 @@ mod tests {
     #[test]
     fn runtime_dictionary_obligations_are_revalidated_against_the_instance() {
         let module = checked_program(concat!(
-            "def pick: <T where Copy T> T -> T = value => value\n",
+            "def pick: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let stored = pick\n",
             "let answer = stored 42\n",
         ));
@@ -6151,7 +6151,7 @@ mod tests {
     fn specialized_effect_call_steps_are_recorded_and_revalidated() {
         let module = checked_program(concat!(
             "use std.io.(IO, println)\n",
-            "def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\n",
+            "def twice: <effect E> (() ->{E} ()) ->{E} () = <effect E> f => { f (); f () }\n",
             "def output: () ->{IO} () = () => println \"hello\"\n",
             "twice output\n",
         ));
@@ -6190,7 +6190,7 @@ mod tests {
         let module = checked_program(concat!(
             "trait Merge Left Right Output { merge: (Left, Right) -> Output }\n",
             "impl Merge I32 I32 I32 { merge = (left, right) => left + right }\n",
-            "def combine: <L, R, O where Merge L R O> (L, R) -> O = pair => Merge.merge pair\n",
+            "def combine: <L, R, O where Merge L R O> (L, R) -> O = <L, R, O where Merge L R O> pair => Merge.merge pair\n",
             "let total: I32 = combine (20, 22)\n",
         ));
         let mut lowered = crate::Lowerer::new()
@@ -6229,7 +6229,7 @@ mod tests {
     #[test]
     fn generic_instances_substitute_signatures_separately() {
         let (_, mut program) = lower_with_worklist(concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first: I32 = identity 1\n",
             "let second: U8 = identity (U8 :: 1)\n",
         ));
@@ -6274,7 +6274,7 @@ mod tests {
     #[test]
     fn unused_generic_bounds_do_not_require_an_instance_substitution() {
         let (_, mut program) = lower_with_worklist(concat!(
-            "def irrelevant: <T where Copy T> I32 -> I32 = value => value\n",
+            "def irrelevant: <T where Copy T> I32 -> I32 = <T where Copy T> value => value\n",
             "let result = irrelevant 1\n",
         ));
         materialize(&mut program);
@@ -6362,7 +6362,7 @@ mod tests {
     #[test]
     fn repeated_product_counts_substitute_in_bodies() {
         let (_, mut program) = lower_with_worklist(concat!(
-            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => (value ^ N)\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = <T, N where Copy T, Natural N> value => n => (value ^ N)\n",
             "let repeated: (I32 ^ 3) = repeat 7 3\n",
         ));
         materialize(&mut program);
@@ -6393,7 +6393,7 @@ mod tests {
     #[test]
     fn nested_closures_and_captures_materialize_concretely() {
         let (_, mut program) = lower_with_worklist(concat!(
-            "def make: <T where Copy T> T -> (() -> T) = value => () => value\n",
+            "def make: <T where Copy T> T -> (() -> T) = <T where Copy T> value => () => value\n",
             "let produced: () -> I32 = make 7\n",
         ));
         materialize(&mut program);
@@ -6417,7 +6417,7 @@ mod tests {
     #[test]
     fn identical_requests_share_one_body() {
         let (_, mut program) = lower_with_worklist(concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first: I32 = identity 1\n",
             "let second: I32 = identity 1\n",
         ));
@@ -6467,7 +6467,7 @@ mod tests {
     #[test]
     fn recursive_calls_bind_to_their_own_instance() {
         let (_, mut program) = lower_with_worklist(concat!(
-            "def recursive: <T where Copy T> T -> T = value => recursive value\n",
+            "def recursive: <T where Copy T> T -> T = <T where Copy T> value => recursive value\n",
             "let result: I32 = recursive 1\n",
         ));
         materialize(&mut program);
@@ -6559,7 +6559,7 @@ mod tests {
     #[test]
     fn formatting_sites_store_concrete_evidence() {
         let (_, mut program) = lower_with_worklist(concat!(
-            "def render: <T where Display T> move T -> String = move value => \"value=$value\"\n",
+            "def render: <T where Display T> move T -> String = <T where Display T> move value => \"value=$value\"\n",
             "let result: String = render 1\n",
         ));
         materialize(&mut program);
@@ -6598,7 +6598,7 @@ mod tests {
     fn copy_and_drop_facts_agree_with_checking() {
         let (module, mut program) = lower_with_worklist(concat!(
             "use std.cinterop.(CString, c_string)\n",
-            "def discard: <T> move T -> () = move value => { value; () }\n",
+            "def discard: <T> move T -> () = <T> move value => { value; () }\n",
             "def make_string: () -> (() -> String) = () => {\n",
             "  let held = \"captured\"\n",
             "  () => held\n",
@@ -6756,8 +6756,8 @@ mod tests {
     #[test]
     fn repeated_lowering_produces_stable_bodies() {
         let source = concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
-            "def discard: <T> move T -> () = move value => { value; () }\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
+            "def discard: <T> move T -> () = <T> move value => { value; () }\n",
             "let first: I32 = identity 1\n",
             "let second: U8 = identity (U8 :: 1)\n",
             "let third: () = discard 2\n",
@@ -6776,7 +6776,7 @@ mod tests {
     #[test]
     fn materialization_cannot_mutate_templates() {
         let (_, mut program) = lower_with_worklist(concat!(
-            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let first: I32 = identity 1\n",
         ));
         let template_expressions = program
@@ -7082,7 +7082,7 @@ mod tests {
     fn buffer_pop_alternatives_are_recorded_and_revalidated() {
         let (_, mut program) = lower_with_worklist(concat!(
             "use std.buffer.Buffer\n",
-            "def take: <T> mut Buffer T -> Option T = mut values => Buffer.pop values\n",
+            "def take: <T> mut Buffer T -> Option T = <T> mut values => Buffer.pop values\n",
             "let mut values: Buffer I32 = Buffer.with_capacity (USize :: 1)\n",
             "let popped = take values\n",
         ));
@@ -7116,8 +7116,8 @@ mod tests {
         let (_, mut program) = lower_with_worklist(concat!(
             "use std.coroutine.*\n",
             "use std.io.(IO, println)\n",
-            "def make: <T> Scheduler -> (Wait T, Resolver T) = sched => completion sched\n",
-            "def finish: <T> (Resolver T; T) -> () = (resolver; value) => resolver |> complete value\n",
+            "def make: <T> Scheduler -> (Wait T, Resolver T) = <T> sched => completion sched\n",
+            "def finish: <T> (Resolver T; T) -> () = <T> (resolver; value) => resolver |> complete value\n",
             "def worker_io: () -> Coroutine{IO} I32 = () => coro { println \"work\"; 7 }\n",
             "def worker_pure: () -> Coroutine{} U8 = () => coro { U8 :: 8 }\n",
             "def launch: () -> Coroutine{Tasks, IO} () = () => coro {\n",
@@ -7328,7 +7328,7 @@ mod tests {
     fn external_await_outcomes_are_recorded_and_revalidated() {
         let (_, mut program) = lower_with_worklist(concat!(
             "use std.coroutine.*\n",
-            "def waiter: <T> move Wait T -> Coroutine{} () = move pending => coro {\n",
+            "def waiter: <T> move Wait T -> Coroutine{} () = <T> move pending => coro {\n",
             "  let _ = await pending\n",
             "  ()\n",
             "}\n",
