@@ -1,5 +1,9 @@
 # Plan: Type parameters on function values
 
+## Current state
+
+Generic bracket formatting is implemented; syntax and compiler support remain pending.
+
 ## Goal
 
 Let a function value declare its own compile-time parameters:

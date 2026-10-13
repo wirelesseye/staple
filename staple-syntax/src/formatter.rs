@@ -46,6 +46,8 @@ struct Formatter<'a> {
     at_line_start: bool,
     previous: Option<TokenKind>,
     separated: bool,
+    generic_depth: usize,
+    generic_open: bool,
 }
 
 impl<'a> Formatter<'a> {
@@ -60,6 +62,8 @@ impl<'a> Formatter<'a> {
             at_line_start: true,
             previous: None,
             separated: false,
+            generic_depth: 0,
+            generic_open: false,
         }
     }
 
@@ -168,6 +172,38 @@ impl<'a> Formatter<'a> {
                     self.text(":");
                     self.space();
                 }
+                TokenKind::Operator
+                    if token.text == "<"
+                        && (self.at_line_start
+                            || self.pending_newlines > 0
+                            || matches!(
+                                self.previous,
+                                Some(
+                                    TokenKind::Colon
+                                        | TokenKind::Equals
+                                        | TokenKind::LParen
+                                        | TokenKind::Comma
+                                        | TokenKind::DoubleColon
+                                        | TokenKind::FatArrow
+                                        | TokenKind::Arrow
+                                )
+                            )) =>
+                {
+                    self.flush_pending(false);
+                    if self.separated || needs_space(self.previous, token.kind) {
+                        self.space();
+                    }
+                    self.text("<");
+                    self.generic_depth += 1;
+                    self.generic_open = true;
+                }
+                TokenKind::Operator if token.text == ">" && self.generic_depth > 0 => {
+                    self.pending_newlines = 0;
+                    self.trim_line();
+                    self.text(">");
+                    self.space();
+                    self.generic_depth -= 1;
+                }
                 TokenKind::Caret
                 | TokenKind::Operator
                 | TokenKind::As
@@ -182,13 +218,18 @@ impl<'a> Formatter<'a> {
                 }
                 _ => {
                     self.flush_pending(true);
-                    if self.separated || needs_space(self.previous, token.kind) {
+                    if self.generic_open {
+                        self.trim_line();
+                    } else if self.separated || needs_space(self.previous, token.kind) {
                         self.space();
                     }
                     self.text(&token.text);
                 }
             }
             if !token.kind.is_trivia() {
+                if token.text != "<" {
+                    self.generic_open = false;
+                }
                 self.previous = Some(token.kind);
                 self.separated = false;
             }
@@ -369,6 +410,16 @@ fn needs_space(previous: Option<TokenKind>, current: TokenKind) -> bool {
 mod tests {
     use super::{format_source, format_token_stream};
     use crate::{TokenKind, lex};
+
+    #[test]
+    fn formats_generic_brackets_and_preserves_comparisons() {
+        let source = "def f: <T where Copy T> T -> T = x => x\nlet less = x < y\n";
+        let formatted = format_source(source).unwrap();
+        assert_eq!(formatted, source);
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+        let effect = "def f: <effect E> (() ->{E} ()) ->{E} () = f => f ()\n";
+        assert_eq!(format_source(effect).unwrap(), effect);
+    }
 
     #[test]
     fn formats_repeated_elements() {
