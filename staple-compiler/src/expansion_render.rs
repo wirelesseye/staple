@@ -404,7 +404,11 @@ fn render_expr(program: &Program, expression: &Expression) -> String {
             out
         }
         Expression::Function(function) => format!(
-            "{} =>{} {}",
+            "{}{} =>{} {}",
+            function
+                .generics
+                .as_ref()
+                .map_or_else(String::new, |g| format!("{g} ")),
             render_pattern(&function.pattern),
             function
                 .effect_lower_bound

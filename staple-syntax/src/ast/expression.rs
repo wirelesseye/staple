@@ -173,6 +173,8 @@ pub struct MatchArm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionExpression {
     pub syntax: Syntax,
+    /// Compile-time parameters, only on the outermost function of a curried chain.
+    pub generics: Option<super::GenericParameters>,
     pub pattern: Pattern,
     /// Effects required by this value, in addition to its body's inferred effects.
     pub effect_lower_bound: Option<EffectSet>,

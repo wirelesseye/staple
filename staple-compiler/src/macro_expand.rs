@@ -7077,6 +7077,9 @@ impl MacroExpander {
         self.freshen_syntax(expression_syntax_mut(expression), module, mark);
         match expression {
             Expression::Function(function) => {
+                if let Some(generics) = &mut function.generics {
+                    freshen_generics(self, generics, module, mark);
+                }
                 freshen_pattern(self, &mut function.pattern, module, mark);
                 if let Some(effects) = &mut function.effect_lower_bound {
                     self.freshen_syntax(&mut effects.syntax, module, mark);
@@ -10877,6 +10880,9 @@ fn substitute_splices(
     let mut result = expression.clone();
     match &mut result {
         Expression::Function(function) => {
+            if let Some(generics) = &mut function.generics {
+                substitute_generics(generics, environment, diagnostics)?;
+            }
             substitute_pattern(&mut function.pattern, environment, diagnostics)?;
             if let Some(effects) = &mut function.effect_lower_bound {
                 for resource in &mut effects.resources {

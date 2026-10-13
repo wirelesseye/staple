@@ -2,7 +2,7 @@
 
 ## Current state
 
-Generic bracket formatting is implemented; syntax and compiler support remain pending.
+Generic bracket formatting, value-generic AST/parser support, macro freshening/splices, and expansion rendering are implemented. Compiler scoping, checking, LSP, and migration remain pending.
 
 ## Goal
 

@@ -851,8 +851,7 @@ impl Grammar {
     fn parse_macro_value(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let pattern = self.parse_top_level_parameter_pattern()?;
-        let patterns = if matches!(&pattern, Pattern::Product(product) if product.slotted)
-        {
+        let patterns = if matches!(&pattern, Pattern::Product(product) if product.slotted) {
             let Pattern::Product(product) = pattern else {
                 unreachable!()
             };
@@ -898,6 +897,7 @@ impl Grammar {
         for (start, pattern) in parameter_starts.into_iter().zip(patterns).rev() {
             expression = Expression::Function(Box::new(FunctionExpression {
                 syntax: self.syntax(start),
+                generics: None,
                 pattern,
                 effect_lower_bound: None,
                 body: Box::new(expression),
@@ -1130,10 +1130,7 @@ impl Grammar {
                 let associated_name = self
                     .expect(TokenKind::Identifier, "expected associated type name")?
                     .text;
-                self.expect(
-                    TokenKind::Equals,
-                    "expected `=` after associated type name",
-                )?;
+                self.expect(TokenKind::Equals, "expected `=` after associated type name")?;
                 let previous = self.newline_terminates_type;
                 let previous_any = self.any_newline_terminates_type;
                 self.newline_terminates_type = true;
@@ -1553,8 +1550,7 @@ impl Grammar {
         if self.at(TokenKind::LBrace) {
             return Err(self.error("effect parameter must appear immediately after the type name"));
         }
-        let (trait_bounds, subtype_bounds) =
-            self.parse_where_clause(&mut type_parameters)?;
+        let (trait_bounds, subtype_bounds) = self.parse_where_clause(&mut type_parameters)?;
         let has_body = self.eat(TokenKind::Equals);
         if !has_body && !type_parameters.is_empty() {
             return Err(self.error("singleton types cannot have compile-time parameters"));
@@ -1694,7 +1690,7 @@ impl Grammar {
         let name = self.parse_binding_name()?;
         if self.at_operator("<") {
             return Err(self.error(format!(
-                "compile-time parameters belong to the annotation; write `{name}: <T> …`"
+                "compile-time parameters belong to the function value; write `{name} = <T> x: T => …`"
             )));
         }
         let annotation = if self.eat(TokenKind::Colon) {
@@ -1718,6 +1714,18 @@ impl Grammar {
         } else {
             None
         };
+        if matches!(&value, Some(Expression::Function(f)) if f.generics.is_some()) {
+            if signal {
+                return Err(
+                    self.error("generic function types are not supported in signal bindings")
+                );
+            }
+            if kind == BindingKind::Const {
+                return Err(
+                    self.error("compile-time parameters are only allowed on `def` bindings")
+                );
+            }
+        }
         if value.is_none() {
             match kind {
                 BindingKind::Const => {
@@ -1953,11 +1961,15 @@ impl Grammar {
                 },
             )));
         }
+        let starts_generic = self.at_operator("<");
         let function_error = match self.parse_function_expression() {
             Ok(function) => return Ok(Expression::Function(Box::new(function))),
             Err(error) => error,
         };
         self.position = checkpoint;
+        if starts_generic {
+            return Err(function_error);
+        }
         let expression = self.parse_pipe_expression()?;
         if matches!(self.peek(), Some(TokenKind::Arrow | TokenKind::FatArrow)) {
             return Err(function_error);
@@ -1968,6 +1980,17 @@ impl Grammar {
     /// Parses a function parameter pattern and body.
     fn parse_function_expression(&mut self) -> Result<FunctionExpression, ParseError> {
         let start = self.position;
+        let generics = if self.at_operator("<") {
+            let (parameters, trait_bounds, subtype_bounds) = self.parse_bracketed_generics()?;
+            Some(crate::GenericParameters {
+                syntax: self.annotation_syntax(start, 1),
+                parameters,
+                trait_bounds,
+                subtype_bounds,
+            })
+        } else {
+            None
+        };
         let mut pattern = self.parse_top_level_parameter_pattern()?;
         if matches!(&pattern, Pattern::Product(p) if p.slotted)
             && let Pattern::Product(p) = &mut pattern
@@ -2000,8 +2023,16 @@ impl Grammar {
             None
         };
         let body = Box::new(self.parse_expression()?);
+        if let Expression::Function(inner) = body.as_ref() {
+            if inner.generics.is_some() {
+                return Err(
+                    self.error("compile-time parameters must be on the outermost function value")
+                );
+            }
+        }
         Ok(FunctionExpression {
             syntax: self.syntax(start),
+            generics,
             pattern,
             effect_lower_bound,
             body,
@@ -2025,9 +2056,7 @@ impl Grammar {
     /// pattern; bracketed parameter lists are rejected with a migration hint.
     fn parse_parameter_slot_pattern(&mut self) -> Result<Pattern, ParseError> {
         if self.at(TokenKind::LBracket) {
-            return Err(self.error(
-                "parameter products are written `(a; b)`",
-            ));
+            return Err(self.error("parameter products are written `(a; b)`"));
         }
         let checkpoint = self.position;
         let start = self.position;
@@ -2347,9 +2376,7 @@ impl Grammar {
         if self.at(TokenKind::Star) && !self.conversion_target {
             return Err(self.error("juxtaposed parameters are now written `(A; B) -> R`"));
         }
-        if (whole_mutable || whole_moved)
-            && matches!(&parameter, Type::Product(p) if p.slotted)
-        {
+        if (whole_mutable || whole_moved) && matches!(&parameter, Type::Product(p) if p.slotted) {
             return Err(self.error("mark individual slots of a slotted parameter type"));
         }
         if self.at(TokenKind::Arrow) {
@@ -2378,9 +2405,9 @@ impl Grammar {
             };
             let resources = if self.at(TokenKind::LBrace) {
                 if self.tokens[self.next_non_trivia(self.position)].span.start != arrow.span.end {
-                    return Err(self.error(
-                        "an effect set must immediately follow `->`; write `->{...}`",
-                    ));
+                    return Err(
+                        self.error("an effect set must immediately follow `->`; write `->{...}`")
+                    );
                 }
                 self.parse_effect_set()?
             } else {
@@ -4291,7 +4318,10 @@ impl Grammar {
         // Re-parsed macro fragments carry tokens whose spans point into the
         // original file; never slice past this parser's source.
         let offset = offset.min(self.source.len());
-        let line = self.line_starts.partition_point(|start| *start <= offset).max(1);
+        let line = self
+            .line_starts
+            .partition_point(|start| *start <= offset)
+            .max(1);
         let line_start = self.line_starts[line - 1].min(offset);
         SourceLocation {
             line,

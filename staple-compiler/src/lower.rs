@@ -18299,6 +18299,7 @@ mod tests {
         expressions.push((
             "Function",
             Expression::Function(Box::new(FunctionExpression {
+                generics: None,
                 syntax: syntax.clone(),
                 pattern: wildcard_pattern(),
                 effect_lower_bound: None,

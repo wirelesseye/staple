@@ -1965,7 +1965,13 @@ fn rejects_defaults_on_juxtaposed_parameter_slots() {
     let error =
         parse("def render: (width: I32 = 800; body: (() -> ())) -> () = (width; body) => ()\n")
             .expect_err("juxtaposed slots must have exact arity");
-    assert!(error.message.contains("slotted product slots cannot declare defaults"), "{}", error.message);
+    assert!(
+        error
+            .message
+            .contains("slotted product slots cannot declare defaults"),
+        "{}",
+        error.message
+    );
 
     parse("def render: (((width: I32 = 800)); body: (() -> ())) -> () = (width; body) => ()\n")
         .expect("a nested product parameter may retain its own field defaults");
@@ -3084,19 +3090,55 @@ fn rejects_invalid_parameter_product_syntax_with_migration_hints() {
         ("def f: I32 * I32 -> I32\n", "`(A; B) -> R`"),
         ("def f = x * y => x\n", "`(a; b) => body`"),
         ("macro f = x * y => x\n", "`(a; b) => body`"),
-        ("def f: [I32, I32] -> I32\n", "parameter products are written `(A; B)`"),
-        ("def f = [a, b] => a\n", "parameter products are written `(a; b)`"),
-        ("macro f = [a, b] => quote {}\n", "parameter products are written `(a; b)`"),
-        ("type Empty = alias []\n", "parameter products are written `(A; B)`"),
-        ("def f = [] => ()\n", "parameter products are written `(a; b)`"),
-        ("def f: [x: I32 = 1, I32] -> I32\n", "parameter products are written `(A; B)`"),
-        ("def f: [I32, ...] -> I32\n", "parameter products are written `(A; B)`"),
-        ("def f: mut [I32, I32] -> ()\n", "parameter products are written `(A; B)`"),
+        (
+            "def f: [I32, I32] -> I32\n",
+            "parameter products are written `(A; B)`",
+        ),
+        (
+            "def f = [a, b] => a\n",
+            "parameter products are written `(a; b)`",
+        ),
+        (
+            "macro f = [a, b] => quote {}\n",
+            "parameter products are written `(a; b)`",
+        ),
+        (
+            "type Empty = alias []\n",
+            "parameter products are written `(A; B)`",
+        ),
+        (
+            "def f = [] => ()\n",
+            "parameter products are written `(a; b)`",
+        ),
+        (
+            "def f: [x: I32 = 1, I32] -> I32\n",
+            "parameter products are written `(A; B)`",
+        ),
+        (
+            "def f: [I32, ...] -> I32\n",
+            "parameter products are written `(A; B)`",
+        ),
+        (
+            "def f: mut [I32, I32] -> ()\n",
+            "parameter products are written `(A; B)`",
+        ),
         ("type Invalid = alias I32[2]\n", "array types"),
-        ("def f = [[a, b], c] => a\n", "parameter products are written `(a; b)`"),
-        ("def f = [a, [b, c]] => a\n", "parameter products are written `(a; b)`"),
-        ("def identity<T> = value: T => value\n", "belong to the annotation"),
-        ("def keep<A>: (A -> ()) -> () = f => ()\n", "belong to the annotation"),
+        (
+            "def f = [[a, b], c] => a\n",
+            "parameter products are written `(a; b)`",
+        ),
+        (
+            "def f = [a, [b, c]] => a\n",
+            "parameter products are written `(a; b)`",
+        ),
+        (
+            "def identity<T> = value: T => value\n",
+            "belong to the function value",
+        ),
+        (
+            "def keep<A>: (A -> ()) -> () = f => ()\n",
+            "belong to the function value",
+        ),
     ] {
         let error = parse(source).expect_err("invalid parameter product");
         assert!(error.message.contains(hint), "{source}: {error}");
@@ -3727,4 +3769,21 @@ fn function_type_effect_sets_require_arrow_adjacency() {
     assert!(parse("def f: () ->{IO} () = () => ()\n").is_ok());
     assert!(parse("def f: () -> () = () => ()\n").is_ok());
     assert!(parse("def f: () ->\n () = () => ()\n").is_ok());
+}
+
+#[test]
+fn function_value_compile_time_parameters() {
+    for source in [
+        "def identity = <T> move x: T => T :: x",
+        "def copy = <T where Copy T> x: T => x",
+        "def apply = <effect E> f: (() ->{E} ()) =>{E} f ()",
+        "def first = <T, U> x: T => y: U => T :: x",
+    ] {
+        let parsed = staple_syntax::parse(source).unwrap();
+        assert_eq!(parsed.syntax.text(), source);
+        let formatted = staple_syntax::format_source(source).unwrap();
+        assert_eq!(staple_syntax::format_source(&formatted).unwrap(), formatted);
+    }
+    let error = staple_syntax::parse("def bad = x => <T> y: T => y").unwrap_err();
+    assert!(error.message.contains("outermost function value"));
 }

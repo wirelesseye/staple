@@ -480,8 +480,17 @@ pub struct Binding {
 }
 
 impl Binding {
-    /// The parameters introduced by the top-level annotation.
+    /// The canonical parameters introduced by the function value.
     pub fn generics(&self) -> Option<&super::GenericParameters> {
+        if let Some(Expression::Function(function)) = &self.value
+            && let Some(generics) = &function.generics
+        {
+            return Some(generics);
+        }
+        self.annotation_generics()
+    }
+    /// Parameters scoped only to the binding annotation.
+    pub fn annotation_generics(&self) -> Option<&super::GenericParameters> {
         match self.annotation.as_ref() {
             Some(Type::Forall(ty))
                 if matches!(self.kind, BindingKind::Def | BindingKind::Extern) =>
