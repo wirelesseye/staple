@@ -2,7 +2,7 @@
 
 ## Current state
 
-Syntax, macros, isolated scopes, canonical value schemes, generic contracts, result/effect inference, specialization, stored generic closures, and LSP support are implemented. Required parameter restatements are migrated. Workspace tests and stored-value effect regressions pass. Value-only stdlib/example/fixture and reference migration is prepared for the next commit.
+Implementation and required stdlib/example/fixture/reference migrations are complete. Validation includes the workspace suite, compiler/effect regressions, and 154/154 matching behavior cases. All 11 examples have equivalent LLVM IR after generated syntax-ID and local-name normalization; raw generated names differ. The optional monomorphic style-only migration is deferred.
 
 ## Goal
 

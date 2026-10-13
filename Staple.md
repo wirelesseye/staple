@@ -746,7 +746,7 @@ namespace, so its public members are selected through the type name:
 type Animal = wrap ...
 
 companion Animal {
-    pub def teleport: (Animal; F32; F32) -> Animal = (animal; x; y) => animal
+    pub def teleport = (animal: Animal; x: F32; y: F32) => Animal :: animal
 }
 
 let animal: Animal = ...
@@ -1023,7 +1023,7 @@ The initializer is evaluated by the compiler, and may call ordinary functions,
 including recursively:
 
 ```staple
-def fibonacci: I32 -> I32 = n =>
+def fibonacci = n: I32 => I32 ::
     match n < 2 {
         True() => n,
         False() => fibonacci (n - 1) + fibonacci (n - 2),
@@ -1302,7 +1302,7 @@ type Config = from (window: (width: I32 = 800, height: I32 = 600), title: String
 
 let origin: Point = ()
 let config: Config = (window: (.height: 900))
-def text: TextArgs -> () = args => ()
+def text = args: TextArgs => () :: ()
 
 text ("Hello")          // equivalent to text ("Hello", 0, 0)
 text ("Hello", .y: 10) // equivalent to text ("Hello", 0, 10)
@@ -1398,7 +1398,7 @@ integer type literal, a type alias, or a compile-time parameter constrained by
 type Count = alias 3
 let cells: (I32 ^ Count) = (0 ^ Count)
 
-def repeat: <T, N where Natural N> T -> (T ^ N) = value => (value ^ N)
+def repeat = <T, N where Copy T, Natural N> value: T => (T ^ N) :: (value ^ N)
 ```
 
 A runtime value is never a valid count, even when its type is a singleton: with
@@ -1550,9 +1550,7 @@ expression constrains it.
 A function value may declare an effect lower bound immediately after `=>`:
 
 ```staple
-def greet = () =>{IO} {
-    println "Hello world!"
-}
+def apply = <effect E> f: (() ->{E} ()) =>{E} f ()
 ```
 
 The declared effects remain part of the function even when unused, and merge
@@ -1676,11 +1674,10 @@ function application and infix operators, so `I32 :: a + b` means
 
 When a type-ascription expression is a function body, its type constrains the
 function result, including values produced by explicit `return` statements.
-For named bindings, a complete binding annotation is the canonical way to
-write both the parameter and result types:
+A function value can write both its parameter type and result ascription:
 
 ```staple
-def identity: I32 -> I32 = value => value
+def identity = value: I32 => I32 :: value
 ```
 
 A binding annotation may also constrain the complete function type. A function
@@ -1692,93 +1689,113 @@ let add: (x: I32, y: I32) -> I32
 
 ### Generic functions
 
-A function type may be quantified by compile-time parameters written in angle
-brackets before it. The quantified type `<T> move T -> T` is a *scheme*: it
-describes a function that works for every `T`. Any function whose type is a
-scheme is generic, whatever declares it:
+A function value declares compile-time parameters in angle brackets before its
+parameter pattern. Its type is a *scheme*: `<T> move T -> T` describes a function
+that works for every `T`.
 
 ```staple
-// A `def`.
-def identity: <T> move T -> T = move value => value
-
-// A `let` whose annotation is a scheme, checked against a lambda.
-let duplicate: <T where Copy T> T -> (T, T) = value => (value, value)
+def identity = <T> move value: T => T :: value
+let duplicate = <T where Copy T> value: T => (T, T) :: (value, value)
 
 type Box T = wrap T
-
-// A companion member: the companion's parameters, then the member's own.
 companion<T> Box T {
-    pub def map: <U> (move Box T, move T -> U) -> Box U =
-        (move Box value, move f) => Box (f value)
+    pub def map = <U> (move box: Box T, move f: (move T -> U)) => Box U :: {
+        let Box value = box
+        Box (f value)
+    }
 }
 
-// A trait member, which may also declare parameters of its own.
 trait Visit T { visit: <A> (T, move A) -> A }
+impl Visit I32 { visit = <B> (_, move value: B) => value }
 ```
 
-The other generic functions are implementation members, which are generic
-over their `impl<…>` parameters (see [Generic trait
-implementations](#generic-trait-implementations)), the constructors of generic
-types (`Box` has the scheme `<T> move T -> Box T`), and generic intrinsics
-(below).
+Companion, implementation, and trait parameters remain in scope in their
+members. An implementation of a generic trait member, and a generic trait
+default method, must declare the member's own parameters on its function value.
+Constructors of generic types (`Box` has scheme `<T> move T -> Box T`) and generic
+intrinsics are also generic.
 
 #### Declaring parameters
 
-A parameter list contains type parameters and `effect` parameters, followed by
-an optional `where` clause:
+A list contains type parameters and `effect` parameters, followed by an
+optional `where` clause:
 
 ```staple
-def first: <A, B> (move A, B) -> A = (move a, b) => a
-def show_all: <T where Display T> List T ->{IO} () = items => {
+def first = <A, B> (move a: A, b: B) => A :: a
+def show_all = <T where Display T> items: List T =>{IO} () :: {
     // ...
 }
-def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }
+def twice = <effect E> f: (() ->{E} ()) =>{E} () :: { f (); f () }
 ```
 
-Parameters are flattened: `first` declares `<A, B>` even though its value
-parameter is the product `(A, B)`, and product patterns are not permitted
-inside the angle brackets. The `where` clause holds trait bounds (see [Traits
-and bounded generic functions](#traits-and-bounded-generic-functions)),
-subtype bounds (see [Subtype bounds](#subtype-bounds)), and `?Sized`
-relaxations. Effect parameters stand for effect sets and are described with
-effects under [Typed resources](#typed-resources).
+Parameters are positional: `first` declares `<A, B>` even though its runtime
+parameter is a product. Product patterns are not allowed inside angle brackets.
+The `where` clause holds trait bounds (see [Traits and bounded generic
+functions](#traits-and-bounded-generic-functions)), subtype bounds (see
+[Subtype bounds](#subtype-bounds)), and `?Sized` relaxations. Effect parameters
+stand for effect sets; see [Typed resources](#typed-resources).
 
-Every type parameter has an implicit `Sized` bound, so it may appear in by-value
-parameters, results, products, and represented types. A function that only
-stores or forwards a type behind a constructor that accepts unsized arguments
-can relax that default:
+Every type parameter has an implicit `Sized` bound. A function that forwards a
+type behind a constructor accepting unsized arguments can relax that default:
 
 ```staple
-def preserve_ref: <T where ?Sized T> Ref T -> Ref T = value => value
+def preserve_ref = <T where ?Sized T> value: Ref T => value
 ```
 
 `?Sized T` must name a parameter of the same list and may appear once per
 parameter. It is a relaxation, not a trait bound: `where Sized T` remains an
 ordinary bound. A relaxed parameter cannot be passed or returned by value.
-`Sized` is compiler-derived, so explicit `impl Sized` declarations are
-rejected.
+`Sized` is compiler-derived, so explicit `impl Sized` declarations are rejected.
 
-When a binding's annotation is a scheme, its parameters are in scope in the
-binding's value, including the types of local bindings:
+Compile-time parameters declared by a value are visible in its pattern, effects,
+and body, including local type annotations:
 
 ```staple
-def singleton: <T> move T -> List T = move value => {
+def singleton = <T> move value: T => List T :: {
     let mut items: List T = List.new ()
     List.push items value
     items
 }
 ```
 
-Parameters must be declared: an unannotated definition is never generalized,
-and a `let` gets parameters only through a scheme annotation, which makes it a
-polymorphic value (below). Parameters of an enclosing companion, implementation,
-or trait are in scope in its members, and an `extern` block inside a companion
-inherits the companion's parameters and bounds.
+Without a surrounding generic function type, each runtime parameter needs a
+fully known type in terms of the declared parameters. `<T> x => x` is an error;
+`<T> move x: T => x` supplies the required type. The result may be inferred, as in
+`def drop = <T> move value: T => ()`. A recursive generic function must ascribe
+its result (`R :: ...`) before it can call itself. Definitions are never
+implicitly generalized.
 
-Generic `extern` bindings are allowed only for the reserved
-`"staple-intrinsic"` ABI; ordinary external ABIs cannot declare compile-time
-parameters. Intrinsics must be called directly, and their type and effect
-arguments are inferred at the call.
+Only the outermost function in a curried chain may declare parameters:
+`<T where Copy T> x: T => y: T => x` declares `T` for both arrows; `x => <T> y: T => y` is
+rejected. Separate function values in higher-rank arguments and type ascriptions
+may declare their own lists.
+
+#### With an explicit type annotation
+
+An annotation is a contract with its own independently scoped parameters. The
+value's parameters are the function's canonical signature:
+
+```staple
+def identity: <T> move T -> T = <U> move value: U => U :: value
+def copy_identity: <T where Copy T> T -> T = <U where Copy U> value: U => value
+
+// Errors: the value must declare parameters, and annotation names cannot leak.
+def missing: <T> move T -> T = move value => value
+def out_of_scope: <T> move T -> T = <U> move value: T => T :: value
+```
+
+The lists must have the same count, parameter kinds (`T` versus `effect E`),
+sizedness, and bounds after positional renaming. Bounds are compared as sets,
+so their order does not matter. A missing or extra bound is an error. The same
+rule applies to any function value checked against a generic function type,
+including trait implementations, default methods, ascriptions, and higher-rank
+arguments. A non-function value such as `let f: <T> move T -> T = identity` does
+not need to redeclare the parameters.
+
+An `extern` block inside a companion inherits its parameters and bounds.
+Generic `extern` annotations are allowed only for the reserved
+`"staple-intrinsic"` ABI. Intrinsics must be called directly; their type and
+effect arguments are inferred at the call.
 
 #### Using a generic function
 
@@ -1799,7 +1816,7 @@ Without a value argument, the result is the instantiated function:
 let list = List.new.<I32> ()
 let text = identity.<String> "hello"
 let specialized = identity.<String>
-let mapped = Box.map.<I32, String> (Box 1, value => "${value}")
+let mapped = Box.map.<I32, String> (Box 1, move value => "${value}")
 let visited = Visit.visit.<_, I32> (1, 42)
 ```
 
@@ -1831,14 +1848,14 @@ parameter, a result, a product or `wrap` field, and as a type argument when an
 annotation spells it out:
 
 ```staple
-def consume: (<T> move T -> T) -> (I32, String) = f => (f 42, f "hello")
+def consume = f: (<T> move T -> T) => (I32, String) :: (f 42, f "hello")
 
 type Functions = wrap (identity: <T> move T -> T,)
 
 let mut selected: <T> move T -> T = identity
 let functions = Functions (identity: selected)
 let pair = consume functions.identity
-let inline = consume (move value => value)
+let inline = consume (<U> move value: U => value)
 ```
 
 A generic function becomes a *polymorphic value* when its context expects a
@@ -1861,7 +1878,7 @@ that differ only in parameter names are the same type.
   or instantiated to compound types:
 
   ```staple
-  def pick_first: <A, B> (move A, move B) -> A = (move a, move b) => a
+  def pick_first = <A, B> (move a: A, move b: B) => A :: a
   let swapped: <Y, X> (move X, move Y) -> X = pick_first
   let pairs: <T> move (T, T) -> (T, T) = identity
   ```
@@ -1925,7 +1942,7 @@ and cannot be moved, dropped, or returned whole. A resource entry may be marked
 `mut` to request a mutable borrow:
 
 ```staple
-def increment: () ->{mut Counter} () = () => {
+def increment = () =>{mut Counter} () :: {
     (resource Counter).value = (resource Counter).value + 1
 }
 ```
@@ -1939,7 +1956,7 @@ Function arrows list their effects in braces. Effect sets are
 unordered and duplicate-free, and each arrow in a curried type has its own set:
 
 ```staple
-def timestamp: () ->{Clock} I32 = () => {
+def timestamp = () =>{Clock} I32 :: {
     let clock = resource Clock
     clock.now ()
 }
@@ -1948,7 +1965,7 @@ def timestamp: () ->{Clock} I32 = () => {
 Generic functions may quantify over an effect set with an `effect` parameter:
 
 ```staple
-def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }
+def twice = <effect E> f: (() ->{E} ()) =>{E} () :: { f (); f () }
 ```
 
 An effect variable may represent the empty set, resources, state effects, or a
@@ -1968,7 +1985,7 @@ passed, and called with a different set each time:
 
 ```staple
 let stored: <effect E> (() ->{E} ()) ->{E} () = twice
-def run: (<effect E> (() ->{E} ()) ->{E} ()) ->{IO} () = repeat => {
+def run = repeat: (<effect E> (() ->{E} ()) ->{E} ()) =>{IO} () :: {
     repeat (() => println "hi")           // E := {IO}
     repeat (() => ())                     // E := {}
 }
@@ -2069,7 +2086,7 @@ of type `() -> T`. The compiler treats that argument as `() => expression`, so
 the expression is evaluated only when the callback is invoked:
 
 ```staple
-def evaluate: (() -> I32) -> I32 = callback => callback ()
+def evaluate = callback: (() -> I32) => I32 :: callback ()
 
 let answer = evaluate { expensive_computation () }
 ```
@@ -2201,7 +2218,7 @@ higher-order function takes a mutating callback:
 ```staple
 let reset: (mut I32 -> ()) = mut n => { n = 0 }
 def call: (mut I32 -> ()) -> () = f => ()         // parameter is `mut I32 -> ()`
-def twice: <A> ((mut A -> ()); mut A) -> () = (f; mut a) => { f a; f a }
+def twice = <A> (f: (mut A -> ()); mut a: A) => () :: { f a; f a }
 ```
 
 Only a marker with no following `->` marks the element itself, as on `mut A`
@@ -2226,7 +2243,7 @@ parameter value itself. A mutable argument is passed by address, so either
 kind of change is visible in the caller:
 
 ```staple
-def clear: mut Ref (I32, I32) -> () = mut cell => { cell.0 = 0 }
+def clear = mut cell: Ref (I32, I32) => () :: { cell.0 = 0 }
 
 let mut counter: Ref (I32, I32) = Ref (1, 2)
 clear counter
@@ -2234,7 +2251,7 @@ clear counter
 let fixed: Ref (I32, I32) = Ref (1, 2)
 clear fixed // error: `fixed` is not declared `mut`
 
-def replace: mut I32 -> () = mut value => { value = 42 }
+def replace = mut value: I32 => () :: { value = 42 }
 let mut answer = 0
 replace answer // answer is now 42
 ```
@@ -2275,7 +2292,7 @@ impl Drop File {
     cleanup = File descriptor => close descriptor
 }
 
-def describe: File -> String = file => "file $file"
+def describe = file: File => String :: "file $file"
 // `file` is borrowed here: `describe` cannot move, drop, or return it whole.
 ```
 
@@ -2286,7 +2303,7 @@ store it, return it, or let it drop at scope exit, and the caller can no
 longer use the argument afterward:
 
 ```staple
-def close_file: move File -> () = move file => drop file
+def close_file = move file: File => () :: drop file
 
 let handle: File = open "log.txt"
 close_file handle
@@ -2329,8 +2346,8 @@ parameter as one unit, whether that pattern is a parenthesized product or a
 nominal destructure:
 
 ```staple
-def f4: <A, B> move (A, B) -> A = move (a, _) => a
-def unbox: <T> move Box T -> T = move Box (value) => value
+def f4 = <A, B> move (a: A, _: B) => A :: a
+def unbox = <T> move box: Box T => T :: { let Box value = box; value }
 ```
 
 Every destructured binding is owned, exactly as if the whole parameter were
@@ -2355,7 +2372,7 @@ is conservatively treated as non-`Copy`, since no `Copy T` bound is known —
 must mark a parameter `move` before moving, returning, or storing it:
 
 ```staple
-def identity: <T> move T -> T = move value => value
+def identity = <T> move value: T => T :: value
 ```
 
 Constructs that consume a value outright — `drop`, a match expression's
@@ -2448,8 +2465,8 @@ implementation, so `Iterator.Item (Range I32)` is `I32`. A projection of generic
 types requires a matching bound in the same `where` clause:
 
 ```staple
-def next_item: <Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter) =
-    move iter => Iterator.next iter
+def next_item = <Iter where Iterator Iter> move iter: Iter =>
+    IterStep (Iter, Iterator.Item Iter) :: Iterator.next iter
 ```
 
 An implementation binds every associated type exactly once with
@@ -2520,7 +2537,7 @@ instantiated prerequisites, and a generic bound makes its prerequisites
 available transitively:
 
 ```staple
-def equal_ordered: <T where Ord T> T -> T -> Bool = left => right => {
+def equal_ordered = <T where Ord T> left: T => right: T => Bool :: {
     left == right
 }
 ```
@@ -2537,15 +2554,15 @@ the concrete implementation overrides a sibling default. Default bodies are
 generic over the trait parameters and are monomorphized only when used.
 
 A generic `def` adds one or more trait bounds in a `where` clause inside its
-angle-bracketed compile-time parameter list, before its ordinary function
-type:
+angle-bracketed compile-time parameter list, before its runtime parameter
+pattern:
 
 ```staple
-def print: <T where ToString T> T ->{IO} () = value => {
+def print = <T where ToString T> value: T =>{IO} () :: {
     print_string (to_string value)
 }
 
-def combine: <L, R, O where Add L R O> (L, R) -> O = pair => {
+def combine = <L, R, O where Add L R O> pair: (L, R) => O :: {
     Add.add pair
 }
 ```
@@ -2660,7 +2677,7 @@ A generic `def` or `type` may also bound a compile-time parameter with `<:`,
 placed alongside trait bounds in the same `where` clause:
 
 ```staple
-def string_identity: <T where T <: String> T -> T = x => x
+def string_identity = <T where T <: String> x: T => T :: x
 ```
 
 `T <: SuperType` is not backed by an `impl`; it is checked against a fixed
@@ -2803,7 +2820,7 @@ specialized. In this example `f` always accepts one opaque `A`, including
 when `A` is a slotted product:
 
 ```staple
-def compose: <A, B, C> (A -> B; B -> C) -> A -> C = (f; g) => a => g (f a)
+def compose = <A, B, C> (f: A -> B; g: B -> C) => a: A => C :: g (f a)
 ```
 
 #### Function names are not overloaded
@@ -3008,7 +3025,7 @@ contributed to the enclosing function:
 use std.io.(IO, println)
 
 // Building the coroutine is pure; the `IO` effect rides on the type.
-def build: () -> Coroutine{IO} () = () => coro { println "hi" }
+def build = () => Coroutine{IO} () :: coro { println "hi" }
 ```
 
 Omitting the row is the empty set, exactly as for an effect-parameterized type
@@ -3022,7 +3039,7 @@ fewer. A body that needs an effect outside `E` is an error:
 
 ```staple
 // Accepted: the body is pure, but the declared row may be larger.
-def quiet: () -> Coroutine{IO} I32 = () => coro { 5 }
+def quiet = () => Coroutine{IO} I32 :: coro { 5 }
 ```
 
 Without an expected type, or when the expected row is still an effect variable to
@@ -3033,7 +3050,7 @@ body's inferred effects.
 coroutine, yields `T`, and folds `E` into the awaiting body's effect row:
 
 ```staple
-def run: () -> Coroutine{IO} () = () => coro { await (build ()) }
+def run = () => Coroutine{IO} () :: coro { await (build ()) }
 ```
 
 `await` on a `Task T` yields `Completed T | Cancelled`.
@@ -3130,7 +3147,7 @@ with Tasks = task_scope (sched) {
   `block_on` traps: a task-awaiting coroutine needs a real pump loop.
 
 ```staple
-def consumer: () -> Coroutine{Tasks, IO} () = () => coro {
+def consumer = () => Coroutine{Tasks, IO} () :: coro {
     let work = spawn (worker ())
     match await work {
         Completed value => println "worker produced ${value:?}",
@@ -3166,8 +3183,8 @@ a host tick, a timer, an event.
 use std.coroutine.*
 
 // `completion`'s `T` is not inferred from `sched` alone; give it a typed home.
-def signal_completion: Scheduler -> (wait: Wait I32, resolver: Resolver I32) =
-    s => completion s
+def signal_completion = s: Scheduler =>
+    (wait: Wait I32, resolver: Resolver I32) :: completion s
 
 let (wait, resolver) = signal_completion (sched)
 

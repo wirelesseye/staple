@@ -3,24 +3,15 @@ use std.io.println
 
 type Pair (A, B) = alias (A, B)
 
-trait Label T {
-    label: T -> String
-}
+trait Label T {label: T -> String}
 
-impl Label I32 {
-    label = _ => "integer"
-}
+impl Label I32 {label = _ => "integer"}
 
-impl Label Bool {
-    label = value => match value {
-        True => "true",
-        False => "false",
-    }
-}
+impl Label Bool {label = value => match value {True => "true", False => "false",}}
 
-def identity: <T> move T -> T = <T> move value => value
-def first: <A, B> move Pair (A, B) -> A = <A, B> move (left, _) => left
-def labeled: <T where Label T> T -> String = <T where Label T> value => Label.label value
+def identity = <T> move value: T => T :: value
+def first = <A, B> move (left: A, _: B) => A :: left
+def labeled = <T where Label T> value: T => String :: Label.label value
 
 // Generic functions become first-class values when context fixes their type.
 let int_identity: I32 -> I32 = identity

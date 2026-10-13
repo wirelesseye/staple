@@ -3,14 +3,17 @@ use std.slice.Slice
 use std.syntax.*
 
 def require: Bool -> () = condition => if condition { () } else { panic "as conversion failed" }
-def generic: <From, To where Convert From To> move From -> To = <From, To where Convert From To> move value => value as To
-def generic_inferred: <From, To where Convert From To> move From -> To = <From, To where Convert From To> move value => value as _
+def generic = <From, To where Convert From To> move value: From => To :: value as To
+def generic_inferred = <From, To where Convert From To> move value: From => To :: value as _
 def require_wide: I64 -> () = value => require (value == 42)
-def next: mut I32 -> I32 = mut counter => { counter = counter + 1; counter }
+def next: mut I32 -> I32 = mut counter => {
+    counter = counter + 1;
+    counter
+}
 
 type Source = wrap I32
 type Target = wrap I32
-impl !Copy Source {}
+impl ! Copy Source {}
 impl Convert Source Target { convert = move Source value => Target value }
 
 macro widen = value: Expr => parse_quote { $value as I64 }

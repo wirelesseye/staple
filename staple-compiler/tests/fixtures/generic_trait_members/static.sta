@@ -10,7 +10,7 @@ trait DefaultVisit T {
 }
 impl DefaultVisit I32 {}
 impl DefaultVisit Bool { visit_default = <A> (_, move value) => value }
-def relay: <T, A where Visit T> (T, move A) -> A = <T, A where Visit T> (item, move value) => Visit.visit (item, value)
+def relay = <T, A where Visit T> (item: T, move value: A) => A :: Visit.visit (item, value)
 println "${Visit.visit (1, 42)}"
 println "${Visit.visit.<_, String> (Box (Bool :: True), "generic")}"
 println "${relay (1, Bool :: True)}"

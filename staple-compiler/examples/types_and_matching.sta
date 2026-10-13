@@ -5,25 +5,18 @@ pub type Number = alias I32
 pub type UserId = pub wrap Number
 pub type Box T = pub wrap (value: T)
 
-typegroup Switch {
-    Enabled,
-    Disabled
-}
+typegroup Switch {Enabled, Disabled}
 use Switch.*
 
-def unbox: <T> move Box T -> T = <T> move Box value => value
-
-def switch_number = switch: Switch => match switch {
-    Switch.Enabled => 1,
-    Switch.Disabled => 0,
+def unbox = <T> move box: Box T => T :: {
+    let Box value = box;
+    value
 }
+
+def switch_number = switch: Switch => match switch {Switch.Enabled => 1, Switch.Disabled => 0,}
 
 // A wildcard arm can make a product match exhaustive.
-def same_switch = (left: Switch, right: Switch) => match (left, right) {
-    (Enabled(), Enabled()) => True,
-    (Disabled(), Disabled()) => True,
-    _ => False,
-}
+def same_switch = (left: Switch, right: Switch) => match (left, right) {(Enabled(), Enabled()) => True, (Disabled(), Disabled()) => True, _ => False,}
 
 let UserId raw_id = UserId 42
 let boxed: Box I32 = Box (value: raw_id)
@@ -33,10 +26,6 @@ let singleton_value = switch_number Enabled
 
 println "Nominal patterns, generic constructors, and singleton matches evaluated successfully."
 when {
-    (same_switch (Enabled, Disabled)) => {
-        println "same"
-    },
-    else => {
-        println "different"
-    },
+    (same_switch (Enabled, Disabled)) => {println "same"},
+    else => {println "different"},
 }

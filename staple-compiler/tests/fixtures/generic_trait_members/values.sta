@@ -1,7 +1,7 @@
 use std.io.println
 trait Visit T { visit: <A> (T, move A) -> A }
 impl Visit I32 { visit = <A> (_, move value) => value }
-def relay: <T, A where Visit T> (T, move A) -> A = <T, A where Visit T> (item, move value) => Visit.visit (item, value)
+def relay = <T, A where Visit T> (item: T, move value: A) => A :: Visit.visit (item, value)
 let stored = relay
 println "${stored (1, "dynamic")}"
 let member = Visit.visit
@@ -12,7 +12,7 @@ def consume: (<T where ToString T> T -> String) -> String = f => f 7
 println "${consume ToString.to_string}"
 type Box T = wrap T
 impl <T> Visit (Box T) { visit = <A> (_, move value) => value }
-def capture_member: <T where Visit T, Copy T> T -> (() -> I32) = <T where Visit T, Copy T> item => {
+def capture_member = <T where Visit T, Copy T> item: T => (() -> I32) :: {
     let f: (T, move I32) -> I32 = Visit.visit
     () => f (item, 13)
 }

@@ -10,19 +10,19 @@ def error_code: ConversionError -> I32 = error => match error {
     ConversionError.InvalidNumber => 4,
 }
 
-def expect_error: <T where Copy T> (Ok T | ConversionError, I32) -> () = <T where Copy T> (result, expected) => match result {
+def expect_error = <T where Copy T> (result: Ok T | ConversionError, expected: I32) => () :: match result {
     Ok _ => panic "expected a conversion error",
     error: ConversionError => if (error_code error == expected) { () } else { panic "wrong conversion error" },
 }
 
-def expect_success: <T where Copy T, Eq T> (Ok T | ConversionError, T) -> () = <T where Copy T, Eq T> (result, expected) => match result {
+def expect_success = <T where Copy T, Eq T> (result: Ok T | ConversionError, expected: T) => () :: match result {
     Ok value => if (value == expected) { () } else { panic "wrong converted value" },
     _ => panic "unexpected conversion error",
 }
 
 let nan: F64 = 0.0 / 0.0
 let infinity: F64 = 1.0 / 0.0
-let negative_infinity: F64 = -1.0 / 0.0
+let negative_infinity: F64 = - 1.0 / 0.0
 let result_0: Ok I8 | ConversionError = TryConvert.try_convert (I16 :: 127)
 expect_success (result_0, I8 :: 127)
 let result_1: Ok I8 | ConversionError = TryConvert.try_convert (I16 :: 128)
@@ -141,6 +141,12 @@ let result_57: Ok Bool | InvalidBool = TryConvert.try_convert (((I8 :: 0) - (I8 
 match result_57 { InvalidBool => (), _ => panic "invalid boolean accepted", }
 
 let narrowed_nan: Ok F32 | ConversionError = TryConvert.try_convert nan
-match narrowed_nan { Ok value => if (value != value) { () } else { panic "NaN lost" }, _ => panic "NaN conversion failed", }
+match narrowed_nan {
+    Ok value => if (value != value) { () } else { panic "NaN lost" },
+    _ => panic "NaN conversion failed",
+}
 let narrowed_infinity: Ok F32 | ConversionError = TryConvert.try_convert infinity
-match narrowed_infinity { Ok value => if (value > (F32 :: 1.0e30)) { () } else { panic "infinity lost" }, _ => panic "infinity conversion failed", }
+match narrowed_infinity {
+    Ok value => if (value > (F32 :: 1.0e30)) { () } else { panic "infinity lost" },
+    _ => panic "infinity conversion failed",
+}

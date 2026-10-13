@@ -89,7 +89,7 @@ pub def pump: (Scheduler, USize) -> (executed: USize, ready: USize) =
 /// and a `Resolver T` to fulfil it. The wait may only be `await`ed from a task
 /// on the same scheduler. Completing before the `await` registers still
 /// delivers the value.
-pub def completion: <T> Scheduler -> (wait: Wait T, resolver: Resolver T) = <T> sched => __completion sched
+pub def completion = <T> sched: Scheduler => (wait: Wait T, resolver: Resolver T) :: __completion sched
 
 /// Like `completion`, but with an owned cancellation callback. `on_cancel` runs
 /// exactly once if the consumer abandons the wait before it resolves — the
@@ -97,7 +97,7 @@ pub def completion: <T> Scheduler -> (wait: Wait T, resolver: Resolver T) = <T> 
 /// successful `complete` or `cancel` releases the callback without running it.
 /// Libraries use it to unregister a timer or external subscription. The
 /// callback may not suspend.
-pub def completion_with_cancel: <T> (Scheduler, () -> ()) -> (wait: Wait T, resolver: Resolver T) = <T> (sched, on_cancel) => __completion_with_cancel (sched, on_cancel)
+pub def completion_with_cancel = <T> (sched: Scheduler, on_cancel: () -> ()) => (wait: Wait T, resolver: Resolver T) :: __completion_with_cancel (sched, on_cancel)
 
 /// Creates a unit-valued completion bound to `scheduler` and returns the `Wait`
 /// to `await` plus an opaque `CompletionToken` for a host to resolve.
@@ -120,13 +120,13 @@ impl !Copy Tasks {}
 companion Task {
     /// Reports whether the task has finished (completed or cancelled), without
     /// consuming its result.
-    pub def is_finished: <T> Task T -> Bool = <T> task => __task_is_finished task
+    pub def is_finished = <T> task: Task T => Bool :: __task_is_finished task
 
     /// Requests cancellation of the task. Idempotent, and a no-op once the task
     /// has finished. A running task unwinds at its next `await` / `yield_now` /
     /// return boundary rather than delivering a value to its body; a not-yet
     /// started task never runs its body. Borrows the handle.
-    pub def cancel: <T> Task T -> () = <T> task => __task_cancel task
+    pub def cancel = <T> task: Task T => () :: __task_cancel task
 }
 
 /// A one-shot wait that a task `await`s and anything can resolve. Affine:
@@ -162,9 +162,9 @@ companion CompletionToken {
 companion Resolver {
     /// Consumes the resolver and the value, records completion, and wakes a
     /// registered waiter. If the waiter has already gone the value is dropped.
-    pub def complete: <T> (Resolver T; T) -> () = <T> (resolver; value) => __resolver_complete resolver value
+    pub def complete = <T> (resolver: Resolver T; value: T) => () :: __resolver_complete resolver value
 
     /// Consumes the resolver and cancels the operation: a registered waiter is
     /// woken with `Cancelled`.
-    pub def cancel: <T> Resolver T -> () = <T> resolver => __resolver_cancel resolver
+    pub def cancel = <T> resolver: Resolver T => () :: __resolver_cancel resolver
 }
