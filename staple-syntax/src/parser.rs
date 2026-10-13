@@ -899,6 +899,7 @@ impl Grammar {
             expression = Expression::Function(Box::new(FunctionExpression {
                 syntax: self.syntax(start),
                 pattern,
+                effect_lower_bound: None,
                 body: Box::new(expression),
             }));
         }
@@ -1990,11 +1991,19 @@ impl Grammar {
                  top-level product parameter",
             ));
         }
-        self.expect(TokenKind::FatArrow, "expected `=>` before function body")?;
+        let arrow = self.expect(TokenKind::FatArrow, "expected `=>` before function body")?;
+        let effect_lower_bound = if self.at(TokenKind::LBrace)
+            && self.tokens[self.next_non_trivia(self.position)].span.start == arrow.span.end
+        {
+            Some(self.parse_effect_set()?)
+        } else {
+            None
+        };
         let body = Box::new(self.parse_expression()?);
         Ok(FunctionExpression {
             syntax: self.syntax(start),
             pattern,
+            effect_lower_bound,
             body,
         })
     }
@@ -2343,7 +2352,8 @@ impl Grammar {
         {
             return Err(self.error("mark individual slots of a slotted parameter type"));
         }
-        if self.eat(TokenKind::Arrow) {
+        if self.at(TokenKind::Arrow) {
+            let arrow = self.bump_token().expect("peeked arrow");
             let mutations = if whole_mutable {
                 if contains_mutable_type_element(&parameter) {
                     return Err(self.error("a whole mutable parameter cannot also mark individual product elements `mut`"));
@@ -2367,6 +2377,11 @@ impl Grammar {
                 self.extract_parameter_moves(&mut parameter)?
             };
             let resources = if self.at(TokenKind::LBrace) {
+                if self.tokens[self.next_non_trivia(self.position)].span.start != arrow.span.end {
+                    return Err(self.error(
+                        "an effect set must immediately follow `->`; write `->{...}`",
+                    ));
+                }
                 self.parse_effect_set()?
             } else {
                 EffectSet::empty()
@@ -2398,9 +2413,7 @@ impl Grammar {
         let mut state = Vec::new();
         if !self.at(TokenKind::RBrace) {
             loop {
-                if self.peek() == Some(TokenKind::Identifier)
-                    && self.tokens[self.position].text == "state"
-                {
+                if self.peek_text("state") {
                     self.bump_token();
                     let effect = if self.eat(TokenKind::Dot) {
                         let name = self

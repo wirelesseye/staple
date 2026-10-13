@@ -849,6 +849,11 @@ impl Collector<'_> {
         match expression {
             Expression::Function(value) => {
                 self.pattern(&value.pattern);
+                if let Some(effects) = &value.effect_lower_bound {
+                    for resource in &effects.resources {
+                        self.ty(&resource.value_type);
+                    }
+                }
                 self.expression(&value.body);
             }
             Expression::TypeApplication(application) => {
@@ -1206,6 +1211,33 @@ fn token_range(syntax: &Syntax, name: &str, last: bool) -> Option<Range<usize>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_function_effect_lower_bound_types() {
+        let source = "type Clock = wrap I32\ndef read = () =>{Clock} ()\n";
+        let path = std::env::temp_dir().join("staple-definition-effect-lower-bound.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &resolved, None);
+        let reference = source.rfind("Clock").unwrap();
+        assert!(
+            entries.iter().any(|entry| entry.range.start == reference
+                && entry
+                    .targets
+                    .iter()
+                    .any(|target| target.selection_range.start == source.find("Clock").unwrap())),
+            "{entries:?}"
+        );
+    }
 
     #[test]
     fn indexes_local_values_types_and_trait_members() {

@@ -379,6 +379,12 @@ impl fmt::Display for ResourceEffect {
     }
 }
 
+impl fmt::Display for EffectSet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&format_effect_set(self))
+    }
+}
+
 impl EffectSet {
     pub fn empty() -> Self {
         Self {

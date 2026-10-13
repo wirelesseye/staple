@@ -1547,6 +1547,22 @@ visible.
 type from the body unless a surrounding function type or a type ascription
 expression constrains it.
 
+A function value may declare an effect lower bound immediately after `=>`:
+
+```staple
+def greet = () =>{IO} {
+    println "Hello world!"
+}
+```
+
+The declared effects remain part of the function even when unused, and merge
+with effects inferred from its body. An empty `=>{}` adds no requirements.
+A surrounding function type still constrains the combined effects.
+The opening brace must touch the arrow: `=>{IO}` declares effects, while
+`=> { ... }` introduces a body block. Spaces, newlines, and comments cannot
+separate an arrow from its effect set; function types likewise require
+`->{IO}`, rather than `-> {IO}`.
+
 A function whose result type is `Never` has no normal-return path. Calling it
 makes the following path unreachable, just like evaluating any other
 expression of type `Never`.
@@ -2088,8 +2104,9 @@ analysis, while function type equality uses only the public state effect.
 
 `resource Clock` has type `Clock` and makes the enclosing function require that
 resource. Calls propagate requirements transitively, including through
-recursion, trait methods, and function values. An unannotated function infers
-the minimal required set. An explicit set remains part of its declared
+recursion, trait methods, and function values. A function without a type effect
+contract infers the union of its body effects and any function-value lower
+bound. An explicit set in a function type remains part of its declared
 contract: resources may be unused, but the body cannot require an unlisted
 resource. Function types with different effect sets are distinct and are not
 implicitly widened.

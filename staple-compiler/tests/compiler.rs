@@ -15167,3 +15167,245 @@ fn slotted_specialized_direct_calls_preserve_the_baseline_abi() {
     );
     assert!(text.contains(&format!("define internal i32 @{callee}(ptr %0, i32 %left, i32 %right) {{\nentry:\n  ret i32 %left\n}}")));
 }
+
+#[test]
+fn function_effect_lower_bounds_merge_and_propagate() {
+    let module = type_check(concat!(
+        "use std.io.(IO, println)\n",
+        "type Clock = wrap I32\n",
+        "def unused = () =>{Clock} 42\n",
+        "def empty = () =>{} ()\n",
+        "def greet = () =>{Clock} { println \"hello\" }\n",
+        "def duplicate = () =>{IO, IO} println \"once\"\n",
+        "def forward = () => greet ()\n",
+        "def recurse = again: Bool =>{Clock} () :: { if again { recurse False } else { () } }\n",
+        "def evaluate: <effect E> (() ->{E} ()) ->{E} () = callback => callback ()\n",
+        "let stored = greet\n",
+        "with Clock = Clock 7 { unused (); forward (); recurse False; evaluate stored }\n",
+    ));
+    let effects = |name: &str| {
+        let function = module
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .unwrap();
+        &module.type_of_function(function.id).unwrap().effects
+    };
+    assert!(effects("empty").is_empty());
+    for name in ["unused", "recurse"] {
+        assert_eq!(effects(name).resources.len(), 1);
+        assert_eq!(effects(name).resources[0].value_type.to_string(), "Clock");
+    }
+    for name in ["greet", "forward"] {
+        assert_eq!(effects(name).resources.len(), 2);
+        assert!(
+            effects(name)
+                .resources
+                .iter()
+                .any(|resource| resource.value_type.to_string() == "IO")
+        );
+        assert!(
+            effects(name)
+                .resources
+                .iter()
+                .any(|resource| resource.value_type.to_string() == "Clock")
+        );
+    }
+    assert_eq!(effects("duplicate").resources.len(), 1);
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .unwrap();
+    assert!(
+        llvm.contains("@unused("),
+        "unused effect-bearing function should be emitted"
+    );
+}
+
+#[test]
+fn function_effect_lower_bounds_merge_resource_modes_and_state_without_fake_accesses() {
+    use staple_compiler::CheckedStateEffect;
+    let module = type_check(concat!(
+        "type Counter = wrap (value: I32)\n",
+        "let mut count = 0\n",
+        "def update = () =>{Counter} { (resource Counter).value = 1 }\n",
+        "def state_union = () =>{state.read} { count = 1 }\n",
+        "def unused_state = () =>{state} ()\n",
+        "def unused_mut = () =>{mut Counter, Counter} ()\n",
+    ));
+    let function = |name: &str| {
+        module
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .unwrap()
+    };
+    for name in ["update", "unused_mut"] {
+        let effects = &module.type_of_function(function(name).id).unwrap().effects;
+        assert_eq!(effects.resources.len(), 1);
+        assert!(effects.resources[0].mutable, "{name}: {effects}");
+    }
+    for name in ["state_union", "unused_state"] {
+        assert_eq!(
+            module
+                .type_of_function(function(name).id)
+                .unwrap()
+                .effects
+                .state,
+            Some(CheckedStateEffect::ReadWrite)
+        );
+    }
+    let accesses = module
+        .state_accesses_of_function(function("state_union").id)
+        .unwrap();
+    assert!(accesses.reads.is_empty());
+    assert_eq!(accesses.writes.len(), 1);
+    let accesses = module
+        .state_accesses_of_function(function("unused_state").id)
+        .unwrap();
+    assert!(accesses.reads.is_empty() && accesses.writes.is_empty());
+}
+
+#[test]
+fn function_effect_lower_bounds_respect_type_and_trait_contracts() {
+    for source in [
+        "type Clock = wrap I32\ndef invalid: () -> () = () =>{Clock} ()\n",
+        "trait Pure T { run: T -> () }\nimpl Pure I32 { run = value =>{state} () }\n",
+        "type Clock = wrap I32\ntrait Pure T { run: T -> () = value =>{Clock} () }\n",
+    ] {
+        let diagnostics = type_check_errors(source, "lower bounds must fit the contract");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|message| message.contains("declared effect set")),
+            "{diagnostics:?}"
+        );
+    }
+    type_check("type Clock = wrap I32\ndef valid: () ->{Clock, state} () = () =>{Clock} ()\n");
+}
+
+#[test]
+fn function_effect_lower_bounds_validate_resources_and_variables() {
+    for source in [
+        "def invalid = () =>{I32} ()\n",
+        "def invalid: <effect E, effect F> () ->{E} () = () =>{E, F} ()\n",
+    ] {
+        let diagnostics = type_check_errors(source, "invalid lower bound");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|message| message.contains("concrete, sized nominal type")
+                    || message.contains("at most one effect variable")),
+            "{diagnostics:?}"
+        );
+    }
+    let diagnostics = type_check_errors(
+        "def conflict: <effect E, effect F> (() ->{F} ()) ->{E} () = callback =>{E} callback ()\n",
+        "a union of distinct effect variables is not representable",
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("distinct effect variables")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn function_effect_lower_bounds_preserve_open_rows_and_nested_function_purity() {
+    let module = type_check(concat!(
+        "use std.io.(IO, println)\n",
+        "def run: <effect E> (() ->{E} ()) ->{E, IO} () = callback =>{E, IO} callback ()\n",
+        "def leaf = () =>{IO} println \"hello\"\n",
+        "def make = () => () =>{IO} ()\n",
+        "run leaf\n",
+        "make () ()\n",
+    ));
+    let make = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "make")
+        .unwrap();
+    let ty = module.type_of_function(make.id).unwrap();
+    assert!(ty.effects.is_empty());
+    let CheckedType::Function(inner) = ty.result.as_ref() else {
+        panic!("nested function type")
+    };
+    assert_eq!(inner.effects.resources.len(), 1);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .unwrap();
+}
+
+#[test]
+fn function_effect_lower_bounds_survive_macro_expansion_and_rendering() {
+    let module = type_check(concat!(
+        "type Clock = wrap I32\n",
+        "macro make = resource_type: Type => parse_quote { () =>{$resource_type} 42 }\n",
+        "def generated = make Clock\n",
+        "with Clock = Clock 7 { generated () }\n",
+    ));
+    let generated = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "generated")
+        .unwrap();
+    assert_eq!(
+        module
+            .type_of_function(generated.id)
+            .unwrap()
+            .effects
+            .resources[0]
+            .value_type
+            .to_string(),
+        "Clock"
+    );
+    let expanded = staple_compiler::render_expanded_module(module.resolved().program()).unwrap();
+    assert!(expanded.contains("=>{Clock}"), "{expanded}");
+    staple_syntax::parse(&expanded).unwrap();
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .unwrap();
+}
+
+#[test]
+fn function_effect_lower_bounds_pass_unused_and_mutable_resources_at_runtime() {
+    use std::sync::atomic::{AtomicI32, Ordering};
+    static RESULT: AtomicI32 = AtomicI32::new(0);
+    extern "C" fn record(value: i32) {
+        RESULT.store(value, Ordering::SeqCst);
+    }
+    let module = type_check(concat!(
+        "extern \"c\" { record: I32 -> () }\n",
+        "type Clock = wrap I32\n",
+        "type Counter = wrap (value: I32)\n",
+        "def unused = () =>{Clock} 42\n",
+        "def update = () =>{Counter} { (resource Counter).value = 42 }\n",
+        "def read = () =>{Counter} (resource Counter).value\n",
+        "let mut counter = Counter (value: 1)\n",
+        "with Clock = Clock 7 { with mut Counter = counter { update (); record (unused () + read ()) } }\n",
+    ));
+    let context = Context::create();
+    let text = CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .unwrap();
+    let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+        text.as_bytes(),
+        "function-effect-lower-bounds",
+    );
+    let llvm = context.create_module_from_ir(buffer).unwrap();
+    llvm.verify().unwrap();
+    let engine = llvm
+        .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+        .unwrap();
+    engine.add_global_mapping(
+        &llvm.get_function("record").unwrap(),
+        record as *const () as usize,
+    );
+    type Main = unsafe extern "C" fn() -> i32;
+    let main = unsafe { engine.get_function::<Main>("main").unwrap() };
+    assert_eq!(unsafe { main.call() }, 0);
+    assert_eq!(RESULT.load(Ordering::SeqCst), 84);
+}

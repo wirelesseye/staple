@@ -672,6 +672,11 @@ impl<'a> Classifier<'a> {
         match expression {
             Expression::Function(value) => {
                 self.pattern(&value.pattern, PARAMETER, resolved);
+                if let Some(effects) = &value.effect_lower_bound {
+                    for resource in &effects.resources {
+                        self.ty(&resource.value_type, resolved);
+                    }
+                }
                 self.expression(&value.body, resolved);
             }
             Expression::TypeApplication(application) => {
@@ -1446,6 +1451,21 @@ pub fn offset(source: &str, position: lsp_types::Position) -> Option<usize> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn highlights_function_effect_lower_bound_types() {
+        let source = "type Clock = wrap I32\ndef read = () =>{Clock} ()\n";
+        let module = parse(source).unwrap();
+        let labels = labels(source, &tokens(source, Some(&module), None, None));
+        assert_eq!(
+            labels
+                .iter()
+                .filter(|label| **label == ("Clock", TYPE))
+                .count(),
+            2,
+            "{labels:?}"
+        );
+    }
 
     #[test]
     fn legend_order_is_stable() {

@@ -2657,6 +2657,8 @@ pub struct TypeChecker {
     polymorphic_storage_symbols: HashSet<SymbolId>,
     /// Generic argument templates in declaration order, including constructors.
     function_types: HashMap<FunctionId, CheckedFunctionType>,
+    function_effect_lower_bounds: HashMap<FunctionId, CheckedEffectSet>,
+    conflicting_lower_bound_variables: HashSet<FunctionId>,
     function_schemes: HashMap<FunctionId, CheckedScheme>,
     expression_schemes: HashMap<SyntaxId, CheckedScheme>,
     explicit_value_substitutions: HashMap<SyntaxId, HashMap<TypeParameterId, CheckedType>>,
@@ -5083,6 +5085,12 @@ impl TypeChecker {
 
     fn seed_function_types(&mut self, module: &ResolvedModule) {
         for function in module.functions() {
+            if let Some(source) = &function.effect_lower_bound {
+                let effects = self.resolve_effect_set(module, source);
+                self.function_effect_lower_bounds.insert(function.id, effects);
+            }
+        }
+        for function in module.functions() {
             if let Some(annotation) = &function.binding_annotation
                 && let CheckedType::Forall(scheme) = self.resolve_source_type(module, annotation)
             {
@@ -5264,6 +5272,7 @@ impl TypeChecker {
             let resources = annotated_function
                 .as_ref()
                 .map(|function| function.effects.clone())
+                .or_else(|| self.function_effect_lower_bounds.get(&function.id).cloned())
                 .unwrap_or_default();
             let mut mutations = annotated_function
                 .as_ref()
@@ -5896,6 +5905,17 @@ impl TypeChecker {
             Expression::Access(access) => {
                 self.place_resources_now(module, &access.value, target_parameters)
             }
+            Expression::Product(product)
+                if !product.slotted
+                    && product.elements.len() == 1
+                    && product.elements[0].name.is_none()
+                    && !product.elements[0].spread =>
+            {
+                self.place_resources_now(module, &product.elements[0].value, target_parameters)
+            }
+            Expression::TypeAscription(ascription) => {
+                self.place_resources_now(module, &ascription.value, target_parameters)
+            }
             Expression::Index(index) => self
                 .place_resources_now(module, &index.value, target_parameters)
                 .union(&self.expression_effects_now(module, &index.index, target_parameters)),
@@ -6108,6 +6128,37 @@ impl TypeChecker {
         resources
     }
 
+    fn merge_function_effect_lower_bound(
+        &mut self,
+        function: &ResolvedFunction,
+        body: CheckedEffectSet,
+    ) -> CheckedEffectSet {
+        let Some(lower) = self.function_effect_lower_bounds.get(&function.id) else {
+            return body;
+        };
+        if let (Some(left), Some(right)) = (&lower.variable, &body.variable)
+            && left.id != right.id
+        {
+            if self.conflicting_lower_bound_variables.insert(function.id) {
+                self.diagnostics.push(Diagnostic::new(
+                    function
+                        .effect_lower_bound
+                        .as_ref()
+                        .expect("lower bound")
+                        .syntax
+                        .span
+                        .clone(),
+                    "function effect lower bound and body require distinct effect variables; an effect set may contain at most one effect variable",
+                ));
+            }
+            // Keep the lower bound while reporting the unrepresentable union.
+            let mut combined = lower.union(&body);
+            combined.variable = lower.variable.clone();
+            return combined;
+        }
+        lower.union(&body)
+    }
+
     fn infer_effects(&mut self, module: &ResolvedModule) {
         let declared = module
             .functions()
@@ -6163,6 +6214,7 @@ impl TypeChecker {
                 let mut inferred = CheckedEffectSet::canonical(inferred_body.resources)
                     .with_state(inferred_body.state);
                 inferred.variable = inferred_body.variable;
+                let inferred = self.merge_function_effect_lower_bound(function, inferred);
                 if self.function_types[&function.id].effects != inferred {
                     updates.push((function.id, function.binding_syntax, inferred));
                 }
@@ -6234,6 +6286,19 @@ impl TypeChecker {
             let mut actual =
                 CheckedEffectSet::canonical(actual_body.resources).with_state(actual_body.state);
             actual.variable = actual_body.variable;
+            let actual = self.merge_function_effect_lower_bound(function, actual);
+            let violation_span = |allowed: &CheckedEffectSet| {
+                function
+                    .effect_lower_bound
+                    .as_ref()
+                    .filter(|_| {
+                        !self.function_effect_lower_bounds[&function.id].is_subset_of(allowed)
+                    })
+                    .map_or_else(
+                        || function.body.syntax().span.clone(),
+                        |source| source.syntax.span.clone(),
+                    )
+            };
             if let Some(allowed) = declared.get(&function.id)
                 && !actual.is_subset_of(allowed)
             {
@@ -6243,7 +6308,7 @@ impl TypeChecker {
                     "function body"
                 };
                 self.diagnostics.push(Diagnostic::new(
-                    function.body.syntax().span.clone(),
+                    violation_span(allowed),
                     format!(
                         "{body} requires effects {}, which are not contained in its \
                          declared effect set {}",
@@ -6272,7 +6337,7 @@ impl TypeChecker {
                         |context| format!("{context}: {message}"),
                     );
                 self.diagnostics.push(Diagnostic::new(
-                    function.body.syntax().span.clone(),
+                    violation_span(&allowed),
                     message,
                 ));
             }
@@ -14543,6 +14608,7 @@ impl TypeChecker {
                 mutable: false,
                 moved: false,
             }),
+            effect_lower_bound: None,
             result_annotation: None,
             binding_annotation: None,
             companion_target: None,

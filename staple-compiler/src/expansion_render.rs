@@ -404,8 +404,12 @@ fn render_expr(program: &Program, expression: &Expression) -> String {
             out
         }
         Expression::Function(function) => format!(
-            "{} => {}",
+            "{} =>{} {}",
             render_pattern(&function.pattern),
+            function
+                .effect_lower_bound
+                .as_ref()
+                .map_or_else(String::new, ToString::to_string),
             render_expr(program, &function.body),
         ),
         Expression::Loop(loop_) => format!("loop {}", render_block(program, &loop_.body)),

@@ -1,4 +1,4 @@
-use super::{Item, Pattern, Syntax, Type, VisibilitySyntax};
+use super::{EffectSet, Item, Pattern, Syntax, Type, VisibilitySyntax};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression {
@@ -174,6 +174,8 @@ pub struct MatchArm {
 pub struct FunctionExpression {
     pub syntax: Syntax,
     pub pattern: Pattern,
+    /// Effects required by this value, in addition to its body's inferred effects.
+    pub effect_lower_bound: Option<EffectSet>,
     pub body: Box<Expression>,
 }
 

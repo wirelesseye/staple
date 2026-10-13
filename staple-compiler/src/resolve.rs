@@ -386,6 +386,7 @@ pub struct ResolvedFunction {
     pub name: String,
     pub binding_syntax: Option<SyntaxId>,
     pub pattern: Pattern,
+    pub effect_lower_bound: Option<staple_syntax::EffectSet>,
     pub result_annotation: Option<Type>,
     pub binding_annotation: Option<Type>,
     pub companion_target: Option<Type>,
@@ -4106,6 +4107,11 @@ impl NameResolver {
                     ));
                 }
                 self.resolve_pattern_types_lenient(&value.pattern);
+                if let Some(effects) = &value.effect_lower_bound {
+                    for resource in &effects.resources {
+                        self.resolve_type_lenient(&resource.value_type);
+                    }
+                }
                 self.resolve_compile_time_expression_annotations(&value.body);
             }
             Expression::TypeApplication(application) => {
@@ -4649,6 +4655,11 @@ impl NameResolver {
                 self.function_parents
                     .insert(function_id, self.function_stack.last().copied());
                 self.resolve_pattern_types(&function.pattern);
+                if let Some(effects) = &function.effect_lower_bound {
+                    for resource in &effects.resources {
+                        self.resolve_type(&resource.value_type);
+                    }
+                }
                 self.function_stack.push(function_id);
                 let outer_loop_depth = self.loop_depth;
                 self.loop_depth = 0;
@@ -4697,6 +4708,7 @@ impl NameResolver {
                     name,
                     binding_syntax: suggested_function.map(|(_, syntax)| syntax),
                     pattern: function.pattern.clone(),
+                    effect_lower_bound: function.effect_lower_bound.clone(),
                     result_annotation: match function.body.as_ref() {
                         Expression::TypeAscription(ascription) => Some(ascription.ty.clone()),
                         _ => None,

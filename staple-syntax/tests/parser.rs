@@ -3654,3 +3654,77 @@ fn formats_slotted_products_and_call_spreads_idempotently() {
         );
     }
 }
+
+#[test]
+fn parses_function_value_effect_lower_bounds() {
+    let source = concat!(
+        "def empty = () =>{} ()\n",
+        "def resource = () =>{IO, mut Clock, state.read} { () }\n",
+        "def nested = () =>{IO} () =>{state.write} ()\n",
+        "def generic: <effect E> (() ->{E} ()) ->{E} () = callback =>{E} callback ()\n",
+        "def spaced = () => { () }\n",
+        "def commented = () => /* block */ { () }\n",
+    );
+    let module = parse(source).unwrap();
+    assert_eq!(module.syntax.text(), source);
+    let function = |index| {
+        let Item::Binding(binding) = &module.items[index] else {
+            panic!("binding")
+        };
+        let Some(Expression::Function(function)) = &binding.value else {
+            panic!("function")
+        };
+        function
+    };
+    assert!(function(0).effect_lower_bound.as_ref().unwrap().is_empty());
+    let effects = function(1).effect_lower_bound.as_ref().unwrap();
+    assert_eq!(effects.resources.len(), 2);
+    assert!(effects.resources[1].mutable);
+    assert_eq!(effects.state, [staple_syntax::StateEffect::Read]);
+    let Expression::Function(inner) = function(2).body.as_ref() else {
+        panic!("nested function")
+    };
+    assert_eq!(
+        inner.effect_lower_bound.as_ref().unwrap().state,
+        [staple_syntax::StateEffect::Write]
+    );
+    assert_eq!(
+        function(3)
+            .effect_lower_bound
+            .as_ref()
+            .unwrap()
+            .resources
+            .len(),
+        1
+    );
+    for index in [4, 5] {
+        assert!(function(index).effect_lower_bound.is_none());
+        assert!(matches!(
+            function(index).body.as_ref(),
+            Expression::Block(_)
+        ));
+    }
+    for invalid in [
+        "def f = () =>{}",
+        "def f = () =>{IO}",
+        "def f = () =>{state.bad} ()",
+        "def f = () =>{IO ()",
+    ] {
+        assert!(parse(invalid).is_err(), "{invalid}");
+    }
+}
+
+#[test]
+fn function_type_effect_sets_require_arrow_adjacency() {
+    for separator in [" ", "\n", "/* comment */", " /* comment */ "] {
+        let source = format!("def f: () ->{separator}{{IO}} () = () => ()\n");
+        let error = parse(&source).unwrap_err();
+        assert!(
+            error.message.contains("immediately follow `->`"),
+            "{error:?}"
+        );
+    }
+    assert!(parse("def f: () ->{IO} () = () => ()\n").is_ok());
+    assert!(parse("def f: () -> () = () => ()\n").is_ok());
+    assert!(parse("def f: () ->\n () = () => ()\n").is_ok());
+}

@@ -18301,6 +18301,7 @@ mod tests {
             Expression::Function(Box::new(FunctionExpression {
                 syntax: syntax.clone(),
                 pattern: wildcard_pattern(),
+                effect_lower_bound: None,
                 body: Box::new(name_expression("value")),
             })),
         ));

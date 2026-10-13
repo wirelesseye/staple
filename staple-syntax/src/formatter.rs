@@ -101,7 +101,16 @@ impl<'a> Formatter<'a> {
                 }
                 TokenKind::LBrace | TokenKind::LParen | TokenKind::LBracket => {
                     self.flush_pending(false);
-                    if self.separated || needs_space(self.previous, token.kind) {
+                    let arrow_effect_set = token.kind == TokenKind::LBrace
+                        && index > 0
+                        && matches!(
+                            self.tokens[index - 1].kind,
+                            TokenKind::Arrow | TokenKind::FatArrow
+                        )
+                        && self.tokens[index - 1].span.end == token.span.start;
+                    if arrow_effect_set {
+                        self.trim_line();
+                    } else if self.separated || needs_space(self.previous, token.kind) {
                         self.space();
                     }
                     self.text(&token.text);
@@ -463,6 +472,23 @@ mod parameter_product_tests {
         let formatted = format_source(source).expect("slotted products format");
         assert!(formatted.contains("Callable (I32; I32) I32"), "{formatted}");
         assert!(formatted.contains("values[index]"), "{formatted}");
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+}
+
+#[cfg(test)]
+mod effect_adjacency_tests {
+    use super::format_source;
+
+    #[test]
+    fn preserves_effect_arrow_adjacency_and_spaced_blocks() {
+        let source = "def f:()->{IO}()=()=>{IO} { () }\ndef pure=()=>{} ()\ndef block=()=> { () }\ndef commented=()=> /* block */ { () }\n";
+        let formatted = format_source(source).unwrap();
+        assert!(formatted.contains("->{IO}"), "{formatted}");
+        assert!(formatted.contains("=>{IO}"), "{formatted}");
+        assert!(formatted.contains("=>{} ()"), "{formatted}");
+        assert!(formatted.contains("=> { () }"), "{formatted}");
+        assert!(formatted.contains("=> /* block */ { () }"), "{formatted}");
         assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
 }

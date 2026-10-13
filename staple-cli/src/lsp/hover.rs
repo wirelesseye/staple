@@ -1482,6 +1482,11 @@ impl Collector<'_> {
         match expression {
             Expression::Function(function) => {
                 self.pattern(&function.pattern);
+                if let Some(effects) = &function.effect_lower_bound {
+                    for resource in &effects.resources {
+                        self.ty(&resource.value_type);
+                    }
+                }
                 self.expression(&function.body);
             }
             Expression::TypeApplication(application) => {
@@ -2164,6 +2169,38 @@ impl Declaration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hovers_function_effect_lower_bound_types() {
+        let source = "type Clock = wrap I32\ndef read = () =>{Clock} ()\n";
+        let path = std::env::temp_dir().join("staple-hover-effect-lower-bound.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+        let reference = source.rfind("Clock").unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.range.start == reference && entry.signature.contains("Clock")),
+            "{entries:?}"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.signature == "def read: () ->{Clock} ()"),
+            "{entries:?}"
+        );
+    }
 
     #[test]
     fn wrapped_intrinsic_hover_shows_the_public_def() {
