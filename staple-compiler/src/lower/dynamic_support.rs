@@ -41,8 +41,6 @@ impl DynamicSupport {
 pub(crate) enum RejectionReason {
     /// A callable value expression (`CallableValue`).
     CallableValue,
-    /// A parameter product appears in a dynamic signature.
-    ParameterProducts,
     /// Recursive (`Ref`/`Slice`/`Syntax`) construction.
     RecursiveConstruction,
     /// A deferred callable expression reached the scanner.
@@ -113,7 +111,6 @@ impl RejectionReason {
     pub(crate) fn description(self) -> &'static str {
         match self {
             RejectionReason::CallableValue => "callable value expression",
-            RejectionReason::ParameterProducts => "parameter products",
             RejectionReason::RecursiveConstruction => "recursive construction",
             RejectionReason::Deferred => "deferred expression",
             RejectionReason::ParameterDependentNonGeneric => "parameter-dependent non-generic call",
@@ -207,7 +204,7 @@ impl LoweredProgram {
         function: FunctionId,
         caller_runtime: &BTreeSet<TypeParameterId>,
         current: bool,
-        function_type: &CheckedFunctionType,
+        _function_type: &CheckedFunctionType,
         substitutions: &crate::CallSubstitutions,
     ) -> Option<crate::RuntimeScope> {
         if !(self.dictionary_pass_generic_calls || self.dictionary_pass_effect_rows)
@@ -216,16 +213,7 @@ impl LoweredProgram {
         {
             return None;
         }
-        // A call site whose types name a parameter product cannot lower through
-        // a dynamic implementation, so it stays monomorphized.
-        if contains_parameter_product(&CheckedType::Function(function_type.clone()))
-            || substitutions
-                .types
-                .iter()
-                .any(|entry| contains_parameter_product(&entry.value_type))
-        {
-            return None;
-        }
+
         if !self.dynamic_support(function).is_supported() {
             return None;
         }
@@ -478,9 +466,7 @@ impl LoweredProgram {
         // key, or arrive as a run-time bundle, so they are not restrictions.
         // A resource effect row is an ABI fact, not a restriction. The
         // dynamic ABI passes each resource provider as a pointer.
-        if contains_parameter_product(&CheckedType::Function(template.signature.clone())) {
-            walker.reject(RejectionReason::ParameterProducts);
-        }
+
         if let Some(reason) = signature_function_restriction(&template.signature) {
             walker.reject(reason);
         }
@@ -556,48 +542,6 @@ fn contains_polymorphic_function(ty: &CheckedType) -> bool {
         } => {
             arguments.iter().any(contains_polymorphic_function)
                 || contains_polymorphic_function(representation)
-        }
-        _ => false,
-    }
-}
-
-/// Whether a type contains a parameter product anywhere. Capable parameters
-/// cannot appear in a scheme used as a value, and the dynamic emitter does not
-/// model their arity.
-fn contains_parameter_product(ty: &CheckedType) -> bool {
-    match ty {
-        CheckedType::ParameterProduct(_) => true,
-        CheckedType::CPointer { pointee } => contains_parameter_product(pointee),
-        CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
-            contains_parameter_product(value)
-        }
-        CheckedType::Array { element, count } => {
-            contains_parameter_product(element) || contains_parameter_product(count)
-        }
-        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
-            arguments.iter().any(contains_parameter_product)
-        }
-        CheckedType::Product(product) => product
-            .elements
-            .iter()
-            .any(|field| contains_parameter_product(&field.value_type)),
-        CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_parameter_product),
-        CheckedType::Function(function) => {
-            contains_parameter_product(&function.parameter)
-                || contains_parameter_product(&function.result)
-                || function
-                    .effects
-                    .resources
-                    .iter()
-                    .any(|resource| contains_parameter_product(&resource.value_type))
-        }
-        CheckedType::Wrapper {
-            arguments,
-            representation,
-            ..
-        } => {
-            arguments.iter().any(contains_parameter_product)
-                || contains_parameter_product(representation)
         }
         _ => false,
     }

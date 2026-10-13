@@ -456,7 +456,7 @@ fn effect_bundles_exist_only_for_run_time_rows() {
 
     let unused = emit(concat!(
         "def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\n",
-        "def never: <T> [T] -> () = x => {\n",
+        "def never: <T> T -> () = x => {\n",
         "    let stored: <effect E> (() ->{E} ()) ->{E} () = twice\n",
         "    ()\n",
         "}\n",
@@ -1073,7 +1073,7 @@ fn coro_moves_owned_non_copy_captures() {
         .check(resolve(concat!(
             "use std.coroutine.*\n",
             "def get_task: () -> Task I32\n",
-            "def drop_it: <T> [T] -> () = _ => ()\n",
+            "def drop_it: <T> T -> () = _ => ()\n",
             "def bad: () -> () =\n",
             "    () => {\n",
             "        let handle = get_task ()\n",
@@ -1662,6 +1662,22 @@ fn rejects_a_recursive_type_that_omits_the_self_reference_arguments() {
 }
 
 #[test]
+fn rejects_an_alias_of_an_under_applied_type_constructor() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "type Entry K V = wrap (key: K, value: V)\ntype Partial = alias Entry String\n",
+        ))
+        .expect_err_diagnostics("an alias cannot name a partially applied type constructor");
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.message
+                == "type constructor `Entry` expects 2 type arguments, but 1 was supplied"
+        }),
+        "unexpected diagnostics: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn rejects_a_bare_generic_type_constructor_used_as_a_value_type() {
     let diagnostics = TypeChecker::new()
         .check(resolve("let bad: Option = 1\n"))
@@ -2093,7 +2109,7 @@ fn fills_named_type_field_defaults_at_calls_and_construction() {
 #[test]
 fn rejects_same_name_functions_at_different_arities() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let program = ProgramLoader::new().with_standard_library_root(root.join("stdlib")).load_source("def app: I32 -> I32 = value => value\ndef app: [I32, I32] -> I32 = [left, right] => left\n", root).expect("source loads");
+    let program = ProgramLoader::new().with_standard_library_root(root.join("stdlib")).load_source("def app: I32 -> I32 = value => value\ndef app: (I32; I32) -> I32 = (left; right) => left\n", root).expect("source loads");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
         .expect_err_diagnostics("duplicate names must be rejected");
@@ -2121,7 +2137,7 @@ fn juxtaposed_functions_apply_extra_arguments_to_the_result() {
     let source = concat!(
         "def apply: I32 -> I32 -> I32 = first => second => first + second\n",
         "let through_unary: I32 = apply 1 2\n",
-        "def extend: [I32, I32] -> I32 -> I32 = [first, second] => third => first + second + third\n",
+        "def extend: (I32; I32) -> I32 -> I32 = (first; second) => third => first + second + third\n",
         "let through_binary: I32 = extend 1 2 3\n",
     );
     let module = type_check(source);
@@ -2146,7 +2162,7 @@ fn rejects_an_inference_placeholder_as_a_value() {
 #[test]
 fn rejects_same_scope_local_function_overloads() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let program = ProgramLoader::new().with_standard_library_root(root.join("stdlib")).load_source("def run = () => {\n def local = value: I32 => value\n def local = [left: I32, right: I32] => left\n local 1\n}\n", root).expect("source loads");
+    let program = ProgramLoader::new().with_standard_library_root(root.join("stdlib")).load_source("def run = () => {\n def local = value: I32 => value\n def local = (left: I32; right: I32) => left\n local 1\n}\n", root).expect("source loads");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
         .expect_err_diagnostics("duplicate names must be rejected");
@@ -2161,7 +2177,7 @@ fn rejects_same_scope_local_function_overloads() {
 #[test]
 fn rejects_duplicate_functions_before_bare_name_use() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let program = ProgramLoader::new().with_standard_library_root(root.join("stdlib")).load_source("def choose = value: I32 => value\ndef choose = [left: I32, right: I32] => left\nlet ambiguous = choose\n", root).expect("source loads");
+    let program = ProgramLoader::new().with_standard_library_root(root.join("stdlib")).load_source("def choose = value: I32 => value\ndef choose = (left: I32; right: I32) => left\nlet ambiguous = choose\n", root).expect("source loads");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
         .expect_err_diagnostics("duplicate names must be rejected");
@@ -2179,7 +2195,7 @@ fn rejects_trait_member_overloads() {
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            "trait Render T { render: T -> T\n render: [T, T] -> T\n}\n",
+            "trait Render T { render: T -> T\n render: (T; T) -> T\n}\n",
             root,
         )
         .expect("source loads");
@@ -2197,7 +2213,7 @@ fn rejects_trait_member_overloads() {
 #[test]
 fn rejects_companion_item_overloads() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let program = ProgramLoader::new().with_standard_library_root(root.join("stdlib")).load_source("type Box = wrap I32\ncompanion Box {\n pub def make: I32 -> Box = value => Box value\n pub def make: [I32, I32] -> Box = [left, right] => Box left\n}\n", root).expect("source loads");
+    let program = ProgramLoader::new().with_standard_library_root(root.join("stdlib")).load_source("type Box = wrap I32\ncompanion Box {\n pub def make: I32 -> Box = value => Box value\n pub def make: (I32; I32) -> Box = (left; right) => Box left\n}\n", root).expect("source loads");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
         .expect_err_diagnostics("duplicate names must be rejected");
@@ -5531,7 +5547,7 @@ fn diagnostics_in_macro_generated_syntax_point_at_the_macro_definition() {
     // line/column inside the internal reconstruction.
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "macro pick = [condition: Expr, body: Expr] =>\n", // line 1
+            "macro pick = (condition: Expr; body: Expr) =>\n", // line 1
             "    quote {\n",                                   // line 2
             "        match $condition {\n",                    // line 3
             "            True => $body,\n",                    // line 4
@@ -5592,7 +5608,7 @@ fn inspects_identifier_and_call_syntax() {
 fn constructs_identifier_and_call_syntax() {
     let module = type_check(concat!(
         "macro generated_name = _: Expr => Ident \"answer\"\n",
-        "macro generated_call = [callee: Expr, argument: Expr] =>\n",
+        "macro generated_call = (callee: Expr; argument: Expr) =>\n",
         "    CallExpr (callee: callee, argument: argument)\n",
         "def identity = (value: I32) => value\n",
         "let answer: I32 = 40\n",
@@ -5666,7 +5682,7 @@ fn structured_syntax_overloads_use_leaf_specificity() {
 fn constructed_identifiers_use_definition_hygiene_and_children_keep_caller_hygiene() {
     let module = type_check(concat!(
         "macro definition_name = _: Expr => Ident \"captured\"\n",
-        "macro apply = [callee: Expr, argument: Expr] =>\n",
+        "macro apply = (callee: Expr; argument: Expr) =>\n",
         "    CallExpr (callee: callee, argument: argument)\n",
         "let captured: I32 = 7\n",
         "def definition_site = (captured: String) => definition_name ()\n",
@@ -5683,13 +5699,13 @@ fn constructed_identifiers_use_definition_hygiene_and_children_keep_caller_hygie
 #[test]
 fn mutates_call_syntax_with_value_semantics_and_shared_capture_cells() {
     let module = type_check(concat!(
-        "macro replace_call = [value: CallExpr, replacement: Expr] => {\n",
+        "macro replace_call = (value: CallExpr; replacement: Expr) => {\n",
         "    let original = value\n",
         "    let mut changed = value\n",
         "    changed.argument = replacement\n",
         "    parse_quote { ($original, $changed) }\n",
         "}\n",
-        "macro replace_from_closure = [value: CallExpr, replacement: Expr] => {\n",
+        "macro replace_from_closure = (value: CallExpr; replacement: Expr) => {\n",
         "    let mut changed = value\n",
         "    let update = () => { changed.argument = replacement; () }\n",
         "    update ()\n",
@@ -5864,9 +5880,9 @@ fn expands_item_modifier_macros_with_nearest_modifier_first() {
 #[test]
 fn modifier_arguments_support_expression_type_and_pattern_syntax() {
     let module = type_check(concat!(
-        "macro @value = [value, _] => parse_quote { let generated: I32 = $value }\n",
-        "macro @typed: [Parenthesized (Type), Item] -> Item = [ty, _] => parse_quote { let typed: $ty = 1 }\n",
-        "macro @bind: [Parenthesized (Pattern), Item] -> Item = [pattern, _] => parse_quote { let $pattern = (40, 2) }\n",
+        "macro @value = (value; _) => parse_quote { let generated: I32 = $value }\n",
+        "macro @typed: (Parenthesized (Type); Item) -> Item = (ty; _) => parse_quote { let typed: $ty = 1 }\n",
+        "macro @bind: (Parenthesized (Pattern); Item) -> Item = (pattern; _) => parse_quote { let $pattern = (40, 2) }\n",
         "@value(42)\n",
         "let replaced = 0\n",
         "@typed(I32)\n",
@@ -6112,7 +6128,7 @@ fn modified_item_can_be_destructured_and_reconstructed_losslessly() {
         "    ModifiedItem (modifiers, inner) => ModifiedItem (modifiers: modifiers, item: inner),\n",
         "    _ => panic \"outer item is unsupported\",\n",
         "}\n",
-        "macro @inner: [Parenthesized (Expr), Item] -> Item = [value, _] => parse_quote { let reconstructed: I32 = $value }\n",
+        "macro @inner: (Parenthesized (Expr); Item) -> Item = (value; _) => parse_quote { let reconstructed: I32 = $value }\n",
         "@outer\n",
         "@inner(1)\n",
         "let original: I32 = 0\n",
@@ -6133,17 +6149,17 @@ fn expands_metadata_aware_macros_and_contextual_visibility_splices() {
         "    Package => parse_quote { 2 },\n",
         "    Public => parse_quote { 3 },\n",
         "}\n",
-        "macro define_alias = [metadata: MacroCallMetadata, ty: Type] => {\n",
+        "macro define_alias = (metadata: MacroCallMetadata; ty: Type) => {\n",
         "    let actual = normalize_visibility metadata.visibility\n",
         "    parse_quote { $actual type Generated = alias $ty }\n",
         "}\n",
-        "macro classify = [before: Expr, vis: Visibility, after: Expr] => {\n",
+        "macro classify = (before: Expr; vis: Visibility; after: Expr) => {\n",
         "    let number = visibility_number vis\n",
         "    number\n",
         "}\n",
         "macro call_visibility = metadata: MacroCallMetadata => visibility_number metadata.visibility\n",
-        "macro first_visibility = [vis: Visibility, value: Expr] => visibility_number vis\n",
-        "macro final_visibility = [value: Expr, vis: Visibility] => visibility_number vis\n",
+        "macro first_visibility = (vis: Visibility; value: Expr) => visibility_number vis\n",
+        "macro final_visibility = (value: Expr; vis: Visibility) => visibility_number vis\n",
         "pub define_alias I32\n",
         "let implicit: I32 = classify 10 20\n",
         "let public: I32 = classify 10 pub 20\n",
@@ -6379,8 +6395,8 @@ fn type_checks_method_call_syntax_for_juxtaposed_companion_methods() {
     let module = type_check(concat!(
         "type Animal = from I32\n",
         "companion Animal {\n",
-        "    pub def move_to: [Animal, (F32, F32)] -> Animal = [animal, _] => animal\n",
-        "    pub def teleport: [Animal, F32, F32] -> Animal = [animal, _, _] => animal\n",
+        "    pub def move_to: (Animal; (F32, F32)) -> Animal = (animal; _) => animal\n",
+        "    pub def teleport: (Animal; F32; F32) -> Animal = (animal; _; _) => animal\n",
         "}\n",
         "let animal: Animal = 1\n",
         "let moved: Animal = animal |> move_to (1.0, 1.0)\n",
@@ -6388,7 +6404,7 @@ fn type_checks_method_call_syntax_for_juxtaposed_companion_methods() {
         "def relocate: Animal -> Animal = value => value |> move_to (1.0, 1.0)\n",
         "def make: () -> Animal = () => animal\n",
         "let moved_from_call: Animal = (make ()) |> teleport 1.0 2.0\n",
-        "companion Animal { pub def tag: <T> [Animal, T] -> Animal = [animal, _] => animal }\n",
+        "companion Animal { pub def tag: <T> (Animal; T) -> Animal = (animal; _) => animal }\n",
         "let tagged: Animal = animal |> tag 7\n",
     ));
     let context = Context::create();
@@ -6403,7 +6419,7 @@ fn rejects_incomplete_method_call_on_a_juxtaposed_companion_method() {
         .check(resolve(concat!(
             "type Animal = from I32\n",
             "companion Animal {\n",
-            "    pub def move_to: [Animal, (F32, F32)] -> Animal = [animal, _] => animal\n",
+            "    pub def move_to: (Animal; (F32, F32)) -> Animal = (animal; _) => animal\n",
             "}\n",
             "let animal: Animal = 1\n",
             "let incomplete = animal |> move_to\n",
@@ -6497,7 +6513,7 @@ fn typegroup_rejects_opaque_variants() {
 #[test]
 fn equals_and_fat_arrow_are_structured_syntax_nodes() {
     let module = type_check(concat!(
-        "macro punctuation = [_: Ident String, equal: Equals, _: Ident String, arrow: FatArrow, _: Braced (Sequence SyntaxNode)] =>\n",
+        "macro punctuation = (_: Ident String; equal: Equals; _: Ident String; arrow: FatArrow; _: Braced (Sequence SyntaxNode)) =>\n",
         "    match (equal, arrow, Equals, FatArrow) {\n",
         "        (Equals, FatArrow, Equals, FatArrow) => parse_quote { let punctuated: I32 = 42 },\n",
         "    }\n",
@@ -6815,7 +6831,7 @@ fn diagnoses_invalid_metadata_macro_uses() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
-            "macro invalid: [Expr, MacroCallMetadata] -> Expr = [left, metadata] => left\n",
+            "macro invalid: (Expr; MacroCallMetadata) -> Expr = (left; metadata) => left\n",
             "macro `invalid` may use `MacroCallMetadata` only as its first parameter",
         ),
         (
@@ -6864,7 +6880,7 @@ fn implicit_macro_call_metadata_can_make_overloads_ambiguous() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let source = concat!(
         "macro choose: Expr -> Expr = value => parse_quote { $value }\n",
-        "macro choose: [MacroCallMetadata, Expr] -> Expr = [metadata, value] => parse_quote { $value }\n",
+        "macro choose: (MacroCallMetadata; Expr) -> Expr = (metadata; value) => parse_quote { $value }\n",
         "let result = choose 1\n",
     );
     let program = ProgramLoader::new()
@@ -6886,11 +6902,11 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
-            "macro @invalid: [SyntaxNode, Item] -> Item = [value, item] => item\n",
+            "macro @invalid: (SyntaxNode; Item) -> Item = (value; item) => item\n",
             "modifier macro `@invalid` must have signature `Item -> Item`, `Item -> Sequence Item`, or `Item -> Syntax`, optionally with a leading `Parenthesized (Expr | Type | Pattern) ->` argument",
         ),
         (
-            "macro @required: [Parenthesized (Expr), Item] -> Item = [value, item] => item\n@required\nlet value = 1\n",
+            "macro @required: (Parenthesized (Expr); Item) -> Item = (value; item) => item\n@required\nlet value = 1\n",
             "modifier macro `@required` requires a parenthesized argument",
         ),
         (
@@ -6968,11 +6984,11 @@ fn accepts_opaque_type_and_pattern_macro_inputs_and_contextual_splices() {
     let module = type_check(concat!(
         "def type_identity: Type -> Type = value => value\n",
         "def pattern_identity: Pattern -> Pattern = value => value\n",
-        "macro define_value = [ty: Type, value: Expr] => {\n",
+        "macro define_value = (ty: Type; value: Expr) => {\n",
         "    let actual = type_identity ty\n",
         "    parse_quote { let generated: $actual = $value }\n",
         "}\n",
-        "macro destructure = [pattern: Pattern, value: Expr] => {\n",
+        "macro destructure = (pattern: Pattern; value: Expr) => {\n",
         "    let actual = pattern_identity pattern\n",
         "    parse_quote { let $actual = $value }\n",
         "}\n",
@@ -6989,10 +7005,10 @@ fn accepts_opaque_type_and_pattern_macro_inputs_and_contextual_splices() {
 #[test]
 fn accepts_product_type_and_pattern_macro_inputs_without_extra_grouping() {
     let module = type_check(concat!(
-        "macro for = [pattern: Pattern, _: Ident \"in\", value: Expr, body: Expr] => parse_quote {\n",
+        "macro for = (pattern: Pattern; _: Ident \"in\"; value: Expr; body: Expr) => parse_quote {\n",
         "    { let $pattern = $value; $body }\n",
         "}\n",
-        "macro ascribe = [ty: Type, value: Expr] => parse_quote { $ty :: $value }\n",
+        "macro ascribe = (ty: Type; value: Expr) => parse_quote { $ty :: $value }\n",
         "let direct: I32 = for (left, right) in (40, 2) { left + right }\n",
         "let legacy: I32 = for ((left, right)) in (40, 2) { left + right }\n",
         "let empty: () = for () in () { () }\n",
@@ -7491,7 +7507,7 @@ fn diagnoses_invalid_item_macro_outputs_and_placements() {
 fn evaluates_pure_syntax_helpers_and_conditional_macros() {
     let module = type_check(concat!(
         "def syntax_identity: SyntaxNode -> SyntaxNode = value => value\n",
-        "macro choose = [condition, then, else] => parse_quote {\n",
+        "macro choose = (condition; then; else) => parse_quote {\n",
         "    match $condition { True => $then, False => $else, }\n",
         "}\n",
         "macro passthrough = value => syntax_identity value\n",
@@ -7508,10 +7524,10 @@ fn evaluates_pure_syntax_helpers_and_conditional_macros() {
 fn expands_typed_macros_with_literal_identifier_parameters() {
     let module = type_check(concat!(
         "macro conditional =\n",
-        "    [condition: Expr,\n",
-        "    then_branch: Expr,\n",
-        "    _: Ident \"else\",\n",
-        "    else_branch: Expr] => parse_quote {\n",
+        "    (condition: Expr;\n",
+        "    then_branch: Expr;\n",
+        "    _: Ident \"else\";\n",
+        "    else_branch: Expr) => parse_quote {\n",
         "        match $condition {\n",
         "            True() => $then_branch,\n",
         "            False() => $else_branch,\n",
@@ -7624,7 +7640,7 @@ fn rejects_invalid_sequence_positions_and_source_punctuation() {
 #[test]
 fn top_level_macro_sequences_capture_zero_one_and_many_arguments() {
     let module = type_check(concat!(
-        "macro count = [_: Ident \"marker\", values: Sequence (Ident String), _: Equals, name: Ident String, _: FatArrow, _: Braced Syntax] => match values {\n",
+        "macro count = (_: Ident \"marker\"; values: Sequence (Ident String); _: Equals; name: Ident String; _: FatArrow; _: Braced Syntax) => match values {\n",
         "    Sequence () => quote { let $name: I32 = 0 },\n",
         "    Sequence (first: Ident String, rest: Sequence Ident String) => match rest {\n",
         "        Sequence () => quote { let $name: I32 = 1 },\n",
@@ -7644,11 +7660,11 @@ fn top_level_macro_sequences_capture_zero_one_and_many_arguments() {
 #[test]
 fn top_level_macro_sequences_backtrack_for_visibility_and_fixed_suffixes() {
     let module = type_check(concat!(
-        "macro classify = [_: Ident \"marker\",\n",
-        "    values: Sequence (Ident String),\n",
-        "    visibility: Visibility,\n",
-        "    _: Equals,\n",
-        "    name: Ident String, _: FatArrow, _: Braced Syntax] => match (values, visibility) {\n",
+        "macro classify = (_: Ident \"marker\";\n",
+        "    values: Sequence (Ident String);\n",
+        "    visibility: Visibility;\n",
+        "    _: Equals;\n",
+        "    name: Ident String; _: FatArrow; _: Braced Syntax) => match (values, visibility) {\n",
         "        (Sequence (), Private) => quote { let $name: I32 = 40 },\n",
         "        (Sequence (first: Ident String, rest: Sequence Ident String), Public) => quote { let $name: I32 = 41 },\n",
         "        (Sequence (first: Ident String, rest: Sequence Ident String), Package) => quote { let $name: I32 = 42 },\n",
@@ -7667,7 +7683,7 @@ fn top_level_macro_sequences_backtrack_for_visibility_and_fixed_suffixes() {
 #[test]
 fn top_level_macro_sequence_may_be_the_final_parameter() {
     let module = type_check(concat!(
-        "macro tail = [_: Ident \"marker\", name: Ident String, values: Sequence (Ident String)] => match values {\n",
+        "macro tail = (_: Ident \"marker\"; name: Ident String; values: Sequence (Ident String)) => match values {\n",
         "    Sequence () => quote { let $name: I32 = 0 },\n",
         "    Sequence (first: Ident String, rest: Sequence Ident String) => match rest {\n",
         "        Sequence () => quote { let $name: I32 = 1 },\n",
@@ -7687,8 +7703,8 @@ fn top_level_macro_sequence_may_be_the_final_parameter() {
 #[test]
 fn longer_complete_overload_still_beats_a_trailing_sequence_overload() {
     let module = type_check(concat!(
-        "macro pick = [value: Ident String, _: Sequence (Ident String)] => quote { let $value: I32 = 0 }\n",
-        "macro pick = [value: Ident String, _: Sequence (Ident String), _: Equals, _: Braced Syntax] => quote { let $value: I32 = 1 }\n",
+        "macro pick = (value: Ident String; _: Sequence (Ident String)) => quote { let $value: I32 = 0 }\n",
+        "macro pick = (value: Ident String; _: Sequence (Ident String); _: Equals; _: Braced Syntax) => quote { let $value: I32 = 1 }\n",
         "pick alpha one two\n",
         "pick beta one two = {}\n",
     ));
@@ -7701,9 +7717,9 @@ fn longer_complete_overload_still_beats_a_trailing_sequence_overload() {
 #[test]
 fn fixed_and_more_specific_overloads_beat_top_level_sequences() {
     let module = type_check(concat!(
-        "macro choose = [_: Sequence Expr, _: Equals, name: Ident String, _: FatArrow, _: Braced Syntax] => quote { let $name: String = \"wrong\" }\n",
-        "macro choose = [_: Sequence (Ident String), _: Equals, name: Ident String, _: FatArrow, _: Braced Syntax] => quote { let $name: I32 = 1 }\n",
-        "macro choose = [_: Ident String, _: Equals, name: Ident String, _: FatArrow, _: Braced Syntax] => quote { let $name: I32 = 2 }\n",
+        "macro choose = (_: Sequence Expr; _: Equals; name: Ident String; _: FatArrow; _: Braced Syntax) => quote { let $name: String = \"wrong\" }\n",
+        "macro choose = (_: Sequence (Ident String); _: Equals; name: Ident String; _: FatArrow; _: Braced Syntax) => quote { let $name: I32 = 1 }\n",
+        "macro choose = (_: Ident String; _: Equals; name: Ident String; _: FatArrow; _: Braced Syntax) => quote { let $name: I32 = 2 }\n",
         "choose value = fixed => {}\n",
         "choose left right = repeated => {}\n",
     ));
@@ -7716,8 +7732,8 @@ fn fixed_and_more_specific_overloads_beat_top_level_sequences() {
 #[test]
 fn annotated_top_level_sequences_compile_and_incomparable_sequences_are_ambiguous() {
     let module = type_check(concat!(
-        "macro annotated: [Sequence (Ident String), Equals, Ident String, FatArrow, Braced Syntax] -> Syntax =\n",
-        "    [values: Sequence (Ident String), _: Equals, name: Ident String, _: FatArrow, _: Braced Syntax] => quote { let $name: I32 = 42 }\n",
+        "macro annotated: (Sequence (Ident String); Equals; Ident String; FatArrow; Braced Syntax) -> Syntax =\n",
+        "    (values: Sequence (Ident String); _: Equals; name: Ident String; _: FatArrow; _: Braced Syntax) => quote { let $name: I32 = 42 }\n",
         "annotated first second = generated => {}\n",
     ));
     let context = Context::create();
@@ -7730,8 +7746,8 @@ fn annotated_top_level_sequences_compile_and_incomparable_sequences_are_ambiguou
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             &with_syntax_imports(concat!(
-                "macro clash = [_: Sequence Type, _: Equals, _: Ident String, _: FatArrow, _: Braced Syntax] => quote { let generated: I32 = 1 }\n",
-                "macro clash = [_: Sequence Pattern, _: Equals, _: Ident String, _: FatArrow, _: Braced Syntax] => quote { let generated: I32 = 2 }\n",
+                "macro clash = (_: Sequence Type; _: Equals; _: Ident String; _: FatArrow; _: Braced Syntax) => quote { let generated: I32 = 1 }\n",
+                "macro clash = (_: Sequence Pattern; _: Equals; _: Ident String; _: FatArrow; _: Braced Syntax) => quote { let generated: I32 = 2 }\n",
                 "clash Value = output => {}\n",
             )),
             root,
@@ -7752,15 +7768,15 @@ fn rejects_invalid_top_level_macro_sequence_signatures() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
-            "macro invalid = [first: Sequence (Ident String), second: Sequence Expr, _: Equals] => parse_quote { 0 }\n",
+            "macro invalid = (first: Sequence (Ident String); second: Sequence Expr; _: Equals) => parse_quote { 0 }\n",
             "a macro signature may contain at most one top-level `Sequence` parameter",
         ),
         (
-            "macro @invalid: [Sequence (Ident String), Item] -> Item = [values, item] => item\n",
+            "macro @invalid: (Sequence (Ident String); Item) -> Item = (values; item) => item\n",
             "top-level `Sequence` parameters are not supported by modifier macros",
         ),
         (
-            "macro invalid = [values: Sequence (Sequence (Ident String)), _: Equals] => parse_quote { 0 }\n",
+            "macro invalid = (values: Sequence (Sequence (Ident String)); _: Equals) => parse_quote { 0 }\n",
             "a top-level `Sequence` element must be a single syntax category, found `Sequence Ident String`",
         ),
     ] {
@@ -7787,7 +7803,7 @@ fn rejects_curried_macro_annotations() {
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             &with_syntax_imports(
-                "macro invalid: Expr -> Expr -> Item = [left, right] => parse_quote { $left }\n",
+                "macro invalid: Expr -> Expr -> Item = (left; right) => parse_quote { $left }\n",
             ),
             root,
         )
@@ -8024,7 +8040,7 @@ fn provides_integer_range_iterator_implementations() {
 fn macro_overloads_choose_longest_then_most_specific() {
     let module = type_check(concat!(
         "macro select = value: Expr => parse_quote { 10 }\n",
-        "macro select = [value: Expr, _: Ident \"with\", replacement: Expr] => parse_quote { $replacement }\n",
+        "macro select = (value: Expr; _: Ident \"with\"; replacement: Expr) => parse_quote { $replacement }\n",
         "macro classify = value: SyntaxNode => parse_quote { 1 }\n",
         "macro classify = value: Expr => parse_quote { 2 }\n",
         "macro classify = value: Ident String => parse_quote { 3 }\n",
@@ -8085,8 +8101,8 @@ fn diagnoses_duplicate_and_ambiguous_macro_overloads() {
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             concat!(
-                "macro crossed = [left: Ident String, right: Expr] => parse_quote { 1 }\n",
-                "macro crossed = [left: Expr, right: Ident String] => parse_quote { 2 }\n",
+                "macro crossed = (left: Ident String; right: Expr) => parse_quote { 1 }\n",
+                "macro crossed = (left: Expr; right: Ident String) => parse_quote { 2 }\n",
                 "crossed first second\n",
             ),
             root,
@@ -8109,7 +8125,7 @@ fn rejects_a_mismatched_literal_identifier_macro_argument() {
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             concat!(
-                "macro conditional = [value: Expr, _: Ident \"else\"] => parse_quote { $value }\n",
+                "macro conditional = (value: Expr; _: Ident \"else\") => parse_quote { $value }\n",
                 "conditional 1 otherwise\n",
             ),
             root,
@@ -8131,7 +8147,7 @@ fn rejects_bare_literal_identifier_macro_parameters() {
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            "macro conditional = [value: Expr, Ident \"else\"] => parse_quote { $value }\n",
+            "macro conditional = (value: Expr; Ident \"else\") => parse_quote { $value }\n",
             root,
         )
         .expect("source should parse");
@@ -8424,7 +8440,7 @@ fn diagnoses_incomplete_and_non_syntax_macros() {
     let incomplete = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            "macro pair = [left, right] => parse_quote { ($left, $right) }\npair 1\n",
+            "macro pair = (left; right) => parse_quote { ($left, $right) }\npair 1\n",
             root,
         )
         .expect("source should parse");
@@ -8845,7 +8861,6 @@ fn type_checks_and_generates_curried_functions() {
         assert_eq!(
             module.type_of_function(function.id).expect("checked type"),
             &staple_compiler::CheckedFunctionType {
-                parameter_style: staple_syntax::FunctionParameterStyle::Single,
                 default: None,
                 parameter: Box::new(CheckedType::I32),
                 mutations: Vec::new(),
@@ -8853,7 +8868,6 @@ fn type_checks_and_generates_curried_functions() {
                 effects: staple_compiler::CheckedEffectSet::default(),
                 result: Box::new(CheckedType::Function(
                     staple_compiler::CheckedFunctionType {
-                        parameter_style: staple_syntax::FunctionParameterStyle::Single,
                         default: None,
                         parameter: Box::new(CheckedType::I32),
                         mutations: Vec::new(),
@@ -8877,7 +8891,7 @@ fn type_checks_and_generates_curried_functions() {
 #[test]
 fn type_checks_and_generates_non_curried_juxtaposed_functions() {
     let source = concat!(
-        "let pair_add: [x: I32, y: I32] -> I32 = [x: I32, y: I32] => x + y\n",
+        "let pair_add: (x: I32; y: I32) -> I32 = (x: I32; y: I32) => x + y\n",
         "let result: I32 = pair_add 1 2\n",
     );
     let module = type_check(source);
@@ -8891,7 +8905,7 @@ fn type_checks_and_generates_non_curried_juxtaposed_functions() {
 fn rejects_incomplete_juxtaposed_calls() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "let pair_add: [x: I32, y: I32] -> I32 = [x, y] => x + y\n",
+            "let pair_add: (x: I32; y: I32) -> I32 = (x; y) => x + y\n",
             "let partial = pair_add 1\n",
         )))
         .expect_err_diagnostics("juxtaposed calls cannot be partial");
@@ -8905,7 +8919,7 @@ fn rejects_incomplete_juxtaposed_calls() {
 #[test]
 fn completes_a_juxtaposed_call_before_calling_its_result() {
     let source = concat!(
-        "let choose: [x: I32, y: I32] -> I32 -> I32 = [x, y] => z => x + y + z\n",
+        "let choose: (x: I32; y: I32) -> I32 -> I32 = (x; y) => z => x + y + z\n",
         "let result: I32 = choose 1 2 3\n",
     );
     let module = type_check(source);
@@ -8919,7 +8933,7 @@ fn completes_a_juxtaposed_call_before_calling_its_result() {
 fn keeps_product_and_juxtaposed_function_types_distinct() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "let juxtaposed: [x: I32, y: I32] -> I32 = [x, y] => x + y\n",
+            "let juxtaposed: (x: I32; y: I32) -> I32 = (x; y) => x + y\n",
             "let product: (I32, I32) -> I32 = juxtaposed\n",
         )))
         .expect_err_diagnostics("function parameter styles must remain distinct");
@@ -8933,7 +8947,7 @@ fn keeps_product_and_juxtaposed_function_types_distinct() {
 #[test]
 fn supports_patterns_in_juxtaposed_parameter_slots() {
     let source = concat!(
-        "let combine: [(I32, I32), I32] -> I32 = [(left, right), _] => left + right\n",
+        "let combine: ((I32, I32); I32) -> I32 = ((left, right); _) => left + right\n",
         "let result: I32 = combine (1, 2) 3\n",
     );
     let module = type_check(source);
@@ -8946,7 +8960,7 @@ fn supports_patterns_in_juxtaposed_parameter_slots() {
 #[test]
 fn lowers_mutation_markers_on_juxtaposed_parameter_slots() {
     let source = concat!(
-        "let replace: [mut target: I32, value: I32] -> () = [mut target, value] => { target = value }\n",
+        "let replace: (mut target: I32; value: I32) -> () = (mut target; value) => { target = value }\n",
         "let mut number = 1\n",
         "replace number 9\n",
     );
@@ -9062,6 +9076,31 @@ fn compiles_arithmetic_negation_via_neg_trait() {
     CodeGenerator::new(&context)
         .compile_module(&lower(&module))
         .expect("prefix `-` should compile via `Neg` trait dispatch");
+}
+
+/// A one-element product literal `(e)` or `(name: e)` is `e` itself, even when
+/// `e` is a product: it checks against an expected product as a whole and
+/// places `e`'s slots as call arguments, rather than as one slot of its own.
+#[test]
+fn compiles_singleton_product_literals_wrapping_products() {
+    let module = type_check(concat!(
+        "use std.io.println\n",
+        "type Box T = wrap (value: T)\n",
+        "type Defaulted = wrap (a: I32, b: I32 = 5)\n",
+        "def sum: (I32, I32) -> I32 = (a, b) => a + b\n",
+        "let s = (3, 4)\n",
+        "let named: Box (I32, I32) = Box (value: (1, 2))\n",
+        "let unnamed: Box (I32, I32) = Box ((1, 2))\n",
+        "let symbol: Box (I32, I32) = Box (value: s)\n",
+        "let pair: (I32, I32) = (value: (1, 2))\n",
+        "let defaulted = Defaulted (a: 1)\n",
+        "println \"${named.value.0} ${unnamed.value.1} ${symbol.value.0} ${pair.1}\"\n",
+        "println \"${sum (value: (1, 2))} ${sum ((1, 2))} ${defaulted.b}\"\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("singleton product literals around products should compile");
 }
 
 #[test]
@@ -10279,7 +10318,7 @@ fn monomorphizes_nested_and_recursive_generic_calls() {
 fn monomorphizes_generic_closures_with_captures() {
     let module = type_check(concat!(
         "def outer: I32 -> I32 = y => {\n",
-        "  def inner: <T> [T] -> I32 = x => y\n",
+        "  def inner: <T> T -> I32 = x => y\n",
         "  inner \"ignored\"\n",
         "}\n",
         "let answer: I32 = outer 42\n",
@@ -10308,7 +10347,7 @@ fn infers_product_and_result_only_compile_time_parameters() {
 #[test]
 fn monomorphizes_curried_generic_function_layers() {
     let module = type_check(concat!(
-        "def keep_first: <A, B where Copy A> A -> [B] -> A = a => b => a\n",
+        "def keep_first: <A, B where Copy A> A -> B -> A = a => b => a\n",
         "let answer: I32 = keep_first 42 \"ignored\"\n",
     ));
     let context = Context::create();
@@ -11389,7 +11428,7 @@ fn rejects_external_function_overloads() {
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            "extern \"c\" { foreign: I32 -> I32\n foreign: [I32, I32] -> I32\n}\n",
+            "extern \"c\" { foreign: I32 -> I32\n foreign: (I32; I32) -> I32\n}\n",
             root,
         )
         .expect("source loads");
@@ -12215,17 +12254,17 @@ fn stdlib_opaque_copy_policy_uses_explicit_negative_implementations() {
 }
 
 #[test]
-fn parameter_product_aliases_normalize_function_parameters() {
+fn slotted_product_aliases_normalize_function_parameters() {
     let module = type_check(concat!(
         "type Callable Arg Result = alias Arg -> Result\n",
-        "type Inputs = alias [I32, I32]\n",
+        "type Inputs = alias (I32; I32)\n",
         "type Add = alias Callable Inputs I32\n",
-        "def add: Add = [x, y] => x + y\n",
+        "def add: Add = (x; y) => x + y\n",
         "let answer: I32 = add 1 2\n",
-        "type One = alias [I32]\n",
-        "def increment: [value: One] -> I32 = [value] => value + 1\n",
+        "type One = alias (I32;)\n",
+        "def increment: (value: One;) -> I32 = (value;) => value + 1\n",
         "let plain: I32 -> I32 = increment\n",
-        "let bracketed: [I32] -> I32 = x => x + 1\n",
+        "let bracketed: (I32;) -> I32 = x => x + 1\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
@@ -12234,13 +12273,13 @@ fn parameter_product_aliases_normalize_function_parameters() {
 }
 
 #[test]
-fn parameter_products_survive_nominal_type_arguments_and_specialization() {
+fn slotted_products_survive_nominal_type_arguments_and_specialization() {
     let module = type_check(concat!(
-        "type Inputs = alias [I32, I32]\n",
+        "type Inputs = alias (I32; I32)\n",
         "type Handler Args = wrap (callback: Args -> I32, label: String)\n",
         "type Wrapped Args = wrap Args -> I32\n",
         "type Tag P = wrap I32\n",
-        "def add: Inputs -> I32 = [x, y] => x + y\n",
+        "def add: Inputs -> I32 = (x; y) => x + y\n",
         "def identity: Handler Inputs -> Handler Inputs = h => h\n",
         "let handler: Handler Inputs = Handler (callback: add, label: \"sum\")\n",
         "let result: I32 = (identity handler).callback 1 2\n",
@@ -12250,15 +12289,15 @@ fn parameter_products_survive_nominal_type_arguments_and_specialization() {
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&lower(&module))
-        .expect("nominal parameter products specialize");
+        .expect("nominal slotted products specialize");
 }
 
 #[test]
-fn parameter_product_spreads_preserve_slots() {
+fn slotted_product_spreads_preserve_slots() {
     let module = type_check(concat!(
-        "type Inputs = alias [I32, I32]\n",
-        "type More = alias [...Inputs, I32]\n",
-        "def add: More -> I32 = [a, b, c] => a + b + c\n",
+        "type Inputs = alias (I32; I32)\n",
+        "type More = alias (...Inputs; I32)\n",
+        "def add: More -> I32 = (a; b; c) => a + b + c\n",
         "let result: I32 = add 1 2 3\n",
     ));
     let context = Context::create();
@@ -12268,41 +12307,34 @@ fn parameter_product_spreads_preserve_slots() {
 }
 
 #[test]
-fn rejects_parameter_products_in_value_positions() {
-    for suffix in [
-        "let invalid: Inputs = 1\n",
-        "type Nested = alias (Inputs, Inputs) -> ()\n",
+fn slotted_products_are_values_in_nested_and_nominal_positions() {
+    let module = type_check(concat!(
+        "type Inputs = alias (I32; I32)\n",
         "type Payload = wrap Inputs\n",
-        "type Bad = alias (Inputs, I32)\nlet invalid: Bad = (1, 2)\n",
-        "def invalid: I32 -> Inputs = x => x\n",
-        "let invalid: Inputs | I32 = 1\n",
-        "def invalid: [Inputs, I32] -> I32 = [x, y] => y\n",
-        "let invalid: (...Inputs) = (1, 2)\n",
-        "def invalid: mut Inputs -> () = mut x => ()\n",
-        "type Box T = wrap (value: T)\nlet invalid: Box Inputs = Box 1\n",
-        "type Bad A = alias (A, I32)\nlet invalid: Bad Inputs = (1, 2)\n",
-    ] {
-        let source = format!("type Inputs = alias [I32, I32]\n{suffix}");
-        let diagnostics = TypeChecker::new()
-            .check(resolve(&source))
-            .expect_err_diagnostics("parameter products are not values");
-        assert!(
-            diagnostics
-                .iter()
-                .any(|d| d.message.contains("parameter product")
-                    || d.message.contains("mark individual slots")),
-            "{source}\n{diagnostics:?}"
-        );
-    }
+        "type Nested = alias (Inputs, Inputs)\n",
+        "type Box T = wrap (value: T)\n",
+        "let slots: Inputs = (1; 2)\n",
+        "let payload: Payload = Payload 1 2\n",
+        "let nested: Nested = (slots, slots)\n",
+        "let boxed: Box Inputs = Box slots\n",
+        "let sum: Inputs | I32 = slots\n",
+        "let mut list: List Inputs = List.new ()\n",
+        "list |> push slots\n",
+        "def identity: Inputs -> Inputs = (a; b) => (a; b)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("slotted values compile");
 }
 
 #[test]
-fn capable_generic_signatures_accept_juxtaposed_callbacks() {
+fn slotted_generic_signatures_accept_juxtaposed_callbacks() {
     let module = type_check(concat!(
         "type Registry A = wrap (callback: A -> (), label: String)\n",
-        "def keep: <A> [Registry A, A -> ()] -> Registry A = [registry, callback] => registry\n",
-        "def add: [I32, I32] -> () = [a, b] => ()\n",
-        "let registry: Registry [I32, I32] = Registry (callback: add, label: \"sum\")\n",
+        "def keep: <A> (Registry A; A -> ()) -> Registry A = (registry; callback) => registry\n",
+        "def add: (I32; I32) -> () = (a; b) => ()\n",
+        "let registry: Registry (I32; I32) = Registry (callback: add, label: \"sum\")\n",
         "let result = keep registry add\n",
         "result.callback 1 2\n",
     ));
@@ -12313,27 +12345,27 @@ fn capable_generic_signatures_accept_juxtaposed_callbacks() {
 }
 
 #[test]
-fn capable_generic_bodies_cannot_call_unknown_arity_parameters() {
-    let diagnostics = TypeChecker::new()
-        .check(resolve(concat!(
-            "def bad: <A> (A -> ()) -> () = f => f 1\n",
-        )))
-        .expect_err_diagnostics("unknown arity cannot be called");
+fn slotted_generic_bodies_call_opaque_parameters_as_one_slot() {
+    type_check("def apply: <A, R> (A -> R; A) -> R = (f; value) => f value\n");
+    let messages = type_check_errors(
+        "def bad: <A> (A -> ()) -> () = f => f 1\n",
+        "a scalar cannot stand in for an opaque A",
+    );
     assert!(
-        diagnostics
+        messages
             .iter()
-            .any(|d| d.message.contains("write `[A] -> R`")),
-        "{diagnostics:?}"
+            .any(|message| message.contains("expected") || message.contains("cannot")),
+        "{messages:?}"
     );
 }
 
 #[test]
-fn capable_generic_expected_types_and_forwarding_work() {
+fn slotted_generic_expected_types_and_forwarding_work() {
     let module = type_check(concat!(
         "def keep: <A> (A -> ()) -> A -> () = f => f\n",
         "def forward: <A> (A -> ()) -> A -> () = f => keep f\n",
-        "def callback: [I32, I32] -> () = [a, b] => ()\n",
-        "let explicit: [I32, I32] -> () = keep callback\n",
+        "def callback: (I32; I32) -> () = (a; b) => ()\n",
+        "let explicit: (I32; I32) -> () = keep callback\n",
         "let inferred = forward callback\n",
         "explicit 1 2\n",
         "inferred 1 2\n",
@@ -12345,32 +12377,30 @@ fn capable_generic_expected_types_and_forwarding_work() {
 }
 
 #[test]
-fn single_value_generic_signatures_reject_juxtaposed_callbacks() {
+fn slotted_generic_calls_reject_scalar_arguments_for_product_slots() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "def apply: <A, R> [A -> R, A] -> R = [f, a] => f a\n",
-            "def callback: [I32, I32] -> I32 = [a, b] => a + b\n",
+            "def apply: <A, R> (A -> R; A) -> R = (f; a) => f a\n",
+            "def callback: (I32; I32) -> I32 = (a; b) => a + b\n",
             "let invalid = apply callback 1\n",
         )))
-        .expect_err_diagnostics("a value slot forbids a parameter product");
+        .expect_err_diagnostics("a scalar cannot fill a product-valued slot");
     assert!(
-        diagnostics
-            .iter()
-            .any(|d| d.message.contains("`A` of `apply` requires a single value")),
+        diagnostics.iter().any(|d| d.message.contains("expected")),
         "{diagnostics:?}"
     );
 }
 
 #[test]
-fn companion_capability_is_decided_per_member() {
+fn slotted_companion_members_infer_parameter_types() {
     let prefix = concat!(
         "type Handler A = wrap (callback: A -> I32, label: String)\n",
         "companion<A> Handler A {\n",
         " pub def get_callback: Handler A -> A -> I32 = handler => handler.callback\n",
-        " pub def evaluate: [Handler A, A] -> I32 = [handler, value] => handler.callback value\n",
+        " pub def evaluate: (Handler A; A) -> I32 = (handler; value) => handler.callback value\n",
         "}\n",
-        "def sum: [I32, I32] -> I32 = [a, b] => a + b\n",
-        "let handler: Handler [I32, I32] = Handler (callback: sum, label: \"sum\")\n",
+        "def sum: (I32; I32) -> I32 = (a; b) => a + b\n",
+        "let handler: Handler (I32; I32) = Handler (callback: sum, label: \"sum\")\n",
     );
     let module = type_check(&format!(
         "{prefix}let callback = Handler.get_callback handler\nlet result: I32 = callback 1 2\n"
@@ -12381,24 +12411,21 @@ fn companion_capability_is_decided_per_member() {
         .expect("capable companion specializes");
     let diagnostics = TypeChecker::new()
         .check(resolve(&format!("{prefix}Handler.evaluate handler 1\n")))
-        .expect_err_diagnostics("the value-using member is single-value");
+        .expect_err_diagnostics("member argument must match its inferred type");
     assert!(
-        diagnostics
-            .iter()
-            .any(|d| d.message.contains("requires a single value")),
+        diagnostics.iter().any(|d| d.message.contains("expected")),
         "{diagnostics:?}"
     );
 }
 
 #[test]
-fn parameter_product_template_spreads_and_markers_normalize_after_substitution() {
+fn slotted_product_template_spreads_and_markers_normalize_after_substitution() {
     let module = type_check(concat!(
-        "type Expand Args Result = alias [...Args] -> Result\n",
-        "type Inputs = alias [I32, I32]\n",
-        "def sum: Expand Inputs I32 = [a, b] => a + b\n",
+        "type Expand Args Result = alias (...Args;) -> Result\n",
+        "type Inputs = alias (I32; I32)\n",
+        "def sum: Expand Inputs I32 = (a; b) => a + b\n",
         "let result: I32 = sum 1 2\n",
-        "type In T = alias [mut List T, move T]\n",
-        "def push: In I32 -> () = [mut list, move value] => list |> push value\n",
+        "def push: (mut List I32; move I32) -> () = (mut list; move value) => list |> push value\n",
         "let mut list: List I32 = List.new ()\n",
         "push list 1\n",
     ));
@@ -12409,11 +12436,11 @@ fn parameter_product_template_spreads_and_markers_normalize_after_substitution()
 }
 
 #[test]
-fn opaque_and_phantom_parameters_accept_parameter_products() {
+fn opaque_and_phantom_parameters_accept_slotted_products() {
     type_check(concat!(
         "use std.cinterop.CPointer\n",
         "use std.coroutine.Task\n",
-        "type Inputs = alias [I32, I32]\n",
+        "type Inputs = alias (I32; I32)\n",
         "type Handle Args = opaque\n",
         "def pointer: CPointer Inputs -> CPointer Inputs = value => value\n",
         "def task: move Task Inputs -> Task Inputs = move value => value\n",
@@ -12423,37 +12450,32 @@ fn opaque_and_phantom_parameters_accept_parameter_products() {
 }
 
 #[test]
-fn parameter_product_capability_comes_from_signatures_only() {
-    for source in [
-        "def bad: <A> A -> I32 = _ => 1\n",
-        "def bad: <A> (A -> ()) -> () = f => { let invalid: A = 1; () }\n",
-        "def takes: <A> ([A] -> ()) -> () = g => ()\ndef bad: <B> (B -> ()) -> () = f => takes f\n",
-        "def bad: <A> ([...A] -> ()) -> () = f => f 1\n",
-    ] {
-        let diagnostics = TypeChecker::new()
-            .check(resolve(source))
-            .expect_err_diagnostics("the body cannot use a capable parameter as a value");
-        assert!(
-            diagnostics
-                .iter()
-                .any(|d| d.message.contains("may be a parameter product")
-                    || d.message.contains("requires a single value")),
-            "{source}\n{diagnostics:?}"
-        );
-    }
+fn slotted_generic_signatures_have_no_capability_restrictions() {
+    type_check(concat!(
+        "def constant: <A> A -> I32 = _ => 1\n",
+        "def takes: <A> ((A;) -> ()) -> () = g => ()\n",
+        "def forward: <B> (B -> ()) -> () = f => takes f\n",
+        "let polymorphic: <A> A -> I32 = constant\n",
+    ));
+    let messages = type_check_errors(
+        "def invalid: <A> (A -> ()) -> () = _ => { let value: A = 1; () }\n",
+        "generic values still require matching types",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("expected")),
+        "{messages:?}"
+    );
 }
 
 #[test]
-fn single_slot_parameter_products_collapse_names_and_markers() {
+fn single_slot_slotted_products_collapse_names_and_markers() {
     let module = type_check(concat!(
-        "type One = alias [named: I32]\n",
-        "def identity: One -> I32 = [x] => x\n",
+        "type One = alias (named: I32;)\n",
+        "def identity: One -> I32 = (x;) => x\n",
         "let plain: I32 -> I32 = identity\n",
-        "type Borrow = alias [mut List I32]\n",
-        "def append_one: Borrow -> () = [mut list] => list |> push 1\n",
+        "def append_one: (mut List I32;) -> () = (mut list;) => list |> push 1\n",
         "let plain_push: mut List I32 -> () = append_one\n",
-        "type Owned = alias [move String]\n",
-        "def take: Owned -> String = [move value] => value\n",
+        "def take: (move String;) -> String = (move value;) => value\n",
         "let plain_take: move String -> String = take\n",
         "let mut list: List I32 = List.new ()\n",
         "plain_push list\n",
@@ -12467,10 +12489,10 @@ fn single_slot_parameter_products_collapse_names_and_markers() {
 }
 
 #[test]
-fn parameter_product_spreads_validate_after_substitution() {
+fn slotted_product_spreads_validate_after_substitution() {
     for argument in ["()", "I32"] {
         let source = format!(
-            "type Expand A = alias [...A] -> ()\ndef invalid: Expand {argument} = () => ()\n"
+            "type Expand A = alias (...A;) -> ()\ndef invalid: Expand {argument} = () => ()\n"
         );
         let diagnostics = TypeChecker::new()
             .check(resolve(&source))
@@ -12486,13 +12508,13 @@ fn parameter_product_spreads_validate_after_substitution() {
 }
 
 #[test]
-fn parameter_products_pass_through_generic_impl_headers() {
+fn slotted_products_pass_through_generic_impl_headers() {
     let module = type_check(concat!(
         "type Handler A = wrap (callback: A -> (), label: String)\n",
         "trait Inspect T { inspect: T -> () }\n",
         "impl<A> Inspect (Handler A) { inspect = handler => () }\n",
-        "def callback: [I32, I32] -> () = [a, b] => ()\n",
-        "let handler: Handler [I32, I32] = Handler (callback: callback, label: \"sum\")\n",
+        "def callback: (I32; I32) -> () = (a; b) => ()\n",
+        "let handler: Handler (I32; I32) = Handler (callback: callback, label: \"sum\")\n",
         "Inspect.inspect handler\n",
     ));
     let context = Context::create();
@@ -12502,46 +12524,34 @@ fn parameter_products_pass_through_generic_impl_headers() {
 }
 
 #[test]
-fn parameter_products_are_rejected_by_map_and_trait_bounds() {
-    for source in [
+fn slotted_products_satisfy_structural_trait_bounds() {
+    type_check(concat!(
+        "def bounded: <A where Copy A> (A -> ()) -> () = f => ()\n",
+        "def callback: (I32; I32) -> () = (a; b) => ()\n",
+        "bounded callback\n",
+    ));
+    let messages = type_check_errors(
         concat!(
-            "def map: <T, U> [List T, T -> U] -> List U = [list, f] => List.new ()\n",
-            "def callback: [I32, I32] -> I32 = [a, b] => a + b\n",
+            "def map: <T, U> (List T; T -> U) -> List U = (list; f) => List.new ()\n",
+            "def callback: (I32; I32) -> I32 = (a; b) => a + b\n",
             "let list: List I32 = List.new ()\n",
             "map list callback\n",
         ),
-        concat!(
-            "def bounded: <A where Copy A> (A -> ()) -> () = f => ()\n",
-            "def callback: [I32, I32] -> () = [a, b] => ()\n",
-            "bounded callback\n",
-        ),
-    ] {
-        let diagnostics = TypeChecker::new()
-            .check(resolve(source))
-            .expect_err_diagnostics("the signature requires a single value");
-        assert!(
-            diagnostics
-                .iter()
-                .any(|d| d.message.contains("requires a single value")),
-            "{diagnostics:?}"
-        );
-    }
+        "callback parameter must match the list element type",
+    );
+    assert!(!messages.is_empty());
 }
 
 #[test]
-fn parameter_product_placement_errors_are_reported_once() {
-    let diagnostics = TypeChecker::new()
-        .check(resolve(concat!(
-            "type Inputs = alias [I32, I32]\n",
-            "type M A = alias mut A -> ()\n",
-            "def f: M Inputs = [a, b] => ()\n",
-        )))
-        .expect_err_diagnostics("a mutable alias parameter is single-value");
-    let matching = diagnostics
-        .iter()
-        .filter(|d| d.message.contains("cannot instantiate `A` of `M`"))
-        .count();
-    assert_eq!(matching, 1, "{diagnostics:?}");
+fn slotted_product_aliases_cannot_own_slot_markers() {
+    for source in [
+        "type Invalid = alias (mut I32; I32)\n",
+        "type Invalid = alias (move String)\n",
+    ] {
+        let error = staple_syntax::parse(source)
+            .expect_err("slot markers require a function parameter");
+        assert!(error.message.contains("only allowed on a function parameter type"), "{error:?}");
+    }
 }
 
 fn type_check_errors(source: &str, reason: &str) -> Vec<String> {
@@ -12932,7 +12942,7 @@ fn intrinsic_registration_checks_names_and_loaded_modules() {
         ),
         (
             "std/core/reference.sta",
-            "    __ref_replace: <T> [mut Ref T, move T] -> T\n",
+            "    __ref_replace: <T> (mut Ref T; move T) -> T\n",
             "",
             "standard library `std.core.reference` does not declare intrinsic `__ref_replace`",
         ),
@@ -13073,7 +13083,7 @@ fn call_site_type_arguments_specialize_functions_and_constructors() {
     let module = type_check(concat!(
         "use std.list.List\n",
         "def identity: <T> move T -> T = move x => x\n",
-        "def second: <A, B> [move B, move A] -> B = [move b, move a] => b\n",
+        "def second: <A, B> (move B; move A) -> B = (move b; move a) => b\n",
         "let list = List.new.<I32> ()\n",
         "let empty: () -> List I32 = List.new.<I32>\n",
         "let another = empty ()\n",
@@ -13278,8 +13288,8 @@ fn forall_preserves_generic_compile_time_helpers() {
 fn checked_schemes_preserve_enclosing_rigid_parameters() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "def outer: <T> [move T] -> I32 = move value => {\n",
-            "  def helper: [move T] -> T = move x => x\n",
+            "def outer: <T> (move T) -> I32 = move value => {\n",
+            "  def helper: (move T) -> T = move x => x\n",
             "  helper 5\n",
             "  0\n",
             "}\n",
@@ -13297,8 +13307,8 @@ fn checked_schemes_preserve_enclosing_rigid_parameters() {
 #[test]
 fn checked_schemes_instantiate_local_generics_independently() {
     type_check(concat!(
-        "def outer: <T> [move T] -> T = move value => {\n",
-        "  def helper: <U> [move U] -> U = move x => x\n",
+        "def outer: <T> (move T) -> T = move value => {\n",
+        "  def helper: <U> (move U) -> U = move x => x\n",
         "  helper value\n",
         "}\n",
         "outer 1\n",
@@ -13451,14 +13461,6 @@ fn rejects_invalid_polymorphic_values() {
         (
             "use std.io.IO\ndef apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\nlet bad: (() ->{IO} I32) -> I32 = apply\n",
             "expected",
-        ),
-        (
-            "def run: <A> (A -> I32) -> I32 = f => 42\nlet f = run\n",
-            "parameter-product-capable",
-        ),
-        (
-            "def consume: (<A> A -> I32) -> I32 = f => 42\n",
-            "parameter-product-capable",
         ),
         ("let f: <T> move T -> T = move x => 42\n", "expected"),
         (
@@ -13920,25 +13922,23 @@ fn trait_member_parameters_cannot_reuse_trait_parameter_names() {
 }
 
 #[test]
-fn trait_member_parameters_are_single_value() {
-    // Like trait parameters, a member's own parameters never bind to a
-    // parameter product, so a parameter that occurs only as a function's
-    // parameter, or not at all, is accepted.
+fn trait_member_parameters_admit_slotted_values() {
     let declarations = concat!(
         "trait Run T { run: <A> (T, A -> I32) -> I32 }\n",
         "impl Run I32 { run = (_, f) => 1 }\n",
         "trait Measure T { measure: <A> T -> USize }\n",
         "impl Measure I32 { measure = _ => 4 }\n",
     );
-    lower(&type_check(&format!(
-        "{declarations}let ran = Run.run (1, (value: I32) => value)\nlet size = Measure.measure.<_, String> 1\nlet member = Measure.measure\n"
-    )));
-    let diagnostics = TypeChecker::new()
-        .check(resolve(&format!(
-            "{declarations}def add: [I32, I32] -> I32 = [left, right] => left + right\nlet ran = Run.run (1, add)\n"
-        )))
-        .expect_err_diagnostics("a member parameter cannot bind to a parameter product");
-    assert!(!diagnostics.is_empty());
+    for use_site in [
+        "let ran = Run.run (1, (value: I32) => value)\nlet size = Measure.measure.<_, String> 1\nlet member = Measure.measure\n",
+        "def add: (I32; I32) -> I32 = (left; right) => left + right\nlet ran = Run.run (1, add)\nlet size = Measure.measure.<_, (I32; I32)> 1\n",
+    ] {
+        let module = type_check(&format!("{declarations}{use_site}"));
+        let context = Context::create();
+        CodeGenerator::new(&context)
+            .compile_module(&lower(&module))
+            .expect("trait-member generics admit slotted callback parameters and type arguments");
+    }
 }
 
 #[test]
@@ -14093,7 +14093,7 @@ fn pipe_stages_resolve_companions_traits_and_qualified_members() {
         "let explicit_trait: I32 = value |> Finish.finish.<Boxed> 2\n",
         "let grouped: I32 = value |> (step 1) |> (finish 2)\n",
         "let partial: I32 -> I32 = value |> finish\n",
-        "companion Boxed { pub def tag: <T> Boxed -> [T] -> I32 = _ => [_] => 4 }\n",
+        "companion Boxed { pub def tag: <T> Boxed -> T -> I32 = _ => _ => 4 }\n",
         "let generic: I32 = value |> tag.<I32> 2\n",
         "trait Associated T { type Output; convert: T -> Output }\n",
         "impl Associated Boxed { type Output = I32; convert = Boxed value => value }\n",
@@ -14101,10 +14101,10 @@ fn pipe_stages_resolve_companions_traits_and_qualified_members() {
         "trait Pair T { first: T -> I32 }\n",
         "impl Pair (I32, I32) { first = (a, _) => a }\n",
         "let structural: I32 = (1, 2) |> first\n",
-        "trait Hop T { hop: [T, I32] -> T }\n",
-        "impl Hop Boxed { hop = [value, _] => value }\n",
+        "trait Hop T { hop: (T; I32) -> T }\n",
+        "impl Hop Boxed { hop = (value; _) => value }\n",
         "let juxtaposed: Boxed = value |> hop 2\n",
-        "companion Boxed { pub def marked: <T> [Boxed, T] -> Boxed = [value, _] => value }\n",
+        "companion Boxed { pub def marked: <T> (Boxed; T) -> Boxed = (value; _) => value }\n",
         "let explicit_slots: Boxed = value |> marked.<I32> 2\n",
         "let explicit_trait_slots: Boxed = value |> Hop.hop.<Boxed> 2\n",
         "mod Helpers { pub trait Render T { render: T -> String } }\n",
@@ -14149,8 +14149,8 @@ fn pipe_stages_reject_ambiguous_incomplete_and_non_method_calls() {
         ),
         (
             concat!(
-                "trait Hop T { hop: [T, I32] -> T }\n",
-                "impl Hop I32 { hop = [value, _] => value }\n",
+                "trait Hop T { hop: (T; I32) -> T }\n",
+                "impl Hop I32 { hop = (value; _) => value }\n",
                 "let result = 1 |> hop\n",
             ),
             "juxtaposed",
@@ -14169,8 +14169,8 @@ fn pipe_stages_reject_ambiguous_incomplete_and_non_method_calls() {
         ),
         (
             concat!(
-                "trait Hop T { hop: [T, I32] -> T }\n",
-                "impl Hop I32 { hop = [value, _] => value }\n",
+                "trait Hop T { hop: (T; I32) -> T }\n",
+                "impl Hop I32 { hop = (value; _) => value }\n",
                 "let result = 1 |> Hop.hop.<String> 2\n",
             ),
             "no trait implementation",
@@ -14202,4 +14202,968 @@ fn pipe_stages_reject_ambiguous_incomplete_and_non_method_calls() {
             "{diagnostics:?}"
         );
     }
+}
+
+#[test]
+fn slotted_products_typecheck_as_distinct_values_and_function_parameters() {
+    let module = type_check(concat!(
+        "def add: (I32; I32) -> I32 = (x; y) => x + y\n",
+        "let sum: I32 = add 1 2\n",
+        "let slots: (I32; I32) = (1; 2)\n",
+        "let plain: (I32, I32) = (...slots)\n",
+        "let again: (I32; I32) = (...plain;)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context).compile_module(&lower(&module)).expect("slotted products should lower as products");
+    let errors = type_check_errors("let wrong: (I32; I32) = (1, 2)\n", "product kinds are distinct");
+    assert!(errors.iter().any(|message| message.contains("expected `(I32; I32)`")), "{errors:?}");
+}
+
+#[test]
+fn slotted_type_spreads_preserve_target_kind_and_validate_substitutions() {
+    let module = type_check(concat!(
+        "type Append P = alias (...P; I32)\n",
+        "type Plain P = alias (...P, I32)\n",
+        "type Slots P = alias (...P;)\n",
+        "let slotted: Append (I32, I32) = (1; 2; 3)\n",
+        "let ordinary: Plain (I32; I32) = (1, 2, 3)\n",
+        "let converted: Slots (I32, I32) = (1; 2)\n",
+        "let single: Append () = 3\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context).compile_module(&lower(&module)).expect("type spreads should specialize to fixed products");
+    for source in [
+        "type Append P = alias (...P; I32)\nlet bad: Append I32 = (1; 2)\n",
+        "type Slots P = alias (...P;)\nlet bad: Slots () = ()\n",
+        "type Empty = alias (...(I32 ^ 0);)\nlet bad: Empty = ()\n",
+    ] {
+        let errors = type_check_errors(source, "type spread must have a valid fixed shape");
+        assert!(errors.iter().any(|message| message.contains("cannot spread non-product") || message.contains("at least one slot")), "{errors:?}");
+    }
+}
+
+#[test]
+fn slotted_function_markers_follow_expanded_type_slots() {
+    let module = type_check(concat!(
+        "def replace: (...(I32, I32); mut I32) -> () = (a; b; mut value) => { value = a + b }\n",
+        "let mut result: I32 = 0\n",
+        "replace 1 2 result\n",
+        "def singleton: (mut I32;) -> () = mut value => { value = 4 }\n",
+        "singleton result\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("expanded slot markers compile");
+}
+
+#[test]
+fn slotted_calls_hint_to_spread_a_whole_parameter_value() {
+    for source in [
+        "def add: (I32; I32) -> I32 = (a; b) => a + b\nlet p: (I32; I32) = (1; 2)\nadd p\n",
+        "def add: (I64; I64) -> I64 = (a; b) => a + b\nadd (1; 2)\n",
+        "def add: (I32; I32) -> I32 = (a; b) => a + b\nlet wrapped = (pair: (1; 2), other: 3)\nadd wrapped.pair\n",
+        "def add: (I32; I32) -> I32 = (a; b) => a + b\nlet f: (I32; I32) -> I32 = add\nlet x: (I32; I32) = (1; 2)\nf x\n",
+        "def first: <T> (T; T) -> T = (a; _) => a\nlet p: (I32; I32) = (1; 2)\nfirst.<I32> p\n",
+        "trait Choose T { choose: (T; T) -> T }\nimpl Choose I32 { choose = (a; _) => a }\nlet p: (I32; I32) = (1; 2)\nChoose.choose.<I32> p\n",
+        "type Animal = from I32\ncompanion Animal { pub def choose: (Animal; Animal) -> Animal = (a; _) => a }\nlet a: Animal = 1\nlet p: (Animal; Animal) = (a; a)\nAnimal.choose p\n",
+        "trait Choose T { choose: (T; T) -> T }\nimpl Choose I32 { choose = (a; _) => a }\nlet p: (I32; I32) = (1; 2)\np |> Choose.choose.<I32>\n",
+        "def add: (x: I32; y: I32) -> I32 = (x; y) => x + y\nlet p = (1; 2)\nadd p\n",
+        "def add: (x: I32; y: I32) -> I32 = (x; y) => x + y\ndef g = (p: (I32; I32)) => add p\n",
+        "def add: (x: I32; y: I32) -> I32 = (x; y) => x + y\ndef main = () => {\n    let p = (1; 2)\n    add p\n}\n",
+    ] {
+        let messages = type_check_errors(source, "the product fills one argument, not two slots");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("spread it into the slots:")),
+            "{source}: {messages:?}"
+        );
+    }
+    type_check(concat!(
+        "def first: ((I32; I32); I32) -> I32 = (pair; _) => pair.0\n",
+        "let pair: (I32; I32) = (1; 2)\n",
+        "let value: I32 = first pair 3\n",
+        "let literal: I32 = first (1; 2) 3\n",
+    ));
+}
+
+#[test]
+fn slotted_diagnostics_quote_the_call_and_slot_separators() {
+    let messages = type_check_errors(
+        "def add: (x: I32; y: I32) -> I32 = (x; y) => x + y\nlet p = (1; 2)\nadd p\n",
+        "a whole slotted value fills one slot",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("`add ...p`")),
+        "{messages:?}"
+    );
+    let messages = type_check_errors(
+        "def add: (I32; I32) -> I32 = (a; b) => a + b\nadd (1; 2)\n",
+        "a slotted literal fills one slot",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("`add ...(1; 2)`")),
+        "{messages:?}"
+    );
+    let messages = type_check_errors(
+        "def add: (I32; I32) -> I32 = (a; b) => a + b\nadd 1 ...(2, 3)\n",
+        "a spread overruns the last slot",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("spread fills 2 slots but only 1 slot remains")),
+        "{messages:?}"
+    );
+    let messages = type_check_errors(
+        "def first: <A> (move A; I32) -> A = (a; n) => a\n",
+        "slot markers disagree with the annotation",
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("(A; I32)")
+            && message.contains("(move A; I32)")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn generic_constructors_take_slotted_values_as_one_slot() {
+    let module = type_check(concat!(
+        "type Box T = wrap (value: T)\n",
+        "let slots: (I32; I32) = (1; 2)\n",
+        "let inferred = Box slots\n",
+        "let expected: Box (I32; I32) = Box slots\n",
+        "let literal: Box (I32; I32) = Box (1; 2)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("boxed slotted values compile");
+    let messages = type_check_errors(
+        "type Box T = wrap (value: T)\nlet slots: (I32; I32) = (1; 2)\nlet b: Box (I32; I32) = Box ...slots\n",
+        "a generic parameter is one slot",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("spread fills 2 slots but only 1 slot remains")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn slotted_call_spreads_reject_statically_unknown_or_non_product_values() {
+    let unknown = type_check_errors(
+        "def bad: <A> (A; (I32; I32) -> I32) -> I32 = (value; f) => f ...value\n",
+        "an opaque parameter has no known spread shape",
+    );
+    assert!(
+        unknown
+            .iter()
+            .any(|message| message == "cannot spread a value of unknown shape"),
+        "{unknown:?}"
+    );
+    let scalar = type_check_errors(
+        "def add: (I32; I32) -> I32 = (a; b) => a + b\nlet value: I32 = 1\nadd ...value\n",
+        "a scalar is not a spread operand",
+    );
+    assert!(
+        scalar
+            .iter()
+            .any(|message| message.contains("cannot spread non-product value")),
+        "{scalar:?}"
+    );
+}
+
+#[test]
+fn slotted_direct_calls_spread_fixed_products_into_consecutive_slots() {
+    let module = type_check(concat!(
+        "def add: (I64; I64) -> I64 = (a; b) => a + b\n",
+        "let slotted: (I64; I64) = (1; 2)\n",
+        "let plain: (I64, I64) = (3, 4)\n",
+        "let first: I64 = add ...slotted\n",
+        "let second: I64 = add ...plain\n",
+        "let third: I64 = add ...(5; 6)\n",
+        "def sum: (I32; I32; I32) -> I32 = (a; b; c) => a + b + c\n",
+        "let fourth: I32 = sum 1 ...(2, 3)\n",
+        "let fifth: I32 = sum ...(1, 2) 3\n",
+        "let sixth: I32 = sum ...() 1 2 3\n",
+        "let f: (I64; I64) -> I64 = add\n",
+        "let seventh: I64 = f ...plain\n",
+        "def same: <A where Copy A> (A; A) -> A = (a; _) => a\n",
+        "let eighth: I32 = same ...(7, 8)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("call spreads emit LLVM");
+}
+
+#[test]
+fn slotted_direct_call_spreads_cannot_overrun_or_fill_plain_product_slots() {
+    for source in [
+        "def f: (I32; I32) -> I32 = (a; b) => a + b\nf 1 ...(2, 3)\n",
+        "def f: (I32, I32) -> I32 = (a, b) => a + b\nf ...(1, 2)\n",
+    ] {
+        let messages = type_check_errors(source, "spreads cannot overrun a static slot count");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("but only")),
+            "{messages:?}"
+        );
+    }
+}
+
+#[test]
+fn generic_constructor_values_keep_their_expected_callable_types() {
+    for name in [
+        "dynamic_constructor_values",
+        "census_constructor_adapters",
+        "example_traits_and_generics",
+    ] {
+        let program = staple_compiler::codegen_corpus()
+            .iter()
+            .find(|program| program.name == name)
+            .expect("corpus case");
+        let source = match program.source {
+            staple_compiler::CorpusSource::Inline(source) => source.to_owned(),
+            staple_compiler::CorpusSource::File(path) => std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join(path),
+            )
+            .expect("corpus file"),
+        };
+        let module = type_check(&source);
+        let context = Context::create();
+        CodeGenerator::new(&context)
+            .compile_module(&lower(&module))
+            .unwrap_or_else(|diagnostics| panic!("{name}: {diagnostics:?}"));
+    }
+}
+
+#[test]
+fn slotted_trait_calls_spread_operands_and_keep_pipeline_first_slots() {
+    let module = type_check(concat!(
+        "trait Total T { total: (T; T; T) -> T }\n",
+        "impl Total I32 { total = (a; b; c) => a + b + c }\n",
+        "let plain: (I32, I32, I32) = (1, 2, 3)\n",
+        "let slotted: (I32; I32; I32) = (4; 5; 6)\n",
+        "let first: I32 = Total.total ...plain\n",
+        "let second: I32 = Total.total ...slotted\n",
+        "let third: I32 = Total.total 1 ...(2, 3)\n",
+        "let fourth: I32 = 1 |> Total.total ...(2, 3)\n",
+        "let fifth: I32 = Total.total.<I32> ...(1, 2, 3)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("trait spreads emit LLVM");
+}
+
+#[test]
+fn slotted_trait_spreads_report_slot_overruns_and_incomplete_calls() {
+    for (suffix, expected) in [
+        ("Total.total 1 ...(2, 3)\n", "but only"),
+        ("Total.total ...()\n", "expected 2 arguments, found 0"),
+        ("Total.total ...1\n", "cannot spread non-product value"),
+    ] {
+        let source = format!(
+            "trait Total T {{ total: (T; T) -> T }}\nimpl Total I32 {{ total = (a; b) => a + b }}\n{suffix}"
+        );
+        let messages = type_check_errors(&source, "trait spreads obey static slot counts");
+        assert!(
+            messages.iter().any(|message| message.contains(expected)),
+            "{messages:?}"
+        );
+    }
+}
+
+#[test]
+fn slotted_call_spreads_apply_extra_arguments_to_returned_functions() {
+    let module = type_check(concat!(
+        "def add: (I32; I32) -> I32 = (a; b) => a + b\n",
+        "def choose: (I32; I32) -> (I32; I32) -> I32 = (a; b) => add\n",
+        "let first: I32 = choose ...(1, 2) ...(3, 4)\n",
+        "let second: I32 = choose 1 2 3 4\n",
+        "trait Choose T { choose: (T; T) -> (T; T) -> T }\n",
+        "impl Choose I32 { choose = (a; b) => add }\n",
+        "let third: I32 = Choose.choose ...(1, 2) ...(3, 4)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("returned slotted functions use fresh call groups");
+}
+
+#[test]
+fn slotted_companion_calls_spread_remaining_slots() {
+    let module = type_check(concat!(
+        "type Animal = from I32\n",
+        "companion Animal {\n",
+        "    pub def teleport: (Animal; I64; I64) -> Animal = (animal; _; _) => animal\n",
+        "    pub def tag: <T> (Animal; T; T) -> Animal = (animal; _; _) => animal\n",
+        "}\n",
+        "let animal: Animal = 1\n",
+        "let plain: (I64, I64) = (2, 3)\n",
+        "let slotted: (I64; I64) = (4; 5)\n",
+        "let first: Animal = animal |> teleport ...plain\n",
+        "let second: Animal = animal |> teleport ...slotted\n",
+        "let third: Animal = animal |> teleport ...(6, 7)\n",
+        "let fourth: Animal = animal |> Animal.teleport ...(8, 9)\n",
+        "let fifth: Animal = Animal.teleport animal ...plain\n",
+        "let sixth: Animal = animal |> tag ...(1, 2)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("companion spreads preserve receiver-first calls and literal context");
+}
+
+#[test]
+fn slotted_companion_spreads_reject_overruns_and_unknown_shapes() {
+    for (suffix, expected) in [
+        ("animal |> teleport ...(1, 2, 3)\n", "but only"),
+        ("animal |> teleport ...1\n", "cannot spread non-product value"),
+        ("def invalid: <T> T -> Animal = value => animal |> teleport ...value\n", "unknown shape"),
+    ] {
+        let source = format!(
+            "type Animal = from I32\ncompanion Animal {{ pub def teleport: (Animal; I32; I32) -> Animal = (animal; _; _) => animal }}\nlet animal: Animal = 1\n{suffix}"
+        );
+        let messages = type_check_errors(&source, "companion spreads obey static slot counts");
+        assert!(messages.iter().any(|message| message.contains(expected)), "{messages:?}");
+    }
+}
+
+#[test]
+fn overloaded_slotted_trait_calls_contextualize_candidate_slots() {
+    let module = type_check(concat!(
+        "trait Numeric T { compute: (T; I64; () -> I64) -> I64 }\n",
+        "trait Logical T { compute: (T; Bool; () -> Bool) -> Bool }\n",
+        "impl Numeric I32 { compute = (_; value; callback) => value + callback () }\n",
+        "impl Logical Bool { compute = (_; value; _) => value }\n",
+        "let receiver: I32 = 1\n",
+        "let value: I64 = compute receiver 2 { 3 }\n",
+        "let spread: I64 = compute ...(receiver, 2) { 3 }\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("each overload supplies its own ordinary slot context");
+    let messages = type_check_errors(
+        concat!(
+            "trait First T { choose: (T; I64) -> I64 }\n",
+            "trait Second T { choose: (T; I64) -> I64 }\n",
+            "impl First I32 { choose = (_; value) => value }\n",
+            "impl Second I32 { choose = (_; value) => value }\n",
+            "let receiver: I32 = 1\n",
+            "let value: I64 = choose receiver 2\n",
+        ),
+        "two viable contextual candidates remain ambiguous",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("ambiguous trait method")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn slotted_trait_calls_contextualize_each_ordinary_slot() {
+    let module = type_check(concat!(
+        "trait Compute T { compute: (T; I64; () -> I64) -> I64 }\n",
+        "impl Compute I32 { compute = (_; value; callback) => value + callback () }\n",
+        "let receiver: I32 = 1\n",
+        "let first: I64 = Compute.compute receiver 2 { 3 }\n",
+        "let second: I64 = Compute.compute ...(receiver, 2) { 3 }\n",
+        "let third: I64 = receiver |> Compute.compute 2 { 3 }\n",
+        "def direct: (I64; () -> I64) -> I64 = (value; callback) => value + callback ()\n",
+        "let fourth: I64 = direct 2 { 3 }\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("trait slots apply literal context and implicit thunking independently");
+}
+
+#[test]
+fn slotted_values_support_patterns_access_and_designated_initializers() {
+    let module = type_check(concat!(
+        "type Slots = alias (first: I32; middle: (I32, I32); last: I32)\n",
+        "let slots: Slots = (.last: 4; .middle: (2, 3); .first: 1)\n",
+        "let (a; b, c; d) = slots\n",
+        "let whole: Slots = slots\n",
+        "let result: I32 = whole.first + whole.middle.0 + (whole.1).1 + whole.last\n",
+        "def sum: Slots -> I32 = value => value.first + value.middle.0 + value.middle.1 + value.last\n",
+        "def destructure: Slots -> I32 = (a; b, c; d) => a + b + c + d\n",
+        "def matched: Slots -> I32 = value => match value { (a; b, c; d) => a + b + c + d }\n",
+        "let first: I32 = sum ...slots\n",
+        "let second: I32 = destructure ...slots\n",
+        "let third: I32 = matched ...slots\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("slotted value patterns and access emit LLVM");
+}
+
+#[test]
+fn slotted_constant_products_fold_and_convert_in_both_directions() {
+    let module = type_check(concat!(
+        "const slots: (x: I32; y: I32) = (x: 1 + 1; y: 2 + 2)\n",
+        "const plain: (x: I32, y: I32) = (...slots)\n",
+        "const restored: (x: I32; y: I32) = (...plain;)\n",
+        "def read: () -> I32 = () => slots.x + slots.y + plain.0 + restored.1\n",
+    ));
+    for (name, slotted) in [("slots", true), ("plain", false), ("restored", true)] {
+        let value = module
+            .syntax()
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Binding(binding) if binding.name == name => binding.value.as_ref(),
+                _ => None,
+            })
+            .expect("folded constant binding");
+        let staple_syntax::Expression::Product(product) = value else {
+            panic!("constant must fold to a product literal");
+        };
+        assert_eq!(product.slotted, slotted);
+        assert_eq!(product.elements.len(), 2);
+        for (element, literal) in product.elements.iter().zip(["2", "4"]) {
+            assert!(
+                matches!(&element.value, staple_syntax::Expression::Integer(integer) if integer.literal == literal)
+            );
+        }
+    }
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("slotted constant products fold through conversion spreads");
+    assert!(llvm.contains("i32 2"));
+    assert!(llvm.contains("i32 4"));
+}
+
+#[test]
+fn slotted_values_support_structural_copy_and_debug() {
+    let module = type_check(concat!(
+        "use std.fmt.Formatter\n",
+        "def copied: <T where Copy T> T -> T = value => value\n",
+        "let slots: (I32; I32) = (1; 2)\n",
+        "let same: (I32; I32) = copied slots\n",
+        "let shown: String = Formatter.debug same\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("slotted values synthesize structural trait implementations");
+}
+
+#[test]
+fn product_display_is_structural_for_plain_and_slotted_values() {
+    let module = type_check(concat!(
+        "use std.fmt.Formatter\n",
+        "def show: <T where Display T> T -> String = value => Formatter.display value\n",
+        "let plain: (I32, I32) = (1, 2)\n",
+        "let slots: (I32; I32) = (3; 4)\n",
+        "let nested: (I32; (I32, I32)) = (5; plain)\n",
+        "let first: String = show plain\n",
+        "let second: String = show slots\n",
+        "let third: String = show nested\n",
+        "let fourth: String = slots |> to_string\n",
+        "let fifth: String = Formatter.display ()\n",
+        "def show_slots: <T where Display T> (T; T) -> String = value => Formatter.display value\n",
+        "let sixth: String = show_slots 6 7\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("product Display derives delegates through generic dictionaries");
+}
+
+#[test]
+fn product_display_requires_element_traits_and_rejects_overrides() {
+    let messages = type_check_errors(
+        concat!(
+            "use std.fmt.Formatter\n",
+            "let callback: () -> I32 = () => 1\n",
+            "let slots: (I32; () -> I32) = (1; callback)\n",
+            "let shown: String = Formatter.display slots\n",
+        ),
+        "product Display requires Display for every slot",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("trait bound is not satisfied")),
+        "{messages:?}"
+    );
+    let messages = type_check_errors(
+        "impl Display (I32; I32) { fmt = (value, mut formatter) => () }\n",
+        "structural product Display cannot be overridden",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("cannot implement an external trait for external types")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn structural_product_equality_supports_plain_slotted_and_generic_values() {
+    let module = type_check(concat!(
+        "def compare: <T where Eq T> (T; T) -> Bool = (left; right) => left == right\n",
+        "def compare_slots: <T where Eq T> ((T; T); (T; T)) -> Bool = (left; right) => left == right\n",
+        "let plain: (I32, I32) = (1, 2)\n",
+        "let slots: (I32; I32) = (3; 4)\n",
+        "let named: (left: I32; right: String) = (left: 5; right: \"value\")\n",
+        "let nested: (I32; (I32, I32)) = (6; plain)\n",
+        "let first: Bool = plain == plain\n",
+        "let second: Bool = slots != slots\n",
+        "let third: Bool = named == named\n",
+        "let fourth: Bool = nested == nested\n",
+        "let fifth: Bool = compare slots slots\n",
+        "let sixth: Bool = compare_slots slots slots\n",
+        "let seventh: Bool = () == ()\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("product Eq derives element delegates through generic dictionaries");
+}
+
+#[test]
+fn structural_product_equality_requires_element_traits_and_matching_kinds() {
+    for source in [
+        "let callback: () -> I32 = () => 1\nlet slots: (I32; () -> I32) = (1; callback)\nlet equal: Bool = slots == slots\n",
+        "let slots: (I32; I32) = (1; 2)\nlet plain: (I32, I32) = (1, 2)\nlet equal: Bool = slots == plain\n",
+    ] {
+        let messages =
+            type_check_errors(source, "product equality requires compatible Eq elements");
+        assert!(!messages.is_empty());
+    }
+}
+
+#[test]
+fn slotted_values_derive_indexing_mutation_and_iteration() {
+    let module = type_check(concat!(
+        "let mut slots: (I32; I32) = (1; 2)\n",
+        "let position: USize = 1\n",
+        "let first: I32 = slots[position]\n",
+        "slots[position] = 3\n",
+        "let iterator: ((I32; I32), USize) = IntoIterator.into_iterator slots\n",
+        "let step: IterStep (((I32; I32), USize), I32) = Iterator.next iterator\n",
+        "let mixed: (I32; Bool) = (1; True)\n",
+        "let indexed: I32 | Bool = mixed[position]\n",
+        "let mixed_iterator: ((I32; Bool), USize) = IntoIterator.into_iterator mixed\n",
+        "let mixed_step: IterStep (((I32; Bool), USize), I32 | Bool) = Iterator.next mixed_iterator\n",
+        "let mut total: I32 = 0\n",
+        "for value in slots { total = total + value }\n",
+        "let plain: (I32, I32) = (...slots)\n",
+        "let expanded: (I32; I32; I32) = (...plain; 4)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("slotted products derive the full product indexing and iteration paths");
+}
+
+#[test]
+fn mutable_slotted_spreads_reject_immutable_product_roots() {
+    for source in [
+        "def change: (mut I32; I32) -> () = (mut value; _) => { value = 3 }\nlet pair: (I32; I32) = (1; 2)\nchange ...pair\n",
+        "def change: (I32; mut I32; I32) -> () = (_; mut value; _) => { value = 3 }\nlet pair: (I32, I32) = (1, 2)\nchange 0 ...pair\n",
+    ] {
+        let messages =
+            type_check_errors(source, "mutable spread projections require mutable roots");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("not declared `mut`")),
+            "{messages:?}"
+        );
+    }
+}
+
+#[test]
+fn slotted_generic_opaque_calls_and_specialized_function_values_emit() {
+    let module = type_check(concat!(
+        "type Slots = alias (I32; I32)\n",
+        "def add: Slots -> I32 = (a; b) => a + b\n",
+        "def apply: <A, R> (A -> R; A) -> R = (f; value) => f value\n",
+        "def identity: <A where Copy A> A -> A = value => value\n",
+        "let first: I32 = apply add (20; 22)\n",
+        "let specialized: Slots -> Slots = identity.<Slots>\n",
+        "let second: Slots = specialized 3 4\n",
+        "let third: Slots = identity.<Slots> 5 6\n",
+        "let stored = apply\n",
+        "let fourth: I32 = stored add (7; 8)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("opaque generic calls adapt aggregate arguments to the shared slotted ABI");
+}
+
+#[test]
+fn slotted_spreads_preserve_move_positions() {
+    type_check(concat!(
+        "use std.cinterop.*\n",
+        "def consume: (I32; I32; move CString) -> () = (a; b; move text) => ()\n",
+        "def valid = () => { let text = c_string \"x\"; consume ...(1; 2) text }\n",
+        "def mixed: (move CString; CString) -> () = (move a; b) => ()\n",
+        "def literal = () => { let first = c_string \"x\"; let second = c_string \"y\"; mixed ...(first; second); CString.to_string_unchecked second }\n",
+    ));
+    for body in [
+        "consume ...(1; 2) text; CString.to_string_unchecked text",
+        "mixed ...(text; c_string \"y\"); CString.to_string_unchecked text",
+    ] {
+        let source = format!(
+            "use std.cinterop.*\ndef consume: (I32; I32; move CString) -> () = (a; b; move text) => ()\ndef mixed: (move CString; CString) -> () = (move a; b) => ()\ndef invalid = () => {{ let text = c_string \"x\"; {body} }}\n"
+        );
+        let diagnostics = TypeChecker::new()
+            .check(resolve(&source))
+            .expect_err_diagnostics("a spread must preserve consuming slot positions");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("use of moved value")),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn slotted_macro_parameters_match_atomic_syntax() {
+    let module = type_check(concat!(
+        "macro apply: (Expr; Expr) -> Expr = (callee; argument) => parse_quote { $callee $argument }\n",
+        "macro inferred = (callee: Expr; argument: Expr) => parse_quote { $callee $argument }\n",
+        "macro grouped: (Parenthesized (Expr); Expr) -> Expr = (left; right) => parse_quote { $left + $right }\n",
+        "def identity: I32 -> I32 = value => value\n",
+        "let first: I32 = apply identity 42\n",
+        "let second: I32 = inferred identity 43\n",
+        "let third: I32 = grouped (20) 22\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("annotated and inferred slotted macros emit expanded code");
+}
+
+#[test]
+fn polymorphic_callback_values_admit_slotted_instantiations() {
+    let module = type_check(concat!(
+        "type Slots = alias (I32; I32)\n",
+        "def sum: Slots -> I32 = (first; second) => first + second\n",
+        "def run: <A> (A -> I32) -> I32 = f => 42\n",
+        "def consume: (<A> A -> I32) -> I32 = f => 42\n",
+        "def constant: <A> A -> I32 = _ => 0\n",
+        "let stored = run\n",
+        "let first: I32 = stored sum\n",
+        "let second: I32 = consume constant\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context).compile_module(&lower(&module))
+        .expect("polymorphic callback values no longer carry parameter-product capability restrictions");
+}
+
+#[test]
+fn generic_whole_mutation_preserves_slotted_writeback() {
+    static RESULT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+    extern "C" fn record(value: i32) {
+        RESULT.store(value, std::sync::atomic::Ordering::SeqCst);
+    }
+    let mut failures = Vec::new();
+    for call in [
+        "update.<Slots> ...pair\n",
+        "let stored = update\nstored.<Slots> ...pair\n",
+        "def borrow: <A where Transform A> mut A -> (() -> ()) = mut current => () => { current = Transform.transform current; () }\ndef scoped: () ->{state} I32 = () => { let mut local: Slots = (1; 2); { let apply = borrow.<Slots> ...local; apply () }; local.0 + local.1 }\npair = (scoped (); 0)\n",
+        "def captured: <A where Transform A> mut A -> () = mut current => { let apply = () => { current = Transform.transform current; () }; apply () }\ncaptured.<Slots> ...pair\n",
+        "def captured: <A where Transform A> mut A -> () = mut current => { let apply = () => { current = Transform.transform current; () }; apply () }\nlet stored = captured\nstored.<Slots> ...pair\n",
+        "def forward: <A where Transform A> mut A -> () = mut current => update current\nforward.<Slots> ...pair\n",
+        "def forward: <A where Transform A> mut A -> () = mut current => { if True { update current } else { () }; () }\nforward.<Slots> ...pair\n",
+        "def forward: <A where Transform A> mut A -> () = mut current => { return update current; }\nlet mut left = (1; 100)\nlet mut right = (200; 2)\nforward.<Slots> left.0 right.1\npair = (left.0; right.1)\n",
+        "let mut left = (1; 100)\nlet mut right = (200; 2)\nupdate.<Slots> left.0 right.1\npair = (left.0; right.1)\n",
+        "def forward: <A where Transform A> mut A -> () = mut current => update current\nlet mut left = (1; 100)\nlet mut right = (200; 2)\nforward.<Slots> left.0 right.1\npair = (left.0; right.1)\n",
+    ] {
+        let module = type_check(&format!(
+            "extern \"c\" {{ record: I32 -> () }}\n\
+             type Slots = alias (I32; I32)\n\
+             trait Transform T {{ transform: T -> T }}\n\
+             impl Transform Slots {{ transform = pair => (pair.0 + 10; pair.1 + 20) }}\n\
+             def update: <A where Transform A> mut A -> () = mut current => {{ current = Transform.transform current; () }}\n\
+             let mut pair: Slots = (1; 2)\n\
+             {call}\
+             record (pair.0 + pair.1)\n"
+        ));
+        let context = Context::create();
+        let text = match CodeGenerator::new(&context).compile_module(&lower(&module)) {
+            Ok(text) => text,
+            Err(diagnostics) => {
+                failures.push(format!("{call}: {diagnostics:?}"));
+                continue;
+            }
+        };
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "generic-mutation",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        engine.add_global_mapping(
+            &llvm.get_function("record").unwrap(),
+            record as *const () as usize,
+        );
+        RESULT.store(0, std::sync::atomic::Ordering::SeqCst);
+        type Main = unsafe extern "C" fn() -> i32;
+        let main = unsafe { engine.get_function::<Main>("main").unwrap() };
+        assert_eq!(unsafe { main.call() }, 0);
+        let result = RESULT.load(std::sync::atomic::Ordering::SeqCst);
+        if result != 33 {
+            failures.push(format!("{call}: mutation result {result}, expected 33"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn higher_order_functions_accept_parenthesized_mutating_callbacks() {
+    static RESULT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+    extern "C" fn record(value: i32) {
+        RESULT.store(value, std::sync::atomic::Ordering::SeqCst);
+    }
+    let module = type_check(
+        "extern \"c\" { record: I32 -> () }\n\
+         def twice: <A> ((mut A -> ()); mut A) -> () = (f; mut a) => { f a; f a }\n\
+         def apply: (mut I32 -> ()) -> (mut I32 -> ()) = f => f\n\
+         def bump: mut I32 -> () = mut n => { n = n + 1; () }\n\
+         let reset: (mut I32 -> ()) = mut n => { n = 1 }\n\
+         let mut x: I32 = 5\n\
+         reset x\n\
+         twice bump x\n\
+         twice (apply (mut n => { n = n * 10; () })) x\n\
+         record x\n",
+    );
+    let context = Context::create();
+    let text = CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("mutating callbacks should compile");
+    let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+        text.as_bytes(),
+        "mutating-callbacks",
+    );
+    let llvm = context.create_module_from_ir(buffer).unwrap();
+    llvm.verify().unwrap();
+    let engine = llvm
+        .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+        .unwrap();
+    engine.add_global_mapping(
+        &llvm.get_function("record").unwrap(),
+        record as *const () as usize,
+    );
+    type Main = unsafe extern "C" fn() -> i32;
+    let main = unsafe { engine.get_function::<Main>("main").unwrap() };
+    assert_eq!(unsafe { main.call() }, 0);
+    assert_eq!(RESULT.load(std::sync::atomic::Ordering::SeqCst), 300);
+}
+
+#[test]
+fn slotted_returned_mutation_closures_drop_non_copy_slots_once() {
+    static DROPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    extern "C" fn record(value: i32) {
+        let shift = match value {
+            1 => 0,
+            2 => 8,
+            10 => 16,
+            20 => 24,
+            _ => {
+                DROPS.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
+        };
+        DROPS.fetch_add(1 << shift, std::sync::atomic::Ordering::SeqCst);
+    }
+    let mut failures = Vec::new();
+    for (name, body, expected) in [
+        ("direct", "update.<Slots> ...local;", 0x01010101),
+        (
+            "returned",
+            "{ let apply = borrow.<Slots> ...local; apply () };",
+            0x01010101,
+        ),
+        (
+            "mixed",
+            "let (first; second) = local; discard first second;",
+            0x00000101,
+        ),
+    ] {
+        let prelude = concat!(
+            "extern \"c\" { record: I32 -> () }\n",
+            "type Resource = wrap I32\n",
+            "impl Drop Resource { cleanup = Resource value => record value }\n",
+            "type Slots = alias (Resource; Resource)\n",
+            "trait Transform T { transform: T -> T }\n",
+            "impl Transform Slots { transform = _ => (Resource 10; Resource 20) }\n",
+            "def borrow: <A where Transform A> mut A -> (() -> ()) = mut current => () => { current = Transform.transform current; () }\n",
+            "def update: <A where Transform A> mut A -> () = mut current => { current = Transform.transform current; () }\n",
+            "def discard: (move Resource; Resource) -> () = (move first; _) => { drop first; () }\n",
+        );
+        let module = type_check(&format!(
+            "{prelude}def scoped: () ->{{state}} () = () => {{ let mut local: Slots = (Resource 1; Resource 2); {body} () }}\nscoped ()\n"
+        ));
+        let context = Context::create();
+        let text = CodeGenerator::new(&context)
+            .compile_module(&lower(&module))
+            .unwrap();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "non-copy-slotted-capture",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        engine.add_global_mapping(
+            &llvm.get_function("record").unwrap(),
+            record as *const () as usize,
+        );
+        DROPS.store(0, std::sync::atomic::Ordering::SeqCst);
+        type Main = unsafe extern "C" fn() -> i32;
+        let main = unsafe { engine.get_function::<Main>("main").unwrap() };
+        assert_eq!(unsafe { main.call() }, 0);
+        let drops = DROPS.load(std::sync::atomic::Ordering::SeqCst);
+        if drops != expected {
+            failures.push(format!(
+                "{name}: drop counts {drops:#010x}, expected {expected:#010x}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn slotted_whole_patterns_cannot_hide_mixed_parameter_ownership() {
+    for pattern in ["_", "pair"] {
+        let source = format!(
+            "type Resource = wrap I32\nimpl Drop Resource {{ cleanup = Resource _ => () }}\ndef discard: (move Resource; Resource) -> () = {pattern} => ()\n"
+        );
+        let diagnostics = type_check_errors(
+            &source,
+            "a whole borrowed pattern cannot consume only one slot",
+        );
+        assert!(
+            diagnostics.iter().any(|message| message.contains("move")),
+            "{pattern}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn slotted_borrowed_closures_cannot_outlive_caller_storage() {
+    let diagnostics = type_check_errors(
+        concat!(
+            "type Slots = alias (I32; I32)\n",
+            "trait Transform T { transform: T -> T }\n",
+            "impl Transform Slots { transform = pair => (pair.0 + 10; pair.1 + 20) }\n",
+            "def borrow: <A where Transform A> mut A -> (() -> ()) = mut current => () => { current = Transform.transform current; () }\n",
+            "def invalid: () ->{state} (() -> ()) = () => { let mut local: Slots = (1; 2); borrow.<Slots> ...local }\n",
+        ),
+        "a caller-owned local cannot be retained by a returned borrowed closure",
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("borrowed closure cannot escape")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn slotted_function_storage_composition_and_polymorphic_apply_run() {
+    static RESULT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+    extern "C" fn record(value: i32) {
+        RESULT.store(value, std::sync::atomic::Ordering::SeqCst);
+    }
+    let module = type_check(concat!(
+        "extern \"c\" { record: I32 -> () }\n",
+        "type Slots = alias (I32; I32)\n",
+        "def add: Slots -> I32 = (a; b) => a + b\n",
+        "def twice: I32 -> I32 = value => value * 2\n",
+        "def apply: <A, R> (A -> R; A) -> R = (f; value) => f value\n",
+        "def compose: <A, B, C> (move (A -> B); move (B -> C)) -> (A -> C) = (move first; move second) => value => second (first value)\n",
+        "type Registry = wrap (callback: Slots -> I32,)\n",
+        "let registry = Registry (callback: add)\n",
+        "let mut callbacks: List (Slots -> I32) = List.new ()\n",
+        "callbacks |> push add\n",
+        "let from_list = callbacks[0]\n",
+        "let composed: Slots -> I32 = compose add twice\n",
+        "let polymorphic: <A, R> (A -> R; A) -> R = apply\n",
+        "let a: I32 = registry.callback 1 2\n",
+        "let b: I32 = from_list 3 4\n",
+        "let c: I32 = composed 5 6\n",
+        "let d: I32 = polymorphic add (7; 8)\n",
+        "record (a + b + c + d)\n",
+    ));
+    let context = Context::create();
+    let text = CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .unwrap();
+    let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+        text.as_bytes(),
+        "slotted-function-flow",
+    );
+    let llvm = context.create_module_from_ir(buffer).unwrap();
+    llvm.verify().unwrap();
+    let engine = llvm
+        .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+        .unwrap();
+    engine.add_global_mapping(
+        &llvm.get_function("record").unwrap(),
+        record as *const () as usize,
+    );
+    type Main = unsafe extern "C" fn() -> i32;
+    let main = unsafe { engine.get_function::<Main>("main").unwrap() };
+    assert_eq!(unsafe { main.call() }, 0);
+    assert_eq!(RESULT.load(std::sync::atomic::Ordering::SeqCst), 47);
+}
+
+#[test]
+fn slotted_specialized_direct_calls_preserve_the_baseline_abi() {
+    let module = type_check(concat!(
+        "def pick: <A where Copy A> (A; A) -> A = (left; right) => left\n",
+        "def invoke: I32 -> I32 = value => pick.<I32> value 22\n",
+    ));
+    let context = Context::create();
+    let text = CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .unwrap();
+    let caller = text
+        .split("define i32 @invoke(ptr %0, i32 %value) {\n")
+        .nth(1)
+        .unwrap()
+        .split("\n}")
+        .next()
+        .unwrap();
+    let call = caller
+        .lines()
+        .find(|line| line.contains("call i32 @"))
+        .unwrap();
+    let callee = call.split('@').nth(1).unwrap().split('(').next().unwrap();
+    // Snapshot the pre-change flattened ABI; instance numbering is incidental.
+    assert_eq!(
+        caller,
+        format!(
+            "entry:\n  %closure.call = call i32 @{callee}(ptr null, i32 %value, i32 22)\n  ret i32 %closure.call"
+        )
+    );
+    assert!(text.contains(&format!("define internal i32 @{callee}(ptr %0, i32 %left, i32 %right) {{\nentry:\n  ret i32 %left\n}}")));
 }

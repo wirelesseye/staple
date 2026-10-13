@@ -799,6 +799,8 @@ fn select_structural(
         let result = function_type.result.as_ref().clone();
         let sum = crate::sum_through_implicit_wrapper(&result).ok_or_else(unavailable)?;
         let yield_representation = CheckedType::Product(crate::CheckedProductType {
+            slotted: false,
+            spreads: Vec::new(),
             elements: vec![
                 crate::CheckedTypeElement {
                     name: None,
@@ -886,6 +888,8 @@ fn sum_width(output: &crate::CheckedType) -> usize {
 /// The `(source, USize)` iterator a product converts into.
 fn pair_with_cursor(source: &crate::CheckedType) -> crate::CheckedType {
     crate::CheckedType::Product(crate::CheckedProductType {
+        slotted: false,
+        spreads: Vec::new(),
         elements: vec![
             crate::CheckedTypeElement {
                 name: None,
@@ -2748,11 +2752,18 @@ pub(super) fn expand(
             method: *method,
             closure_offset: plan.layout.environment + 2 * index,
         });
+        // Dictionary callers use the trait declaration's dynamic shape. A
+        // bare trait parameter remains one opaque pointer even when its
+        // concrete implementation accepts a flattened slotted product.
+        let dynamic_type = match &program.trait_methods.get(*method).expect("catalogued method").value_type {
+            CheckedType::Function(function) => function.clone(),
+            _ => return Err(vec![Diagnostic::new(origin.span.clone(), "dictionary method has no dynamic function signature")]),
+        };
         let key = ArtifactRequestKey::ReabstractionThunk(ReabstractionThunkKey {
             dictionary_slot: dictionary_slot.clone(),
             concrete: CanonicalFunctionType::concrete(&function_type, origin)
                 .map_err(|error| vec![error])?,
-            dynamic: CanonicalFunctionType::dynamic(&function_type, origin)
+            dynamic: CanonicalFunctionType::dynamic(&dynamic_type, origin)
                 .map_err(|error| vec![error])?,
             direction: ReabstractionDirection::ConcreteToDynamic,
         });
@@ -2766,7 +2777,7 @@ pub(super) fn expand(
             plan: Plan::ReabstractionThunk(ReabstractionThunkPlan {
                 dictionary_slot,
                 concrete: function_type.clone(),
-                dynamic: function_type,
+                dynamic: dynamic_type,
                 direction: ReabstractionDirection::ConcreteToDynamic,
                 children: Vec::new(),
             }),
@@ -2848,7 +2859,6 @@ mod tests {
             id: TypeParameterId(id),
             name: format!("P{id}"),
             sized: true,
-            parameter_product_capable: false,
         };
         let bound = |id, argument| CheckedTraitBound {
             trait_id: TraitId(id),

@@ -143,8 +143,8 @@ let (associated_flag, associated_value) = associated_relay_value 41
 println "${associated_flag}"
 println "${associated_value}"
 
-trait Curried T { pass: <A> [T] -> ([move A] -> A) }
-impl Curried I32 { pass = [_] => [move value] => value }
+trait Curried T { pass: <A> T -> ((move A) -> A) }
+impl Curried I32 { pass = _ => move value => value }
 def curried_relay: <T, A where Curried T> (T, move A) -> A =
     (item, move value) => Curried.pass.<T, A> item value
 let curried_relay_value = curried_relay

@@ -66,7 +66,7 @@ extern "staple-intrinsic" {
     __completion_token: Scheduler -> (wait: Wait (), token: CompletionToken)
     __task_is_finished: <T> Task T -> Bool
     __task_cancel: <T> Task T -> ()
-    __resolver_complete: <T> [Resolver T, T] -> ()
+    __resolver_complete: <T> (Resolver T; T) -> ()
     __resolver_cancel: <T> Resolver T -> ()
     __completion_token_resolve: CompletionToken -> ()
     __completion_token_cancel: CompletionToken -> ()
@@ -164,7 +164,7 @@ companion CompletionToken {
 companion Resolver {
     /// Consumes the resolver and the value, records completion, and wakes a
     /// registered waiter. If the waiter has already gone the value is dropped.
-    pub def complete: <T> [Resolver T, T] -> () = [resolver, value] => __resolver_complete resolver value
+    pub def complete: <T> (Resolver T; T) -> () = (resolver; value) => __resolver_complete resolver value
 
     /// Consumes the resolver and cancels the operation: a registered waiter is
     /// woken with `Cancelled`.

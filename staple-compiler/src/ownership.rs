@@ -365,7 +365,7 @@ impl<'a> OwnershipChecker<'a> {
                         crate::CheckedType::Product(product) => product.elements.len(),
                         _ => 0,
                     };
-                    if plan.arguments.len() == expected {
+                    if plan.supplied_slots() == expected {
                         let mut callee = value.callee.as_ref();
                         for _ in 1..plan.consumed_calls {
                             let Expression::Call(previous) = callee else {
@@ -374,23 +374,48 @@ impl<'a> OwnershipChecker<'a> {
                             callee = previous.callee.as_ref();
                         }
                         self.check_expression(callee, false);
+                        let mut slot = 0;
                         for (index, argument) in plan.arguments.iter().enumerate() {
-                            if let Some(thunk) =
-                                self.module.implicit_thunk_for(argument.syntax().id)
-                            {
+                            let count = plan.spreads.get(&index).copied().unwrap_or(1);
+                            if let Some(thunk) = self.module.implicit_thunk_for(argument.syntax().id) {
                                 for capture in &thunk.captures {
                                     if !self.module.has_mutable_storage(*capture) {
                                         self.use_symbol(*capture, argument.syntax(), true);
                                     }
                                 }
                             } else {
-                                self.check_expression(
-                                    argument,
-                                    plan.function
-                                        .moves
-                                        .contains(&crate::CheckedMutation::Element(index)),
+                                let mut operand_function = plan.function.clone();
+                                operand_function.parameter = Box::new(
+                                    self.module
+                                        .type_of_expression(argument.syntax().id)
+                                        .expect("checked call operand type")
+                                        .clone(),
                                 );
+                                let remap = |markers: &[crate::CheckedMutation]| {
+                                    markers
+                                        .iter()
+                                        .filter_map(|marker| match *marker {
+                                            crate::CheckedMutation::Whole => {
+                                                Some(crate::CheckedMutation::Whole)
+                                            }
+                                            crate::CheckedMutation::Element(position)
+                                                if (slot..slot + count).contains(&position) =>
+                                            {
+                                                Some(if plan.spreads.contains_key(&index) {
+                                                    crate::CheckedMutation::Element(position - slot)
+                                                } else {
+                                                    crate::CheckedMutation::Whole
+                                                })
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect()
+                                };
+                                operand_function.moves = remap(&plan.function.moves);
+                                operand_function.mutations = remap(&plan.function.mutations);
+                                self.check_call_argument(argument, Some(&operand_function));
                             }
+                            slot += count;
                         }
                         return self.expression_continues(expression);
                     }

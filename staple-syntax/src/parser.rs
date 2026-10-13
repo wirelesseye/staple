@@ -841,18 +841,18 @@ impl Grammar {
     }
 
     /// Parses a macro declaration's value: a juxtaposed parameter list whose
-    /// elements are separated by `*`, a single `=>`, and then the macro body
+    /// slots are separated by `;`, a single `=>`, and then the macro body
     /// (`quote`/`parse_quote`, a `match`, a block, or a bare syntax
-    /// expression). Multiple parameters are written `[a, b] => body`, not as a
+    /// expression). Multiple parameters are written `(a; b) => body`, not as a
     /// curried `a => b => body` chain — the value is desugared here into the
     /// nested single-parameter `Function` chain that the rest of the compiler
     /// consumes, so a body that itself parses as a bare function is rejected as
     /// the old curried spelling.
     fn parse_macro_value(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
-        let bracketed = self.at(TokenKind::LBracket);
         let pattern = self.parse_top_level_parameter_pattern()?;
-        let patterns = if bracketed {
+        let patterns = if matches!(&pattern, Pattern::Product(product) if product.slotted)
+        {
             let Pattern::Product(product) = pattern else {
                 unreachable!()
             };
@@ -862,7 +862,7 @@ impl Grammar {
         };
         let parameter_starts = vec![start; patterns.len()];
         if self.at(TokenKind::Star) {
-            return Err(self.error("juxtaposed parameters are now written `[a, b] => body`"));
+            return Err(self.error("juxtaposed parameters are now written `(a; b) => body`"));
         }
         for pattern in &patterns {
             if parameter_has_nested_mutable(pattern) {
@@ -889,7 +889,7 @@ impl Grammar {
             return Err(ParseError {
                 offset,
                 location: self.location(offset),
-                message: "macro parameters use brackets; write `[a, b] => body` \
+                message: "macro parameters use slots; write `(a; b) => body` \
                           instead of a curried `a => b => body`"
                     .to_owned(),
             });
@@ -898,7 +898,6 @@ impl Grammar {
         for (start, pattern) in parameter_starts.into_iter().zip(patterns).rev() {
             expression = Expression::Function(Box::new(FunctionExpression {
                 syntax: self.syntax(start),
-                parameter_style: crate::FunctionParameterStyle::Single,
                 pattern,
                 body: Box::new(expression),
             }));
@@ -1968,22 +1967,16 @@ impl Grammar {
     /// Parses a function parameter pattern and body.
     fn parse_function_expression(&mut self) -> Result<FunctionExpression, ParseError> {
         let start = self.position;
-        let bracketed = self.at(TokenKind::LBracket);
         let mut pattern = self.parse_top_level_parameter_pattern()?;
-        let juxtaposed =
-            bracketed && matches!(&pattern, Pattern::Product(p) if p.elements.len() > 1);
-        if bracketed && let Pattern::Product(p) = &mut pattern {
+        if matches!(&pattern, Pattern::Product(p) if p.slotted)
+            && let Pattern::Product(p) = &mut pattern
+        {
             if p.elements.len() == 1 && !p.mutable && !p.moved {
                 pattern = p.elements.remove(0);
             }
         }
-        let parameter_style = if juxtaposed {
-            crate::FunctionParameterStyle::Juxtaposed
-        } else {
-            crate::FunctionParameterStyle::Single
-        };
         if self.at(TokenKind::Star) {
-            return Err(self.error("juxtaposed parameters are now written `[a, b] => body`"));
+            return Err(self.error("juxtaposed parameters are now written `(a; b) => body`"));
         }
         if parameter_has_nested_mutable(&pattern) {
             return Err(self.error(
@@ -2001,7 +1994,6 @@ impl Grammar {
         let body = Box::new(self.parse_expression()?);
         Ok(FunctionExpression {
             syntax: self.syntax(start),
-            parameter_style,
             pattern,
             body,
         })
@@ -2017,39 +2009,15 @@ impl Grammar {
     /// destructure (`move Box (value) => ...`) is parsed by `parse_pattern`
     /// and rejected outside parameter position by `pattern_has_move`.
     fn parse_top_level_parameter_pattern(&mut self) -> Result<Pattern, ParseError> {
-        if self.eat(TokenKind::LBracket) {
-            let start = self.position - 1;
-            let mut elements = Vec::new();
-            while !self.at(TokenKind::RBracket) {
-                elements.push(self.parse_parameter_slot_pattern()?);
-                if !self.eat(TokenKind::Comma) {
-                    break;
-                }
-            }
-            self.expect(TokenKind::RBracket, "expected `]` after parameters")?;
-            if elements.is_empty() {
-                return Err(self.error("a parameter product needs at least one slot"));
-            }
-            if elements.len() > crate::MAX_PRODUCT_ARITY {
-                return Err(self.error("function parameter arity exceeds the limit"));
-            }
-            return Ok(Pattern::Product(ProductPattern {
-                syntax: self.syntax(start),
-                elements,
-                mutable: false,
-                moved: false,
-            }));
-        }
         self.parse_parameter_slot_pattern()
     }
 
     /// Parses one slot of a function's parameter: a top-level parameter
-    /// pattern without the bracketed parameter-product form, which is only
-    /// valid as the function's whole parameter.
+    /// pattern; bracketed parameter lists are rejected with a migration hint.
     fn parse_parameter_slot_pattern(&mut self) -> Result<Pattern, ParseError> {
         if self.at(TokenKind::LBracket) {
             return Err(self.error(
-                "parameter products cannot be nested; destructure a product slot with `( … )`",
+                "parameter products are written `(a; b)`",
             ));
         }
         let checkpoint = self.position;
@@ -2133,6 +2101,61 @@ impl Grammar {
         Ok(pattern)
     }
 
+    /// Wraps a comma group as one slot, retaining singleton slot names.
+    fn pattern_slot(mut elements: Vec<Pattern>, syntax: Syntax) -> Pattern {
+        if elements.len() == 1 {
+            elements.remove(0)
+        } else {
+            Pattern::Product(ProductPattern {
+                slotted: false,
+                syntax,
+                elements,
+                mutable: false,
+                moved: false,
+            })
+        }
+    }
+
+    fn type_slot(mut elements: Vec<TypeElement>, syntax: Syntax) -> TypeElement {
+        if elements.len() == 1 {
+            elements.remove(0)
+        } else {
+            TypeElement {
+                syntax: syntax.clone(),
+                name: None,
+                ty: Type::Product(ProductType {
+                    slotted: false,
+                    syntax,
+                    elements,
+                    variadic: false,
+                }),
+                default: None,
+                spread: false,
+                mutable: false,
+                moved: false,
+            }
+        }
+    }
+
+    fn expression_slot(mut elements: Vec<ProductElement>, syntax: Syntax) -> ProductElement {
+        if elements.len() == 1 {
+            elements.remove(0)
+        } else {
+            ProductElement {
+                syntax: syntax.clone(),
+                name: None,
+                designated: false,
+                value: Expression::Product(ProductExpression {
+                    slotted: false,
+                    syntax,
+                    elements,
+                }),
+                spread: false,
+                named_spread: false,
+            }
+        }
+    }
+
     /// Parses a parenthesized product pattern. When `mutable`/`moved` is
     /// set, the whole destructured parameter is being marked as a single
     /// unit (e.g. `mut (a, b) => ...`), which cannot be combined with `mut`
@@ -2145,15 +2168,37 @@ impl Grammar {
     ) -> Result<Pattern, ParseError> {
         self.expect(TokenKind::LParen, "expected `(`")?;
         let mut elements = Vec::new();
+        let mut slots = Vec::new();
+        let mut slotted = false;
+        let mut slot_start = self.position;
         if !self.at(TokenKind::RParen) {
             loop {
                 elements.push(self.parse_pattern()?);
-                if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
+                if self.at(TokenKind::Semicolon) {
+                    slotted = true;
+                    let syntax = self.syntax(slot_start);
+                    slots.push(Self::pattern_slot(std::mem::take(&mut elements), syntax));
+                    self.bump_token();
+                    slot_start = self.position;
+                    if self.at(TokenKind::RParen) {
+                        break;
+                    }
+                } else if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                     break;
                 }
             }
         }
+        if slotted {
+            if !elements.is_empty() {
+                let syntax = self.syntax(slot_start);
+                slots.push(Self::pattern_slot(elements, syntax));
+            }
+            elements = slots;
+        }
         self.expect(TokenKind::RParen, "expected `)` after parameter")?;
+        if slotted && (mutable || moved) {
+            return Err(self.error("mark individual slots of a slotted parameter"));
+        }
         if mutable && elements.iter().any(pattern_element_marks_mutable) {
             return Err(self.error(
                 "a whole mutable parameter cannot also mark individual product elements `mut`",
@@ -2165,6 +2210,7 @@ impl Grammar {
             ));
         }
         Ok(Pattern::Product(ProductPattern {
+            slotted,
             syntax: self.syntax(start),
             elements,
             mutable,
@@ -2204,6 +2250,7 @@ impl Grammar {
             );
         if namespace.is_some() && !adjacent_argument {
             let argument = Box::new(Pattern::Product(ProductPattern {
+                slotted: false,
                 syntax: self.syntax(start),
                 elements: Vec::new(),
                 mutable: false,
@@ -2289,10 +2336,12 @@ impl Grammar {
         };
         let mut parameter = self.parse_type_union()?;
         if self.at(TokenKind::Star) && !self.conversion_target {
-            return Err(self.error("juxtaposed parameters are now written `[A, B] -> R`"));
+            return Err(self.error("juxtaposed parameters are now written `(A; B) -> R`"));
         }
-        if (whole_mutable || whole_moved) && matches!(parameter, Type::ParameterProduct(_)) {
-            return Err(self.error("mark individual slots of a parameter product"));
+        if (whole_mutable || whole_moved)
+            && matches!(&parameter, Type::Product(p) if p.slotted)
+        {
+            return Err(self.error("mark individual slots of a slotted parameter type"));
         }
         if self.eat(TokenKind::Arrow) {
             let mutations = if whole_mutable {
@@ -2340,62 +2389,6 @@ impl Grammar {
             }
             Ok(parameter)
         }
-    }
-
-    fn parse_parameter_product_type(&mut self, start: usize) -> Result<Type, ParseError> {
-        self.expect(TokenKind::LBracket, "expected `[`")?;
-        let mut elements = Vec::new();
-        while !self.at(TokenKind::RBracket) {
-            let element_start = self.position;
-            let mutable = self.eat(TokenKind::Mut);
-            let moved = !mutable && self.eat(TokenKind::Move);
-            if matches!(self.peek(), Some(TokenKind::Mut | TokenKind::Move)) {
-                return Err(self.error("a parameter cannot repeat a `mut` or `move` marker"));
-            }
-            let spread = self.eat(TokenKind::Ellipsis);
-            if spread && matches!(self.peek(), Some(TokenKind::Comma | TokenKind::RBracket)) {
-                return Err(self.error("parameter products cannot be variadic"));
-            }
-            let name = if !spread
-                && self.peek() == Some(TokenKind::Identifier)
-                && self.peek_n(1) == Some(TokenKind::Colon)
-            {
-                let name = self.bump_token().expect("identifier").text;
-                self.expect(TokenKind::Colon, "expected `:`")?;
-                Some(name)
-            } else {
-                None
-            };
-            let ty = self.parse_type()?;
-            if self.at(TokenKind::Equals) {
-                return Err(self
-                    .error("juxtaposed parameters have exact arity and cannot declare defaults"));
-            }
-            elements.push(TypeElement {
-                syntax: self.syntax(element_start),
-                name,
-                ty,
-                default: None,
-                spread,
-                mutable,
-                moved,
-            });
-            if !self.eat(TokenKind::Comma) {
-                break;
-            }
-        }
-        self.expect(TokenKind::RBracket, "expected `]` after parameter product")?;
-        if elements.is_empty() {
-            return Err(self.error("a parameter product needs at least one slot; use `() -> R` for a function without arguments"));
-        }
-        if elements.len() > crate::MAX_PRODUCT_ARITY {
-            return Err(self.error("function parameter arity exceeds the limit"));
-        }
-        Ok(Type::ParameterProduct(ProductType {
-            syntax: self.syntax(start),
-            elements,
-            variadic: false,
-        }))
     }
 
     fn parse_effect_set(&mut self) -> Result<EffectSet, ParseError> {
@@ -2473,7 +2466,7 @@ impl Grammar {
             }
             if contains_mutable_type_element(&element.ty) {
                 return Err(self.error(
-                    "`mut` is only allowed on a direct element of a function parameter product",
+                    "`mut` is only allowed on a direct element of a function parameter type",
                 ));
             }
         }
@@ -2498,7 +2491,7 @@ impl Grammar {
             }
             if contains_move_type_element(&element.ty) {
                 return Err(self.error(
-                    "`move` is only allowed on a direct element of a function parameter product",
+                    "`move` is only allowed on a direct element of a function parameter type",
                 ));
             }
         }
@@ -2577,10 +2570,28 @@ impl Grammar {
     }
 
     /// Parses a non-function type such as an inferred type, product, or name.
+    /// Returns whether a product element starts with a `mut`/`move` marker that
+    /// belongs to a function type's parameter (`mut T -> R`) rather than the element.
+    fn is_marked_function_type_element_start(&self) -> bool {
+        if !self.at(TokenKind::Mut) && !self.at(TokenKind::Move) {
+            return false;
+        }
+        let mut candidate = self.clone();
+        candidate.bump_token();
+        candidate.eat(TokenKind::Mut);
+        candidate.eat(TokenKind::Move);
+        if candidate.peek() == Some(TokenKind::Identifier)
+            && candidate.peek_n(1) == Some(TokenKind::Colon)
+        {
+            return false;
+        }
+        candidate.parse_type_union().is_ok() && candidate.at(TokenKind::Arrow)
+    }
+
     fn parse_type_atom(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
         if self.at(TokenKind::LBracket) {
-            return self.parse_parameter_product_type(start);
+            return Err(self.error("parameter products are written `(A; B)`"));
         }
         if self.eat(TokenKind::Dollar) {
             if self.quote_depth == 0 {
@@ -2628,12 +2639,20 @@ impl Grammar {
         }
         if self.eat(TokenKind::LParen) {
             let mut elements = Vec::new();
+            let mut slots = Vec::new();
+            let mut slotted = false;
+            let mut slot_start = self.position;
             let mut variadic = false;
             if !self.at(TokenKind::RParen) {
                 loop {
                     let element_start = self.position;
-                    let mutable = self.eat(TokenKind::Mut);
-                    let moved = if mutable {
+                    // `mut T -> R` / `move T -> R` is a function type element; only a
+                    // marker with no following `->` marks the element itself.
+                    let marked_function = self.is_marked_function_type_element_start();
+                    let mutable = !marked_function && self.eat(TokenKind::Mut);
+                    let moved = if marked_function {
+                        false
+                    } else if mutable {
                         if self.eat(TokenKind::Move) {
                             return Err(self.error(
                                 "a product element cannot be marked both `mut` and `move`",
@@ -2696,6 +2715,7 @@ impl Grammar {
                     } else {
                         let ty = self.parse_type()?;
                         if elements.is_empty()
+                            && !slotted
                             && name.is_none()
                             && !mutable
                             && !moved
@@ -2733,13 +2753,40 @@ impl Grammar {
                         });
                     }
 
-                    if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
+                    if self.at(TokenKind::Semicolon) {
+                        slotted = true;
+                        let syntax = self.syntax(slot_start);
+                        slots.push(Self::type_slot(std::mem::take(&mut elements), syntax));
+                        self.bump_token();
+                        slot_start = self.position;
+                        if self.at(TokenKind::RParen) {
+                            break;
+                        }
+                    } else if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                         break;
                     }
                 }
             }
+            if slotted {
+                if slots
+                    .iter()
+                    .chain(elements.iter())
+                    .any(|element| element.default.is_some())
+                {
+                    return Err(self.error("slotted product slots cannot declare defaults"));
+                }
+                if variadic {
+                    return Err(self.error("slotted products cannot be variadic"));
+                }
+                if !elements.is_empty() {
+                    let syntax = self.syntax(slot_start);
+                    slots.push(Self::type_slot(elements, syntax));
+                }
+                elements = slots;
+            }
             self.expect(TokenKind::RParen, "expected `)` in type")?;
             return Ok(Type::Product(ProductType {
+                slotted,
                 syntax: self.syntax(start),
                 elements,
                 variadic,
@@ -2820,11 +2867,11 @@ impl Grammar {
                 expression => expression,
             }
         }
-        fn split(stage: Expression, arguments: &mut Vec<Expression>) -> Expression {
+        fn split(stage: Expression, arguments: &mut Vec<(Expression, bool)>) -> Expression {
             match ungroup(stage) {
                 Expression::Call(call) => {
                     let head = split(*call.callee, arguments);
-                    arguments.push(*call.argument);
+                    arguments.push((*call.argument, call.spread));
                     head
                 }
                 head => head,
@@ -2858,6 +2905,7 @@ impl Grammar {
         // The selector carries no receiver copy: the receiver occurs only in
         // the first call argument, keeping syntax identities and evaluation unique.
         let empty = Expression::Product(ProductExpression {
+            slotted: false,
             syntax: Syntax::synthetic(self.syntax(stage_start).id, head.syntax().span.clone()),
             elements: Vec::new(),
         });
@@ -2868,15 +2916,17 @@ impl Grammar {
         let receiver_call_syntax = self.syntax(start);
         self.position = stage_end;
         let mut result = Expression::Call(CallExpression {
+            spread: false,
             syntax: receiver_call_syntax,
             callee: Box::new(head),
             argument: Box::new(receiver),
         });
-        for argument in arguments {
+        for (argument, spread) in arguments {
             self.position = argument.syntax().token_range.end;
             let syntax = self.syntax(start);
             self.position = stage_end;
             result = Expression::Call(CallExpression {
+                spread,
                 syntax,
                 callee: Box::new(result),
                 argument: Box::new(argument),
@@ -3111,6 +3161,7 @@ impl Grammar {
                 accessor: Accessor::Name("convert".to_owned()),
             });
             let value = Expression::Call(CallExpression {
+                spread: false,
                 syntax: self.syntax(start),
                 callee: Box::new(callee),
                 argument: Box::new(expression),
@@ -3177,7 +3228,14 @@ impl Grammar {
             }));
         }
         let mut expression = self.parse_access_expression()?;
-        while self.starts_atom() {
+        while self.starts_atom()
+            || (self.at(TokenKind::Ellipsis)
+                && !(self.newline_terminates_expression && self.has_newline_before_next_token()))
+        {
+            let spread = self.eat(TokenKind::Ellipsis);
+            if spread && self.eat(TokenKind::Equals) {
+                return Err(self.error("`...=` is not allowed at call sites; use `...expr`"));
+            }
             let checkpoint = self.position;
             let next_syntax_id = self.next_syntax_id;
             let argument = match self.parse_access_expression() {
@@ -3200,6 +3258,7 @@ impl Grammar {
                 Err(error) => return Err(error),
             };
             expression = Expression::Call(CallExpression {
+                spread,
                 syntax: self.syntax(start),
                 callee: Box::new(expression),
                 argument: Box::new(argument),
@@ -3781,6 +3840,9 @@ impl Grammar {
         let previous_brace_termination = self.brace_terminates_expression;
         self.brace_terminates_expression = false;
         let mut elements = Vec::new();
+        let mut slots = Vec::new();
+        let mut slotted = false;
+        let mut slot_start = self.position;
         let mut saw_designated = false;
         if !self.at(TokenKind::RParen) {
             loop {
@@ -3821,6 +3883,7 @@ impl Grammar {
                 }
                 let value = self.parse_expression()?;
                 if elements.is_empty()
+                    && !slotted
                     && name.is_none()
                     && !designated
                     && !spread
@@ -3848,15 +3911,33 @@ impl Grammar {
                     spread,
                     named_spread,
                 });
-                if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
+                if self.at(TokenKind::Semicolon) {
+                    slotted = true;
+                    let syntax = self.syntax(slot_start);
+                    slots.push(Self::expression_slot(std::mem::take(&mut elements), syntax));
+                    saw_designated = false;
+                    self.bump_token();
+                    slot_start = self.position;
+                    if self.at(TokenKind::RParen) {
+                        break;
+                    }
+                } else if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                     break;
                 }
             }
+        }
+        if slotted {
+            if !elements.is_empty() {
+                let syntax = self.syntax(slot_start);
+                slots.push(Self::expression_slot(elements, syntax));
+            }
+            elements = slots;
         }
         let close = self.expect(TokenKind::RParen, "expected `)` after product");
         self.brace_terminates_expression = previous_brace_termination;
         close?;
         Ok(Expression::Product(ProductExpression {
+            slotted,
             syntax: self.syntax(start),
             elements,
         }))
@@ -4443,7 +4524,7 @@ fn parameter_has_nested_move(pattern: &Pattern) -> bool {
 
 /// Whether a macro body's tail position is a bare function expression, which
 /// signals the removed curried `a => b => body` spelling rather than the
-/// juxtaposed `[a, b] => body` form. Looks through a type ascription so the
+/// juxtaposed `(a; b) => body` form. Looks through a type ascription so the
 /// diagnostic still fires on `a => b => T :: body`.
 fn macro_body_is_bare_function(expression: &Expression) -> bool {
     match expression {

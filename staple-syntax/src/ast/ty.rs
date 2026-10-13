@@ -13,7 +13,6 @@ pub enum Type {
     StringLiteral(StringLiteralType),
     Named(NamedType),
     Product(ProductType),
-    ParameterProduct(ParameterProductType),
     Sum(SumType),
     Function(FunctionType),
     Forall(ForallType),
@@ -30,7 +29,7 @@ impl Type {
             Self::NumberLiteral(ty) => &ty.syntax,
             Self::StringLiteral(ty) => &ty.syntax,
             Self::Named(ty) => &ty.syntax,
-            Self::Product(ty) | Self::ParameterProduct(ty) => &ty.syntax,
+            Self::Product(ty) => &ty.syntax,
             Self::Sum(ty) => &ty.syntax,
             Self::Function(ty) => &ty.syntax,
             Self::Forall(ty) => &ty.syntax,
@@ -56,7 +55,7 @@ impl fmt::Display for Type {
                 formatter.write_str("(")?;
                 for (index, element) in product.elements.iter().enumerate() {
                     if index > 0 {
-                        formatter.write_str(", ")?;
+                        formatter.write_str(if product.slotted { "; " } else { ", " })?;
                     }
                     if element.spread {
                         formatter.write_str("...")?;
@@ -67,32 +66,14 @@ impl fmt::Display for Type {
                 }
                 if product.variadic {
                     if !product.elements.is_empty() {
-                        formatter.write_str(", ")?;
+                        formatter.write_str(if product.slotted { "; " } else { ", " })?;
                     }
                     formatter.write_str("...")?;
                 }
-                formatter.write_str(")")
-            }
-            Self::ParameterProduct(product) => {
-                formatter.write_str("[")?;
-                for (index, element) in product.elements.iter().enumerate() {
-                    if index > 0 {
-                        formatter.write_str(", ")?;
-                    }
-                    if element.mutable {
-                        formatter.write_str("mut ")?;
-                    }
-                    if element.moved {
-                        formatter.write_str("move ")?;
-                    }
-                    if element.spread {
-                        formatter.write_str("...")?;
-                    } else if let Some(name) = &element.name {
-                        write!(formatter, "{name}: ")?;
-                    }
-                    write!(formatter, "{}", element.ty)?;
+                if product.slotted && product.elements.len() == 1 {
+                    formatter.write_str(";")?;
                 }
-                formatter.write_str("]")
+                formatter.write_str(")")
             }
             Self::Sum(sum) => {
                 for (index, alternative) in sum.alternatives.iter().enumerate() {
@@ -178,7 +159,7 @@ fn format_mutable_parameter(
     let mut result = String::from("(");
     for (index, element) in product.elements.iter().enumerate() {
         if index > 0 {
-            result.push_str(", ");
+            result.push_str(if product.slotted { "; " } else { ", " });
         }
         if mutations
             .iter()
@@ -199,9 +180,12 @@ fn format_mutable_parameter(
     }
     if product.variadic {
         if !product.elements.is_empty() {
-            result.push_str(", ");
+            result.push_str(if product.slotted { "; " } else { ", " });
         }
         result.push_str("...");
+    }
+    if product.slotted && product.elements.len() == 1 {
+        result.push(';');
     }
     result.push(')');
     result
@@ -329,6 +313,8 @@ pub struct NamedType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductType {
+    /// Whether top-level elements are slots separated by `;`.
+    pub slotted: bool,
     pub syntax: Syntax,
     pub elements: Vec<TypeElement>,
     pub variadic: bool,
@@ -367,13 +353,6 @@ pub struct FunctionType {
     pub moves: Vec<MutationTarget>,
     pub effects: EffectSet,
     pub result: Box<Type>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FunctionParameterStyle {
-    #[default]
-    Single,
-    Juxtaposed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -489,9 +468,6 @@ pub struct DefaultTypeBound {
     pub parameter: NamedType,
     pub default: Type,
 }
-
-/// Slots of a juxtaposed function, retained as a type before alias expansion.
-pub type ParameterProductType = ProductType;
 
 /// A compile-time parameter list and its constraints.
 #[derive(Debug, Clone, PartialEq, Eq)]

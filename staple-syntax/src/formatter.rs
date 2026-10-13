@@ -269,7 +269,8 @@ fn groups(tokens: &[SyntaxToken]) -> Vec<Option<Group>> {
                 let line_comment = tokens[open + 1..index]
                     .iter()
                     .any(|token| token.kind == TokenKind::LineComment);
-                let top_level_separator = has_top_level_separator(tokens, open + 1, index);
+                let top_level_separator = tokens[open].kind == TokenKind::LBrace
+                    && has_top_level_separator(tokens, open + 1, index);
                 let width = tokens[open..=index]
                     .iter()
                     .filter(|token| !token.kind.is_trivia())
@@ -402,10 +403,10 @@ mod tests {
 
     #[test]
     fn formats_juxtaposed_macro_parameters() {
-        let source = "macro choose=[condition: Expr,when_true: Expr,_: Ident \"else\",when_false: Expr]=>quote {}\n";
+        let source = "macro choose=(condition: Expr;when_true: Expr;_: Ident \"else\";when_false: Expr)=>quote {}\n";
         let formatted = format_source(source).unwrap();
         assert!(formatted.contains(
-            "macro choose = [condition: Expr, when_true: Expr, _: Ident \"else\", when_false: Expr] => quote {}"
+            "macro choose = (condition: Expr; when_true: Expr; _: Ident \"else\"; when_false: Expr) => quote {}"
         ));
         assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
@@ -457,10 +458,10 @@ mod tests {
 mod parameter_product_tests {
     use super::format_source;
     #[test]
-    fn preserves_bracket_type_arguments_and_tight_indices() {
-        let source = "type Add=alias Callable [I32,I32] I32\ndef add:[I32,I32]->I32=[x,y]=>x+y\nlet value=values[index]\n";
-        let formatted = format_source(source).expect("brackets format");
-        assert!(formatted.contains("Callable [I32, I32] I32"), "{formatted}");
+    fn preserves_slotted_type_arguments_and_tight_indices() {
+        let source = "type Add=alias Callable (I32;I32) I32\ndef add:(I32;I32)->I32=(x;y)=>x+y\nlet value=values[index]\n";
+        let formatted = format_source(source).expect("slotted products format");
+        assert!(formatted.contains("Callable (I32; I32) I32"), "{formatted}");
         assert!(formatted.contains("values[index]"), "{formatted}");
         assert_eq!(format_source(&formatted).unwrap(), formatted);
     }

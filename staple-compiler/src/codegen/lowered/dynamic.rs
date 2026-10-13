@@ -640,6 +640,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let mut argument_conversions = std::collections::BTreeMap::new();
         let mut result_conversion = None;
         let mut writebacks = Vec::new();
+        let mut packed_writebacks = Vec::new();
         if let Some(conversions) = self.view.conversions(owner) {
             for ((site, argument), conversion) in conversions {
                 if *site != call_id {
@@ -751,6 +752,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .builder
                 .build_store(storage, product)
                 .map_err(compiler_diagnostic)?;
+            for (index, value) in values.iter().enumerate() {
+                if call.function_type.mutations.contains(&crate::CheckedMutation::Element(index)) {
+                    let destination = BasicValueEnum::try_from(*value)
+                        .map_err(|_| Diagnostic::new(span.clone(), "invalid mutable argument"))?
+                        .into_pointer_value();
+                    let field = self.backend.builder.build_struct_gep(
+                        product.get_type(), storage, index as u32, "dynamic.packed.writeback",
+                    ).map_err(compiler_diagnostic)?;
+                    packed_writebacks.push((
+                        self.backend.compile_type(parameter_types[index])?, destination, field,
+                    ));
+                }
+            }
             arguments.push(storage.into());
         } else {
             for (index, value) in values.iter().enumerate() {
@@ -836,6 +850,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_indirect_call(function_type, code, &arguments, "polymorphic.call")
                     .map_err(compiler_diagnostic)?;
             }
+        }
+        for (ty, destination, source) in packed_writebacks {
+            let value = self.load_dynamic_storage(ty, source, "dynamic.packed.updated")
+                .map_err(compiler_diagnostic)?;
+            self.backend.builder.build_store(destination, value)
+                .map_err(compiler_diagnostic)?;
         }
         for (function, destination, source) in writebacks {
             self.backend
@@ -1343,7 +1363,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             id: *parameter,
                             name: String::new(),
                             sized: true,
-                            parameter_product_capable: false,
                         },
                     })
                     .collect(),

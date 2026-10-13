@@ -1,4 +1,4 @@
-use super::{FunctionParameterStyle, Item, Pattern, Syntax, Type, VisibilitySyntax};
+use super::{Item, Pattern, Syntax, Type, VisibilitySyntax};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression {
@@ -173,7 +173,6 @@ pub struct MatchArm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionExpression {
     pub syntax: Syntax,
-    pub parameter_style: FunctionParameterStyle,
     pub pattern: Pattern,
     pub body: Box<Expression>,
 }
@@ -193,6 +192,8 @@ pub struct BlockExpression {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductExpression {
+    /// Whether top-level elements are slots separated by `;`.
+    pub slotted: bool,
     pub syntax: Syntax,
     pub elements: Vec<ProductElement>,
 }
@@ -200,6 +201,7 @@ pub struct ProductExpression {
 impl ProductExpression {
     pub fn empty() -> Self {
         Self {
+            slotted: false,
             syntax: Syntax::compiler(),
             elements: vec![],
         }
@@ -235,6 +237,8 @@ pub struct ProductElement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallExpression {
+    /// Whether the atomic argument is spread into consecutive call slots.
+    pub spread: bool,
     pub syntax: Syntax,
     pub callee: Box<Expression>,
     pub argument: Box<Expression>,

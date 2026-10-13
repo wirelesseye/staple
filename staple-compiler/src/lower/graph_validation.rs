@@ -861,7 +861,6 @@ pub(crate) mod tests {
                     id: TypeParameterId(0),
                     name: "T".to_owned(),
                     sized: true,
-                    parameter_product_capable: false,
                 },
             });
         let diagnostics = program.validate_specialization_graph();
@@ -906,7 +905,6 @@ pub(crate) mod tests {
             id: TypeParameterId(999),
             name: "Unresolved".to_owned(),
             sized: true,
-            parameter_product_capable: false,
         });
         let diagnostics = program.validate_specialization_graph();
         assert!(
@@ -971,7 +969,6 @@ pub(crate) mod tests {
             id: TypeParameterId(999),
             name: "Unresolved".to_owned(),
             sized: true,
-            parameter_product_capable: false,
         });
         let diagnostics = program.validate_specialization_graph();
         assert!(
@@ -1825,16 +1822,7 @@ pub(crate) mod tests {
                 declaration.eagerly_declared,
                 "the plan records the emitter eager foreign-symbol declaration: {plan:?}"
             );
-            let expected_arity = if plan.callable_type.parameter_style
-                == staple_syntax::FunctionParameterStyle::Juxtaposed
-            {
-                match plan.callable_type.parameter.as_ref() {
-                    crate::CheckedType::Product(product) => product.elements.len(),
-                    _ => 1,
-                }
-            } else {
-                1
-            };
+            let expected_arity = plan.callable_type.slot_count();
             assert_eq!(
                 declaration.arity, expected_arity,
                 "the recorded arity matches the adapter's parameter shape"

@@ -48,6 +48,9 @@ struct FunctionEnvironment<'context> {
     locals: HashMap<SymbolId, AnyValueEnum<'context>>,
     binding_cells: HashMap<SymbolId, PointerValue<'context>>,
     parameter_pointers: HashMap<SymbolId, PointerValue<'context>>,
+    /// A whole binding whose mutable product fields arrive at separate addresses.
+    split_parameter_pointers: HashMap<SymbolId, Vec<PointerValue<'context>>>,
+    split_call_writebacks: Vec<(SymbolId, PointerValue<'context>, CheckedType)>,
     closure_environment: Option<PointerValue<'context>>,
     /// The resource value each active provider supplies, keyed by the
     /// provider a `LoweredResourceUse` names. The emitter never selects a
@@ -84,6 +87,7 @@ impl<'context> FunctionEnvironment<'context> {
         self.locals = snapshot.locals.clone();
         self.binding_cells = snapshot.binding_cells.clone();
         self.parameter_pointers = snapshot.parameter_pointers.clone();
+        self.split_parameter_pointers = snapshot.split_parameter_pointers.clone();
         self.owned = snapshot.owned.clone();
         self.owned_order = snapshot.owned_order.clone();
     }
@@ -1316,6 +1320,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             return Ok(());
         }
+        if let [Some(symbol)] = symbols.as_slice()
+            && let CheckedType::Product(product) = parameter_type
+            && product.slotted
+            && product.elements.len() > 1
+            && pointers.len() == product.elements.len()
+            && pointers
+                .iter()
+                .enumerate()
+                .all(|(slot, (index, _))| slot == *index)
+        {
+            environment.binding_cells.remove(symbol);
+            environment.parameter_pointers.remove(symbol);
+            environment.split_parameter_pointers.insert(
+                *symbol,
+                pointers.iter().map(|(_, pointer)| *pointer).collect(),
+            );
+            return Ok(());
+        }
         for (index, pointer) in pointers {
             if let Some(Some(symbol)) = symbols.get(*index) {
                 environment.binding_cells.remove(symbol);
@@ -1440,7 +1462,36 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if self.capture_stores_pointer(capture) {
                     let pointer = value.into_pointer_value();
                     if self.capture_is_parameter_pointer(capture) {
-                        environment.parameter_pointers.insert(symbol, pointer);
+                        if let CheckedType::Product(product) = &capture.value_type
+                            && product.slotted
+                            && product.elements.len() > 1
+                        {
+                            let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+                            let list_type = self
+                                .backend
+                                .context
+                                .struct_type(&vec![pointer_type.into(); product.elements.len()], false);
+                            let list = self
+                                .backend
+                                .builder
+                                .build_load(list_type, pointer, "capture.slots")
+                                .map_err(compiler_diagnostic)?
+                                .into_struct_value();
+                            let pointers = (0..product.elements.len())
+                                .map(|slot| {
+                                    self.backend
+                                        .builder
+                                        .build_extract_value(list, slot as u32, "capture.slot")
+                                        .map(|value| value.into_pointer_value())
+                                        .map_err(compiler_diagnostic)
+                                })
+                                .collect::<CodeGenerationResult<Vec<_>>>()?;
+                            environment
+                                .split_parameter_pointers
+                                .insert(symbol, pointers);
+                        } else {
+                            environment.parameter_pointers.insert(symbol, pointer);
+                        }
                     } else {
                         environment.binding_cells.insert(symbol, pointer);
                     }
@@ -5202,6 +5253,61 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .allocate_capture_environment(environment_type, environment_value, span.clone())
     }
 
+    /// Captured parameter slots retain their original addresses. The managed
+    /// pointer list lives with the closure, including returned borrowed closures.
+    fn split_capture_pointer(
+        &self,
+        symbol: SymbolId,
+        value_type: &CheckedType,
+        environment: &FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let CheckedType::Product(product) = value_type else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "split capture requires a product",
+            ));
+        };
+        let pointers = if let Some(pointers) = environment.split_parameter_pointers.get(&symbol) {
+            pointers.clone()
+        } else {
+            let pointer = environment
+                .parameter_pointers
+                .get(&symbol)
+                .copied()
+                .ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "slotted capture storage is not available")
+                })?;
+            let ty = self.backend.compile_type(value_type)?.into_struct_type();
+            (0..product.elements.len())
+                .map(|slot| {
+                    self.backend
+                        .builder
+                        .build_struct_gep(ty, pointer, slot as u32, "capture.field")
+                        .map_err(compiler_diagnostic)
+                })
+                .collect::<CodeGenerationResult<Vec<_>>>()?
+        };
+        let fields = pointers
+            .into_iter()
+            .map(BasicValueEnum::from)
+            .collect::<Vec<_>>();
+        let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+        let list_type = self
+            .backend
+            .context
+            .struct_type(&vec![pointer_type.into(); fields.len()], false);
+        let mut value = list_type.const_zero();
+        for (slot, field) in fields.into_iter().enumerate() {
+            value = self
+                .backend
+                .insert_capture(value, field, slot as u32, span.clone())?;
+        }
+        self.backend
+            .allocate_capture_environment(list_type, value, span.clone())
+            .map(Into::into)
+    }
+
     /// Reads a capture from the current scope. Shared cells and borrowed values
     /// store pointers; by-value captures store the value itself.
     fn closure_capture_value(
@@ -5213,6 +5319,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<BasicValueEnum<'context>> {
         use crate::LoweredCaptureAccess;
         let symbol = capture.capture.symbol;
+        if capture.access != LoweredCaptureAccess::ByValue
+            && (capture.access == LoweredCaptureAccess::Borrowed
+                || self
+                    .view
+                    .symbol(symbol)
+                    .is_some_and(|symbol| symbol.mutated_parameter))
+            && matches!(&capture.value_type, CheckedType::Product(product) if product.slotted && product.elements.len() > 1)
+        {
+            return self.split_capture_pointer(symbol, &capture.value_type, environment, span);
+        }
         let pointer = match capture.access {
             LoweredCaptureAccess::SharedCell => environment
                 .parameter_pointers
@@ -5238,14 +5354,51 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     span,
                     environment,
                 )?;
-                value_as_basic(value).ok_or_else(|| {
-                    Diagnostic::new(span.clone(), "captured value is not first-class")
-                })
+                value_as_basic(value)
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "captured value is not first-class"))
             }
         }
     }
 
     fn emit_call(
+        &mut self,
+        owner: EmissionOwner,
+        id: LoweredCallId,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let mark = environment.split_call_writebacks.len();
+        let result = self.emit_call_inner(owner, id, environment)?;
+        let writebacks = environment.split_call_writebacks.split_off(mark);
+        for (symbol, pointer, ty) in writebacks {
+            let value = self
+                .backend
+                .builder
+                .build_load(
+                    self.backend.compile_type(&ty)?,
+                    pointer,
+                    "parameter.updated",
+                )
+                .map_err(compiler_diagnostic)?
+                .into_struct_value();
+            for (slot, destination) in environment.split_parameter_pointers[&symbol]
+                .iter()
+                .enumerate()
+            {
+                let field = self
+                    .backend
+                    .builder
+                    .build_extract_value(value, slot as u32, "parameter.updated.slot")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(*destination, field)
+                    .map_err(compiler_diagnostic)?;
+            }
+        }
+        Ok(result)
+    }
+
+    fn emit_call_inner(
         &mut self,
         owner: EmissionOwner,
         id: LoweredCallId,
@@ -5901,7 +6054,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 && self.place_rooted_in_plain_local(owner, place, environment))
         {
             match self.emit_place_pointer(owner, place, environment) {
-                Ok(pointer) => return Ok(pointer.into()),
+                Ok(pointer) => {
+                    if record.pass_mode == LoweredArgumentPassMode::MutablePlace
+                        && let Some(place) = self.view.place(owner, place)
+                        && let crate::LoweredPlaceKind::Symbol { symbol } = place.kind
+                        && environment.split_parameter_pointers.contains_key(&symbol)
+                    {
+                        environment.split_call_writebacks.push((symbol, pointer, place.value_type.clone()));
+                    }
+                    return Ok(pointer.into());
+                },
                 // A borrowed argument falls back to a materialized copy when
                 // its possibly place-rooted operand is not actually
                 // addressable; the mutation path has no fallback. An indexed
@@ -6041,6 +6203,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<BasicValueEnum<'context>> {
         let symbol = capture.capture.symbol;
+        if self.capture_stores_pointer(capture)
+            && self.capture_is_parameter_pointer(capture)
+            && matches!(&capture.value_type, CheckedType::Product(product) if product.slotted && product.elements.len() > 1)
+        {
+            return self.split_capture_pointer(symbol, &capture.value_type, environment, span);
+        }
         if capture.requires_initialization_state || capture.mutable_storage || capture.derived {
             let pointer = environment
                 .parameter_pointers
@@ -6117,8 +6285,78 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         cleanups: &mut Vec<(usize, DropSource<'context>)>,
         slots: &mut [Option<BasicMetadataValueEnum<'context>>],
     ) -> CodeGenerationResult<()> {
-        let value = self.emit_expression(owner, expression, environment)?;
+        let base_place = if !by_value_route {
+            mappings.iter().find_map(|(_, slot)| {
+                let record = call.arguments.get(*slot)?;
+                let place = self.view.place(owner, record.place?)?;
+                match place.kind {
+                    crate::LoweredPlaceKind::ProductElement { base, .. } => Some(base),
+                    _ => None,
+                }
+            })
+        } else {
+            None
+        };
+        let split_pointers = base_place.and_then(|place| {
+            let place = self.view.place(owner, place)?;
+            let crate::LoweredPlaceKind::Symbol { symbol } = place.kind else {
+                return None;
+            };
+            environment.split_parameter_pointers.get(&symbol).cloned()
+        });
+        // A split mutable parameter already supplies each slot's storage.
+        // Forward those places directly rather than rebuilding an aggregate.
+        if let Some(pointers) = &split_pointers
+            && mappings.iter().all(|(_, slot)| {
+                call.arguments.get(*slot).is_some_and(|record| {
+                    record.pass_mode == LoweredArgumentPassMode::MutablePlace
+                })
+            })
+        {
+            for (source, slot) in mappings {
+                let pointer = pointers.get(*source).copied().ok_or_else(|| {
+                    Diagnostic::new(
+                        call.origin.span.clone(),
+                        "split spread field is out of range",
+                    )
+                })?;
+                place_argument_slot(slots, *slot, pointer.into(), &call.origin.span)?;
+            }
+            return Ok(());
+        }
+        let base_pointer = base_place
+            .map(|place| self.emit_place_pointer(owner, place, environment))
+            .transpose()?;
+        let value = if let (Some(place), Some(pointer)) = (base_place, base_pointer) {
+            let value_type = &self
+                .view
+                .place(owner, place)
+                .expect("recorded spread base")
+                .value_type;
+            self.backend
+                .builder
+                .build_load(
+                    self.backend.compile_type(value_type)?,
+                    pointer,
+                    "product.spread.value",
+                )
+                .map_err(compiler_diagnostic)?
+                .as_any_value_enum()
+        } else {
+            self.emit_expression(owner, expression, environment)?
+        };
+        if base_pointer.is_some() {
+            let operand = self
+                .view
+                .expression(owner, expression)
+                .expect("recorded spread operand")
+                .clone();
+            self.release_moved_ownership(owner, environment, &operand)?;
+        }
         if environment.returned {
+            return Ok(());
+        }
+        if mappings.is_empty() {
             return Ok(());
         }
         let Some(BasicValueEnum::StructValue(product)) = value_as_basic(value) else {
@@ -6131,6 +6369,38 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let record = call.arguments.get(*slot).ok_or_else(|| {
                 Diagnostic::new(call.origin.span.clone(), "missing spread argument record")
             })?;
+            if record.pass_mode == LoweredArgumentPassMode::MutablePlace
+                && let Some(pointers) = &split_pointers
+            {
+                let pointer = pointers.get(*source).copied().ok_or_else(|| {
+                    Diagnostic::new(
+                        call.origin.span.clone(),
+                        "split spread field is out of range",
+                    )
+                })?;
+                place_argument_slot(slots, *slot, pointer.into(), &call.origin.span)?;
+                continue;
+            }
+            if let Some(pointer) = base_pointer
+                && record.pass_mode == LoweredArgumentPassMode::MutablePlace
+                && record.place.is_some()
+            {
+                let pointer = self
+                    .backend
+                    .builder
+                    .build_struct_gep(
+                        product.get_type(),
+                        pointer,
+                        *source as u32,
+                        "product.spread.place",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                if record.drops_after_call {
+                    cleanups.push((*slot, DropSource::Temporary(pointer)));
+                }
+                place_argument_slot(slots, *slot, pointer.into(), &call.origin.span)?;
+                continue;
+            }
             let element = self
                 .backend
                 .builder
@@ -6177,9 +6447,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         id: crate::PlaceId,
         environment: &mut FunctionEnvironment<'context>,
     ) -> CodeGenerationResult<PointerValue<'context>> {
-        let place = self.view.place(owner, id).ok_or_else(|| {
-            Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered place")
-        })?;
+        let place = self
+            .view
+            .place(owner, id)
+            .ok_or_else(|| Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered place"))?;
         let unsupported = |family| {
             Diagnostic::new(
                 place.origin.span.clone(),
@@ -6190,6 +6461,29 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         };
         match &place.kind {
             crate::LoweredPlaceKind::Symbol { symbol } => {
+                if environment.split_parameter_pointers.contains_key(symbol) {
+                    let value = self.load_symbol_value(
+                        owner,
+                        *symbol,
+                        false,
+                        &place.value_type,
+                        &place.origin.span,
+                        environment,
+                    )?;
+                    let value = value_as_basic(value).ok_or_else(|| {
+                        Diagnostic::new(place.origin.span.clone(), "invalid split parameter value")
+                    })?;
+                    let pointer = self
+                        .backend
+                        .entry_builder()
+                        .build_alloca(value.get_type(), "parameter.aggregate")
+                        .map_err(compiler_diagnostic)?;
+                    self.backend
+                        .builder
+                        .build_store(pointer, value)
+                        .map_err(compiler_diagnostic)?;
+                    return Ok(pointer);
+                }
                 if let Some(pointer) = environment.parameter_pointers.get(symbol).copied() {
                     return Ok(pointer);
                 }
@@ -6296,9 +6590,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .ref_payload_pointer(value, dereference, place.origin.span.clone())
             }
             crate::LoweredPlaceKind::ProductElement { base, index, slice } => {
-                let base_place = self.view.place(owner, *base).ok_or_else(|| {
-                    Diagnostic::new(place.origin.span.clone(), "missing base place")
-                })?;
+                let base_place = self
+                    .view
+                    .place(owner, *base)
+                    .ok_or_else(|| Diagnostic::new(place.origin.span.clone(), "missing base place"))?;
+                if !*slice
+                    && let crate::LoweredPlaceKind::Symbol { symbol } = base_place.kind
+                    && let Some(pointers) = environment.split_parameter_pointers.get(&symbol)
+                {
+                    return pointers.get(*index).copied().ok_or_else(|| {
+                        Diagnostic::new(
+                            place.origin.span.clone(),
+                            "split parameter field is out of range",
+                        )
+                    });
+                }
                 if *slice {
                     // The emitter evaluates the slice value, then loads its pointer
                     // and length and bounds-checks the fixed index.
@@ -6377,16 +6683,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .symbol(*symbol)
                         .is_some_and(|symbol| symbol.mutable_storage)
                 {
-                    self.check_symbol_initialization(
-                        owner,
-                        environment,
-                        *symbol,
-                        &place.origin.span,
-                    )?;
+                    self.check_symbol_initialization(owner, environment, *symbol, &place.origin.span)?;
                 }
                 let pointer = self.emit_place_pointer(owner, *base, environment)?;
-                let container_type =
-                    super::layout::strip_place_wrappers(base_place.value_type.clone());
+                let container_type = super::layout::strip_place_wrappers(base_place.value_type.clone());
                 let BasicTypeEnum::StructType(container_llvm) =
                     self.backend.compile_type(&container_type)?
                 else {
@@ -6429,7 +6729,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return self.emit_mutate_index_assignment(owner, id, assignment, &place, environment);
         }
         let span = place.origin.span.clone();
-        let pointer = self.emit_place_pointer(owner, assignment.target, environment)?;
+        let split = match &place.kind {
+            crate::LoweredPlaceKind::Symbol { symbol } => {
+                environment.split_parameter_pointers.get(symbol).cloned()
+            }
+            _ => None,
+        };
+        let pointer = if split.is_some() {
+            None
+        } else {
+            Some(self.emit_place_pointer(owner, assignment.target, environment)?)
+        };
         let value = self.emit_expression(owner, assignment.value, environment)?;
         if environment.returned {
             return Ok(());
@@ -6445,7 +6755,25 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .and_then(|symbol| environment.binding_cells.get(&symbol).copied());
             let source = match cell {
                 Some(cell) => DropSource::Cell(cell),
-                None => DropSource::Place(pointer),
+                None => match pointer {
+                    Some(pointer) => DropSource::Place(pointer),
+                    None => {
+                        let crate::LoweredPlaceKind::Symbol { symbol } = place.kind else {
+                            unreachable!()
+                        };
+                        let old = self.load_symbol_value(
+                            owner,
+                            symbol,
+                            false,
+                            &place.value_type,
+                            &span,
+                            environment,
+                        )?;
+                        DropSource::Value(value_as_basic(old).ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "invalid split parameter value")
+                        })?)
+                    }
+                },
             };
             self.emit_drop_site(
                 owner,
@@ -6454,10 +6782,25 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 &span,
             )?;
         }
-        self.backend
-            .builder
-            .build_store(pointer, value)
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        if let Some(pointers) = split {
+            let product = value.into_struct_value();
+            for (slot, pointer) in pointers.into_iter().enumerate() {
+                let field = self
+                    .backend
+                    .builder
+                    .build_extract_value(product, slot as u32, "assigned.slot")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(pointer, field)
+                    .map_err(compiler_diagnostic)?;
+            }
+        } else {
+            self.backend
+                .builder
+                .build_store(pointer.expect("ordinary place pointer"), value)
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        }
         // A field projection never initializes its base; the base is already
         // initialized (or the projection's own check traps). Its root symbol
         // exists here for notification only.
@@ -7134,6 +7477,23 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         span: &staple_syntax::Span,
         environment: &FunctionEnvironment<'context>,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        if let Some(pointers) = environment.split_parameter_pointers.get(&symbol) {
+            let types = flattened_parameter_types(value_type);
+            let fields = pointers
+                .iter()
+                .zip(types)
+                .map(|(pointer, ty)| {
+                    self.backend
+                        .builder
+                        .build_load(self.backend.compile_type(ty)?, *pointer, "parameter.slot")
+                        .map_err(compiler_diagnostic)
+                })
+                .collect::<CodeGenerationResult<Vec<_>>>()?;
+            return self
+                .backend
+                .build_product_value(&fields, span.clone())
+                .map(|value| value.as_any_value_enum());
+        }
         if let Some(pointer) = environment.parameter_pointers.get(&symbol).copied() {
             let llvm_type = self.backend.compile_type(value_type)?;
             return self

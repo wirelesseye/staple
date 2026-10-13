@@ -674,7 +674,11 @@ impl LoweredArtifactPlan {
                             }
                         }
                     }
-                    StructuralBody::SumDebug { alternatives } => {
+                    StructuralBody::SumDebug { alternatives }
+                    | StructuralBody::ProductEquality {
+                        elements: alternatives,
+                        ..
+                    } => {
                         for delegate in alternatives {
                             debug(delegate, visit);
                         }
@@ -1225,6 +1229,12 @@ pub(crate) struct StructuralMethodPlan {
 pub(crate) enum StructuralBody {
     /// Request-time only: the family expander replaces this marker.
     Unexpanded,
+    /// Product equality: compare fields in order, stopping at the first mismatch.
+    ProductEquality {
+        elements: Vec<DebugDelegate>,
+        /// `Eq.ne` negates the conjunction of element-level `Eq.eq` results.
+        negate: bool,
+    },
     /// Product `Debug`: write the recorded literal steps and delegate each
     /// element to `Debug.fmt`.
     ProductDebug {
@@ -1344,7 +1354,11 @@ impl StructuralMethodPlan {
                     }
                 }
             }
-            StructuralBody::SumDebug { alternatives } => {
+            StructuralBody::SumDebug { alternatives }
+            | StructuralBody::ProductEquality {
+                elements: alternatives,
+                ..
+            } => {
                 for delegate in alternatives {
                     visit_planned(&delegate.callee, visit);
                 }
@@ -1376,7 +1390,11 @@ impl StructuralMethodPlan {
                     }
                 }
             }
-            StructuralBody::SumDebug { alternatives } => {
+            StructuralBody::SumDebug { alternatives }
+            | StructuralBody::ProductEquality {
+                elements: alternatives,
+                ..
+            } => {
                 for delegate in alternatives {
                     visit_planned_mut(&mut delegate.callee, visit);
                 }

@@ -120,12 +120,6 @@ impl<'program, 'context> Backend<'program, 'context> {
                         "dynamic implementations do not support variadic parameters",
                     ));
                 }
-                CheckedType::ParameterProduct(_) => {
-                    return Err(Diagnostic::new(
-                        Span::Compiler,
-                        "dynamic implementations require a fixed parameter shape",
-                    ));
-                }
                 parameter => flattened_parameter_types(parameter).len(),
             }
         };

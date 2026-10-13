@@ -1021,7 +1021,7 @@ impl Collector<'_> {
             }
 
             Type::Named(value) => self.named_type(value),
-            Type::Product(value) | Type::ParameterProduct(value) => {
+            Type::Product(value) => {
                 for element in &value.elements {
                     self.ty(&element.ty);
                 }

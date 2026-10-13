@@ -3078,7 +3078,6 @@ mod tests {
             id: parameter_id,
             name: "T".to_owned(),
             sized: true,
-            parameter_product_capable: false,
         };
         program
             .trait_implementations
@@ -5794,7 +5793,6 @@ mod tests {
             id: TypeParameterId(999999),
             name: "Foreign".to_owned(),
             sized: true,
-            parameter_product_capable: false,
         });
         assert!(!program.validate_instance_bodies().is_empty());
     }

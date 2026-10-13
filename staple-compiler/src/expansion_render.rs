@@ -364,7 +364,7 @@ fn render_pattern(pattern: &Pattern) -> String {
                     .iter()
                     .map(render_pattern)
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(if product.slotted { "; " } else { ", " })
             )
         }
         Pattern::Nominal(nominal) => format!(
@@ -405,22 +405,7 @@ fn render_expr(program: &Program, expression: &Expression) -> String {
         }
         Expression::Function(function) => format!(
             "{} => {}",
-            if function.parameter_style == staple_syntax::FunctionParameterStyle::Juxtaposed {
-                let Pattern::Product(product) = &function.pattern else {
-                    unreachable!()
-                };
-                format!(
-                    "[{}]",
-                    product
-                        .elements
-                        .iter()
-                        .map(render_pattern)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            } else {
-                render_pattern(&function.pattern)
-            },
+            render_pattern(&function.pattern),
             render_expr(program, &function.body),
         ),
         Expression::Loop(loop_) => format!("loop {}", render_block(program, &loop_.body)),
@@ -768,4 +753,28 @@ fn expr_has_generated(expression: &Expression) -> bool {
 
 fn pattern_is_generated(pattern: &Pattern) -> bool {
     pattern.syntax().is_generated()
+}
+
+#[cfg(test)]
+mod slotted_pattern_tests {
+    use super::*;
+
+    #[test]
+    fn renders_function_patterns_from_their_product_kind() {
+        for (source, expected) in [
+            ("def f = (a; b) => a\n", "(a; b)"),
+            ("def f = (a, b) => a\n", "(a, b)"),
+            ("def f = (a; b, c) => a\n", "(a; (b, c))"),
+            ("def f = (a;) => a\n", "a"),
+        ] {
+            let module = staple_syntax::parse(source).expect("function parses");
+            let Item::Binding(binding) = &module.items[0] else {
+                panic!("binding")
+            };
+            let Some(Expression::Function(function)) = &binding.value else {
+                panic!("function")
+            };
+            assert_eq!(render_pattern(&function.pattern), expected);
+        }
+    }
 }

@@ -68,13 +68,10 @@ pub(crate) enum CanonicalType {
         pointee: Box<CanonicalType>,
     },
     Product {
+        slotted: bool,
+        spreads: Vec<usize>,
         elements: Vec<CanonicalProductElement>,
         variadic: bool,
-    },
-    ParameterProduct {
-        elements: Vec<CanonicalProductElement>,
-        mutations: Vec<usize>,
-        moves: Vec<usize>,
     },
     Sum {
         alternatives: Vec<CanonicalType>,
@@ -84,7 +81,7 @@ pub(crate) enum CanonicalType {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum CanonicalSchemeParameter {
-    Type { sized: bool, capable: bool },
+    Type { sized: bool },
     Effect,
     Product(Vec<CanonicalSchemeParameter>),
 }
@@ -120,18 +117,12 @@ pub(crate) struct CanonicalProductElement {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CanonicalFunctionType {
     pub parameter: Box<CanonicalType>,
-    pub parameter_style: CanonicalParameterStyle,
     pub mutations: Vec<CanonicalMutation>,
     pub moves: Vec<CanonicalMutation>,
     pub effects: CanonicalEffectSet,
     pub result: Box<CanonicalType>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum CanonicalParameterStyle {
-    Single,
-    Juxtaposed,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum CanonicalMutation {
@@ -186,8 +177,7 @@ impl CanonicalType {
             | CanonicalType::Sum {
                 alternatives: arguments,
             } => deepest(&mut arguments.iter()),
-            CanonicalType::Product { elements, .. }
-            | CanonicalType::ParameterProduct { elements, .. } => {
+            CanonicalType::Product { elements, .. } => {
                 deepest(&mut elements.iter().map(|element| &element.value_type))
             }
             CanonicalType::Function(function) => {
@@ -217,17 +207,9 @@ impl CanonicalType {
                     ids: &mut Vec<TypeParameterId>,
                 ) -> CanonicalSchemeParameter {
                     match p {
-                        crate::CheckedSchemeParameter::Type {
-                            id,
-                            sized,
-                            parameter_product_capable,
-                            ..
-                        } => {
+                        crate::CheckedSchemeParameter::Type { id, sized, .. } => {
                             ids.push(*id);
-                            CanonicalSchemeParameter::Type {
-                                sized: *sized,
-                                capable: *parameter_product_capable,
-                            }
+                            CanonicalSchemeParameter::Type { sized: *sized }
                         }
                         crate::CheckedSchemeParameter::Effect { id, .. } => {
                             ids.push(*id);
@@ -260,7 +242,6 @@ impl CanonicalType {
                         id: bound.parameter,
                         name: String::new(),
                         sized: true,
-                        parameter_product_capable: false,
                     };
                     bounds.push(CanonicalSchemeBound::Subtype(
                         Self::convert(&parameter, origin, runtime, &nested)?,
@@ -356,26 +337,9 @@ impl CanonicalType {
             CheckedType::CPointer { pointee } => CanonicalType::CPointer {
                 pointee: Box::new(Self::convert(pointee, origin, runtime, binders)?),
             },
-            CheckedType::ParameterProduct(product) => CanonicalType::ParameterProduct {
-                elements: product
-                    .elements
-                    .iter()
-                    .map(|element| {
-                        Ok(CanonicalProductElement {
-                            name: element.name.clone(),
-                            value_type: Self::convert(
-                                &element.value_type,
-                                origin,
-                                runtime,
-                                binders,
-                            )?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, Diagnostic>>()?,
-                mutations: product.mutations.clone(),
-                moves: product.moves.clone(),
-            },
             CheckedType::Product(product) => CanonicalType::Product {
+                slotted: product.slotted,
+                spreads: product.spreads.clone(),
                 elements: product
                     .elements
                     .iter()
@@ -482,12 +446,6 @@ impl CanonicalFunctionType {
                 runtime,
                 binders,
             )?),
-            parameter_style: match function.parameter_style {
-                staple_syntax::FunctionParameterStyle::Single => CanonicalParameterStyle::Single,
-                staple_syntax::FunctionParameterStyle::Juxtaposed => {
-                    CanonicalParameterStyle::Juxtaposed
-                }
-            },
             mutations: function.mutations.iter().cloned().map(Into::into).collect(),
             moves: function.moves.iter().cloned().map(Into::into).collect(),
             effects: CanonicalEffectSet::convert(&function.effects, origin, runtime, binders)?,
@@ -1499,7 +1457,9 @@ fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
 
 fn structural_name(structural: StructuralTraitMethod) -> &'static str {
     match structural {
+        StructuralTraitMethod::Equality => "equality",
         StructuralTraitMethod::Debug => "debug",
+        StructuralTraitMethod::Display => "display",
         StructuralTraitMethod::Index => "index",
         StructuralTraitMethod::DerefIndex => "deref_index",
         StructuralTraitMethod::MutateIndex => "mutate_index",
@@ -1516,9 +1476,7 @@ fn origin_diagnostic(origin: &Origin, message: impl Into<String>) -> Diagnostic 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use staple_syntax::{
-        Expression, FunctionParameterStyle, IntegerExpression, Span, Syntax, SyntaxId,
-    };
+    use staple_syntax::{Expression, IntegerExpression, Span, Syntax, SyntaxId};
 
     use crate::{
         CheckedFunctionParameterDefault, CheckedProductType, CheckedSumType, CheckedTypeElement,
@@ -1531,7 +1489,6 @@ mod tests {
                 id: TypeParameterId(id),
                 name: format!("P{id}"),
                 sized: true,
-                parameter_product_capable: false,
             };
             let order = if reverse {
                 [second, first]
@@ -1545,7 +1502,6 @@ mod tests {
                         id: TypeParameterId(id),
                         name: format!("P{id}"),
                         sized: true,
-                        parameter_product_capable: false,
                     })
                     .collect(),
                 trait_bounds: vec![],
@@ -1554,7 +1510,6 @@ mod tests {
                 body: Box::new(CheckedType::Function(CheckedFunctionType {
                     parameter: Box::new(parameter(first)),
                     result: Box::new(parameter(second)),
-                    parameter_style: staple_syntax::FunctionParameterStyle::Single,
                     mutations: vec![],
                     moves: vec![],
                     default: None,
@@ -1578,7 +1533,6 @@ mod tests {
                         id: TypeParameterId(ids[0]),
                         name: "Bound".into(),
                         sized: true,
-                        parameter_product_capable: false,
                     }],
                 });
             }
@@ -1651,15 +1605,26 @@ mod tests {
 
     fn function_type(
         parameter: CheckedType,
-        parameter_style: FunctionParameterStyle,
+        slotted: bool,
         mutations: Vec<CheckedMutation>,
         moves: Vec<CheckedMutation>,
         effects: CheckedEffectSet,
         result: CheckedType,
     ) -> CheckedFunctionType {
+        let mut parameter = parameter;
+        if slotted {
+            match &mut parameter {
+                CheckedType::Product(product) => product.slotted = true,
+                _ => parameter = CheckedType::Product(CheckedProductType {
+                    slotted: true,
+                    spreads: Vec::new(),
+                    elements: vec![element(None, parameter, None); 2],
+                    variadic: false,
+                }),
+            }
+        }
         CheckedFunctionType {
             parameter: Box::new(parameter),
-            parameter_style,
             default: None,
             mutations,
             moves,
@@ -1733,6 +1698,8 @@ mod tests {
                 "Second",
                 vec![CheckedType::I32],
                 CheckedType::Product(CheckedProductType {
+                    slotted: false,
+                    spreads: Vec::new(),
                     elements: vec![element(Some("payload"), CheckedType::I32, None)],
                     variadic: false,
                 }),
@@ -1741,10 +1708,14 @@ mod tests {
         );
         assert_eq!(
             concrete(&CheckedType::Product(CheckedProductType {
+                slotted: false,
+                spreads: Vec::new(),
                 elements: vec![element(Some("x"), CheckedType::I32, None)],
                 variadic: false,
             })),
             concrete(&CheckedType::Product(CheckedProductType {
+                slotted: false,
+                spreads: Vec::new(),
                 elements: vec![element(
                     Some("x"),
                     CheckedType::I32,
@@ -1761,7 +1732,7 @@ mod tests {
             })),
             ..function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 Vec::new(),
                 Vec::new(),
                 CheckedEffectSet::default(),
@@ -1771,7 +1742,7 @@ mod tests {
         assert_eq!(
             canonical_function(&function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 Vec::new(),
                 Vec::new(),
                 CheckedEffectSet::default(),
@@ -1805,6 +1776,8 @@ mod tests {
         );
         let named = |name: Option<&str>| {
             CheckedType::Product(CheckedProductType {
+                slotted: false,
+                spreads: Vec::new(),
                 elements: vec![element(name, CheckedType::I32, None)],
                 variadic: false,
             })
@@ -1813,6 +1786,8 @@ mod tests {
         assert_ne!(concrete(&named(Some("x"))), concrete(&named(None)));
         assert_ne!(
             concrete(&CheckedType::Product(CheckedProductType {
+                slotted: false,
+                spreads: Vec::new(),
                 elements: vec![
                     element(None, CheckedType::I32, None),
                     element(None, CheckedType::I64, None),
@@ -1820,6 +1795,8 @@ mod tests {
                 variadic: false,
             })),
             concrete(&CheckedType::Product(CheckedProductType {
+                slotted: false,
+                spreads: Vec::new(),
                 elements: vec![
                     element(None, CheckedType::I64, None),
                     element(None, CheckedType::I32, None),
@@ -1830,10 +1807,14 @@ mod tests {
         );
         assert_ne!(
             concrete(&CheckedType::Product(CheckedProductType {
+                slotted: false,
+                spreads: Vec::new(),
                 elements: vec![element(None, CheckedType::I32, None)],
                 variadic: false,
             })),
             concrete(&CheckedType::Product(CheckedProductType {
+                slotted: false,
+                spreads: Vec::new(),
                 elements: vec![element(None, CheckedType::I32, None)],
                 variadic: true,
             })),
@@ -1889,7 +1870,7 @@ mod tests {
         assert_ne!(
             canonical_function(&function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 Vec::new(),
                 Vec::new(),
                 CheckedEffectSet::default(),
@@ -1897,7 +1878,7 @@ mod tests {
             )),
             canonical_function(&function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Juxtaposed,
+                true,
                 Vec::new(),
                 Vec::new(),
                 CheckedEffectSet::default(),
@@ -1908,7 +1889,7 @@ mod tests {
         assert_ne!(
             canonical_function(&function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 vec![CheckedMutation::Whole],
                 Vec::new(),
                 CheckedEffectSet::default(),
@@ -1916,7 +1897,7 @@ mod tests {
             )),
             canonical_function(&function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 Vec::new(),
                 Vec::new(),
                 CheckedEffectSet::default(),
@@ -1927,7 +1908,7 @@ mod tests {
         assert_ne!(
             canonical_function(&function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 Vec::new(),
                 vec![CheckedMutation::Whole, CheckedMutation::Element(1)],
                 CheckedEffectSet::default(),
@@ -1935,7 +1916,7 @@ mod tests {
             )),
             canonical_function(&function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 Vec::new(),
                 vec![CheckedMutation::Element(1), CheckedMutation::Whole],
                 CheckedEffectSet::default(),
@@ -1951,7 +1932,7 @@ mod tests {
         assert_ne!(
             canonical_function(&function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 Vec::new(),
                 Vec::new(),
                 effects(
@@ -1971,7 +1952,7 @@ mod tests {
             )),
             canonical_function(&function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 Vec::new(),
                 Vec::new(),
                 effects(
@@ -1994,7 +1975,7 @@ mod tests {
         assert_ne!(
             concrete(&CheckedType::Function(function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 Vec::new(),
                 Vec::new(),
                 effects(
@@ -2008,7 +1989,7 @@ mod tests {
             ))),
             concrete(&CheckedType::Function(function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 Vec::new(),
                 Vec::new(),
                 effects(
@@ -2025,7 +2006,7 @@ mod tests {
         let stateful = |state| {
             concrete(&CheckedType::Function(function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 Vec::new(),
                 Vec::new(),
                 effects(Vec::new(), state),
@@ -2048,7 +2029,7 @@ mod tests {
         assert_ne!(
             concrete(&CheckedType::Function(function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 Vec::new(),
                 Vec::new(),
                 effects(Vec::new(), None),
@@ -2056,7 +2037,7 @@ mod tests {
             ))),
             concrete(&CheckedType::Function(function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 Vec::new(),
                 Vec::new(),
                 effects(
@@ -2078,7 +2059,6 @@ mod tests {
             id: TypeParameterId(5),
             name: "First".to_owned(),
             sized: false,
-            parameter_product_capable: false,
         };
         let diagnostic = CanonicalType::concrete(&first, &requesting_origin())
             .expect_err("an unresolved parameter never forms a concrete key");
@@ -2096,7 +2076,6 @@ mod tests {
                     id: TypeParameterId(6),
                     name: "First".to_owned(),
                     sized: false,
-                    parameter_product_capable: false,
                 },
                 &requesting_origin()
             )
@@ -2109,7 +2088,6 @@ mod tests {
                     id: TypeParameterId(6),
                     name: "Nested".to_owned(),
                     sized: false,
-                    parameter_product_capable: false,
                 })),
                 &requesting_origin(),
             )
@@ -2276,19 +2254,19 @@ mod tests {
         let signature = function_type(
             CheckedType::Function(function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 Vec::new(),
                 Vec::new(),
                 CheckedEffectSet::default(),
                 CheckedType::I32,
             )),
-            FunctionParameterStyle::Single,
+            false,
             Vec::new(),
             Vec::new(),
             CheckedEffectSet::default(),
             CheckedType::Function(function_type(
                 CheckedType::I32,
-                FunctionParameterStyle::Single,
+                false,
                 Vec::new(),
                 Vec::new(),
                 CheckedEffectSet::default(),
@@ -2352,7 +2330,7 @@ mod tests {
     fn artifact_keys_are_namespaced_and_concrete() {
         let callable = function_type(
             CheckedType::I32,
-            FunctionParameterStyle::Single,
+            false,
             Vec::new(),
             Vec::new(),
             CheckedEffectSet::default(),
@@ -2421,9 +2399,8 @@ mod tests {
                 id: TypeParameterId(4),
                 name: "T".to_owned(),
                 sized: false,
-                parameter_product_capable: false,
             },
-            FunctionParameterStyle::Single,
+            false,
             Vec::new(),
             Vec::new(),
             CheckedEffectSet::default(),
@@ -2450,7 +2427,6 @@ mod tests {
                     id: TypeParameterId(5),
                     name: "K".to_owned(),
                     sized: false,
-                    parameter_product_capable: false,
                 }],
                 &callable,
                 &requesting_origin(),
@@ -2464,7 +2440,7 @@ mod tests {
     fn simple_callable() -> CheckedFunctionType {
         function_type(
             CheckedType::I32,
-            FunctionParameterStyle::Single,
+            false,
             Vec::new(),
             Vec::new(),
             CheckedEffectSet::default(),
@@ -3101,4 +3077,21 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn slotted_product_kind_is_part_of_specialization_identity() {
+        let plain = CheckedType::Product(CheckedProductType {
+            slotted: false,
+            spreads: Vec::new(),
+            elements: vec![CheckedTypeElement { name: None, value_type: CheckedType::I32, default: None }; 2],
+            variadic: false,
+        });
+        let mut slots = plain.clone();
+        let CheckedType::Product(product) = &mut slots else { unreachable!() };
+        product.slotted = true;
+        let mut keys = std::collections::HashSet::new();
+        keys.insert(concrete(&plain));
+        keys.insert(concrete(&slots));
+        assert_eq!(keys.len(), 2);
+    }
+
 }

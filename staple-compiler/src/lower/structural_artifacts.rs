@@ -190,6 +190,13 @@ pub(super) fn expand_structural_method(
     };
     let mut requests = Vec::new();
     let body = match plan.structural {
+        StructuralTraitMethod::Equality => match structural_equality_body(program, &plan, &origin) {
+            Ok((body, selected_requests)) => {
+                requests.extend(selected_requests);
+                body
+            }
+            Err(diagnostic) => return Err(vec![diagnostic]),
+        },
         StructuralTraitMethod::Index => match structural_index_body(&plan, &origin) {
             Ok(body) => body,
             Err(diagnostic) => return Err(vec![diagnostic]),
@@ -233,7 +240,7 @@ pub(super) fn expand_structural_method(
                 Err(diagnostic) => return Err(vec![diagnostic]),
             }
         }
-        StructuralTraitMethod::Debug => match structural_debug_body(program, &plan, &origin) {
+        StructuralTraitMethod::Debug | StructuralTraitMethod::Display => match structural_debug_body(program, &plan, &origin) {
             Ok((body, selected_requests)) => {
                 requests.extend(selected_requests);
                 body
@@ -582,13 +589,58 @@ fn structural_deref_mutate_body(
 /// `Debug` for a product (ordered literal/element steps plus the shared
 /// `Formatter.write` instance) or a sum (one delegate per alternative in tag
 /// order, no literals).
-fn structural_debug_body(
+fn structural_equality_body(
     program: &LoweredProgram,
     plan: &StructuralMethodPlan,
     origin: &Origin,
 ) -> Result<(StructuralBody, Vec<ClosureRequest>), Diagnostic> {
     let (trait_id, method) =
-        standard_trait_method(program, program.semantic_ids.debug_trait, origin, "Debug")?;
+        standard_trait_method(program, program.semantic_ids.eq_trait, origin, "Eq")?;
+    let target = structural_argument(plan, 0, origin)?;
+    let CheckedType::Product(product) = target else {
+        return Err(Diagnostic::new(
+            origin.span.clone(),
+            "structural Eq target is not a product",
+        ));
+    };
+    let negate = program
+        .trait_methods
+        .get(plan.method)
+        .is_some_and(|method| method.name == "ne");
+    let mut requests = Vec::new();
+    let mut elements = Vec::new();
+    for element in &product.elements {
+        let selected = select_concrete_trait_method(
+            program,
+            origin,
+            trait_id,
+            method,
+            std::slice::from_ref(&element.value_type),
+        )?;
+        requests.push(selected.request);
+        elements.push(DebugDelegate {
+            value_type: element.value_type.clone(),
+            callee: selected.callee,
+            callee_type: selected.callee_type,
+        });
+    }
+    Ok((
+        StructuralBody::ProductEquality { elements, negate },
+        requests,
+    ))
+}
+
+fn structural_debug_body(
+    program: &LoweredProgram,
+    plan: &StructuralMethodPlan,
+    origin: &Origin,
+) -> Result<(StructuralBody, Vec<ClosureRequest>), Diagnostic> {
+    let (semantic_trait, name) = if plan.structural == StructuralTraitMethod::Display {
+        (program.semantic_ids.display_trait, "Display")
+    } else {
+        (program.semantic_ids.debug_trait, "Debug")
+    };
+    let (trait_id, method) = standard_trait_method(program, semantic_trait, origin, name)?;
     let target = structural_argument(plan, 0, origin)?;
     match &target {
         CheckedType::Sum(sum) => {
@@ -615,7 +667,7 @@ fn structural_debug_body(
             let Some(write_function) = program.string_formatting.write else {
                 return Err(Diagnostic::new(
                     origin.span.clone(),
-                    "Formatter.write is unavailable for structural Debug".to_string(),
+                    "Formatter.write is unavailable for structural product formatting".to_string(),
                 ));
             };
             let signature = program
@@ -653,7 +705,7 @@ fn structural_debug_body(
             let mut steps = vec![DebugStep::Write("(".to_string())];
             for (index, element) in product.elements.iter().enumerate() {
                 if index != 0 {
-                    steps.push(DebugStep::Write(", ".to_string()));
+                    steps.push(DebugStep::Write(if product.slotted { "; " } else { ", " }.to_string()));
                 }
                 if let Some(name) = &element.name {
                     steps.push(DebugStep::Write(name.clone()));
@@ -819,6 +871,8 @@ fn structural_into_iterator_body(
 ) -> Result<StructuralBody, Diagnostic> {
     let source = structural_argument(plan, 0, origin)?;
     let iterator = CheckedType::Product(CheckedProductType {
+        slotted: false,
+        spreads: Vec::new(),
         elements: vec![
             CheckedTypeElement {
                 name: None,
@@ -874,6 +928,8 @@ fn structural_next_body(
     };
     let sum = sum.clone();
     let yield_representation = CheckedType::Product(CheckedProductType {
+        slotted: false,
+        spreads: Vec::new(),
         elements: vec![
             CheckedTypeElement {
                 name: None,
@@ -984,6 +1040,8 @@ fn build_product(parameters: &[CheckedType], variadic: bool) -> CheckedType {
     match parameters {
         [single] => single.clone(),
         _ => CheckedType::Product(CheckedProductType {
+            slotted: false,
+            spreads: Vec::new(),
             elements: parameters
                 .iter()
                 .map(|value_type| CheckedTypeElement {
@@ -1052,6 +1110,8 @@ mod tests {
 
     fn positional_product(elements: &[CheckedType]) -> CheckedType {
         CheckedType::Product(CheckedProductType {
+            slotted: false,
+            spreads: Vec::new(),
             elements: elements
                 .iter()
                 .map(|value_type| CheckedTypeElement {
@@ -1441,6 +1501,50 @@ mod tests {
             CheckedType::Wrapper { representation, .. }
                 if representation.as_ref() == &positional_product(&[item.clone(), iterator.clone()])
         ));
+    }
+
+    #[test]
+    fn product_formatting_preserves_plain_and_slotted_separators() {
+        let (_, lowered) = lower(concat!(
+            "use std.fmt.Formatter\n",
+            "let plain: (I32, I32) = (1, 2)\n",
+            "let slots: (I32; I32) = (3; 4)\n",
+            "let a = Formatter.display plain\n",
+            "let b = Formatter.display slots\n",
+            "let c = Formatter.debug plain\n",
+            "let d = Formatter.debug slots\n",
+        ));
+        for structural in [StructuralTraitMethod::Display, StructuralTraitMethod::Debug] {
+            let plans = structural_plans(&lowered, structural);
+            assert_eq!(plans.len(), 2);
+            for plan in plans {
+                let CheckedType::Product(product) = &plan.arguments[0] else {
+                    panic!("product formatting target");
+                };
+                let StructuralBody::ProductDebug { steps, write } = &plan.body else {
+                    panic!("product formatting body");
+                };
+                assert!(write.instance.is_some());
+                let literals = steps
+                    .iter()
+                    .filter_map(|step| match step {
+                        DebugStep::Write(literal) => Some(literal.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    literals,
+                    ["(", if product.slotted { "; " } else { ", " }, ")"]
+                );
+                assert_eq!(
+                    steps
+                        .iter()
+                        .filter(|step| matches!(step, DebugStep::Element { .. }))
+                        .count(),
+                    2
+                );
+            }
+        }
     }
 
     #[test]

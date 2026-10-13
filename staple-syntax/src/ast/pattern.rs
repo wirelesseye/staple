@@ -42,6 +42,7 @@ impl Pattern {
             Self::Product(pattern) => {
                 let elements = pattern.elements.iter().map(Self::type_element).collect();
                 Type::Product(ProductType {
+                    slotted: pattern.slotted,
                     syntax: pattern.syntax.clone(),
                     elements,
                     variadic: false,
@@ -113,6 +114,8 @@ pub struct BindingPattern {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductPattern {
+    /// Whether top-level elements are slots separated by `;`.
+    pub slotted: bool,
     pub syntax: Syntax,
     pub elements: Vec<Pattern>,
     /// Whether the whole product was marked `mut`/`move` as a single unit

@@ -228,9 +228,6 @@ impl<'program, 'context> Backend<'program, 'context> {
     ) -> CodeGenerationResult<BasicTypeEnum<'context>> {
         match value_type {
             CheckedType::Forall(_) => Ok(self.closure_type().into()),
-            CheckedType::ParameterProduct(_) => {
-                unreachable!("parameter products have no value layout")
-            }
             CheckedType::Inferred => Err(Diagnostic::new(
                 Span::Compiler,
                 "cannot generate code for an inferred type before type checking",
@@ -1392,9 +1389,7 @@ mod tests {
         fn verify(backend: &Backend<'_, '_>, value_type: &CheckedType) {
             if matches!(
                 value_type,
-                CheckedType::ParameterProduct(_)
-                    | CheckedType::Forall(_)
-                    | CheckedType::TypeConstructor { .. }
+                CheckedType::Forall(_) | CheckedType::TypeConstructor { .. }
             ) || crate::contains_type_parameter(value_type)
             {
                 return;

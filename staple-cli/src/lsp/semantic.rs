@@ -1119,7 +1119,7 @@ impl<'a> Classifier<'a> {
                     1,
                 );
             }
-            Type::Product(value) | Type::ParameterProduct(value) => {
+            Type::Product(value) => {
                 for element in &value.elements {
                     if let Some(name) = &element.name {
                         self.mark_first(&element.syntax, name, PROPERTY, DECLARATION, 1);

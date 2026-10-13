@@ -305,7 +305,7 @@ fn rejects_reexporting_duplicate_function_definitions() {
         "origin.sta",
         concat!(
             "pub def choose: I32 -> I32 = value => value\n",
-            "pub def choose: [I32, I32] -> I32 = [left, right] => left + right\n",
+            "pub def choose: (I32; I32) -> I32 = (left; right) => left + right\n",
         ),
     );
     fixture.write("facade.sta", "pub use origin.choose\n");
@@ -329,7 +329,7 @@ fn rejects_combining_same_named_functions_from_different_modules() {
     fixture.write("first.sta", "pub def choose: I32 -> I32 = value => value\n");
     fixture.write(
         "second.sta",
-        "pub def choose: [I32, I32] -> I32 = [left, right] => left + right\n",
+        "pub def choose: (I32; I32) -> I32 = (left; right) => left + right\n",
     );
     fixture.write(
         "main.sta",
@@ -2160,7 +2160,7 @@ fn generated_type_and_pattern_splices_keep_caller_hygiene() {
         "helpers.sta",
         concat!(
             "pub macro define_alias = ty: Type => parse_quote { type Generated = alias $ty }\n",
-            "pub macro destructure = [pattern: Pattern, value: Expr] => parse_quote { let $pattern = $value }\n",
+            "pub macro destructure = (pattern: Pattern; value: Expr) => parse_quote { let $pattern = $value }\n",
         ),
     );
 
@@ -2198,7 +2198,7 @@ fn preserves_macro_overload_sets_through_imports_and_reexports() {
         "helpers.sta",
         concat!(
             "pub macro reveal = value: Expr => parse_quote { $value }\n",
-            "pub macro reveal = [value: Expr, _: Ident \"with\", replacement: Expr] => parse_quote { $replacement }\n",
+            "pub macro reveal = (value: Expr; _: Ident \"with\"; replacement: Expr) => parse_quote { $replacement }\n",
         ),
     );
     fixture.write("bridge.sta", "pub use helpers.reveal\n");
@@ -2229,7 +2229,7 @@ fn does_not_merge_macro_overloads_from_unrelated_imports() {
     );
     fixture.write(
         "right.sta",
-        "pub macro choose = [value: Expr, other: Expr] => parse_quote { 2 }\n",
+        "pub macro choose = (value: Expr; other: Expr) => parse_quote { 2 }\n",
     );
     fixture.write(
         "main.sta",

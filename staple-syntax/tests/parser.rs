@@ -289,6 +289,115 @@ fn parses_mutable_parameter_types_losslessly() {
     assert!(parse("def bad: mut (mut A, B) -> () = (a, b) => ()\n").is_err());
 }
 
+#[test]
+fn parses_marked_function_types_inside_parentheses() {
+    use staple_syntax::{FunctionType, MutationTargetKind};
+
+    fn single_element(ty: &Type) -> &Type {
+        match ty {
+            Type::Product(product) if product.elements.len() == 1 => &product.elements[0].ty,
+            other => other,
+        }
+    }
+
+    fn whole_marked_function(ty: &Type, moved: bool) -> &FunctionType {
+        let Type::Function(function) = single_element(ty) else {
+            panic!("expected a function type, got {ty:?}");
+        };
+        let targets = if moved {
+            &function.moves
+        } else {
+            &function.mutations
+        };
+        assert!(matches!(
+            targets.as_slice(),
+            [target] if matches!(target.target, MutationTargetKind::Whole)
+        ));
+        function
+    }
+
+    let source = concat!(
+        "let f: (mut I32 -> ()) = mut n => { n = 1 }
+",
+        "def run: (I32; (mut I32 -> ())) -> () = (n; f) => ()
+",
+        "def call: (mut I32 -> ()) -> () = f => ()
+",
+        "def consume: (move A -> (), mut B) -> () = (f, b) => ()
+",
+        "def twice: <A> ((mut A -> ()); mut A) -> () = (f; a) => ()
+",
+    );
+    let module = parse(source).expect("marked function types in parentheses should parse");
+    assert_eq!(module.text(), source);
+
+    let Item::Binding(f) = &module.items[0] else {
+        panic!("expected binding");
+    };
+    whole_marked_function(f.annotation.as_ref().unwrap(), false);
+
+    let Item::Binding(run) = &module.items[1] else {
+        panic!("expected binding");
+    };
+    let Some(Type::Function(run)) = &run.annotation else {
+        panic!("expected function annotation");
+    };
+    assert!(run.mutations.is_empty());
+    let Type::Product(slots) = run.parameter.as_ref() else {
+        panic!("expected slotted parameter");
+    };
+    assert!(slots.slotted);
+    assert!(!slots.elements[1].mutable);
+    whole_marked_function(&slots.elements[1].ty, false);
+
+    let Item::Binding(call) = &module.items[2] else {
+        panic!("expected binding");
+    };
+    let Some(Type::Function(call)) = &call.annotation else {
+        panic!("expected function annotation");
+    };
+    assert!(call.mutations.is_empty());
+    whole_marked_function(&call.parameter, false);
+
+    let Item::Binding(consume) = &module.items[3] else {
+        panic!("expected binding");
+    };
+    let Some(Type::Function(consume)) = &consume.annotation else {
+        panic!("expected function annotation");
+    };
+    assert!(consume.moves.is_empty());
+    assert!(matches!(
+        consume.mutations.as_slice(),
+        [target] if matches!(target.target, MutationTargetKind::Element(1))
+    ));
+    let Type::Product(elements) = consume.parameter.as_ref() else {
+        panic!("expected product parameter");
+    };
+    whole_marked_function(&elements.elements[0].ty, true);
+
+    let Item::Binding(twice) = &module.items[4] else {
+        panic!("expected binding");
+    };
+    let Some(Type::Forall(twice)) = &twice.annotation else {
+        panic!("expected generic annotation");
+    };
+    let Type::Function(twice) = twice.body.as_ref() else {
+        panic!("expected function body");
+    };
+    assert!(matches!(
+        twice.mutations.as_slice(),
+        [target] if matches!(target.target, MutationTargetKind::Element(1))
+    ));
+    let Type::Product(slots) = twice.parameter.as_ref() else {
+        panic!("expected slotted parameter");
+    };
+    whole_marked_function(&slots.elements[0].ty, false);
+
+    // A marker with no following `->` still marks the slot element itself.
+    assert!(parse("def bad: (mut I32) = 1\n").is_err());
+    assert!(parse("let bad: (I32; (mut I32)) -> () = (n; m) => ()\n").is_err());
+}
+
 fn unmodified_item(item: &Item) -> &Item {
     item
 }
@@ -541,8 +650,8 @@ fn parses_repeated_product_values_losslessly() {
 
 #[test]
 fn rejects_malformed_repeated_products() {
-    assert!(parse("let bad = (value; 3)\n").is_err());
-    assert!(parse("type Old = alias (I32; 3)\n").is_err());
+    assert!(parse("let slots = (value; 3)\n").is_ok());
+    assert!(parse("type Slots = alias (I32; 3)\n").is_ok());
     assert!(parse("let good: (I32^3) = (0^3)\n").is_ok());
     assert!(parse("let bad = (a, b ^ 3)\n").is_err());
     assert!(parse("let bad = (name: value ^ 3)\n").is_err());
@@ -1214,7 +1323,7 @@ fn parses_the_opaque_parse_quote_signature() {
 #[test]
 fn parses_macro_bodies_quotes_and_splices_losslessly() {
     let source = concat!(
-        "macro choose = [condition, then, else] => quote {\n",
+        "macro choose = (condition; then; else) => quote {\n",
         "    match $condition { True() => $then, False() => $else, }\n",
         "}\n",
     );
@@ -1230,8 +1339,8 @@ fn parses_macro_bodies_quotes_and_splices_losslessly() {
 #[test]
 fn parses_typed_macro_parameters_and_literal_identifiers() {
     let source = concat!(
-        "macro conditional = [condition: Expr, then_branch: Expr, ",
-        "_: Ident \"else\", else_branch: Expr] => quote { $else_branch }\n",
+        "macro conditional = (condition: Expr; then_branch: Expr; ",
+        "_: Ident \"else\"; else_branch: Expr) => quote { $else_branch }\n",
     );
     let root = parse(source).expect("typed macro parameters should parse");
     assert_eq!(root.text(), source);
@@ -1258,7 +1367,7 @@ fn rejects_curried_macro_parameter_chains() {
     let error = parse("macro choose = condition => when_true => quote { $when_true }\n")
         .expect_err("a curried macro parameter chain should be rejected");
     assert!(
-        error.message.contains("write `[a, b] => body`"),
+        error.message.contains("write `(a; b) => body`"),
         "unexpected error: {error:?}"
     );
 }
@@ -1343,7 +1452,7 @@ fn parses_expression_and_single_item_quotations_losslessly() {
 fn parses_modifier_macro_definitions_and_item_modifiers_losslessly() {
     let source = concat!(
         "macro @identity: Item -> Item = item => item\n",
-        "macro @replace: [Parenthesized (Expr), Item] -> Item = [value, item] => quote { let generated = $value }\n",
+        "macro @replace: (Parenthesized (Expr); Item) -> Item = (value; item) => quote { let generated = $value }\n",
         "@identity\n",
         "@replace(42)\n",
         "def original = () => 0\n",
@@ -1402,7 +1511,7 @@ fn parses_triple_slash_docs_on_named_declarations_and_members() {
 #[test]
 fn parses_metadata_aware_macro_calls_losslessly() {
     let source = concat!(
-        "macro define = [metadata: MacroCallMetadata, ty: Type] => quote { type Generated = alias $ty }\n",
+        "macro define = (metadata: MacroCallMetadata; ty: Type) => quote { type Generated = alias $ty }\n",
         "pub define I32\n",
         "pub(package) define I32\n",
         "configure value pub I32\n",
@@ -1625,7 +1734,7 @@ fn parses_product_parameter_and_expression_body() {
         panic!("expected function");
     };
     assert!(
-        matches!(function.pattern, Pattern::Product(ref product) if product.elements.len() == 2)
+        matches!(function.pattern, Pattern::Product(ref product) if !product.slotted && product.elements.len() == 2)
     );
     let Expression::Binary(binary) = function.body.as_ref() else {
         panic!("expected surface `+` expression");
@@ -1830,7 +1939,7 @@ fn parses_contextually_typed_curried_parameters() {
 
 #[test]
 fn parses_juxtaposed_function_parameters_and_types() {
-    let root = parse("let add: [x: I32, y: I32] -> I32 = [x: I32, y: I32] => x + y\n")
+    let root = parse("let add: (x: I32; y: I32) -> I32 = (x: I32; y: I32) => x + y\n")
         .expect("juxtaposed function should parse");
     let staple_syntax::Item::Binding(binding) = &root.items[0] else {
         panic!("expected binding");
@@ -1840,29 +1949,25 @@ fn parses_juxtaposed_function_parameters_and_types() {
     };
     assert!(matches!(
         annotation.parameter.as_ref(),
-        staple_syntax::Type::ParameterProduct(_)
+        staple_syntax::Type::Product(product) if product.slotted && product.elements.len() == 2
     ));
     let Some(staple_syntax::Expression::Function(function)) = &binding.value else {
         panic!("expected function expression");
     };
-    assert_eq!(
-        function.parameter_style,
-        staple_syntax::FunctionParameterStyle::Juxtaposed
-    );
     assert!(matches!(
         function.pattern,
-        staple_syntax::Pattern::Product(ref product) if product.elements.len() == 2
+        staple_syntax::Pattern::Product(ref product) if product.slotted && product.elements.len() == 2
     ));
 }
 
 #[test]
 fn rejects_defaults_on_juxtaposed_parameter_slots() {
     let error =
-        parse("def render: [width: I32 = 800, body: (() -> ())] -> () = [width, body] => ()\n")
+        parse("def render: (width: I32 = 800; body: (() -> ())) -> () = (width; body) => ()\n")
             .expect_err("juxtaposed slots must have exact arity");
-    assert!(error.message.contains("exact arity"), "{}", error.message);
+    assert!(error.message.contains("slotted product slots cannot declare defaults"), "{}", error.message);
 
-    parse("def render: [((width: I32 = 800)), body: (() -> ())] -> () = [width, body] => ()\n")
+    parse("def render: (((width: I32 = 800)); body: (() -> ())) -> () = (width; body) => ()\n")
         .expect("a nested product parameter may retain its own field defaults");
 }
 
@@ -2957,15 +3062,15 @@ fn negative_implementations_accept_effect_parameters() {
 #[test]
 fn parses_parameter_product_type_atoms_and_single_slots() {
     for source in [
-        "def f: [I32, I32] -> I32 = [x, y] => x + y\n",
-        "def f: <T> [Ref T, T] -> ()\n",
-        "def f: [mut x: I32, move y: I32,] -> () = [mut x, move y] => ()\n",
-        "def f: [(I32, I32), I32] -> I32 = [(a, b), c] => a\n",
-        "type Inputs = alias [...Pair, String]\n",
-        "type Add = alias Callable [I32, I32] I32\n",
-        "def f: [I32] -> I32 = [x: I32] => x\n",
-        "def f: [mut I32] -> () = [mut x] => ()\n",
-        "def f: <A> ([A] -> ()) -> () = f => ()\n",
+        "def f: (I32; I32) -> I32 = (x; y) => x + y\n",
+        "def f: <T> (Ref T; T) -> ()\n",
+        "def f: (mut x: I32; move y: I32;) -> () = (mut x; move y) => ()\n",
+        "def f: ((I32, I32); I32) -> I32 = ((a, b); c) => a\n",
+        "type Inputs = alias (...Pair; String)\n",
+        "type Add = alias Callable (I32; I32) I32\n",
+        "def f: I32 -> I32 = x: I32 => x\n",
+        "def f: (mut I32) -> () = (mut x) => ()\n",
+        "def f: <A> (A -> ()) -> () = f => ()\n",
         "m [a b]\n",
         "m [one, two]\n",
     ] {
@@ -2976,25 +3081,22 @@ fn parses_parameter_product_type_atoms_and_single_slots() {
 #[test]
 fn rejects_invalid_parameter_product_syntax_with_migration_hints() {
     for (source, hint) in [
-        ("def f: I32 * I32 -> I32\n", "`[A, B] -> R`"),
-        ("def f = x * y => x\n", "`[a, b] => body`"),
-        ("macro f = x * y => x\n", "`[a, b] => body`"),
-        ("type Empty = alias []\n", "at least one slot"),
-        ("def f = [] => ()\n", "at least one slot"),
-        ("def f: [x: I32 = 1, I32] -> I32\n", "exact arity"),
-        ("def f: [I32, ...] -> I32\n", "cannot be variadic"),
-        ("def f: mut [I32, I32] -> ()\n", "mark individual slots"),
+        ("def f: I32 * I32 -> I32\n", "`(A; B) -> R`"),
+        ("def f = x * y => x\n", "`(a; b) => body`"),
+        ("macro f = x * y => x\n", "`(a; b) => body`"),
+        ("def f: [I32, I32] -> I32\n", "parameter products are written `(A; B)`"),
+        ("def f = [a, b] => a\n", "parameter products are written `(a; b)`"),
+        ("macro f = [a, b] => quote {}\n", "parameter products are written `(a; b)`"),
+        ("type Empty = alias []\n", "parameter products are written `(A; B)`"),
+        ("def f = [] => ()\n", "parameter products are written `(a; b)`"),
+        ("def f: [x: I32 = 1, I32] -> I32\n", "parameter products are written `(A; B)`"),
+        ("def f: [I32, ...] -> I32\n", "parameter products are written `(A; B)`"),
+        ("def f: mut [I32, I32] -> ()\n", "parameter products are written `(A; B)`"),
         ("type Invalid = alias I32[2]\n", "array types"),
-        ("def f = [[a, b], c] => a\n", "cannot be nested"),
-        ("def f = [a, [b, c]] => a\n", "cannot be nested"),
-        (
-            "def identity<T> = value: T => value\n",
-            "belong to the annotation",
-        ),
-        (
-            "def keep<A>: (A -> ()) -> () = f => ()\n",
-            "belong to the annotation",
-        ),
+        ("def f = [[a, b], c] => a\n", "parameter products are written `(a; b)`"),
+        ("def f = [a, [b, c]] => a\n", "parameter products are written `(a; b)`"),
+        ("def identity<T> = value: T => value\n", "belong to the annotation"),
+        ("def keep<A>: (A -> ()) -> () = f => ()\n", "belong to the annotation"),
     ] {
         let error = parse(source).expect_err("invalid parameter product");
         assert!(error.message.contains(hint), "{source}: {error}");
@@ -3351,5 +3453,204 @@ fn pipe_stages_group_calls_and_bind_below_binary_operators() {
         "value |>\nmethod\n",
     ] {
         assert!(parse(source).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn parses_slotted_types_with_comma_groups_and_names() {
+    let source = "let p: (a: I32; b: I32, c: I32; d: I32;) = (1; 2, 3; 4)\n";
+    let module = parse(source).unwrap();
+    assert_eq!(module.syntax.text(), source);
+    let Item::Binding(binding) = &module.items[0] else {
+        panic!("expected binding")
+    };
+    let Some(Type::Product(product)) = &binding.annotation else {
+        panic!("expected product")
+    };
+    assert!(product.slotted);
+    assert_eq!(product.elements.len(), 3);
+    assert_eq!(product.elements[0].name.as_deref(), Some("a"));
+    assert_eq!(product.elements[1].name, None);
+    assert_eq!(product.elements[2].name.as_deref(), Some("d"));
+    let Type::Product(group) = &product.elements[1].ty else {
+        panic!("expected comma group")
+    };
+    assert!(!group.slotted);
+    assert_eq!(group.elements.len(), 2);
+    assert_eq!(group.elements[0].name.as_deref(), Some("b"));
+    assert_eq!(group.elements[1].name.as_deref(), Some("c"));
+    assert_eq!(group.syntax.text().trim(), "b: I32, c: I32");
+    assert_eq!(
+        binding.annotation.as_ref().unwrap().to_string(),
+        "(a: I32; (b: I32, c: I32); d: I32)"
+    );
+
+    let module = parse("let p: (a: I32; pair: (b: I32, c: I32); d: I32) = p\n").unwrap();
+    let Item::Binding(binding) = &module.items[0] else {
+        panic!("expected binding")
+    };
+    let Some(Type::Product(product)) = &binding.annotation else {
+        panic!("expected product")
+    };
+    assert_eq!(product.elements[1].name.as_deref(), Some("pair"));
+}
+
+#[test]
+fn parses_slotted_values_and_patterns_as_nested_products() {
+    let module = parse("let (a; b, c; d) = (1; 2, 3; 4)\n").unwrap();
+    let Item::PatternBinding(binding) = &module.items[0] else {
+        panic!("expected binding")
+    };
+    let Pattern::Product(pattern) = &binding.pattern else {
+        panic!("expected pattern")
+    };
+    assert!(pattern.slotted);
+    assert_eq!(pattern.elements.len(), 3);
+    let Pattern::Product(group) = &pattern.elements[1] else {
+        panic!("expected comma group")
+    };
+    assert!(!group.slotted);
+    assert_eq!(group.elements.len(), 2);
+    assert_eq!(group.syntax.text().trim(), "b, c");
+    assert!(matches!(binding.pattern.ty(), Type::Product(p) if p.slotted));
+    let Expression::Product(product) = &binding.value else {
+        panic!("expected value")
+    };
+    assert!(product.slotted);
+    assert_eq!(product.elements.len(), 3);
+    let Expression::Product(group) = &product.elements[1].value else {
+        panic!("expected comma group")
+    };
+    assert!(!group.slotted);
+    assert_eq!(group.elements.len(), 2);
+    assert_eq!(group.syntax.text().trim(), "2, 3");
+}
+
+#[test]
+fn preserves_singleton_slots_and_nested_slotted_products() {
+    let module = parse("let p: (I32;) = (1;)\nlet q: (I32; (I32; I32)) = q\n").unwrap();
+    let Item::Binding(binding) = &module.items[0] else {
+        panic!("expected binding")
+    };
+    assert!(
+        matches!(&binding.annotation, Some(Type::Product(p)) if p.slotted && p.elements.len() == 1)
+    );
+    assert!(
+        matches!(&binding.value, Some(Expression::Product(p)) if p.slotted && p.elements.len() == 1)
+    );
+    assert_eq!(binding.annotation.as_ref().unwrap().to_string(), "(I32;)");
+    let Item::Binding(binding) = &module.items[1] else {
+        panic!("expected binding")
+    };
+    let Some(Type::Product(product)) = &binding.annotation else {
+        panic!("expected product")
+    };
+    assert!(matches!(&product.elements[1].ty, Type::Product(p) if p.slotted));
+    let module = parse("let unit = ()\n").unwrap();
+    let Item::Binding(binding) = &module.items[0] else {
+        panic!("expected binding")
+    };
+    assert!(
+        matches!(&binding.value, Some(Expression::Product(p)) if !p.slotted && p.elements.is_empty())
+    );
+}
+
+#[test]
+fn parses_slotted_function_patterns_and_slot_markers() {
+    let module =
+        parse("def f: (mut I32; move I32) -> I32 = (mut x; move y) => x\ndef one = (x;) => x\n")
+            .unwrap();
+    let Item::Binding(binding) = &module.items[0] else {
+        panic!("expected binding")
+    };
+    let Some(Type::Function(ty)) = &binding.annotation else {
+        panic!("expected function type")
+    };
+    assert_eq!(ty.mutations.len(), 1);
+    assert_eq!(ty.moves.len(), 1);
+    let Some(Expression::Function(f)) = &binding.value else {
+        panic!("expected function")
+    };
+    assert!(matches!(&f.pattern, Pattern::Product(p) if p.slotted));
+    let Item::Binding(binding) = &module.items[1] else {
+        panic!("expected binding")
+    };
+    let Some(Expression::Function(f)) = &binding.value else {
+        panic!("expected function")
+    };
+    assert!(matches!(f.pattern, Pattern::Binding(_)));
+    assert!(parse("let p: (mut I32; I32) = p\n").is_err());
+    assert!(parse("let p: (I32; ...) = p\n").is_err());
+    assert!(parse("def f: mut (I32; I32) -> I32 = (x; y) => x\n").is_err());
+    assert!(parse("def f: (x: I32 = 1; I32) -> I32 = (x; y) => x\n").is_err());
+}
+
+#[test]
+fn parses_atomic_call_spreads_and_preserves_them_in_pipelines() {
+    let module = parse("f 1 ...(g x) 4\np |> f ...q\n").unwrap();
+    let Item::Expression(Expression::Call(last)) = &module.items[0] else {
+        panic!("expected call")
+    };
+    assert!(!last.spread);
+    let Expression::Call(spread) = last.callee.as_ref() else {
+        panic!("expected spread call")
+    };
+    assert!(spread.spread);
+    assert!(
+        matches!(spread.argument.as_ref(), Expression::Product(p) if !p.slotted && p.elements.len() == 1)
+    );
+    let Expression::Call(first) = spread.callee.as_ref() else {
+        panic!("expected first call")
+    };
+    assert!(!first.spread);
+    let Item::Expression(Expression::Call(last)) = &module.items[1] else {
+        panic!("expected pipeline call")
+    };
+    assert!(last.spread);
+    let Expression::Call(receiver) = last.callee.as_ref() else {
+        panic!("expected receiver call")
+    };
+    assert!(!receiver.spread);
+    let module = parse("f ...g x\n").unwrap();
+    let Item::Expression(Expression::Call(last)) = &module.items[0] else {
+        panic!("expected call")
+    };
+    assert!(!last.spread);
+    assert!(
+        matches!(last.callee.as_ref(), Expression::Call(c) if c.spread && matches!(c.argument.as_ref(), Expression::Name(_)))
+    );
+    for source in [
+        "f ...=p\n",
+        "f ...\n",
+        "let p = (1;; 2)\n",
+        "let p: (; I32)\n",
+        "let (x;; y) = p\n",
+    ] {
+        assert!(parse(source).is_err(), "accepted invalid syntax: {source}");
+    }
+}
+
+#[test]
+fn formats_slotted_products_and_call_spreads_idempotently() {
+    for source in [
+        "def add:(I32;I32)->I32=(x;y)=>x+y\nadd ...(1;2)\n",
+        "let p = (1; 2, 3; 4;)\nlet (a; b,c;d) = p\n",
+        "let p: (...Inputs; String) = p\nlet p = (...q;)\n",
+        "let p = (\n // first slot\n 1;\n // second slot\n 2;\n)\n",
+    ] {
+        let formatted = staple_syntax::format_source(source).unwrap();
+        assert_eq!(staple_syntax::format_source(&formatted).unwrap(), formatted);
+        assert_eq!(
+            staple_syntax::lex(source)
+                .into_iter()
+                .filter(|t| !t.kind.is_trivia())
+                .map(|t| (t.kind, t.text))
+                .collect::<Vec<_>>(),
+            staple_syntax::lex(&formatted)
+                .into_iter()
+                .filter(|t| !t.kind.is_trivia())
+                .map(|t| (t.kind, t.text))
+                .collect::<Vec<_>>()
+        );
     }
 }

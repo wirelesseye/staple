@@ -31,11 +31,7 @@ pub(super) fn descriptor_request(
 /// run-time parameter are not collected: their descriptors are built at run
 /// time from their components.
 pub(super) fn collect_concrete_types(ty: &CheckedType, types: &mut Vec<CheckedType>) {
-    if matches!(
-        ty,
-        CheckedType::ParameterProduct(_)
-            | CheckedType::TypeConstructor { .. }
-    ) {
+    if matches!(ty, CheckedType::TypeConstructor { .. }) {
         return;
     }
     if !crate::contains_type_parameter(ty) {

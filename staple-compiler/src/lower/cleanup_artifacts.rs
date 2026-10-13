@@ -612,7 +612,23 @@ impl<'a> LoweredWalker<'a> {
     fn run(mut self) -> WalkResult {
         if let OwnerArenas::Instance(body) = self.owner {
             let parameter_pattern = body.parameter_pattern;
-            self.walk_pattern(parameter_pattern)?;
+            let moves = body.signature.moves.clone();
+            let parameter = self.owner.pattern(self.program, parameter_pattern).cloned();
+            if !moves.contains(&crate::CheckedMutation::Whole)
+                && let Some(pattern) = parameter
+                && let super::LoweredPatternKind::Product { elements, .. } = &pattern.kind
+            {
+                self.visited_patterns.insert(parameter_pattern);
+                self.visitor.pattern_site(&pattern, &pattern.origin)?;
+                for (slot, element) in elements.iter().enumerate() {
+                    self.walk_pattern_with_ownership(
+                        *element,
+                        moves.contains(&crate::CheckedMutation::Element(slot)),
+                    )?;
+                }
+            } else {
+                self.walk_pattern_with_ownership(parameter_pattern, !moves.is_empty())?;
+            }
         }
         let root = match self.owner {
             OwnerArenas::Instance(body) => body.root,
@@ -804,6 +820,10 @@ impl<'a> LoweredWalker<'a> {
     }
 
     fn walk_pattern(&mut self, id: PatternId) -> WalkResult {
+        self.walk_pattern_with_ownership(id, true)
+    }
+
+    fn walk_pattern_with_ownership(&mut self, id: PatternId, owned: bool) -> WalkResult {
         if !self.visited_patterns.insert(id) {
             return Ok(());
         }
@@ -816,13 +836,14 @@ impl<'a> LoweredWalker<'a> {
         let value_type = pattern.value_type.clone();
         let kind = pattern.kind.clone();
         match kind {
-            super::LoweredPatternKind::Wildcard => {
+            super::LoweredPatternKind::Wildcard if owned => {
                 self.visitor.drop_site(
                     ArtifactUseSite::WildcardDiscard(id),
                     &value_type,
                     &origin,
                 )?;
             }
+            super::LoweredPatternKind::Wildcard => {}
             super::LoweredPatternKind::Binding {
                 symbol: Some(symbol),
                 ..
@@ -833,15 +854,15 @@ impl<'a> LoweredWalker<'a> {
             | super::LoweredPatternKind::Literal { .. } => {}
             super::LoweredPatternKind::Product { elements, .. } => {
                 for element in elements {
-                    self.walk_pattern(element)?;
+                    self.walk_pattern_with_ownership(element, owned)?;
                 }
             }
             super::LoweredPatternKind::Nominal { argument, .. } => {
-                self.walk_pattern(argument)?;
+                self.walk_pattern_with_ownership(argument, owned)?;
             }
             super::LoweredPatternKind::At { binding, pattern } => {
-                self.walk_pattern(binding)?;
-                self.walk_pattern(pattern)?;
+                self.walk_pattern_with_ownership(binding, owned)?;
+                self.walk_pattern_with_ownership(pattern, owned)?;
             }
         }
         Ok(())
@@ -2521,7 +2542,7 @@ mod tests {
         "  callback\n",
         "}\n",
         "def use_borrowed = (value: BorrowedValue) => { let callback = () => inspect (value.*); callback () }\n",
-        "def peek: <T> [T] -> I32 = _ => 0\n",
+        "def peek: <T> T -> I32 = _ => 0\n",
         "def make_generic: <T> move T -> (() -> I32) = move value => () => peek value\n",
         "def use_derived = () => {\n",
         "  let signal count = 1\n",
@@ -3145,7 +3166,8 @@ mod tests {
         "def make_c: () -> CString = () => c_string \"x\"\n",
         "def extern_temp: () -> I32 = () => inspect (c_string \"x\")\n",
         "def discard_result: () -> () = () => { make_c (); () }\n",
-        "def ignore: (CString) -> I32 = _ => 0\n",
+        "def ignore: move CString -> I32 = move value => { let _ = value; 0 }\n",
+        "def borrow_ignore: CString -> I32 = _ => 0\n",
         "def drop_body: () -> Never = () => loop { make_c () }\n",
         "def owned_param: move CString -> CString = move value => value\n",
         "def mutate_c: move (CString, CString) -> (CString, CString) = move pair => {\n",
@@ -3172,6 +3194,7 @@ mod tests {
         "def loop_body_drop: () -> Never = () => loop { make_c () }\n",
         "let discarded = discard_result ()\n",
         "let ignored = ignore (c_string \"x\")\n",
+        "let borrowed_ignored = borrow_ignore (c_string \"x\")\n",
         "let mutated = mutate_c (c_string \"a\", c_string \"c\")\n",
         "let celled = cell_finalizer ()\n",
         "let closure = closure_env (c_string \"e\")\n",
@@ -3216,7 +3239,7 @@ mod tests {
         );
         assert!(
             has(|site| matches!(site, ArtifactUseSite::WildcardDiscard(_))),
-            "a wildcard parameter discard site"
+            "an owned wildcard discard site"
         );
         assert!(
             has(|site| matches!(site, ArtifactUseSite::OwnedBinding(_))),
@@ -3244,7 +3267,11 @@ mod tests {
             instance_bindings(program, "owned_param"),
             vec![(OwnedStorage::Value, CheckedType::CString)]
         );
-        assert!(instance_bindings(program, "ignore").is_empty());
+        assert_eq!(
+            instance_bindings(program, "ignore"),
+            vec![(OwnedStorage::Value, CheckedType::CString)]
+        );
+        assert!(instance_bindings(program, "borrow_ignore").is_empty());
 
         // A moved product parameter and a mutable local: value then cell, in
         // registration order.
@@ -3300,11 +3327,8 @@ mod tests {
                                 (
                                     record.symbol.0,
                                     record.storage,
-                                    CanonicalType::concrete(
-                                        &record.value_type,
-                                        &Origin::compiler(),
-                                    )
-                                    .expect("concrete owned type"),
+                                    CanonicalType::concrete(&record.value_type, &Origin::compiler())
+                                        .expect("concrete owned type"),
                                     record.glue.map(|glue| glue.index()),
                                 )
                             })
@@ -3329,11 +3353,8 @@ mod tests {
                                 (
                                     record.symbol.0,
                                     record.storage,
-                                    CanonicalType::concrete(
-                                        &record.value_type,
-                                        &Origin::compiler(),
-                                    )
-                                    .expect("concrete owned type"),
+                                    CanonicalType::concrete(&record.value_type, &Origin::compiler())
+                                        .expect("concrete owned type"),
                                     record.glue.map(|glue| glue.index()),
                                 )
                             })

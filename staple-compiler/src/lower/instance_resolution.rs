@@ -402,11 +402,6 @@ pub(super) fn collect_referenced_parameters(
                 collect_referenced_parameters(argument, out);
             }
         }
-        CheckedType::ParameterProduct(product) => {
-            for element in &product.elements {
-                collect_referenced_parameters(&element.value_type, out);
-            }
-        }
         CheckedType::Product(product) => {
             for element in &product.elements {
                 collect_referenced_parameters(&element.value_type, out);
@@ -1162,6 +1157,8 @@ impl<'a> TraitSelectionContext<'a> {
             self.program.semantic_ids.into_iterator_trait,
             self.program.semantic_ids.iterator_trait,
             self.program.semantic_ids.debug_trait,
+            self.program.semantic_ids.display_trait,
+            self.program.semantic_ids.eq_trait,
             |value_type| self.is_copy(value_type),
             |value_type| {
                 self.program.semantic_ids.debug_trait.is_some_and(|debug| {
@@ -2497,7 +2494,6 @@ impl LoweredProgram {
                             id: *parameter,
                             name: relevant.name(*parameter).unwrap_or("").to_owned(),
                             sized: true,
-                            parameter_product_capable: false,
                         }),
                     },
                 );
@@ -2880,11 +2876,6 @@ impl<'a> ParameterCollector<'a> {
             | CheckedType::Opaque { arguments, .. } => {
                 for argument in arguments {
                     self.collect_type(argument);
-                }
-            }
-            CheckedType::ParameterProduct(product) => {
-                for element in &product.elements {
-                    self.collect_type(&element.value_type);
                 }
             }
             CheckedType::Product(product) => {
@@ -3982,7 +3973,6 @@ mod tests {
             id: TypeParameterId(id),
             name: name.to_owned(),
             sized: true,
-            parameter_product_capable: false,
         }
     }
 
@@ -4565,7 +4555,6 @@ mod tests {
     fn checked_function_type(parameter: CheckedType, result: CheckedType) -> CheckedFunctionType {
         CheckedFunctionType {
             parameter: Box::new(parameter),
-            parameter_style: staple_syntax::FunctionParameterStyle::Single,
             default: None,
             mutations: Vec::new(),
             moves: Vec::new(),
@@ -4949,6 +4938,8 @@ mod tests {
             .expect("Index in the prelude");
         let method = program.traits.get(index).expect("Index trait").methods[0];
         let product = CheckedType::Product(CheckedProductType {
+            slotted: false,
+            spreads: Vec::new(),
             elements: vec![
                 CheckedTypeElement {
                     name: None,
@@ -5760,7 +5751,6 @@ mod tests {
                 id: child_only,
                 name: "ChildOnly".to_owned(),
                 sized: true,
-                parameter_product_capable: false,
             });
         let outer = relevance(&program, "make_task");
         assert!(!outer.contains_type(child_only));

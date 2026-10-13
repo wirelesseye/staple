@@ -28,12 +28,15 @@ Example:
         --stdlib stdlib --runs 4 staple-compiler/examples/*.sta
 
 Exit status is 1 when any program differs or fails to compile on one side
-only, and 0 otherwise.
+or both sides, and 0 otherwise. For syntax migrations, --old-source-root maps
+paths relative to --new-source-root into the baseline checkout; --old-stdlib
+selects its matching standard library. Normalization is unchanged.
 """
 
 import argparse
 import difflib
 import hashlib
+from pathlib import Path
 import subprocess
 import sys
 
@@ -90,6 +93,9 @@ def main() -> int:
     parser.add_argument("--old", required=True, help="baseline staple binary")
     parser.add_argument("--new", required=True, help="staple binary under test")
     parser.add_argument("--stdlib", required=True, help="standard library root")
+    parser.add_argument("--old-stdlib", help="baseline standard library root (defaults to --stdlib)")
+    parser.add_argument("--old-source-root", help="baseline checkout containing matching source paths")
+    parser.add_argument("--new-source-root", default=".", help="root for source paths mapped into --old-source-root")
     parser.add_argument("--runs", type=int, default=4, help="compilations per binary")
     parser.add_argument(
         "--show-diff", action="store_true", help="print a diff for each differing program"
@@ -103,10 +109,18 @@ def main() -> int:
 
     failed = False
     for program in arguments.programs:
-        old = variants(arguments.old, arguments.stdlib, program, arguments.runs)
+        old_program = program
+        if arguments.old_source_root:
+            try:
+                relative = Path(program).resolve().relative_to(Path(arguments.new_source_root).resolve())
+            except ValueError:
+                parser.error(f"{program}: outside --new-source-root")
+            old_program = str(Path(arguments.old_source_root) / relative)
+        old = variants(arguments.old, arguments.old_stdlib or arguments.stdlib, old_program, arguments.runs)
         new = variants(arguments.new, arguments.stdlib, program, arguments.runs)
         if old is None and new is None:
             print(f"{program}: does not compile with either binary")
+            failed = True
             continue
         if old is None or new is None:
             side = "old" if old is None else "new"

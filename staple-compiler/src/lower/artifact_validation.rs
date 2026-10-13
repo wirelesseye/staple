@@ -626,7 +626,7 @@ mod tests {
             "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
             "def pick: Bool -> (CString | I32) = condition => when { condition => c_string \"a\", else => 1 }\n",
             "def capture: move CString -> (() -> I32) = move value => () => inspect value\n",
-            "def peek: <T> [T] -> I32 = _ => 1\n",
+            "def peek: <T> T -> I32 = _ => 1\n",
             "def generic: <T where Copy T> T -> Coroutine{} I32 = value => coro { peek value; 1 }\n",
             "let signal flag = 0\n",
             "def waiting: () -> Coroutine{Reactive} () = () => coro {\n",

@@ -384,7 +384,6 @@ impl NumericType {
 pub struct ResolvedFunction {
     pub id: FunctionId,
     pub name: String,
-    pub parameter_style: staple_syntax::FunctionParameterStyle,
     pub binding_syntax: Option<SyntaxId>,
     pub pattern: Pattern,
     pub result_annotation: Option<Type>,
@@ -4696,7 +4695,6 @@ impl NameResolver {
                 self.functions.push(ResolvedFunction {
                     id: function_id,
                     name,
-                    parameter_style: function.parameter_style,
                     binding_syntax: suggested_function.map(|(_, syntax)| syntax),
                     pattern: function.pattern.clone(),
                     result_annotation: match function.body.as_ref() {
@@ -5143,7 +5141,7 @@ impl NameResolver {
                         .push(Diagnostic::new(named.syntax.span.clone(), message));
                 }
             }
-            Type::Product(product) | Type::ParameterProduct(product) => {
+            Type::Product(product) => {
                 let defaults_allowed = self.field_default_products.contains(&product.syntax.id);
                 for element in &product.elements {
                     self.resolve_type_with(&element.ty, strict);
@@ -5472,7 +5470,7 @@ impl NameResolver {
                     ));
                 }
             }
-            Type::Product(product) | Type::ParameterProduct(product) => {
+            Type::Product(product) => {
                 for element in &product.elements {
                     self.validate_type_visibility(&element.ty, required, subject);
                 }

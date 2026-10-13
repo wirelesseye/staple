@@ -104,6 +104,120 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .backend
             .load_structural_parameters(function, &plan.callable_type)?;
         let result = match &plan.body {
+            StructuralBody::ProductEquality { elements, negate } => {
+                let [
+                    BasicValueEnum::StructValue(left),
+                    BasicValueEnum::StructValue(right),
+                ] = values.as_slice()
+                else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "invalid structural equality arguments",
+                    ));
+                };
+                let failed = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "equality.failed");
+                let merge = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "equality.merge");
+                for (index, delegate) in elements.iter().enumerate() {
+                    let left_field = self
+                        .backend
+                        .builder
+                        .build_extract_value(*left, index as u32, "equality.left")
+                        .map_err(compiler_diagnostic)?;
+                    let right_field = self
+                        .backend
+                        .builder
+                        .build_extract_value(*right, index as u32, "equality.right")
+                        .map_err(compiler_diagnostic)?;
+                    let arguments = self.backend.build_trait_arguments(
+                        &delegate.callee_type,
+                        &[left_field, right_field],
+                        span.clone(),
+                    )?;
+                    let callee = self.planned_function(&delegate.callee, span)?;
+                    let compared = self
+                        .backend
+                        .builder
+                        .build_direct_call(callee, &arguments, "equality.element")
+                        .map_err(compiler_diagnostic)?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "equality delegate has no result")
+                        })?;
+                    let BasicValueEnum::StructValue(compared) = compared else {
+                        return Err(Diagnostic::new(
+                            span.clone(),
+                            "equality delegate has an invalid Bool representation",
+                        ));
+                    };
+                    let tag = self.backend.build_sum_tag(compared, "equality.tag")?;
+                    let equal = self
+                        .backend
+                        .build_sum_tag_compare(tag, 0, "equality.equal")?;
+                    let next = self
+                        .backend
+                        .context
+                        .append_basic_block(function, "equality.next");
+                    self.backend
+                        .builder
+                        .build_conditional_branch(equal, next, failed)
+                        .map_err(compiler_diagnostic)?;
+                    self.backend.builder.position_at_end(next);
+                }
+                let succeeded = self
+                    .backend
+                    .builder
+                    .get_insert_block()
+                    .expect("equality body has a block");
+                self.backend
+                    .builder
+                    .build_unconditional_branch(merge)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(failed);
+                self.backend
+                    .builder
+                    .build_unconditional_branch(merge)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(merge);
+                let condition = self
+                    .backend
+                    .builder
+                    .build_phi(self.backend.context.bool_type(), "equality.result")
+                    .map_err(compiler_diagnostic)?;
+                condition.add_incoming(&[
+                    (
+                        &self.backend.context.bool_type().const_int(1, false),
+                        succeeded,
+                    ),
+                    (&self.backend.context.bool_type().const_zero(), failed),
+                ]);
+                let mut equal = condition.as_basic_value().into_int_value();
+                if *negate {
+                    equal = self
+                        .backend
+                        .builder
+                        .build_not(equal, "equality.negated")
+                        .map_err(compiler_diagnostic)?;
+                }
+                value_as_basic(
+                    self.backend.build_bool_value(
+                        equal,
+                        self.backend
+                            .compile_type(&plan.callable_type.result)?
+                            .into_struct_type(),
+                        span.clone(),
+                    )?,
+                )
+                .ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "equality result is not first-class")
+                })?
+            }
             StructuralBody::ProductDebug { steps, write } => {
                 let [BasicValueEnum::StructValue(value), formatter] = values.as_slice() else {
                     return Err(Diagnostic::new(
@@ -346,7 +460,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .map_err(compiler_diagnostic)?;
                         (Some(reference), "mutate_index.deref")
                     }
-                    other @ (crate::StructuralTraitMethod::Debug
+                    other @ (crate::StructuralTraitMethod::Equality
+                    | crate::StructuralTraitMethod::Display
+                    | crate::StructuralTraitMethod::Debug
                     | crate::StructuralTraitMethod::Index
                     | crate::StructuralTraitMethod::MutateIndex
                     | crate::StructuralTraitMethod::IntoIterator

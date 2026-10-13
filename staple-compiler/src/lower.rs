@@ -1279,6 +1279,8 @@ pub(crate) struct LoweredCallArgument {
     pub place: Option<PlaceId>,
     /// The value is materialized into a temporary for the pass.
     pub temporary: bool,
+    /// This projected value remains owned by an existing source binding.
+    pub borrowed_source: bool,
     /// The temporary must be dropped after the call.
     pub drops_after_call: bool,
 }
@@ -2768,7 +2770,6 @@ pub(crate) struct LoweredFunction {
     pub declared_bounds: Vec<CheckedTraitBound>,
     /// Own declarations, excluding lexical ancestors, for bound-entry partitioning.
     pub own_declared_bounds: Vec<CheckedTraitBound>,
-    pub parameter_style: staple_syntax::FunctionParameterStyle,
     /// The lowered parameter pattern, with bound symbols in source order.
     pub parameter_pattern: PatternId,
     pub parameters: Vec<SymbolId>,
@@ -2978,6 +2979,7 @@ pub(crate) struct LoweredSemanticIds {
     pub default_trait: Option<TraitId>,
     pub debug_trait: Option<TraitId>,
     pub display_trait: Option<TraitId>,
+    pub eq_trait: Option<TraitId>,
     pub index_trait: Option<TraitId>,
     pub mutate_index_trait: Option<TraitId>,
     pub into_iterator_trait: Option<TraitId>,
@@ -3168,6 +3170,7 @@ impl LoweredProgram {
             default_trait: ids.default_trait,
             debug_trait: ids.debug_trait,
             display_trait: ids.display_trait,
+            eq_trait: ids.eq_trait,
             index_trait: ids.index_trait,
             mutate_index_trait: ids.mutate_index_trait,
             into_iterator_trait: ids.into_iterator_trait,
@@ -3829,7 +3832,6 @@ impl LoweredProgram {
             bounds: module.bounds_of_function(function.id).to_vec(),
             declared_bounds: module.declared_bounds_of_function(function.id),
             own_declared_bounds,
-            parameter_style: function.parameter_style,
             parameter_pattern,
             parameters: pattern_symbols(resolved, &function.pattern),
             body_coercion: None,
@@ -6053,6 +6055,8 @@ impl LoweredProgram {
                 .unwrap_or(CheckedType::Never);
             return Ok(LoweredProduct {
                 final_type: CheckedProductType {
+                    slotted: product.slotted,
+                    spreads: Vec::new(),
                     elements: vec![crate::CheckedTypeElement {
                         name: element.name.clone(),
                         value_type,
@@ -6108,6 +6112,8 @@ impl LoweredProgram {
             }
             return Ok(LoweredProduct {
                 final_type: CheckedProductType {
+                    slotted: product.slotted,
+                    spreads: Vec::new(),
                     elements,
                     variadic: false,
                 },
@@ -6842,7 +6848,7 @@ impl LoweredProgram {
                 CheckedType::Product(product) => product.elements.len(),
                 _ => 0,
             };
-            if plan.arguments.len() == expected {
+            if plan.supplied_slots() == expected {
                 let mut callee = call.callee.as_ref();
                 for _ in 1..plan.consumed_calls {
                     let Expression::Call(previous) = callee else {
@@ -7921,6 +7927,9 @@ impl LoweredProgram {
             self.consumed_calls.insert(previous.syntax.id);
             callee = previous.callee.as_ref();
         }
+        // The complete chain invokes its root directly. Keep a polymorphic
+        // root in its scheme ABI instead of materializing a concrete value adapter.
+        self.callee_expressions.insert(callee.syntax().id);
         let symbol = module.symbol_for(callee.syntax().id);
         let intrinsic = symbol.and_then(|symbol| module.resolved().intrinsic_function(symbol));
         let (target, callee_field, intrinsic_call) = match (intrinsic, symbol) {
@@ -7941,12 +7950,12 @@ impl LoweredProgram {
         let function_type = plan.function.clone();
         let types = flattened_parameter_types(&function_type.parameter);
         let count = types.len();
-        if plan.arguments.len() != count {
+        if plan.supplied_slots() != count {
             return Err(Diagnostic::new(
                 origin.span.clone(),
                 format!(
                     "juxtaposed call has {} arguments for {count} parameter slots",
-                    plan.arguments.len()
+                    plan.supplied_slots()
                 ),
             ));
         }
@@ -7964,19 +7973,99 @@ impl LoweredProgram {
         if let Some(callee) = callee_field {
             steps.push(LoweredCallStep::Callee { expression: callee });
         }
+        let mut slot = 0;
         for (index, argument) in plan.arguments.iter().enumerate() {
-            let entry = self.lower_call_argument(
-                module,
-                owner,
-                context,
-                argument,
-                Some(index),
-                &types[index],
-                indirect[index],
-                mutation_mask[index],
-            )?;
-            steps.push(call_argument_step(index, index, entry.expression));
-            arguments.push(entry);
+            if let Some(filled) = plan.spreads.get(&index).copied() {
+                let mut argument = argument;
+                while let Expression::Product(product) = argument
+                    && let [element] = product.elements.as_slice()
+                    && element.name.is_none()
+                    && !element.spread
+                    && !element.named_spread
+                    && module.type_of_expression(product.syntax.id).is_some()
+                    && module.type_of_expression(product.syntax.id)
+                        == module.type_of_expression(element.value.syntax().id)
+                {
+                    argument = &element.value;
+                }
+                let mutable = mutation_mask[slot..slot + filled]
+                    .iter()
+                    .any(|mutable| *mutable);
+                let (operand, base_place) = if mutable {
+                    let placement = self.lower_argument_value(module, owner, context, argument)?;
+                    (
+                        placement.expression.expect("spread operands never use implicit thunking"),
+                        placement.place,
+                    )
+                } else {
+                    (self.lower_expression(module, owner, context, argument)?, None)
+                };
+                let owned_operand = !expression_has_place_root(module.resolved(), argument)
+                    || module.moved_symbols(argument.syntax().id).next().is_some();
+                let owned_fields = spread_field_ownership(module, argument);
+                let mut mappings = Vec::new();
+                for source in 0..filled {
+                    let pass_mode = if mutation_mask[slot] {
+                        LoweredArgumentPassMode::MutablePlace
+                    } else if indirect[slot] {
+                        LoweredArgumentPassMode::MaterializedTemporary
+                    } else {
+                        LoweredArgumentPassMode::Value
+                    };
+                    let place = if mutation_mask[slot] {
+                        base_place.map(|base| {
+                            self.places.push(LoweredPlace {
+                                origin: Origin {
+                                    syntax: argument.syntax().id,
+                                    span: argument.syntax().span.clone(),
+                                },
+                                value_type: types[slot].clone(),
+                                kind: LoweredPlaceKind::ProductElement {
+                                    base,
+                                    index: source,
+                                    slice: false,
+                                },
+                            })
+                        })
+                    } else {
+                        None
+                    };
+                    mappings.push(LoweredSpreadMapping { source, slot });
+                    arguments.push(LoweredCallArgument {
+                        expression: Some(operand),
+                        thunk: None,
+                        slot: Some(slot),
+                        pass_mode,
+                        expected: types[slot].clone(),
+                        place,
+                        temporary: place.is_none() && (mutation_mask[slot] || indirect[slot]),
+                        borrowed_source: !owned_fields.get(source).copied().unwrap_or(owned_operand),
+                        drops_after_call: false,
+                    });
+                    slot += 1;
+                }
+                // Even a zero-slot spread evaluates its operand once.
+                steps.push(LoweredCallStep::ProductSpread {
+                    argument: slot.saturating_sub(filled),
+                    expression: operand,
+                    mappings,
+                    owned_operand,
+                });
+            } else {
+                let entry = self.lower_call_argument(
+                    module,
+                    owner,
+                    context,
+                    argument,
+                    Some(slot),
+                    &types[slot],
+                    indirect[slot],
+                    mutation_mask[slot],
+                )?;
+                steps.push(call_argument_step(slot, slot, entry.expression));
+                arguments.push(entry);
+                slot += 1;
+            }
         }
         let resource_bindings = if !target.records_resources() {
             Vec::new()
@@ -7993,16 +8082,11 @@ impl LoweredProgram {
             }
             _ => None,
         };
-        let buffer_pop =
-            LoweredOptionAlternatives::for_call(&target, function_type.result.as_ref())
+        let buffer_pop = LoweredOptionAlternatives::for_call(&target, function_type.result.as_ref())
+            .map_err(|message| Diagnostic::new(origin.span.clone(), message))?;
+        let runtime =
+            LoweredRuntimeCallFacts::for_call(&target, &arguments, &function_type, &self.semantic_ids)
                 .map_err(|message| Diagnostic::new(origin.span.clone(), message))?;
-        let runtime = LoweredRuntimeCallFacts::for_call(
-            &target,
-            &arguments,
-            &function_type,
-            &self.semantic_ids,
-        )
-        .map_err(|message| Diagnostic::new(origin.span.clone(), message))?;
         let mut arguments = arguments;
         mark_call_temporary_drops(
             &target,
@@ -8171,6 +8255,7 @@ impl LoweredProgram {
                         expected: expected.clone(),
                         place,
                         temporary: (mutation || indirect_slot) && place.is_none(),
+                        borrowed_source: false,
                         drops_after_call: false,
                     }
                 })
@@ -8201,6 +8286,7 @@ impl LoweredProgram {
                     expected: types[index].clone(),
                     place,
                     temporary: false,
+                    borrowed_source: false,
                     drops_after_call: false,
                 });
             }
@@ -8259,6 +8345,7 @@ impl LoweredProgram {
                         .unwrap_or(CheckedType::Error),
                     place: placement.place,
                     temporary: false,
+                    borrowed_source: false,
                     drops_after_call: false,
                 })
                 .collect();
@@ -8295,6 +8382,18 @@ impl LoweredProgram {
             return Ok(None);
         }
         let plan = module.product_default_plan(argument.syntax().id).cloned();
+        // A plain one-element product `(e)` or `(name: e)` not completed by
+        // defaults is `e` itself: its slots are `e`'s, not one per source
+        // element, so `f ((1, 2))` and `Box (value: (1, 2))` place `e`.
+        if let Expression::Product(product) = argument
+            && let [element] = product.elements.as_slice()
+            && !element.spread
+            && !element.designated
+            && !element.named_spread
+            && plan.is_none()
+        {
+            return self.place_call_arguments(module, owner, context, &element.value);
+        }
         let Expression::Product(product) = argument else {
             // A non-product argument checked against a defaulted product
             // parameter initializes its first slot; defaults fill the rest.
@@ -8600,6 +8699,7 @@ impl LoweredProgram {
             expected: expected.clone(),
             place: placement.place,
             temporary,
+            borrowed_source: false,
             // Decided for the whole call by `mark_call_temporary_drops`.
             drops_after_call: false,
         })
@@ -13228,7 +13328,8 @@ pub(crate) fn internal_invariant(span: Span, invariant: &str) -> Diagnostic {
 /// themselves and never get caller drops. A borrowed slot must also have its
 /// own ABI slot. Spread slots share their operand: when that operand is a
 /// temporary the call owns, each element in a borrowed slot is its own
-/// temporary; a named operand keeps its elements.
+/// temporary. A named operand keeps its elements unless the call consumes it;
+/// then the caller also drops its elements that the callee only borrows.
 pub(crate) fn mark_call_temporary_drops(
     target: &LoweredCallableTarget,
     function_type: &CheckedFunctionType,
@@ -13279,9 +13380,11 @@ pub(crate) fn mark_call_temporary_drops(
             });
         let borrowed = !mutation && !moved && own_operand;
         argument.drops_after_call = caller_drops
-            && argument.place.is_none()
+            && (argument.place.is_none()
+                || argument.expression.is_some_and(|expression| owned_spreads.contains(&expression)))
             && argument.thunk.is_none()
             && (mutation || borrowed)
+            && (mutation || !argument.borrowed_source)
             && needs_drop(&call_temporary_drop_type(
                 &argument.expected,
                 argument.expression.and_then(&operand_type).as_ref(),
@@ -13680,6 +13783,63 @@ fn owner_function(owner: ExpressionOwner) -> Option<FunctionId> {
         ExpressionOwner::Function(function) => Some(function),
         ExpressionOwner::Module(_) => None,
     }
+}
+
+/// Ownership of each field projected by a call spread. Literal products may
+/// combine call-owned temporaries with views of existing borrowed bindings.
+fn spread_field_ownership(module: &TypedModule, expression: &Expression) -> Vec<bool> {
+    let mut expression = expression;
+    while let Expression::Product(product) = expression
+        && let [element] = product.elements.as_slice()
+        && element.name.is_none()
+        && !element.spread
+        && !element.named_spread
+        && module.type_of_expression(product.syntax.id).is_some()
+        && module.type_of_expression(product.syntax.id)
+            == module.type_of_expression(element.value.syntax().id)
+    {
+        expression = &element.value;
+    }
+    if let Expression::Product(product) = expression {
+        return product
+            .elements
+            .iter()
+            .flat_map(|element| {
+                if element.spread || element.named_spread {
+                    spread_field_ownership(module, &element.value)
+                } else {
+                    let mut value = &element.value;
+                    while let Expression::Product(group) = value
+                        && let [inner] = group.elements.as_slice()
+                        && inner.name.is_none()
+                        && !inner.spread
+                        && !inner.named_spread
+                        && module.type_of_expression(group.syntax.id).is_some()
+                        && module.type_of_expression(group.syntax.id)
+                            == module.type_of_expression(inner.value.syntax().id)
+                    {
+                        value = &inner.value;
+                    }
+                    vec![
+                        !expression_has_place_root(module.resolved(), value)
+                            || module.moved_symbols(value.syntax().id).next().is_some(),
+                    ]
+                }
+            })
+            .collect();
+    }
+    let count = match module.type_of_expression(expression.syntax().id) {
+        Some(CheckedType::Product(product)) => product.elements.len(),
+        _ => 0,
+    };
+    vec![
+        !expression_has_place_root(module.resolved(), expression)
+            || module
+                .moved_symbols(expression.syntax().id)
+                .next()
+                .is_some();
+        count
+    ]
 }
 
 /// Whether an expression is a direct symbol or an access chain rooted in one.
@@ -14831,6 +14991,20 @@ impl<'a> SourceCoverage<'a> {
                 .implicit_thunk_for(argument.syntax().id)
                 .is_none()
         {
+            // A plain one-element product is its element, matching
+            // `place_call_arguments`.
+            if let [element] = product.elements.as_slice()
+                && !element.spread
+                && !element.designated
+                && !element.named_spread
+                && self
+                    .module
+                    .product_default_plan(product.syntax.id)
+                    .is_none()
+            {
+                self.visit_call_argument(owner, &element.value);
+                return;
+            }
             for element in &product.elements {
                 self.visit_expression(owner, &element.value);
             }
@@ -14864,7 +15038,7 @@ impl<'a> SourceCoverage<'a> {
                     CheckedType::Product(product) => product.elements.len(),
                     _ => 0,
                 };
-                if plan.arguments.len() != expected {
+                if plan.supplied_slots() != expected {
                     return;
                 }
                 let mut current = call;
@@ -15232,6 +15406,347 @@ mod tests {
             .parent()
             .expect("compiler crate should have a workspace parent")
             .join("stdlib")
+    }
+
+    #[test]
+    fn slotted_call_spreads_evaluate_operands_once_in_source_order() {
+        let module = checked_program(concat!(
+            "def pair: mut I32 -> (I32; I32) = mut count => { count = count + 1; (count; count) }\n",
+            "def tick: mut I32 -> () = mut count => { count = count + 1 }\n",
+            "def add: (I32; I32) -> I32 = (a; b) => a + b\n",
+            "def run: () -> I32 = () => { let mut count: I32 = 0; let result = add ...(pair count); result * 10 + count }\n",
+            "def run_empty: () -> I32 = () => { let mut count: I32 = 0; let result = add ...(tick count) ...(pair count); result * 10 + count }\n",
+            "def combine: (I32; I32; I32; I32) -> I32 = (a; b; c; d) => a * 1000 + b * 100 + c * 10 + d\n",
+            "def run_order: () -> I32 = () => { let mut count: I32 = 0; let result = combine ...(pair count) ...(pair count); result * 10 + count }\n",
+            "run ()\nrun_empty ()\nrun_order ()\n",
+        ));
+        let lowered = Lowerer::new().lower(&module).expect("spreads lower");
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .expect("spreads emit");
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "slotted-call-spreads",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        // Initialize the module's function-value globals before calling instances.
+        type Main = unsafe extern "C" fn() -> i32;
+        let main = unsafe { engine.get_function::<Main>("main").unwrap() };
+        assert_eq!(unsafe { main.call() }, 0);
+        type Run = unsafe extern "C" fn(*const usize) -> i32;
+        for (name, expected) in [("run", 21), ("run_empty", 42), ("run_order", 11222)] {
+            let symbol = lowered
+                .program
+                .instances
+                .iter()
+                .find_map(|(_, instance)| {
+                    (lowered
+                        .program
+                        .functions
+                        .get(instance.template)
+                        .unwrap()
+                        .name
+                        == name)
+                        .then(|| instance.name.clone())
+                })
+                .expect("instantiated function");
+            let run = unsafe { engine.get_function::<Run>(&symbol).unwrap() };
+            assert_eq!(unsafe { run.call(std::ptr::null()) }, expected);
+        }
+    }
+
+    #[test]
+    fn structural_product_equality_short_circuits_and_negates_at_runtime() {
+        let module = checked_program(concat!(
+            "type Guard = wrap USize\n",
+            "impl Eq Guard { eq = (Guard left, Guard right) => (1, 2)[left] == (1, 2)[right] }\n",
+            "def run: () -> I32 = () => {\n",
+            "    let plain: (I32, I32) = (1, 2)\n",
+            "    let slots: (I32; I32) = (3; 4)\n",
+            "    let guard = Guard 99\n",
+            "    let first: (I32; Guard) = (1; guard)\n",
+            "    let second: (I32; Guard) = (2; guard)\n",
+            "    let a = if (plain == (1, 2)) { 1 } else { 0 }\n",
+            "    let b = if (slots == (3; 4)) { 2 } else { 0 }\n",
+            "    let c = if (slots != (3; 4)) { 0 } else { 4 }\n",
+            "    let d = if (slots != (3; 5)) { 8 } else { 0 }\n",
+            "    let e = if (() == ()) { 16 } else { 0 }\n",
+            "    let f = if (() != ()) { 0 } else { 32 }\n",
+            "    let g = if (first == second) { 0 } else { 64 }\n",
+            "    let h = if (first != second) { 128 } else { 0 }\n",
+            "    a + b + c + d + e + f + g + h\n",
+            "}\nrun ()\n",
+        ));
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .expect("product equality lowers");
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .expect("product equality emits");
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "product-equality",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Main = unsafe extern "C" fn() -> i32;
+        let main = unsafe { engine.get_function::<Main>("main").unwrap() };
+        assert_eq!(unsafe { main.call() }, 0);
+        let symbol = lowered
+            .program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (lowered
+                    .program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "run")
+                    .then(|| instance.name.clone())
+            })
+            .expect("run instance");
+        type Run = unsafe extern "C" fn(*const usize) -> i32;
+        let run = unsafe { engine.get_function::<Run>(&symbol).unwrap() };
+        assert_eq!(unsafe { run.call(std::ptr::null()) }, 255);
+    }
+
+    #[test]
+    fn mutable_slotted_spreads_update_original_product_fields() {
+        let module = checked_program(concat!(
+            "def change: (mut I32; mut I32) -> () = (mut a; mut b) => { a = a + 10; b = b + 20 }\n",
+            "def offset: (I32; mut I32; I32) -> () = (amount; mut a; _) => { a = a + amount }\n",
+            "trait Modify T { modify: (mut T; mut T) -> () }\n",
+            "impl Modify I32 { modify = (mut a; mut b) => { a = a + 1; b = b + 1 } }\n",
+            "def run: () -> I32 = () => {\n",
+            "    let mut slots: (I32; I32) = (1; 2)\n",
+            "    let mut plain: (I32, I32) = (3, 4)\n",
+            "    let mut nested: (pair: (I32; I32), other: I32) = (pair: (5; 6), other: 0)\n",
+            "    change ...(slots)\n",
+            "    change ...plain\n",
+            "    change ...nested.pair\n",
+            "    let callable: (mut I32; mut I32) -> () = change\n",
+            "    callable ...plain\n",
+            "    Modify.modify ...nested.pair\n",
+            "    offset 30 ...slots\n",
+            "    change ...(7, 8)\n",
+            "    slots.0 + slots.1 + plain.0 + plain.1 + nested.pair.0 + nested.pair.1\n",
+            "}\nrun ()\n",
+        ));
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .expect("mutable spreads lower");
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .expect("mutable spreads emit");
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "mutable-slot-spreads",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Main = unsafe extern "C" fn() -> i32;
+        let main = unsafe { engine.get_function::<Main>("main").unwrap() };
+        assert_eq!(unsafe { main.call() }, 0);
+        let symbol = lowered
+            .program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (lowered
+                    .program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "run")
+                    .then(|| instance.name.clone())
+            })
+            .expect("run instance");
+        type Run = unsafe extern "C" fn(*const usize) -> i32;
+        let run = unsafe { engine.get_function::<Run>(&symbol).unwrap() };
+        assert_eq!(unsafe { run.call(std::ptr::null()) }, 173);
+    }
+
+    #[test]
+    fn slotted_generic_abi_matches_direct_functions_at_runtime() {
+        let module = checked_program(concat!(
+            "type Slots = alias (I32; I32)\n",
+            "def direct: Slots -> Slots = (a; b) => (a; b)\n",
+            "def identity: <A where Copy A> A -> A = value => value\n",
+            "def combine: Slots -> I32 = (a; b) => a * 10 + b\n",
+            "def increment: I32 -> I32 = value => value + 1\n",
+            "def apply: <A, R> (A -> R; A) -> R = (f; value) => f value\n",
+            "def compose: <A, B, C> (B -> C; A -> B) -> A -> C = (f; g) => value => f (g value)\n",
+            "type Callback = wrap (call: Slots -> I32)\n",
+            "def run: () -> I32 = () => {\n",
+            "    let specialized: Slots -> Slots = identity.<Slots>\n",
+            "    let pair: Slots = direct ...(specialized 3 4)\n",
+            "    let first: I32 = apply combine (20; 22)\n",
+            "    let stored = apply\n",
+            "    let second: I32 = stored combine pair\n",
+            "    let explicit: I32 = stored.<Slots, I32> combine pair\n",
+            "    let composed: Slots -> I32 = compose increment combine\n",
+            "    let third: I32 = composed 5 6\n",
+            "    let wrapped = Callback combine\n",
+            "    let fourth: I32 = wrapped.call 7 8\n",
+            "    let mut callbacks: List (Slots -> I32) = List.new ()\n",
+            "    callbacks |> push combine\n",
+            "    let fifth: I32 = (callbacks[0]) 9 10\n",
+            "    first + second + explicit + third + fourth + fifth\n",
+            "}\nrun ()\n",
+        ));
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .expect("generic slotted ABI lowers");
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .expect("generic slotted ABI emits");
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "generic-slot-abi",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let find_instance = |name: &str| {
+            lowered
+                .program
+                .instances
+                .iter()
+                .find_map(|(_, instance)| {
+                    (lowered
+                        .program
+                        .functions
+                        .get(instance.template)
+                        .unwrap()
+                        .name
+                        == name)
+                        .then(|| instance.name.clone())
+                })
+                .expect("concrete function instance")
+        };
+        let direct = llvm.get_function(&find_instance("direct")).unwrap();
+        let identity = llvm.get_function(&find_instance("identity")).unwrap();
+        assert_eq!(direct.get_type(), identity.get_type());
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Main = unsafe extern "C" fn() -> i32;
+        let main = unsafe { engine.get_function::<Main>("main").unwrap() };
+        assert_eq!(unsafe { main.call() }, 0);
+        type Run = unsafe extern "C" fn(*const usize) -> i32;
+        let run = unsafe { engine.get_function::<Run>(&find_instance("run")).unwrap() };
+        assert_eq!(unsafe { run.call(std::ptr::null()) }, 525);
+    }
+
+    #[test]
+    fn consuming_slotted_spreads_drop_each_owned_field_once() {
+        static COUNTS: [std::sync::atomic::AtomicI32; 14] =
+            [const { std::sync::atomic::AtomicI32::new(0) }; 14];
+        extern "C" fn record(value: i32) {
+            COUNTS[value.trailing_zeros() as usize].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        for count in &COUNTS {
+            count.store(0, std::sync::atomic::Ordering::SeqCst);
+        }
+        let module = checked_program(concat!(
+            "extern \"c\" { record: I32 -> () }\n",
+            "type Resource = wrap I32\n",
+            "impl Drop Resource { cleanup = Resource value => { record value } }\n",
+            "def consume: (move Resource; Resource) -> () = (move owned; borrowed) => ()\n",
+            "def borrow: (Resource; Resource) -> () = (first; second) => ()\n",
+            "def change: (move Resource; mut Resource; I32) ->{state} () = (move owned; mut borrowed; next) => { borrowed = Resource next; () }\n",
+            "def run: () ->{state} I32 = () => {\n",
+            " consume ...(Resource 1; Resource 2)\n",
+            " let pair = (Resource 4; Resource 8)\n",
+            " consume ...(pair)\n",
+            " let first = Resource 16\n",
+            " let second = Resource 32\n",
+            " borrow ...(first; second)\n",
+            " borrow first second\n",
+            " borrow ...(...(first; second))\n",
+            " consume ...(Resource 64; (second))\n",
+            " borrow ...((first); Resource 128)\n",
+            " change ...(Resource 256; Resource 512) 1024\n",
+            " let mut changing = (Resource 2048; Resource 4096)\n",
+            " change ...(changing) 8192\n",
+            " 0\n",
+            "}\nrun ()\n",
+        ));
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .expect("consuming slotted spread lowers");
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .expect("consuming slotted spread emits");
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "slot-drop-cleanup",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let find_instance = |name: &str| {
+            lowered
+                .program
+                .instances
+                .iter()
+                .find_map(|(_, instance)| {
+                    (lowered
+                        .program
+                        .functions
+                        .get(instance.template)
+                        .unwrap()
+                        .name
+                        == name)
+                        .then(|| instance.name.clone())
+                })
+                .expect("concrete function instance")
+        };
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        engine.add_global_mapping(
+            &llvm.get_function("record").unwrap(),
+            record as *const () as usize,
+        );
+        type Main = unsafe extern "C" fn() -> i32;
+        let main = unsafe { engine.get_function::<Main>("main").unwrap() };
+        assert_eq!(unsafe { main.call() }, 0);
+        for (index, count) in COUNTS.iter().enumerate() {
+            assert_eq!(
+                count.swap(0, std::sync::atomic::Ordering::SeqCst),
+                1,
+                "resource {}",
+                1 << index
+            );
+        }
+        type Run = unsafe extern "C" fn(*const usize) -> i32;
+        let run = unsafe { engine.get_function::<Run>(&find_instance("run")).unwrap() };
+        assert_eq!(unsafe { run.call(std::ptr::null()) }, 0);
+        for (index, count) in COUNTS.iter().enumerate() {
+            assert_eq!(
+                count.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "resource {}",
+                1 << index
+            );
+        }
     }
 
     fn checked_program(source: &str) -> TypedModule {
@@ -15810,7 +16325,6 @@ mod tests {
             module.bounds_of_function(source.id).to_vec()
         );
         assert!(!lowered.bounds.is_empty());
-        assert_eq!(lowered.parameter_style, source.parameter_style);
         assert_eq!(
             lowered.binding_symbol,
             source
@@ -17786,7 +18300,6 @@ mod tests {
             "Function",
             Expression::Function(Box::new(FunctionExpression {
                 syntax: syntax.clone(),
-                parameter_style: FunctionParameterStyle::Single,
                 pattern: wildcard_pattern(),
                 body: Box::new(name_expression("value")),
             })),
@@ -17861,6 +18374,7 @@ mod tests {
         expressions.push((
             "Product",
             Expression::Product(ProductExpression {
+                slotted: false,
                 syntax: syntax.clone(),
                 elements: vec![ProductElement {
                     syntax: syntax.clone(),
@@ -17883,6 +18397,7 @@ mod tests {
         expressions.push((
             "Call",
             Expression::Call(CallExpression {
+                spread: false,
                 syntax: syntax.clone(),
                 callee: Box::new(name_expression("value")),
                 argument: Box::new(name_expression("value")),
@@ -18292,7 +18807,7 @@ mod tests {
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
             "def generic_identity: <T where Copy T> T -> T = value => value\n",
-            "let juxtaposed: [x: I32, y: I32] -> I32 = [x, y] => x + y\n",
+            "let juxtaposed: (x: I32; y: I32) -> I32 = (x; y) => x + y\n",
             "type TestBox = wrap (value: I32)\n",
             "def sum_product: (I32, I32) -> I32 = pair => {\n",
             "  let mut total: I32 = 0\n",
@@ -19224,7 +19739,7 @@ mod tests {
     fn step4_fixture() -> &'static str {
         concat!(
             "use std.core.reference.(Ref)\n",
-            "let pair_add: [x: I32, y: I32] -> I32 = [x, y] => x + y\n",
+            "let pair_add: (x: I32; y: I32) -> I32 = (x; y) => x + y\n",
             "type Defaulted = wrap (String, x: I32 = 0, y: I32 = 0)\n",
             "def juxtaposed_samples: () -> I32 = () => {\n",
             "  let chained: I32 = pair_add 1 2\n",
@@ -19718,7 +20233,7 @@ mod tests {
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
             "def generic_identity: <T where Copy T> T -> T = value => value\n",
-            "let pair_add: [x: I32, y: I32] -> I32 = [x, y] => x + y\n",
+            "let pair_add: (x: I32; y: I32) -> I32 = (x; y) => x + y\n",
             "def trait_sample: () -> Bool = () => test_show 1\n",
             "def transition_samples: () -> I32 = () => {\n",
             "  let closure = (value: I32) => value\n",
@@ -19809,7 +20324,7 @@ mod tests {
             }
             if let Some(plan) = module.juxtaposed_call_plan(call.origin.syntax) {
                 assert_eq!(plan.function, call.function_type);
-                assert_eq!(plan.arguments.len(), call.arguments.len());
+                assert_eq!(plan.supplied_slots(), call.arguments.len());
             }
         }
 
@@ -24448,7 +24963,6 @@ mod tests {
             id: TypeParameterId(900_000),
             name: "T".to_owned(),
             sized: true,
-            parameter_product_capable: false,
         };
         let origin = Origin::compiler();
         let select = |environment: &[CheckedTraitBound], arguments: Vec<CheckedType>| {

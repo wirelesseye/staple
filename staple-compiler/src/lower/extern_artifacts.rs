@@ -97,17 +97,10 @@ fn adapter_indirect_parameters(
 }
 
 /// The adapter's declared arity, used to adapt the declared native signature.
-/// A juxtaposed parameter product counts its elements; everything
+/// A slotted parameter type counts its elements; everything
 /// else is one parameter.
 fn declared_arity(plan: &ExternAdapterPlan) -> usize {
-    if plan.callable_type.parameter_style == staple_syntax::FunctionParameterStyle::Juxtaposed {
-        match plan.callable_type.parameter.as_ref() {
-            CheckedType::Product(product) => product.elements.len(),
-            _ => 1,
-        }
-    } else {
-        1
-    }
+    plan.callable_type.slot_count()
 }
 
 /// A variadic parameter makes the adapter impossible, mirroring

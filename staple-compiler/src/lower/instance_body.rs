@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use staple_syntax::{Diagnostic, FunctionParameterStyle, Span};
+use staple_syntax::{Diagnostic, Span};
 
 use crate::specialization::{
     ArtifactOrdinal, ArtifactRequestKey, ConstructorAdapterKey, InstanceKey, StructuralMethodKey,
@@ -187,7 +187,6 @@ pub(crate) struct LoweredInstanceBody {
     /// Available environment/prerequisite routes for expanded obligations.
     pub dictionary_environment_recipes:
         Vec<Option<super::trait_dictionaries::EnvironmentDictionaryRecipe>>,
-    pub parameter_style: FunctionParameterStyle,
     /// The instance-local parameter pattern.
     pub parameter_pattern: PatternId,
     /// Parameters in declaration order with their concrete types.
@@ -257,7 +256,6 @@ impl LoweredInstanceBody {
             origin,
             signature: CheckedFunctionType {
                 parameter: Box::new(CheckedType::Never),
-                parameter_style: FunctionParameterStyle::Single,
                 default: None,
                 mutations: Vec::new(),
                 moves: Vec::new(),
@@ -270,7 +268,6 @@ impl LoweredInstanceBody {
             dictionary_calls: BTreeMap::new(),
             dictionary_values: BTreeMap::new(),
             dictionary_environment_recipes: Vec::new(),
-            parameter_style: FunctionParameterStyle::Single,
             parameter_pattern: PatternId::from_index(0),
             parameters: Vec::new(),
             captures: Vec::new(),
@@ -723,7 +720,6 @@ impl<'a> BodyCloner<'a> {
                 }
             })
             .collect();
-        self.body.parameter_style = function.parameter_style;
         self.body.parameters = function
             .parameters
             .iter()
@@ -881,7 +877,6 @@ impl<'a> BodyCloner<'a> {
             CheckedType::Function(function_type) => function_type,
             other => CheckedFunctionType {
                 parameter: Box::new(other),
-                parameter_style: function_type.parameter_style,
                 default: function_type.default.clone(),
                 mutations: function_type.mutations.clone(),
                 moves: function_type.moves.clone(),
@@ -945,6 +940,8 @@ impl<'a> BodyCloner<'a> {
 
     fn product_type(&self, product: &CheckedProductType) -> CheckedProductType {
         CheckedProductType {
+            slotted: product.slotted,
+            spreads: product.spreads.clone(),
             elements: product
                 .elements
                 .iter()
@@ -1963,7 +1960,14 @@ impl<'a> BodyCloner<'a> {
         let whole_move = call.function_type.moves.contains(&CheckedMutation::Whole);
         for argument in &mut call.arguments {
             let expected = argument.expected.clone();
-            let mutation = whole_mutation
+            // An opaque whole mutable operand remains one source place even
+            // when specialization expands its ABI into several mutable slots.
+            let expanded_whole_mutation = argument.slot.is_none()
+                && argument.pass_mode == super::LoweredArgumentPassMode::MutablePlace
+                && matches!(&expected, CheckedType::Product(product)
+                    if product.slotted && product.elements.iter().enumerate().all(|(slot, _)|
+                        call.function_type.mutations.contains(&CheckedMutation::Element(slot))));
+            let mutation = whole_mutation || expanded_whole_mutation
                 || argument.slot.is_some_and(|slot| {
                     call.function_type
                         .mutations
@@ -2156,7 +2160,6 @@ impl<'a> BodyCloner<'a> {
     fn error_signature(&self) -> CheckedFunctionType {
         CheckedFunctionType {
             parameter: Box::new(CheckedType::Error),
-            parameter_style: FunctionParameterStyle::Single,
             default: None,
             mutations: Vec::new(),
             moves: Vec::new(),
@@ -7114,7 +7117,7 @@ mod tests {
             "use std.coroutine.*\n",
             "use std.io.(IO, println)\n",
             "def make: <T> Scheduler -> (Wait T, Resolver T) = sched => completion sched\n",
-            "def finish: <T> [Resolver T, T] -> () = [resolver, value] => resolver |> complete value\n",
+            "def finish: <T> (Resolver T; T) -> () = (resolver; value) => resolver |> complete value\n",
             "def worker_io: () -> Coroutine{IO} I32 = () => coro { println \"work\"; 7 }\n",
             "def worker_pure: () -> Coroutine{} U8 = () => coro { U8 :: 8 }\n",
             "def launch: () -> Coroutine{Tasks, IO} () = () => coro {\n",
@@ -7325,7 +7328,7 @@ mod tests {
     fn external_await_outcomes_are_recorded_and_revalidated() {
         let (_, mut program) = lower_with_worklist(concat!(
             "use std.coroutine.*\n",
-            "def waiter: <T> move Wait [T] -> Coroutine{} () = move pending => coro {\n",
+            "def waiter: <T> move Wait T -> Coroutine{} () = move pending => coro {\n",
             "  let _ = await pending\n",
             "  ()\n",
             "}\n",
