@@ -8349,7 +8349,7 @@ impl TypeChecker {
         let generic_annotation_is_function = matches!(
             declared_type.as_ref().map(CheckedType::scheme_body),
             Some(CheckedType::Function(_))
-        ) || matches!(&binding.value, Some(Expression::Function(f)) if f.generics.is_some());
+        ) || matches!(&binding.value, Some(Expression::Function(_)));
         let value_type = binding
             .value
             .as_ref()

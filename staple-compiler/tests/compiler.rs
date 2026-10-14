@@ -15727,3 +15727,21 @@ fn annotated_nominal_patterns_supply_parameter_types() {
         );
     }
 }
+
+#[test]
+fn value_defined_companion_members_use_companion_parameters() {
+    let module = type_check(concat!(
+        "type Box T = wrap T\n",
+        "companion<T> Box T {\n",
+        "    pub def unwrap = move (Box value): Box T => T :: value\n",
+        "    pub def rewrap = <U> (move box: Box T, move f: (move T -> U)) => Box U :: {\n",
+        "        let Box value = box\n",
+        "        Box (f value)\n",
+        "    }\n",
+        "}\n",
+        "def name = move value: I32 => String :: \"one\"\n",
+        "let answer: I32 = Box.unwrap (Box 42)\n",
+        "let text: Box String = Box.rewrap (Box 1, name)\n",
+    ));
+    lower(&module);
+}
