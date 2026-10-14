@@ -6832,8 +6832,18 @@ impl TypeChecker {
                 let refreshed = module
                     .symbol_for(expression.syntax().id)
                     .and_then(|symbol| {
-                        if matches!(existing, Some(CheckedType::Forall(_))) {
-                            self.symbol_types.get(&symbol).cloned()
+                        if let Some(CheckedType::Forall(occurrence)) = &existing {
+                            // Only an occurrence that is the symbol's own scheme
+                            // follows its updates; one subsumed into a different
+                            // expected scheme keeps that target type.
+                            match self.symbol_types.get(&symbol) {
+                                Some(CheckedType::Forall(scheme))
+                                    if scheme.parameters == occurrence.parameters =>
+                                {
+                                    Some(CheckedType::Forall(scheme.clone()))
+                                }
+                                _ => existing.clone(),
+                            }
                         } else {
                             self.symbol_value_type(symbol).cloned()
                         }

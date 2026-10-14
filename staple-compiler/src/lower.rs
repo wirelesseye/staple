@@ -25194,6 +25194,20 @@ mod tests {
             "let answer: I32 = swapped (1, \"x\")\n",
         ));
         assert_eq!(adapters, 1);
+        // Narrowing a bound projects the stronger dictionary through an
+        // adapter, whether the source is a value-only generic `def` or a
+        // stored polymorphic value.
+        for source in [
+            "def different = <T where Eq T> (a: T, b: T) => Eq.ne (a, b)\nlet ord_poly: <U where Ord U> (U, U) -> Bool = different\n",
+            // The annotation keeps the first step an alpha-renaming; a
+            // labelled value-only scheme would need an adapter of its own.
+            "def different: <T where Eq T> (T, T) -> Bool = <T where Eq T> (a, b) => Eq.ne (a, b)\nlet eq_poly: <V where Eq V> (V, V) -> Bool = different\nlet ord_poly: <U where Ord U> (U, U) -> Bool = eq_poly\n",
+        ] {
+            let (_, _, adapters) = polymorphic_census(&format!(
+                "use std.core.cmp.(Eq, Ord)\n{source}let answer = ord_poly (1, 2)\n"
+            ));
+            assert_eq!(adapters, 1, "{source}");
+        }
     }
 
     #[test]
