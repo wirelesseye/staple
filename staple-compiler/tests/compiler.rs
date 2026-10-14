@@ -15729,6 +15729,24 @@ fn annotated_nominal_patterns_supply_parameter_types() {
 }
 
 #[test]
+fn value_defined_macro_helpers_supply_their_signature() {
+    // A helper's parameter annotations and result ascription stand in for a
+    // binding annotation, including `parse_quote`'s contextual syntax type.
+    let module = type_check(concat!(
+        "def increment = value: Expr => Expr :: parse_quote { $value + 1 }\n",
+        "def add = left: Expr => right: Expr => Expr :: parse_quote { $left + $right }\n",
+        "def pair = (first: Expr, second: Expr) => Expr :: parse_quote { ($first, $second) }\n",
+        "macro inc: Expr -> Expr = value => increment value\n",
+        "macro sum: Expr -> Expr = value => add value value\n",
+        "macro both: Expr -> Expr = value => pair (value, value)\n",
+        "let answer: I32 = inc 41\n",
+        "let doubled: I32 = sum 21\n",
+        "let twice: (I32, I32) = both 7\n",
+    ));
+    lower(&module);
+}
+
+#[test]
 fn value_defined_companion_members_use_companion_parameters() {
     let module = type_check(concat!(
         "type Box T = wrap T\n",

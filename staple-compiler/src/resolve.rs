@@ -6085,7 +6085,16 @@ fn analyze_compile_time_bindings(
 ) -> HashMap<SyntaxId, CompileTimeBindingInfo> {
     let mut globals = HashMap::new();
     for (module, helper) in helpers {
-        let type_display = helper.annotation.as_ref().map(ToString::to_string);
+        let type_display = helper.annotation.as_ref().map(ToString::to_string).or_else(|| {
+            let value = helper.value.as_ref()?;
+            let signature = crate::macro_expand::function_value_signature(value)?;
+            Some(match value {
+                Expression::Function(function) if let Some(generics) = &function.generics => {
+                    format!("{generics} {signature}")
+                }
+                _ => signature.to_string(),
+            })
+        });
         globals.insert(
             helper.name.clone(),
             CompileTimeBindingInfo {

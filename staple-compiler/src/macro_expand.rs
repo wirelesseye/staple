@@ -1963,10 +1963,8 @@ impl MacroExpander {
             return;
         }
         if let Some(value) = &helper.binding.value {
-            let expected = helper
-                .binding
-                .annotation_body()
-                .map(|ty| self.checked_compile_type(ty))
+            let expected = binding_signature(&helper.binding)
+                .map(|ty| self.checked_compile_type(&ty))
                 .unwrap_or(CompileType::Unknown);
             self.check_compile_expression(
                 helper.module,
@@ -2316,9 +2314,8 @@ impl MacroExpander {
     ) -> CompileType {
         match item {
             Item::Binding(binding) => {
-                let annotation = binding
-                    .annotation_body()
-                    .map(|ty| self.checked_compile_type(ty));
+                let annotation =
+                    binding_signature(binding).map(|ty| self.checked_compile_type(&ty));
                 let ty = binding.value.as_ref().map_or(CompileType::Error, |value| {
                     self.check_compile_expression(module, value, environment, annotation.as_ref())
                 });
@@ -5527,7 +5524,7 @@ impl MacroExpander {
                                 return None;
                             };
                             let value = if let Some(expected) =
-                                binding.annotation_body().and_then(meta_type)
+                                binding_signature(binding).as_ref().and_then(meta_type)
                                 && let Expression::Quote(quote) = value
                                 && quote.kind == staple_syntax::QuoteKind::ParseQuote
                             {
@@ -6282,8 +6279,8 @@ impl MacroExpander {
                     self.suppress_expansion_trailer = true;
                     return None;
                 }
-                let expected = binding
-                    .annotation_body()
+                let expected = binding_signature(&binding)
+                    .as_ref()
                     .and_then(function_result_meta_type);
                 let value = binding.value?;
                 let previous_context = expected
@@ -8725,9 +8722,41 @@ fn compile_pattern_annotation(pattern: &Pattern) -> Option<CompileType> {
     }
 }
 
-fn helper_compile_type(binding: &Binding) -> CompileType {
+/// A compile-time binding's declared type: its annotation, or for a
+/// value-defined function its parameter patterns' types, effect lower bounds,
+/// and innermost `T :: …` result ascription.
+fn binding_signature(binding: &Binding) -> Option<Type> {
     binding
         .annotation_body()
+        .cloned()
+        .or_else(|| binding.value.as_ref().and_then(function_value_signature))
+}
+
+pub(crate) fn function_value_signature(expression: &Expression) -> Option<Type> {
+    let Expression::Function(function) = expression else {
+        return None;
+    };
+    let result = match function.body.as_ref() {
+        body @ Expression::Function(_) => function_value_signature(body)?,
+        Expression::TypeAscription(ascription) => ascription.ty.clone(),
+        _ => Type::Inferred(staple_syntax::InferredType::new()),
+    };
+    Some(Type::Function(staple_syntax::FunctionType {
+        syntax: function.syntax.clone(),
+        parameter: Box::new(function.pattern.ty()),
+        mutations: Vec::new(),
+        moves: Vec::new(),
+        effects: function
+            .effect_lower_bound
+            .clone()
+            .unwrap_or_else(staple_syntax::EffectSet::empty),
+        result: Box::new(result),
+    }))
+}
+
+fn helper_compile_type(binding: &Binding) -> CompileType {
+    binding_signature(binding)
+        .as_ref()
         .map(compile_type)
         .or_else(|| binding.value.as_ref().and_then(infer_compile_function_type))
         .unwrap_or(CompileType::Unknown)
@@ -9905,7 +9934,7 @@ fn binding_is_compile_time_helper(binding: &Binding) -> bool {
 }
 
 fn binding_contains_syntax(binding: &Binding) -> bool {
-    binding.annotation_body().is_some_and(type_contains_syntax)
+    binding_signature(binding).is_some_and(|ty| type_contains_syntax(&ty))
         || binding
             .value
             .as_ref()
@@ -9913,9 +9942,8 @@ fn binding_contains_syntax(binding: &Binding) -> bool {
 }
 
 fn binding_uses_macro_call_metadata(binding: &Binding) -> bool {
-    binding
-        .annotation_body()
-        .is_some_and(|annotation| type_contains_named(annotation, "MacroCallMetadata"))
+    binding_signature(binding)
+        .is_some_and(|annotation| type_contains_named(&annotation, "MacroCallMetadata"))
         || binding.value.as_ref().is_some_and(|value| {
             let mut current = value;
             while let Expression::Function(function) = current {

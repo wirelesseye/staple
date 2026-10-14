@@ -233,7 +233,9 @@ structural node. The grammatical categories parse the complete fragment in
 their respective contexts, while `Sequence Item` parses zero or more complete
 items in source order. Annotations, type ascriptions, declared helper or macro
 result types, and other typed compile-time boundaries provide `parse_quote`'s
-contextual construction type; requesting `Syntax` through any of them is rejected. A
+contextual construction type; requesting `Syntax` through any of them is rejected.
+A value-defined helper declares its result with an ascription, as in
+`def increment = value: Expr => Expr :: parse_quote { $value + 1 }`. A
 `parse_quote` reached with no contextual type at all — for example inside an
 untyped compile-time helper — is rejected the same way. This contextual
 selection is specific to `parse_quote`: wrapping a `quote` fragment in
