@@ -162,6 +162,8 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::ResolverCancel => RejectionReason::AsyncIntrinsic,
         IntrinsicFunction::NumericConvert { .. }
         | IntrinsicFunction::ParseNumber { .. }
+        | IntrinsicFunction::PointerLoad
+        | IntrinsicFunction::PointerStore
         | IntrinsicFunction::PointerOffset
         | IntrinsicFunction::PointerCast
         | IntrinsicFunction::PointerAddress
@@ -495,6 +497,8 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::StringToCString
             | IntrinsicFunction::StringAdd
             | IntrinsicFunction::NumericConvert { .. }
+            | IntrinsicFunction::PointerLoad
+            | IntrinsicFunction::PointerStore
             | IntrinsicFunction::PointerOffset
             | IntrinsicFunction::PointerCast
             | IntrinsicFunction::PointerAddress
@@ -523,6 +527,7 @@ fn contains_polymorphic_function(ty: &CheckedType) -> bool {
     match ty {
         CheckedType::Function(_) => contains_type_parameter(ty),
         CheckedType::RawPtr { pointee } => contains_polymorphic_function(pointee),
+        CheckedType::RawMutPtr { pointee } => contains_polymorphic_function(pointee),
         CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
             contains_polymorphic_function(value)
         }

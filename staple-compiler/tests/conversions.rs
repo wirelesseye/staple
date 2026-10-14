@@ -241,3 +241,103 @@ fn raw_pointer_byte_offsets_run_and_emit_for_32_and_64_bit_targets() {
     #[cfg(unix)]
     run(&lowered);
 }
+
+#[test]
+fn mutable_raw_pointers_run_and_emit_for_32_and_64_bit_targets() {
+    let lowered = lower(include_str!("fixtures/pointer_mutable.sta"));
+    let context = Context::create();
+    let generator = CodeGenerator::new(&context);
+    for target in ["i386-unknown-linux-gnu", "x86_64-unknown-linux-gnu"] {
+        let llvm = generator
+            .compile_module_for_target(&lowered, Some(target))
+            .unwrap_or_else(|errors| panic!("{target}: {errors:?}"));
+        assert!(llvm.contains("pointer.load"), "concrete load must emit");
+        assert!(
+            llvm.contains("raw.pointer"),
+            "dynamic memory access must emit"
+        );
+    }
+    #[cfg(unix)]
+    run(&lowered);
+}
+
+#[test]
+fn raw_pointer_operations_reject_invalid_access_and_implicit_conversions() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let cases = [
+        (
+            "def bad: RawPtr I32 -> RawMutPtr I32 = p => p",
+            "RawMutPtr I32",
+        ),
+        (
+            "def bad: RawMutPtr I32 -> RawPtr I32 = p => p",
+            "RawPtr I32",
+        ),
+        (
+            "def bad: RawOpaquePtr -> RawOpaqueMutPtr = p => p",
+            "RawOpaqueMutPtr",
+        ),
+        (
+            "def bad: RawOpaqueMutPtr -> RawOpaquePtr = p => p",
+            "RawOpaquePtr",
+        ),
+        (
+            "def bad: RawMutPtr I32 -> RawMutPtr U8 = p => p as RawMutPtr U8",
+            "bound",
+        ),
+        (
+            "let p: RawPtr I32 = RawPtr.null ()\nRawMutPtr.store p 1",
+            "RawMutPtr",
+        ),
+        (
+            "let p = RawOpaqueMutPtr.null ()\nRawMutPtr.store p 1",
+            "RawMutPtr",
+        ),
+        ("let p = RawOpaquePtr.null ()\nRawPtr.load p", "RawPtr"),
+        (
+            "let p: RawPtr CString = RawPtr.null ()\nRawPtr.load p",
+            "bound",
+        ),
+        (
+            "let p: RawMutPtr CString = RawMutPtr.null ()\nRawMutPtr.load p",
+            "bound",
+        ),
+        (
+            "let p: RawMutPtr CString = RawMutPtr.null ()\nlet v = c_string \"bad\"\nRawMutPtr.store p v",
+            "bound",
+        ),
+        (
+            "let store = RawMutPtr.store\nlet p: RawMutPtr CString = RawMutPtr.null ()\nlet v = c_string \"bad\"\nstore p v",
+            "bound",
+        ),
+        (
+            "let p: RawMutPtr CString = RawMutPtr.null ()\nlet v = c_string \"bad\"\n(if True { RawMutPtr.store } else { RawMutPtr.store }) p v",
+            "bound",
+        ),
+        (
+            "let p: RawPtr I32 = RawPtr.null ()\nlet q: RawMutPtr I32 = RawMutPtr.null ()\nlet bad = p == q",
+            "Raw",
+        ),
+        ("def bad: CString -> RawMutPtr CChar = p => p", "RawMutPtr"),
+        (
+            "type Token = opaque\nlet p: RawMutPtr Token = RawMutPtr.null ()",
+            "Sized",
+        ),
+    ];
+    for (body, expected) in cases {
+        let source = format!("use std.ptr.*\nuse std.cinterop.*\n{body}\n");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(&source, root)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let errors = TypeChecker::new()
+            .check(resolved)
+            .err()
+            .unwrap_or_else(|| panic!("invalid pointer operation was accepted: {body}"));
+        assert!(
+            errors.iter().any(|error| error.message.contains(expected)),
+            "{body}: {errors:?}"
+        );
+    }
+}

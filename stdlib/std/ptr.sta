@@ -2,7 +2,7 @@ pub mod
 
 use std.core.sized.sized_opaque
 
-/// A non-owning, low-level pointer to a value of type `Pointee`.
+/// A non-owning, low-level pointer that permits reads of a `Pointee`.
 /// Copying or converting the pointer does not validate its address, alignment,
 /// or allocation lifetime, and does not transfer ownership.
 @sized_opaque
@@ -13,7 +13,35 @@ pub type RawPtr Pointee = opaque
 @sized_opaque
 pub type RawOpaquePtr = opaque
 
+/// A non-owning raw pointer that permits reads and writes.
+/// Copies and conversions do not validate the target or transfer ownership.
+@sized_opaque
+pub type RawMutPtr Pointee = opaque
+/// An untyped raw pointer that permits explicit conversion to mutable pointers.
+/// Compatible with C `void *`; does not manage allocation lifetime.
+@sized_opaque
+pub type RawOpaqueMutPtr = opaque
+
 extern "staple-intrinsic" {
+    __pointer_load: <T where Copy T> RawPtr T -> T
+    __mut_pointer_load: <T where Copy T> RawMutPtr T -> T
+    __pointer_store: <T where Copy T> (RawMutPtr T, T) -> ()
+    __mut_pointer_address: <T> RawMutPtr T -> USize
+    __address_mut_pointer: <T> USize -> RawMutPtr T
+    __mut_opaque_address: RawOpaqueMutPtr -> USize
+    __address_mut_opaque: USize -> RawOpaqueMutPtr
+    __mut_pointer_offset: <T> (RawMutPtr T, ISize) -> RawMutPtr T
+    __mut_opaque_offset: (RawOpaqueMutPtr, ISize) -> RawOpaqueMutPtr
+    __mut_pointer_to_pointer: <T> RawMutPtr T -> RawPtr T
+    __pointer_to_mut_pointer: <T> RawPtr T -> RawMutPtr T
+    __mut_pointer_to_opaque: <T> RawMutPtr T -> RawOpaquePtr
+    __opaque_to_mut_pointer: <T> RawOpaquePtr -> RawMutPtr T
+    __mut_pointer_to_mut_opaque: <T> RawMutPtr T -> RawOpaqueMutPtr
+    __mut_opaque_to_mut_pointer: <T> RawOpaqueMutPtr -> RawMutPtr T
+    __pointer_to_mut_opaque: <T> RawPtr T -> RawOpaqueMutPtr
+    __mut_opaque_to_pointer: <T> RawOpaqueMutPtr -> RawPtr T
+    __opaque_to_mut_opaque: RawOpaquePtr -> RawOpaqueMutPtr
+    __mut_opaque_to_opaque: RawOpaqueMutPtr -> RawOpaquePtr
     __pointer_address: <T> RawPtr T -> USize
     __address_pointer: <T> USize -> RawPtr T
     __pointer_opaque: <T> RawPtr T -> RawOpaquePtr
@@ -48,12 +76,107 @@ impl Convert USize RawOpaquePtr {
     convert = move value => __address_opaque value
 }
 
+impl<T> Convert (RawMutPtr T) (RawPtr T) {
+    convert = move value => __mut_pointer_to_pointer value
+}
+
+impl<T> Convert (RawPtr T) (RawMutPtr T) {
+    convert = move value => __pointer_to_mut_pointer value
+}
+
+impl<T> Convert (RawMutPtr T) RawOpaquePtr {
+    convert = move value => __mut_pointer_to_opaque value
+}
+
+impl<T> Convert RawOpaquePtr (RawMutPtr T) {
+    convert = move value => __opaque_to_mut_pointer value
+}
+
+impl<T> Convert (RawMutPtr T) RawOpaqueMutPtr {
+    convert = move value => __mut_pointer_to_mut_opaque value
+}
+
+impl<T> Convert RawOpaqueMutPtr (RawMutPtr T) {
+    convert = move value => __mut_opaque_to_mut_pointer value
+}
+
+impl<T> Convert (RawPtr T) RawOpaqueMutPtr {
+    convert = move value => __pointer_to_mut_opaque value
+}
+
+impl<T> Convert RawOpaqueMutPtr (RawPtr T) {
+    convert = move value => __mut_opaque_to_pointer value
+}
+
+impl Convert RawOpaquePtr RawOpaqueMutPtr {
+    convert = move value => __opaque_to_mut_opaque value
+}
+
+impl Convert RawOpaqueMutPtr RawOpaquePtr {
+    convert = move value => __mut_opaque_to_opaque value
+}
+
+impl<T> Convert (RawMutPtr T) USize {
+    convert = move value => __mut_pointer_address value
+}
+
+impl<T> Convert USize (RawMutPtr T) {
+    convert = move value => __address_mut_pointer value
+}
+
+impl Convert RawOpaqueMutPtr USize {
+    convert = move value => __mut_opaque_address value
+}
+
+impl Convert USize RawOpaqueMutPtr {
+    convert = move value => __address_mut_opaque value
+}
+
+impl<T> Eq (RawPtr T) {
+    eq = (left, right) => ((left as USize) == (right as USize))
+}
+
+impl<T> Eq (RawMutPtr T) {
+    eq = (left, right) => ((left as USize) == (right as USize))
+}
+
+impl Eq RawOpaquePtr {
+    eq = (left, right) => ((left as USize) == (right as USize))
+}
+
+impl Eq RawOpaqueMutPtr {
+    eq = (left, right) => ((left as USize) == (right as USize))
+}
+
 companion<T> RawPtr T {
     /// Returns a new pointer offset by a signed number of bytes.
     /// Does not validate the resulting address, alignment, or allocation lifetime.
     /// Does not dereference the pointer or transfer ownership.
     pub def offset = (pointer: RawPtr T; bytes: ISize) =>
         RawPtr T :: __pointer_offset (pointer, bytes)
+    /// Returns the null pointer.
+    pub def null = () => RawPtr T :: Convert.convert (USize :: 0)
+}
+
+companion<T where Copy T> RawPtr T {
+    /// Copies the pointee. The caller must provide valid, aligned, initialized memory.
+    pub def load = pointer: RawPtr T => T :: __pointer_load pointer
+}
+
+companion<T> RawMutPtr T {
+    /// Returns a pointer offset by a signed number of bytes, without validation.
+    pub def offset = (pointer: RawMutPtr T; bytes: ISize) =>
+        RawMutPtr T :: __mut_pointer_offset (pointer, bytes)
+    /// Returns the null pointer.
+    pub def null = () => RawMutPtr T :: Convert.convert (USize :: 0)
+}
+
+companion<T where Copy T> RawMutPtr T {
+    /// Copies the pointee. The caller must provide valid, aligned, initialized memory.
+    pub def load = pointer: RawMutPtr T => T :: __mut_pointer_load pointer
+    /// Overwrites the pointee without dropping its previous value.
+    /// The caller must provide valid, aligned, writable memory.
+    pub def store = (pointer: RawMutPtr T; value: T) => () :: __pointer_store (pointer, value)
 }
 
 companion RawOpaquePtr {
@@ -62,4 +185,14 @@ companion RawOpaquePtr {
     /// Does not dereference the pointer or transfer ownership.
     pub def offset = (pointer: RawOpaquePtr; bytes: ISize) =>
         RawOpaquePtr :: __opaque_offset (pointer, bytes)
+    /// Returns the null pointer.
+    pub def null = () => RawOpaquePtr :: Convert.convert (USize :: 0)
+}
+
+companion RawOpaqueMutPtr {
+    /// Returns a pointer offset by a signed number of bytes, without validation.
+    pub def offset = (pointer: RawOpaqueMutPtr; bytes: ISize) =>
+        RawOpaqueMutPtr :: __mut_opaque_offset (pointer, bytes)
+    /// Returns the null pointer.
+    pub def null = () => RawOpaqueMutPtr :: Convert.convert (USize :: 0)
 }

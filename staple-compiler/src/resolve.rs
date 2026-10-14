@@ -94,8 +94,10 @@ pub enum BuiltinType {
     Buffer,
     CChar,
     RawOpaquePtr,
+    RawOpaqueMutPtr,
     CString,
     RawPtr,
+    RawMutPtr,
     IO,
     Reactive,
     Syntax,
@@ -285,6 +287,8 @@ pub enum IntrinsicFunction {
     ParseNumber {
         to: NumericType,
     },
+    PointerLoad,
+    PointerStore,
     PointerOffset,
     PointerCast,
     PointerAddress,
@@ -1693,6 +1697,18 @@ impl NameResolver {
             (
                 "std/ptr.sta",
                 "std.ptr",
+                "RawMutPtr",
+                BuiltinType::RawMutPtr,
+            ),
+            (
+                "std/ptr.sta",
+                "std.ptr",
+                "RawOpaqueMutPtr",
+                BuiltinType::RawOpaqueMutPtr,
+            ),
+            (
+                "std/ptr.sta",
+                "std.ptr",
                 "RawOpaquePtr",
                 BuiltinType::RawOpaquePtr,
             ),
@@ -1908,6 +1924,97 @@ impl NameResolver {
             ));
         }
         for (module, name, intrinsic) in [
+            (
+                "std.ptr",
+                "__mut_pointer_to_pointer",
+                IntrinsicFunction::PointerCast,
+            ),
+            (
+                "std.ptr",
+                "__pointer_to_mut_pointer",
+                IntrinsicFunction::PointerCast,
+            ),
+            (
+                "std.ptr",
+                "__mut_pointer_to_opaque",
+                IntrinsicFunction::PointerCast,
+            ),
+            (
+                "std.ptr",
+                "__opaque_to_mut_pointer",
+                IntrinsicFunction::PointerCast,
+            ),
+            (
+                "std.ptr",
+                "__mut_pointer_to_mut_opaque",
+                IntrinsicFunction::PointerCast,
+            ),
+            (
+                "std.ptr",
+                "__mut_opaque_to_mut_pointer",
+                IntrinsicFunction::PointerCast,
+            ),
+            (
+                "std.ptr",
+                "__pointer_to_mut_opaque",
+                IntrinsicFunction::PointerCast,
+            ),
+            (
+                "std.ptr",
+                "__mut_opaque_to_pointer",
+                IntrinsicFunction::PointerCast,
+            ),
+            (
+                "std.ptr",
+                "__opaque_to_mut_opaque",
+                IntrinsicFunction::PointerCast,
+            ),
+            (
+                "std.ptr",
+                "__mut_opaque_to_opaque",
+                IntrinsicFunction::PointerCast,
+            ),
+            ("std.ptr", "__pointer_load", IntrinsicFunction::PointerLoad),
+            (
+                "std.ptr",
+                "__mut_pointer_load",
+                IntrinsicFunction::PointerLoad,
+            ),
+            (
+                "std.ptr",
+                "__pointer_store",
+                IntrinsicFunction::PointerStore,
+            ),
+            (
+                "std.ptr",
+                "__mut_pointer_address",
+                IntrinsicFunction::PointerAddress,
+            ),
+            (
+                "std.ptr",
+                "__address_mut_pointer",
+                IntrinsicFunction::AddressPointer,
+            ),
+            (
+                "std.ptr",
+                "__mut_opaque_address",
+                IntrinsicFunction::PointerAddress,
+            ),
+            (
+                "std.ptr",
+                "__address_mut_opaque",
+                IntrinsicFunction::AddressPointer,
+            ),
+            (
+                "std.ptr",
+                "__mut_pointer_offset",
+                IntrinsicFunction::PointerOffset,
+            ),
+            (
+                "std.ptr",
+                "__mut_opaque_offset",
+                IntrinsicFunction::PointerOffset,
+            ),
             (
                 "std.ptr",
                 "__pointer_offset",
@@ -2348,7 +2455,11 @@ impl NameResolver {
         }
         if matches!(
             builtin,
-            BuiltinType::RawPtr | BuiltinType::Ref | BuiltinType::Slice | BuiltinType::Buffer
+            BuiltinType::RawPtr
+                | BuiltinType::RawMutPtr
+                | BuiltinType::Ref
+                | BuiltinType::Slice
+                | BuiltinType::Buffer
         ) && declaration.type_parameters.len() != 1
         {
             self.diagnostics.push(Diagnostic::new(
@@ -2389,6 +2500,7 @@ impl NameResolver {
         if matches!(
             builtin,
             BuiltinType::RawOpaquePtr
+                | BuiltinType::RawOpaqueMutPtr
                 | BuiltinType::Cancelled
                 | BuiltinType::Scheduler
                 | BuiltinType::Tasks

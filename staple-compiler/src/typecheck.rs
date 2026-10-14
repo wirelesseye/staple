@@ -494,6 +494,7 @@ pub enum CheckedType {
     CString,
     CChar,
     RawOpaquePtr,
+    RawOpaqueMutPtr,
     Parameter {
         id: TypeParameterId,
         name: String,
@@ -511,6 +512,9 @@ pub enum CheckedType {
         arguments: Vec<CheckedType>,
     },
     RawPtr {
+        pointee: Box<CheckedType>,
+    },
+    RawMutPtr {
         pointee: Box<CheckedType>,
     },
     Product(CheckedProductType),
@@ -628,6 +632,9 @@ fn compact_type_template(value_type: CheckedType) -> CheckedType {
         CheckedType::Slice(inner) => CheckedType::Slice(Box::new(compact_type_template(*inner))),
         CheckedType::Buffer(inner) => CheckedType::Buffer(Box::new(compact_type_template(*inner))),
         CheckedType::RawPtr { pointee } => CheckedType::RawPtr {
+            pointee: Box::new(compact_type_template(*pointee)),
+        },
+        CheckedType::RawMutPtr { pointee } => CheckedType::RawMutPtr {
             pointee: Box::new(compact_type_template(*pointee)),
         },
         CheckedType::Array { element, count } => CheckedType::Array {
@@ -1265,6 +1272,7 @@ impl CheckedType {
             Self::Forall(scheme) => scheme.body.is_fully_known(),
             Self::Inferred | Self::Error | Self::TypeConstructor { .. } => false,
             Self::RawPtr { pointee } => pointee.is_fully_known(),
+            Self::RawMutPtr { pointee } => pointee.is_fully_known(),
             Self::Ref(value) | Self::Slice(value) | Self::Buffer(value) => value.is_fully_known(),
             Self::Array { element, count } => element.is_fully_known() && count.is_fully_known(),
             Self::Product(product) => {
@@ -1302,6 +1310,7 @@ impl CheckedType {
             | Self::String
             | Self::StringLiteralSet(_)
             | Self::CString
+            | Self::RawOpaqueMutPtr
             | Self::RawOpaquePtr
             | Self::CChar
             | Self::Opaque { .. }
@@ -1328,6 +1337,7 @@ impl CheckedType {
             | Self::Ref(_)
             | Self::Slice(_)
             | Self::Buffer(_)
+            | Self::RawMutPtr { .. }
             | Self::RawPtr { .. }
             | Self::Forall(_)
             | Self::Function(_)
@@ -1346,6 +1356,7 @@ impl CheckedType {
             | Self::String
             | Self::StringLiteralSet(_)
             | Self::CString
+            | Self::RawOpaqueMutPtr
             | Self::RawOpaquePtr
             | Self::CChar => true,
             Self::NumberLiteral(_) => true,
@@ -1391,6 +1402,7 @@ impl fmt::Display for CheckedType {
             }
             Self::CString => formatter.write_str("CString"),
             Self::RawOpaquePtr => formatter.write_str("RawOpaquePtr"),
+            Self::RawOpaqueMutPtr => formatter.write_str("RawOpaqueMutPtr"),
             Self::CChar => formatter.write_str("CChar"),
             Self::Parameter { name, .. } => formatter.write_str(name),
             Self::TypeConstructor {
@@ -1412,6 +1424,7 @@ impl fmt::Display for CheckedType {
                 Ok(())
             }
             Self::RawPtr { pointee } => write!(formatter, "RawPtr {pointee}"),
+            Self::RawMutPtr { pointee } => write!(formatter, "RawMutPtr {pointee}"),
             Self::Product(product) => {
                 formatter.write_str("(")?;
                 for (index, element) in product.elements.iter().enumerate() {
@@ -4834,6 +4847,8 @@ impl TypeChecker {
             let expected = match intrinsic {
                 crate::IntrinsicFunction::NumericConvert { .. }
                 | crate::IntrinsicFunction::ParseNumber { .. }
+                | crate::IntrinsicFunction::PointerLoad
+                | crate::IntrinsicFunction::PointerStore
                 | crate::IntrinsicFunction::PointerOffset
                 | crate::IntrinsicFunction::PointerCast
                 | crate::IntrinsicFunction::PointerAddress
@@ -5080,7 +5095,31 @@ impl TypeChecker {
                     .cloned()
                     .unwrap_or(CheckedType::Error),
             };
-            if !optional_types_equivalent(self.symbol_value_type(*symbol), Some(&expected)) {
+            // Raw memory operations must retain the Copy contract even if a
+            // standard-library intrinsic declaration is edited independently
+            // of its public companion wrapper.
+            let copy_pointee = match (*intrinsic, &expected) {
+                (crate::IntrinsicFunction::PointerLoad, CheckedType::Function(function)) => {
+                    Some(function.result.as_ref())
+                }
+                (crate::IntrinsicFunction::PointerStore, CheckedType::Function(function)) => {
+                    let CheckedType::Product(product) = function.parameter.as_ref() else {
+                        unreachable!("validated pointer store parameter");
+                    };
+                    Some(&product.elements[1].value_type)
+                }
+                _ => None,
+            };
+            let copy_contract = copy_pointee.is_none_or(|pointee| {
+                let bounds = self
+                    .callable_symbol_bounds
+                    .get(symbol)
+                    .map_or(&[][..], |(bounds, _)| bounds.as_slice());
+                self.is_copy_with(pointee, bounds)
+            });
+            if !copy_contract
+                || !optional_types_equivalent(self.symbol_value_type(*symbol), Some(&expected))
+            {
                 self.diagnostics.push(Diagnostic::new(
                     Span::Compiler,
                     "standard-library intrinsic has an invalid type",
@@ -11077,6 +11116,48 @@ impl TypeChecker {
                             };
                             root_callee = previous.callee.as_ref();
                         }
+                        // Slot filling instantiates the full function without
+                        // passing through instantiate_function_use. Check the
+                        // root scheme against that full type, including bounds
+                        // inferred by a later slot of a partial application.
+                        let root_symbol =
+                            module.symbol_for(root_callee.syntax().id).or_else(|| {
+                                let function = self.function_origin(module, root_callee)?;
+                                self.symbols_by_function.get(&function).copied()
+                            });
+                        let root_scheme = self
+                            .expression_schemes
+                            .get(&root_callee.syntax().id)
+                            .cloned()
+                            .or_else(|| {
+                                let value_type =
+                                    self.expression_types.get(&root_callee.syntax().id)?;
+                                match value_type {
+                                    CheckedType::Forall(scheme) => Some(scheme.as_ref().clone()),
+                                    _ => None,
+                                }
+                            })
+                            .or_else(|| {
+                                match root_symbol.and_then(|symbol| self.symbol_types.get(&symbol))
+                                {
+                                    Some(CheckedType::Forall(scheme)) => {
+                                        Some(scheme.as_ref().clone())
+                                    }
+                                    _ => None,
+                                }
+                            });
+                        if let Some(scheme) = root_scheme {
+                            self.expression_schemes
+                                .entry(root_callee.syntax().id)
+                                .or_insert_with(|| scheme.clone());
+                            self.check_instantiated_bounds(
+                                scheme.trait_bounds,
+                                scheme.subtype_bounds,
+                                &scheme.body,
+                                &CheckedType::Function(original.clone()),
+                                root_callee.syntax().span.clone(),
+                            );
+                        }
                         self.expression_types.insert(
                             root_callee.syntax().id,
                             CheckedType::Function(original.clone()),
@@ -16042,6 +16123,11 @@ impl TypeChecker {
                 pointee: Box::new(arguments[0].clone()),
             };
         }
+        if module.builtin_type(id) == Some(BuiltinType::RawMutPtr) {
+            return CheckedType::RawMutPtr {
+                pointee: Box::new(arguments[0].clone()),
+            };
+        }
         if module.builtin_type(id) == Some(BuiltinType::Buffer) {
             return CheckedType::Buffer(Box::new(arguments[0].clone()));
         }
@@ -16414,11 +16500,17 @@ impl TypeChecker {
                     arguments: Vec::new(),
                 },
                 BuiltinType::RawOpaquePtr => CheckedType::RawOpaquePtr,
+                BuiltinType::RawOpaqueMutPtr => CheckedType::RawOpaqueMutPtr,
                 BuiltinType::CChar => CheckedType::CChar,
                 BuiltinType::CString => CheckedType::CString,
                 BuiltinType::RawPtr => CheckedType::TypeConstructor {
                     id,
                     name: "RawPtr".to_owned(),
+                    arguments: Vec::new(),
+                },
+                BuiltinType::RawMutPtr => CheckedType::TypeConstructor {
+                    id,
+                    name: "RawMutPtr".to_owned(),
                     arguments: Vec::new(),
                 },
                 BuiltinType::IO => CheckedType::Opaque {
@@ -16711,7 +16803,8 @@ pub(crate) fn types_equivalent(actual: &CheckedType, expected: &CheckedType) -> 
         (CheckedType::Ref(a), CheckedType::Ref(b))
         | (CheckedType::Slice(a), CheckedType::Slice(b))
         | (CheckedType::Buffer(a), CheckedType::Buffer(b))
-        | (CheckedType::RawPtr { pointee: a }, CheckedType::RawPtr { pointee: b }) => {
+        | (CheckedType::RawPtr { pointee: a }, CheckedType::RawPtr { pointee: b })
+        | (CheckedType::RawMutPtr { pointee: a }, CheckedType::RawMutPtr { pointee: b }) => {
             types_equivalent(a, b)
         }
         (
@@ -16895,6 +16988,7 @@ fn schemes_well_formed(ty: &CheckedType) -> bool {
         CheckedType::Ref(ty)
         | CheckedType::Slice(ty)
         | CheckedType::Buffer(ty)
+        | CheckedType::RawMutPtr { pointee: ty }
         | CheckedType::RawPtr { pointee: ty } => schemes_well_formed(ty),
         CheckedType::Array { element, count } => {
             schemes_well_formed(element) && schemes_well_formed(count)
@@ -16933,6 +17027,9 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
         }
         (CheckedType::CString, CheckedType::CString) => Some(CheckedType::CString),
         (CheckedType::RawOpaquePtr, CheckedType::RawOpaquePtr) => Some(CheckedType::RawOpaquePtr),
+        (CheckedType::RawOpaqueMutPtr, CheckedType::RawOpaqueMutPtr) => {
+            Some(CheckedType::RawOpaqueMutPtr)
+        }
         (CheckedType::CChar, CheckedType::CChar) => Some(CheckedType::CChar),
         (CheckedType::NumberLiteral(_), CheckedType::USize) => Some(CheckedType::USize),
         (CheckedType::NumberLiteral(actual), CheckedType::NumberLiteral(expected))
@@ -16990,6 +17087,12 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
                 pointee: Box::new(pointee),
             })
         }
+        (
+            CheckedType::RawMutPtr { pointee: actual },
+            CheckedType::RawMutPtr { pointee: expected },
+        ) => merge_types(*actual, *expected).map(|pointee| CheckedType::RawMutPtr {
+            pointee: Box::new(pointee),
+        }),
         (CheckedType::Ref(actual), CheckedType::Ref(expected)) => {
             merge_types(*actual, *expected).map(|value| CheckedType::Ref(Box::new(value)))
         }
@@ -17559,6 +17662,9 @@ pub(crate) fn substitute_type(
         CheckedType::RawPtr { pointee } => CheckedType::RawPtr {
             pointee: Box::new(substitute_type(*pointee, substitutions)),
         },
+        CheckedType::RawMutPtr { pointee } => CheckedType::RawMutPtr {
+            pointee: Box::new(substitute_type(*pointee, substitutions)),
+        },
         CheckedType::Ref(value) => {
             CheckedType::Ref(Box::new(substitute_type(*value, substitutions)))
         }
@@ -17783,6 +17889,9 @@ fn erase_type_parameters_in(
         CheckedType::RawPtr { pointee } => CheckedType::RawPtr {
             pointee: Box::new(erase_type_parameters_in(pointee, solvable)),
         },
+        CheckedType::RawMutPtr { pointee } => CheckedType::RawMutPtr {
+            pointee: Box::new(erase_type_parameters_in(pointee, solvable)),
+        },
         CheckedType::Ref(value) => {
             CheckedType::Ref(Box::new(erase_type_parameters_in(value, solvable)))
         }
@@ -17888,6 +17997,7 @@ pub(crate) fn type_contains_scheme(ty: &CheckedType) -> bool {
         CheckedType::Ref(ty)
         | CheckedType::Slice(ty)
         | CheckedType::Buffer(ty)
+        | CheckedType::RawMutPtr { pointee: ty }
         | CheckedType::RawPtr { pointee: ty } => type_contains_scheme(ty),
         CheckedType::Array { element, count } => {
             type_contains_scheme(element) || type_contains_scheme(count)
@@ -17909,6 +18019,7 @@ pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
         CheckedType::Forall(scheme) => !scheme.free_ids(false).is_empty(),
         CheckedType::Parameter { .. } => true,
         CheckedType::RawPtr { pointee } => contains_type_parameter(pointee),
+        CheckedType::RawMutPtr { pointee } => contains_type_parameter(pointee),
         CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
             contains_type_parameter(value)
         }
@@ -17952,7 +18063,8 @@ fn contains_effect_parameter(value_type: &CheckedType) -> bool {
                 || contains_effect_parameter(&function.parameter)
                 || contains_effect_parameter(&function.result)
         }
-        CheckedType::RawPtr { pointee }
+        CheckedType::RawMutPtr { pointee }
+        | CheckedType::RawPtr { pointee }
         | CheckedType::Ref(pointee)
         | CheckedType::Slice(pointee)
         | CheckedType::Buffer(pointee) => contains_effect_parameter(pointee),
@@ -17987,6 +18099,7 @@ pub(crate) fn contains_inferred_type(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Inferred | CheckedType::TypeConstructor { .. } => true,
         CheckedType::RawPtr { pointee } => contains_inferred_type(pointee),
+        CheckedType::RawMutPtr { pointee } => contains_inferred_type(pointee),
         CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
             contains_inferred_type(value)
         }
@@ -18025,6 +18138,7 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
                 ids.insert(*id);
             }
             CheckedType::RawPtr { pointee } => collect(pointee, ids),
+            CheckedType::RawMutPtr { pointee } => collect(pointee, ids),
             CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
                 collect(value, ids)
             }
@@ -18176,6 +18290,9 @@ fn unify_impl_headers(
             true
         }
         (CheckedType::RawPtr { pointee: left }, CheckedType::RawPtr { pointee: right }) => {
+            unify_impl_headers(left, right, free_parameters, substitutions)
+        }
+        (CheckedType::RawMutPtr { pointee: left }, CheckedType::RawMutPtr { pointee: right }) => {
             unify_impl_headers(left, right, free_parameters, substitutions)
         }
         (CheckedType::Ref(left), CheckedType::Ref(right))
@@ -18365,6 +18482,7 @@ fn sized_type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId
             }
             CheckedType::Parameter { .. } => {}
             CheckedType::RawPtr { pointee } => collect(pointee, ids),
+            CheckedType::RawMutPtr { pointee } => collect(pointee, ids),
             CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
                 collect(value, ids)
             }
@@ -18458,6 +18576,7 @@ fn collect_rigid_parameters(
         CheckedType::Ref(ty)
         | CheckedType::Slice(ty)
         | CheckedType::Buffer(ty)
+        | CheckedType::RawMutPtr { pointee: ty }
         | CheckedType::RawPtr { pointee: ty } => {
             collect_rigid_parameters(ty, declared, substitutions)
         }
@@ -18533,6 +18652,10 @@ fn infer_type_parameters_mode(
         }
         CheckedType::RawPtr { pointee } => {
             matches!(actual, CheckedType::RawPtr { pointee: actual_pointee }
+            if infer_type_parameters_mode(allow_schemes, pointee, actual_pointee, substitutions))
+        }
+        CheckedType::RawMutPtr { pointee } => {
+            matches!(actual, CheckedType::RawMutPtr { pointee: actual_pointee }
             if infer_type_parameters_mode(allow_schemes, pointee, actual_pointee, substitutions))
         }
         CheckedType::Ref(value) => {
@@ -18821,7 +18944,8 @@ fn merge_trait_arguments(left: &[CheckedType], right: &[CheckedType]) -> Option<
 
 fn clear_function_effects(value_type: &mut CheckedType) {
     match value_type {
-        CheckedType::RawPtr { pointee }
+        CheckedType::RawMutPtr { pointee }
+        | CheckedType::RawPtr { pointee }
         | CheckedType::Ref(pointee)
         | CheckedType::Slice(pointee)
         | CheckedType::Buffer(pointee) => clear_function_effects(pointee),
@@ -18982,7 +19106,8 @@ fn array_lengths_are_natural(
             };
             count_is_natural && array_lengths_are_natural(element, bounds, natural_trait)
         }
-        CheckedType::RawPtr { pointee }
+        CheckedType::RawMutPtr { pointee }
+        | CheckedType::RawPtr { pointee }
         | CheckedType::Ref(pointee)
         | CheckedType::Slice(pointee)
         | CheckedType::Buffer(pointee) => array_lengths_are_natural(pointee, bounds, natural_trait),
@@ -20128,6 +20253,7 @@ fn checked_type_contains_sum(value_type: &CheckedType) -> bool {
                 || checked_type_contains_sum(&function.result)
         }
         CheckedType::RawPtr { pointee } => checked_type_contains_sum(pointee),
+        CheckedType::RawMutPtr { pointee } => checked_type_contains_sum(pointee),
         CheckedType::Ref(value) | CheckedType::Buffer(value) => checked_type_contains_sum(value),
         CheckedType::Wrapper {
             arguments,
@@ -20149,6 +20275,7 @@ fn checked_type_contains_slice(value_type: &CheckedType) -> bool {
         CheckedType::Slice(_) => true,
         CheckedType::Ref(value)
         | CheckedType::Buffer(value)
+        | CheckedType::RawMutPtr { pointee: value }
         | CheckedType::RawPtr { pointee: value } => checked_type_contains_slice(value),
         CheckedType::Product(product) => product
             .elements
@@ -20437,11 +20564,13 @@ pub(crate) fn is_copy_type(
         | CheckedType::NumberLiteral(_)
         | CheckedType::String
         | CheckedType::StringLiteralSet(_)
+        | CheckedType::RawOpaqueMutPtr
         | CheckedType::RawOpaquePtr
         | CheckedType::CChar
         | CheckedType::CString
         | CheckedType::Buffer(_)
         | CheckedType::Opaque { .. }
+        | CheckedType::RawMutPtr { .. }
         | CheckedType::RawPtr { .. }
         | CheckedType::Ref(_)
         | CheckedType::Slice(_)
@@ -20789,6 +20918,19 @@ fn valid_conversion_intrinsic_type(
         crate::IntrinsicFunction::ParseNumber { to } => {
             *function.parameter == CheckedType::String && checked_result(to)
         }
+        crate::IntrinsicFunction::PointerLoad => {
+            matches!(function.parameter.as_ref(), CheckedType::RawPtr { pointee } | CheckedType::RawMutPtr { pointee }
+                if **pointee == *function.result && pointee.is_sized())
+        }
+        crate::IntrinsicFunction::PointerStore => {
+            matches!(function.parameter.as_ref(), CheckedType::Product(product)
+                if !product.variadic && matches!(product.elements.as_slice(), [pointer, value]
+                    if pointer.name.is_none() && value.name.is_none()
+                    && pointer.default.is_none() && value.default.is_none()
+                    && matches!(&pointer.value_type, CheckedType::RawMutPtr { pointee }
+                        if **pointee == value.value_type && pointee.is_sized())))
+                && matches!(function.result.as_ref(), CheckedType::Product(product) if product.elements.is_empty() && !product.variadic)
+        }
         crate::IntrinsicFunction::PointerOffset => {
             matches!(function.parameter.as_ref(), CheckedType::Product(product)
                 if !product.variadic && matches!(product.elements.as_slice(), [pointer, count]
@@ -20796,26 +20938,48 @@ fn valid_conversion_intrinsic_type(
                     && pointer.default.is_none() && count.default.is_none()
                     && count.value_type == CheckedType::ISize
                     && pointer.value_type == *function.result
-                    && matches!(pointer.value_type, CheckedType::RawPtr { .. } | CheckedType::RawOpaquePtr)))
+                    && matches!(pointer.value_type, CheckedType::RawPtr { .. } | CheckedType::RawMutPtr { .. } | CheckedType::RawOpaquePtr | CheckedType::RawOpaqueMutPtr)))
         }
         crate::IntrinsicFunction::PointerCast => {
-            matches!(
-                (function.parameter.as_ref(), function.result.as_ref()),
-                (CheckedType::RawPtr { .. }, CheckedType::RawOpaquePtr)
-                    | (CheckedType::RawOpaquePtr, CheckedType::RawPtr { .. })
-            )
+            let typed = |ty: &CheckedType| match ty {
+                CheckedType::RawPtr { pointee } | CheckedType::RawMutPtr { pointee } => {
+                    Some(pointee.clone())
+                }
+                _ => None,
+            };
+            let pointer = |ty: &CheckedType| {
+                matches!(
+                    ty,
+                    CheckedType::RawPtr { .. }
+                        | CheckedType::RawMutPtr { .. }
+                        | CheckedType::RawOpaquePtr
+                        | CheckedType::RawOpaqueMutPtr
+                )
+            };
+            pointer(&function.parameter)
+                && pointer(&function.result)
+                && match (typed(&function.parameter), typed(&function.result)) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => true,
+                }
         }
         crate::IntrinsicFunction::PointerAddress => {
             matches!(
                 function.parameter.as_ref(),
-                CheckedType::RawPtr { .. } | CheckedType::RawOpaquePtr
+                CheckedType::RawPtr { .. }
+                    | CheckedType::RawMutPtr { .. }
+                    | CheckedType::RawOpaquePtr
+                    | CheckedType::RawOpaqueMutPtr
             ) && *function.result == CheckedType::USize
         }
         crate::IntrinsicFunction::AddressPointer => {
             *function.parameter == CheckedType::USize
                 && matches!(
                     function.result.as_ref(),
-                    CheckedType::RawPtr { .. } | CheckedType::RawOpaquePtr
+                    CheckedType::RawPtr { .. }
+                        | CheckedType::RawMutPtr { .. }
+                        | CheckedType::RawOpaquePtr
+                        | CheckedType::RawOpaqueMutPtr
                 )
         }
         crate::IntrinsicFunction::ValidateUtf8 => {

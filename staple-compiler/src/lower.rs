@@ -13688,6 +13688,8 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         )),
         Intrinsic::NumericConvert { .. }
         | Intrinsic::ParseNumber { .. }
+        | Intrinsic::PointerLoad
+        | Intrinsic::PointerStore
         | Intrinsic::PointerOffset
         | Intrinsic::PointerCast
         | Intrinsic::PointerAddress
@@ -14085,6 +14087,7 @@ fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
             arguments.iter().any(checked_type_contains_ref)
         }
         CheckedType::RawPtr { pointee } => checked_type_contains_ref(pointee),
+        CheckedType::RawMutPtr { pointee } => checked_type_contains_ref(pointee),
         _ => false,
     }
 }

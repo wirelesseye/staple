@@ -4883,7 +4883,9 @@ fn cinterop_types_require_an_explicit_import() {
 fn raw_pointer_types_require_std_ptr_imports() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for imports in ["", "use std.cinterop.*\n"] {
-        let source = format!("{imports}def pointer: RawPtr I32\ndef opaque: RawOpaquePtr\n");
+        let source = format!(
+            "{imports}def pointer: RawPtr I32\ndef opaque: RawOpaquePtr\ndef mutable: RawMutPtr I32\ndef opaque_mutable: RawOpaqueMutPtr\n"
+        );
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
             .load_source(&source, root)
@@ -4891,7 +4893,7 @@ fn raw_pointer_types_require_std_ptr_imports() {
         let diagnostics = NameResolver::new()
             .resolve_program(program)
             .expect_err_diagnostics("raw pointer types require std.ptr imports");
-        for name in ["RawPtr", "RawOpaquePtr"] {
+        for name in ["RawPtr", "RawOpaquePtr", "RawMutPtr", "RawOpaqueMutPtr"] {
             assert!(
                 diagnostics
                     .iter()
@@ -4901,9 +4903,11 @@ fn raw_pointer_types_require_std_ptr_imports() {
         }
     }
     type_check(concat!(
-        "use std.ptr.(RawPtr, RawOpaquePtr)\n",
+        "use std.ptr.(RawPtr, RawOpaquePtr, RawMutPtr, RawOpaqueMutPtr)\n",
         "def pointer: RawPtr I32 -> RawPtr I32 = value => value\n",
         "def opaque: RawOpaquePtr -> RawOpaquePtr = value => value\n",
+        "def mutable: RawMutPtr I32 -> RawMutPtr I32 = value => value\n",
+        "def opaque_mutable: RawOpaqueMutPtr -> RawOpaqueMutPtr = value => value\n",
     ));
 }
 
@@ -12268,6 +12272,9 @@ fn stdlib_opaque_copy_policy_uses_explicit_negative_implementations() {
         ("CChar", true),
         ("RawPtr I32", true),
         ("RawOpaquePtr", true),
+        ("RawMutPtr I32", true),
+        ("RawMutPtr CString", true),
+        ("RawOpaqueMutPtr", true),
         ("IO", true),
         ("CString", false),
         ("Buffer I32", false),
@@ -15843,4 +15850,34 @@ fn value_defined_companion_members_use_companion_parameters() {
         "let text: Box String = Box.rewrap (Box 1, name)\n",
     ));
     lower(&module);
+}
+
+#[test]
+fn raw_pointer_memory_intrinsics_require_copy_and_matching_types() {
+    for (original, replacement) in [
+        (
+            "__pointer_load: <T where Copy T> RawPtr T -> T",
+            "__pointer_load: <T> RawPtr T -> T",
+        ),
+        (
+            "__mut_pointer_load: <T where Copy T> RawMutPtr T -> T",
+            "__mut_pointer_load: <T where Copy T> RawMutPtr T -> I32",
+        ),
+        (
+            "__pointer_store: <T where Copy T> (RawMutPtr T, T) -> ()",
+            "__pointer_store: <T> (RawMutPtr T, T) -> ()",
+        ),
+        (
+            "__pointer_store: <T where Copy T> (RawMutPtr T, T) -> ()",
+            "__pointer_store: <T where Copy T> (RawPtr T, T) -> ()",
+        ),
+    ] {
+        let diagnostics = stdlib_modifier_diagnostics("std/ptr.sta", original, replacement);
+        assert!(
+            diagnostics.iter().any(|d| d
+                .message
+                .contains("standard-library intrinsic has an invalid type")),
+            "{replacement}: {diagnostics:?}"
+        );
+    }
 }

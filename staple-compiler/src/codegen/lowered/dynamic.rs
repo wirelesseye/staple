@@ -3764,6 +3764,38 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 return Ok(storage);
             }
+            crate::IntrinsicFunction::PointerLoad | crate::IntrinsicFunction::PointerStore => {
+                let pointer = self
+                    .load_dynamic_storage(
+                        self.backend.context.ptr_type(AddressSpace::default()),
+                        slot_pointer(0)?,
+                        "raw.pointer",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                if intrinsic == crate::IntrinsicFunction::PointerLoad {
+                    let descriptor =
+                        self.dynamic_descriptor(&call.result_type, environment, span)?;
+                    self.backend
+                        .copy_dynamic_value(descriptor, pointer, storage)?;
+                } else {
+                    let CheckedType::Product(product) = call.function_type.parameter.as_ref()
+                    else {
+                        return Err(Diagnostic::new(
+                            span.clone(),
+                            "pointer store requires a product",
+                        ));
+                    };
+                    let descriptor = self.dynamic_descriptor(
+                        &product.elements[1].value_type,
+                        environment,
+                        span,
+                    )?;
+                    self.backend
+                        .copy_dynamic_value(descriptor, slot_pointer(1)?, pointer)?;
+                }
+                return Ok(storage);
+            }
             crate::IntrinsicFunction::RefReplace => {
                 let reference = slot_pointer(0)?;
                 let replacement = slot_pointer(1)?;
@@ -9251,7 +9283,9 @@ fn is_static_layout_type(value_type: &CheckedType) -> bool {
         CheckedType::Ref(_)
             | CheckedType::Slice(_)
             | CheckedType::Buffer(_)
+            | CheckedType::RawMutPtr { .. }
             | CheckedType::RawPtr { .. }
+            | CheckedType::RawOpaqueMutPtr
             | CheckedType::RawOpaquePtr
             | CheckedType::Function(_)
             | CheckedType::Forall(_)

@@ -3705,13 +3705,15 @@ over a frozen buffer, keeps the whole allocation alive, including the other
 elements, until no such pointer remains.
 
 `CChar` and `CString` are public opaque types in `std.cinterop`.
-`RawOpaquePtr` and the generic `RawPtr` constructor are public opaque types in
-`std.ptr`. Source code must import them explicitly, for example with
+`RawPtr`, `RawMutPtr`, `RawOpaquePtr`, and `RawOpaqueMutPtr` are public opaque
+types in `std.ptr`. Source code must import them explicitly, for example with
 `use std.cinterop.*` and `use std.ptr.*`. `RawPtr T` is a non-owning, low-level
 pointer type; the pointee is a compile-time argument with no runtime field.
 Raw pointers are `Copy` and do not manage allocation lifetime or validate their
 targets. They can also be used for C interop. There are no `*T` or `*const T`
-type forms and Staple does not distinguish mutable and const raw pointers.
+type forms. `RawMutPtr T` permits raw reads and writes, while `RawPtr T`
+permits raw reads. Their opaque counterparts have no pointee type and must be
+converted to typed pointers before accessing memory.
 
 `CString` is an owned, move-only pointer to NUL-terminated bytes and drops with
 `free`. It is compatible with `RawPtr CChar`, but an arbitrary
@@ -3803,8 +3805,8 @@ preserves the pointer. Integer-to-pointer conversion does not validate the
 address, alignment, allocation lifetime, or whether dereferencing is permitted.
 Address arithmetic follows the existing `USize` arithmetic rules.
 
-`RawPtr.offset pointer bytes` and `RawOpaquePtr.offset pointer bytes` return a
-new pointer of the same type, offset by `bytes: ISize`. Both count bytes,
+The `offset pointer bytes` companion function on all four pointer types returns
+a new pointer of the same type, offset by `bytes: ISize`. All count bytes,
 regardless of the pointee type; negative offsets move backward. They do not
 dereference the pointer, validate its address or allocation lifetime, or
 transfer ownership.
@@ -3823,6 +3825,35 @@ let opaque = pointer as RawOpaquePtr
 let restored = opaque as RawPtr I32
 let inferred: RawPtr I32 = opaque as _
 let address = opaque as USize
+```
+
+
+`RawMutPtr T` and `RawOpaqueMutPtr` also convert to and from `USize`.
+All four pointer families explicitly convert to one another, including conversions
+that recover mutability. Direct conversions between `RawPtr T` and `RawMutPtr T`
+preserve `T`; reinterpret a pointee through an opaque pointer. These conversions
+do not validate memory or grant ownership, and there are no implicit pointer
+conversions. The existing call-scoped `CString` view remains limited to
+`RawPtr CChar`.
+
+All four pointer types provide `null ()` and implement `Eq` by address, without
+requiring `Eq` or `Copy` on the pointee. Comparing different pointer types requires
+an explicit conversion. Typed null pointers infer their pointee from context.
+
+`RawPtr.load pointer` and `RawMutPtr.load pointer` copy a value from memory.
+`RawMutPtr.store pointer value` overwrites memory and returns `()`, without
+requiring a mutable pointer binding or dropping the previous value. Both
+operations require a sized, `Copy` pointee. They perform ordinary, non-atomic
+memory accesses without runtime validation: callers must provide valid, aligned
+memory with a live allocation; loads require an initialized valid value and
+stores require writable memory. Opaque pointers provide neither operation.
+
+```staple
+let null: RawMutPtr I32 = RawMutPtr.null ()
+let writable: RawMutPtr I32 = pointer as RawMutPtr I32
+RawMutPtr.store writable 42
+let value = RawPtr.load (writable as RawPtr I32)
+let same = writable == (pointer as RawMutPtr I32)
 ```
 
 

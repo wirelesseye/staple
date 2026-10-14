@@ -1,0 +1,98 @@
+use std.ptr.*
+
+extern "c" {
+    malloc: USize -> RawOpaqueMutPtr
+    memset: (RawMutPtr U8, I32, USize) -> RawOpaqueMutPtr
+}
+
+def require = condition: Bool => if condition { () } else { panic "pointer check failed" }
+def read = <T where Copy T> pointer: RawMutPtr T => T :: RawMutPtr.load pointer
+def write = <T where Copy T> (pointer: RawMutPtr T; value: T) => () :: RawMutPtr.store pointer value
+
+use std.cinterop.CString
+let noncopy_nil: RawMutPtr CString = RawMutPtr.null ()
+require (noncopy_nil == RawMutPtr.null ())
+let noncopy_const_nil: RawPtr CString = RawPtr.null ()
+require (noncopy_const_nil == RawPtr.null ())
+
+let nil: RawPtr I32 = RawPtr.null ()
+let nil_mut: RawMutPtr I32 = RawMutPtr.null ()
+require ((nil as USize) == 0)
+require ((nil_mut as USize) == 0)
+require (RawOpaquePtr.null () == (nil as RawOpaquePtr))
+require (RawOpaqueMutPtr.null () == (nil_mut as RawOpaqueMutPtr))
+require (nil == RawPtr.null ())
+require (nil_mut == RawMutPtr.null ())
+
+let stored_null = RawMutPtr.null
+let generic_nil: RawMutPtr I32 = stored_null ()
+require (generic_nil == nil_mut)
+require (RawMutPtr.offset nil_mut 0 == nil_mut)
+require (RawOpaqueMutPtr.offset (RawOpaqueMutPtr.null ()) 0 == RawOpaqueMutPtr.null ())
+
+let memory = malloc 128
+require (memory != RawOpaqueMutPtr.null ())
+require (memset (memory as RawMutPtr U8, 0, 128) == memory)
+let pointer = memory as RawMutPtr I32
+RawMutPtr.store pointer 42
+require (RawMutPtr.load pointer == 42)
+let immutable = pointer as RawPtr I32
+require (RawPtr.load immutable == 42)
+write pointer 17
+require (read pointer == 17)
+require ((immutable as RawMutPtr I32) == pointer)
+require (((pointer as RawOpaquePtr) as RawMutPtr I32) == pointer)
+require (((immutable as RawOpaqueMutPtr) as RawPtr I32) == immutable)
+require (((memory as RawOpaquePtr) as RawOpaqueMutPtr) == memory)
+require (((pointer as USize) as RawMutPtr I32) == pointer)
+require (((memory as USize) as RawOpaqueMutPtr) == memory)
+require (RawMutPtr.offset pointer 0 == pointer)
+require (RawOpaqueMutPtr.offset memory 0 == memory)
+require ((RawMutPtr.offset pointer 3 as USize) == ((pointer as USize) + 3))
+require ((RawMutPtr.offset pointer (-(ISize :: 3)) as USize) == ((pointer as USize) - 3))
+require ((RawOpaqueMutPtr.offset memory 3 as USize) == ((memory as USize) + 3))
+require ((RawOpaqueMutPtr.offset memory (-(ISize :: 3)) as USize) == ((memory as USize) - 3))
+require (RawMutPtr.offset pointer 1 != pointer)
+require (RawOpaqueMutPtr.offset memory 1 != memory)
+
+// Stored generic functions exercise descriptor-based memory operations.
+let stored_read = read
+let stored_write = write
+stored_write pointer 61
+require (stored_read pointer == 61)
+let stored_immutable_read = RawPtr.load
+require (stored_immutable_read immutable == 61)
+
+(if True { RawMutPtr.store } else { RawMutPtr.store }) pointer 62
+require (RawMutPtr.load pointer == 62)
+
+let pair_pointer = memory as RawMutPtr (I32, I32)
+RawMutPtr.store pair_pointer (11, 22)
+let (first, second) = RawMutPtr.load pair_pointer
+require (first == 11)
+require (second == 22)
+stored_write pair_pointer (33, 44)
+let (third, fourth) = stored_read pair_pointer
+require (third == 33)
+require (fourth == 44)
+let immutable_pair = pair_pointer as RawPtr (I32, I32)
+let (fifth, sixth) = stored_immutable_read immutable_pair
+require (fifth == 33)
+require (sixth == 44)
+
+let pointer_pointer = memory as RawMutPtr (RawMutPtr I32)
+RawMutPtr.store pointer_pointer pointer
+require (RawMutPtr.load pointer_pointer == pointer)
+stored_write pointer_pointer nil_mut
+require (stored_read pointer_pointer == nil_mut)
+let unit_pointer = memory as RawMutPtr ()
+RawMutPtr.store unit_pointer ()
+let unit: () = RawMutPtr.load unit_pointer
+stored_write unit_pointer ()
+let dynamic_unit: () = stored_read unit_pointer
+
+let bool_pointer = memory as RawMutPtr Bool
+RawMutPtr.store bool_pointer True
+require (RawMutPtr.load bool_pointer)
+stored_write bool_pointer False
+require (stored_read bool_pointer == False)

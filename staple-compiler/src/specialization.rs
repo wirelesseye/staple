@@ -59,12 +59,16 @@ pub(crate) enum CanonicalType {
     CString,
     CChar,
     RawOpaquePtr,
+    RawOpaqueMutPtr,
     Nominal {
         kind: CanonicalNominalKind,
         id: TypeId,
         arguments: Vec<CanonicalType>,
     },
     RawPtr {
+        pointee: Box<CanonicalType>,
+    },
+    RawMutPtr {
         pointee: Box<CanonicalType>,
     },
     Product {
@@ -168,6 +172,7 @@ impl CanonicalType {
             CanonicalType::Ref(inner)
             | CanonicalType::Slice(inner)
             | CanonicalType::Buffer(inner)
+            | CanonicalType::RawMutPtr { pointee: inner }
             | CanonicalType::RawPtr { pointee: inner } => inner.nesting_depth(),
             CanonicalType::Array { element, count } => {
                 deepest(&mut [element.as_ref(), count.as_ref()].into_iter())
@@ -303,6 +308,7 @@ impl CanonicalType {
             CheckedType::CString => CanonicalType::CString,
             CheckedType::CChar => CanonicalType::CChar,
             CheckedType::RawOpaquePtr => CanonicalType::RawOpaquePtr,
+            CheckedType::RawOpaqueMutPtr => CanonicalType::RawOpaqueMutPtr,
             CheckedType::Parameter { id, .. } if binders.iter().any(|ids| ids.contains(id)) => {
                 let (depth, index) = binders
                     .iter()
@@ -334,6 +340,9 @@ impl CanonicalType {
                 arguments: Self::convert_arguments(arguments, origin, runtime, binders)?,
             },
             CheckedType::RawPtr { pointee } => CanonicalType::RawPtr {
+                pointee: Box::new(Self::convert(pointee, origin, runtime, binders)?),
+            },
+            CheckedType::RawMutPtr { pointee } => CanonicalType::RawMutPtr {
                 pointee: Box::new(Self::convert(pointee, origin, runtime, binders)?),
             },
             CheckedType::Product(product) => CanonicalType::Product {
@@ -1655,6 +1664,7 @@ mod tests {
             CanonicalType::Ref(payload)
             | CanonicalType::Slice(payload)
             | CanonicalType::Buffer(payload)
+            | CanonicalType::RawMutPtr { pointee: payload }
             | CanonicalType::RawPtr { pointee: payload } => 1 + node_count(payload),
             CanonicalType::Array { element, count } => 1 + node_count(element) + node_count(count),
             CanonicalType::Nominal { arguments, .. } => {

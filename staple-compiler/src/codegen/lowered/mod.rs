@@ -7748,6 +7748,34 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .as_any_value_enum())
             }
 
+            IntrinsicFunction::PointerLoad => {
+                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
+                    return Err(unsupported("pointer load operands"));
+                };
+                let payload_type = self.backend.compile_type(result_type)?;
+                Ok(self
+                    .backend
+                    .builder
+                    .build_load(payload_type, *pointer, "pointer.load")
+                    .map_err(compiler_diagnostic)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::PointerStore => {
+                let [BasicMetadataValueEnum::PointerValue(pointer), value] = arguments else {
+                    return Err(unsupported("pointer store operands"));
+                };
+                let value = BasicValueEnum::try_from(*value)
+                    .map_err(|_| unsupported("pointer store value"))?;
+                self.backend
+                    .builder
+                    .build_store(*pointer, value)
+                    .map_err(compiler_diagnostic)?;
+                Ok(self
+                    .backend
+                    .compile_type(result_type)?
+                    .const_zero()
+                    .as_any_value_enum())
+            }
             IntrinsicFunction::PointerOffset => {
                 let [
                     BasicMetadataValueEnum::PointerValue(pointer),

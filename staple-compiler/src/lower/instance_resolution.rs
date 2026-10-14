@@ -392,6 +392,7 @@ pub(super) fn collect_referenced_parameters(
         CheckedType::Ref(payload)
         | CheckedType::Slice(payload)
         | CheckedType::Buffer(payload)
+        | CheckedType::RawMutPtr { pointee: payload }
         | CheckedType::RawPtr { pointee: payload } => collect_referenced_parameters(payload, out),
         CheckedType::Array { element, count } => {
             collect_referenced_parameters(element, out);
@@ -446,6 +447,7 @@ pub(super) fn collect_referenced_parameters(
         | CheckedType::String
         | CheckedType::StringLiteralSet(_)
         | CheckedType::CString
+        | CheckedType::RawOpaqueMutPtr
         | CheckedType::RawOpaquePtr
         | CheckedType::CChar => {}
     }
@@ -976,6 +978,7 @@ fn contains_placeholder(value_type: &CheckedType) -> bool {
         CheckedType::Ref(payload)
         | CheckedType::Slice(payload)
         | CheckedType::Buffer(payload)
+        | CheckedType::RawMutPtr { pointee: payload }
         | CheckedType::RawPtr { pointee: payload } => contains_placeholder(payload),
         CheckedType::Array { element, count } => {
             contains_placeholder(element) || contains_placeholder(count)
@@ -2930,12 +2933,14 @@ impl<'a> ParameterCollector<'a> {
             | CheckedType::String
             | CheckedType::StringLiteralSet(_)
             | CheckedType::CString
+            | CheckedType::RawOpaqueMutPtr
             | CheckedType::RawOpaquePtr
             | CheckedType::CChar => {}
             CheckedType::Parameter { id, name, .. } => self.relevant.notice_type(*id, name),
             CheckedType::Ref(payload)
             | CheckedType::Slice(payload)
             | CheckedType::Buffer(payload)
+            | CheckedType::RawMutPtr { pointee: payload }
             | CheckedType::RawPtr { pointee: payload } => self.collect_type(payload),
             CheckedType::Array { element, count } => {
                 self.collect_type(element);
