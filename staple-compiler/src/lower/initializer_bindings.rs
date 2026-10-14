@@ -283,14 +283,13 @@ impl<'a> InitializerBinder<'a> {
         let runtime = if polymorphic {
             Some(self.program.scheme_runtime_scope(function))
         } else if differential {
-            self.program
-                .differential_call_runtime(
-                    function,
-                    &BTreeSet::new(),
-                    false,
-                    &call_function_type,
-                    &call_substitutions,
-                )
+            self.program.differential_call_runtime(
+                function,
+                &BTreeSet::new(),
+                false,
+                &call_function_type,
+                &call_substitutions,
+            )
         } else {
             None
         };
@@ -1221,16 +1220,16 @@ impl<'a> InitializerBindingValidator<'a> {
         let initializer = self.initializer;
         // Members of dictionaries a scheme adapter builds are bound by their
         // recipes rather than at a site.
-        let members = super::trait_dictionaries::initializer_builder_uses(
-            self.program,
-            initializer,
-        )
-        .into_iter()
-        .filter_map(|(_, use_)| match use_ {
-            super::trait_dictionaries::BuilderUse::Entry(member, _) => Some(member.instance),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
+        let members =
+            super::trait_dictionaries::initializer_builder_uses(self.program, initializer)
+                .into_iter()
+                .filter_map(|(_, use_)| match use_ {
+                    super::trait_dictionaries::BuilderUse::Entry(member, _) => {
+                        Some(member.instance)
+                    }
+                    _ => None,
+                })
+                .collect::<HashSet<_>>();
         let missing = self
             .program
             .instances

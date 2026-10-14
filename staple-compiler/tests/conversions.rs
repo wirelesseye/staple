@@ -170,10 +170,15 @@ fn opaque_pointer_requires_explicit_conversion() {
             .load_source(source, root)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
-        let errors = TypeChecker::new().check(resolved).expect_err("implicit pointer conversion must fail");
-        assert!(errors.iter().any(|error| error.message.contains("expected")
-            && error.message.contains("COpaquePointer")
-            && error.message.contains("CPointer I32")), "{errors:?}");
+        let errors = TypeChecker::new()
+            .check(resolved)
+            .expect_err("implicit pointer conversion must fail");
+        assert!(
+            errors.iter().any(|error| error.message.contains("expected")
+                && error.message.contains("COpaquePointer")
+                && error.message.contains("CPointer I32")),
+            "{errors:?}"
+        );
     }
 }
 

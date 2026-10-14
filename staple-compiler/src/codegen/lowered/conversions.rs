@@ -708,10 +708,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             if indirect {
                 arguments.push(incoming.into());
             } else {
-                arguments.push(
-                    self.conversion_load(&resource.value_type, incoming)?
-                        .into(),
-                );
+                arguments.push(self.conversion_load(&resource.value_type, incoming)?.into());
             }
         }
         if concrete_caller {

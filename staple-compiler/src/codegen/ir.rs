@@ -142,8 +142,9 @@ impl<'program, 'context> Backend<'program, 'context> {
 
     /// Writes `message` to stderr and exits with status 1, ending the block.
     pub(crate) fn build_panic(&self, message: &str, span: &Span) -> CodeGenerationResult<()> {
-        let fail =
-            |error: inkwell::builder::BuilderError| Diagnostic::new(span.clone(), error.to_string());
+        let fail = |error: inkwell::builder::BuilderError| {
+            Diagnostic::new(span.clone(), error.to_string())
+        };
         let pointer_type = self.context.ptr_type(AddressSpace::default());
         let write = self.declare_named_function(
             "write",

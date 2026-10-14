@@ -497,7 +497,12 @@ impl<'a> EmissionView<'a> {
     pub(crate) fn conversions(
         &self,
         owner: EmissionOwner,
-    ) -> Option<&'a std::collections::BTreeMap<(super::LoweredCallId, Option<usize>), super::LoweredReabstraction>> {
+    ) -> Option<
+        &'a std::collections::BTreeMap<
+            (super::LoweredCallId, Option<usize>),
+            super::LoweredReabstraction,
+        >,
+    > {
         match owner {
             EmissionOwner::Instance(id) => self
                 .program
@@ -505,9 +510,7 @@ impl<'a> EmissionView<'a> {
                 .get(id)
                 .and_then(|record| record.body.as_ref())
                 .map(|body| &body.conversions),
-            EmissionOwner::Initializer(id) => {
-                self.program.initializer_conversions.get(id.index())
-            }
+            EmissionOwner::Initializer(id) => self.program.initializer_conversions.get(id.index()),
         }
     }
 

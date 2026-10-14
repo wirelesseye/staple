@@ -3327,8 +3327,11 @@ mod tests {
                                 (
                                     record.symbol.0,
                                     record.storage,
-                                    CanonicalType::concrete(&record.value_type, &Origin::compiler())
-                                        .expect("concrete owned type"),
+                                    CanonicalType::concrete(
+                                        &record.value_type,
+                                        &Origin::compiler(),
+                                    )
+                                    .expect("concrete owned type"),
                                     record.glue.map(|glue| glue.index()),
                                 )
                             })
@@ -3353,8 +3356,11 @@ mod tests {
                                 (
                                     record.symbol.0,
                                     record.storage,
-                                    CanonicalType::concrete(&record.value_type, &Origin::compiler())
-                                        .expect("concrete owned type"),
+                                    CanonicalType::concrete(
+                                        &record.value_type,
+                                        &Origin::compiler(),
+                                    )
+                                    .expect("concrete owned type"),
                                     record.glue.map(|glue| glue.index()),
                                 )
                             })

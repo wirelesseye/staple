@@ -123,7 +123,6 @@ pub(crate) struct CanonicalFunctionType {
     pub result: Box<CanonicalType>,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum CanonicalMutation {
     Whole,
@@ -1115,9 +1114,13 @@ pub(crate) struct TraitDictionaryKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum DynamicStructuralShape {
     /// `Debug` for a product: one optional field name per element.
-    DebugProduct { names: Vec<Option<String>> },
+    DebugProduct {
+        names: Vec<Option<String>>,
+    },
     /// `Debug` for a sum with this many alternatives.
-    DebugSum { alternatives: usize },
+    DebugSum {
+        alternatives: usize,
+    },
     /// `Index` of a product by a bounds-checked position. `injections` gives,
     /// per element, its alternative in the output sum, or none when the output
     /// is the element type itself.
@@ -1126,7 +1129,9 @@ pub(crate) enum DynamicStructuralShape {
         output_alternatives: usize,
     },
     /// `MutateIndex` of a homogeneous product with this many elements.
-    MutateProduct { length: usize },
+    MutateProduct {
+        length: usize,
+    },
     /// `Index` or `MutateIndex` through a `Ref`, delegating to the payload.
     DerefIndex,
     DerefMutateIndex,
@@ -1615,12 +1620,14 @@ mod tests {
         if slotted {
             match &mut parameter {
                 CheckedType::Product(product) => product.slotted = true,
-                _ => parameter = CheckedType::Product(CheckedProductType {
-                    slotted: true,
-                    spreads: Vec::new(),
-                    elements: vec![element(None, parameter, None); 2],
-                    variadic: false,
-                }),
+                _ => {
+                    parameter = CheckedType::Product(CheckedProductType {
+                        slotted: true,
+                        spreads: Vec::new(),
+                        elements: vec![element(None, parameter, None); 2],
+                        variadic: false,
+                    })
+                }
             }
         }
         CheckedFunctionType {
@@ -3082,16 +3089,24 @@ mod tests {
         let plain = CheckedType::Product(CheckedProductType {
             slotted: false,
             spreads: Vec::new(),
-            elements: vec![CheckedTypeElement { name: None, value_type: CheckedType::I32, default: None }; 2],
+            elements: vec![
+                CheckedTypeElement {
+                    name: None,
+                    value_type: CheckedType::I32,
+                    default: None
+                };
+                2
+            ],
             variadic: false,
         });
         let mut slots = plain.clone();
-        let CheckedType::Product(product) = &mut slots else { unreachable!() };
+        let CheckedType::Product(product) = &mut slots else {
+            unreachable!()
+        };
         product.slotted = true;
         let mut keys = std::collections::HashSet::new();
         keys.insert(concrete(&plain));
         keys.insert(concrete(&slots));
         assert_eq!(keys.len(), 2);
     }
-
 }

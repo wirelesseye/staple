@@ -298,7 +298,6 @@ struct Grammar {
     source_name: Option<Arc<str>>,
 }
 
-
 const NOMINAL_PATTERN_ANNOTATION_ERROR: &str =
     "only a single parenthesized nominal pattern can be annotated, as in `(Box value): Box I32`";
 

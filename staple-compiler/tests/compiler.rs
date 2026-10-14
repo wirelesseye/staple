@@ -888,7 +888,9 @@ fn a_coroutine_body_may_not_exceed_its_declared_row() {
         .expect_err_diagnostics("an inferred effect beyond the declared row");
     assert!(
         converged.iter().any(|diagnostic| {
-            diagnostic.message.contains("coroutine body requires effects {IO}")
+            diagnostic
+                .message
+                .contains("coroutine body requires effects {IO}")
                 || diagnostic
                     .message
                     .contains("expected `Coroutine{} I32`, found `Coroutine{IO} I32`")
@@ -2634,7 +2636,9 @@ fn writes_through_a_ref_require_mut_on_a_named_root() {
         "cell.0 = 3\n",
     ));
     let diagnostics = TypeChecker::new()
-        .check(resolve("let cell: Ref (I32 ^ 2) = Ref (1, 2)\ncell.0 = 3\n"))
+        .check(resolve(
+            "let cell: Ref (I32 ^ 2) = Ref (1, 2)\ncell.0 = 3\n",
+        ))
         .expect_err_diagnostics("writing through a `Ref` requires `mut` on the binding");
     assert!(
         diagnostics
@@ -12564,9 +12568,14 @@ fn slotted_product_aliases_cannot_own_slot_markers() {
         "type Invalid = alias (mut I32; I32)\n",
         "type Invalid = alias (move String)\n",
     ] {
-        let error = staple_syntax::parse(source)
-            .expect_err("slot markers require a function parameter");
-        assert!(error.message.contains("only allowed on a function parameter type"), "{error:?}");
+        let error =
+            staple_syntax::parse(source).expect_err("slot markers require a function parameter");
+        assert!(
+            error
+                .message
+                .contains("only allowed on a function parameter type"),
+            "{error:?}"
+        );
     }
 }
 
@@ -13282,8 +13291,15 @@ fn forall_generic_binding_macro_expansion_remains_parseable_and_hygienic() {
     assert!(compact.contains("identity:<T>"), "{expanded}");
     assert!(!compact.contains("identity<T>"), "{expanded}");
     let reparsed = parse(&expanded).unwrap();
-    assert!(reparsed.items.iter().any(|item| matches!(item, Item::Binding(binding) if binding.generics().is_some())));
-    TypeChecker::new().check(resolved).expect("fresh generic annotation must type-check");
+    assert!(
+        reparsed
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::Binding(binding) if binding.generics().is_some()))
+    );
+    TypeChecker::new()
+        .check(resolved)
+        .expect("fresh generic annotation must type-check");
 }
 
 #[test]
@@ -13763,9 +13779,9 @@ fn effect_parameters_bind_to_rigid_effect_rows() {
         .check(resolve(&source))
         .expect_err_diagnostics("the result row must keep `F`");
     assert!(
-        diagnostics
-            .iter()
-            .any(|d| d.message.starts_with("generic function conflicts with the expected type")),
+        diagnostics.iter().any(|d| d
+            .message
+            .starts_with("generic function conflicts with the expected type")),
         "{diagnostics:?}"
     );
 }
@@ -13819,7 +13835,9 @@ fn checks_generic_trait_member_conformance() {
 #[test]
 fn infers_generic_trait_member_arguments_and_explicit_order() {
     TypeChecker::new()
-        .check(resolve(include_str!("fixtures/generic_trait_members/static.sta")))
+        .check(resolve(include_str!(
+            "fixtures/generic_trait_members/static.sta"
+        )))
         .expect("static generic member calls should check");
     TypeChecker::new().check(resolve("trait Source T { type Element; read: T -> Element }\nimpl Source I32 { type Element = I32; read = x => x }\nlet x = Source.read.<I32> 1\n"))
         .expect("associated parameters are omitted from explicit argument order");
@@ -13896,7 +13914,9 @@ fn lowers_dispatch_chains_that_end_at_a_deeper_type() {
 #[test]
 fn checks_polymorphic_trait_members_and_keeps_projection_restriction() {
     TypeChecker::new()
-        .check(resolve(include_str!("fixtures/generic_trait_members/values.sta")))
+        .check(resolve(include_str!(
+            "fixtures/generic_trait_members/values.sta"
+        )))
         .expect("member values instantiate independently and subsume bounds");
     let diagnostics = TypeChecker::new()
         .check(resolve(
@@ -14228,9 +14248,19 @@ fn slotted_products_typecheck_as_distinct_values_and_function_parameters() {
         "let again: (I32; I32) = (...plain;)\n",
     ));
     let context = Context::create();
-    CodeGenerator::new(&context).compile_module(&lower(&module)).expect("slotted products should lower as products");
-    let errors = type_check_errors("let wrong: (I32; I32) = (1, 2)\n", "product kinds are distinct");
-    assert!(errors.iter().any(|message| message.contains("expected `(I32; I32)`")), "{errors:?}");
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("slotted products should lower as products");
+    let errors = type_check_errors(
+        "let wrong: (I32; I32) = (1, 2)\n",
+        "product kinds are distinct",
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.contains("expected `(I32; I32)`")),
+        "{errors:?}"
+    );
 }
 
 #[test]
@@ -14245,14 +14275,22 @@ fn slotted_type_spreads_preserve_target_kind_and_validate_substitutions() {
         "let single: Append () = 3\n",
     ));
     let context = Context::create();
-    CodeGenerator::new(&context).compile_module(&lower(&module)).expect("type spreads should specialize to fixed products");
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("type spreads should specialize to fixed products");
     for source in [
         "type Append P = alias (...P; I32)\nlet bad: Append I32 = (1; 2)\n",
         "type Slots P = alias (...P;)\nlet bad: Slots () = ()\n",
         "type Empty = alias (...(I32 ^ 0);)\nlet bad: Empty = ()\n",
     ] {
         let errors = type_check_errors(source, "type spread must have a valid fixed shape");
-        assert!(errors.iter().any(|message| message.contains("cannot spread non-product") || message.contains("at least one slot")), "{errors:?}");
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("cannot spread non-product")
+                    || message.contains("at least one slot")),
+            "{errors:?}"
+        );
     }
 }
 
@@ -14309,7 +14347,9 @@ fn slotted_diagnostics_quote_the_call_and_slot_separators() {
         "a whole slotted value fills one slot",
     );
     assert!(
-        messages.iter().any(|message| message.contains("`add ...p`")),
+        messages
+            .iter()
+            .any(|message| message.contains("`add ...p`")),
         "{messages:?}"
     );
     let messages = type_check_errors(
@@ -14317,7 +14357,9 @@ fn slotted_diagnostics_quote_the_call_and_slot_separators() {
         "a slotted literal fills one slot",
     );
     assert!(
-        messages.iter().any(|message| message.contains("`add ...(1; 2)`")),
+        messages
+            .iter()
+            .any(|message| message.contains("`add ...(1; 2)`")),
         "{messages:?}"
     );
     let messages = type_check_errors(
@@ -14423,9 +14465,7 @@ fn slotted_direct_call_spreads_cannot_overrun_or_fill_plain_product_slots() {
     ] {
         let messages = type_check_errors(source, "spreads cannot overrun a static slot count");
         assert!(
-            messages
-                .iter()
-                .any(|message| message.contains("but only")),
+            messages.iter().any(|message| message.contains("but only")),
             "{messages:?}"
         );
     }
@@ -14555,7 +14595,10 @@ fn slotted_companion_spreads_reject_overruns_and_unknown_shapes() {
             "type Animal = from I32\ncompanion Animal {{ pub def teleport: (Animal; I32; I32) -> Animal = (animal; _; _) => animal }}\nlet animal: Animal = 1\n{suffix}"
         );
         let messages = type_check_errors(&source, "companion spreads obey static slot counts");
-        assert!(messages.iter().any(|message| message.contains(expected)), "{messages:?}");
+        assert!(
+            messages.iter().any(|message| message.contains(expected)),
+            "{messages:?}"
+        );
     }
 }
 
@@ -14728,9 +14771,9 @@ fn product_display_requires_element_traits_and_rejects_overrides() {
         "structural product Display cannot be overridden",
     );
     assert!(
-        messages
-            .iter()
-            .any(|message| message.contains("cannot implement an external trait for external types")),
+        messages.iter().any(
+            |message| message.contains("cannot implement an external trait for external types")
+        ),
         "{messages:?}"
     );
 }
@@ -14889,8 +14932,11 @@ fn polymorphic_callback_values_admit_slotted_instantiations() {
         "let second: I32 = consume constant\n",
     ));
     let context = Context::create();
-    CodeGenerator::new(&context).compile_module(&lower(&module))
-        .expect("polymorphic callback values no longer carry parameter-product capability restrictions");
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect(
+            "polymorphic callback values no longer carry parameter-product capability restrictions",
+        );
 }
 
 #[test]
@@ -15516,8 +15562,14 @@ fn function_value_type_parameters_check_kinds_sizedness_and_extra_bounds() {
     const SHAPE: &str =
         "function value compile-time parameters differ in count, kind, or sizedness";
     for (source, expected) in [
-        ("def f: <T> move T -> T = <effect E> x: I32 => I32 :: x", SHAPE),
-        ("def f: <T where ?Sized T> Ref T -> Ref T = <U> x: Ref U => x", SHAPE),
+        (
+            "def f: <T> move T -> T = <effect E> x: I32 => I32 :: x",
+            SHAPE,
+        ),
+        (
+            "def f: <T where ?Sized T> Ref T -> Ref T = <U> x: Ref U => x",
+            SHAPE,
+        ),
         (
             "def f: <T> T -> T = <U where Copy U> x: U => x",
             "function value compile-time parameter bounds differ from the function type",

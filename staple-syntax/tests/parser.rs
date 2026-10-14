@@ -3829,7 +3829,9 @@ fn parenthesized_nominal_patterns_take_type_annotations() {
         panic!("nominal")
     };
     assert!(inner.annotation.is_none());
-    assert!(matches!(inner.argument.as_ref(), Pattern::Binding(binding) if binding.ty.to_string() == "I32"));
+    assert!(
+        matches!(inner.argument.as_ref(), Pattern::Binding(binding) if binding.ty.to_string() == "I32")
+    );
     let formatted = staple_syntax::format_source(source).unwrap();
     assert_eq!(formatted, source);
     for invalid in [
@@ -3840,7 +3842,10 @@ fn parenthesized_nominal_patterns_take_type_annotations() {
         "let (x): I32 = 1",
     ] {
         let error = staple_syntax::parse(invalid).unwrap_err();
-        assert!(error.message.contains("can be annotated"), "{invalid}: {error:?}");
+        assert!(
+            error.message.contains("can be annotated"),
+            "{invalid}: {error:?}"
+        );
     }
     // `mut` modifies only bindings, so a whole annotated nominal cannot be `mut`.
     assert!(staple_syntax::parse("def f = mut (Box a): Box I32 => a").is_err());

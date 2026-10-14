@@ -471,17 +471,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         self.backend
                             .compile_closure_function_type(&plan.callable_type)?
                     } else {
-                        self.backend.compile_dynamic_function_type_with_dictionaries(
-                            &plan.callable_type,
-                            if plan.scheme.is_some() {
-                                plan.runtime_parameters().len()
-                            } else {
-                                0
-                            },
-                            plan.scheme
-                                .as_ref()
-                                .map_or(0, |scheme| self.view.scheme_dictionary_count(scheme)),
-                        )?
+                        self.backend
+                            .compile_dynamic_function_type_with_dictionaries(
+                                &plan.callable_type,
+                                if plan.scheme.is_some() {
+                                    plan.runtime_parameters().len()
+                                } else {
+                                    0
+                                },
+                                plan.scheme
+                                    .as_ref()
+                                    .map_or(0, |scheme| self.view.scheme_dictionary_count(scheme)),
+                            )?
                     };
                     vec![
                         self.backend
@@ -585,11 +586,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                                     "scheme adapter target is not a function",
                                 ));
                             };
-                            self.backend.compile_dynamic_function_type_with_dictionaries(
-                                target,
-                                scheme.type_parameter_ids().len(),
-                                plan.target_dictionaries,
-                            )?
+                            self.backend
+                                .compile_dynamic_function_type_with_dictionaries(
+                                    target,
+                                    scheme.type_parameter_ids().len(),
+                                    plan.target_dictionaries,
+                                )?
                         }
                         CheckedType::Function(target)
                             if crate::contains_type_parameter(&plan.target) =>
@@ -1466,11 +1468,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             && product.slotted
                             && product.elements.len() > 1
                         {
-                            let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
-                            let list_type = self
-                                .backend
-                                .context
-                                .struct_type(&vec![pointer_type.into(); product.elements.len()], false);
+                            let pointer_type =
+                                self.backend.context.ptr_type(AddressSpace::default());
+                            let list_type = self.backend.context.struct_type(
+                                &vec![pointer_type.into(); product.elements.len()],
+                                false,
+                            );
                             let list = self
                                 .backend
                                 .builder
@@ -5354,8 +5357,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     span,
                     environment,
                 )?;
-                value_as_basic(value)
-                    .ok_or_else(|| Diagnostic::new(span.clone(), "captured value is not first-class"))
+                value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "captured value is not first-class")
+                })
             }
         }
     }
@@ -5802,9 +5806,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 let (code, pointer) = callee_parts.ok_or_else(|| unsupported("indirect callee"))?;
                 if call.scheme.is_some() {
-                    let value = self.emit_concrete_polymorphic_call(
-                        owner, id, &call, code, pointer, &values,
-                    )?;
+                    let value = self
+                        .emit_concrete_polymorphic_call(owner, id, &call, code, pointer, &values)?;
                     self.emit_call_cleanup(owner, id, cleanups, &call.origin.span)?;
                     return Ok(value);
                 }
@@ -6060,10 +6063,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         && let crate::LoweredPlaceKind::Symbol { symbol } = place.kind
                         && environment.split_parameter_pointers.contains_key(&symbol)
                     {
-                        environment.split_call_writebacks.push((symbol, pointer, place.value_type.clone()));
+                        environment.split_call_writebacks.push((
+                            symbol,
+                            pointer,
+                            place.value_type.clone(),
+                        ));
                     }
                     return Ok(pointer.into());
-                },
+                }
                 // A borrowed argument falls back to a materialized copy when
                 // its possibly place-rooted operand is not actually
                 // addressable; the mutation path has no fallback. An indexed
@@ -6308,9 +6315,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // Forward those places directly rather than rebuilding an aggregate.
         if let Some(pointers) = &split_pointers
             && mappings.iter().all(|(_, slot)| {
-                call.arguments.get(*slot).is_some_and(|record| {
-                    record.pass_mode == LoweredArgumentPassMode::MutablePlace
-                })
+                call.arguments
+                    .get(*slot)
+                    .is_some_and(|record| record.pass_mode == LoweredArgumentPassMode::MutablePlace)
             })
         {
             for (source, slot) in mappings {
@@ -6447,10 +6454,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         id: crate::PlaceId,
         environment: &mut FunctionEnvironment<'context>,
     ) -> CodeGenerationResult<PointerValue<'context>> {
-        let place = self
-            .view
-            .place(owner, id)
-            .ok_or_else(|| Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered place"))?;
+        let place = self.view.place(owner, id).ok_or_else(|| {
+            Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered place")
+        })?;
         let unsupported = |family| {
             Diagnostic::new(
                 place.origin.span.clone(),
@@ -6590,10 +6596,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .ref_payload_pointer(value, dereference, place.origin.span.clone())
             }
             crate::LoweredPlaceKind::ProductElement { base, index, slice } => {
-                let base_place = self
-                    .view
-                    .place(owner, *base)
-                    .ok_or_else(|| Diagnostic::new(place.origin.span.clone(), "missing base place"))?;
+                let base_place = self.view.place(owner, *base).ok_or_else(|| {
+                    Diagnostic::new(place.origin.span.clone(), "missing base place")
+                })?;
                 if !*slice
                     && let crate::LoweredPlaceKind::Symbol { symbol } = base_place.kind
                     && let Some(pointers) = environment.split_parameter_pointers.get(&symbol)
@@ -6683,10 +6688,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .symbol(*symbol)
                         .is_some_and(|symbol| symbol.mutable_storage)
                 {
-                    self.check_symbol_initialization(owner, environment, *symbol, &place.origin.span)?;
+                    self.check_symbol_initialization(
+                        owner,
+                        environment,
+                        *symbol,
+                        &place.origin.span,
+                    )?;
                 }
                 let pointer = self.emit_place_pointer(owner, *base, environment)?;
-                let container_type = super::layout::strip_place_wrappers(base_place.value_type.clone());
+                let container_type =
+                    super::layout::strip_place_wrappers(base_place.value_type.clone());
                 let BasicTypeEnum::StructType(container_llvm) =
                     self.backend.compile_type(&container_type)?
                 else {

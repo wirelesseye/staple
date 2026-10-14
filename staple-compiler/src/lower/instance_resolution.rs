@@ -1662,13 +1662,14 @@ impl LoweredProgram {
                 continue;
             }
             let mut substitution = HashMap::new();
-            let forward = implementation
-                .arguments
-                .iter()
-                .zip(&bound.arguments)
-                .all(|(template, actual)| {
-                    infer_type_parameters(template, actual, &mut substitution)
-                });
+            let forward =
+                implementation
+                    .arguments
+                    .iter()
+                    .zip(&bound.arguments)
+                    .all(|(template, actual)| {
+                        infer_type_parameters(template, actual, &mut substitution)
+                    });
             if forward {
                 // A `where` clause over concrete types that fails excludes the
                 // candidate; one over run-time types stays unknown.

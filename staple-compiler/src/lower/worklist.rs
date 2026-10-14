@@ -1032,10 +1032,12 @@ impl<'a> WorklistBuilder<'a> {
             target,
         };
         let resolved = if let Some(scope) = &explicit {
-            self.program.resolve_instance_request_in_scope(&request, scope)
+            self.program
+                .resolve_instance_request_in_scope(&request, scope)
         } else if polymorphic {
             let scope = self.program.scheme_runtime_scope(function);
-            self.program.resolve_instance_request_in_scope(&request, &scope)
+            self.program
+                .resolve_instance_request_in_scope(&request, &scope)
         } else if differential {
             match self.program.differential_call_runtime(
                 function,

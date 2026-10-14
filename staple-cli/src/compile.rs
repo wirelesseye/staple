@@ -4915,7 +4915,11 @@ mod tests {
                 false,
                 true,
             );
-            assert!(calls > 0, "{} must route calls through bundles", program.name);
+            assert!(
+                calls > 0,
+                "{} must route calls through bundles",
+                program.name
+            );
             tested += 1;
         }
         assert!(tested > 0);

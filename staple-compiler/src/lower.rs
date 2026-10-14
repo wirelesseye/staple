@@ -729,10 +729,7 @@ impl LoweredCoercionPlan {
 
     /// Matches a scheme's body against another scheme's, whose parameters
     /// stay rigid, recovering the source's instantiation over them.
-    fn adapt(
-        scheme: &crate::CheckedScheme,
-        target: &crate::CheckedScheme,
-    ) -> Result<Self, String> {
+    fn adapt(scheme: &crate::CheckedScheme, target: &crate::CheckedScheme) -> Result<Self, String> {
         let (CheckedType::Function(body), CheckedType::Function(expected)) =
             (scheme.body.as_ref(), target.body.as_ref())
         else {
@@ -7006,15 +7003,16 @@ impl LoweredProgram {
         // instantiated type or at a different scheme still constructs the
         // quantified closure; the expression's coercion adapts it.
         let natural = natural_expression_type(module, syntax);
-        let scheme = natural
-            .as_ref()
-            .and_then(|ty| match self.instantiated_scheme(module, syntax, ty) {
-                Some(source) => Some(source),
-                None => match ty {
-                    CheckedType::Forall(scheme) => Some(scheme.as_ref().clone()),
-                    _ => None,
-                },
-            });
+        let scheme =
+            natural
+                .as_ref()
+                .and_then(|ty| match self.instantiated_scheme(module, syntax, ty) {
+                    Some(source) => Some(source),
+                    None => match ty {
+                        CheckedType::Forall(scheme) => Some(scheme.as_ref().clone()),
+                        _ => None,
+                    },
+                });
         let checked_function_type = match (&scheme, natural) {
             (Some(scheme), _) => match scheme.body.as_ref() {
                 CheckedType::Function(function_type) => Some(function_type.clone()),
@@ -8011,11 +8009,16 @@ impl LoweredProgram {
                 let (operand, base_place) = if mutable {
                     let placement = self.lower_argument_value(module, owner, context, argument)?;
                     (
-                        placement.expression.expect("spread operands never use implicit thunking"),
+                        placement
+                            .expression
+                            .expect("spread operands never use implicit thunking"),
                         placement.place,
                     )
                 } else {
-                    (self.lower_expression(module, owner, context, argument)?, None)
+                    (
+                        self.lower_expression(module, owner, context, argument)?,
+                        None,
+                    )
                 };
                 let owned_operand = !expression_has_place_root(module.resolved(), argument)
                     || module.moved_symbols(argument.syntax().id).next().is_some();
@@ -8056,7 +8059,10 @@ impl LoweredProgram {
                         expected: types[slot].clone(),
                         place,
                         temporary: place.is_none() && (mutation_mask[slot] || indirect[slot]),
-                        borrowed_source: !owned_fields.get(source).copied().unwrap_or(owned_operand),
+                        borrowed_source: !owned_fields
+                            .get(source)
+                            .copied()
+                            .unwrap_or(owned_operand),
                         drops_after_call: false,
                     });
                     slot += 1;
@@ -8099,11 +8105,16 @@ impl LoweredProgram {
             }
             _ => None,
         };
-        let buffer_pop = LoweredOptionAlternatives::for_call(&target, function_type.result.as_ref())
-            .map_err(|message| Diagnostic::new(origin.span.clone(), message))?;
-        let runtime =
-            LoweredRuntimeCallFacts::for_call(&target, &arguments, &function_type, &self.semantic_ids)
+        let buffer_pop =
+            LoweredOptionAlternatives::for_call(&target, function_type.result.as_ref())
                 .map_err(|message| Diagnostic::new(origin.span.clone(), message))?;
+        let runtime = LoweredRuntimeCallFacts::for_call(
+            &target,
+            &arguments,
+            &function_type,
+            &self.semantic_ids,
+        )
+        .map_err(|message| Diagnostic::new(origin.span.clone(), message))?;
         let mut arguments = arguments;
         mark_call_temporary_drops(
             &target,
@@ -13398,7 +13409,9 @@ pub(crate) fn mark_call_temporary_drops(
         let borrowed = !mutation && !moved && own_operand;
         argument.drops_after_call = caller_drops
             && (argument.place.is_none()
-                || argument.expression.is_some_and(|expression| owned_spreads.contains(&expression)))
+                || argument
+                    .expression
+                    .is_some_and(|expression| owned_spreads.contains(&expression)))
             && argument.thunk.is_none()
             && (mutation || borrowed)
             && (mutation || !argument.borrowed_source)
@@ -13977,7 +13990,9 @@ impl SymbolDeclarationFacts {
                         // The emitter skips generic bindings (no storage global) and
                         // symbols that already have a declaration global
                         // (externs are predeclared before storage runs).
-                        if !module.has_declared_scheme(symbol) && !resolved.is_external_symbol(symbol) {
+                        if !module.has_declared_scheme(symbol)
+                            && !resolved.is_external_symbol(symbol)
+                        {
                             globals.insert(symbol);
                         }
                     }
@@ -15680,7 +15695,8 @@ mod tests {
         static COUNTS: [std::sync::atomic::AtomicI32; 14] =
             [const { std::sync::atomic::AtomicI32::new(0) }; 14];
         extern "C" fn record(value: i32) {
-            COUNTS[value.trailing_zeros() as usize].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            COUNTS[value.trailing_zeros() as usize]
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         for count in &COUNTS {
             count.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -24620,8 +24636,7 @@ mod tests {
             "{recipes:?}"
         );
         program.record_reabstractions();
-        let diagnostics = program
-            .close_artifact_catalog(&artifact_closure::ProductionHooks);
+        let diagnostics = program.close_artifact_catalog(&artifact_closure::ProductionHooks);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         program.assign_initializer_names();
         let diagnostics = program.validate_instance_bodies();
@@ -24684,12 +24699,7 @@ mod tests {
             .instances
             .iter()
             .find_map(|(_, instance)| {
-                (program
-                    .functions
-                    .get(instance.template)
-                    .unwrap()
-                    .name
-                    == "build")
+                (program.functions.get(instance.template).unwrap().name == "build")
                     .then(|| instance.name.clone())
             })
             .unwrap();
@@ -24948,7 +24958,10 @@ mod tests {
             .artifacts
             .iter()
             .filter(|(_, artifact)| {
-                matches!(artifact.plan, Some(LoweredArtifactPlan::DynamicStructural(_)))
+                matches!(
+                    artifact.plan,
+                    Some(LoweredArtifactPlan::DynamicStructural(_))
+                )
             })
             .count();
         assert_eq!(slots, 2, "one shared slot per shape");
@@ -26211,7 +26224,3 @@ mod tests {
         }
     }
 }
-
-
-
-

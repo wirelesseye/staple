@@ -190,13 +190,15 @@ pub(super) fn expand_structural_method(
     };
     let mut requests = Vec::new();
     let body = match plan.structural {
-        StructuralTraitMethod::Equality => match structural_equality_body(program, &plan, &origin) {
-            Ok((body, selected_requests)) => {
-                requests.extend(selected_requests);
-                body
+        StructuralTraitMethod::Equality => {
+            match structural_equality_body(program, &plan, &origin) {
+                Ok((body, selected_requests)) => {
+                    requests.extend(selected_requests);
+                    body
+                }
+                Err(diagnostic) => return Err(vec![diagnostic]),
             }
-            Err(diagnostic) => return Err(vec![diagnostic]),
-        },
+        }
         StructuralTraitMethod::Index => match structural_index_body(&plan, &origin) {
             Ok(body) => body,
             Err(diagnostic) => return Err(vec![diagnostic]),
@@ -240,13 +242,15 @@ pub(super) fn expand_structural_method(
                 Err(diagnostic) => return Err(vec![diagnostic]),
             }
         }
-        StructuralTraitMethod::Debug | StructuralTraitMethod::Display => match structural_debug_body(program, &plan, &origin) {
-            Ok((body, selected_requests)) => {
-                requests.extend(selected_requests);
-                body
+        StructuralTraitMethod::Debug | StructuralTraitMethod::Display => {
+            match structural_debug_body(program, &plan, &origin) {
+                Ok((body, selected_requests)) => {
+                    requests.extend(selected_requests);
+                    body
+                }
+                Err(diagnostic) => return Err(vec![diagnostic]),
             }
-            Err(diagnostic) => return Err(vec![diagnostic]),
-        },
+        }
     };
     Ok((
         LoweredArtifactPlan::StructuralMethod(StructuralMethodPlan { body, ..plan }),
@@ -705,7 +709,9 @@ fn structural_debug_body(
             let mut steps = vec![DebugStep::Write("(".to_string())];
             for (index, element) in product.elements.iter().enumerate() {
                 if index != 0 {
-                    steps.push(DebugStep::Write(if product.slotted { "; " } else { ", " }.to_string()));
+                    steps.push(DebugStep::Write(
+                        if product.slotted { "; " } else { ", " }.to_string(),
+                    ));
                 }
                 if let Some(name) = &element.name {
                     steps.push(DebugStep::Write(name.clone()));

@@ -377,7 +377,9 @@ impl<'a> OwnershipChecker<'a> {
                         let mut slot = 0;
                         for (index, argument) in plan.arguments.iter().enumerate() {
                             let count = plan.spreads.get(&index).copied().unwrap_or(1);
-                            if let Some(thunk) = self.module.implicit_thunk_for(argument.syntax().id) {
+                            if let Some(thunk) =
+                                self.module.implicit_thunk_for(argument.syntax().id)
+                            {
                                 for capture in &thunk.captures {
                                     if !self.module.has_mutable_storage(*capture) {
                                         self.use_symbol(*capture, argument.syntax(), true);

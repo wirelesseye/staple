@@ -40,11 +40,11 @@ use staple_syntax::{Diagnostic, Span};
 #[cfg(test)]
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-mod conversions;
 mod abi;
-mod dynamic;
+mod conversions;
 #[doc(hidden)]
 pub mod corpus;
+mod dynamic;
 mod ir;
 mod layout;
 mod lowered;

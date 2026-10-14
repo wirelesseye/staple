@@ -364,7 +364,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             crate::DictionaryRecipe::Builder(build) => {
                 let environment = environment.ok_or_else(|| {
-                    Diagnostic::new(span.clone(), "dictionary builder has no dynamic environment")
+                    Diagnostic::new(
+                        span.clone(),
+                        "dictionary builder has no dynamic environment",
+                    )
                 })?;
                 self.build_dictionary(build, environment, span)
             }
@@ -377,12 +380,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let environment = environment.ok_or_else(|| {
                     Diagnostic::new(span.clone(), "dictionary recipe has no dynamic environment")
                 })?;
-                let mut dictionary = *environment
-                    .dictionaries
-                    .get(recipe.argument)
-                    .ok_or_else(|| {
-                        Diagnostic::new(span.clone(), "dictionary recipe argument is absent")
-                    })?;
+                let mut dictionary =
+                    *environment
+                        .dictionaries
+                        .get(recipe.argument)
+                        .ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "dictionary recipe argument is absent")
+                        })?;
                 let pointer = self.backend.context.ptr_type(AddressSpace::default());
                 let width = self.backend.target_data.get_pointer_byte_size(None) as u64;
                 for slot in &recipe.prerequisites {
@@ -412,8 +416,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         arguments: &[PointerValue<'context>],
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
-        let dictionary =
-            self.dictionary_recipe_value(&dispatch.recipe, Some(environment), span)?;
+        let dictionary = self.dictionary_recipe_value(&dispatch.recipe, Some(environment), span)?;
         let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
         let width = self.backend.target_data.get_pointer_byte_size(None) as u64;
         let offset = self
@@ -495,7 +498,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .and_then(|functions| functions.first())
             .copied()
             .ok_or_else(|| Diagnostic::new(span.clone(), "undeclared structural slot"))?;
-        store(layout.slots.start, slot.as_global_value().as_pointer_value())?;
+        store(
+            layout.slots.start,
+            slot.as_global_value().as_pointer_value(),
+        )?;
         let null = self
             .backend
             .context
@@ -526,7 +532,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         for (index, component) in structural.components.iter().enumerate() {
             let value = self.dictionary_recipe_value(&component.recipe, environment, span)?;
-            store(layout.environment + structural.descriptors.len() + index, value)?;
+            store(
+                layout.environment + structural.descriptors.len() + index,
+                value,
+            )?;
         }
         Ok(dictionary)
     }
@@ -753,15 +762,28 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .build_store(storage, product)
                 .map_err(compiler_diagnostic)?;
             for (index, value) in values.iter().enumerate() {
-                if call.function_type.mutations.contains(&crate::CheckedMutation::Element(index)) {
+                if call
+                    .function_type
+                    .mutations
+                    .contains(&crate::CheckedMutation::Element(index))
+                {
                     let destination = BasicValueEnum::try_from(*value)
                         .map_err(|_| Diagnostic::new(span.clone(), "invalid mutable argument"))?
                         .into_pointer_value();
-                    let field = self.backend.builder.build_struct_gep(
-                        product.get_type(), storage, index as u32, "dynamic.packed.writeback",
-                    ).map_err(compiler_diagnostic)?;
+                    let field = self
+                        .backend
+                        .builder
+                        .build_struct_gep(
+                            product.get_type(),
+                            storage,
+                            index as u32,
+                            "dynamic.packed.writeback",
+                        )
+                        .map_err(compiler_diagnostic)?;
                     packed_writebacks.push((
-                        self.backend.compile_type(parameter_types[index])?, destination, field,
+                        self.backend.compile_type(parameter_types[index])?,
+                        destination,
+                        field,
                     ));
                 }
             }
@@ -840,11 +862,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
             }
             DynamicCallee::Indirect { code, count } => {
-                let function_type = self.backend.compile_dynamic_function_type_with_dictionaries(
-                    signature,
-                    count,
-                    self.view.dictionary_call_arguments(owner, call_id).len(),
-                )?;
+                let function_type = self
+                    .backend
+                    .compile_dynamic_function_type_with_dictionaries(
+                        signature,
+                        count,
+                        self.view.dictionary_call_arguments(owner, call_id).len(),
+                    )?;
                 self.backend
                     .builder
                     .build_indirect_call(function_type, code, &arguments, "polymorphic.call")
@@ -852,9 +876,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         for (ty, destination, source) in packed_writebacks {
-            let value = self.load_dynamic_storage(ty, source, "dynamic.packed.updated")
+            let value = self
+                .load_dynamic_storage(ty, source, "dynamic.packed.updated")
                 .map_err(compiler_diagnostic)?;
-            self.backend.builder.build_store(destination, value)
+            self.backend
+                .builder
+                .build_store(destination, value)
                 .map_err(compiler_diagnostic)?;
         }
         for (function, destination, source) in writebacks {
@@ -3151,11 +3178,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_struct_gep(closure_type, closure, 1, "closure.environment.slot")
                     .map_err(compiler_diagnostic)?;
                 let closure_environment = self
-                    .load_dynamic_storage(
-                        pointer_type,
-                        closure_environment,
-                        "closure.environment",
-                    )
+                    .load_dynamic_storage(pointer_type, closure_environment, "closure.environment")
                     .map_err(compiler_diagnostic)?
                     .into_pointer_value();
                 (code, closure_environment)
@@ -3262,16 +3285,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let signature = match (&callee, &call.scheme) {
             (DynamicCalleeSource::Slot(dispatch), _) => &dispatch.entry_type,
             (_, scheme) => match scheme {
-            Some(scheme) => match scheme.body.as_ref() {
-                CheckedType::Function(signature) => signature,
-                _ => {
-                    return Err(Diagnostic::new(
-                        span.clone(),
-                        "polymorphic call scheme is not a function",
-                    ));
-                }
-            },
-            None => &call.function_type,
+                Some(scheme) => match scheme.body.as_ref() {
+                    CheckedType::Function(signature) => signature,
+                    _ => {
+                        return Err(Diagnostic::new(
+                            span.clone(),
+                            "polymorphic call scheme is not a function",
+                        ));
+                    }
+                },
+                None => &call.function_type,
             },
         };
         // A scheme's single `T` parameter instantiated to a product arrives as
@@ -3285,9 +3308,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if pack && slots.iter().all(Option::is_none) && unplaced.len() == 1 {
             slots = vec![Some(unplaced[0])];
         } else if pack {
-            let packed = *environment.packed_arguments.get(&id).ok_or_else(|| {
-                Diagnostic::new(span.clone(), "missing packed argument storage")
-            })?;
+            let packed = *environment
+                .packed_arguments
+                .get(&id)
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing packed argument storage"))?;
             let descriptor =
                 self.dynamic_descriptor(&call.function_type.parameter, environment, span)?;
             for (index, slot) in slots.iter().enumerate() {
@@ -3406,7 +3430,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     span,
                 )?;
                 if writeback {
-                    let function = self.reabstraction_writeback_code(owner, call_id, index, span)?;
+                    let function =
+                        self.reabstraction_writeback_code(owner, call_id, index, span)?;
                     writebacks.push((
                         function,
                         &conversion.concrete,
@@ -3811,14 +3836,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 // Clone each element through the element type's dictionary,
                 // growing the new buffer's length as elements land so a
                 // partial clone drops what exists.
-                let Some(crate::LoweredExpressionKind::Call(call_id)) =
-                    self.view.expression(owner, id).map(|expression| &expression.kind)
+                let Some(crate::LoweredExpressionKind::Call(call_id)) = self
+                    .view
+                    .expression(owner, id)
+                    .map(|expression| &expression.kind)
                 else {
                     return Err(Diagnostic::new(span.clone(), "buffer clone is not a call"));
                 };
-                let Some(LoweredBoundTarget::Dictionary(dispatch)) = self
-                    .view
-                    .binding(owner, LoweredBindingSite::Call(*call_id))
+                let Some(LoweredBoundTarget::Dictionary(dispatch)) =
+                    self.view.binding(owner, LoweredBindingSite::Call(*call_id))
                 else {
                     return Err(Diagnostic::new(
                         span.clone(),
@@ -4315,7 +4341,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         .map_err(|_| Diagnostic::new(span.clone(), "dynamic comparison result is not first-class"))
     }
 
-
     /// The declared function of the instantiation adapter one expression's
     /// coercion builds its closure from.
     fn instantiation_adapter_code(
@@ -4673,7 +4698,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .type_parameter_ids()
                         .into_iter()
                         .enumerate()
-                        .map(|(index, parameter)| (parameter, parameters[1 + index].into_pointer_value()))
+                        .map(|(index, parameter)| {
+                            (parameter, parameters[1 + index].into_pointer_value())
+                        })
                         .collect(),
                     compound_descriptors: Vec::new(),
                     // The target's dictionaries follow its descriptors.
@@ -4694,8 +4721,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     resources: HashMap::new(),
                     loops: Vec::new(),
                     closure: environment,
-                    result: parameters[1 + own_descriptors + own_dictionaries]
-                        .into_pointer_value(),
+                    result: parameters[1 + own_descriptors + own_dictionaries].into_pointer_value(),
                     result_descriptor: pointer.const_null(),
                     bundle: None,
                     returned: false,
@@ -4735,7 +4761,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         } else {
             self.backend
                 .entry_builder()
-                .build_alloca(self.backend.compile_type(&target.result)?, "instantiation.result")
+                .build_alloca(
+                    self.backend.compile_type(&target.result)?,
+                    "instantiation.result",
+                )
                 .map_err(compiler_diagnostic)?
         };
         arguments.push(result.into());
@@ -4954,11 +4983,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         for slot in &slots {
             arguments.push((*slot).into());
         }
-        let function_type = self.backend.compile_dynamic_function_type_with_dictionaries(
-            signature,
-            source_descriptors.len(),
-            plan.dictionaries,
-        )?;
+        let function_type = self
+            .backend
+            .compile_dynamic_function_type_with_dictionaries(
+                signature,
+                source_descriptors.len(),
+                plan.dictionaries,
+            )?;
         self.backend
             .builder
             .build_indirect_call(function_type, code, &arguments, "instantiation.call")
@@ -5091,37 +5122,38 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             Ok(())
         };
         // A bounds-checked position, switching on it over `count` blocks.
-        let switch_on_position = |position: inkwell::values::IntValue<'context>,
-                                  count: usize,
-                                  name: &str|
-         -> CodeGenerationResult<Vec<inkwell::basic_block::BasicBlock<'context>>> {
-            let blocks = (0..count)
-                .map(|index| {
-                    self.backend
-                        .context
-                        .append_basic_block(function, &format!("{name}.{index}"))
-                })
-                .collect::<Vec<_>>();
-            let fallback = self
-                .backend
-                .context
-                .append_basic_block(function, &format!("{name}.out_of_bounds"));
-            let cases = blocks
-                .iter()
-                .enumerate()
-                .map(|(index, block)| (size.const_int(index as u64, false), *block))
-                .collect::<Vec<_>>();
-            self.backend
-                .builder
-                .build_switch(position, fallback, &cases)
-                .map_err(compiler_diagnostic)?;
-            self.backend.builder.position_at_end(fallback);
-            self.backend
-                .builder
-                .build_unreachable()
-                .map_err(compiler_diagnostic)?;
-            Ok(blocks)
-        };
+        let switch_on_position =
+            |position: inkwell::values::IntValue<'context>,
+             count: usize,
+             name: &str|
+             -> CodeGenerationResult<Vec<inkwell::basic_block::BasicBlock<'context>>> {
+                let blocks = (0..count)
+                    .map(|index| {
+                        self.backend
+                            .context
+                            .append_basic_block(function, &format!("{name}.{index}"))
+                    })
+                    .collect::<Vec<_>>();
+                let fallback = self
+                    .backend
+                    .context
+                    .append_basic_block(function, &format!("{name}.out_of_bounds"));
+                let cases = blocks
+                    .iter()
+                    .enumerate()
+                    .map(|(index, block)| (size.const_int(index as u64, false), *block))
+                    .collect::<Vec<_>>();
+                self.backend
+                    .builder
+                    .build_switch(position, fallback, &cases)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(fallback);
+                self.backend
+                    .builder
+                    .build_unreachable()
+                    .map_err(compiler_diagnostic)?;
+                Ok(blocks)
+            };
         let load_size = |slot: PointerValue<'context>| -> CodeGenerationResult<_> {
             Ok(self
                 .load_dynamic_storage(size, slot, "structural.position")
@@ -5169,7 +5201,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map_err(compiler_diagnostic)?
                         .into_pointer_value();
                     let member_type = self.backend.context.void_type().fn_type(
-                        &[pointer.into(), pointer.into(), pointer.into(), pointer.into()],
+                        &[
+                            pointer.into(),
+                            pointer.into(),
+                            pointer.into(),
+                            pointer.into(),
+                        ],
                         false,
                     );
                     self.backend
@@ -5201,7 +5238,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 let tag = self.dynamic_sum_tag(value, span)?;
                 let payload = self.dynamic_sum_payload(compound, value, *alternatives)?;
-                let done = self.backend.context.append_basic_block(function, "sum.done");
+                let done = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "sum.done");
                 let blocks = (0..*alternatives)
                     .map(|index| {
                         self.backend
@@ -5226,7 +5266,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map_err(compiler_diagnostic)?
                         .into_pointer_value();
                     let member_type = self.backend.context.void_type().fn_type(
-                        &[pointer.into(), pointer.into(), pointer.into(), pointer.into()],
+                        &[
+                            pointer.into(),
+                            pointer.into(),
+                            pointer.into(),
+                            pointer.into(),
+                        ],
                         false,
                     );
                     self.backend
@@ -5259,7 +5304,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let output = word(environment + 1)?;
                 let position = load_size(argument(3))?;
                 let blocks = switch_on_position(position, injections.len(), "index")?;
-                let done = self.backend.context.append_basic_block(function, "index.done");
+                let done = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "index.done");
                 for (index, block) in blocks.iter().enumerate() {
                     self.backend.builder.position_at_end(*block);
                     let (field, descriptor) =
@@ -5352,12 +5400,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "structural.finished",
                     )
                     .map_err(compiler_diagnostic)?;
-                let done_block = self.backend.context.append_basic_block(function, "next.done");
+                let done_block = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "next.done");
                 let yield_block = self
                     .backend
                     .context
                     .append_basic_block(function, "next.yield");
-                let exit = self.backend.context.append_basic_block(function, "next.exit");
+                let exit = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "next.exit");
                 self.backend
                     .builder
                     .build_conditional_branch(finished, done_block, yield_block)
@@ -5445,7 +5499,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .backend
                 .copy_dynamic_value(element_descriptor, element, destination),
             Some(alternative) => {
-                let payload = self.dynamic_sum_payload(output_descriptor, destination, alternatives)?;
+                let payload =
+                    self.dynamic_sum_payload(output_descriptor, destination, alternatives)?;
                 self.backend
                     .copy_dynamic_value(element_descriptor, element, payload)?;
                 self.backend
@@ -5561,10 +5616,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let environment = parameters[0].into_pointer_value();
         let mut arguments = vec![parameters[0].into()];
         for index in 0..plan.bound {
-            let offset = self
-                .backend
-                .size_type
-                .const_int((plan.environment_offset + index) as u64 * pointer_bytes, false);
+            let offset = self.backend.size_type.const_int(
+                (plan.environment_offset + index) as u64 * pointer_bytes,
+                false,
+            );
             let slot = self.backend.dynamic_byte_offset(environment, offset)?;
             let descriptor = self
                 .load_dynamic_storage(pointer, slot, "entry.descriptor")
@@ -5653,7 +5708,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .resource_provider(EmissionOwner::Instance(id), *provider_id)
                 .ok_or_else(|| unsupported("missing function resource provider"))?;
             if row_bundle.is_some() {
-                bundled_providers.push((*provider_id, position, provider.resource.value_type.clone()));
+                bundled_providers.push((
+                    *provider_id,
+                    position,
+                    provider.resource.value_type.clone(),
+                ));
                 continue;
             }
             let pointer = parameters
@@ -5835,11 +5894,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 )?;
                 if let Some(LoweredCoercionPlan::Instantiate { types }) = &record.coercion_plan {
                     for ty in types {
-                        self.prepare_dynamic_descriptor(
-                            ty,
-                            &mut environment,
-                            &record.origin.span,
-                        )?;
+                        self.prepare_dynamic_descriptor(ty, &mut environment, &record.origin.span)?;
                     }
                 }
                 if !matches!(record.coercion_plan, Some(LoweredCoercionPlan::Identity)) {
@@ -7316,8 +7371,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if environment.returned {
             return Ok(());
         }
-        if let Some(LoweredBoundTarget::Dictionary(dispatch)) =
-            self.view.binding(owner, LoweredBindingSite::IndexedAssignment(id))
+        if let Some(LoweredBoundTarget::Dictionary(dispatch)) = self
+            .view
+            .binding(owner, LoweredBindingSite::IndexedAssignment(id))
         {
             // A run-time operand type writes through its dictionary slot; the
             // dynamic ABI takes every operand by pointer.
@@ -9099,11 +9155,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_direct_call(
                         function,
                         &arguments,
-                        if !callee_dynamic {
-                            "concrete.call"
-                        } else {
-                            ""
-                        },
+                        if !callee_dynamic { "concrete.call" } else { "" },
                     )
                     .map_err(compiler_diagnostic)?;
                 for (function, destination, source) in writebacks {

@@ -95,14 +95,15 @@ fn instantiation_request(
         target: CanonicalType::dynamic(&produced, &expression.origin)
             .map_err(|error| vec![error])?,
     };
-    let (dictionaries, target_dictionaries, entailment) = super::trait_dictionaries::adapter_dictionaries(
-        program,
-        scheme,
-        types,
-        &produced,
-        &expression.origin,
-    )
-    .map_err(|error| vec![error])?;
+    let (dictionaries, target_dictionaries, entailment) =
+        super::trait_dictionaries::adapter_dictionaries(
+            program,
+            scheme,
+            types,
+            &produced,
+            &expression.origin,
+        )
+        .map_err(|error| vec![error])?;
     Ok(Some(ClosureRequest::Artifact {
         key: ArtifactRequestKey::InstantiationAdapter(key),
         plan: Plan::InstantiationAdapter(crate::InstantiationAdapterPlan {

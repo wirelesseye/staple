@@ -1044,11 +1044,7 @@ impl Collector<'_> {
     /// Builds the unified `where` clause text (trait bounds and subtype
     /// bounds), e.g.
     /// ` where Debug T, T <: Super`, or an empty string when there are none.
-    fn where_clause(
-        &self,
-        trait_bounds: &[TraitBound],
-        subtype_bounds: &[SubtypeBound],
-    ) -> String {
+    fn where_clause(&self, trait_bounds: &[TraitBound], subtype_bounds: &[SubtypeBound]) -> String {
         let constraints = subtype_bounds
             .iter()
             .map(|bound| bound.syntax.text().trim().to_owned())
@@ -2302,10 +2298,7 @@ mod tests {
             .iter()
             .find(|entry| entry.range.contains(&start) && entry.signature.contains("replace:"))
             .unwrap_or_else(|| panic!("intrinsic hover: {hovers:?}"));
-        assert!(
-            hover.signature.starts_with("def replace: "),
-            "{hover:?}"
-        );
+        assert!(hover.signature.starts_with("def replace: "), "{hover:?}");
         assert!(
             hover
                 .documentation

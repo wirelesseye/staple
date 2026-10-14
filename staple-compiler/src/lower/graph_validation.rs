@@ -497,7 +497,8 @@ impl<'a> GraphValidator<'a> {
         // supply their descriptors.
         for entry in &substitutions.types {
             if !bound.contains(&entry.parameter)
-                && contains_parameter_outside_scope(&entry.value_type, runtime) {
+                && contains_parameter_outside_scope(&entry.value_type, runtime)
+            {
                 self.report(
                     origin,
                     format!(

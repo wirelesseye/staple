@@ -660,7 +660,8 @@ impl SupportWalker<'_> {
         let Some(evidence) = evidence else {
             return false;
         };
-        let (trait_id, arguments, _) = crate::lower::trait_dictionaries::evidence_obligation(evidence);
+        let (trait_id, arguments, _) =
+            crate::lower::trait_dictionaries::evidence_obligation(evidence);
         let obligation = crate::CheckedTraitBound {
             trait_id,
             arguments: arguments.to_vec(),
@@ -774,8 +775,8 @@ impl SupportWalker<'_> {
                     && dispatch.arguments.iter().any(contains_type_parameter)
                 {
                     let origin = item.origin.clone();
-                    supplied = self
-                        .trait_call_has_dictionary(assignment.evidence.as_ref(), &origin);
+                    supplied =
+                        self.trait_call_has_dictionary(assignment.evidence.as_ref(), &origin);
                     if !supplied {
                         self.reject(RejectionReason::TraitCallRuntime);
                     }
@@ -828,7 +829,8 @@ impl SupportWalker<'_> {
                 for part in &template.parts {
                     if let crate::LoweredStringTemplatePart::Interpolation(interpolation) = part {
                         if crate::contains_type_parameter(&interpolation.value_type)
-                            && !self.trait_call_has_dictionary(Some(&interpolation.evidence), &origin)
+                            && !self
+                                .trait_call_has_dictionary(Some(&interpolation.evidence), &origin)
                         {
                             self.reject(RejectionReason::TraitCallRuntime);
                         }
@@ -1165,15 +1167,19 @@ impl SupportWalker<'_> {
                     && contains_type_parameter(element)
                 {
                     // Elements clone through the element type's dictionary.
-                    let supplied = self.program.semantic_ids.clone_trait.is_some_and(|trait_id| {
-                        self.obligation_supplied(
-                            &crate::CheckedTraitBound {
-                                trait_id,
-                                arguments: vec![element.as_ref().clone()],
-                            },
-                            &call.origin,
-                        )
-                    });
+                    let supplied = self
+                        .program
+                        .semantic_ids
+                        .clone_trait
+                        .is_some_and(|trait_id| {
+                            self.obligation_supplied(
+                                &crate::CheckedTraitBound {
+                                    trait_id,
+                                    arguments: vec![element.as_ref().clone()],
+                                },
+                                &call.origin,
+                            )
+                        });
                     if !supplied {
                         self.reject(RejectionReason::BufferClone);
                     }
@@ -1679,12 +1685,10 @@ mod tests {
                     continue;
                 };
                 unsupported += 1;
-                if reasons.iter().any(|reason| {
-                    matches!(
-                        reason,
-                        RejectionReason::TraitCallRuntime
-                    )
-                }) {
+                if reasons
+                    .iter()
+                    .any(|reason| matches!(reason, RejectionReason::TraitCallRuntime))
+                {
                     // Generated symbol names contain semantic IDs and change
                     // between imports. The body origin is the stable identity.
                     // Inline programs all load as <stdin>, so keep them separate.
@@ -1699,12 +1703,10 @@ mod tests {
                         .entry(format!("{source_scope}{:?}", function.body_origin.span))
                         .or_default()
                         .extend(reasons.iter().copied());
-                    if reasons.iter().all(|reason| {
-                        matches!(
-                            reason,
-                            RejectionReason::TraitCallRuntime
-                        )
-                    }) {
+                    if reasons
+                        .iter()
+                        .all(|reason| matches!(reason, RejectionReason::TraitCallRuntime))
+                    {
                         trait_only += 1;
                     }
                     let mut traits = BTreeSet::new();

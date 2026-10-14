@@ -432,7 +432,10 @@ impl fmt::Display for CheckedSchemeHeader<'_> {
                 None => write!(formatter, "{:?}", bound.trait_id)?,
             }
             for argument in &bound.arguments {
-                if matches!(argument, CheckedType::Function(_) | CheckedType::Forall(_) | CheckedType::Sum(_)) {
+                if matches!(
+                    argument,
+                    CheckedType::Function(_) | CheckedType::Forall(_) | CheckedType::Sum(_)
+                ) {
                     write!(formatter, " ({argument})")?;
                 } else {
                     write!(formatter, " {argument}")?;
@@ -1045,10 +1048,14 @@ fn fills_whole_slotted_parameter(parameter: &CheckedType, actual: &CheckedType) 
             parameter.slotted
                 && actual.slotted
                 && parameter.elements.len() == actual.elements.len()
-                && parameter.elements.iter().zip(&actual.elements).all(|(slot, value)| {
-                    (value.name.is_none() || value.name == slot.name)
-                        && types_equivalent(&value.value_type, &slot.value_type)
-                })
+                && parameter
+                    .elements
+                    .iter()
+                    .zip(&actual.elements)
+                    .all(|(slot, value)| {
+                        (value.name.is_none() || value.name == slot.name)
+                            && types_equivalent(&value.value_type, &slot.value_type)
+                    })
         }
         _ => false,
     }
@@ -1411,7 +1418,9 @@ impl fmt::Display for CheckedType {
                     if index > 0 {
                         formatter.write_str(if product.slotted { "; " } else { ", " })?;
                     }
-                    if product.spreads.contains(&index) { formatter.write_str("...")?; }
+                    if product.spreads.contains(&index) {
+                        formatter.write_str("...")?;
+                    }
                     if let Some(name) = &element.name {
                         write!(formatter, "{name}: ")?;
                     }
@@ -1438,8 +1447,7 @@ impl fmt::Display for CheckedType {
                 Ok(())
             }
             Self::Function(function) => {
-                let mut parameter = if function.is_slotted()
-                {
+                let mut parameter = if function.is_slotted() {
                     format_juxtaposed_checked_parameter(function)
                 } else {
                     format_mutable_and_moved_checked_parameter(
@@ -2326,10 +2334,7 @@ impl TypedModule {
                 continue;
             };
             let parameter = match (function.is_slotted(), function.parameter.as_ref()) {
-                (
-                    true,
-                    CheckedType::Product(product),
-                ) => {
+                (true, CheckedType::Product(product)) => {
                     let Some(first) = product.elements.first() else {
                         continue;
                     };
@@ -2383,10 +2388,7 @@ impl TypedModule {
                     continue;
                 };
                 let parameter = match (function.is_slotted(), function.parameter.as_ref()) {
-                    (
-                        true,
-                        CheckedType::Product(product),
-                    ) => {
+                    (true, CheckedType::Product(product)) => {
                         let Some(first) = product.elements.first() else {
                             continue;
                         };
@@ -4076,8 +4078,7 @@ impl TypeChecker {
             }
         };
         let arity_satisfied = source_arguments.len() >= expected_arity
-            || resolved_trait.declaration.type_parameters
-                [source_arguments.len()..expected_arity]
+            || resolved_trait.declaration.type_parameters[source_arguments.len()..expected_arity]
                 .iter()
                 .all(has_default);
         if !allow_inference && !arity_satisfied {
@@ -4181,9 +4182,7 @@ impl TypeChecker {
                     .unwrap_or("_");
                 self.diagnostics.push(Diagnostic::new(
                     span,
-                    format!(
-                        "trait argument for `{name}` cannot be inferred from associated types"
-                    ),
+                    format!("trait argument for `{name}` cannot be inferred from associated types"),
                 ));
                 return None;
             }
@@ -4585,7 +4584,9 @@ impl TypeChecker {
             // Error recovery may replace the entire function value with Error;
             // it must not leave a scheme with a non-function body behind.
             Some(ty) => *ty = body,
-            None => { self.symbol_types.insert(symbol, body); }
+            None => {
+                self.symbol_types.insert(symbol, body);
+            }
         }
     }
 
@@ -5755,7 +5756,9 @@ impl TypeChecker {
     ) -> Option<String> {
         let scheme = self.function_schemes.get(&function)?;
         let member = implemented_trait_member_name(module, function)?;
-        Some(format!("trait member `{member}` must implement scheme `{scheme}`"))
+        Some(format!(
+            "trait member `{member}` must implement scheme `{scheme}`"
+        ))
     }
 
     fn ensure_function_checked(&mut self, module: &ResolvedModule, function_id: FunctionId) {
@@ -5894,7 +5897,9 @@ impl TypeChecker {
                 && !self.impl_function_types.contains_key(&function.id))
         {
             let outer_effect_function = self.current_effect_function.replace(Some(function.id));
-            let outer_accesses = self.current_state_accesses.replace(StateAccesses::default());
+            let outer_accesses = self
+                .current_state_accesses
+                .replace(StateAccesses::default());
             let target_parameters = self.parameter_positions(function.id);
             let body = self.expression_effects_now(module, &function.body, &target_parameters);
             self.current_effect_function.set(outer_effect_function);
@@ -6685,10 +6690,8 @@ impl TypeChecker {
                         || message.clone(),
                         |context| format!("{context}: {message}"),
                     );
-                self.diagnostics.push(Diagnostic::new(
-                    violation_span(&allowed),
-                    message,
-                ));
+                self.diagnostics
+                    .push(Diagnostic::new(violation_span(&allowed), message));
             }
             let current_module = self.function_module(module, function);
             self.record_expression_effects(
@@ -7116,7 +7119,8 @@ impl TypeChecker {
                     &value_type
                 ),
                 (Some(CheckedType::Function(_)), CheckedType::Function(_))
-                | (Some(CheckedType::Forall(_)), CheckedType::Forall(_)))
+                    | (Some(CheckedType::Forall(_)), CheckedType::Forall(_))
+            )
             && !optional_types_equivalent(
                 self.expression_types.get(&expression.syntax().id),
                 Some(&value_type),
@@ -8346,10 +8350,11 @@ impl TypeChecker {
             }
             self.resolve_source_type(module, binding.annotation_body().unwrap_or(annotation))
         });
-        let generic_annotation_is_function = matches!(
-            declared_type.as_ref().map(CheckedType::scheme_body),
-            Some(CheckedType::Function(_))
-        ) || matches!(&binding.value, Some(Expression::Function(_)));
+        let generic_annotation_is_function =
+            matches!(
+                declared_type.as_ref().map(CheckedType::scheme_body),
+                Some(CheckedType::Function(_))
+            ) || matches!(&binding.value, Some(Expression::Function(_)));
         let value_type = binding
             .value
             .as_ref()
@@ -8955,7 +8960,8 @@ impl TypeChecker {
                     .function_for(expression.syntax().id)
                     .is_some_and(|id| self.inferred_value_schemes.contains(&id));
                 let body_expected = (!infer_effects).then_some(scheme.body.as_ref());
-                let actual = self.check_expression_expected_inner(module, expression, body_expected);
+                let actual =
+                    self.check_expression_expected_inner(module, expression, body_expected);
                 if actual != CheckedType::Error {
                     if let Some(id) = module.function_for(expression.syntax().id) {
                         if let Some(ty) = self.function_types.get(&id) {
@@ -9713,10 +9719,9 @@ impl TypeChecker {
                             .pipe_targets
                             .insert(root_syntax, PipeTarget::Trait(*method));
                         if let Expression::TypeApplication(application) = call_root {
-                            trial.pipe_targets.insert(
-                                application.value.syntax().id,
-                                PipeTarget::Trait(*method),
-                            );
+                            trial
+                                .pipe_targets
+                                .insert(application.value.syntax().id, PipeTarget::Trait(*method));
                         }
                         let actual = trial.check_expression_expected(module, expression, expected);
                         if actual != CheckedType::Error
@@ -10111,8 +10116,7 @@ impl TypeChecker {
                                 else {
                                     continue;
                                 };
-                                if !root.is_slotted()
-                                {
+                                if !root.is_slotted() {
                                     continue;
                                 }
                                 let CheckedType::Product(product) = root.parameter.as_ref() else {
@@ -10649,9 +10653,7 @@ impl TypeChecker {
                         return CheckedType::Error;
                     }
                     let argument_expected_owned = match &raw_callee_type {
-                        CheckedType::Function(function)
-                            if function.is_slotted() =>
-                        {
+                        CheckedType::Function(function) if function.is_slotted() => {
                             match function.parameter.as_ref() {
                                 CheckedType::Product(product) => {
                                     product.elements.first().map(|element| {
@@ -13351,7 +13353,6 @@ impl TypeChecker {
             );
             expected.clone()
         } else {
-            
             self.diagnostics.push(Diagnostic::new(
                 span,
                 format!("expected `{expected}`, found `{actual}`"),
@@ -14570,7 +14571,8 @@ impl TypeChecker {
             declared_parameters,
             sized_parameters,
         );
-        let instantiated = self.normalize_instantiated_projections(&bounds, &template, instantiated);
+        let instantiated =
+            self.normalize_instantiated_projections(&bounds, &template, instantiated);
         self.check_instantiated_bounds(
             bounds,
             subtype_bounds,
@@ -15295,9 +15297,7 @@ impl TypeChecker {
                     named.syntax.span.clone(),
                 )
             }
-            Type::Application(application)
-                if projection_head(module, source_type).is_some() =>
-            {
+            Type::Application(application) if projection_head(module, source_type).is_some() => {
                 let (trait_id, associated, sources) = projection_head(module, source_type).unwrap();
                 self.resolve_projection(
                     module,
@@ -15334,7 +15334,10 @@ impl TypeChecker {
                 let span = product.syntax.span.clone();
                 let product = self.resolve_product_type(module, product);
                 if product.slotted && product.elements.is_empty() {
-                    self.diagnostics.push(Diagnostic::new(span, "a slotted product needs at least one slot"));
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "a slotted product needs at least one slot",
+                    ));
                     return CheckedType::Error;
                 }
                 if (product.variadic || product.elements.len() != 1)
@@ -16781,13 +16784,16 @@ fn alpha_renaming(
 /// `Trait.member` for a function implementing a trait member, either in an
 /// implementation or as the trait's default method.
 fn implemented_trait_member_name(module: &ResolvedModule, function: FunctionId) -> Option<String> {
-    let implemented = module.trait_implementations().iter().find_map(|implementation| {
-        let method = implementation
-            .methods
-            .iter()
-            .find_map(|(method, candidate)| (*candidate == function).then_some(*method))?;
-        Some((implementation.trait_id, method))
-    });
+    let implemented = module
+        .trait_implementations()
+        .iter()
+        .find_map(|implementation| {
+            let method = implementation
+                .methods
+                .iter()
+                .find_map(|(method, candidate)| (*candidate == function).then_some(*method))?;
+            Some((implementation.trait_id, method))
+        });
     let (trait_id, method) = implemented.or_else(|| {
         module.traits().iter().find_map(|(trait_id, trait_)| {
             trait_
@@ -17028,7 +17034,12 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
                     })
                 })
                 .collect::<Option<Vec<_>>>()?;
-            Some(normalize_checked_product(CheckedProductType { slotted: actual.slotted, spreads: actual.spreads, elements, variadic: actual.variadic }))
+            Some(normalize_checked_product(CheckedProductType {
+                slotted: actual.slotted,
+                spreads: actual.spreads,
+                elements,
+                variadic: actual.variadic,
+            }))
         }
         (CheckedType::Function(mut actual), CheckedType::Function(expected))
             if actual.is_slotted() != expected.is_slotted()
@@ -17608,15 +17619,25 @@ pub(crate) fn substitute_type(
                         }
                         value_type @ (CheckedType::Parameter { .. } | CheckedType::Inferred) => {
                             result.spreads.push(offset);
-                            result.elements.push(CheckedTypeElement { name: None, value_type, default: None });
+                            result.elements.push(CheckedTypeElement {
+                                name: None,
+                                value_type,
+                                default: None,
+                            });
                         }
                         _ => return CheckedType::Error,
                     }
                 } else {
-                    result.elements.push(CheckedTypeElement { name: element.name, value_type, default: element.default });
+                    result.elements.push(CheckedTypeElement {
+                        name: element.name,
+                        value_type,
+                        default: element.default,
+                    });
                 }
             }
-            if result.elements.len() > MAX_PRODUCT_ARITY || (result.slotted && result.elements.is_empty()) {
+            if result.elements.len() > MAX_PRODUCT_ARITY
+                || (result.slotted && result.elements.is_empty())
+            {
                 CheckedType::Error
             } else if had_spreads {
                 normalize_checked_product(result)
@@ -17629,10 +17650,16 @@ pub(crate) fn substitute_type(
             let effects = substitute_effect_set(function.effects, substitutions);
             let parameter = substitute_type(*function.parameter.clone(), substitutions);
             let mutations = substitute_slot_markers(
-                &function.parameter, &parameter, function.mutations, substitutions,
+                &function.parameter,
+                &parameter,
+                function.mutations,
+                substitutions,
             );
             let moves = substitute_slot_markers(
-                &function.parameter, &parameter, function.moves, substitutions,
+                &function.parameter,
+                &parameter,
+                function.moves,
+                substitutions,
             );
             normalize_function_type(CheckedFunctionType {
                 default: function.default,
@@ -18616,19 +18643,31 @@ fn infer_type_parameters_mode(
                     return false;
                 };
                 let mutations = substitute_slot_markers(
-                    &template.parameter, &actual.parameter, template.mutations.clone(), substitutions,
+                    &template.parameter,
+                    &actual.parameter,
+                    template.mutations.clone(),
+                    substitutions,
                 );
                 let moves = substitute_slot_markers(
-                    &template.parameter, &actual.parameter, template.moves.clone(), substitutions,
+                    &template.parameter,
+                    &actual.parameter,
+                    template.moves.clone(),
+                    substitutions,
                 );
                 // Expected callee types built from an argument may still
                 // carry a whole marker; compare it in its per-slot form.
                 let no_substitutions = HashMap::new();
                 let actual_mutations = substitute_slot_markers(
-                    &actual.parameter, &actual.parameter, actual.mutations.clone(), &no_substitutions,
+                    &actual.parameter,
+                    &actual.parameter,
+                    actual.mutations.clone(),
+                    &no_substitutions,
                 );
                 let actual_moves = substitute_slot_markers(
-                    &actual.parameter, &actual.parameter, actual.moves.clone(), &no_substitutions,
+                    &actual.parameter,
+                    &actual.parameter,
+                    actual.moves.clone(),
+                    &no_substitutions,
                 );
                 if mutations != actual_mutations || moves != actual_moves {
                     return false;
@@ -18889,8 +18928,17 @@ fn normalize_product_type(elements: Vec<CheckedTypeElement>, variadic: bool) -> 
     normalize_product_type_kind(elements, variadic, false)
 }
 
-fn normalize_product_type_kind(elements: Vec<CheckedTypeElement>, variadic: bool, slotted: bool) -> CheckedType {
-    normalize_checked_product(CheckedProductType { slotted, spreads: Vec::new(), elements, variadic })
+fn normalize_product_type_kind(
+    elements: Vec<CheckedTypeElement>,
+    variadic: bool,
+    slotted: bool,
+) -> CheckedType {
+    normalize_checked_product(CheckedProductType {
+        slotted,
+        spreads: Vec::new(),
+        elements,
+        variadic,
+    })
 }
 
 fn normalize_checked_product(mut product: CheckedProductType) -> CheckedType {
@@ -20831,7 +20879,11 @@ mod first_class_scheme_tests {
         assert!(inferred.is_empty());
         inferred.insert(TypeParameterId(7), CheckedType::I32);
         assert!(infer_type_parameters(&template, &actual, &mut inferred));
-        assert_eq!(inferred.len(), 1, "quantified parameters never enter the outer substitution map");
+        assert_eq!(
+            inferred.len(),
+            1,
+            "quantified parameters never enter the outer substitution map"
+        );
     }
 
     #[test]
@@ -20844,7 +20896,11 @@ mod first_class_scheme_tests {
         let actual = identity(100, "U");
         let mut inferred = HashMap::new();
         assert!(!infer_type_parameters(&template, &actual, &mut inferred));
-        assert!(infer_type_parameters_with_schemes(&template, &actual, &mut inferred));
+        assert!(infer_type_parameters_with_schemes(
+            &template,
+            &actual,
+            &mut inferred
+        ));
         assert_eq!(inferred.get(&TypeParameterId(7)), Some(&actual));
     }
 
@@ -20926,7 +20982,14 @@ mod slotted_product_tests {
 
     fn pair(slotted: bool) -> CheckedType {
         normalize_product_type_kind(
-            vec![CheckedTypeElement { name: None, value_type: CheckedType::I32, default: None }; 2],
+            vec![
+                CheckedTypeElement {
+                    name: None,
+                    value_type: CheckedType::I32,
+                    default: None
+                };
+                2
+            ],
             false,
             slotted,
         )
@@ -20944,7 +21007,11 @@ mod slotted_product_tests {
             let template = normalize_checked_product(CheckedProductType {
                 slotted,
                 spreads: vec![0],
-                elements: vec![CheckedTypeElement { name: None, value_type: parameter.clone(), default: None }],
+                elements: vec![CheckedTypeElement {
+                    name: None,
+                    value_type: parameter.clone(),
+                    default: None,
+                }],
                 variadic: false,
             });
             assert!(!template.is_fully_known());
@@ -20956,9 +21023,22 @@ mod slotted_product_tests {
                 assert!(substituted.is_fully_known());
             }
             assert_eq!(substitute_type(template.clone(), &HashMap::new()), template);
-            assert_eq!(substitute_type(template.clone(), &HashMap::from([(id, CheckedType::I32)])), CheckedType::Error);
-            let empty = substitute_type(template, &HashMap::from([(id, CheckedType::empty_product())]));
-            assert_eq!(empty, if slotted { CheckedType::Error } else { CheckedType::empty_product() });
+            assert_eq!(
+                substitute_type(template.clone(), &HashMap::from([(id, CheckedType::I32)])),
+                CheckedType::Error
+            );
+            let empty = substitute_type(
+                template,
+                &HashMap::from([(id, CheckedType::empty_product())]),
+            );
+            assert_eq!(
+                empty,
+                if slotted {
+                    CheckedType::Error
+                } else {
+                    CheckedType::empty_product()
+                }
+            );
         }
     }
 
@@ -21060,20 +21140,44 @@ mod slotted_product_tests {
         assert!(!types_equivalent(&plain, &slotted));
         assert_ne!(plain, slotted);
         assert!(merge_types(plain.clone(), slotted.clone()).is_none());
-        assert!(!infer_type_parameters(&plain, &slotted, &mut HashMap::new()));
-        assert!(types_equivalent(&substitute_type(slotted.clone(), &HashMap::new()), &slotted));
+        assert!(!infer_type_parameters(
+            &plain,
+            &slotted,
+            &mut HashMap::new()
+        ));
+        assert!(types_equivalent(
+            &substitute_type(slotted.clone(), &HashMap::new()),
+            &slotted
+        ));
         assert!(types_equivalent(&erase_type_parameters(&slotted), &slotted));
-        assert!(types_equivalent(&compact_type_template(slotted.clone()), &slotted));
+        assert!(types_equivalent(
+            &compact_type_template(slotted.clone()),
+            &slotted
+        ));
         assert_eq!(slotted.to_string(), "(I32; I32)");
         assert_eq!(plain.to_string(), "(I32, I32)");
-        let array = CheckedType::Array { element: Box::new(CheckedType::I32), count: Box::new(CheckedType::NumberLiteral(2)) };
+        let array = CheckedType::Array {
+            element: Box::new(CheckedType::I32),
+            count: Box::new(CheckedType::NumberLiteral(2)),
+        };
         assert!(infer_type_parameters(&array, &plain, &mut HashMap::new()));
-        assert!(!infer_type_parameters(&array, &slotted, &mut HashMap::new()));
+        assert!(!infer_type_parameters(
+            &array,
+            &slotted,
+            &mut HashMap::new()
+        ));
     }
 
     #[test]
     fn singleton_slots_normalize_without_retaining_the_slot_name() {
-        let element = CheckedTypeElement { name: Some("slot".into()), value_type: CheckedType::I32, default: None };
-        assert_eq!(normalize_product_type_kind(vec![element], false, true), CheckedType::I32);
+        let element = CheckedTypeElement {
+            name: Some("slot".into()),
+            value_type: CheckedType::I32,
+            default: None,
+        };
+        assert_eq!(
+            normalize_product_type_kind(vec![element], false, true),
+            CheckedType::I32
+        );
     }
 }

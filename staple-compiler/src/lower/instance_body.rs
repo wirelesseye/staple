@@ -774,9 +774,10 @@ impl<'a> BodyCloner<'a> {
                     *callee,
                 ) {
                     Ok(arguments) if !arguments.is_empty() => {
-                        self.body
-                            .dictionary_calls
-                            .insert(super::trait_dictionaries::DictionarySite::Call(call_id), arguments);
+                        self.body.dictionary_calls.insert(
+                            super::trait_dictionaries::DictionarySite::Call(call_id),
+                            arguments,
+                        );
                     }
                     Ok(_) => {}
                     Err(error) => self.diagnostics.push(error),
@@ -801,9 +802,10 @@ impl<'a> BodyCloner<'a> {
                     call,
                 ) {
                     Ok(arguments) if !arguments.is_empty() => {
-                        self.body
-                            .dictionary_calls
-                            .insert(super::trait_dictionaries::DictionarySite::Call(call_id), arguments);
+                        self.body.dictionary_calls.insert(
+                            super::trait_dictionaries::DictionarySite::Call(call_id),
+                            arguments,
+                        );
                     }
                     Ok(_) => {}
                     Err(error) => self.diagnostics.push(error),
@@ -1967,7 +1969,8 @@ impl<'a> BodyCloner<'a> {
                 && matches!(&expected, CheckedType::Product(product)
                     if product.slotted && product.elements.iter().enumerate().all(|(slot, _)|
                         call.function_type.mutations.contains(&CheckedMutation::Element(slot))));
-            let mutation = whole_mutation || expanded_whole_mutation
+            let mutation = whole_mutation
+                || expanded_whole_mutation
                 || argument.slot.is_some_and(|slot| {
                     call.function_type
                         .mutations
@@ -2922,14 +2925,13 @@ impl<'a> BodyCloner<'a> {
             let runtime = if polymorphic {
                 Some(self.program.scheme_runtime_scope(function))
             } else if differential {
-                self.program
-                    .differential_call_runtime(
-                        function,
-                        &self.enclosing.key.runtime_ids(),
-                        false,
-                        &call_function_type,
-                        &call_substitutions,
-                    )
+                self.program.differential_call_runtime(
+                    function,
+                    &self.enclosing.key.runtime_ids(),
+                    false,
+                    &call_function_type,
+                    &call_substitutions,
+                )
             } else {
                 None
             };
@@ -5589,10 +5591,9 @@ impl<'a> BodyValidator<'a> {
             }
         }
         for (_, expression) in self.body.expressions() {
-            for argument in super::trait_dictionaries::adapter_entailment_recipes(
-                self.program,
-                expression,
-            ) {
+            for argument in
+                super::trait_dictionaries::adapter_entailment_recipes(self.program, expression)
+            {
                 recipe_member_instances(&argument.recipe, &expression.origin, &mut members);
             }
         }

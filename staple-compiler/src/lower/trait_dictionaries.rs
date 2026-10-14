@@ -146,7 +146,10 @@ pub(crate) struct EnvironmentDictionaryRecipe {
 /// Two obligations name the same trait at equivalent types. Parameters are
 /// compared by identity, so a capture's or a signature's spelling of the same
 /// parameter matches a bound's.
-pub(crate) fn bounds_equivalent(left: &crate::CheckedTraitBound, right: &crate::CheckedTraitBound) -> bool {
+pub(crate) fn bounds_equivalent(
+    left: &crate::CheckedTraitBound,
+    right: &crate::CheckedTraitBound,
+) -> bool {
     left.trait_id == right.trait_id
         && left.arguments.len() == right.arguments.len()
         && left
@@ -509,7 +512,8 @@ fn select_at_depth(
             dictionaries.push(if bounds_equivalent(&at_caller, &built) {
                 MemberDictionarySelection::Itself
             } else {
-                let selection = select_at_depth(program, environment, &at_caller, origin, depth + 1)?;
+                let selection =
+                    select_at_depth(program, environment, &at_caller, origin, depth + 1)?;
                 MemberDictionarySelection::Select(at_caller, selection)
             });
         }
@@ -572,7 +576,8 @@ fn select_at_depth(
         });
     }
     let mut prerequisites = Vec::new();
-    let trait_substitution = dictionary_substitution(metadata, &chosen.completed).unwrap_or_default();
+    let trait_substitution =
+        dictionary_substitution(metadata, &chosen.completed).unwrap_or_default();
     for prerequisite in &metadata.prerequisites {
         if markers.contains(&Some(prerequisite.trait_id)) {
             prerequisites.push(None);
@@ -650,200 +655,206 @@ fn select_structural(
             .collect::<Result<Vec<_>, _>>()
     };
     let mut components = Vec::new();
-    let (shape, completed, descriptors): (Shape, Vec<CheckedType>, Vec<CheckedType>) = if Some(
-        trait_id,
-    ) == ids.debug_trait
-    {
-        let [target] = obligation.arguments.as_slice() else {
-            return Err(unavailable());
-        };
-        let (shape, elements): (_, Vec<CheckedType>) = match target {
-            CheckedType::Product(product) if !product.variadic => (
-                Shape::DebugProduct {
-                    names: product
+    let (shape, completed, descriptors): (Shape, Vec<CheckedType>, Vec<CheckedType>) =
+        if Some(trait_id) == ids.debug_trait {
+            let [target] = obligation.arguments.as_slice() else {
+                return Err(unavailable());
+            };
+            let (shape, elements): (_, Vec<CheckedType>) = match target {
+                CheckedType::Product(product) if !product.variadic => (
+                    Shape::DebugProduct {
+                        names: product
+                            .elements
+                            .iter()
+                            .map(|element| element.name.clone())
+                            .collect(),
+                    },
+                    product
                         .elements
                         .iter()
-                        .map(|element| element.name.clone())
+                        .map(|element| element.value_type.clone())
                         .collect(),
-                },
-                product
-                    .elements
-                    .iter()
-                    .map(|element| element.value_type.clone())
-                    .collect(),
-            ),
-            CheckedType::Sum(sum) => (
-                Shape::DebugSum {
-                    alternatives: sum.alternatives.len(),
-                },
-                sum.alternatives.clone(),
-            ),
-            _ => return Err(unavailable()),
-        };
-        for element in elements {
-            components.push(select_component(crate::CheckedTraitBound {
-                trait_id,
-                arguments: vec![element],
-            })?);
-        }
-        (shape, obligation.arguments.clone(), vec![target.clone()])
-    } else if Some(trait_id) == ids.index_trait || Some(trait_id) == ids.mutate_index_trait {
-        let mutate = Some(trait_id) == ids.mutate_index_trait;
-        let [target, position, dependent] = obligation.arguments.as_slice() else {
-            return Err(unavailable());
-        };
-        match target {
-            CheckedType::Ref(payload) => {
-                let delegate = select_component(crate::CheckedTraitBound {
-                    trait_id,
-                    arguments: vec![payload.as_ref().clone(), position.clone(), dependent.clone()],
-                })?;
-                let output = selection_obligation(&delegate.1)
-                    .and_then(|bound| bound.arguments.get(2).cloned())
-                    .unwrap_or_else(|| dependent.clone());
-                let position = selection_obligation(&delegate.1)
-                    .and_then(|bound| bound.arguments.get(1).cloned())
-                    .unwrap_or_else(|| position.clone());
-                components.push(delegate);
-                (
-                    if mutate {
-                        Shape::DerefMutateIndex
-                    } else {
-                        Shape::DerefIndex
+                ),
+                CheckedType::Sum(sum) => (
+                    Shape::DebugSum {
+                        alternatives: sum.alternatives.len(),
                     },
-                    vec![target.clone(), position, output],
-                    Vec::new(),
-                )
+                    sum.alternatives.clone(),
+                ),
+                _ => return Err(unavailable()),
+            };
+            for element in elements {
+                components.push(select_component(crate::CheckedTraitBound {
+                    trait_id,
+                    arguments: vec![element],
+                })?);
             }
-            CheckedType::Product(product)
-                if !product.variadic
-                    && !product.elements.is_empty()
-                    && matches!(position, CheckedType::USize | CheckedType::Inferred) =>
-            {
-                if mutate {
-                    let element = product.homogeneous_element().ok_or_else(unavailable)?.clone();
-                    if !matches!(dependent, CheckedType::Inferred)
-                        && !crate::types_equivalent(dependent, &element)
-                    {
-                        return Err(unavailable());
-                    }
+            (shape, obligation.arguments.clone(), vec![target.clone()])
+        } else if Some(trait_id) == ids.index_trait || Some(trait_id) == ids.mutate_index_trait {
+            let mutate = Some(trait_id) == ids.mutate_index_trait;
+            let [target, position, dependent] = obligation.arguments.as_slice() else {
+                return Err(unavailable());
+            };
+            match target {
+                CheckedType::Ref(payload) => {
+                    let delegate = select_component(crate::CheckedTraitBound {
+                        trait_id,
+                        arguments: vec![
+                            payload.as_ref().clone(),
+                            position.clone(),
+                            dependent.clone(),
+                        ],
+                    })?;
+                    let output = selection_obligation(&delegate.1)
+                        .and_then(|bound| bound.arguments.get(2).cloned())
+                        .unwrap_or_else(|| dependent.clone());
+                    let position = selection_obligation(&delegate.1)
+                        .and_then(|bound| bound.arguments.get(1).cloned())
+                        .unwrap_or_else(|| position.clone());
+                    components.push(delegate);
                     (
-                        Shape::MutateProduct {
-                            length: product.elements.len(),
+                        if mutate {
+                            Shape::DerefMutateIndex
+                        } else {
+                            Shape::DerefIndex
                         },
-                        vec![target.clone(), CheckedType::USize, element],
-                        vec![target.clone()],
+                        vec![target.clone(), position, output],
+                        Vec::new(),
                     )
-                } else {
-                    let output = crate::product_item(product);
-                    if !matches!(dependent, CheckedType::Inferred)
-                        && !crate::types_equivalent(dependent, &output)
-                    {
-                        return Err(unavailable());
+                }
+                CheckedType::Product(product)
+                    if !product.variadic
+                        && !product.elements.is_empty()
+                        && matches!(position, CheckedType::USize | CheckedType::Inferred) =>
+                {
+                    if mutate {
+                        let element = product
+                            .homogeneous_element()
+                            .ok_or_else(unavailable)?
+                            .clone();
+                        if !matches!(dependent, CheckedType::Inferred)
+                            && !crate::types_equivalent(dependent, &element)
+                        {
+                            return Err(unavailable());
+                        }
+                        (
+                            Shape::MutateProduct {
+                                length: product.elements.len(),
+                            },
+                            vec![target.clone(), CheckedType::USize, element],
+                            vec![target.clone()],
+                        )
+                    } else {
+                        let output = crate::product_item(product);
+                        if !matches!(dependent, CheckedType::Inferred)
+                            && !crate::types_equivalent(dependent, &output)
+                        {
+                            return Err(unavailable());
+                        }
+                        (
+                            Shape::IndexProduct {
+                                injections: injections(product, &output)?,
+                                output_alternatives: sum_width(&output),
+                            },
+                            vec![target.clone(), CheckedType::USize, output.clone()],
+                            vec![target.clone(), output],
+                        )
                     }
-                    (
-                        Shape::IndexProduct {
-                            injections: injections(product, &output)?,
-                            output_alternatives: sum_width(&output),
-                        },
-                        vec![target.clone(), CheckedType::USize, output.clone()],
-                        vec![target.clone(), output],
-                    )
+                }
+                _ => return Err(unavailable()),
+            }
+        } else if Some(trait_id) == ids.into_iterator_trait {
+            let [source, _] = obligation.arguments.as_slice() else {
+                return Err(unavailable());
+            };
+            let CheckedType::Product(product) = source else {
+                return Err(unavailable());
+            };
+            if product.variadic || product.elements.is_empty() {
+                return Err(unavailable());
+            }
+            let iterator = pair_with_cursor(source);
+            (
+                Shape::IntoIterProduct,
+                vec![source.clone(), iterator.clone()],
+                vec![source.clone(), iterator],
+            )
+        } else if Some(trait_id) == ids.iterator_trait {
+            let [iterator, _] = obligation.arguments.as_slice() else {
+                return Err(unavailable());
+            };
+            let CheckedType::Product(pair) = iterator else {
+                return Err(unavailable());
+            };
+            let [first, second] = pair.elements.as_slice() else {
+                return Err(unavailable());
+            };
+            let (CheckedType::Product(product), CheckedType::USize) =
+                (&first.value_type, &second.value_type)
+            else {
+                return Err(unavailable());
+            };
+            if product.variadic || product.elements.is_empty() {
+                return Err(unavailable());
+            }
+            let item = crate::product_item(product);
+            let metadata = program.traits.get(trait_id).ok_or_else(unavailable)?;
+            let method = *metadata.methods.first().ok_or_else(unavailable)?;
+            let function_type = super::worklist::instantiate_method_type(
+                program,
+                origin,
+                trait_id,
+                method,
+                &[iterator.clone(), item.clone()],
+            )?;
+            let result = function_type.result.as_ref().clone();
+            let sum = crate::sum_through_implicit_wrapper(&result).ok_or_else(unavailable)?;
+            let yield_representation = CheckedType::Product(crate::CheckedProductType {
+                slotted: false,
+                spreads: Vec::new(),
+                elements: vec![
+                    crate::CheckedTypeElement {
+                        name: None,
+                        value_type: item.clone(),
+                        default: None,
+                    },
+                    crate::CheckedTypeElement {
+                        name: None,
+                        value_type: iterator.clone(),
+                        default: None,
+                    },
+                ],
+                variadic: false,
+            });
+            let mut done = None;
+            let mut yield_ = None;
+            for (index, alternative) in sum.alternatives.iter().enumerate() {
+                if let CheckedType::Wrapper { representation, .. } = alternative {
+                    if representation.as_ref() == iterator {
+                        done = Some(index);
+                    }
+                    if representation.as_ref() == &yield_representation {
+                        yield_ = Some(index);
+                    }
                 }
             }
-            _ => return Err(unavailable()),
-        }
-    } else if Some(trait_id) == ids.into_iterator_trait {
-        let [source, _] = obligation.arguments.as_slice() else {
-            return Err(unavailable());
-        };
-        let CheckedType::Product(product) = source else {
-            return Err(unavailable());
-        };
-        if product.variadic || product.elements.is_empty() {
-            return Err(unavailable());
-        }
-        let iterator = pair_with_cursor(source);
-        (
-            Shape::IntoIterProduct,
-            vec![source.clone(), iterator.clone()],
-            vec![source.clone(), iterator],
-        )
-    } else if Some(trait_id) == ids.iterator_trait {
-        let [iterator, _] = obligation.arguments.as_slice() else {
-            return Err(unavailable());
-        };
-        let CheckedType::Product(pair) = iterator else {
-            return Err(unavailable());
-        };
-        let [first, second] = pair.elements.as_slice() else {
-            return Err(unavailable());
-        };
-        let (CheckedType::Product(product), CheckedType::USize) = (&first.value_type, &second.value_type)
-        else {
-            return Err(unavailable());
-        };
-        if product.variadic || product.elements.is_empty() {
-            return Err(unavailable());
-        }
-        let item = crate::product_item(product);
-        let metadata = program.traits.get(trait_id).ok_or_else(unavailable)?;
-        let method = *metadata.methods.first().ok_or_else(unavailable)?;
-        let function_type = super::worklist::instantiate_method_type(
-            program,
-            origin,
-            trait_id,
-            method,
-            &[iterator.clone(), item.clone()],
-        )?;
-        let result = function_type.result.as_ref().clone();
-        let sum = crate::sum_through_implicit_wrapper(&result).ok_or_else(unavailable)?;
-        let yield_representation = CheckedType::Product(crate::CheckedProductType {
-            slotted: false,
-            spreads: Vec::new(),
-            elements: vec![
-                crate::CheckedTypeElement {
-                    name: None,
-                    value_type: item.clone(),
-                    default: None,
+            let (Some(done), Some(yield_)) = (done, yield_) else {
+                return Err(unavailable());
+            };
+            (
+                Shape::NextProduct {
+                    injections: injections(product, &item)?,
+                    item_alternatives: sum_width(&item),
+                    result_alternatives: sum.alternatives.len(),
+                    done,
+                    yield_,
                 },
-                crate::CheckedTypeElement {
-                    name: None,
-                    value_type: iterator.clone(),
-                    default: None,
-                },
-            ],
-            variadic: false,
-        });
-        let mut done = None;
-        let mut yield_ = None;
-        for (index, alternative) in sum.alternatives.iter().enumerate() {
-            if let CheckedType::Wrapper { representation, .. } = alternative {
-                if representation.as_ref() == iterator {
-                    done = Some(index);
-                }
-                if representation.as_ref() == &yield_representation {
-                    yield_ = Some(index);
-                }
-            }
-        }
-        let (Some(done), Some(yield_)) = (done, yield_) else {
+                vec![iterator.clone(), item.clone()],
+                vec![iterator.clone(), result],
+            )
+        } else {
             return Err(unavailable());
         };
-        (
-            Shape::NextProduct {
-                injections: injections(product, &item)?,
-                item_alternatives: sum_width(&item),
-                result_alternatives: sum.alternatives.len(),
-                done,
-                yield_,
-            },
-            vec![iterator.clone(), item.clone()],
-            vec![iterator.clone(), result],
-        )
-    } else {
-        return Err(unavailable());
-    };
     let obligation = crate::CheckedTraitBound {
         trait_id,
         arguments: completed,
@@ -868,13 +879,15 @@ fn select_structural(
                 .collect(),
         })?));
     }
-    Ok(DictionarySelection::Structural(Box::new(StructuralSelection {
-        shape,
-        obligation,
-        descriptors,
-        components,
-        prerequisites,
-    })))
+    Ok(DictionarySelection::Structural(Box::new(
+        StructuralSelection {
+            shape,
+            obligation,
+            descriptors,
+            components,
+            prerequisites,
+        },
+    )))
 }
 
 /// How many alternatives a sum output has, or zero for any other type.
@@ -1236,9 +1249,14 @@ pub(super) fn site_runtime_obligation(
             .map(|argument| crate::substitute_type(argument.clone(), &map))
             .collect(),
     };
-    runtime_obligations(ids, std::slice::from_ref(&bound), &Default::default(), runtime)
-        .into_iter()
-        .next()
+    runtime_obligations(
+        ids,
+        std::slice::from_ref(&bound),
+        &Default::default(),
+        runtime,
+    )
+    .into_iter()
+    .next()
 }
 
 /// The interned dynamic instance of a dictionary member, requested from the
@@ -1699,7 +1717,8 @@ pub(super) fn adapter_entailment_recipes(
     program: &super::LoweredProgram,
     expression: &super::LoweredExpression,
 ) -> Vec<DictionaryCallArgument> {
-    let Ok(selections) = adapter_entailment(program, expression, &Default::default(), &expression.origin)
+    let Ok(selections) =
+        adapter_entailment(program, expression, &Default::default(), &expression.origin)
     else {
         return Vec::new();
     };
@@ -1726,7 +1745,13 @@ fn adapter_builder_uses(
 ) {
     for argument in adapter_entailment_recipes(program, expression) {
         let mut uses = Vec::new();
-        walk_recipe(program, &argument.obligation, &argument.recipe, false, &mut uses);
+        walk_recipe(
+            program,
+            &argument.obligation,
+            &argument.recipe,
+            false,
+            &mut uses,
+        );
         found.extend(
             uses.into_iter()
                 .map(|(_, use_)| (expression.origin.clone(), use_)),
@@ -1781,7 +1806,13 @@ pub(super) fn initializer_builder_uses(
                     continue;
                 }
                 let mut uses = Vec::new();
-                walk_recipe(program, &argument.obligation, &argument.recipe, true, &mut uses);
+                walk_recipe(
+                    program,
+                    &argument.obligation,
+                    &argument.recipe,
+                    true,
+                    &mut uses,
+                );
                 visitor
                     .found
                     .extend(uses.into_iter().map(|(_, use_)| (origin.clone(), use_)));
@@ -1993,7 +2024,10 @@ fn plan_instance_dictionaries(
 pub(super) enum BuilderUse {
     Entry(BuilderMember, usize),
     Static(crate::CheckedTraitBound),
-    Structural(crate::specialization::DynamicStructuralShape, crate::TraitId),
+    Structural(
+        crate::specialization::DynamicStructuralShape,
+        crate::TraitId,
+    ),
     /// A concrete type whose static descriptor a structural dictionary
     /// stores. A concrete owner has no dynamic environment to build it from.
     Descriptor(crate::CheckedType),
@@ -2030,11 +2064,20 @@ fn walk_recipe(
                 .chain(&structural.descriptors);
             for ty in stored {
                 if !crate::contains_type_parameter(ty) {
-                    uses.push((structural.obligation.clone(), BuilderUse::Descriptor(ty.clone())));
+                    uses.push((
+                        structural.obligation.clone(),
+                        BuilderUse::Descriptor(ty.clone()),
+                    ));
                 }
             }
             for component in &structural.components {
-                walk_recipe(program, &component.obligation, &component.recipe, false, uses);
+                walk_recipe(
+                    program,
+                    &component.obligation,
+                    &component.recipe,
+                    false,
+                    uses,
+                );
             }
             for prerequisite in structural.prerequisites.iter().flatten() {
                 walk_recipe(
@@ -2292,7 +2335,9 @@ pub(super) fn scan_instance(
         else {
             unreachable!()
         };
-        *use_site = Some(super::artifact_closure::ArtifactUseSite::DictionaryBuilder(index));
+        *use_site = Some(super::artifact_closure::ArtifactUseSite::DictionaryBuilder(
+            index,
+        ));
         requests.push(request);
     }
     Ok(requests)
@@ -2328,8 +2373,8 @@ pub(super) fn initializer_call_arguments(
                     self.arguments.insert(DictionarySite::Call(id), arguments);
                 }
             } else if call.scheme.is_some() {
-                let arguments = plan_scheme_call(self.program, None, &[], call)
-                    .map_err(|error| vec![error])?;
+                let arguments =
+                    plan_scheme_call(self.program, None, &[], call).map_err(|error| vec![error])?;
                 if !arguments.is_empty() {
                     self.arguments.insert(DictionarySite::Call(id), arguments);
                 }
@@ -2345,7 +2390,8 @@ pub(super) fn initializer_call_arguments(
             let arguments = plan_instantiation(self.program, None, &[], expression)
                 .map_err(|error| vec![error])?;
             if !arguments.is_empty() {
-                self.arguments.insert(DictionarySite::Coercion(id), arguments);
+                self.arguments
+                    .insert(DictionarySite::Coercion(id), arguments);
             }
             Ok(())
         }
@@ -2425,7 +2471,9 @@ pub(super) fn scan_initializer(
         else {
             unreachable!()
         };
-        *use_site = Some(super::artifact_closure::ArtifactUseSite::DictionaryBuilder(index));
+        *use_site = Some(super::artifact_closure::ArtifactUseSite::DictionaryBuilder(
+            index,
+        ));
         requests.push(request);
     }
     Ok(requests)
@@ -2786,7 +2834,12 @@ pub(super) fn expand(
         // Dictionary callers use the trait declaration's dynamic shape. A
         // bare trait parameter remains one opaque pointer even when its
         // concrete implementation accepts a flattened slotted product.
-        let dynamic_type = match &program.trait_methods.get(*method).expect("catalogued method").value_type {
+        let dynamic_type = match &program
+            .trait_methods
+            .get(*method)
+            .expect("catalogued method")
+            .value_type
+        {
             CheckedType::Function(function) => function.clone(),
             _ => {
                 return Err(vec![Diagnostic::new(

@@ -1957,42 +1957,118 @@ impl NameResolver {
                 "__buffer_with_capacity",
                 IntrinsicFunction::BufferWithCapacity,
             ),
-            ("std.buffer", "__buffer_length", IntrinsicFunction::BufferLength),
-            ("std.buffer", "__buffer_capacity", IntrinsicFunction::BufferCapacity),
+            (
+                "std.buffer",
+                "__buffer_length",
+                IntrinsicFunction::BufferLength,
+            ),
+            (
+                "std.buffer",
+                "__buffer_capacity",
+                IntrinsicFunction::BufferCapacity,
+            ),
             ("std.buffer", "__buffer_push", IntrinsicFunction::BufferPush),
             ("std.buffer", "__buffer_pop", IntrinsicFunction::BufferPop),
             ("std.buffer", "__buffer_get", IntrinsicFunction::BufferGet),
-            ("std.buffer", "__buffer_freeze", IntrinsicFunction::BufferFreeze),
-            ("std.buffer", "__buffer_transfer", IntrinsicFunction::BufferTransfer),
-            ("std.buffer", "__buffer_clone", IntrinsicFunction::BufferClone),
-            ("std.slice", "__slice_length", IntrinsicFunction::SliceLength),
-            ("std.slice", "__slice_get_ref", IntrinsicFunction::SliceGetRef),
-            ("std.slice", "__slice_from_ref", IntrinsicFunction::SliceFromRef),
-            ("std.core.reference", "__ref_replace", IntrinsicFunction::RefReplace),
-            ("std.core.reactive", "__reactive_scope", IntrinsicFunction::ReactiveScope),
+            (
+                "std.buffer",
+                "__buffer_freeze",
+                IntrinsicFunction::BufferFreeze,
+            ),
+            (
+                "std.buffer",
+                "__buffer_transfer",
+                IntrinsicFunction::BufferTransfer,
+            ),
+            (
+                "std.buffer",
+                "__buffer_clone",
+                IntrinsicFunction::BufferClone,
+            ),
+            (
+                "std.slice",
+                "__slice_length",
+                IntrinsicFunction::SliceLength,
+            ),
+            (
+                "std.slice",
+                "__slice_get_ref",
+                IntrinsicFunction::SliceGetRef,
+            ),
+            (
+                "std.slice",
+                "__slice_from_ref",
+                IntrinsicFunction::SliceFromRef,
+            ),
+            (
+                "std.core.reference",
+                "__ref_replace",
+                IntrinsicFunction::RefReplace,
+            ),
+            (
+                "std.core.reactive",
+                "__reactive_scope",
+                IntrinsicFunction::ReactiveScope,
+            ),
             // Call-site-sensitive intrinsics are public API themselves; the
             // rest sit behind ordinary `def` wrappers so they stay first-class.
             ("std.core.reactive", "reaction", IntrinsicFunction::Reaction),
             ("std.core.reactive", "batch", IntrinsicFunction::Batch),
             ("std.core.reactive", "snapshot", IntrinsicFunction::Snapshot),
-            ("std.coroutine", "block_on", IntrinsicFunction::CoroutineBlockOn),
+            (
+                "std.coroutine",
+                "block_on",
+                IntrinsicFunction::CoroutineBlockOn,
+            ),
             ("std.coroutine", "spawn", IntrinsicFunction::Spawn),
             ("std.coroutine", "yield_now", IntrinsicFunction::YieldNow),
             ("std.coroutine", "until", IntrinsicFunction::Until),
-            ("std.coroutine", "__scheduler", IntrinsicFunction::SchedulerCreate),
-            ("std.coroutine", "__task_scope", IntrinsicFunction::TaskScope),
+            (
+                "std.coroutine",
+                "__scheduler",
+                IntrinsicFunction::SchedulerCreate,
+            ),
+            (
+                "std.coroutine",
+                "__task_scope",
+                IntrinsicFunction::TaskScope,
+            ),
             ("std.coroutine", "__pump", IntrinsicFunction::Pump),
-            ("std.coroutine", "__completion", IntrinsicFunction::Completion),
+            (
+                "std.coroutine",
+                "__completion",
+                IntrinsicFunction::Completion,
+            ),
             (
                 "std.coroutine",
                 "__completion_with_cancel",
                 IntrinsicFunction::CompletionWithCancel,
             ),
-            ("std.coroutine", "__completion_token", IntrinsicFunction::CompletionToken),
-            ("std.coroutine", "__task_is_finished", IntrinsicFunction::TaskIsFinished),
-            ("std.coroutine", "__task_cancel", IntrinsicFunction::TaskCancel),
-            ("std.coroutine", "__resolver_complete", IntrinsicFunction::ResolverComplete),
-            ("std.coroutine", "__resolver_cancel", IntrinsicFunction::ResolverCancel),
+            (
+                "std.coroutine",
+                "__completion_token",
+                IntrinsicFunction::CompletionToken,
+            ),
+            (
+                "std.coroutine",
+                "__task_is_finished",
+                IntrinsicFunction::TaskIsFinished,
+            ),
+            (
+                "std.coroutine",
+                "__task_cancel",
+                IntrinsicFunction::TaskCancel,
+            ),
+            (
+                "std.coroutine",
+                "__resolver_complete",
+                IntrinsicFunction::ResolverComplete,
+            ),
+            (
+                "std.coroutine",
+                "__resolver_cancel",
+                IntrinsicFunction::ResolverCancel,
+            ),
             (
                 "std.coroutine",
                 "__completion_token_resolve",
@@ -4839,7 +4915,10 @@ impl NameResolver {
                 if let Accessor::Method(name) = &access.accessor {
                     self.trait_method_references.insert(
                         access.syntax.id,
-                        self.visible_trait_methods.get(name).cloned().unwrap_or_default(),
+                        self.visible_trait_methods
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_default(),
                     );
                     return;
                 }
@@ -6085,16 +6164,20 @@ fn analyze_compile_time_bindings(
 ) -> HashMap<SyntaxId, CompileTimeBindingInfo> {
     let mut globals = HashMap::new();
     for (module, helper) in helpers {
-        let type_display = helper.annotation.as_ref().map(ToString::to_string).or_else(|| {
-            let value = helper.value.as_ref()?;
-            let signature = crate::macro_expand::function_value_signature(value)?;
-            Some(match value {
-                Expression::Function(function) if let Some(generics) = &function.generics => {
-                    format!("{generics} {signature}")
-                }
-                _ => signature.to_string(),
-            })
-        });
+        let type_display = helper
+            .annotation
+            .as_ref()
+            .map(ToString::to_string)
+            .or_else(|| {
+                let value = helper.value.as_ref()?;
+                let signature = crate::macro_expand::function_value_signature(value)?;
+                Some(match value {
+                    Expression::Function(function) if let Some(generics) = &function.generics => {
+                        format!("{generics} {signature}")
+                    }
+                    _ => signature.to_string(),
+                })
+            });
         globals.insert(
             helper.name.clone(),
             CompileTimeBindingInfo {
