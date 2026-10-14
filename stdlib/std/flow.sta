@@ -115,6 +115,22 @@ pub macro while =
         }
     }
 
+/// Evaluates an expression, discards its result, and produces `()`.
+///
+/// # Example
+///
+/// ```staple
+/// discard (process item)
+/// ```
+pub macro discard =
+    value: Expr =>
+    parse_quote {
+        {
+            $value
+            ()
+        }
+    }
+
 /// Iterates over an `IntoIterator`, binding each item to a pattern.
 ///
 /// # Example
