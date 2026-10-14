@@ -5070,8 +5070,7 @@ impl NameResolver {
         self.resolve_type_with(ty, false);
     }
 
-    /// Resolve rejected generic types in their own scope so the placement
-    /// diagnostic does not turn into spurious unknown-parameter errors.
+    /// Declares a parameter list in the current scope and resolves its bounds.
     fn resolve_value_generics(
         &mut self,
         generics: &staple_syntax::GenericParameters,
@@ -5091,34 +5090,28 @@ impl NameResolver {
         for bound in &generics.subtype_bounds {
             if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
                 self.type_parameters.insert(bound.syntax.id, id);
+            } else if strict {
+                self.diagnostics.push(Diagnostic::new(
+                    bound.parameter.syntax.span.clone(),
+                    format!(
+                        "unknown compile-time parameter `{}` in subtype bound",
+                        bound.parameter.name
+                    ),
+                ));
             }
             self.resolve_type_with(&bound.supertype, strict);
         }
     }
 
+    /// Resolve rejected generic types in their own scope so the placement
+    /// diagnostic does not turn into spurious unknown-parameter errors.
     fn resolve_forall_type(&mut self, ty: &staple_syntax::ForallType, strict: bool, message: &str) {
         if !message.is_empty() {
             self.diagnostics
                 .push(Diagnostic::new(ty.syntax.span.clone(), message));
         }
         self.push_type_parameter_scope();
-        for parameter in &ty.generics.parameters {
-            self.declare_type_parameter_pattern(parameter);
-        }
-        for bound in &ty.generics.trait_bounds {
-            if let Some(id) = self.resolve_trait_name(&bound.trait_name) {
-                self.trait_references.insert(bound.syntax.id, id);
-            }
-            for argument in &bound.arguments {
-                self.resolve_type_with(argument, strict);
-            }
-        }
-        for bound in &ty.generics.subtype_bounds {
-            if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
-                self.type_parameters.insert(bound.syntax.id, id);
-            }
-            self.resolve_type_with(&bound.supertype, strict);
-        }
+        self.resolve_value_generics(&ty.generics, strict && message.is_empty());
         self.resolve_type_with(&ty.body, strict);
         self.pop_type_parameter_scope();
     }

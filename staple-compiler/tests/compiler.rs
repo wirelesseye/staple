@@ -15533,6 +15533,24 @@ fn function_value_type_parameters_check_kinds_sizedness_and_extra_bounds() {
 }
 
 #[test]
+fn function_value_type_parameters_reject_unknown_subtype_bound_parameters() {
+    for source in [
+        "def f = <T where U <: I32> move x: T => x\n",
+        "def f: <T where U <: I32> move T -> T = <V> move x: V => x\n",
+    ] {
+        let diagnostics = resolve_result(source)
+            .err()
+            .expect("unknown subtype-bound parameter");
+        assert!(
+            diagnostics.iter().any(|d| d
+                .message
+                .contains("unknown compile-time parameter `U` in subtype bound")),
+            "{source}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
 fn closures_over_mutable_locals_keep_contextual_state_effects() {
     // Captured-state effects stay contextual until effect inference, so these
     // pre-existing programs keep checking.
