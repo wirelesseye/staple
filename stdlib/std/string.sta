@@ -22,20 +22,20 @@ pub trait ToString T {
     to_string: T -> String
 }
 
-def string_bytes: String -> Slice U8 = value => {
+def string_bytes = value: String => Slice U8 :: {
     let String bytes = value
     bytes
 }
 
-def string_from_utf8_unchecked: Slice U8 -> String = bytes => String bytes
+def string_from_utf8_unchecked = bytes: Slice U8 => String :: String bytes
 
 companion String {
     use std.slice.Slice
     /// Returns the UTF-8 bytes backing a string.
-    pub def bytes: String -> Slice U8 = value => string_bytes value
+    pub def bytes = value: String => Slice U8 :: string_bytes value
 
     /// Constructs a String from bytes, returning InvalidUtf8 on validation failure.
-    pub def from_utf8: Slice U8 -> Ok String | InvalidUtf8 = bytes =>
+    pub def from_utf8 = bytes: Slice U8 => Ok String | InvalidUtf8 ::
         if (__valid_utf8 bytes == 1) {
             Ok (String.from_utf8_unchecked bytes)
         } else {
@@ -43,7 +43,7 @@ companion String {
         }
 
     /// Constructs a string from bytes known to contain valid UTF-8.
-    pub def from_utf8_unchecked: Slice U8 -> String = bytes => string_from_utf8_unchecked bytes
+    pub def from_utf8_unchecked = bytes: Slice U8 => String :: string_from_utf8_unchecked bytes
 }
 
 impl Add String {

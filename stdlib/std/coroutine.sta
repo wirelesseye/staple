@@ -74,22 +74,23 @@ extern "staple-intrinsic" {
 
 /// Creates a scheduler. Destroying it closes its scopes and cancels their
 /// tasks.
-pub def scheduler: () -> Scheduler = () => __scheduler ()
+pub def scheduler = () => Scheduler :: __scheduler ()
 
 /// Creates a `Tasks` scope bound to `sched`.
-pub def task_scope: Scheduler -> Tasks = sched => __task_scope sched
+pub def task_scope = sched: Scheduler => Tasks :: __task_scope sched
 
 /// Runs a bounded snapshot of the scheduler's ready coroutines. Tasks that
 /// suspend, or are spawned during the pump, become eligible for a later pump.
 /// Returns the number of resumes performed and the number still ready.
-pub def pump: (Scheduler, USize) -> (executed: USize, ready: USize) =
-    (sched, budget) => __pump (sched, budget)
+pub def pump = (sched: Scheduler, budget: USize) =>
+    (executed: USize, ready: USize) :: __pump (sched, budget)
 
 /// Creates a one-shot completion bound to `scheduler`: a `Wait T` to `await`
 /// and a `Resolver T` to fulfil it. The wait may only be `await`ed from a task
 /// on the same scheduler. Completing before the `await` registers still
 /// delivers the value.
-pub def completion = <T> sched: Scheduler => (wait: Wait T, resolver: Resolver T) :: __completion sched
+pub def completion = <T> sched: Scheduler =>
+    (wait: Wait T, resolver: Resolver T) :: __completion sched
 
 /// Like `completion`, but with an owned cancellation callback. `on_cancel` runs
 /// exactly once if the consumer abandons the wait before it resolves — the
@@ -97,12 +98,13 @@ pub def completion = <T> sched: Scheduler => (wait: Wait T, resolver: Resolver T
 /// successful `complete` or `cancel` releases the callback without running it.
 /// Libraries use it to unregister a timer or external subscription. The
 /// callback may not suspend.
-pub def completion_with_cancel = <T> (sched: Scheduler, on_cancel: () -> ()) => (wait: Wait T, resolver: Resolver T) :: __completion_with_cancel (sched, on_cancel)
+pub def completion_with_cancel = <T> (sched: Scheduler, on_cancel: () -> ()) =>
+    (wait: Wait T, resolver: Resolver T) :: __completion_with_cancel (sched, on_cancel)
 
 /// Creates a unit-valued completion bound to `scheduler` and returns the `Wait`
 /// to `await` plus an opaque `CompletionToken` for a host to resolve.
-pub def completion_token: Scheduler -> (wait: Wait (), token: CompletionToken) =
-    sched => __completion_token sched
+pub def completion_token = sched: Scheduler =>
+    (wait: Wait (), token: CompletionToken) :: __completion_token sched
 
 /// An explicitly driven owner of coroutine ready queues. No coroutine runs
 /// until a `pump`. Multiple schedulers coexist on the one runtime thread.
@@ -152,17 +154,18 @@ impl !Copy CompletionToken {}
 companion CompletionToken {
     /// Resolves the completion with `()`, waking a parked waiter. Consumes the
     /// token. The C entry point is `__staple_completion_token_resolve`.
-    pub def resolve: CompletionToken -> () = token => __completion_token_resolve token
+    pub def resolve = token: CompletionToken => () :: __completion_token_resolve token
 
     /// Cancels the completion, waking a parked waiter with `Cancelled`.
     /// Consumes the token. The C entry point is `__staple_completion_token_cancel`.
-    pub def cancel: CompletionToken -> () = token => __completion_token_cancel token
+    pub def cancel = token: CompletionToken => () :: __completion_token_cancel token
 }
 
 companion Resolver {
     /// Consumes the resolver and the value, records completion, and wakes a
     /// registered waiter. If the waiter has already gone the value is dropped.
-    pub def complete = <T> (resolver: Resolver T; value: T) => () :: __resolver_complete resolver value
+    pub def complete = <T> (resolver: Resolver T; value: T) =>
+        () :: __resolver_complete resolver value
 
     /// Consumes the resolver and cancels the operation: a registered waiter is
     /// woken with `Cancelled`.

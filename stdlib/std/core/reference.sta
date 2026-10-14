@@ -14,7 +14,7 @@ extern "staple-intrinsic" {
 
 companion<T> Ref T {
     /// Replaces the referenced value and returns the old value.
-    pub def replace: (mut Ref T; move T) -> T = (mut reference; move value) => __ref_replace reference value
+    pub def replace = (mut reference: Ref T; move value: T) => T :: __ref_replace reference value
 }
 
 impl<T where Eq T> Eq (Ref T) {

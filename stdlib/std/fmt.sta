@@ -19,15 +19,13 @@ pub trait Debug T {
     fmt: (T, mut Formatter) -> ()
 }
 
-def derived_debug_implementation:
-    (
-        Ident String,
-        String,
-        Type,
-        Sequence (Ident String),
-        Type,
-    ) -> Item =
-(name_syntax, name, target, parameters, representation) => {
+def derived_debug_implementation = (
+    name_syntax: Ident String,
+    name: String,
+    target: Type,
+    parameters: Sequence (Ident String),
+    representation: Type,
+) => Item :: {
     let name_expression = StringExpr name
     let inner_name = Ident "inner"
     let inner_pattern = BindingPattern inner_name
@@ -61,7 +59,7 @@ def derived_debug_implementation:
 /// Derives `Debug` for a bodyless singleton type, formatting it as its name.
 /// Singleton types cannot carry compile-time parameters, so the implementation
 /// is always unparameterized.
-def derived_singleton_debug_implementation: (String, Type) -> Item = (name, target) => {
+def derived_singleton_debug_implementation = (name: String, target: Type) => Item :: {
     let name_expression = StringExpr name
     parse_quote {
         impl Debug $target {
@@ -115,7 +113,7 @@ pub macro @derive_debug: Item -> Sequence Item = item => match item {
     _ => panic "derive_debug item is unsupported",
 }
 
-def grow_formatter: mut Formatter -> () = mut formatter => {
+def grow_formatter = mut formatter: Formatter => () :: {
     let Formatter(mut source) = formatter
     let old_capacity = Buffer.capacity source
     let new_capacity: USize = if (old_capacity == 0) { 16 } else { old_capacity * 2 }
@@ -124,12 +122,12 @@ def grow_formatter: mut Formatter -> () = mut formatter => {
     formatter = Formatter destination
 }
 
-def write_byte: mut Formatter -> U8 -> () = mut formatter => byte => {
+def write_byte = mut formatter: Formatter => byte: U8 => () :: {
     if ((formatter.* |> length) == (formatter.* |> capacity)) { grow_formatter formatter }
     formatter.* |> push byte
 }
 
-def formatter_write: (mut Formatter, String) -> () = (mut formatter, value) => {
+def formatter_write = (mut formatter: Formatter, value: String) => () :: {
     let bytes = String.bytes value
     let mut index: USize = 0
     while (index < Slice.length bytes) {
@@ -138,7 +136,7 @@ def formatter_write: (mut Formatter, String) -> () = (mut formatter, value) => {
     }
 }
 
-def formatter_write_debug: (mut Formatter, String) -> () = (mut formatter, value) => {
+def formatter_write_debug = (mut formatter: Formatter, value: String) => () :: {
     formatter |> write "\""
     let bytes = String.bytes value
     let mut index: USize = 0
@@ -158,22 +156,23 @@ def formatter_write_debug: (mut Formatter, String) -> () = (mut formatter, value
     formatter |> write "\""
 }
 
-def formatter_finish: move Formatter -> String = move formatter => {
+def formatter_finish = move formatter: Formatter => String :: {
     let Formatter buffer = formatter
     String.from_utf8_unchecked (Buffer.freeze buffer)
 }
 
-def formatter_new: () -> Formatter = () => Formatter (Buffer.with_capacity 16)
+def formatter_new = () => Formatter :: Formatter (Buffer.with_capacity 16)
 
 companion Formatter {
     /// Creates an empty formatter.
-    pub def new: () -> Formatter = () => formatter_new ()
+    pub def new = () => Formatter :: formatter_new ()
 
     /// Appends a UTF-8 string to the formatter.
-    pub def write: (mut Formatter; String) -> () = (mut formatter; value) => formatter_write (formatter, value)
+    pub def write = (mut formatter: Formatter; value: String) =>
+        () :: formatter_write (formatter, value)
 
     /// Finishes formatting and returns the accumulated string.
-    pub def finish: move Formatter -> String = move formatter => formatter_finish formatter
+    pub def finish = move formatter: Formatter => String :: formatter_finish formatter
 
     /// Formats a value using its Display implementation.
     pub def display = <T where Display T> value: T => String :: {

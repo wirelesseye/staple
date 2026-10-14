@@ -20,11 +20,11 @@ extern "staple-intrinsic" {
 
 companion<T> Slice T {
     /// Returns the number of elements in the slice.
-    pub def length: Slice T -> USize = value => __slice_length value
+    pub def length = value: Slice T => USize :: __slice_length value
     /// Makes a slice from a fixed reference to a homogeneous array.
     pub def from_ref = <N where Natural N> value: Ref (T ^ N) => Slice T :: __slice_from_ref value
     /// Borrows an element by position, or `None` if out of bounds.
-    pub def get_ref: (Slice T; USize) -> Option (Ref T) = (slice; position) => {
+    pub def get_ref = (slice: Slice T; position: USize) => Option (Ref T) :: {
         if (position < Slice.length slice) {
             Some (Slice.get_ref_unchecked slice position)
         } else {
@@ -33,7 +33,8 @@ companion<T> Slice T {
     }
 
     /// Borrows an element by position, trapping if out of bounds.
-    pub def get_ref_unchecked: (Slice T; USize) -> Ref T = (slice; position) => __slice_get_ref (slice, position)
+    pub def get_ref_unchecked = (slice: Slice T; position: USize) =>
+        Ref T :: __slice_get_ref (slice, position)
 }
 
 impl<T where Copy T> Index (Slice T) USize {

@@ -5,10 +5,7 @@ use std.iterator.(IntoIterator, Iterator)
 use std.iterator.IterStep.(Done, Yield)
 use std.syntax.*
 
-def when_clauses:
-    Sequence (Expr, FatArrow, Expr) ->
-    Expr =
-clauses => match clauses {
+def when_clauses = clauses: Sequence (Expr, FatArrow, Expr) => Expr :: match clauses {
     Sequence () => parse_quote { () },
     Sequence (first, rest) => match first {
         (condition: Ident "else", _, fallback) => match rest {
@@ -49,7 +46,7 @@ pub macro when =
 // parenthesised, matching `while` and `for`. The trailing arms arrive as a flat
 // `Sequence Expr` of `else` / `if` / condition / branch atoms, which this helper
 // walks recursively.
-def if_branches: (Expr, Expr, Sequence Expr) -> Expr = (condition, consequent, rest) => {
+def if_branches = (condition: Expr, consequent: Expr, rest: Sequence Expr) => Expr :: {
     // `first` and `rest` are the required binding names for a `Sequence`
     // head/tail destructure, so each level rebinds `first` to a descriptive
     // local before recursing.

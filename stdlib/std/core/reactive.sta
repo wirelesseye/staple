@@ -8,7 +8,7 @@ pub type Reactive = opaque
 impl !Copy Reactive {}
 
 /// Creates a resource that owns reactions until its `with` block exits.
-pub def reactive_scope: () -> Reactive = () => __reactive_scope ()
+pub def reactive_scope = () => Reactive :: __reactive_scope ()
 
 extern "staple-intrinsic" {
     __reactive_scope: () -> Reactive

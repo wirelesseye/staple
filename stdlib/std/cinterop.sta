@@ -42,22 +42,20 @@ extern "staple-intrinsic" {
 companion CString {
     /// Validates UTF-8 and copies the bytes into a String.
     /// Consumes and frees the C string on both success and failure.
-    pub def to_string: move CString -> Ok String | InvalidUtf8 =
-        move value => TryConvert.try_convert value
+    pub def to_string = move value: CString =>
+        Ok String | InvalidUtf8 :: TryConvert.try_convert value
 
     /// Copies a String into a C string, rejecting embedded NUL bytes.
-    pub def from_string: String -> Ok CString | InteriorNul =
-        value => TryConvert.try_convert value
+    pub def from_string = value: String => Ok CString | InteriorNul :: TryConvert.try_convert value
 
     /// Copies bytes known to be valid UTF-8, consuming and freeing the C string.
     /// The caller must ensure the bytes are valid UTF-8.
-    pub def to_string_unchecked: move CString -> String =
-        move value => __string_from_c_string_unchecked value
+    pub def to_string_unchecked = move value: CString =>
+        String :: __string_from_c_string_unchecked value
 
     /// Copies and terminates a String without checking for embedded NUL bytes.
     /// The caller must ensure the String contains no embedded NUL bytes.
-    pub def from_string_unchecked: String -> CString =
-        value => __string_to_c_string_unchecked value
+    pub def from_string_unchecked = value: String => CString :: __string_to_c_string_unchecked value
 }
 
 extern "staple-intrinsic" {

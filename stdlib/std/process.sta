@@ -15,13 +15,13 @@ mod raw {
 use raw.exit as terminate
 
 /// Terminates the current process with the given exit code.
-pub def exit: I32 -> Never = code => {
+pub def exit = code: I32 => Never :: {
     let _ = terminate code
     loop { continue }
 }
 
 /// Terminates the program after printing `message`.
-pub def panic: String -> Never = message => {
+pub def panic = message: String => Never :: {
     match (CString.from_string message) {
         Ok text => { let _ = printf (c_string "panic: %s\n", text); () },
         InteriorNul => { let _ = printf (c_string "panic: message contains an embedded NUL byte\n"); () },

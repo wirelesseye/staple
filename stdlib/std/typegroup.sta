@@ -2,12 +2,15 @@ pub mod
 
 use std.syntax.*
 
-def typegroup_apply_modifiers: (Sequence Modifier, Item) -> Item = (modifiers, item) => match modifiers {
+def typegroup_apply_modifiers = (
+    modifiers: Sequence Modifier,
+    item: Item,
+) => Item :: match modifiers {
     Sequence () => item,
     _ => ModifiedItem (modifiers: modifiers, item: item),
 }
 
-def typegroup_body_item: (Ident String, TypeBody) -> Item = (variant, body) => match body {
+def typegroup_body_item = (variant: Ident String, body: TypeBody) => Item :: match body {
     AliasBody underlying => parse_quote { pub type $variant = alias $underlying },
     WrapperBody (visibility, underlying) => match visibility {
         Private => parse_quote { pub type $variant = wrap $underlying },
@@ -22,8 +25,11 @@ def typegroup_body_item: (Ident String, TypeBody) -> Item = (variant, body) => m
     OpaqueBody => panic "opaque typegroup variants are unsupported",
 }
 
-def typegroup_generic_body_item: (Ident String, Syntax, TypeBody) -> Item =
-(variant, parameters, body) => match body {
+def typegroup_generic_body_item = (
+    variant: Ident String,
+    parameters: Syntax,
+    body: TypeBody,
+) => Item :: match body {
     AliasBody underlying => parse_quote { pub type $variant $parameters = alias $underlying },
     WrapperBody (visibility, underlying) => match visibility {
         Private => parse_quote { pub type $variant $parameters = wrap $underlying },
@@ -38,10 +44,7 @@ def typegroup_generic_body_item: (Ident String, Syntax, TypeBody) -> Item =
     OpaqueBody => panic "opaque typegroup variants are unsupported",
 }
 
-def typegroup_items:
-    Sequence (Sequence Modifier, Ident String, Optional (Equals, TypeBody)) ->
-    Sequence Item =
-entries => match entries {
+def typegroup_items = entries: Sequence (Sequence Modifier, Ident String, Optional (Equals, TypeBody)) => Sequence Item :: match entries {
     Sequence () => Sequence (),
     Sequence (first, rest) => match first {
         (modifiers, variant, None) => {
@@ -57,12 +60,10 @@ entries => match entries {
     },
 }
 
-def typegroup_generic_items:
-    (
-        Syntax,
-        Sequence (Sequence Modifier, Ident String, Optional (Equals, TypeBody)),
-    ) -> Sequence Item =
-(parameters, entries) => match entries {
+def typegroup_generic_items = (
+    parameters: Syntax,
+    entries: Sequence (Sequence Modifier, Ident String, Optional (Equals, TypeBody)),
+) => Sequence Item :: match entries {
     Sequence () => Sequence (),
     Sequence (first, rest) => {
         let tail = typegroup_generic_items (parameters, rest)
@@ -81,12 +82,10 @@ def typegroup_generic_items:
     },
 }
 
-def typegroup_sum:
-    (
-        Ident String,
-        Sequence (Sequence Modifier, Ident String, Optional (Equals, TypeBody)),
-    ) -> Type =
-(group, entries) => match entries {
+def typegroup_sum = (
+    group: Ident String,
+    entries: Sequence (Sequence Modifier, Ident String, Optional (Equals, TypeBody)),
+) => Type :: match entries {
     Sequence (first, rest) => match first {
         (_, variant, _) => {
             let head: Type = parse_quote { $group.$variant }
@@ -102,7 +101,7 @@ def typegroup_sum:
     _ => panic "empty typegroup is unsupported",
 }
 
-def typegroup_parameter_syntax: Sequence Type -> Syntax = parameters => match parameters {
+def typegroup_parameter_syntax = parameters: Sequence Type => Syntax :: match parameters {
     Sequence () => quote {},
     Sequence (first, rest) => {
         let tail = typegroup_parameter_syntax rest
@@ -110,13 +109,11 @@ def typegroup_parameter_syntax: Sequence Type -> Syntax = parameters => match pa
     },
 }
 
-def typegroup_generic_sum_syntax:
-    (
-        Ident String,
-        Syntax,
-        Sequence (Sequence Modifier, Ident String, Optional (Equals, TypeBody)),
-    ) -> Syntax =
-(group, parameters, entries) => match entries {
+def typegroup_generic_sum_syntax = (
+    group: Ident String,
+    parameters: Syntax,
+    entries: Sequence (Sequence Modifier, Ident String, Optional (Equals, TypeBody)),
+) => Syntax :: match entries {
     Sequence (first, rest) => match first {
         (_, variant, underlying) => {
             let head: Syntax = match underlying {

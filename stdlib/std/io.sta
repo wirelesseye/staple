@@ -13,7 +13,7 @@ pub(package) extern "c" {
 }
 
 /// Writes a string to standard output without a trailing newline.
-pub def print: String ->{IO} () = value => {
+pub def print = value: String =>{IO} () :: {
     match (CString.from_string value) {
         Ok text => { let _ = printf (c_string "%s", text); () },
         InteriorNul => panic "cannot print a string containing a NUL byte",
@@ -21,7 +21,7 @@ pub def print: String ->{IO} () = value => {
 }
 
 /// Writes a string followed by a newline to standard output.
-pub def println: String ->{IO} () = value => {
+pub def println = value: String =>{IO} () :: {
     match (CString.from_string value) {
         Ok text => { let _ = printf (c_string "%s\n", text); () },
         InteriorNul => panic "cannot print a string containing a NUL byte",
