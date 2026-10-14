@@ -180,10 +180,8 @@ pub(crate) enum ArtifactUseSite {
     CStringConversion(LoweredCallId),
     /// A completion intrinsic dropping an orphaned handle.
     CompletionOrphan(LoweredCallId),
-    /// A buffer allocation's element finalizer.
+    /// A frozen buffer's element finalizer.
     BufferAllocation(LoweredCallId),
-    /// A buffer clone's destination-buffer finalizer.
-    BufferCloneFinalizer(LoweredCallId),
     /// A buffer clone's per-element `Clone` call (an instance use).
     BufferCloneElement(LoweredCallId),
     /// A `coro` creation's resume/cleanup pair, at the `Coro` expression.
@@ -647,6 +645,15 @@ impl LoweredProgram {
             while expanded_artifacts < self.artifacts.len() {
                 let artifact = LoweredArtifactRequestId::from_index(expanded_artifacts);
                 expanded_artifacts += 1;
+                // A catalog closed earlier already carries this artifact's
+                // edges, and expanding it again would record them twice.
+                if self
+                    .artifacts
+                    .get(artifact)
+                    .is_some_and(|record| record.expanded)
+                {
+                    continue;
+                }
                 let (plan, requests) = match hooks.expand(self, artifact) {
                     Ok(result) => result,
                     Err(diagnostics) => return diagnostics,
@@ -1905,11 +1912,6 @@ impl LoweredProgram {
                 }
             }
             ArtifactUseSite::BufferAllocation(id) => {
-                if !call(id) {
-                    report("call", id.index());
-                }
-            }
-            ArtifactUseSite::BufferCloneFinalizer(id) => {
                 if !call(id) {
                     report("call", id.index());
                 }

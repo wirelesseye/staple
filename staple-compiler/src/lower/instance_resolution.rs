@@ -2215,8 +2215,7 @@ fn concrete_type_needs_drop(program: &LoweredProgram, value_type: &CheckedType) 
         return true;
     }
     match value_type {
-        CheckedType::CString | CheckedType::Unique(_) => true,
-        CheckedType::Buffer(_) => false,
+        CheckedType::CString | CheckedType::Unique(_) | CheckedType::Buffer(_) => true,
         CheckedType::Product(product) => product
             .elements
             .iter()

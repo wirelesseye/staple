@@ -1827,43 +1827,15 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
-    /// Field 3 of a buffer header, the element data pointer.
+    /// Field 2 of a buffer header, the element data pointer.
     pub(crate) fn buffer_data_pointer(
         &self,
         buffer: PointerValue<'context>,
         element: BasicTypeEnum<'context>,
     ) -> CodeGenerationResult<PointerValue<'context>> {
         self.builder
-            .build_struct_gep(self.buffer_header_type(element), buffer, 3, "buffer.data")
+            .build_struct_gep(self.buffer_header_type(element), buffer, 2, "buffer.data")
             .map_err(compiler_diagnostic)
-    }
-
-    /// Trap if buffer frozen.
-    pub(crate) fn trap_if_buffer_frozen(
-        &self,
-        buffer: PointerValue<'context>,
-        header: StructType<'context>,
-        span: Span,
-    ) -> CodeGenerationResult<()> {
-        let slot = self
-            .builder
-            .build_struct_gep(header, buffer, 2, "buffer.frozen.slot")
-            .map_err(compiler_diagnostic)?;
-        let frozen = self
-            .builder
-            .build_load(self.context.i8_type(), slot, "buffer.frozen")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let frozen = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::NE,
-                frozen,
-                self.context.i8_type().const_zero(),
-                "buffer.is_frozen",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.build_trap_if(frozen, span)
     }
 
     /// The capacity overflow trap `Buffer.with_capacity`
@@ -1877,11 +1849,11 @@ impl<'program, 'context> Backend<'program, 'context> {
     ) -> CodeGenerationResult<()> {
         let offset = self
             .target_data
-            .offset_of_element(&header, 3)
+            .offset_of_element(&header, 2)
             .ok_or_else(|| {
                 internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "buffer header layout has a data pointer at field 3",
+                    "buffer header layout has a data pointer at field 2",
                 )
             })?;
         let stride = self.target_data.get_abi_size(&llvm_element);
@@ -1906,23 +1878,26 @@ impl<'program, 'context> Backend<'program, 'context> {
         self.build_trap_if(too_large, span)
     }
 
-    /// Allocates the header shared by Buffer.with_capacity and Buffer.clone.
-    /// The prefix distinguishes their SSA names.
+    /// Allocates the header shared by Buffer.with_capacity, Buffer.clone and
+    /// Buffer.freeze. The prefix distinguishes their SSA names. An `owned`
+    /// buffer is malloc-backed and rooted for the GC until it is dropped; a
+    /// frozen buffer is a plain GC allocation.
     pub(crate) fn build_buffer_allocation(
         &self,
         capacity: IntValue<'context>,
         llvm_element: BasicTypeEnum<'context>,
         header: StructType<'context>,
         prefix: &str,
+        owned: bool,
         span: Span,
     ) -> CodeGenerationResult<PointerValue<'context>> {
         let offset = self
             .target_data
-            .offset_of_element(&header, 3)
+            .offset_of_element(&header, 2)
             .ok_or_else(|| {
                 internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "buffer header layout has a data pointer at field 3",
+                    "buffer header layout has a data pointer at field 2",
                 )
             })?;
         let stride = self.target_data.get_abi_size(&llvm_element);
@@ -1961,8 +1936,11 @@ impl<'program, 'context> Backend<'program, 'context> {
                 &format!("{prefix}.allocation.bytes"),
             )
             .map_err(compiler_diagnostic)?;
-        let buffer =
-            self.build_gc_allocation(bytes, &format!("{prefix}.allocate"), span.clone())?;
+        let buffer = if owned {
+            self.build_unique_allocation(bytes, span.clone())?
+        } else {
+            self.build_gc_allocation(bytes, &format!("{prefix}.allocate"), span.clone())?
+        };
         self.builder
             .build_memset(
                 buffer,

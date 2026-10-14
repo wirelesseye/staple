@@ -4751,7 +4751,7 @@ mod tests {
             let source = if captured {
                 "def make: <T where Copy T> T -> (() -> T) = <T where Copy T> value => { let mut held = value; () => held }\nlet result = make 42\n"
             } else {
-                "use std.buffer.Buffer\ndef make: <T where Copy T> USize -> Buffer T = <T where Copy T> capacity => Buffer.with_capacity.<T> capacity\nlet result: Buffer I32 = make 3\n"
+                "use std.buffer.Buffer\nuse std.slice.Slice\ndef make: <T where Copy T> USize -> Slice T = <T where Copy T> capacity => { let mut buffer: Buffer T = Buffer.with_capacity.<T> capacity; Buffer.freeze buffer }\nlet result: Slice I32 = make 3\n"
             };
             let (text, name) = dynamic_test_module(source, "make");
             let context = inkwell::context::Context::create();
@@ -4788,7 +4788,7 @@ mod tests {
                         environment: std::ptr::null(),
                     };
                     let input = [42u8; 32];
-                    let mut allocation: *const u8 = std::ptr::null();
+                    let allocation: *const u8;
                     unsafe {
                         if captured {
                             make.call(
@@ -4801,12 +4801,17 @@ mod tests {
                             allocation =
                                 closure.environment.add(2 * word).cast::<*const u8>().read();
                         } else {
+                            // A frozen buffer returns a slice over its payload; the
+                            // data pointer sits one header past the allocation.
+                            let mut slice = [0usize; 2];
                             make.call(
                                 std::ptr::null(),
                                 &descriptor,
-                                (&mut allocation as *mut *const u8).cast(),
+                                slice.as_mut_ptr().cast(),
                                 (&capacity as *const usize).cast(),
                             );
+                            let header = (2 * word).div_ceil(align) * align;
+                            allocation = (slice[0] - header) as *const u8;
                         }
                     }
                     assert!(!allocation.is_null());
@@ -4826,20 +4831,13 @@ mod tests {
                             (size + 1).div_ceil(word) * word
                         );
                     } else {
-                        let header = (2 * word + 1).div_ceil(align) * align;
+                        // Freezing copies the (empty) initialized prefix, so the
+                        // payload holds no elements whatever the capacity was.
+                        let header = (2 * word).div_ceil(align) * align;
                         assert_eq!((allocation as usize + header) % align, 0);
-                        if align == word {
-                            for index in 0..capacity {
-                                assert_eq!(
-                                    (allocation as usize + header + index * descriptor.stride)
-                                        % word,
-                                    0
-                                );
-                            }
-                        }
                         assert_eq!(
                             descriptor_address - allocation as usize,
-                            (header + capacity * descriptor.stride).div_ceil(word) * word
+                            header.div_ceil(word) * word
                         );
                     }
                 }

@@ -17,8 +17,7 @@ println (ToString.to_string (List.capacity numbers))
 // out-of-bounds index (it's backed by `List.get_unchecked`), matching how
 // indexing works elsewhere in the language. `List.get` is the checked
 // counterpart: it returns `Option T` instead of trapping. Both require
-// `Copy T` the way `List.get_ref` — which borrows instead of copying —
-// does not.
+// `Copy T`.
 let index: USize = 0
 let first: I32 = numbers[index]
 let last: I32 = match List.get numbers 7 {

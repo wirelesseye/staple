@@ -20767,8 +20767,7 @@ fn type_needs_drop(
         return true;
     }
     match value_type {
-        CheckedType::CString | CheckedType::Unique(_) => true,
-        CheckedType::Buffer(_) => false,
+        CheckedType::CString | CheckedType::Unique(_) | CheckedType::Buffer(_) => true,
         CheckedType::Product(product) => product.elements.iter().any(|element| {
             type_needs_drop(&element.value_type, drop_trait, implementations, discharge)
         }),

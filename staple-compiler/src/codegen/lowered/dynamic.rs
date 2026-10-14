@@ -43,6 +43,9 @@ struct DynamicLoopContext<'context> {
     result_descriptor: PointerValue<'context>,
     binding_mark: usize,
     breaks: bool,
+    /// Which bindings were live where the loop was left; the code after the
+    /// loop continues from that state, not from the end of the body.
+    break_live: Option<HashMap<SymbolId, bool>>,
 }
 
 /// Runtime buffer layout from an element descriptor.
@@ -188,6 +191,86 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .into_pointer_value();
                 self.backend.drop_dynamic_value(components[0], payload)?;
                 self.backend.build_unique_free(payload, span.clone())?;
+            }
+            CompoundDescriptorShape::Buffer => {
+                let buffer = self.load_buffer_pointer(value)?;
+                let element = components[0];
+                let layout = self.dynamic_buffer_layout(element)?;
+                let length = self.load_buffer_metadata(buffer, 0)?;
+                let data = self
+                    .backend
+                    .dynamic_byte_offset(buffer, layout.header_offset)?;
+                let index_slot = self
+                    .backend
+                    .entry_builder()
+                    .build_alloca(self.backend.size_type, "buffer.drop.index")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(index_slot, self.backend.size_type.const_zero())
+                    .map_err(compiler_diagnostic)?;
+                let check = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "buffer.drop.check");
+                let element_block = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "buffer.drop.element");
+                let done = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "buffer.drop.done");
+                self.backend
+                    .builder
+                    .build_unconditional_branch(check)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(check);
+                let index = self
+                    .load_dynamic_storage(self.backend.size_type, index_slot, "buffer.drop.index")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let finished = self
+                    .backend
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::UGE,
+                        index,
+                        length,
+                        "buffer.drop.finished",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_conditional_branch(finished, done, element_block)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(element_block);
+                let offset = self
+                    .backend
+                    .builder
+                    .build_int_mul(index, layout.stride, "buffer.drop.offset")
+                    .map_err(compiler_diagnostic)?;
+                let field = self.backend.dynamic_byte_offset(data, offset)?;
+                self.backend.drop_dynamic_value(element, field)?;
+                let next = self
+                    .backend
+                    .builder
+                    .build_int_add(
+                        index,
+                        self.backend.size_type.const_int(1, false),
+                        "buffer.drop.next",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(index_slot, next)
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_unconditional_branch(check)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(done);
+                self.backend.build_unique_free(buffer, span.clone())?;
             }
             CompoundDescriptorShape::Product => {
                 let mut offset = self.backend.size_type.const_zero();
@@ -2582,13 +2665,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// The element descriptor of a buffer intrinsic, from its `T` argument.
-    /// A fresh dynamic buffer with the given capacity: its header, the
-    /// element area, and the element descriptor in the trailing word. The
-    /// descriptor must already be GC-stable.
+    /// A fresh dynamic buffer with the given capacity: its header and the
+    /// element area. An `owned` buffer is malloc-backed and GC-rooted; a frozen
+    /// one is a GC allocation with the element descriptor in a trailing word
+    /// (the descriptor must already be GC-stable) and the shared finalizer.
     fn allocate_dynamic_buffer(
         &self,
         capacity: inkwell::values::IntValue<'context>,
         element: PointerValue<'context>,
+        owned: bool,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<PointerValue<'context>> {
         let layout = self.dynamic_buffer_layout(element)?;
@@ -2618,9 +2703,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "buffer.total.size",
             )
             .map_err(compiler_diagnostic)?;
-        let buffer = self
-            .backend
-            .build_gc_allocation(total, "buffer", span.clone())?;
+        let buffer = if owned {
+            self.backend
+                .build_unique_allocation(concrete, span.clone())?
+        } else {
+            self.backend
+                .build_gc_allocation(total, "buffer", span.clone())?
+        };
         self.backend
             .builder
             .build_store(buffer, self.backend.size_type.const_zero())
@@ -2633,14 +2722,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_store(capacity_slot, capacity)
             .map_err(compiler_diagnostic)?;
-        let frozen_slot = self.backend.dynamic_byte_offset(
-            buffer,
-            self.backend.size_type.const_int(2 * pointer_bytes, false),
-        )?;
-        self.backend
-            .builder
-            .build_store(frozen_slot, self.backend.context.i8_type().const_zero())
-            .map_err(compiler_diagnostic)?;
+        if owned {
+            return Ok(buffer);
+        }
         let descriptor_slot = self.backend.dynamic_byte_offset(buffer, concrete)?;
         self.backend
             .builder
@@ -2700,34 +2784,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .into_int_value())
     }
 
-    /// Trap when a buffer's frozen flag is set.
-    fn trap_if_buffer_frozen(
-        &self,
-        buffer: PointerValue<'context>,
-        span: &staple_syntax::Span,
-    ) -> CodeGenerationResult<()> {
-        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
-        let slot = self.backend.dynamic_byte_offset(
-            buffer,
-            self.backend.size_type.const_int(2 * pointer_bytes, false),
-        )?;
-        let frozen = self
-            .load_dynamic_storage(self.backend.context.i8_type(), slot, "buffer.frozen")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let frozen = self
-            .backend
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::NE,
-                frozen,
-                self.backend.context.i8_type().const_zero(),
-                "buffer.is_frozen",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.backend.build_trap_if(frozen, span.clone())
-    }
-
     /// The runtime layout of a dynamic buffer: its header offset, element
     /// store size, and element stride, all from the element descriptor.
     fn dynamic_buffer_layout(
@@ -2736,10 +2792,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<DynamicBufferLayout<'context>> {
         let layout = self.backend.load_descriptor_layout(element)?;
         let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
-        let base = self
-            .backend
-            .size_type
-            .const_int(2 * pointer_bytes + 1, false);
+        let base = self.backend.size_type.const_int(2 * pointer_bytes, false);
         let header_offset = self.runtime_align_up(base, layout.align)?;
         Ok(DynamicBufferLayout {
             store_size: layout.store_size,
@@ -3906,8 +3959,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
                 let element = self.intrinsic_element_descriptor(call, environment, span)?;
-                let element = self.copy_descriptor_to_gc(element, span)?;
-                let buffer = self.allocate_dynamic_buffer(capacity, element, span)?;
+                let buffer = self.allocate_dynamic_buffer(capacity, element, true, span)?;
                 self.backend
                     .builder
                     .build_store(storage, buffer)
@@ -3936,11 +3988,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let dispatch = dispatch.clone();
                 let source = self.load_buffer_pointer(slot_pointer(0)?)?;
                 let element = self.intrinsic_element_descriptor(call, environment, span)?;
-                let element_copy = self.copy_descriptor_to_gc(element, span)?;
                 let layout = self.dynamic_buffer_layout(element)?;
                 let length = self.load_buffer_metadata(source, 0)?;
                 let capacity = self.load_buffer_metadata(source, 1)?;
-                let destination = self.allocate_dynamic_buffer(capacity, element_copy, span)?;
+                let destination = self.allocate_dynamic_buffer(capacity, element, true, span)?;
                 let source_data = self
                     .backend
                     .dynamic_byte_offset(source, layout.header_offset)?;
@@ -4041,7 +4092,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let value = slot_pointer(1)?;
                 let element = self.intrinsic_element_descriptor(call, environment, span)?;
                 let layout = self.dynamic_buffer_layout(element)?;
-                self.trap_if_buffer_frozen(buffer, span)?;
                 let length = self.load_buffer_metadata(buffer, 0)?;
                 let capacity = self.load_buffer_metadata(buffer, 1)?;
                 let full = self
@@ -4102,23 +4152,34 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             crate::IntrinsicFunction::BufferFreeze => {
                 let buffer = self.load_buffer_pointer(slot_pointer(0)?)?;
                 let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
-                let frozen_slot = self.backend.dynamic_byte_offset(
-                    buffer,
-                    self.backend.size_type.const_int(2 * pointer_bytes, false),
-                )?;
-                self.backend
-                    .builder
-                    .build_store(
-                        frozen_slot,
-                        self.backend.context.i8_type().const_int(1, false),
-                    )
-                    .map_err(compiler_diagnostic)?;
                 let length = self.load_buffer_metadata(buffer, 0)?;
                 let element = self.intrinsic_element_descriptor(call, environment, span)?;
                 let layout = self.dynamic_buffer_layout(element)?;
-                let data = self
+                // The slice owns a GC copy of the elements; the malloc-backed
+                // source is released without dropping them.
+                let element_copy = self.copy_descriptor_to_gc(element, span)?;
+                let frozen = self.allocate_dynamic_buffer(length, element_copy, false, span)?;
+                self.backend
+                    .builder
+                    .build_store(frozen, length)
+                    .map_err(compiler_diagnostic)?;
+                let source_data = self
                     .backend
                     .dynamic_byte_offset(buffer, layout.header_offset)?;
+                let data = self
+                    .backend
+                    .dynamic_byte_offset(frozen, layout.header_offset)?;
+                let bytes = self
+                    .backend
+                    .builder
+                    .build_int_mul(length, layout.stride, "buffer.freeze.bytes")
+                    .map_err(compiler_diagnostic)?;
+                // Element alignment is runtime-only; LLVM memcpy needs constant alignment.
+                self.backend
+                    .builder
+                    .build_memcpy(data, 1, source_data, 1, bytes)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.build_unique_free(buffer, span.clone())?;
                 self.backend
                     .builder
                     .build_store(storage, data)
@@ -4143,7 +4204,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 };
                 let element = self.intrinsic_element_descriptor(call, environment, span)?;
                 let layout = self.dynamic_buffer_layout(element)?;
-                self.trap_if_buffer_frozen(buffer, span)?;
                 let length = self.load_buffer_metadata(buffer, 0)?;
                 let descriptor = self.dynamic_descriptor(&call.result_type, environment, span)?;
                 let result_layout = self.backend.load_descriptor_layout(descriptor)?;
@@ -4238,8 +4298,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let destination = self.load_buffer_pointer(slot_pointer(1)?)?;
                 let element = self.intrinsic_element_descriptor(call, environment, span)?;
                 let layout = self.dynamic_buffer_layout(element)?;
-                self.trap_if_buffer_frozen(source, span)?;
-                self.trap_if_buffer_frozen(destination, span)?;
                 let source_length = self.load_buffer_metadata(source, 0)?;
                 let destination_length = self.load_buffer_metadata(destination, 0)?;
                 let destination_capacity = self.load_buffer_metadata(destination, 1)?;
@@ -6365,7 +6423,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if !crate::contains_type_parameter(ty) || matches!(ty, CheckedType::Parameter { .. }) {
             return self.dynamic_descriptor(ty, environment, span);
         }
-        if is_static_layout_type(ty) && !matches!(ty, CheckedType::Unique(_)) {
+        if is_static_layout_type(ty)
+            && !matches!(ty, CheckedType::Unique(_) | CheckedType::Buffer(_))
+        {
             // A reference's pointee still gets its descriptor: structural
             // dictionaries reached through the reference use it.
             if let CheckedType::Ref(pointee) = ty {
@@ -6388,6 +6448,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         let (shape, children): (CompoundDescriptorShape, Vec<&CheckedType>) = match ty {
             CheckedType::Unique(payload) => (CompoundDescriptorShape::Unique, vec![payload]),
+            CheckedType::Buffer(element) => (CompoundDescriptorShape::Buffer, vec![element]),
             CheckedType::Product(product) => (
                 CompoundDescriptorShape::Product,
                 product
@@ -6424,7 +6485,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map(|component| self.backend.load_descriptor_layout(*component))
             .collect::<CodeGenerationResult<Vec<_>>>()?;
         let layout = match shape {
-            CompoundDescriptorShape::Unique => self
+            CompoundDescriptorShape::Unique | CompoundDescriptorShape::Buffer => self
                 .backend
                 .static_runtime_layout(self.backend.descriptor_layout(ty)?),
             CompoundDescriptorShape::Product => self.backend.runtime_product_layout(&layouts)?,
@@ -6454,7 +6515,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing compound cleanup entry"))?
             .as_global_value()
             .as_pointer_value();
-        let mut has_drop = self.backend.context.bool_type().const_zero();
+        // An owning allocation always needs releasing, whatever its contents.
+        let mut has_drop = if matches!(
+            shape,
+            CompoundDescriptorShape::Unique | CompoundDescriptorShape::Buffer
+        ) {
+            self.backend.context.bool_type().const_all_ones()
+        } else {
+            self.backend.context.bool_type().const_zero()
+        };
         for component in &components {
             let pointer = self.backend.descriptor_drop_pointer(*component)?;
             let present = self
@@ -6921,6 +6990,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .backend
                 .context
                 .append_basic_block(function, "match.next");
+            // The arm owns the symbols its pattern binds, so they drop with it.
+            let mark = environment.binding_order.len();
             self.test_dynamic_pattern(
                 owner,
                 arm.pattern,
@@ -6933,7 +7004,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )?;
             self.backend.builder.position_at_end(arm_block);
             environment.returned = false;
-            let mark = environment.binding_order.len();
             let value = self.emit_dynamic_expression(owner, arm.body, environment)?;
             if !environment.returned {
                 self.drop_dynamic_bindings(environment, mark)?;
@@ -7411,6 +7481,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             result_descriptor,
             binding_mark: environment.binding_order.len(),
             breaks: false,
+            break_live: None,
         });
         let value = self.emit_dynamic_block(owner, loop_.body, environment)?;
         if !environment.returned {
@@ -7457,6 +7528,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return Ok(result);
         }
         environment.returned = false;
+        if let Some(live) = &context.break_live {
+            for (symbol, live) in live {
+                if let Some(binding) = environment.bindings.get_mut(symbol) {
+                    binding.live = *live;
+                }
+            }
+        }
         Ok(result)
     }
 
@@ -8331,6 +8409,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .builder
                         .build_unconditional_branch(exit)
                         .map_err(compiler_diagnostic)?;
+                    let live = environment
+                        .bindings
+                        .iter()
+                        .map(|(symbol, binding)| (*symbol, binding.live))
+                        .collect::<HashMap<_, _>>();
                     if let Some(context) = environment
                         .loops
                         .iter_mut()
@@ -8338,6 +8421,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .find(|context| context.depth == break_item.loop_depth)
                     {
                         context.breaks = true;
+                        context.break_live.get_or_insert(live);
                     }
                     environment.returned = true;
                 }
@@ -8361,7 +8445,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         Some(place) => place,
                         None => self.emit_dynamic_place(owner, assignment.target, environment)?,
                     };
-                    if assignment.drop_previous {
+                    // A binding that was moved out holds nothing to drop.
+                    let moved_out = assignment
+                        .initialization_symbol
+                        .and_then(|symbol| environment.bindings.get(&symbol))
+                        .is_some_and(|binding| !binding.live);
+                    if assignment.drop_previous && !moved_out {
                         self.backend.drop_dynamic_value(descriptor, target)?;
                     }
                     self.backend.copy_dynamic_value(descriptor, value, target)?;

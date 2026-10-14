@@ -765,6 +765,7 @@ impl LoweredArtifactPlan {
                     | DropGlueBody::CStringFree
                     | DropGlueBody::Wrapper { .. } => {}
                     DropGlueBody::Unique { payload, .. } => visit(Value(payload)),
+                    DropGlueBody::Buffer { element, .. } => visit(Value(element)),
                     DropGlueBody::Product { fields } => {
                         for DroppedElement {
                             index: _,
@@ -1526,6 +1527,11 @@ pub(crate) enum DropGlueBody {
         payload: CheckedType,
         glue: Option<PlannedArtifact>,
     },
+    /// Drop every live element of an owned buffer, then release its allocation.
+    Buffer {
+        element: CheckedType,
+        glue: Option<PlannedArtifact>,
+    },
     /// Drop each listed field in the recorded order, which is reverse element
     /// order; only droppable fields are listed.
     Product { fields: Vec<DroppedElement> },
@@ -1582,7 +1588,7 @@ impl DropGluePlan {
                     visit(PlannedCalleeRef::Artifact(representation));
                 }
             }
-            DropGlueBody::Unique { glue, .. } => {
+            DropGlueBody::Unique { glue, .. } | DropGlueBody::Buffer { glue, .. } => {
                 if let Some(glue) = glue {
                     visit(PlannedCalleeRef::Artifact(glue));
                 }
@@ -1618,7 +1624,7 @@ impl DropGluePlan {
                     visit(PlannedCalleeRefMut::Artifact(representation));
                 }
             }
-            DropGlueBody::Unique { glue, .. } => {
+            DropGlueBody::Unique { glue, .. } | DropGlueBody::Buffer { glue, .. } => {
                 if let Some(glue) = glue {
                     visit(PlannedCalleeRefMut::Artifact(glue));
                 }

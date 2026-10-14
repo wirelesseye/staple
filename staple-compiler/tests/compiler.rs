@@ -5047,8 +5047,10 @@ fn buffer_intrinsics_type_check_and_compile() {
         "let capacity: USize = Buffer.capacity values\n",
         "Buffer.push values 10\n",
         "Buffer.push values 20\n",
-        "let first: Ref I32 = Buffer.get_ref_unchecked values (USize :: 0)\n",
-        "let safe_first: Option (Ref I32) = Buffer.get_ref values (USize :: 0)\n",
+        "let first: I32 = Buffer.get_unchecked values (USize :: 0)\n",
+        "let safe_first: Option I32 = Buffer.get values (USize :: 0)\n",
+        "let replaced: Option () = Buffer.set values (USize :: 1) 30\n",
+        "Buffer.set_unchecked values (USize :: 0) 40\n",
         "let popped: Option I32 = Buffer.pop values\n",
         "let frozen: Slice I32 = Buffer.freeze values\n",
         "let frozen_length: USize = Slice.length frozen\n",
@@ -5061,17 +5063,20 @@ fn buffer_intrinsics_type_check_and_compile() {
     let llvm = CodeGenerator::new(&context)
         .compile_root(&lowered)
         .expect("Buffer operations should compile");
-    assert!(llvm.contains("buffer.allocate"));
+    assert!(llvm.contains("unique.allocate"));
+    assert!(llvm.contains("buffer.freeze.allocate"));
     assert!(llvm.contains("buffer.push.slot"));
     assert!(llvm.contains("buffer.pop.option"));
     assert!(llvm.contains("buffer.slice.pointer"));
 
     let module = type_check(concat!(
         "use std.buffer.Buffer\n",
+        "use std.slice.Slice\n",
         "use std.cinterop.*\n",
         "def exercise: () -> () = () => {\n",
         "let mut owned: Buffer CString = Buffer.with_capacity (USize :: 1)\n",
         "Buffer.push owned (c_string \"owned\")\n",
+        "let frozen: Slice CString = Buffer.freeze owned\n",
         "()\n",
         "}\n",
     ));
@@ -5107,7 +5112,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
     let llvm = CodeGenerator::new(&context)
         .compile_root(&lower(&module))
         .expect("Buffer and List deep clones should compile");
-    assert!(llvm.contains("buffer.clone.allocate"));
+    assert!(llvm.contains("unique.allocate"));
     assert!(llvm.contains("buffer.clone.element"));
     assert!(llvm.contains("buffer.clone.destination.length.slot"));
 
@@ -5200,8 +5205,8 @@ fn list_grows_past_initial_capacity_and_type_checks() {
         "let capacity: USize = List.capacity values\n",
         "let first: Option I32 = List.get values (USize :: 0)\n",
         "let last: I32 = List.get_unchecked values (USize :: 4)\n",
-        "let last_ref: Option (Ref I32) = List.get_ref values (USize :: 4)\n",
-        "let last_ref_unchecked: Ref I32 = List.get_ref_unchecked values (USize :: 4)\n",
+        "let replaced: Option () = List.set values (USize :: 4) 9\n",
+        "List.set_unchecked values (USize :: 0) 8\n",
         "let popped: Option I32 = List.pop values\n",
         "let sized: List I32 = List.with_capacity (USize :: 10)\n",
         "()\n}\n",
@@ -5224,8 +5229,8 @@ fn migrated_stdlib_methods_accept_pipe_method_call_syntax() {
         "values |> push 2\n",
         "let first: Option I32 = values |> get (USize :: 0)\n",
         "let first_unchecked: I32 = values |> get_unchecked (USize :: 0)\n",
-        "let first_ref: Option (Ref I32) = values |> get_ref (USize :: 0)\n",
-        "let last_ref_unchecked: Ref I32 = values |> get_ref_unchecked (USize :: 0)\n",
+        "let replaced: Option () = values |> set (USize :: 0) 3\n",
+        "values |> set_unchecked (USize :: 0) 4\n",
         "()\n}\n",
     ));
     let context = Context::create();
@@ -11074,6 +11079,33 @@ fn allows_move_only_globals_borrowed_from_top_level_statements_and_functions() {
     CodeGenerator::new(&context)
         .compile_root(&lower(&module))
         .expect("borrowing a move-only global should compile");
+}
+
+#[test]
+fn rejects_moving_a_mut_parameter_out_without_reassigning_it() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.buffer.Buffer\n",
+            "def leak = (mut buffer: Buffer I32; move extra: I32) => Buffer I32 :: buffer\n",
+        )))
+        .expect_err_diagnostics("a moved-out mut parameter must be reassigned");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("must be reassigned before the function returns")
+    }));
+}
+
+#[test]
+fn accepts_moving_a_mut_parameter_out_when_it_is_reassigned() {
+    type_check(concat!(
+        "use std.buffer.Buffer\n",
+        "def regrow = (mut buffer: Buffer I32) => () :: {\n",
+        "let mut bigger: Buffer I32 = Buffer.with_capacity (USize :: 8)\n",
+        "Buffer.transfer buffer bigger\n",
+        "buffer = bigger\n",
+        "}\n",
+    ));
 }
 
 #[test]

@@ -217,7 +217,34 @@ impl<'a> OwnershipChecker<'a> {
                 "a borrowed closure cannot escape its lexical scope",
             ));
         }
-        self.check_expression(&function.body, true);
+        let continues = self.check_expression(&function.body, true);
+        if continues {
+            // A `mut` parameter is written back to the caller's storage, so a
+            // move out of it must be repaired by reassignment before returning.
+            let mut moved =
+                self.parameter_symbols
+                    .iter()
+                    .copied()
+                    .filter(|symbol| {
+                        self.module.has_mutable_storage(*symbol)
+                            && !self.module.is_move_parameter(*symbol)
+                            && matches!(
+                                self.states.get(symbol),
+                                Some(ValueState::Moved | ValueState::MaybeMoved)
+                            )
+                            && self.module.type_of_symbol(*symbol).is_some_and(|ty| {
+                                !self.module.is_copy_in_function(ty, self.function)
+                            })
+                    })
+                    .collect::<Vec<_>>();
+            moved.sort_by_key(|symbol| symbol.0);
+            if !moved.is_empty() {
+                self.diagnostics.push(Diagnostic::new(
+                    function.body.syntax().span.clone(),
+                    "a `mut` parameter that was moved out must be reassigned before the function returns",
+                ));
+            }
+        }
     }
 
     /// Returns whether control continues after the expression.

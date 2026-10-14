@@ -1036,6 +1036,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 self.backend.build_unique_free(pointer, span.clone())
             }
+            DropGlueBody::Buffer { element, glue } => {
+                let BasicValueEnum::PointerValue(buffer) = value else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "Buffer has an invalid representation",
+                    ));
+                };
+                if let Some(glue) = glue {
+                    self.emit_buffer_element_drops(buffer, element, glue, span)?;
+                }
+                self.backend.build_unique_free(buffer, span.clone())
+            }
             DropGlueBody::CStringFree => {
                 let BasicValueEnum::PointerValue(pointer) = value else {
                     return Err(Diagnostic::new(
@@ -8177,6 +8189,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     llvm_element,
                     header,
                     "buffer",
+                    true,
                     span.clone(),
                 )?;
                 self.backend.build_buffer_capacity_store(
@@ -8185,13 +8198,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     *capacity,
                     "buffer.capacity.slot",
                 )?;
-                // The `BufferAllocation` use records the element finalizer the
-                // buffer installs.
-                if let Some(finalizer) = self
-                    .artifact_use_function(owner, crate::ArtifactUseSite::BufferAllocation(call_id))
-                {
-                    self.backend.set_gc_finalizer(buffer, finalizer)?;
-                }
                 Ok(buffer.as_any_value_enum())
             }
             IntrinsicFunction::BufferLength => {
@@ -8210,8 +8216,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let element = intrinsic_buffer_element(call, 0, &span)?;
                 let llvm_element = self.backend.compile_type(&element)?;
                 let header = self.backend.buffer_header_type(llvm_element);
-                self.backend
-                    .trap_if_buffer_frozen(*buffer, header, span.clone())?;
                 let length_slot = self
                     .backend
                     .builder
@@ -8319,25 +8323,62 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let element = intrinsic_buffer_element(call, 0, &span)?;
                 let llvm_element = self.backend.compile_type(&element)?;
                 let header = self.backend.buffer_header_type(llvm_element);
-                let frozen_slot = self
-                    .backend
-                    .builder
-                    .build_struct_gep(header, *buffer, 2, "buffer.frozen.slot")
-                    .map_err(compiler_diagnostic)?;
-                self.backend
-                    .builder
-                    .build_store(
-                        frozen_slot,
-                        self.backend.context.i8_type().const_int(1, false),
-                    )
-                    .map_err(compiler_diagnostic)?;
                 let length = self.backend.build_buffer_length(
                     *buffer,
                     header,
                     "buffer.length.slot",
                     "buffer.length",
                 )?;
-                let data = self.backend.buffer_data_pointer(*buffer, llvm_element)?;
+                // The slice owns a GC copy of the elements; the malloc-backed
+                // source is released without dropping them.
+                let frozen = self.backend.build_buffer_allocation(
+                    length,
+                    llvm_element,
+                    header,
+                    "buffer.freeze",
+                    false,
+                    span.clone(),
+                )?;
+                self.backend.build_buffer_capacity_store(
+                    frozen,
+                    header,
+                    length,
+                    "buffer.freeze.capacity.slot",
+                )?;
+                let length_slot = self
+                    .backend
+                    .builder
+                    .build_struct_gep(header, frozen, 0, "buffer.freeze.length.slot")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(length_slot, length)
+                    .map_err(compiler_diagnostic)?;
+                let source_data = self.backend.buffer_data_pointer(*buffer, llvm_element)?;
+                let data = self.backend.buffer_data_pointer(frozen, llvm_element)?;
+                let stride = self.backend.target_data.get_abi_size(&llvm_element);
+                let bytes = self
+                    .backend
+                    .builder
+                    .build_int_mul(
+                        length,
+                        self.backend.size_type.const_int(stride, false),
+                        "buffer.freeze.bytes",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let alignment = self.backend.target_data.get_abi_alignment(&llvm_element);
+                self.backend
+                    .builder
+                    .build_memcpy(data, alignment, source_data, alignment, bytes)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.build_unique_free(*buffer, span.clone())?;
+                // The `BufferAllocation` use records the element finalizer the
+                // frozen buffer installs.
+                if let Some(finalizer) = self
+                    .artifact_use_function(owner, crate::ArtifactUseSite::BufferAllocation(call_id))
+                {
+                    self.backend.set_gc_finalizer(frozen, finalizer)?;
+                }
                 let mut result = self.backend.slice_type().const_zero();
                 result = self
                     .backend
@@ -8511,8 +8552,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         })?;
         let llvm_element = self.backend.compile_type(&element)?;
         let header = self.backend.buffer_header_type(llvm_element);
-        self.backend
-            .trap_if_buffer_frozen(*buffer, header, span.clone())?;
         let length_slot = self
             .backend
             .builder
@@ -8658,8 +8697,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Alias and frozen traps, capacity
-    /// check, element memcpy, then length updates.
+    /// Alias trap, capacity check, element memcpy, then length updates.
     fn emit_buffer_transfer(
         &self,
         call: &crate::LoweredCall,
@@ -8690,10 +8728,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )
             .map_err(compiler_diagnostic)?;
         self.backend.build_trap_if(aliased, span.clone())?;
-        self.backend
-            .trap_if_buffer_frozen(*source, header, span.clone())?;
-        self.backend
-            .trap_if_buffer_frozen(*destination, header, span.clone())?;
         let source_length_slot = self
             .backend
             .builder
@@ -8791,9 +8825,132 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(self.backend.unit_value())
     }
 
-    /// Allocate a destination with the source's capacity, install the recorded
-    /// destination finalizer, then call the recorded element `Clone` instance
-    /// per live element.
+    /// Drops every live element of an owned buffer in index order, either by
+    /// inline drop glue or by calling a recursive descriptor cleanup.
+    fn emit_buffer_element_drops(
+        &self,
+        buffer: PointerValue<'context>,
+        element: &CheckedType,
+        glue: &crate::PlannedArtifact,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let llvm_element = self.backend.compile_type(element)?;
+        let header = self.backend.buffer_header_type(llvm_element);
+        let length = self.backend.build_buffer_length(
+            buffer,
+            header,
+            "buffer.drop.length.slot",
+            "buffer.drop.length",
+        )?;
+        let function = self
+            .backend
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "buffer drop outside a function"))?;
+        let index_slot = self
+            .backend
+            .entry_builder()
+            .build_alloca(self.backend.size_type, "buffer.drop.index")
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(index_slot, self.backend.size_type.const_zero())
+            .map_err(compiler_diagnostic)?;
+        let check = self
+            .backend
+            .context
+            .append_basic_block(function, "buffer.drop.check");
+        let body = self
+            .backend
+            .context
+            .append_basic_block(function, "buffer.drop.element");
+        let done = self
+            .backend
+            .context
+            .append_basic_block(function, "buffer.drop.done");
+        self.backend
+            .builder
+            .build_unconditional_branch(check)
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(check);
+        let index = self
+            .backend
+            .builder
+            .build_load(self.backend.size_type, index_slot, "buffer.drop.index")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let remaining = self
+            .backend
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                index,
+                length,
+                "buffer.drop.remaining",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_conditional_branch(remaining, body, done)
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(body);
+        let data = self.backend.buffer_data_pointer(buffer, llvm_element)?;
+        let (slot, value) = self.backend.build_buffer_element_load(
+            data,
+            llvm_element,
+            index,
+            "buffer.drop.slot",
+            "buffer.drop.value",
+        )?;
+        if glue.kind == crate::LoweredArtifactDependencyKind::DescriptorDrop {
+            let ordinal = glue
+                .artifact
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing recursive Buffer cleanup"))?;
+            let cleanup = self
+                .artifacts
+                .get(&ordinal)
+                .and_then(|functions| functions.first())
+                .copied()
+                .ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "missing recursive cleanup declaration")
+                })?;
+            let null = self
+                .backend
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null();
+            self.backend
+                .builder
+                .build_direct_call(cleanup, &[null.into(), slot.into()], "")
+                .map_err(compiler_diagnostic)?;
+        } else {
+            let plan = self.planned_drop_glue(glue, span)?;
+            self.emit_drop_glue(value, plan, span)?;
+        }
+        let next = self
+            .backend
+            .builder
+            .build_int_add(
+                index,
+                self.backend.size_type.const_int(1, false),
+                "buffer.drop.next",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(index_slot, next)
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_unconditional_branch(check)
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(done);
+        Ok(())
+    }
+
+    /// Allocate an owned destination with the source's capacity, then call the
+    /// recorded element `Clone` instance per live element.
     fn emit_buffer_clone(
         &self,
         owner: EmissionOwner,
@@ -8825,6 +8982,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             llvm_element,
             header,
             "buffer.clone",
+            true,
             span.clone(),
         )?;
         self.backend.build_buffer_capacity_store(
@@ -8833,11 +8991,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             capacity,
             "buffer.clone.destination.capacity.slot",
         )?;
-        if let Some(finalizer) =
-            self.artifact_use_function(owner, crate::ArtifactUseSite::BufferCloneFinalizer(call_id))
-        {
-            self.backend.set_gc_finalizer(destination, finalizer)?;
-        }
         let clone_function = self
             .instance_use_function(owner, crate::ArtifactUseSite::BufferCloneElement(call_id))
             .ok_or_else(|| {

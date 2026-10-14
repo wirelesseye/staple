@@ -329,14 +329,18 @@ fn record_plan_requirements(
             DropGlueBody::CStringFree => {
                 requirements.record(RuntimeRequirement::CStringFree);
             }
-            DropGlueBody::Unique { .. } => {
+            DropGlueBody::Unique { .. } | DropGlueBody::Buffer { .. } => {
                 requirements.record(RuntimeRequirement::CStringFree);
                 requirements.record(RuntimeRequirement::GarbageCollector);
             }
             _ => {}
         },
         LoweredArtifactPlan::CompoundDescriptorDrop(plan)
-            if plan.shape == crate::specialization::CompoundDescriptorShape::Unique =>
+            if matches!(
+                plan.shape,
+                crate::specialization::CompoundDescriptorShape::Unique
+                    | crate::specialization::CompoundDescriptorShape::Buffer
+            ) =>
         {
             requirements.record(RuntimeRequirement::GarbageCollector);
             requirements.record(RuntimeRequirement::CStringFree);
@@ -471,7 +475,11 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
                 IntrinsicFunction::BufferWithCapacity
                 | IntrinsicFunction::BufferClone
                 | IntrinsicFunction::BufferGet
-                | IntrinsicFunction::BufferFreeze => self.gc(),
+                | IntrinsicFunction::BufferFreeze => {
+                    // Buffers are malloc-backed and rooted for the GC.
+                    self.requirements.record(RuntimeRequirement::CStringFree);
+                    self.gc();
+                }
                 IntrinsicFunction::CoroutineBlockOn
                 | IntrinsicFunction::SchedulerCreate
                 | IntrinsicFunction::TaskScope

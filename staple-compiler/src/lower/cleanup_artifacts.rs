@@ -1122,8 +1122,11 @@ impl<'a> LoweredWalker<'a> {
                         )?;
                     }
                 }
-                IntrinsicFunction::BufferWithCapacity => {
-                    if let CheckedType::Buffer(element) = &result_type
+                // Freezing copies the buffer into a GC allocation that owns the
+                // elements, so the element finalizer is installed here.
+                IntrinsicFunction::BufferFreeze => {
+                    if let CheckedType::Slice(element) = &result_type
+                        && !crate::contains_type_parameter(element)
                         && self.program.concrete_needs_drop(element)
                     {
                         let canonical = CanonicalType::concrete(element, &origin)
@@ -1175,21 +1178,6 @@ impl<'a> LoweredWalker<'a> {
                                 )?;
                             }
                         }
-                    }
-                    if let CheckedType::Buffer(element) = &result_type
-                        && self.program.concrete_needs_drop(element)
-                    {
-                        let canonical = CanonicalType::concrete(element, &origin)
-                            .map_err(|diagnostic| vec![diagnostic])?;
-                        self.visitor.finalizer_site(
-                            ArtifactUseSite::BufferCloneFinalizer(id),
-                            GcFinalizerKey::Buffer(canonical),
-                            GcFinalizerPlan::Buffer {
-                                element: element.as_ref().clone(),
-                                glue: None,
-                            },
-                            &origin,
-                        )?;
                     }
                 }
                 _ => {}
@@ -1844,6 +1832,39 @@ fn drop_glue_body(
             };
             Ok(DropGlueBody::Unique {
                 payload: payload.clone(),
+                glue,
+            })
+        }
+        CheckedType::Buffer(element) => {
+            let recursive = program.resolve_recursive_payload(element);
+            let element: &CheckedType = recursive.as_ref().unwrap_or(element.as_ref());
+            let glue = if program.contains_recursive_payload(element) {
+                // A callable boundary closes the recursive cleanup graph.
+                let key = ArtifactRequestKey::DescriptorDrop(
+                    CanonicalType::concrete(element, origin).map_err(|error| vec![error])?,
+                );
+                requests.push(ClosureRequest::Artifact {
+                    key: key.clone(),
+                    plan: LoweredArtifactPlan::DescriptorDrop(super::DescriptorDropPlan {
+                        value_type: element.clone(),
+                        glue: None,
+                    }),
+                    kind: LoweredArtifactDependencyKind::DescriptorDrop,
+                    origin: origin.clone(),
+                    use_site: None,
+                });
+                Some(PlannedArtifact {
+                    key,
+                    artifact: None,
+                    kind: LoweredArtifactDependencyKind::DescriptorDrop,
+                })
+            } else if program.concrete_needs_drop(element) {
+                Some(request_drop_glue(program, element, origin, requests)?)
+            } else {
+                None
+            };
+            Ok(DropGlueBody::Buffer {
+                element: element.clone(),
                 glue,
             })
         }
@@ -3127,7 +3148,6 @@ mod tests {
             .expect("Clone declares a method");
 
         let mut element_sites = 0;
-        let mut finalizer_sites = 0;
         for (_, instance) in program.instances.iter() {
             let Some(body) = &instance.body else {
                 continue;
@@ -3158,20 +3178,10 @@ mod tests {
                     "the planned element clone matches the typed-module selection for {element}"
                 );
             }
-            for use_ in &body.artifact_uses {
-                if matches!(use_.site, ArtifactUseSite::BufferCloneFinalizer(_)) {
-                    finalizer_sites += 1;
-                }
-            }
         }
         assert!(
             element_sites >= 3,
             "every buffer clone selects an element Clone instance: {element_sites}"
-        );
-        // Only the CString-backed element needs a buffer finalizer.
-        assert!(
-            finalizer_sites >= 1,
-            "a buffer of droppable elements clones with a destination finalizer: {finalizer_sites}"
         );
     }
 

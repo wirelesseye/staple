@@ -3529,33 +3529,37 @@ destructured, and it cannot cross a foreign ABI.
 `Buffer T` is low-level, fixed-capacity contiguous storage with an initialized
 prefix. `Buffer.with_capacity` allocates space without constructing any `T`
 values, so it does not require `Default T`. Buffers are move-only owners of
-their managed allocation; `Buffer.length` and `Buffer.capacity` report its
-current initialized length and fixed capacity. Where `Clone T`, cloning a
+their allocation, which is not garbage collected: it is `malloc`-backed and
+released, after dropping every initialized element in index order, when the
+buffer goes out of scope or is consumed. Any managed pointers held by its
+elements stay reachable while it lives. `Buffer.length` and `Buffer.capacity`
+report its current initialized length and fixed capacity. Where `Clone T`, cloning a
 buffer clones every initialized element into an independent allocation while
 preserving the original capacity.
 
 `Buffer.push` appends while spare capacity remains, and `Buffer.pop` moves the
 last initialized element into an `Option T`. Both require a mutable buffer
 argument. Pushing to a full buffer traps; growth belongs in higher-level
-containers such as `List`. `Buffer.get_ref` returns an `Option (Ref T)`
-containing a managed reference to an initialized element, or `None` for an
-out-of-bounds index. `Buffer.get_ref_unchecked` returns the reference directly
-and traps for an out-of-bounds index. Pushing does not
-relocate storage, but popping invalidates references to the removed slot.
+containers such as `List`. Where `Copy T`, `Buffer.get` returns a copy of an
+initialized element as an `Option T`, or `None` for an out-of-bounds index, and
+`Buffer.get_unchecked` returns it directly and traps for an out-of-bounds
+index. `Buffer.set` replaces an element, dropping the old value, and returns
+`Some ()`, or `None` (dropping the new value) for an out-of-bounds index;
+`Buffer.set_unchecked` traps instead. Buffers hand out no references to their
+elements.
 
-`Buffer.freeze` consumes the buffer and returns a zero-copy `Slice T` over its
-initialized prefix. The consumed buffer cannot subsequently be used or frozen
-again. The allocation drops exactly its initialized elements when unreachable;
-an element reference or frozen slice keeps it alive.
+`Buffer.freeze` consumes the buffer and returns a `Slice T` over a managed
+copy of its initialized prefix; the original allocation is released without
+dropping the moved elements. The consumed buffer cannot subsequently be used
+or frozen again. The managed copy drops exactly its initialized elements when
+unreachable; a frozen slice or a `Ref` to one of its elements keeps it alive.
 
 `Buffer.transfer` moves every initialized element of one buffer onto the end
 of another's initialized prefix, in order, and empties the source. Both
-buffer arguments must be mutable. It traps if either buffer is frozen, if the
-destination lacks enough spare capacity for the source's elements, or if the
-source and destination are the same buffer. No allocation occurs: elements
-are moved in place by one bulk copy, and any references into the moved
-elements of the source are invalidated exactly as `Buffer.pop` invalidates a
-reference to a popped element. This is the primitive higher-level growable
+buffer arguments must be mutable. It traps if the destination lacks enough
+spare capacity for the source's elements, or if the source and destination are
+the same buffer. No allocation occurs: elements
+are moved by one bulk copy. This is the primitive higher-level growable
 containers such as `List` use to move an initialized prefix into a larger
 allocation.
 
@@ -3577,19 +3581,20 @@ from the values the same way `List.new` followed by a sequence of
 namespace the same way ordinary `Type.method(...)` calls already resolve a
 function through it.
 
-`List.get_ref` and, where `Copy T`, `List.get` return an element by
-reference or by copy respectively, each wrapped in `Option (Ref T)`/
-`Option T` so that an out-of-bounds index produces `None` instead of
-trapping. `List.get_ref_unchecked` and `List.get_unchecked` are the
-trapping counterparts. `list[index]` and `list[index] = value` delegate to
-`Index`/`MutateIndex`, backed by `get_unchecked`/`get_ref_unchecked`, so
-bracket indexing keeps the trapping behavior it has elsewhere in the
-language; `for item in list` consumes the list — `IntoIterator` moves its
+Where `Copy T`, `List.get` returns an element by copy, wrapped in `Option T`
+so that an out-of-bounds index produces `None` instead of trapping, and
+`List.get_unchecked` is the trapping counterpart. `List.set` replaces an
+element, dropping the old value, and returns `Some ()` or `None` for an
+out-of-bounds index; `List.set_unchecked` traps instead. `list[index]` and
+`list[index] = value` delegate to `Index`/`MutateIndex`, backed by
+`get_unchecked`/`set_unchecked`, so bracket indexing keeps the trapping
+behavior it has elsewhere in the language; `for item in list` consumes the list — `IntoIterator` moves its
 source — and yields owned copies. Iteration requires `Copy T`, the same as
 `List.get`; clone the list with `Clone.clone` first when it must remain
 usable.
 
-`List` is move-only like its underlying `Buffer`. Where `Clone T`, cloning a
+`List` is move-only like its underlying `Buffer`, and likewise not garbage
+collected: dropping a list drops its elements and frees its storage. Where `Clone T`, cloning a
 list clones every initialized element into independent storage and preserves
 the source list's capacity; subsequent growth or mutation of either list does
 not affect the other.
@@ -3707,8 +3712,8 @@ still exist, resurrection does not retain those objects, and allocation is
 allowed while nested collection is suppressed.
 
 A managed allocation stays reachable through a pointer to any position inside
-it, not only its start. A `Ref` to one element of a slice or buffer, or a slice
-over a frozen buffer, keeps the whole allocation alive, including the other
+it, not only its start. A `Ref` to one element of a slice, or a slice over a
+frozen buffer, keeps the whole allocation alive, including the other
 elements, until no such pointer remains.
 
 `CChar` and `CString` are public opaque types in `std.cinterop`.
@@ -3799,7 +3804,7 @@ and underflow reported by the parser return `OutOfRange`. Boolean parsing
 accepts `True`, `true`, `False`, and `false`, otherwise returning `std.core.boolean.InvalidBool`.
 
 `String` converts to its `Slice U8` bytes, `Ref (T ^ N)` converts to `Slice T`,
-and consuming a `Buffer T` converts it to a frozen `Slice T`. Checked byte
+and consuming a `Buffer T` converts it to a `Slice T` over a managed copy of its elements. Checked byte
 slice-to-string conversion uses `String.from_utf8`, which returns
 `Result String std.string.InvalidUtf8`. `String.from_utf8_unchecked` constructs
 a string without validation when the caller knows the bytes are valid UTF-8.

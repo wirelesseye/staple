@@ -3295,7 +3295,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn runs_buffers_and_keeps_interior_views_alive() {
+    fn runs_buffers_and_keeps_frozen_views_alive() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -3312,12 +3312,6 @@ mod tests {
                 "  True() => (),\n",
                 "  False() => { Ref n; churn (n - 1) },\n",
                 "}\n",
-                "def make_ref = () => {\n",
-                "  let mut values: Buffer I32 = Buffer.with_capacity 2\n",
-                "  Buffer.push values 41\n",
-                "  Buffer.push values 42\n",
-                "  Buffer.get_ref_unchecked values 1\n",
-                "}\n",
                 "def make_slice = () => {\n",
                 "  let mut values: Buffer I32 = Buffer.with_capacity 2\n",
                 "  Buffer.push values 7\n",
@@ -3326,17 +3320,19 @@ mod tests {
                 "  Buffer.freeze values\n",
                 "}\n",
                 "let mut empty: Buffer I32 = Buffer.with_capacity 4\n",
-                "match Buffer.get_ref empty 0 { None() => (), Some _ => exit 1 }\n",
+                "match Buffer.get empty 0 { None() => (), Some _ => exit 1 }\n",
                 "Buffer.push empty 42\n",
-                "match Buffer.get_ref empty 0 { Some (Ref value) => if (value != 42) { exit 1 }, None() => exit 1 }\n",
-                "match empty |> get_ref 1 { None() => (), Some _ => exit 1 }\n",
-                "match Buffer.get_ref empty 100 { None() => (), Some _ => exit 1 }\n",
-                "let kept_ref = make_ref ()\n",
+                "match Buffer.get empty 0 { Some value => if (value != 42) { exit 1 }, None() => exit 1 }\n",
+                "match Buffer.set empty 0 43 { Some _ => (), None() => exit 1 }\n",
+                "match Buffer.set empty 1 44 { None() => (), Some _ => exit 1 }\n",
+                "Buffer.set_unchecked empty 0 42\n",
+                "if (Buffer.get_unchecked empty 0 != 42) { exit 1 }\n",
+                "match empty |> get 1 { None() => (), Some _ => exit 1 }\n",
+                "match Buffer.get empty 100 { None() => (), Some _ => exit 1 }\n",
                 "let kept_slice = make_slice ()\n",
                 "churn 40000\n",
                 "churn 40000\n",
-                "let Ref answer = kept_ref\n",
-                "let result = answer - 42\n",
+                "let result = kept_slice[USize :: 0] - 7\n",
                 "match Slice.length kept_slice == 1 {\n",
                 "  True() => exit result,\n",
                 "  False() => exit 1,\n",
@@ -3393,10 +3389,10 @@ mod tests {
                 "match into_length == 4 {\n",
                 "  True() => match from_length == 0 {\n",
                 "    True() => {\n",
-                "      let Ref a = Buffer.get_ref_unchecked into 0\n",
-                "      let Ref b = Buffer.get_ref_unchecked into 1\n",
-                "      let Ref c = Buffer.get_ref_unchecked into 2\n",
-                "      let Ref d = Buffer.get_ref_unchecked into 3\n",
+                "      let a = Buffer.get_unchecked into 0\n",
+                "      let b = Buffer.get_unchecked into 1\n",
+                "      let c = Buffer.get_unchecked into 2\n",
+                "      let d = Buffer.get_unchecked into 3\n",
                 "      match a == 1 {\n",
                 "        True() => match b == 10 {\n",
                 "          True() => match c == 20 {\n",

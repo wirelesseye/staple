@@ -153,7 +153,43 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 157] = [
+static CORPUS: [CorpusProgram; 158] = [
+    expect_stdout(
+        must_run(emits(
+            inline(
+                "buffer_ownership",
+                concat!(
+                    "use std.io.println\n",
+                    "use std.cinterop.(CString, c_string)\n",
+                    "extern \"c\" { puts: CString -> I32 }\n",
+                    "type Resource = wrap CString\n",
+                    "impl Drop Resource { cleanup = Resource value => { puts value; () } }\n",
+                    "def discard = <T> move values: List T => () :: ()\n",
+                    "def run = () => {\n",
+                    "  let mut list: List Resource = List.new ()\n",
+                    "  List.push list (Resource (c_string \"a\"))\n",
+                    "  List.push list (Resource (c_string \"b\"))\n",
+                    "  List.push list (Resource (c_string \"c\"))\n",
+                    "  println \"pushed\"\n",
+                    "  List.set_unchecked list 1 (Resource (c_string \"B\"))\n",
+                    "  println \"set\"\n",
+                    "  match List.set list 9 (Resource (c_string \"lost\")) {\n",
+                    "    None() => println \"oob\",\n",
+                    "    Some _ => println \"bad\",\n",
+                    "  }\n",
+                    "  drop list\n",
+                    "  println \"dropped\"\n",
+                    "  discard (List.singleton (Resource (c_string \"g\")))\n",
+                    "  println \"end\"\n",
+                    "}\n",
+                    "run ()\n",
+                ),
+                "buffer-ownership",
+            ),
+            &["discard", "run"],
+        )),
+        "pushed\nb\nset\nlost\noob\na\nB\nc\ndropped\ng\nend\n",
+    ),
     expect_stdout(
         must_run(emits(
             inline(
@@ -1540,7 +1576,7 @@ debug_pair 5
                     "    Buffer.push values 2\n",
                     "    let length: USize = Buffer.length values\n",
                     "    let capacity: USize = Buffer.capacity values\n",
-                    "    let first: Ref I32 = Buffer.get_ref_unchecked values (USize :: 0)\n",
+                    "    let first: I32 = Buffer.get_unchecked values (USize :: 0)\n",
                     "    let popped: Option I32 = Buffer.pop values\n",
                     "    length + capacity\n",
                     "}\n",
@@ -1570,7 +1606,7 @@ debug_pair 5
                     "\n",
                     "def trapped: () -> USize = () => {\n",
                     "    let values: Buffer I32 = Buffer.with_capacity (USize :: 1)\n",
-                    "    let out: Ref I32 = Buffer.get_ref_unchecked values (USize :: 4)\n",
+                    "    let out: I32 = Buffer.get_unchecked values (USize :: 4)\n",
                     "    0\n",
                     "}\n",
                     "\n",
@@ -3675,8 +3711,8 @@ let value = at (Ref (1, 2), (USize :: 5))
         "direct borrowed\ndrop direct borrowed\ndirect moved\ndrop direct moved\nindirect borrowed\ndrop indirect borrowed\nindirect moved\ndrop indirect moved\ntrait borrowed\ndrop trait borrowed\nproduct element\ndrop product element\nnamed binding\nspread temporary\ndrop spread right\ndrop spread left\nspread temporary mixed\ndrop spread left\ndrop spread right\nspread temporary generic\ndrop spread right\ndrop spread left\nextern C string\nprinted by puts\nend of scope\ndrop spread first\ndrop spread second\ndrop named at scope exit\n",
     )),
     // A `Ref` into the middle of a managed allocation keeps the whole
-    // allocation alive across collections: an array viewed as a slice, a
-    // buffer, and a frozen buffer. No element is finalized during the churn.
+    // allocation alive across collections: an array viewed as a slice and a
+    // frozen buffer. No element is finalized during the churn.
     must_run(expect_stdout(
         emits(
             inline(
@@ -3691,12 +3727,6 @@ let value = at (Ref (1, 2), (USize :: 5))
                     "def from_array: () -> Ref Tag = () => {\n",
                     "    let values: Slice Tag = Slice.from_ref (Ref (Tag (c_string \"drop array first\"), Tag (c_string \"drop array second\"), Tag (c_string \"drop array third\")))\n",
                     "    Slice.get_ref_unchecked values 2\n",
-                    "}\n",
-                    "def from_buffer: () -> Ref Tag = () => {\n",
-                    "    let mut buffer: Buffer Tag = Buffer.with_capacity 4\n",
-                    "    Buffer.push buffer (Tag (c_string \"drop buffer first\"))\n",
-                    "    Buffer.push buffer (Tag (c_string \"drop buffer second\"))\n",
-                    "    Buffer.get_ref_unchecked buffer 1\n",
                     "}\n",
                     "def from_frozen: () -> Ref Tag = () => {\n",
                     "    let mut buffer: Buffer Tag = Buffer.with_capacity 4\n",
@@ -3715,27 +3745,25 @@ let value = at (Ref (1, 2), (USize :: 5))
                     "    }\n",
                     "}\n",
                     "let array = from_array ()\n",
-                    "let buffered = from_buffer ()\n",
                     "let frozen = from_frozen ()\n",
                     "let spins = churn 100000\n",
                     "puts (c_string \"after churn\")\n",
                     "let first = Ref.replace array (Tag (c_string \"drop replacement\"))\n",
-                    "let second = Ref.replace buffered (Tag (c_string \"drop replacement\"))\n",
                     "let third = Ref.replace frozen (Tag (c_string \"drop replacement\"))\n",
                     "puts (c_string \"replaced\")\n",
                 ),
                 "ownership",
             ),
-            &["from_array", "from_buffer", "from_frozen", "churn"],
+            &["from_array", "from_frozen", "churn"],
         ),
         "after churn\nreplaced\n",
     )),
-    // Taking a buffer element `Ref` costs nothing at collection time, so a
-    // loop that takes many of them while allocating stays linear.
+    // Reading a buffer element costs nothing at collection time, so a
+    // loop that reads many of them while allocating stays linear.
     must_run(expect_stdout(
         emits(
             inline(
-                "buffer_refs_in_a_loop_stay_linear",
+                "buffer_reads_in_a_loop_stay_linear",
                 concat!(
                     "use std.io.println\n",
                     "use std.buffer.Buffer\n",
@@ -3746,7 +3774,7 @@ let value = at (Ref (1, 2), (USize :: 5))
                     "    let mut total: USize = 0\n",
                     "    loop {\n",
                     "        if (index == n) { break total }\n",
-                    "        let Ref value = Buffer.get_ref_unchecked buffer 0\n",
+                    "        let value = Buffer.get_unchecked buffer 0\n",
                     "        let garbage = \"x\" + \"y\"\n",
                     "        total = total + 1\n",
                     "        index = index + 1\n",

@@ -181,6 +181,7 @@ pub(super) fn collect_compound_shapes(
         ),
         CheckedType::Sum(sum) => (Shape::Sum, sum.alternatives.iter().collect()),
         CheckedType::Unique(payload) => (Shape::Unique, vec![payload]),
+        CheckedType::Buffer(element) => (Shape::Buffer, vec![element]),
         CheckedType::Wrapper { representation, .. } => {
             collect_compound_shapes(representation, shapes);
             return;
@@ -631,14 +632,13 @@ pub(super) fn scan_instance(
             });
         }
     }
-    // A dynamic buffer allocation installs the shared dynamic buffer
-    // finalizer. `__buffer_clone` allocates its copy the same way.
+    // Freezing a dynamic buffer copies it into a GC allocation that
+    // installs the shared dynamic buffer finalizer.
     if let Some((call_id, _)) = body.calls.iter().find(|(_, call)| {
         matches!(
             &call.target,
             super::LoweredCallableTarget::Intrinsic {
-                intrinsic: crate::IntrinsicFunction::BufferWithCapacity
-                    | crate::IntrinsicFunction::BufferClone,
+                intrinsic: crate::IntrinsicFunction::BufferFreeze,
                 ..
             }
         )

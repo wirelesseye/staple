@@ -804,12 +804,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         element: BasicTypeEnum<'context>,
     ) -> inkwell::types::StructType<'context> {
         self.context.struct_type(
-            &[
-                self.size_type.into(),
-                self.size_type.into(),
-                self.context.i8_type().into(),
-                element,
-            ],
+            &[self.size_type.into(), self.size_type.into(), element],
             false,
         )
     }

@@ -1042,6 +1042,7 @@ pub(crate) enum CompoundDescriptorShape {
     Product,
     Sum,
     Unique,
+    Buffer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
