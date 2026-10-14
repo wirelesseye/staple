@@ -390,6 +390,7 @@ pub(super) fn collect_referenced_parameters(
             out.insert(*id);
         }
         CheckedType::Ref(payload)
+        | CheckedType::Unique(payload)
         | CheckedType::Slice(payload)
         | CheckedType::Buffer(payload)
         | CheckedType::RawMutPtr { pointee: payload }
@@ -976,6 +977,7 @@ fn contains_placeholder(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Inferred | CheckedType::Error => true,
         CheckedType::Ref(payload)
+        | CheckedType::Unique(payload)
         | CheckedType::Slice(payload)
         | CheckedType::Buffer(payload)
         | CheckedType::RawMutPtr { pointee: payload }
@@ -1111,6 +1113,8 @@ impl<'a> TraitSelectionContext<'a> {
     }
 
     fn is_copy(&self, value_type: &CheckedType) -> bool {
+        let resolved = self.program.resolve_recursive_payload(value_type);
+        let value_type = resolved.as_ref().unwrap_or(value_type);
         is_copy_type(
             value_type,
             self.program.semantic_ids.copy_trait,
@@ -2055,6 +2059,73 @@ impl LoweredProgram {
     /// Whether a fully substituted value type needs a drop, mirroring
     /// `TypedModule::type_needs_drop` with the owned trait catalogs and the
     /// coroutine/runtime type identities.
+    /// Resolve the finite representation of a recursive nominal stand-in.
+    pub(crate) fn recursive_representation(&self, value_type: &CheckedType) -> Option<CheckedType> {
+        let CheckedType::Opaque { id, arguments, .. } = value_type else {
+            return None;
+        };
+        let metadata = self.types.get(*id)?;
+        if metadata.builtin.is_some() {
+            return None;
+        }
+        let representation = metadata.representation.as_ref()?;
+        let substitutions = metadata
+            .parameters
+            .iter()
+            .copied()
+            .zip(arguments.iter().cloned())
+            .collect();
+        Some(substitute_type(representation.clone(), &substitutions))
+    }
+
+    pub(crate) fn contains_recursive_payload(&self, ty: &CheckedType) -> bool {
+        match ty {
+            CheckedType::Opaque { .. } => self.recursive_representation(ty).is_some(),
+            CheckedType::Wrapper { representation, .. } => {
+                self.contains_recursive_payload(representation)
+            }
+            CheckedType::Unique(payload) | CheckedType::Ref(payload) => {
+                self.contains_recursive_payload(payload)
+            }
+            CheckedType::Product(product) => product
+                .elements
+                .iter()
+                .any(|field| self.contains_recursive_payload(&field.value_type)),
+            CheckedType::Sum(sum) => sum
+                .alternatives
+                .iter()
+                .any(|alternative| self.contains_recursive_payload(alternative)),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn resolve_recursive_payload(&self, payload: &CheckedType) -> Option<CheckedType> {
+        if let CheckedType::Opaque {
+            id,
+            name,
+            arguments,
+            ..
+        } = payload
+        {
+            return Some(CheckedType::Wrapper {
+                id: *id,
+                name: name.clone(),
+                arguments: arguments.clone(),
+                representation: Box::new(self.recursive_representation(payload)?),
+                introduction: crate::typecheck::WrapperIntroduction::Explicit,
+            });
+        }
+        let CheckedType::Wrapper { representation, .. } = payload else {
+            return None;
+        };
+        let resolved = self.recursive_representation(representation)?;
+        let mut payload = payload.clone();
+        if let CheckedType::Wrapper { representation, .. } = &mut payload {
+            *representation = Box::new(resolved);
+        }
+        Some(payload)
+    }
+
     pub(crate) fn concrete_needs_drop(&self, value_type: &CheckedType) -> bool {
         if self.runtime_opaque_kind(value_type).is_some() {
             return true;
@@ -2144,7 +2215,7 @@ fn concrete_type_needs_drop(program: &LoweredProgram, value_type: &CheckedType) 
         return true;
     }
     match value_type {
-        CheckedType::CString => true,
+        CheckedType::CString | CheckedType::Unique(_) => true,
         CheckedType::Buffer(_) => false,
         CheckedType::Product(product) => product
             .elements
@@ -2154,6 +2225,13 @@ fn concrete_type_needs_drop(program: &LoweredProgram, value_type: &CheckedType) 
             .alternatives
             .iter()
             .any(|alternative| concrete_type_needs_drop(program, alternative)),
+        CheckedType::Wrapper {
+            id, representation, ..
+        } if matches!(representation.as_ref(), CheckedType::Opaque { id: opaque, .. } if id == opaque) => {
+            program
+                .recursive_representation(representation)
+                .is_some_and(|representation| concrete_type_needs_drop(program, &representation))
+        }
         CheckedType::Wrapper { representation, .. } => {
             concrete_type_needs_drop(program, representation)
         }
@@ -2938,6 +3016,7 @@ impl<'a> ParameterCollector<'a> {
             | CheckedType::CChar => {}
             CheckedType::Parameter { id, name, .. } => self.relevant.notice_type(*id, name),
             CheckedType::Ref(payload)
+            | CheckedType::Unique(payload)
             | CheckedType::Slice(payload)
             | CheckedType::Buffer(payload)
             | CheckedType::RawMutPtr { pointee: payload }

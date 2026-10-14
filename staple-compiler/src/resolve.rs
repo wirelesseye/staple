@@ -90,6 +90,7 @@ pub enum BuiltinType {
     Float(FloatType),
     String,
     Ref,
+    Unique,
     Slice,
     Buffer,
     CChar,
@@ -121,6 +122,7 @@ pub enum BuiltinType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RecursiveConstruction {
     ManagedReference,
+    Unique,
     Slice,
     Syntax,
 }
@@ -331,6 +333,8 @@ pub enum IntrinsicFunction {
     BufferTransfer,
     BufferClone,
     RefReplace,
+    UniqueIntoRaw,
+    UniqueFromRaw,
     ReactiveScope,
     Reaction,
     Batch,
@@ -1685,6 +1689,7 @@ impl NameResolver {
             self.register_builtin_type(core, "std.core", float.name(), BuiltinType::Float(float));
         }
         self.register_builtin_type(core, "std.core", "Ref", BuiltinType::Ref);
+        self.register_builtin_type(core, "std.core", "Unique", BuiltinType::Unique);
         for (path, namespace, name, builtin) in [
             (
                 "std/string.sta",
@@ -2124,6 +2129,16 @@ impl NameResolver {
                 IntrinsicFunction::RefReplace,
             ),
             (
+                "std.core.unique",
+                "__unique_into_raw",
+                IntrinsicFunction::UniqueIntoRaw,
+            ),
+            (
+                "std.core.unique",
+                "__unique_from_raw",
+                IntrinsicFunction::UniqueFromRaw,
+            ),
+            (
                 "std.core.reactive",
                 "__reactive_scope",
                 IntrinsicFunction::ReactiveScope,
@@ -2423,7 +2438,7 @@ impl NameResolver {
                 ));
             }
         } else if builtin != BuiltinType::Syntax {
-            let valid_kind = if builtin == BuiltinType::Ref {
+            let valid_kind = if matches!(builtin, BuiltinType::Ref | BuiltinType::Unique) {
                 declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper
                     && declaration.representation_visibility() == Visibility::Public
             } else if builtin == BuiltinType::Slice {
@@ -2458,6 +2473,7 @@ impl NameResolver {
             BuiltinType::RawPtr
                 | BuiltinType::RawMutPtr
                 | BuiltinType::Ref
+                | BuiltinType::Unique
                 | BuiltinType::Slice
                 | BuiltinType::Buffer
         ) && declaration.type_parameters.len() != 1
@@ -2512,7 +2528,7 @@ impl NameResolver {
                 format!("standard library type `{name}` must not accept compile-time arguments"),
             ));
         }
-        if builtin == BuiltinType::Ref
+        if matches!(builtin, BuiltinType::Ref | BuiltinType::Unique)
             && !matches!(
                 declaration.type_parameters.as_slice(),
                 [TypeParameterPattern::Binding(binding)] if !binding.sized
@@ -2520,11 +2536,12 @@ impl NameResolver {
         {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
-                "standard library type `Ref` must relax its parameter with `?Sized`",
+                format!("standard library type `{name}` must relax its parameter with `?Sized`"),
             ));
         }
         let recursive_construction = match builtin {
             BuiltinType::Ref => Some(RecursiveConstruction::ManagedReference),
+            BuiltinType::Unique => Some(RecursiveConstruction::Unique),
             BuiltinType::Slice => Some(RecursiveConstruction::Slice),
             BuiltinType::Syntax
                 if declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper =>

@@ -4781,6 +4781,47 @@ mod tests {
         assert!(dynamic_calls > 0, "the quick subset must use dynamic calls");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unique_ownership_runs_in_static_and_dynamic_modes() {
+        use staple_compiler::{Lowerer, NameResolver, ProgramLoader, TypeChecker};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
+        let program = staple_compiler::codegen_corpus()
+            .iter()
+            .find(|program| program.name == "unique_ownership")
+            .unwrap();
+        let (source, source_root) = corpus_source(program, root);
+        let loaded = ProgramLoader::new()
+            .with_standard_library_root(&standard_library)
+            .load_source(&source, &source_root)
+            .unwrap();
+        let resolved = NameResolver::new()
+            .resolve_program(loaded)
+            .unwrap_or_else(|errors| panic!("{errors:?}"));
+        let checked = TypeChecker::new()
+            .check(resolved)
+            .unwrap_or_else(|errors| panic!("{errors:?}"));
+        let lowered = Lowerer::new()
+            .lower(&checked)
+            .unwrap_or_else(|errors| panic!("{errors:?}"));
+        let result = compile_link_run(&lowered, &options).unwrap();
+        assert_eq!(
+            result,
+            (Some(0), program.expected_stdout.unwrap().to_owned())
+        );
+        assert!(
+            differential_compare(
+                program.name,
+                &source,
+                &source_root,
+                &standard_library,
+                &options
+            ) > 0
+        );
+    }
+
     /// The `dynamic_*` corpus programs must execute through the descriptor ABI.
     #[cfg(unix)]
     #[test]

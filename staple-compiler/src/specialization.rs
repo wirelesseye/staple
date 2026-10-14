@@ -50,6 +50,7 @@ pub(crate) enum CanonicalType {
     String,
     StringLiteralSet(Vec<String>),
     Ref(Box<CanonicalType>),
+    Unique(Box<CanonicalType>),
     Slice(Box<CanonicalType>),
     Buffer(Box<CanonicalType>),
     Array {
@@ -170,6 +171,7 @@ impl CanonicalType {
         1 + match self {
             CanonicalType::Forall { body, .. } => body.nesting_depth(),
             CanonicalType::Ref(inner)
+            | CanonicalType::Unique(inner)
             | CanonicalType::Slice(inner)
             | CanonicalType::Buffer(inner)
             | CanonicalType::RawMutPtr { pointee: inner }
@@ -294,6 +296,9 @@ impl CanonicalType {
             }
             CheckedType::Ref(payload) => {
                 CanonicalType::Ref(Box::new(Self::convert(payload, origin, runtime, binders)?))
+            }
+            CheckedType::Unique(payload) => {
+                CanonicalType::Unique(Box::new(Self::convert(payload, origin, runtime, binders)?))
             }
             CheckedType::Slice(payload) => {
                 CanonicalType::Slice(Box::new(Self::convert(payload, origin, runtime, binders)?))
@@ -1036,6 +1041,7 @@ pub(crate) struct ExternAdapterKey {
 pub(crate) enum CompoundDescriptorShape {
     Product,
     Sum,
+    Unique,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1662,6 +1668,7 @@ mod tests {
     fn node_count(value_type: &CanonicalType) -> usize {
         match value_type {
             CanonicalType::Ref(payload)
+            | CanonicalType::Unique(payload)
             | CanonicalType::Slice(payload)
             | CanonicalType::Buffer(payload)
             | CanonicalType::RawMutPtr { pointee: payload }

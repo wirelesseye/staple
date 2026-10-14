@@ -68,6 +68,7 @@ struct DynamicEnvironment<'context> {
     dictionaries: Vec<PointerValue<'context>>,
     bindings: HashMap<SymbolId, DynamicBinding<'context>>,
     binding_order: Vec<SymbolId>,
+    unique_payloads: HashMap<staple_syntax::SyntaxId, PointerValue<'context>>,
     temporaries: HashMap<ExpressionId, PointerValue<'context>>,
     packed_arguments: HashMap<ExpressionId, PointerValue<'context>>,
     /// Storage for call-boundary conversions whose layout depends on
@@ -176,6 +177,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map(|component| self.backend.load_descriptor_layout(*component))
             .collect::<CodeGenerationResult<Vec<_>>>()?;
         match plan.shape {
+            CompoundDescriptorShape::Unique => {
+                let payload = self
+                    .load_dynamic_storage(
+                        self.backend.context.ptr_type(AddressSpace::default()),
+                        value,
+                        "unique.drop.pointer",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                self.backend.drop_dynamic_value(components[0], payload)?;
+                self.backend.build_unique_free(payload, span.clone())?;
+            }
             CompoundDescriptorShape::Product => {
                 let mut offset = self.backend.size_type.const_zero();
                 let mut fields = Vec::with_capacity(components.len());
@@ -1575,6 +1588,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             dictionaries: Vec::new(),
             bindings: HashMap::new(),
             binding_order: Vec::new(),
+            unique_payloads: HashMap::new(),
             temporaries: HashMap::new(),
             packed_arguments: HashMap::new(),
             converted_values: HashMap::new(),
@@ -1593,6 +1607,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let (product, managed) = match &plan.construction {
             crate::ConstructorConstruction::Value { product, .. } => (product, false),
             crate::ConstructorConstruction::ManagedRef { product, .. } => (product, true),
+            crate::ConstructorConstruction::Unique { product, .. } => (product, false),
             _ => {
                 return Err(Diagnostic::new(
                     span.clone(),
@@ -1601,7 +1616,20 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         };
         let descriptor = self.prepare_dynamic_descriptor(product, &mut environment, span)?;
-        let result = if managed {
+        let result = if matches!(
+            plan.construction,
+            crate::ConstructorConstruction::Unique { .. }
+        ) {
+            let layout = self.backend.load_descriptor_layout(descriptor)?;
+            let allocation = self
+                .backend
+                .build_unique_allocation(layout.store_size, span.clone())?;
+            self.backend
+                .builder
+                .build_store(result, allocation)
+                .map_err(compiler_diagnostic)?;
+            allocation
+        } else if managed {
             let descriptor = self.copy_descriptor_to_gc(descriptor, span)?;
             let allocation = self.allocate_dynamic_cell(descriptor, true, span)?;
             self.backend
@@ -2202,6 +2230,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             dictionaries: Vec::new(),
             bindings: HashMap::new(),
             binding_order: Vec::new(),
+            unique_payloads: HashMap::new(),
             temporaries: HashMap::new(),
             packed_arguments: HashMap::new(),
             converted_values: HashMap::new(),
@@ -3796,6 +3825,37 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 return Ok(storage);
             }
+            crate::IntrinsicFunction::UniqueIntoRaw | crate::IntrinsicFunction::UniqueFromRaw => {
+                let source = slot_pointer(0)?;
+                let pointer = self
+                    .load_dynamic_storage(
+                        self.backend.context.ptr_type(AddressSpace::default()),
+                        source,
+                        "unique.raw",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                if intrinsic == crate::IntrinsicFunction::UniqueIntoRaw {
+                    self.backend
+                        .unregister_unique_payload(pointer, span.clone())?;
+                } else {
+                    let CheckedType::Unique(payload) = &call.result_type else {
+                        return Err(Diagnostic::new(span.clone(), "invalid Unique raw result"));
+                    };
+                    let descriptor = self.dynamic_descriptor(payload, environment, span)?;
+                    let layout = self.backend.load_descriptor_layout(descriptor)?;
+                    self.backend.register_unique_payload(
+                        pointer,
+                        layout.store_size,
+                        span.clone(),
+                    )?;
+                }
+                self.backend
+                    .builder
+                    .build_store(storage, pointer)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
             crate::IntrinsicFunction::RefReplace => {
                 let reference = slot_pointer(0)?;
                 let replacement = slot_pointer(1)?;
@@ -4747,6 +4807,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .collect(),
                     bindings: HashMap::new(),
                     binding_order: Vec::new(),
+                    unique_payloads: HashMap::new(),
                     temporaries: HashMap::new(),
                     packed_arguments: HashMap::new(),
                     converted_values: HashMap::new(),
@@ -5769,6 +5830,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             dictionaries,
             bindings: HashMap::new(),
             binding_order: Vec::new(),
+            unique_payloads: HashMap::new(),
             temporaries: HashMap::new(),
             packed_arguments: HashMap::new(),
             converted_values: HashMap::new(),
@@ -6036,6 +6098,22 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let cell = self.allocate_dynamic_cell(descriptor, captured, &item.origin.span)?;
             environment.cells.insert(symbol, cell);
         }
+        for (_, pattern) in body.patterns() {
+            if pattern.take_unique {
+                let CheckedType::Unique(payload) = &pattern.test.subject else {
+                    continue;
+                };
+                let descriptor = self.prepare_dynamic_descriptor(
+                    payload,
+                    &mut environment,
+                    &pattern.origin.span,
+                )?;
+                environment.unique_payloads.insert(
+                    pattern.origin.syntax,
+                    self.backend.allocate_dynamic_value(descriptor)?,
+                );
+            }
+        }
         // Reserve call results before any body control flow. Descriptor-derived
         // sizes dominate every alloca and each slot is allocated once per call.
         for (expression, record) in body.expressions() {
@@ -6056,6 +6134,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .coercion
                             .as_ref()
                             .map_or(&record.value_type, |coercion| &coercion.source),
+                        &environment,
+                        &record.origin.span,
+                    )?;
+                    environment
+                        .temporaries
+                        .insert(expression, self.backend.allocate_dynamic_value(descriptor)?);
+                }
+                LoweredExpressionKind::Access(access) if access.take_unique => {
+                    let descriptor = self.dynamic_descriptor(
+                        &record.value_type,
                         &environment,
                         &record.origin.span,
                     )?;
@@ -6287,7 +6375,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if !crate::contains_type_parameter(ty) || matches!(ty, CheckedType::Parameter { .. }) {
             return self.dynamic_descriptor(ty, environment, span);
         }
-        if is_static_layout_type(ty) {
+        if is_static_layout_type(ty) && !matches!(ty, CheckedType::Unique(_)) {
             // A reference's pointee still gets its descriptor: structural
             // dictionaries reached through the reference use it.
             if let CheckedType::Ref(pointee) = ty {
@@ -6309,6 +6397,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return Ok(descriptor);
         }
         let (shape, children): (CompoundDescriptorShape, Vec<&CheckedType>) = match ty {
+            CheckedType::Unique(payload) => (CompoundDescriptorShape::Unique, vec![payload]),
             CheckedType::Product(product) => (
                 CompoundDescriptorShape::Product,
                 product
@@ -6345,6 +6434,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map(|component| self.backend.load_descriptor_layout(*component))
             .collect::<CodeGenerationResult<Vec<_>>>()?;
         let layout = match shape {
+            CompoundDescriptorShape::Unique => self
+                .backend
+                .static_runtime_layout(self.backend.descriptor_layout(ty)?),
             CompoundDescriptorShape::Product => self.backend.runtime_product_layout(&layouts)?,
             CompoundDescriptorShape::Sum => self.backend.runtime_sum_layout(&layouts)?.0,
         };
@@ -7099,7 +7191,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )
                 }
 
-                CheckedType::Ref(_) => {
+                CheckedType::Ref(_) | CheckedType::Unique(_) => {
                     let payload = self
                         .load_dynamic_storage(
                             self.backend.context.ptr_type(AddressSpace::default()),
@@ -7402,11 +7494,45 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             ));
         };
         let span = &place.origin.span;
-        let (base_pointer, base_descriptor) = self.emit_dynamic_place(owner, base, environment)?;
+        let deferred = self.place_crosses_unique(owner, base);
+        let base_place = if deferred {
+            None
+        } else {
+            Some(self.emit_dynamic_place(owner, base, environment)?)
+        };
         let position_pointer = self.emit_dynamic_expression(owner, index, environment)?;
         if environment.returned {
             return Ok(());
         }
+        let position = if matches!(
+            self.view
+                .binding(owner, LoweredBindingSite::IndexedAssignment(id)),
+            Some(LoweredBoundTarget::Dictionary(_))
+        ) {
+            None
+        } else {
+            let position_type = self
+                .view
+                .expression(owner, index)
+                .map(|expression| &expression.value_type)
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing index expression"))?;
+            let position = self
+                .load_dynamic_storage(
+                    self.backend.compile_type(position_type)?,
+                    position_pointer,
+                    "mutation.index",
+                )
+                .map_err(compiler_diagnostic)?;
+            Some(position)
+        };
+        let replacement = self.emit_dynamic_expression(owner, assignment.value, environment)?;
+        if environment.returned {
+            return Ok(());
+        }
+        let (base_pointer, base_descriptor) = match base_place {
+            Some(place) => place,
+            None => self.emit_dynamic_place(owner, base, environment)?,
+        };
         if let Some(LoweredBoundTarget::Dictionary(dispatch)) = self
             .view
             .binding(owner, LoweredBindingSite::IndexedAssignment(id))
@@ -7414,10 +7540,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             // A run-time operand type writes through its dictionary slot; the
             // dynamic ABI takes every operand by pointer.
             let dispatch = dispatch.clone();
-            let replacement = self.emit_dynamic_expression(owner, assignment.value, environment)?;
-            if environment.returned {
-                return Ok(());
-            }
             let result = self
                 .backend
                 .entry_builder()
@@ -7439,22 +7561,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             return Ok(());
         }
-        let position_type = self
-            .view
-            .expression(owner, index)
-            .map(|expression| &expression.value_type)
-            .ok_or_else(|| Diagnostic::new(span.clone(), "missing index expression"))?;
-        let position = self
-            .load_dynamic_storage(
-                self.backend.compile_type(position_type)?,
-                position_pointer,
-                "mutation.index",
-            )
-            .map_err(compiler_diagnostic)?;
-        let replacement = self.emit_dynamic_expression(owner, assignment.value, environment)?;
-        if environment.returned {
-            return Ok(());
-        }
+        let position = position.expect("non-dictionary index has a concrete value");
         let replacement = self
             .load_dynamic_storage(
                 self.backend.compile_type(&place.value_type)?,
@@ -7705,7 +7812,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(())
             }
             LoweredPatternKind::Nominal { argument, .. } => {
-                if pattern.test.identity == crate::LoweredPatternIdentity::Ref {
+                if matches!(
+                    pattern.test.identity,
+                    crate::LoweredPatternIdentity::Ref | crate::LoweredPatternIdentity::Unique
+                ) {
                     let payload = self
                         .load_dynamic_storage(
                             self.backend.context.ptr_type(AddressSpace::default()),
@@ -7721,12 +7831,33 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .unwrap_or(CheckedType::Error);
                     let payload_descriptor =
                         self.dynamic_descriptor(&payload_type, environment, &pattern.origin.span)?;
+                    let storage = if pattern.take_unique {
+                        let storage = *environment
+                            .unique_payloads
+                            .get(&pattern.origin.syntax)
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    pattern.origin.span.clone(),
+                                    "missing Unique pattern storage",
+                                )
+                            })?;
+                        self.backend
+                            .copy_dynamic_value(payload_descriptor, payload, storage)?;
+                        self.backend
+                            .build_unique_free(payload, pattern.origin.span.clone())?;
+                        storage
+                    } else {
+                        payload
+                    };
+                    let payload_owned = owned
+                        && (pattern.test.identity != crate::LoweredPatternIdentity::Unique
+                            || pattern.take_unique);
                     self.bind_dynamic_pattern(
                         owner,
                         *argument,
-                        payload,
+                        storage,
                         payload_descriptor,
-                        owned,
+                        payload_owned,
                         environment,
                     )
                 } else {
@@ -8225,10 +8356,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         self.emit_dynamic_indexed_assignment(owner, *id, assignment, environment)?;
                         continue;
                     }
-                    let (target, descriptor) =
-                        self.emit_dynamic_place(owner, assignment.target, environment)?;
+                    let deferred = self.place_crosses_unique(owner, assignment.target);
+                    let place = if deferred {
+                        None
+                    } else {
+                        Some(self.emit_dynamic_place(owner, assignment.target, environment)?)
+                    };
                     let value =
                         self.emit_dynamic_expression(owner, assignment.value, environment)?;
+                    if environment.returned {
+                        return Ok(None);
+                    }
+                    let (target, descriptor) = match place {
+                        Some(place) => place,
+                        None => self.emit_dynamic_place(owner, assignment.target, environment)?,
+                    };
                     if assignment.drop_previous {
                         self.backend.drop_dynamic_value(descriptor, target)?;
                     }
@@ -8531,6 +8673,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let base = self.emit_dynamic_expression(owner, access.base, environment)?;
                 let base =
                     self.dereference_dynamic_pointer(base, dereference, &expression.origin.span)?;
+                if access.take_unique {
+                    let storage = *environment.temporaries.get(&id).ok_or_else(|| {
+                        Diagnostic::new(
+                            expression.origin.span.clone(),
+                            "missing Unique access storage",
+                        )
+                    })?;
+                    self.backend.copy_dynamic_value(descriptor, base, storage)?;
+                    self.backend
+                        .build_unique_free(base, expression.origin.span.clone())?;
+                    return Ok(storage);
+                }
                 match &access.kind {
                     crate::LoweredAccessKind::Product { index, .. } => {
                         self.dynamic_product_field(descriptor, base, *index as u32)?
@@ -8729,6 +8883,41 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if let LoweredCallableTarget::Constructor { recursive, .. } = &call.target {
                     if recursive.is_none() {
                         return self.emit_dynamic_constructor_call(owner, id, call, environment);
+                    }
+                    if *recursive == Some(crate::RecursiveConstruction::Unique) {
+                        let argument = call
+                            .arguments
+                            .first()
+                            .and_then(|argument| argument.expression)
+                            .ok_or_else(|| {
+                                Diagnostic::new(call.origin.span.clone(), "missing Unique payload")
+                            })?;
+                        let value = self.emit_dynamic_expression(owner, argument, environment)?;
+                        let CheckedType::Unique(payload) = &call.result_type else {
+                            return Err(Diagnostic::new(
+                                call.origin.span.clone(),
+                                "invalid Unique constructor result",
+                            ));
+                        };
+                        let descriptor =
+                            self.dynamic_descriptor(payload, environment, &call.origin.span)?;
+                        let layout = self.backend.load_descriptor_layout(descriptor)?;
+                        let allocation = self
+                            .backend
+                            .build_unique_allocation(layout.store_size, call.origin.span.clone())?;
+                        self.backend
+                            .copy_dynamic_value(descriptor, value, allocation)?;
+                        let result = *environment.temporaries.get(&id).ok_or_else(|| {
+                            Diagnostic::new(
+                                call.origin.span.clone(),
+                                "missing Unique result storage",
+                            )
+                        })?;
+                        self.backend
+                            .builder
+                            .build_store(result, allocation)
+                            .map_err(compiler_diagnostic)?;
+                        return Ok(result);
                     }
                     if matches!(
                         recursive,
@@ -9281,6 +9470,7 @@ fn is_static_layout_type(value_type: &CheckedType) -> bool {
     matches!(
         value_type,
         CheckedType::Ref(_)
+            | CheckedType::Unique(_)
             | CheckedType::Slice(_)
             | CheckedType::Buffer(_)
             | CheckedType::RawMutPtr { .. }

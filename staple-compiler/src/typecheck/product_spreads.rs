@@ -72,6 +72,7 @@ fn invalid_spread_substitution(
             arguments.iter().find_map(visit)
         }
         CheckedType::Ref(ty)
+        | CheckedType::Unique(ty)
         | CheckedType::Slice(ty)
         | CheckedType::Buffer(ty)
         | CheckedType::RawMutPtr { pointee: ty }

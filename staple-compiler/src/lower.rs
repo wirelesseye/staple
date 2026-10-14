@@ -776,7 +776,15 @@ impl LoweredCoercionPlan {
         if source == &CheckedType::Never {
             return Ok(LoweredCoercionPlan::Identity);
         }
+        let same_nominal = matches!((source, target),
+            (CheckedType::Wrapper { id: source_id, .. }, CheckedType::Wrapper { id: target_id, .. }) if source_id == target_id)
+            || matches!(
+                (source, target),
+                (CheckedType::Unique(_), CheckedType::Unique(_))
+                    | (CheckedType::Ref(_), CheckedType::Ref(_))
+            );
         if source == target
+            || (same_nominal && crate::merge_types(source.clone(), target.clone()).is_some())
             || matches!(
                 (source, target),
                 (CheckedType::StringLiteralSet(_), CheckedType::String)
@@ -2158,6 +2166,7 @@ pub(crate) struct LoweredCString {
 /// A structural access with its base expression and checked dereference path.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredAccess {
+    pub take_unique: bool,
     pub base: ExpressionId,
     pub kind: LoweredAccessKind,
 }
@@ -2185,6 +2194,7 @@ pub(crate) enum LoweredAccessKind {
 /// match arms.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredPattern {
+    pub take_unique: bool,
     pub origin: Origin,
     pub value_type: CheckedType,
     pub kind: LoweredPatternKind,
@@ -2238,6 +2248,7 @@ pub(crate) enum LoweredPatternIdentity {
     String,
     /// A `Ref` nominal destructure; the emitter loads the payload.
     Ref,
+    Unique,
     /// A wrapper representation destructure where the subject is the wrapper
     /// type itself.
     Representation,
@@ -2358,6 +2369,12 @@ fn pattern_test_plan(
                     .is_some_and(|builtin| builtin == BuiltinType::Ref) =>
             {
                 plan.identity = LoweredPatternIdentity::Ref;
+                children.push(payload.as_ref().clone());
+            }
+            CheckedType::Unique(payload)
+                if target.and_then(|target| builtin_of(target)) == Some(BuiltinType::Unique) =>
+            {
+                plan.identity = LoweredPatternIdentity::Unique;
                 children.push(payload.as_ref().clone());
             }
             CheckedType::Sum(sum) => {
@@ -2912,6 +2929,8 @@ pub(crate) struct LoweredSymbol {
 
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredTypeMetadata {
+    pub representation: Option<CheckedType>,
+    pub parameters: Vec<TypeParameterId>,
     pub origin: Origin,
     pub semantic_id: TypeId,
     /// Tests locate a type's metadata by its declared name.
@@ -3222,6 +3241,16 @@ impl LoweredProgram {
                 continue;
             };
             let value = LoweredTypeMetadata {
+                representation: declaration
+                    .kind()
+                    .is_wrapper()
+                    .then(|| module.type_representation(id).cloned())
+                    .flatten(),
+                parameters: declaration
+                    .type_parameters
+                    .iter()
+                    .filter_map(|parameter| resolved.type_parameter_for(parameter.syntax().id))
+                    .collect(),
                 origin: origin.clone(),
                 semantic_id: id,
                 #[cfg(test)]
@@ -5166,6 +5195,7 @@ impl LoweredProgram {
         }
         let syntax = function.body.syntax();
         Ok(self.patterns.push(LoweredPattern {
+            take_unique: module.takes_unique(syntax.id),
             origin: Origin {
                 syntax: syntax.id,
                 span: syntax.span.clone(),
@@ -5210,6 +5240,7 @@ impl LoweredProgram {
             .map_err(|message| Diagnostic::new(syntax.span.clone(), message))?;
             let argument = self.lower_unprojected_pattern(module, pattern, &children[0])?;
             return Ok(self.patterns.push(LoweredPattern {
+                take_unique: module.takes_unique(syntax.id),
                 origin: Origin {
                     syntax: syntax.id,
                     span: syntax.span.clone(),
@@ -5327,6 +5358,7 @@ impl LoweredProgram {
             }
         };
         Ok(self.patterns.push(LoweredPattern {
+            take_unique: module.takes_unique(syntax.id),
             origin: Origin {
                 syntax: syntax.id,
                 span: syntax.span.clone(),
@@ -5930,7 +5962,11 @@ impl LoweredProgram {
                 }
             }
         };
-        Ok(LoweredExpressionKind::Access(LoweredAccess { base, kind }))
+        Ok(LoweredExpressionKind::Access(LoweredAccess {
+            base,
+            kind,
+            take_unique: module.takes_unique(access.syntax.id),
+        }))
     }
 
     fn lower_integer(
@@ -13717,7 +13753,9 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::BufferFreeze
         | Intrinsic::BufferTransfer
         | Intrinsic::BufferClone
-        | Intrinsic::RefReplace => None,
+        | Intrinsic::RefReplace
+        | Intrinsic::UniqueIntoRaw
+        | Intrinsic::UniqueFromRaw => None,
     }
 }
 
@@ -14065,7 +14103,7 @@ fn collect_pattern_facts(
 /// layout can hold a GC pointer, runtime handle types included.
 fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
     match value_type {
-        CheckedType::Ref(_) | CheckedType::Buffer(_) => true,
+        CheckedType::Ref(_) | CheckedType::Unique(_) | CheckedType::Buffer(_) => true,
         CheckedType::Product(product) => product
             .elements
             .iter()
@@ -15832,12 +15870,14 @@ mod tests {
     fn arena_ids_are_dense_and_in_insertion_order() {
         let mut patterns = Arena::<LoweredPattern, PatternId>::default();
         let first = patterns.push(LoweredPattern {
+            take_unique: false,
             origin: Origin::compiler(),
             value_type: CheckedType::I32,
             kind: LoweredPatternKind::Wildcard,
             test: LoweredPatternTestPlan::undecided(CheckedType::I32),
         });
         let second = patterns.push(LoweredPattern {
+            take_unique: false,
             origin: Origin::compiler(),
             value_type: CheckedType::I64,
             kind: LoweredPatternKind::Wildcard,

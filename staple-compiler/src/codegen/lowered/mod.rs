@@ -925,6 +925,46 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.backend
                     .build_runtime_release(*release, record, span.clone())
             }
+            DropGlueBody::Unique { payload, glue } => {
+                let pointer = value.into_pointer_value();
+                if let Some(glue) = glue {
+                    if glue.kind == crate::LoweredArtifactDependencyKind::DescriptorDrop {
+                        let ordinal = glue.artifact.ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "missing recursive Unique cleanup")
+                        })?;
+                        let function = self
+                            .artifacts
+                            .get(&ordinal)
+                            .and_then(|functions| functions.first())
+                            .copied()
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    span.clone(),
+                                    "missing recursive cleanup declaration",
+                                )
+                            })?;
+                        let null = self
+                            .backend
+                            .context
+                            .ptr_type(AddressSpace::default())
+                            .const_null();
+                        self.backend
+                            .builder
+                            .build_direct_call(function, &[null.into(), pointer.into()], "")
+                            .map_err(compiler_diagnostic)?;
+                        return self.backend.build_unique_free(pointer, span.clone());
+                    }
+                    let ty = self.backend.compile_type(payload)?;
+                    let payload_value = self
+                        .backend
+                        .builder
+                        .build_load(ty, pointer, "unique.drop.payload")
+                        .map_err(compiler_diagnostic)?;
+                    let plan = self.planned_drop_glue(glue, span)?;
+                    self.emit_drop_glue(payload_value, plan, span)?;
+                }
+                self.backend.build_unique_free(pointer, span.clone())
+            }
             DropGlueBody::CStringFree => {
                 let BasicValueEnum::PointerValue(pointer) = value else {
                     return Err(Diagnostic::new(
@@ -2394,6 +2434,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_product_value(&parameters[1..], span.clone())?;
         let result = match &plan.construction {
             crate::ConstructorConstruction::Value { .. } => value,
+            crate::ConstructorConstruction::Unique { payload, .. } => {
+                let ty = self.backend.compile_type(payload)?;
+                let size = self.backend.target_data.get_store_size(&ty);
+                let pointer = self.backend.build_unique_allocation(
+                    self.backend.size_type.const_int(size, false),
+                    span.clone(),
+                )?;
+                self.backend
+                    .builder
+                    .build_store(pointer, value)
+                    .map_err(compiler_diagnostic)?;
+                pointer.into()
+            }
             crate::ConstructorConstruction::ManagedRef {
                 payload, finalizer, ..
             } => {
@@ -3088,9 +3141,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             },
             LoweredPatternKind::Nominal { argument, .. } => {
+                let original_unique = value;
                 // A nominal pattern loads the payload only for a `Ref` pattern;
                 // every other nominal form binds its argument transparently.
-                let value = if pattern.test.identity == crate::LoweredPatternIdentity::Ref {
+                let value = if matches!(
+                    pattern.test.identity,
+                    crate::LoweredPatternIdentity::Ref | crate::LoweredPatternIdentity::Unique
+                ) {
                     let payload = self
                         .view
                         .pattern(owner, *argument)
@@ -3102,7 +3159,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 } else {
                     value
                 };
-                self.bind_pattern(owner, *argument, value, environment)
+                self.bind_pattern(owner, *argument, value, environment)?;
+                if pattern.take_unique {
+                    let pointer = value_as_basic(original_unique)
+                        .ok_or_else(|| Diagnostic::new(span.clone(), "invalid Unique pointer"))?
+                        .into_pointer_value();
+                    self.backend.build_unique_free(pointer, span.clone())?;
+                }
+                Ok(())
             }
             LoweredPatternKind::Literal { .. } => Ok(()),
             LoweredPatternKind::At {
@@ -3664,13 +3728,28 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if dereference.is_empty() {
                     Ok(base)
                 } else {
+                    let payload =
+                        self.backend
+                            .load_ref_payloads(base, dereference, span.clone())?;
+                    if access.take_unique {
+                        let pointer = value_as_basic(base)
+                            .ok_or_else(|| Diagnostic::new(span.clone(), "invalid Unique pointer"))?
+                            .into_pointer_value();
+                        self.backend.build_unique_free(pointer, span.clone())?;
+                    }
+                    Ok(payload.as_any_value_enum())
+                }
+            }
+            // The emitter returns a scalar access as-is, dereference chain included.
+            crate::LoweredAccessKind::Scalar { dereference } => {
+                if dereference.is_empty() {
+                    Ok(base)
+                } else {
                     self.backend
                         .load_ref_payloads(base, dereference, span.clone())
                         .map(|value| value.as_any_value_enum())
                 }
             }
-            // The emitter returns a scalar access as-is, dereference chain included.
-            crate::LoweredAccessKind::Scalar { .. } => Ok(base),
             crate::LoweredAccessKind::Product { index, dereference } => {
                 let value = if dereference.is_empty() {
                     value_as_basic(base)
@@ -4493,8 +4572,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         environment,
                     )
                 }
-                CheckedType::Ref(payload)
-                    if pattern.test.identity == crate::LoweredPatternIdentity::Ref =>
+                CheckedType::Ref(payload) | CheckedType::Unique(payload)
+                    if matches!(
+                        pattern.test.identity,
+                        crate::LoweredPatternIdentity::Ref | crate::LoweredPatternIdentity::Unique
+                    ) =>
                 {
                     let payload_value = self.backend.load_ref_payloads(
                         value.as_any_value_enum(),
@@ -5857,6 +5939,28 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         })
                     })
                     .collect::<CodeGenerationResult<Vec<_>>>()?;
+                if *recursive == Some(crate::RecursiveConstruction::Unique) {
+                    let CheckedType::Unique(payload) = &call.result_type else {
+                        return Err(Diagnostic::new(
+                            call.origin.span.clone(),
+                            "Unique constructor has an invalid result",
+                        ));
+                    };
+                    let value = self
+                        .backend
+                        .build_product_value(&basic, call.origin.span.clone())?;
+                    let ty = self.backend.compile_type(payload)?;
+                    let size = self.backend.target_data.get_store_size(&ty);
+                    let pointer = self.backend.build_unique_allocation(
+                        self.backend.size_type.const_int(size, false),
+                        call.origin.span.clone(),
+                    )?;
+                    self.backend
+                        .builder
+                        .build_store(pointer, value)
+                        .map_err(compiler_diagnostic)?;
+                    return Ok(pointer.as_any_value_enum());
+                }
                 if matches!(
                     recursive,
                     Some(crate::RecursiveConstruction::ManagedReference)
@@ -6721,6 +6825,39 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
+    /// Native owner allocations may be replaced while the replacement expression
+    /// runs. Resolve their payload addresses only after evaluating that expression.
+    fn place_crosses_unique(&self, owner: EmissionOwner, id: crate::PlaceId) -> bool {
+        let Some(place) = self.view.place(owner, id) else {
+            return false;
+        };
+        match &place.kind {
+            crate::LoweredPlaceKind::Dereference {
+                reference,
+                dereference,
+            } => {
+                let Some(expression) = self.view.expression(owner, *reference) else {
+                    return false;
+                };
+                let mut current = expression.value_type.clone();
+                for payload in dereference {
+                    current = super::layout::strip_place_wrappers(current);
+                    if matches!(current, crate::CheckedType::Unique(_)) {
+                        return true;
+                    }
+                    current = payload.clone();
+                }
+                false
+            }
+            crate::LoweredPlaceKind::ProductElement { base, .. }
+            | crate::LoweredPlaceKind::Representation { base }
+            | crate::LoweredPlaceKind::Indexed { base, .. } => {
+                self.place_crosses_unique(owner, *base)
+            }
+            _ => false,
+        }
+    }
+
     /// Emits an assignment. Indexed targets use MutateIndex; other targets drop
     /// the replaced value, store through the place pointer, update initialization
     /// state, and notify the recorded signal root.
@@ -6746,7 +6883,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             _ => None,
         };
-        let pointer = if split.is_some() {
+        let deferred = self.place_crosses_unique(owner, assignment.target);
+        let mut pointer = if split.is_some() || deferred {
             None
         } else {
             Some(self.emit_place_pointer(owner, assignment.target, environment)?)
@@ -6754,6 +6892,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let value = self.emit_expression(owner, assignment.value, environment)?;
         if environment.returned {
             return Ok(());
+        }
+        if deferred && split.is_none() {
+            pointer = Some(self.emit_place_pointer(owner, assignment.target, environment)?);
         }
         let value = value_as_basic(value)
             .ok_or_else(|| Diagnostic::new(span.clone(), "assigned value is not storable"))?;
@@ -6906,12 +7047,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 ));
             }
         };
-        // The emitter compiles the base pointer first, then the position, then the
-        // replacement.
+        // Evaluate the position before the replacement; native payload addresses
+        // are resolved afterwards because either operand may replace the owner.
         self.view.place(owner, *base).ok_or_else(|| {
             Diagnostic::new(span.clone(), "missing indexed assignment base place")
         })?;
-        let pointer = self.emit_place_pointer(owner, *base, environment)?;
+        let deferred = self.place_crosses_unique(owner, *base);
+        let pointer = if deferred {
+            None
+        } else {
+            Some(self.emit_place_pointer(owner, *base, environment)?)
+        };
         let position = self.emit_expression(owner, *index, environment)?;
         if environment.returned {
             return Ok(());
@@ -6920,6 +7066,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if environment.returned {
             return Ok(());
         }
+        let pointer = match pointer {
+            Some(pointer) => pointer,
+            None => self.emit_place_pointer(owner, *base, environment)?,
+        };
         let position = value_as_basic(position).ok_or_else(|| {
             Diagnostic::new(span.clone(), "MutateIndex position is not first-class")
         })?;
@@ -8128,6 +8278,29 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             IntrinsicFunction::BufferTransfer => self.emit_buffer_transfer(call, arguments, &span),
             IntrinsicFunction::BufferClone => {
                 self.emit_buffer_clone(owner, call, call_id, arguments, &span)
+            }
+            IntrinsicFunction::UniqueIntoRaw | IntrinsicFunction::UniqueFromRaw => {
+                let BasicMetadataValueEnum::PointerValue(pointer) = arguments[0] else {
+                    return Err(unsupported("Unique raw conversion"));
+                };
+                if intrinsic == IntrinsicFunction::UniqueIntoRaw {
+                    self.backend
+                        .unregister_unique_payload(pointer, span.clone())?;
+                } else {
+                    let CheckedType::Unique(payload) = result_type else {
+                        return Err(unsupported("Unique result"));
+                    };
+                    if payload.is_sized() {
+                        let ty = self.backend.compile_type(payload)?;
+                        let size = self.backend.target_data.get_store_size(&ty);
+                        self.backend.register_unique_payload(
+                            pointer,
+                            self.backend.size_type.const_int(size, false),
+                            span.clone(),
+                        )?;
+                    }
+                }
+                Ok(pointer.as_any_value_enum())
             }
             IntrinsicFunction::RefReplace => {
                 // Read the old payload, store the replacement, and return the

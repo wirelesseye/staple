@@ -180,6 +180,7 @@ pub(super) fn collect_compound_shapes(
                 .collect(),
         ),
         CheckedType::Sum(sum) => (Shape::Sum, sum.alternatives.iter().collect()),
+        CheckedType::Unique(payload) => (Shape::Unique, vec![payload]),
         CheckedType::Wrapper { representation, .. } => {
             collect_compound_shapes(representation, shapes);
             return;

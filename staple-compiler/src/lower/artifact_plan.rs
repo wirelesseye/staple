@@ -647,6 +647,11 @@ impl LoweredArtifactPlan {
                         product,
                         payload,
                         finalizer: _,
+                    }
+                    | ConstructorConstruction::Unique {
+                        parameters,
+                        product,
+                        payload,
                     } => {
                         values(parameters, visit);
                         visit(Value(product));
@@ -759,6 +764,7 @@ impl LoweredArtifactPlan {
                     | DropGlueBody::RuntimeRelease(_)
                     | DropGlueBody::CStringFree
                     | DropGlueBody::Wrapper { .. } => {}
+                    DropGlueBody::Unique { payload, .. } => visit(Value(payload)),
                     DropGlueBody::Product { fields } => {
                         for DroppedElement {
                             index: _,
@@ -1108,6 +1114,12 @@ pub(crate) enum ConstructorConstruction {
         /// The product rebuilt from `parameters`.
         product: CheckedType,
     },
+    /// Allocate the product with unique ownership, independently of the GC.
+    Unique {
+        parameters: Vec<CheckedType>,
+        product: CheckedType,
+        payload: CheckedType,
+    },
     /// GC-allocate the product as a `Ref` payload, optionally with a payload
     /// finalizer when the payload needs drop.
     ManagedRef {
@@ -1161,9 +1173,10 @@ impl ConstructorAdapterPlan {
                     }
                 }
                 CheckedType::Wrapper { representation, .. } => collect(representation, ids),
-                CheckedType::Ref(ty) | CheckedType::Slice(ty) | CheckedType::Buffer(ty) => {
-                    collect(ty, ids)
-                }
+                CheckedType::Ref(ty)
+                | CheckedType::Unique(ty)
+                | CheckedType::Slice(ty)
+                | CheckedType::Buffer(ty) => collect(ty, ids),
                 CheckedType::Array { element, count } => {
                     collect(element, ids);
                     collect(count, ids);
@@ -1508,6 +1521,11 @@ pub(crate) enum DropGlueBody {
     RuntimeRelease(RuntimeRelease),
     /// Call `free` on the C-string pointer.
     CStringFree,
+    /// Clean up an owned payload and release its allocation.
+    Unique {
+        payload: CheckedType,
+        glue: Option<PlannedArtifact>,
+    },
     /// Drop each listed field in the recorded order, which is reverse element
     /// order; only droppable fields are listed.
     Product { fields: Vec<DroppedElement> },
@@ -1564,6 +1582,11 @@ impl DropGluePlan {
                     visit(PlannedCalleeRef::Artifact(representation));
                 }
             }
+            DropGlueBody::Unique { glue, .. } => {
+                if let Some(glue) = glue {
+                    visit(PlannedCalleeRef::Artifact(glue));
+                }
+            }
             DropGlueBody::Product { fields } => {
                 for field in fields {
                     visit(PlannedCalleeRef::Artifact(&field.glue));
@@ -1593,6 +1616,11 @@ impl DropGluePlan {
                 visit(PlannedCalleeRefMut::Instance(method));
                 if let Some(representation) = representation {
                     visit(PlannedCalleeRefMut::Artifact(representation));
+                }
+            }
+            DropGlueBody::Unique { glue, .. } => {
+                if let Some(glue) = glue {
+                    visit(PlannedCalleeRefMut::Artifact(glue));
                 }
             }
             DropGlueBody::Product { fields } => {

@@ -485,6 +485,7 @@ pub enum CheckedType {
     String,
     StringLiteralSet(Vec<String>),
     Ref(Box<CheckedType>),
+    Unique(Box<CheckedType>),
     Slice(Box<CheckedType>),
     Buffer(Box<CheckedType>),
     Array {
@@ -629,6 +630,7 @@ fn compact_type_template(value_type: CheckedType) -> CheckedType {
             arguments: arguments.into_iter().map(compact_type_template).collect(),
         },
         CheckedType::Ref(inner) => CheckedType::Ref(Box::new(compact_type_template(*inner))),
+        CheckedType::Unique(inner) => CheckedType::Unique(Box::new(compact_type_template(*inner))),
         CheckedType::Slice(inner) => CheckedType::Slice(Box::new(compact_type_template(*inner))),
         CheckedType::Buffer(inner) => CheckedType::Buffer(Box::new(compact_type_template(*inner))),
         CheckedType::RawPtr { pointee } => CheckedType::RawPtr {
@@ -1273,7 +1275,9 @@ impl CheckedType {
             Self::Inferred | Self::Error | Self::TypeConstructor { .. } => false,
             Self::RawPtr { pointee } => pointee.is_fully_known(),
             Self::RawMutPtr { pointee } => pointee.is_fully_known(),
-            Self::Ref(value) | Self::Slice(value) | Self::Buffer(value) => value.is_fully_known(),
+            Self::Ref(value) | Self::Unique(value) | Self::Slice(value) | Self::Buffer(value) => {
+                value.is_fully_known()
+            }
             Self::Array { element, count } => element.is_fully_known() && count.is_fully_known(),
             Self::Product(product) => {
                 product.spreads.is_empty()
@@ -1335,6 +1339,7 @@ impl CheckedType {
             // These values all have a statically known handle or scalar representation.
             Self::Never
             | Self::Ref(_)
+            | Self::Unique(_)
             | Self::Slice(_)
             | Self::Buffer(_)
             | Self::RawMutPtr { .. }
@@ -1395,6 +1400,7 @@ impl fmt::Display for CheckedType {
                 Ok(())
             }
             Self::Ref(value) => format_type_application(formatter, "Ref", value),
+            Self::Unique(value) => format_type_application(formatter, "Unique", value),
             Self::Slice(value) => format_type_application(formatter, "Slice", value),
             Self::Buffer(value) => format_type_application(formatter, "Buffer", value),
             Self::Array { element, count } => {
@@ -1579,6 +1585,7 @@ pub(crate) struct CheckedSemanticIds {
 
 #[derive(Debug, Clone)]
 pub struct TypedModule {
+    type_representations: HashMap<TypeId, CheckedType>,
     resolved: ResolvedModule,
     trait_prerequisites: HashMap<TraitId, Vec<CheckedTraitBound>>,
     expression_types: HashMap<SyntaxId, CheckedType>,
@@ -1962,6 +1969,8 @@ impl TypedModule {
     }
 
     pub fn is_copy_type(&self, value_type: &CheckedType) -> bool {
+        let resolved = self.resolve_recursive_payload(value_type);
+        let value_type = resolved.as_ref().unwrap_or(value_type);
         is_copy_type(
             value_type,
             self.copy_trait,
@@ -1987,6 +1996,8 @@ impl TypedModule {
             .flat_map(|bounds| bounds.iter().cloned())
             .collect::<Vec<_>>();
         let _ = function;
+        let resolved = self.resolve_recursive_payload(value_type);
+        let value_type = resolved.as_ref().unwrap_or(value_type);
         is_copy_type(
             value_type,
             self.copy_trait,
@@ -2110,6 +2121,8 @@ impl TypedModule {
     }
 
     pub fn type_needs_drop(&self, value_type: &CheckedType) -> bool {
+        let resolved = self.resolve_recursive_payload(value_type);
+        let value_type = resolved.as_ref().unwrap_or(value_type);
         // A coroutine frame owns its captures and must run `cleanup` when
         // dropped; a scheduler owns its queues. A `Task` handle's record is
         // GC-managed, so dropping a handle is a no-op (it does not cancel the
@@ -2218,6 +2231,47 @@ impl TypedModule {
 
     pub(crate) fn moved_symbols(&self, syntax: SyntaxId) -> impl Iterator<Item = SymbolId> + '_ {
         self.ownership.moved_symbols(syntax)
+    }
+
+    fn resolve_recursive_payload(&self, ty: &CheckedType) -> Option<CheckedType> {
+        let CheckedType::Wrapper {
+            id,
+            arguments,
+            representation,
+            ..
+        } = ty
+        else {
+            return None;
+        };
+        if !matches!(representation.as_ref(), CheckedType::Opaque { id: opaque, .. } if id == opaque)
+        {
+            return None;
+        }
+        let declaration = self.resolved.type_declarations().get(id)?;
+        let parameters = declaration
+            .type_parameters
+            .iter()
+            .filter_map(|parameter| self.resolved.type_parameter_for(parameter.syntax().id));
+        let substitutions = parameters.zip(arguments.iter().cloned()).collect();
+        let representation =
+            substitute_type(self.type_representations.get(id)?.clone(), &substitutions);
+        let mut ty = ty.clone();
+        if let CheckedType::Wrapper {
+            representation: target,
+            ..
+        } = &mut ty
+        {
+            *target = Box::new(representation);
+        }
+        Some(ty)
+    }
+
+    pub(crate) fn type_representation(&self, id: TypeId) -> Option<&CheckedType> {
+        self.type_representations.get(&id)
+    }
+
+    pub(crate) fn takes_unique(&self, syntax: SyntaxId) -> bool {
+        self.ownership.takes_unique(syntax)
     }
 
     pub(crate) fn is_non_owning_symbol(&self, symbol: SymbolId) -> bool {
@@ -3057,6 +3111,7 @@ impl TypeChecker {
         }
 
         let typed = TypedModule {
+            type_representations: self.type_representations,
             resolved: module,
             trait_prerequisites: self.trait_prerequisites,
             expression_types: self.expression_types,
@@ -5053,6 +5108,21 @@ impl TypeChecker {
                 | crate::IntrinsicFunction::BufferClone => self.symbol_value_type(*symbol)
                     .cloned()
                     .filter(|value_type| valid_buffer_intrinsic_type(value_type, *intrinsic))
+                    .unwrap_or(CheckedType::Error),
+                crate::IntrinsicFunction::UniqueIntoRaw | crate::IntrinsicFunction::UniqueFromRaw => self.symbol_value_type(*symbol)
+                    .cloned()
+                    .filter(|ty| match ty {
+                        CheckedType::Function(function) => match intrinsic {
+                            crate::IntrinsicFunction::UniqueIntoRaw => matches!((function.parameter.as_ref(), function.result.as_ref()),
+                                (CheckedType::Unique(payload), CheckedType::RawMutPtr { pointee })
+                                if types_equivalent(payload, pointee) && function.moves == [CheckedMutation::Whole]),
+                            crate::IntrinsicFunction::UniqueFromRaw => matches!((function.parameter.as_ref(), function.result.as_ref()),
+                                (CheckedType::RawMutPtr { pointee }, CheckedType::Unique(payload))
+                                if types_equivalent(payload, pointee)),
+                            _ => false,
+                        },
+                        _ => false,
+                    })
                     .unwrap_or(CheckedType::Error),
                 crate::IntrinsicFunction::RefReplace => self.symbol_value_type(*symbol)
                     .cloned()
@@ -7793,6 +7863,11 @@ impl TypeChecker {
                     }
                     CheckedType::Ref(payload)
                         if module.builtin_type(expected_id) == Some(BuiltinType::Ref) =>
+                    {
+                        self.bind_pattern_types(module, &pattern.argument, payload);
+                    }
+                    CheckedType::Unique(payload)
+                        if module.builtin_type(expected_id) == Some(BuiltinType::Unique) =>
                     {
                         self.bind_pattern_types(module, &pattern.argument, payload);
                     }
@@ -11554,6 +11629,18 @@ impl TypeChecker {
                 if self.did_return {
                     return CheckedType::empty_product();
                 }
+                if matches!(access.accessor, Accessor::Representation) {
+                    if let CheckedType::Unique(payload) = &value_type {
+                        let payload = payload.as_ref().clone();
+                        self.accesses.insert(
+                            access.syntax.id,
+                            CheckedAccess::Representation {
+                                dereference: vec![payload.clone()],
+                            },
+                        );
+                        return self.finish_expression_type(expression, payload, expected);
+                    }
+                }
                 let (mut accessible, mut dereference) = peel_access_wrappers(&value_type);
 
                 let current_module = module
@@ -12459,9 +12546,12 @@ impl TypeChecker {
                             || matches!(
                                 (module.builtin_type(selected), value_type),
                                 (Some(BuiltinType::String), CheckedType::String)
+                                    | (Some(BuiltinType::Unique), CheckedType::Unique(_))
                                     | (
                                         Some(BuiltinType::Ref),
-                                        CheckedType::Ref(_) | CheckedType::Slice(_)
+                                        CheckedType::Ref(_)
+                                            | CheckedType::Unique(_)
+                                            | CheckedType::Slice(_)
                                     )
                             )
                     })
@@ -12645,6 +12735,11 @@ impl TypeChecker {
                     }
                     CheckedType::Ref(payload)
                         if module.builtin_type(expected_id) == Some(BuiltinType::Ref) =>
+                    {
+                        Some(payload.as_ref().clone())
+                    }
+                    CheckedType::Unique(payload)
+                        if module.builtin_type(expected_id) == Some(BuiltinType::Unique) =>
                     {
                         Some(payload.as_ref().clone())
                     }
@@ -12873,7 +12968,7 @@ impl TypeChecker {
                     &specialized_candidate,
                 )
             }
-            CheckedType::Ref(payload) => {
+            CheckedType::Ref(payload) | CheckedType::Unique(payload) => {
                 let Some(specialized_candidate) = Self::specialize_ref_row(module, candidate)
                 else {
                     return false;
@@ -13189,7 +13284,12 @@ impl TypeChecker {
             CoveragePattern::Pattern(Pattern::Nominal(pattern))
                 if module
                     .type_for_pattern(pattern.syntax.id)
-                    .is_some_and(|id| module.builtin_type(id) == Some(BuiltinType::Ref)) =>
+                    .is_some_and(|id| {
+                        matches!(
+                            module.builtin_type(id),
+                            Some(BuiltinType::Ref | BuiltinType::Unique)
+                        )
+                    }) =>
             {
                 CoveragePattern::Pattern(&pattern.argument)
             }
@@ -16135,6 +16235,9 @@ impl TypeChecker {
             Some(crate::RecursiveConstruction::ManagedReference) => {
                 return CheckedType::Ref(Box::new(arguments[0].clone()));
             }
+            Some(crate::RecursiveConstruction::Unique) => {
+                return CheckedType::Unique(Box::new(arguments[0].clone()));
+            }
             Some(crate::RecursiveConstruction::Slice) => {
                 return CheckedType::Slice(Box::new(arguments[0].clone()));
             }
@@ -16489,6 +16592,11 @@ impl TypeChecker {
                     name: "Ref".to_owned(),
                     arguments: Vec::new(),
                 },
+                BuiltinType::Unique => CheckedType::TypeConstructor {
+                    id,
+                    name: "Unique".to_owned(),
+                    arguments: Vec::new(),
+                },
                 BuiltinType::Slice => CheckedType::TypeConstructor {
                     id,
                     name: "Slice".to_owned(),
@@ -16801,6 +16909,7 @@ pub(crate) fn types_equivalent(actual: &CheckedType, expected: &CheckedType) -> 
             },
         ) => a == b && types_equivalent_list(aa, ba),
         (CheckedType::Ref(a), CheckedType::Ref(b))
+        | (CheckedType::Unique(a), CheckedType::Unique(b))
         | (CheckedType::Slice(a), CheckedType::Slice(b))
         | (CheckedType::Buffer(a), CheckedType::Buffer(b))
         | (CheckedType::RawPtr { pointee: a }, CheckedType::RawPtr { pointee: b })
@@ -16986,6 +17095,7 @@ fn schemes_well_formed(ty: &CheckedType) -> bool {
         }
         CheckedType::Sum(s) => s.alternatives.iter().all(schemes_well_formed),
         CheckedType::Ref(ty)
+        | CheckedType::Unique(ty)
         | CheckedType::Slice(ty)
         | CheckedType::Buffer(ty)
         | CheckedType::RawMutPtr { pointee: ty }
@@ -17095,6 +17205,9 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
         }),
         (CheckedType::Ref(actual), CheckedType::Ref(expected)) => {
             merge_types(*actual, *expected).map(|value| CheckedType::Ref(Box::new(value)))
+        }
+        (CheckedType::Unique(actual), CheckedType::Unique(expected)) => {
+            merge_types(*actual, *expected).map(|value| CheckedType::Unique(Box::new(value)))
         }
         (CheckedType::Slice(actual), CheckedType::Slice(expected)) => {
             merge_types(*actual, *expected).map(|value| CheckedType::Slice(Box::new(value)))
@@ -17668,6 +17781,9 @@ pub(crate) fn substitute_type(
         CheckedType::Ref(value) => {
             CheckedType::Ref(Box::new(substitute_type(*value, substitutions)))
         }
+        CheckedType::Unique(value) => {
+            CheckedType::Unique(Box::new(substitute_type(*value, substitutions)))
+        }
         CheckedType::Slice(value) => {
             CheckedType::Slice(Box::new(substitute_type(*value, substitutions)))
         }
@@ -17995,6 +18111,7 @@ pub(crate) fn type_contains_scheme(ty: &CheckedType) -> bool {
             .any(|element| type_contains_scheme(&element.value_type)),
         CheckedType::Sum(sum) => sum.alternatives.iter().any(type_contains_scheme),
         CheckedType::Ref(ty)
+        | CheckedType::Unique(ty)
         | CheckedType::Slice(ty)
         | CheckedType::Buffer(ty)
         | CheckedType::RawMutPtr { pointee: ty }
@@ -18020,9 +18137,10 @@ pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
         CheckedType::Parameter { .. } => true,
         CheckedType::RawPtr { pointee } => contains_type_parameter(pointee),
         CheckedType::RawMutPtr { pointee } => contains_type_parameter(pointee),
-        CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
-            contains_type_parameter(value)
-        }
+        CheckedType::Ref(value)
+        | CheckedType::Unique(value)
+        | CheckedType::Slice(value)
+        | CheckedType::Buffer(value) => contains_type_parameter(value),
         CheckedType::Array { element, count } => {
             contains_type_parameter(element) || contains_type_parameter(count)
         }
@@ -18066,6 +18184,7 @@ fn contains_effect_parameter(value_type: &CheckedType) -> bool {
         CheckedType::RawMutPtr { pointee }
         | CheckedType::RawPtr { pointee }
         | CheckedType::Ref(pointee)
+        | CheckedType::Unique(pointee)
         | CheckedType::Slice(pointee)
         | CheckedType::Buffer(pointee) => contains_effect_parameter(pointee),
         CheckedType::Array { element, count } => {
@@ -18100,9 +18219,10 @@ pub(crate) fn contains_inferred_type(value_type: &CheckedType) -> bool {
         CheckedType::Inferred | CheckedType::TypeConstructor { .. } => true,
         CheckedType::RawPtr { pointee } => contains_inferred_type(pointee),
         CheckedType::RawMutPtr { pointee } => contains_inferred_type(pointee),
-        CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
-            contains_inferred_type(value)
-        }
+        CheckedType::Ref(value)
+        | CheckedType::Unique(value)
+        | CheckedType::Slice(value)
+        | CheckedType::Buffer(value) => contains_inferred_type(value),
         CheckedType::Array { element, count } => {
             contains_inferred_type(element) || contains_inferred_type(count)
         }
@@ -18139,9 +18259,10 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
             }
             CheckedType::RawPtr { pointee } => collect(pointee, ids),
             CheckedType::RawMutPtr { pointee } => collect(pointee, ids),
-            CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
-                collect(value, ids)
-            }
+            CheckedType::Ref(value)
+            | CheckedType::Unique(value)
+            | CheckedType::Slice(value)
+            | CheckedType::Buffer(value) => collect(value, ids),
             CheckedType::Array { element, count } => {
                 collect(element, ids);
                 collect(count, ids);
@@ -18296,6 +18417,7 @@ fn unify_impl_headers(
             unify_impl_headers(left, right, free_parameters, substitutions)
         }
         (CheckedType::Ref(left), CheckedType::Ref(right))
+        | (CheckedType::Unique(left), CheckedType::Unique(right))
         | (CheckedType::Slice(left), CheckedType::Slice(right))
         | (CheckedType::Buffer(left), CheckedType::Buffer(right)) => {
             unify_impl_headers(left, right, free_parameters, substitutions)
@@ -18483,9 +18605,10 @@ fn sized_type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId
             CheckedType::Parameter { .. } => {}
             CheckedType::RawPtr { pointee } => collect(pointee, ids),
             CheckedType::RawMutPtr { pointee } => collect(pointee, ids),
-            CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
-                collect(value, ids)
-            }
+            CheckedType::Ref(value)
+            | CheckedType::Unique(value)
+            | CheckedType::Slice(value)
+            | CheckedType::Buffer(value) => collect(value, ids),
             CheckedType::Opaque { arguments, .. }
             | CheckedType::TypeConstructor { arguments, .. } => {
                 for argument in arguments {
@@ -18574,6 +18697,7 @@ fn collect_rigid_parameters(
             collect_rigid_parameters(count, declared, substitutions);
         }
         CheckedType::Ref(ty)
+        | CheckedType::Unique(ty)
         | CheckedType::Slice(ty)
         | CheckedType::Buffer(ty)
         | CheckedType::RawMutPtr { pointee: ty }
@@ -18660,6 +18784,12 @@ fn infer_type_parameters_mode(
         }
         CheckedType::Ref(value) => {
             let CheckedType::Ref(actual_value) = actual else {
+                return false;
+            };
+            infer_type_parameters_mode(allow_schemes, value, actual_value, substitutions)
+        }
+        CheckedType::Unique(value) => {
+            let CheckedType::Unique(actual_value) = actual else {
                 return false;
             };
             infer_type_parameters_mode(allow_schemes, value, actual_value, substitutions)
@@ -18947,6 +19077,7 @@ fn clear_function_effects(value_type: &mut CheckedType) {
         CheckedType::RawMutPtr { pointee }
         | CheckedType::RawPtr { pointee }
         | CheckedType::Ref(pointee)
+        | CheckedType::Unique(pointee)
         | CheckedType::Slice(pointee)
         | CheckedType::Buffer(pointee) => clear_function_effects(pointee),
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
@@ -19109,6 +19240,7 @@ fn array_lengths_are_natural(
         CheckedType::RawMutPtr { pointee }
         | CheckedType::RawPtr { pointee }
         | CheckedType::Ref(pointee)
+        | CheckedType::Unique(pointee)
         | CheckedType::Slice(pointee)
         | CheckedType::Buffer(pointee) => array_lengths_are_natural(pointee, bounds, natural_trait),
         CheckedType::Product(product) => product
@@ -19974,7 +20106,7 @@ fn peel_access_wrappers(value_type: &CheckedType) -> (CheckedType, Vec<CheckedTy
     let mut dereference = Vec::new();
     loop {
         match accessible {
-            CheckedType::Ref(payload) => {
+            CheckedType::Ref(payload) | CheckedType::Unique(payload) => {
                 let payload = *payload;
                 dereference.push(payload.clone());
                 accessible = payload;
@@ -20148,7 +20280,7 @@ pub(crate) fn structural_trait_arguments(
         // A `Ref T` is transparent for indexing: `reference[position]` means
         // `(*reference)[position]`, so the derivation delegates to `T`'s own
         // `Index` implementation, whether structural or explicit.
-        if let CheckedType::Ref(payload) = target {
+        if let CheckedType::Ref(payload) | CheckedType::Unique(payload) = target {
             let resolved = resolve_obligation(
                 trait_id,
                 &[
@@ -20186,7 +20318,7 @@ pub(crate) fn structural_trait_arguments(
     if Some(trait_id) == mutate_index_trait {
         // The same auto-deref applies to `MutateIndex`, so index assignment
         // through a `Ref T` writes into the referenced payload.
-        if let CheckedType::Ref(payload) = target {
+        if let CheckedType::Ref(payload) | CheckedType::Unique(payload) = target {
             let resolved = resolve_obligation(
                 trait_id,
                 &[
@@ -20227,7 +20359,9 @@ fn structural_index_length(target: &CheckedType) -> Option<usize> {
         CheckedType::Product(product) if !product.variadic && !product.elements.is_empty() => {
             Some(product.elements.len())
         }
-        CheckedType::Ref(payload) => structural_index_length(payload),
+        CheckedType::Ref(payload) | CheckedType::Unique(payload) => {
+            structural_index_length(payload)
+        }
         _ => None,
     }
 }
@@ -20254,7 +20388,9 @@ fn checked_type_contains_sum(value_type: &CheckedType) -> bool {
         }
         CheckedType::RawPtr { pointee } => checked_type_contains_sum(pointee),
         CheckedType::RawMutPtr { pointee } => checked_type_contains_sum(pointee),
-        CheckedType::Ref(value) | CheckedType::Buffer(value) => checked_type_contains_sum(value),
+        CheckedType::Ref(value) | CheckedType::Unique(value) | CheckedType::Buffer(value) => {
+            checked_type_contains_sum(value)
+        }
         CheckedType::Wrapper {
             arguments,
             representation,
@@ -20274,6 +20410,7 @@ fn checked_type_contains_slice(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Slice(_) => true,
         CheckedType::Ref(value)
+        | CheckedType::Unique(value)
         | CheckedType::Buffer(value)
         | CheckedType::RawMutPtr { pointee: value }
         | CheckedType::RawPtr { pointee: value } => checked_type_contains_slice(value),
@@ -20303,7 +20440,7 @@ fn checked_type_contains_slice(value_type: &CheckedType) -> bool {
 
 fn checked_type_contains_cstring(value_type: &CheckedType) -> bool {
     match value_type {
-        CheckedType::CString => true,
+        CheckedType::CString | CheckedType::Unique(_) => true,
         CheckedType::Product(product) => product
             .elements
             .iter()
@@ -20575,7 +20712,7 @@ pub(crate) fn is_copy_type(
         | CheckedType::Ref(_)
         | CheckedType::Slice(_)
         | CheckedType::Function(_) => true,
-        CheckedType::Array { .. } => false,
+        CheckedType::Unique(_) | CheckedType::Array { .. } => false,
         CheckedType::Parameter { .. } => copy_trait.is_some_and(|copy_trait| {
             bounds.iter().any(|bound| {
                 bound.trait_id == copy_trait
@@ -20603,6 +20740,11 @@ pub(crate) fn is_copy_type(
                 discharge,
             )
         }),
+        CheckedType::Wrapper {
+            id, representation, ..
+        } if matches!(representation.as_ref(), CheckedType::Opaque { id: opaque, .. } if id == opaque) => {
+            false
+        }
         CheckedType::Wrapper { representation, .. } => is_copy_type(
             representation,
             copy_trait,
@@ -20625,7 +20767,7 @@ fn type_needs_drop(
         return true;
     }
     match value_type {
-        CheckedType::CString => true,
+        CheckedType::CString | CheckedType::Unique(_) => true,
         CheckedType::Buffer(_) => false,
         CheckedType::Product(product) => product.elements.iter().any(|element| {
             type_needs_drop(&element.value_type, drop_trait, implementations, discharge)

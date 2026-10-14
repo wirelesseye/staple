@@ -189,7 +189,9 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::BufferGet
         | IntrinsicFunction::BufferFreeze
         | IntrinsicFunction::BufferTransfer
-        | IntrinsicFunction::RefReplace => {
+        | IntrinsicFunction::RefReplace
+        | IntrinsicFunction::UniqueIntoRaw
+        | IntrinsicFunction::UniqueFromRaw => {
             unreachable!("supported intrinsic passed to rejection classifier")
         }
     }
@@ -226,6 +228,19 @@ impl LoweredProgram {
         // monomorphized.
         if self.dictionary_pass_generic_calls
             && !self.static_dictionaries_available(function, &relevant, substitutions)
+        {
+            return None;
+        }
+        // Runtime type arguments need concrete descriptors. Unsized pointees
+        // remain valid handles, but have no by-value layout to describe, so keep
+        // these calls specialized instead of inventing dynamic layouts.
+        if self.dictionary_pass_generic_calls
+            && substitutions.types.iter().any(|entry| {
+                relevant
+                    .type_parameters()
+                    .any(|parameter| parameter == entry.parameter)
+                    && !entry.value_type.is_sized()
+            })
         {
             return None;
         }
@@ -510,6 +525,8 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::SliceLength
             | IntrinsicFunction::SliceGetRef
             | IntrinsicFunction::RefReplace
+            | IntrinsicFunction::UniqueIntoRaw
+            | IntrinsicFunction::UniqueFromRaw
             | IntrinsicFunction::BufferLength
             | IntrinsicFunction::BufferCapacity
             | IntrinsicFunction::BufferWithCapacity
@@ -528,9 +545,10 @@ fn contains_polymorphic_function(ty: &CheckedType) -> bool {
         CheckedType::Function(_) => contains_type_parameter(ty),
         CheckedType::RawPtr { pointee } => contains_polymorphic_function(pointee),
         CheckedType::RawMutPtr { pointee } => contains_polymorphic_function(pointee),
-        CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
-            contains_polymorphic_function(value)
-        }
+        CheckedType::Ref(value)
+        | CheckedType::Unique(value)
+        | CheckedType::Slice(value)
+        | CheckedType::Buffer(value) => contains_polymorphic_function(value),
         CheckedType::Array { element, count } => {
             contains_polymorphic_function(element) || contains_polymorphic_function(count)
         }
@@ -559,7 +577,10 @@ fn contains_polymorphic_function(ty: &CheckedType) -> bool {
 /// storage, so it is reported as an allowed restriction instead.
 fn contains_function_behind_reference(ty: &CheckedType) -> bool {
     match ty {
-        CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
+        CheckedType::Ref(value)
+        | CheckedType::Unique(value)
+        | CheckedType::Slice(value)
+        | CheckedType::Buffer(value) => {
             contains_polymorphic_function(value) || contains_function_behind_reference(value)
         }
         CheckedType::Product(product) => product
@@ -891,7 +912,11 @@ impl SupportWalker<'_> {
                     LoweredCallableTarget::DirectFunction { .. }
                         | LoweredCallableTarget::TraitImplementation { .. }
                         | LoweredCallableTarget::Constructor {
-                            recursive: None | Some(crate::RecursiveConstruction::ManagedReference),
+                            recursive: None
+                                | Some(
+                                    crate::RecursiveConstruction::ManagedReference
+                                        | crate::RecursiveConstruction::Unique
+                                ),
                             ..
                         }
                 );
@@ -1143,7 +1168,10 @@ impl SupportWalker<'_> {
                 if recursive.is_some()
                     && !matches!(
                         recursive,
-                        Some(crate::RecursiveConstruction::ManagedReference)
+                        Some(
+                            crate::RecursiveConstruction::ManagedReference
+                                | crate::RecursiveConstruction::Unique
+                        )
                     )
                 {
                     self.reject(RejectionReason::RecursiveConstruction);
@@ -1817,9 +1845,10 @@ fn collect_parameter_ids(ty: &CheckedType, ids: &mut HashSet<crate::TypeParamete
             }
         }
         CheckedType::Wrapper { representation, .. } => collect_parameter_ids(representation, ids),
-        CheckedType::Ref(inner) | CheckedType::Slice(inner) | CheckedType::Buffer(inner) => {
-            collect_parameter_ids(inner, ids)
-        }
+        CheckedType::Ref(inner)
+        | CheckedType::Unique(inner)
+        | CheckedType::Slice(inner)
+        | CheckedType::Buffer(inner) => collect_parameter_ids(inner, ids),
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             for argument in arguments {
                 collect_parameter_ids(argument, ids);

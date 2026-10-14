@@ -15881,3 +15881,122 @@ fn raw_pointer_memory_intrinsics_require_copy_and_matching_types() {
         );
     }
 }
+
+#[test]
+fn unique_constructs_dereferences_and_transfers_raw_ownership() {
+    let module = type_check(concat!(
+        "use std.ptr.(RawMutPtr)\n",
+        "def roundtrip = () => {\n",
+        "  let value = Unique (x: 12, y: 30)\n",
+        "  let pointer = Unique.unsafe_into_raw value\n",
+        "  let mut restored = Unique.unsafe_from_raw pointer\n",
+        "  restored.x = restored.x + 1\n",
+        "  restored.y\n",
+        "}\n",
+        "def generic = <T where ?Sized T> move value: Unique T => Unique T :: Unique.unsafe_from_raw (Unique.unsafe_into_raw value)\n",
+        "def unbox = () => { let Unique value = Unique 42; value }\n",
+        "def deref = () => { let value = Unique 42; value.*; value.* }\n",
+        "def borrowed_copy = value: Unique I32 => I32 :: value.*\n",
+        "def constructor_value = () => { let allocate: I32 -> Unique I32 = Unique; let owner = allocate 9; owner.* }\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("Unique should emit");
+    assert!(llvm.contains("@malloc"));
+    assert!(llvm.contains("@free"));
+}
+
+#[test]
+fn unique_is_affine_and_borrowed_payloads_cannot_move() {
+    for source in [
+        "def bad = () => { let value = Unique 1; let other = value; value }\n",
+        "def bad = (value: Unique I32) => Unique.unsafe_into_raw value\n",
+        "use std.cinterop.*\ndef bad = (value: Unique CString) => value.*\n",
+        "use std.cinterop.*\ndef bad = () => { let mut owner = Unique (c_string \"owned\"); owner.* = owner.*; () }\n",
+    ] {
+        let errors = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("Unique ownership must be enforced");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("moved value")
+                    || error.message.contains("borrowed value")),
+            "{errors:?}"
+        );
+    }
+}
+
+#[test]
+fn unique_and_raw_pointers_accept_unsized_pointees() {
+    let module = type_check(concat!(
+        "use std.ptr.*\n",
+        "type Unsized = opaque\n",
+        "def adopt = pointer: RawMutPtr Unsized => Unique Unsized :: Unique.unsafe_from_raw pointer\n",
+        "def release = move value: Unique Unsized => RawMutPtr Unsized :: Unique.unsafe_into_raw value\n",
+        "def erase = pointer: RawPtr Unsized => RawOpaquePtr :: Convert.convert pointer\n",
+        "def cast = pointer: RawPtr Unsized => RawMutPtr Unsized :: Convert.convert pointer\n",
+        "def offset = pointer: RawPtr Unsized => RawPtr Unsized :: RawPtr.offset pointer 0\n",
+        "def mutable_offset = pointer: RawMutPtr Unsized => RawMutPtr Unsized :: RawMutPtr.offset pointer 0\n",
+        "def nullable = () => RawPtr Unsized :: RawPtr.null ()\n",
+        "def nullable_mut = () => RawMutPtr Unsized :: RawMutPtr.null ()\n",
+        "def generic = <T where ?Sized T> pointer: RawMutPtr T => RawPtr T :: Convert.convert pointer\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("unsized pointer handles should emit without a pointee layout");
+    let dynamic = Lowerer::new()
+        .with_dictionary_pass_generic_calls(true)
+        .lower(&module)
+        .expect("unsized handles should lower with generic dictionary passing enabled");
+    CodeGenerator::new(&context)
+        .compile_module(&dynamic)
+        .expect("unsized handles should emit with generic dictionary passing enabled");
+    for source in [
+        "use std.ptr.*\ndef invalid = move value: Unique I32 => RawMutPtr I32 :: Convert.convert value\n",
+        "use std.ptr.*\ndef invalid = value: RawMutPtr I32 => Unique I32 :: Convert.convert value\n",
+    ] {
+        TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("Unique has no Convert implementation");
+    }
+}
+
+#[test]
+fn unique_guards_recursive_types_and_borrows_non_copy_payloads() {
+    type_check(concat!(
+        "type Node T = wrap (head: T, tail: Option (Unique (Node T)))\n",
+        "def make: () -> Node I32 = () => Node.<I32> (head: 42, tail: None)\n",
+        "def nest: () -> Node I32 = () => { let leaf = make (); Node.<I32> (head: 1, tail: Some (Unique leaf)) }\n",
+        "def read: Unique I32 -> I32 = Unique value => value\n",
+    ));
+    let errors = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.cinterop.*\n",
+            "def invalid: Unique CString -> CString = Unique value => value\n",
+        )))
+        .expect_err_diagnostics("borrowed destructuring cannot move a payload");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("borrowed value")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn unique_builtin_cleanup_cannot_be_overridden() {
+    let errors = TypeChecker::new()
+        .check(resolve(
+            "impl Drop (Unique I32) { cleanup = owner => () }\n",
+        ))
+        .expect_err_diagnostics("Unique owns its built-in cleanup");
+    assert!(
+        errors.iter().any(|error| error
+            .message
+            .contains("Drop` may only be implemented for a represented nominal type")),
+        "{errors:?}"
+    );
+}

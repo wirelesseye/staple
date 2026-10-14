@@ -91,6 +91,19 @@ pub(super) fn expand_constructor_adapter(
         }
     }
     let construction = match &*plan.callable_type.result {
+        CheckedType::Unique(payload) => {
+            if declared != Some(RecursiveConstruction::Unique) {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    "Unique constructor has an invalid construction strategy",
+                )]);
+            }
+            ConstructorConstruction::Unique {
+                parameters,
+                product,
+                payload: payload.as_ref().clone(),
+            }
+        }
         CheckedType::Ref(payload) => {
             if declared != Some(RecursiveConstruction::ManagedReference) {
                 return Err(vec![Diagnostic::new(
@@ -504,7 +517,7 @@ fn structural_deref_index_body(
     let target = structural_argument(plan, 0, origin)?;
     let position = structural_argument(plan, 1, origin)?;
     let output = structural_argument(plan, 2, origin)?;
-    let CheckedType::Ref(payload) = &target else {
+    let (CheckedType::Ref(payload) | CheckedType::Unique(payload)) = &target else {
         return Err(Diagnostic::new(
             origin.span.clone(),
             "structural DerefIndex target is not a reference".to_string(),
@@ -557,7 +570,7 @@ fn structural_deref_mutate_body(
     let target = structural_argument(plan, 0, origin)?;
     let position = structural_argument(plan, 1, origin)?;
     let element = structural_argument(plan, 2, origin)?;
-    let CheckedType::Ref(payload) = &target else {
+    let (CheckedType::Ref(payload) | CheckedType::Unique(payload)) = &target else {
         return Err(Diagnostic::new(
             origin.span.clone(),
             "structural DerefMutateIndex target is not a reference".to_string(),

@@ -424,7 +424,10 @@ impl ScanVisitor<'_> {
         value_type: &CheckedType,
         origin: &Origin,
     ) -> Result<(), Vec<Diagnostic>> {
-        if !self.program.concrete_needs_drop(value_type) {
+        if crate::contains_type_parameter(value_type)
+            || !self.program.concrete_needs_drop(value_type)
+        {
+            // Dynamic values use their runtime descriptor's cleanup entry.
             return Ok(());
         }
         let canonical =
@@ -484,7 +487,10 @@ impl LoweredOwnerVisitor for ScanVisitor<'_> {
         value_type: &CheckedType,
         origin: &Origin,
     ) -> Result<(), Vec<Diagnostic>> {
-        if !self.program.concrete_needs_drop(value_type) {
+        if crate::contains_type_parameter(value_type)
+            || !self.program.concrete_needs_drop(value_type)
+        {
+            // Dynamic values use their runtime descriptor's cleanup entry.
             return Ok(());
         }
         let canonical =
@@ -554,7 +560,9 @@ impl LoweredOwnerVisitor for CollectVisitor {
     }
 
     fn owned_binding(&mut self, draft: OwnedBindingDraft) -> Result<(), Vec<Diagnostic>> {
-        self.drafts.push(draft);
+        if !crate::contains_type_parameter(&draft.value_type) {
+            self.drafts.push(draft);
+        }
         Ok(())
     }
 
@@ -858,7 +866,10 @@ impl<'a> LoweredWalker<'a> {
                 }
             }
             super::LoweredPatternKind::Nominal { argument, .. } => {
-                self.walk_pattern_with_ownership(argument, owned)?;
+                let payload_owned = owned
+                    && (pattern.test.identity != super::LoweredPatternIdentity::Unique
+                        || pattern.take_unique);
+                self.walk_pattern_with_ownership(argument, payload_owned)?;
             }
             super::LoweredPatternKind::At { binding, pattern } => {
                 self.walk_pattern_with_ownership(binding, owned)?;
@@ -1078,6 +1089,7 @@ impl<'a> LoweredWalker<'a> {
                 recursive: Some(_), ..
             } => {
                 if let CheckedType::Ref(payload) = &result_type
+                    && !crate::contains_type_parameter(payload)
                     && self.program.concrete_needs_drop(payload)
                 {
                     let canonical = CanonicalType::concrete(payload, &origin)
@@ -1802,6 +1814,39 @@ fn drop_glue_body(
     }
     match value_type {
         CheckedType::CString => Ok(DropGlueBody::CStringFree),
+        CheckedType::Unique(payload) => {
+            let recursive = program.resolve_recursive_payload(payload);
+            let payload = recursive.as_ref().unwrap_or(payload);
+            let glue = if program.contains_recursive_payload(payload) {
+                // A callable boundary closes the recursive cleanup graph.
+                let key = ArtifactRequestKey::DescriptorDrop(
+                    CanonicalType::concrete(payload, origin).map_err(|error| vec![error])?,
+                );
+                requests.push(ClosureRequest::Artifact {
+                    key: key.clone(),
+                    plan: LoweredArtifactPlan::DescriptorDrop(super::DescriptorDropPlan {
+                        value_type: payload.clone(),
+                        glue: None,
+                    }),
+                    kind: LoweredArtifactDependencyKind::DescriptorDrop,
+                    origin: origin.clone(),
+                    use_site: None,
+                });
+                Some(PlannedArtifact {
+                    key,
+                    artifact: None,
+                    kind: LoweredArtifactDependencyKind::DescriptorDrop,
+                })
+            } else if program.concrete_needs_drop(payload) {
+                Some(request_drop_glue(program, payload, origin, requests)?)
+            } else {
+                None
+            };
+            Ok(DropGlueBody::Unique {
+                payload: payload.clone(),
+                glue,
+            })
+        }
         CheckedType::Product(product) => {
             // The emitter iterates and drops fields in reverse element order,
             // skipping every field that does not need drop.
@@ -1837,6 +1882,8 @@ fn drop_glue_body(
             Ok(DropGlueBody::Sum { alternatives })
         }
         CheckedType::Wrapper { representation, .. } => {
+            let resolved = program.recursive_representation(representation);
+            let representation = resolved.as_ref().unwrap_or(representation);
             if !program.concrete_needs_drop(representation) {
                 return Err(vec![Diagnostic::new(
                     origin.span.clone(),

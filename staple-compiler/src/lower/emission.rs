@@ -412,6 +412,13 @@ impl<'a> EmissionView<'a> {
     /// The opaque runtime type identity of a fully substituted type, the same
     /// selection `LoweredProgram::runtime_opaque_kind` makes (emission layout
     /// context).
+    pub(crate) fn recursive_representation(
+        &self,
+        ty: &crate::CheckedType,
+    ) -> Option<crate::CheckedType> {
+        self.program.recursive_representation(ty)
+    }
+
     pub(crate) fn runtime_opaque_kind(
         &self,
         value_type: &crate::CheckedType,

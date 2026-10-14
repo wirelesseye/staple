@@ -267,6 +267,21 @@ impl<'program, 'context> Backend<'program, 'context> {
                 // records.
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
+            CheckedType::Opaque { .. }
+                if self
+                    .layout
+                    .view
+                    .recursive_representation(value_type)
+                    .is_some() =>
+            {
+                self.compile_type(
+                    &self
+                        .layout
+                        .view
+                        .recursive_representation(value_type)
+                        .unwrap(),
+                )
+            }
             CheckedType::Opaque { name, .. } => Err(Diagnostic::new(
                 Span::Compiler,
                 format!("opaque type `{name}` has no by-value representation"),
@@ -283,7 +298,9 @@ impl<'program, 'context> Backend<'program, 'context> {
                 })
                 .and_then(|representation| self.compile_type(representation)),
             CheckedType::Slice(_) => Ok(self.slice_type().into()),
-            CheckedType::Ref(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+            CheckedType::Ref(_) | CheckedType::Unique(_) => {
+                Ok(self.context.ptr_type(AddressSpace::default()).into())
+            }
             CheckedType::Buffer(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             CheckedType::RawOpaquePtr
             | CheckedType::RawOpaqueMutPtr

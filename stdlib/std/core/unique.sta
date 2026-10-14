@@ -1,0 +1,31 @@
+pub mod
+
+use std.core.recursive_constructor.recursive_constructor
+use std.ptr.(RawMutPtr)
+
+/// A unique, affine heap owner. Dropping it cleans up its payload and frees
+/// its allocation. The allocation is not managed by the garbage collector.
+/// Unsized payload types may be used in handles and generic signatures;
+/// construction requires a concrete payload layout.
+@recursive_constructor
+pub type Unique T where ?Sized T = pub wrap T
+
+extern "staple-intrinsic" {
+    __unique_into_raw: <T where ?Sized T> (move Unique T) -> RawMutPtr T
+    __unique_from_raw: <T where ?Sized T> RawMutPtr T -> Unique T
+}
+
+companion<T where ?Sized T> Unique T {
+    use std.ptr.(RawMutPtr)
+    /// Transfers ownership to the caller without cleanup or deallocation.
+    /// While raw, the caller must keep any GC-managed payload values alive.
+    /// The caller must eventually reconstruct the owner or clean up and free
+    /// the allocation using the same allocator and payload layout.
+    pub def unsafe_into_raw = move value: Unique T => RawMutPtr T :: __unique_into_raw value
+
+    /// Adopts exclusive ownership of a live, aligned, initialized allocation
+    /// with the correct payload type, allocated using Unique's allocator.
+    /// Ownership must be transferred exactly once. Null, dangling, aliased,
+    /// or incompatible pointers are invalid.
+    pub def unsafe_from_raw = pointer: RawMutPtr T => Unique T :: __unique_from_raw pointer
+}

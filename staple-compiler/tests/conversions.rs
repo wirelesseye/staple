@@ -320,8 +320,8 @@ fn raw_pointer_operations_reject_invalid_access_and_implicit_conversions() {
         ),
         ("def bad: CString -> RawMutPtr CChar = p => p", "RawMutPtr"),
         (
-            "type Token = opaque\nlet p: RawMutPtr Token = RawMutPtr.null ()",
-            "Sized",
+            "type Token = opaque\nlet p: RawMutPtr Token = RawMutPtr.null ()\nRawMutPtr.load p",
+            "bound",
         ),
     ];
     for (body, expected) in cases {

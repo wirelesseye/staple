@@ -300,7 +300,7 @@ fn record_plan_requirements(
         LoweredArtifactPlan::ConstructorAdapter(plan) => {
             if matches!(
                 plan.construction,
-                ConstructorConstruction::ManagedRef { .. }
+                ConstructorConstruction::ManagedRef { .. } | ConstructorConstruction::Unique { .. }
             ) {
                 requirements.record(RuntimeRequirement::GarbageCollector);
             }
@@ -329,8 +329,18 @@ fn record_plan_requirements(
             DropGlueBody::CStringFree => {
                 requirements.record(RuntimeRequirement::CStringFree);
             }
+            DropGlueBody::Unique { .. } => {
+                requirements.record(RuntimeRequirement::CStringFree);
+                requirements.record(RuntimeRequirement::GarbageCollector);
+            }
             _ => {}
         },
+        LoweredArtifactPlan::CompoundDescriptorDrop(plan)
+            if plan.shape == crate::specialization::CompoundDescriptorShape::Unique =>
+        {
+            requirements.record(RuntimeRequirement::GarbageCollector);
+            requirements.record(RuntimeRequirement::CStringFree);
+        }
         LoweredArtifactPlan::GcFinalizer(_) => {
             requirements.record(RuntimeRequirement::GarbageCollector);
         }
@@ -432,6 +442,7 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
                 recursive: Some(_), ..
             } => self.gc(),
             LoweredCallableTarget::Intrinsic { intrinsic, .. } => match intrinsic {
+                IntrinsicFunction::UniqueIntoRaw | IntrinsicFunction::UniqueFromRaw => self.gc(),
                 IntrinsicFunction::ParseNumber { .. } => {
                     self.requirements.record(RuntimeRequirement::NumericParse);
                     self.gc();

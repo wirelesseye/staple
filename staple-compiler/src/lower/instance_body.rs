@@ -322,6 +322,10 @@ impl LoweredInstanceBody {
         self.items.get(id)
     }
 
+    pub(crate) fn patterns(&self) -> impl Iterator<Item = (PatternId, &LoweredPattern)> {
+        self.patterns.iter()
+    }
+
     pub(crate) fn expressions(&self) -> impl Iterator<Item = (ExpressionId, &LoweredExpression)> {
         self.expressions.iter()
     }
@@ -1590,6 +1594,7 @@ impl<'a> BodyCloner<'a> {
         let Some(pattern) = self.program.patterns.get(id).cloned() else {
             self.missing("pattern", id.index());
             return self.body.patterns.push(LoweredPattern {
+                take_unique: false,
                 origin: Origin::compiler(),
                 value_type: CheckedType::Error,
                 kind: LoweredPatternKind::Wildcard,
@@ -1703,6 +1708,7 @@ impl<'a> BodyCloner<'a> {
             }
         };
         let new = self.body.patterns.push(LoweredPattern {
+            take_unique: pattern.take_unique,
             origin: pattern.origin,
             value_type,
             kind,

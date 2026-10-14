@@ -102,8 +102,93 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
-    /// Branches to an `llvm.trap` block when `condition` holds, continuing
-    /// otherwise.
+    /// Allocate an independently owned payload; zero-sized values still get a
+    /// distinct non-null allocation. malloc supplies natural scalar alignment.
+    pub(crate) fn build_unique_allocation(
+        &self,
+        size: inkwell::values::IntValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        let zero = self.size_type.const_zero();
+        let empty = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, size, zero, "unique.empty")
+            .map_err(compiler_diagnostic)?;
+        let size = self
+            .builder
+            .build_select(
+                empty,
+                self.size_type.const_int(1, false),
+                size,
+                "unique.size",
+            )
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let malloc = self.declare_named_function(
+            "malloc",
+            self.context
+                .ptr_type(AddressSpace::default())
+                .fn_type(&[self.size_type.into()], false),
+        );
+        let pointer = self
+            .builder
+            .build_direct_call(malloc, &[size.into()], "unique.allocate")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .basic()
+            .expect("malloc returns a pointer")
+            .into_pointer_value();
+        let null = self
+            .builder
+            .build_is_null(pointer, "unique.failed")
+            .map_err(compiler_diagnostic)?;
+        self.build_trap_if(null, span.clone())?;
+        self.register_unique_payload(pointer, size, span)?;
+        Ok(pointer)
+    }
+
+    /// Trace GC-owned values stored inside an independently allocated owner.
+    pub(crate) fn register_unique_payload(
+        &self,
+        pointer: PointerValue<'context>,
+        size: IntValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let register = self
+            .llvm_module
+            .get_function("__staple_gc_register_root")
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing Unique payload root runtime"))?;
+        self.builder
+            .build_direct_call(register, &[pointer.into(), size.into()], "")
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    pub(crate) fn unregister_unique_payload(
+        &self,
+        pointer: PointerValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let unregister = self
+            .llvm_module
+            .get_function("__staple_gc_unregister_root")
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing Unique payload root runtime"))?;
+        self.builder
+            .build_direct_call(unregister, &[pointer.into()], "")
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    pub(crate) fn build_unique_free(
+        &self,
+        pointer: PointerValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        self.unregister_unique_payload(pointer, span.clone())?;
+        self.build_free_c_string(pointer, span)
+    }
+
+    /// Branches to a trap when condition holds.
     pub(crate) fn build_trap_if(
         &self,
         condition: inkwell::values::IntValue<'context>,

@@ -6,11 +6,16 @@ use staple_syntax::{Diagnostic, Expression, Item, Pattern, Syntax, SyntaxId};
 #[derive(Debug, Clone, Default)]
 pub(crate) struct OwnershipInfo {
     moved_uses: HashMap<SyntaxId, HashSet<SymbolId>>,
+    taken_unique: HashSet<SyntaxId>,
     non_owning_symbols: HashSet<SymbolId>,
     borrowed_captures: HashSet<(FunctionId, SymbolId)>,
 }
 
 impl OwnershipInfo {
+    pub(crate) fn takes_unique(&self, syntax: SyntaxId) -> bool {
+        self.taken_unique.contains(&syntax)
+    }
+
     pub(crate) fn moved_symbols(&self, syntax: SyntaxId) -> impl Iterator<Item = SymbolId> + '_ {
         self.moved_uses
             .get(&syntax)
@@ -480,6 +485,17 @@ impl<'a> OwnershipChecker<'a> {
                         .module
                         .type_of_expression(value.syntax.id)
                         .is_none_or(|ty| self.module.is_copy_in_function(ty, self.function));
+                    let unique_payload =
+                        matches!(value.accessor, staple_syntax::Accessor::Representation)
+                            && matches!(
+                                self.module.type_of_expression(value.value.syntax().id),
+                                Some(crate::CheckedType::Unique(_))
+                            );
+                    if consume && !result_is_copy && unique_payload {
+                        self.info.taken_unique.insert(value.syntax.id);
+                        self.check_expression(&value.value, true);
+                        return true;
+                    }
                     if consume && !result_is_copy {
                         self.diagnostics.push(Diagnostic::new(
                             value.syntax.span.clone(),
@@ -848,11 +864,19 @@ impl<'a> OwnershipChecker<'a> {
                     self.check_expression(&index.value, false);
                     self.check_expression(&index.index, true);
                     self.check_expression(&assignment.value, true);
+                    self.recheck_assignment_root(&index.value);
                     return true;
                 }
                 self.reject_borrowed_escape(&assignment.value);
                 self.check_assignment_target(&assignment.target);
                 self.check_expression(&assignment.value, true);
+                if self
+                    .module
+                    .symbol_for(assignment.target.syntax().id)
+                    .is_none()
+                {
+                    self.recheck_assignment_root(&assignment.target);
+                }
                 if let Some(symbol) = self.module.symbol_for(assignment.target.syntax().id) {
                     self.states.insert(symbol, ValueState::Available);
                 }
@@ -967,6 +991,14 @@ impl<'a> OwnershipChecker<'a> {
                 }
             }
             Pattern::Nominal(value) => {
+                if !freeze
+                    && matches!(
+                        self.module.type_of_pattern(value.syntax.id),
+                        Some(crate::CheckedType::Unique(_))
+                    )
+                {
+                    self.info.taken_unique.insert(value.syntax.id);
+                }
                 let dereferences_ref = matches!(
                     self.module.type_of_pattern(value.syntax.id),
                     Some(crate::CheckedType::Ref(_))
@@ -974,6 +1006,28 @@ impl<'a> OwnershipChecker<'a> {
                 self.bind_pattern(&value.argument, freeze || dereferences_ref);
             }
             Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+        }
+    }
+
+    /// Evaluation of the right-hand side can consume the owner of an already
+    /// evaluated structural destination. Check its root without revisiting
+    /// calls or consuming their arguments a second time.
+    fn recheck_assignment_root(&mut self, mut expression: &Expression) {
+        loop {
+            if let Some(symbol) = self.module.symbol_for(expression.syntax().id) {
+                self.use_symbol(symbol, expression.syntax(), false);
+                return;
+            }
+            expression = match expression {
+                Expression::Access(access) => &access.value,
+                Expression::Index(index) => &index.value,
+                Expression::TypeApplication(value) => &value.value,
+                Expression::TypeAscription(value) => &value.value,
+                Expression::Product(product) if product.elements.len() == 1 => {
+                    &product.elements[0].value
+                }
+                _ => return,
+            };
         }
     }
 
