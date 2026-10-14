@@ -48,10 +48,12 @@ impl Pattern {
                     variadic: false,
                 })
             }
-            Self::Nominal(pattern) => Type::Named(super::NamedType {
-                syntax: pattern.syntax.clone(),
-                namespace: pattern.namespace.clone(),
-                name: pattern.name.clone(),
+            Self::Nominal(pattern) => pattern.annotation.clone().unwrap_or_else(|| {
+                Type::Named(super::NamedType {
+                    syntax: pattern.syntax.clone(),
+                    namespace: pattern.namespace.clone(),
+                    name: pattern.name.clone(),
+                })
             }),
             Self::Splice(pattern) => Type::Inferred(super::InferredType {
                 syntax: pattern.syntax.clone(),
@@ -136,4 +138,7 @@ pub struct NominalPattern {
     /// top-level parameter position.
     pub moved: bool,
     pub argument: Box<Pattern>,
+    /// The whole pattern's type, written `(Box value): Box I32`. Without it the
+    /// pattern only names its constructor.
+    pub annotation: Option<Type>,
 }

@@ -1051,6 +1051,9 @@ impl<'a> Classifier<'a> {
             }
             Pattern::Nominal(value) => {
                 self.mark_first(&value.syntax, &value.name, TYPE, 0, 1);
+                if let Some(annotation) = &value.annotation {
+                    self.ty(annotation, resolved);
+                }
                 self.pattern(&value.argument, kind, resolved);
             }
             Pattern::Wildcard(value) => self.ty(&value.ty, resolved),
@@ -1462,6 +1465,21 @@ pub fn offset(source: &str, position: lsp_types::Position) -> Option<usize> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn highlights_nominal_pattern_annotation_types() {
+        let source = "type Clock = wrap I32\ndef read = ((Clock value): Clock) => value\n";
+        let module = parse(source).unwrap();
+        let labels = labels(source, &tokens(source, Some(&module), None, None));
+        assert_eq!(
+            labels
+                .iter()
+                .filter(|label| **label == ("Clock", TYPE))
+                .count(),
+            3,
+            "{labels:?}"
+        );
+    }
 
     #[test]
     fn highlights_function_effect_lower_bound_types() {

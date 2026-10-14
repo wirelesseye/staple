@@ -367,17 +367,23 @@ fn render_pattern(pattern: &Pattern) -> String {
                     .join(if product.slotted { "; " } else { ", " })
             )
         }
-        Pattern::Nominal(nominal) => format!(
-            "{}{}{} {}",
-            if nominal.moved { "move " } else { "" },
-            nominal
-                .namespace
-                .as_ref()
-                .map(|namespace| format!("{namespace}."))
-                .unwrap_or_default(),
-            nominal.name,
-            render_pattern(&nominal.argument),
-        ),
+        Pattern::Nominal(nominal) => {
+            let pattern = format!(
+                "{}{} {}",
+                nominal
+                    .namespace
+                    .as_ref()
+                    .map(|namespace| format!("{namespace}."))
+                    .unwrap_or_default(),
+                nominal.name,
+                render_pattern(&nominal.argument),
+            );
+            let moved = if nominal.moved { "move " } else { "" };
+            match &nominal.annotation {
+                Some(annotation) => format!("{moved}({pattern}): {annotation}"),
+                None => format!("{moved}{pattern}"),
+            }
+        }
         Pattern::Splice(splice) => format!("${}", splice.name),
     }
 }

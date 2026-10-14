@@ -5780,6 +5780,7 @@ impl MacroExpander {
                         name: name.name.clone(),
                         moved: false,
                         argument: Box::new(argument.clone()),
+                        annotation: None,
                     },
                 ))))
             }
@@ -11494,6 +11495,9 @@ fn substitute_pattern(
             }
         }
         Pattern::Nominal(nominal) => {
+            if let Some(annotation) = &mut nominal.annotation {
+                substitute_type(annotation, environment, diagnostics)?;
+            }
             substitute_pattern(&mut nominal.argument, environment, diagnostics)?
         }
         Pattern::StringLiteral(_) => {}
@@ -12162,6 +12166,9 @@ fn freshen_pattern(
         }
         Pattern::Nominal(nominal) => {
             expander.freshen_syntax(&mut nominal.syntax, module, mark);
+            if let Some(annotation) = &mut nominal.annotation {
+                freshen_type(expander, annotation, module, mark);
+            }
             freshen_pattern(expander, &mut nominal.argument, module, mark);
         }
         Pattern::Splice(splice) => expander.freshen_syntax(&mut splice.syntax, module, mark),

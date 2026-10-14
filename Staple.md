@@ -1645,15 +1645,30 @@ pattern. They are irrefutable and add no runtime check or wrapper:
 
 ```staple
 type UserId = wrap I32
-def unwrap: UserId -> I32 = UserId value => value
+def unwrap = (UserId value): UserId => I32 :: value
 
 let user: UserId = UserId 42
 let UserId value = user
 ```
 
 The same syntax works inside products and with qualified type names. A generic
-nominal pattern must receive its applied type from the value being destructured
-or a surrounding function annotation.
+nominal pattern must receive its applied type from the value being destructured,
+a surrounding function annotation, or its own annotation.
+
+A parenthesized nominal pattern followed by `: Type` annotates the whole
+pattern. Without the parentheses the annotation belongs to the inner pattern:
+`Box value: I32` destructures a `Box` whose representation is `I32`, while
+`(Box value): Box I32` declares that the destructured value is a `Box I32`.
+This is how a function value names the type of a destructured parameter:
+
+```staple
+type Box T = wrap T
+def first = ((Box value): Box I32; index: USize) => I32 :: value
+def unbox = <T> move (Box value): Box T => T :: value
+```
+
+Only a single nominal pattern may be annotated this way; a product or binding
+pattern annotates its own elements instead.
 
 A singleton product pattern is equivalent to its contained pattern, so
 `(value: T)` matches the same values as `value: T`.

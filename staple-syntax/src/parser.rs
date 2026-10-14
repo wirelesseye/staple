@@ -298,6 +298,10 @@ struct Grammar {
     source_name: Option<Arc<str>>,
 }
 
+
+const NOMINAL_PATTERN_ANNOTATION_ERROR: &str =
+    "only a single parenthesized nominal pattern can be annotated, as in `(Box value): Box I32`";
+
 impl Grammar {
     /// Creates a grammar cursor over `tokens` with the given syntax metadata.
     fn new(
@@ -1971,7 +1975,10 @@ impl Grammar {
             return Err(function_error);
         }
         let expression = self.parse_pipe_expression()?;
-        if matches!(self.peek(), Some(TokenKind::Arrow | TokenKind::FatArrow)) {
+        if matches!(self.peek(), Some(TokenKind::Arrow | TokenKind::FatArrow))
+            || (self.at(TokenKind::Colon)
+                && function_error.message == NOMINAL_PATTERN_ANNOTATION_ERROR)
+        {
             return Err(function_error);
         }
         Ok(expression)
@@ -2210,9 +2217,11 @@ impl Grammar {
         let mut slots = Vec::new();
         let mut slotted = false;
         let mut slot_start = self.position;
+        let mut trailing_comma = false;
         if !self.at(TokenKind::RParen) {
             loop {
                 elements.push(self.parse_pattern()?);
+                trailing_comma = self.at(TokenKind::Comma);
                 if self.at(TokenKind::Semicolon) {
                     slotted = true;
                     let syntax = self.syntax(slot_start);
@@ -2235,6 +2244,27 @@ impl Grammar {
             elements = slots;
         }
         self.expect(TokenKind::RParen, "expected `)` after parameter")?;
+        // `(Box value): Box I32` annotates the whole nominal pattern, since
+        // `Box value: Box I32` already annotates `value`.
+        if self.at(TokenKind::Colon) {
+            let annotatable = !slotted
+                && !trailing_comma
+                && matches!(elements.as_slice(), [Pattern::Nominal(nominal)] if nominal.annotation.is_none());
+            if !annotatable {
+                return Err(self.error(NOMINAL_PATTERN_ANNOTATION_ERROR));
+            }
+            if mutable {
+                return Err(self.error("`mut` can only modify a binding pattern"));
+            }
+            self.bump_token();
+            let ty = self.parse_type()?;
+            let Some(Pattern::Nominal(mut nominal)) = elements.pop() else {
+                unreachable!("checked nominal pattern")
+            };
+            nominal.moved |= moved;
+            nominal.annotation = Some(ty);
+            return Ok(Pattern::Nominal(nominal));
+        }
         if slotted && (mutable || moved) {
             return Err(self.error("mark individual slots of a slotted parameter"));
         }
@@ -2301,6 +2331,7 @@ impl Grammar {
                 name,
                 moved,
                 argument,
+                annotation: None,
             }));
         }
         if adjacent_argument {
@@ -2314,6 +2345,7 @@ impl Grammar {
                 name,
                 moved,
                 argument,
+                annotation: None,
             }));
         }
         let ty = if self.eat(TokenKind::Colon) {

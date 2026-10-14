@@ -7726,6 +7726,14 @@ impl TypeChecker {
                 }
             }
             Pattern::Nominal(pattern) => {
+                if let Some(annotation) = &pattern.annotation {
+                    let declared = self.resolve_source_type(module, annotation);
+                    self.require_compatible(
+                        value_type.clone(),
+                        declared,
+                        annotation.syntax().span.clone(),
+                    );
+                }
                 let Some(expected_id) = module.type_for_pattern(pattern.syntax.id) else {
                     return;
                 };

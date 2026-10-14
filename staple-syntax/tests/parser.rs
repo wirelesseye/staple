@@ -3789,3 +3789,59 @@ fn function_value_compile_time_parameters() {
     let error = staple_syntax::parse("def bad = x => <T> y: T => y").unwrap_err();
     assert!(error.message.contains("outermost function value"));
 }
+
+#[test]
+fn parenthesized_nominal_patterns_take_type_annotations() {
+    let source = concat!(
+        "def first = ((Box inner): Box I32; index: USize) => inner\n",
+        "def moved = move (Box inner): Box String => inner\n",
+        "def inner = (Box inner: I32) => inner\n",
+        "let (Box local): Box I32 = Box 7\n",
+    );
+    let module = staple_syntax::parse(source).unwrap();
+    assert_eq!(module.syntax.text(), source);
+    let function = |index: usize| {
+        let Item::Binding(binding) = &module.items[index] else {
+            panic!("binding")
+        };
+        let Some(Expression::Function(function)) = &binding.value else {
+            panic!("function")
+        };
+        function.pattern.clone()
+    };
+    let Pattern::Product(product) = function(0) else {
+        panic!("slotted product")
+    };
+    let Pattern::Nominal(first) = &product.elements[0] else {
+        panic!("annotated nominal slot: {:?}", product.elements[0])
+    };
+    assert_eq!(first.annotation.as_ref().unwrap().to_string(), "Box I32");
+    let Pattern::Nominal(moved) = function(1) else {
+        panic!("annotated nominal parameter")
+    };
+    assert!(moved.moved);
+    assert_eq!(moved.annotation.as_ref().unwrap().to_string(), "Box String");
+    // Without parentheses the annotation still belongs to the inner binding.
+    let Pattern::Product(grouped) = function(2) else {
+        panic!("grouped nominal")
+    };
+    let Pattern::Nominal(inner) = &grouped.elements[0] else {
+        panic!("nominal")
+    };
+    assert!(inner.annotation.is_none());
+    assert!(matches!(inner.argument.as_ref(), Pattern::Binding(binding) if binding.ty.to_string() == "I32"));
+    let formatted = staple_syntax::format_source(source).unwrap();
+    assert_eq!(formatted, source);
+    for invalid in [
+        "def f = (x): I32 => x",
+        "def f = ((Box a), (Box b)): Box I32 => a",
+        "def f = ((Box a),): Box I32 => a",
+        "def f = ((Box a); index: USize): Box I32 => a",
+        "let (x): I32 = 1",
+    ] {
+        let error = staple_syntax::parse(invalid).unwrap_err();
+        assert!(error.message.contains("can be annotated"), "{invalid}: {error:?}");
+    }
+    // `mut` modifies only bindings, so a whole annotated nominal cannot be `mut`.
+    assert!(staple_syntax::parse("def f = mut (Box a): Box I32 => a").is_err());
+}

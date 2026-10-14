@@ -15690,3 +15690,40 @@ fn function_value_type_parameters_survive_macro_freshening() {
     ));
     lower(&module);
 }
+
+#[test]
+fn annotated_nominal_patterns_supply_parameter_types() {
+    let module = type_check(concat!(
+        "type Box T = wrap T\n",
+        "def first = ((Box inner): Box I32; index: USize) => inner\n",
+        "def moved = move (Box inner): Box String => String :: inner\n",
+        "def unbox = <T> move (Box inner): Box T => T :: inner\n",
+        "def matched = (value: Box I32) => match value { (Box n): Box I32 => n }\n",
+        "let (Box local): Box I32 = Box 7\n",
+        "let total: I32 = first (Box 1) 2 + unbox (Box 3) + matched (Box 4) + local\n",
+        "let text: String = moved (Box \"s\")\n",
+    ));
+    lower(&module);
+    for (source, expected) in [
+        (
+            "type Box T = wrap T\ndef f = ((Box inner): I32) => inner\n",
+            "nominal pattern `Box` cannot match `I32`",
+        ),
+        (
+            "type Box T = wrap T\nlet (Box local): Box I32 = Box \"text\"\n",
+            "expected",
+        ),
+        (
+            "type Box T = wrap T\ndef f: Box I32 -> I32 = ((Box inner): Box String) => inner\n",
+            "Box String",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("mismatched nominal annotation");
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "{source}: expected `{expected}` in {diagnostics:?}"
+        );
+    }
+}

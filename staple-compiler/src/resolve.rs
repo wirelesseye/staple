@@ -5404,6 +5404,9 @@ impl NameResolver {
                     }),
                     strict,
                 );
+                if let Some(annotation) = &pattern.annotation {
+                    self.resolve_type_with(annotation, strict);
+                }
                 self.resolve_pattern_types_with(&pattern.argument, strict);
             }
             Pattern::Splice(splice) => {

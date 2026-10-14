@@ -1734,6 +1734,9 @@ impl Collector<'_> {
                     let module = self.definition_module_label(DefinitionId::Type(id));
                     self.named_with_docs(&nominal.syntax, &nominal.name, signature, docs, module);
                 }
+                if let Some(annotation) = &nominal.annotation {
+                    self.ty(annotation);
+                }
                 self.pattern(&nominal.argument);
             }
             Pattern::Binding(binding) => self.ty(&binding.ty),
