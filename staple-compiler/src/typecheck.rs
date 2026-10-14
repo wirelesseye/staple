@@ -5854,13 +5854,17 @@ impl TypeChecker {
         }
         self.did_return = outer_did_return;
         self.return_reachable = outer_return_reachable;
-        // Complete known effects before the function's first use, including
-        // dependencies of inferred value schemes. The global fixed point
-        // still handles recursive/transitive updates.
-        let effects = if function.binding_annotation.is_none()
-            && (!self.function_schemes.contains_key(&function.id)
-                || self.inferred_value_schemes.contains(&function.id))
-            && !self.impl_function_types.contains_key(&function.id)
+        // A value-only generic scheme is instantiated at its uses, so its known
+        // effects, and the resources of the named functions it calls, must be
+        // complete before the first one. Captured-state effects of other
+        // functions stay contextual until the global fixed point, which still
+        // handles recursive/transitive updates.
+        let inferred_scheme = self.inferred_value_schemes.contains(&function.id);
+        let effects = if inferred_scheme
+            || (function.binding_annotation.is_none()
+                && function.binding_syntax.is_some()
+                && !self.function_schemes.contains_key(&function.id)
+                && !self.impl_function_types.contains_key(&function.id))
         {
             let outer_effect_function = self.current_effect_function.replace(Some(function.id));
             let outer_accesses = self.current_state_accesses.replace(StateAccesses::default());
@@ -5870,7 +5874,11 @@ impl TypeChecker {
             self.current_state_accesses.replace(outer_accesses);
             let mut effects = CheckedEffectSet::canonical(body.resources).with_state(body.state);
             effects.variable = body.variable;
-            self.merge_function_effect_lower_bound(&function, effects)
+            let mut effects = self.merge_function_effect_lower_bound(&function, effects);
+            if !inferred_scheme {
+                effects.state = function_type.effects.state;
+            }
+            effects
         } else {
             function_type.effects
         };

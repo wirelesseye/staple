@@ -15533,6 +15533,28 @@ fn function_value_type_parameters_check_kinds_sizedness_and_extra_bounds() {
 }
 
 #[test]
+fn closures_over_mutable_locals_keep_contextual_state_effects() {
+    // Captured-state effects stay contextual until effect inference, so these
+    // pre-existing programs keep checking.
+    type_check(concat!(
+        "def counter: I32 -> (() -> I32) = start => {\n",
+        "    let mut total = start\n",
+        "    () => total\n",
+        "}\n",
+        "def generic_counter = <T where Copy T> start: T => (() -> T) :: {\n",
+        "    let mut total = start\n",
+        "    () => total\n",
+        "}\n",
+        "def call: (() -> I32) -> I32 = f => f ()\n",
+        "def run = () => {\n",
+        "    let mut total = 3\n",
+        "    let g = () => total\n",
+        "    call g\n",
+        "}\n",
+    ));
+}
+
+#[test]
 fn function_value_type_parameters_infer_and_merge_effects() {
     let module = type_check(concat!(
         "use std.io.(IO, println)\n",
