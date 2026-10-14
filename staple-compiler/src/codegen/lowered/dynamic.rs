@@ -9247,8 +9247,8 @@ fn is_static_layout_type(value_type: &CheckedType) -> bool {
         CheckedType::Ref(_)
             | CheckedType::Slice(_)
             | CheckedType::Buffer(_)
-            | CheckedType::CPointer { .. }
-            | CheckedType::COpaquePointer
+            | CheckedType::RawPtr { .. }
+            | CheckedType::RawOpaquePtr
             | CheckedType::Function(_)
             | CheckedType::Forall(_)
     )

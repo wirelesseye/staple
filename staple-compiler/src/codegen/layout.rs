@@ -285,7 +285,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             CheckedType::Slice(_) => Ok(self.slice_type().into()),
             CheckedType::Ref(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             CheckedType::Buffer(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
-            CheckedType::COpaquePointer | CheckedType::CPointer { .. } => {
+            CheckedType::RawOpaquePtr | CheckedType::RawPtr { .. } => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
             CheckedType::Function(_) => Ok(self.closure_type().into()),

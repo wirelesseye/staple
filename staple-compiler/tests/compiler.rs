@@ -4872,10 +4872,38 @@ fn cinterop_types_require_an_explicit_import() {
     );
 
     type_check(concat!(
-        "use std.cinterop.*\n",
+        "use std.cinterop.*\nuse std.ptr.*\n",
         "def character: CChar\n",
-        "def pointer: CPointer CChar\n",
+        "def pointer: RawPtr CChar\n",
         "def text: CString\n",
+    ));
+}
+
+#[test]
+fn raw_pointer_types_require_std_ptr_imports() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for imports in ["", "use std.cinterop.*\n"] {
+        let source = format!("{imports}def pointer: RawPtr I32\ndef opaque: RawOpaquePtr\n");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(&source, root)
+            .expect("source should load");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err_diagnostics("raw pointer types require std.ptr imports");
+        for name in ["RawPtr", "RawOpaquePtr"] {
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| { diagnostic.message == format!("unknown type `{name}`") }),
+                "{diagnostics:?}"
+            );
+        }
+    }
+    type_check(concat!(
+        "use std.ptr.(RawPtr, RawOpaquePtr)\n",
+        "def pointer: RawPtr I32 -> RawPtr I32 = value => value\n",
+        "def opaque: RawOpaquePtr -> RawOpaquePtr = value => value\n",
     ));
 }
 
@@ -4936,17 +4964,17 @@ fn syntax_types_and_quote_require_an_explicit_import() {
 #[test]
 fn c_pointer_preserves_its_pointee_type() {
     let module = resolve(concat!(
-        "use std.cinterop.*\n",
-        "extern \"c\" { consume: (CPointer I32) -> I32 }\n",
+        "use std.cinterop.*\nuse std.ptr.*\n",
+        "extern \"c\" { consume: (RawPtr I32) -> I32 }\n",
         "consume (c_string \"wrong pointee\")\n",
     ));
     let diagnostics = TypeChecker::new()
         .check(module)
-        .expect_err_diagnostics("CString should only coerce to CPointer CChar");
+        .expect_err_diagnostics("CString should only coerce to RawPtr CChar");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("expected `CPointer I32`, found `CString`")
+            .contains("expected `RawPtr I32`, found `CString`")
     }));
 }
 
@@ -9049,9 +9077,9 @@ fn lowers_transitive_captures_across_curried_layers() {
 #[test]
 fn adapts_non_variadic_externs_used_as_function_values() {
     let module = type_check(concat!(
-        "use std.cinterop.*\n",
-        "extern \"c\" { puts: (CPointer CChar) -> I32 }\n",
-        "def apply: ((CPointer CChar) -> I32, CPointer CChar) -> I32 = (f, value) => f value\n",
+        "use std.cinterop.*\nuse std.ptr.*\n",
+        "extern \"c\" { puts: (RawPtr CChar) -> I32 }\n",
+        "def apply: ((RawPtr CChar) -> I32, RawPtr CChar) -> I32 = (f, value) => f value\n",
         "apply (puts, c_string \"hello\")\n",
     ));
     let context = Context::create();
@@ -9186,8 +9214,8 @@ fn rejects_arithmetic_negation_of_unsigned_integers() {
 #[test]
 fn decodes_source_string_literals_before_llvm_generation() {
     let source = concat!(
-        "use std.cinterop.*\n",
-        "extern \"c\" { puts: (CPointer CChar) -> I32 }\n",
+        "use std.cinterop.*\nuse std.ptr.*\n",
+        "extern \"c\" { puts: (RawPtr CChar) -> I32 }\n",
         "puts (c_string \"hello\\n\")\n",
     );
     let module = type_check(source);
@@ -12238,7 +12266,8 @@ fn stdlib_opaque_copy_policy_uses_explicit_negative_implementations() {
     let cases = [
         ("I32", true),
         ("CChar", true),
-        ("CPointer I32", true),
+        ("RawPtr I32", true),
+        ("RawOpaquePtr", true),
         ("IO", true),
         ("CString", false),
         ("Buffer I32", false),
@@ -12255,7 +12284,7 @@ fn stdlib_opaque_copy_policy_uses_explicit_negative_implementations() {
         ("CompletionToken", false),
     ];
     let mut source = String::from(
-        "use std.cinterop.*\nuse std.coroutine.*\nuse std.io.IO\nuse std.buffer.Buffer\n",
+        "use std.cinterop.*\nuse std.ptr.*\nuse std.coroutine.*\nuse std.io.IO\nuse std.buffer.Buffer\n",
     );
     for (index, (name, _)) in cases.iter().enumerate() {
         source.push_str(&format!("def check_copy_{index}: {name} -> () = _ => ()\n"));
@@ -12458,11 +12487,11 @@ fn slotted_product_template_spreads_and_markers_normalize_after_substitution() {
 #[test]
 fn opaque_and_phantom_parameters_accept_slotted_products() {
     type_check(concat!(
-        "use std.cinterop.CPointer\n",
+        "use std.ptr.RawPtr\n",
         "use std.coroutine.Task\n",
         "type Inputs = alias (I32; I32)\n",
         "type Handle Args = opaque\n",
-        "def pointer: CPointer Inputs -> CPointer Inputs = value => value\n",
+        "def pointer: RawPtr Inputs -> RawPtr Inputs = value => value\n",
         "def task: move Task Inputs -> Task Inputs = move value => value\n",
         "type Outer P = wrap (handle: Ref (Handle P))\n",
         "extern \"c\" { foreign: Ref (Handle Inputs) -> Outer Inputs }\n",

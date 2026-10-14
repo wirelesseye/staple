@@ -1,7 +1,8 @@
 use std.cinterop.*
+use std.ptr.*
 
 extern "c" {
-    printf: (CPointer CChar, ...) -> I32
+    printf: (RawPtr CChar, ...) -> I32
 }
 
 printf (c_string "hello, world!\n")

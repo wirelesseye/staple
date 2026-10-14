@@ -58,13 +58,13 @@ pub(crate) enum CanonicalType {
     },
     CString,
     CChar,
-    COpaquePointer,
+    RawOpaquePtr,
     Nominal {
         kind: CanonicalNominalKind,
         id: TypeId,
         arguments: Vec<CanonicalType>,
     },
-    CPointer {
+    RawPtr {
         pointee: Box<CanonicalType>,
     },
     Product {
@@ -168,7 +168,7 @@ impl CanonicalType {
             CanonicalType::Ref(inner)
             | CanonicalType::Slice(inner)
             | CanonicalType::Buffer(inner)
-            | CanonicalType::CPointer { pointee: inner } => inner.nesting_depth(),
+            | CanonicalType::RawPtr { pointee: inner } => inner.nesting_depth(),
             CanonicalType::Array { element, count } => {
                 deepest(&mut [element.as_ref(), count.as_ref()].into_iter())
             }
@@ -302,7 +302,7 @@ impl CanonicalType {
             },
             CheckedType::CString => CanonicalType::CString,
             CheckedType::CChar => CanonicalType::CChar,
-            CheckedType::COpaquePointer => CanonicalType::COpaquePointer,
+            CheckedType::RawOpaquePtr => CanonicalType::RawOpaquePtr,
             CheckedType::Parameter { id, .. } if binders.iter().any(|ids| ids.contains(id)) => {
                 let (depth, index) = binders
                     .iter()
@@ -333,7 +333,7 @@ impl CanonicalType {
                 id: *id,
                 arguments: Self::convert_arguments(arguments, origin, runtime, binders)?,
             },
-            CheckedType::CPointer { pointee } => CanonicalType::CPointer {
+            CheckedType::RawPtr { pointee } => CanonicalType::RawPtr {
                 pointee: Box::new(Self::convert(pointee, origin, runtime, binders)?),
             },
             CheckedType::Product(product) => CanonicalType::Product {
@@ -1655,7 +1655,7 @@ mod tests {
             CanonicalType::Ref(payload)
             | CanonicalType::Slice(payload)
             | CanonicalType::Buffer(payload)
-            | CanonicalType::CPointer { pointee: payload } => 1 + node_count(payload),
+            | CanonicalType::RawPtr { pointee: payload } => 1 + node_count(payload),
             CanonicalType::Array { element, count } => 1 + node_count(element) + node_count(count),
             CanonicalType::Nominal { arguments, .. } => {
                 1 + arguments.iter().map(node_count).sum::<usize>()

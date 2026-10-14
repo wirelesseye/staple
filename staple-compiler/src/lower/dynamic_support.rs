@@ -520,7 +520,7 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
 fn contains_polymorphic_function(ty: &CheckedType) -> bool {
     match ty {
         CheckedType::Function(_) => contains_type_parameter(ty),
-        CheckedType::CPointer { pointee } => contains_polymorphic_function(pointee),
+        CheckedType::RawPtr { pointee } => contains_polymorphic_function(pointee),
         CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
             contains_polymorphic_function(value)
         }

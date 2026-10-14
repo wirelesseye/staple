@@ -13423,7 +13423,7 @@ pub(crate) fn mark_call_temporary_drops(
 }
 
 /// The type a call temporary is dropped as: its parameter type, except that a
-/// `CString` passed where `CPointer CChar` is expected is the same pointer seen
+/// `CString` passed where `RawPtr CChar` is expected is the same pointer seen
 /// without ownership, so the temporary is still dropped as the owned
 /// `CString`.
 pub(crate) fn call_temporary_drop_type(
@@ -13431,7 +13431,7 @@ pub(crate) fn call_temporary_drop_type(
     operand: Option<&CheckedType>,
 ) -> CheckedType {
     match (expected, operand) {
-        (CheckedType::CPointer { pointee }, Some(CheckedType::CString))
+        (CheckedType::RawPtr { pointee }, Some(CheckedType::CString))
             if **pointee == CheckedType::CChar =>
         {
             CheckedType::CString
@@ -14083,7 +14083,7 @@ fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             arguments.iter().any(checked_type_contains_ref)
         }
-        CheckedType::CPointer { pointee } => checked_type_contains_ref(pointee),
+        CheckedType::RawPtr { pointee } => checked_type_contains_ref(pointee),
         _ => false,
     }
 }
@@ -16837,9 +16837,9 @@ mod tests {
     #[test]
     fn symbol_storage_classifies_extern_and_intrinsic_symbols() {
         let module = checked_program(concat!(
-            "use std.cinterop.*\n",
+            "use std.cinterop.*\nuse std.ptr.*\n",
             "extern \"c\" {\n",
-            "  my_puts: (CPointer CChar) -> I32\n",
+            "  my_puts: (RawPtr CChar) -> I32\n",
             "}\n",
         ));
         let mut program = LoweredProgram::default();
@@ -19646,9 +19646,9 @@ mod tests {
     #[test]
     fn borrowed_temporaries_drop_after_the_call() {
         let module = checked_program(concat!(
-            "use std.cinterop.(CString, CPointer, CChar, c_string)\n",
+            "use std.cinterop.(CString, CChar, c_string)\nuse std.ptr.(RawPtr)\n",
             "extern \"c\" { strlen: CString -> USize }\n",
-            "extern \"c\" { printf: (CPointer CChar, ...) -> I32 }\n",
+            "extern \"c\" { printf: (RawPtr CChar, ...) -> I32 }\n",
             "def borrow: CString -> USize = value => strlen value\n",
             "def consume: move CString -> USize = move value => strlen value\n",
             "def apply: (CString -> USize) -> USize = f => f (c_string \"borrowed\")\n",
@@ -19693,7 +19693,7 @@ mod tests {
         }
 
         // Native externs borrow every argument, including variadic slots and
-        // a `CString` viewed as `CPointer CChar` (`print`'s `printf`).
+        // a `CString` viewed as `RawPtr CChar` (`print`'s `printf`).
         let externs = program
             .calls
             .iter()

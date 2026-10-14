@@ -162,8 +162,8 @@ fn opaque_pointer_conversions_run_and_emit_for_32_and_64_bit_targets() {
 fn opaque_pointer_requires_explicit_conversion() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for source in [
-        "use std.cinterop.*\ndef erase: CPointer I32 -> COpaquePointer = value => value\n",
-        "use std.cinterop.*\ndef restore: COpaquePointer -> CPointer I32 = value => value\n",
+        "use std.cinterop.*\nuse std.ptr.*\ndef erase: RawPtr I32 -> RawOpaquePtr = value => value\n",
+        "use std.cinterop.*\nuse std.ptr.*\ndef restore: RawOpaquePtr -> RawPtr I32 = value => value\n",
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
@@ -175,8 +175,8 @@ fn opaque_pointer_requires_explicit_conversion() {
             .expect_err("implicit pointer conversion must fail");
         assert!(
             errors.iter().any(|error| error.message.contains("expected")
-                && error.message.contains("COpaquePointer")
-                && error.message.contains("CPointer I32")),
+                && error.message.contains("RawOpaquePtr")
+                && error.message.contains("RawPtr I32")),
             "{errors:?}"
         );
     }

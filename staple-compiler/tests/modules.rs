@@ -2012,7 +2012,7 @@ fn imports_public_extern_bindings() {
     );
     fixture.write(
         "ffi.sta",
-        "use std.cinterop.*\npub extern \"c\" { puts: (CPointer CChar) -> I32 }\n",
+        "use std.cinterop.*\nuse std.ptr.*\npub extern \"c\" { puts: (RawPtr CChar) -> I32 }\n",
     );
 
     let llvm = fixture.compile().expect("public extern should import");

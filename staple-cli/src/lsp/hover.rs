@@ -3397,8 +3397,8 @@ mod tests {
     #[test]
     fn formats_extern_binding_declarations() {
         let source = concat!(
-            "use std.cinterop.*\n",
-            "extern \"c\" { printf: (CPointer CChar, ...) -> I32 }\n",
+            "use std.cinterop.*\nuse std.ptr.*\n",
+            "extern \"c\" { printf: (RawPtr CChar, ...) -> I32 }\n",
         );
         let path = std::env::temp_dir().join("staple-hover-extern-test.sta");
         let program = ProgramLoader::new()

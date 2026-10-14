@@ -1997,6 +1997,8 @@ impl ProgramLoader {
         let cinterop =
             canonical_file(&root.join("std/cinterop.sta")).map_err(LoadDiagnostic::compiler)?;
         self.standard_library_cinterop = Some(self.load_file(&cinterop)?);
+        let ptr = canonical_file(&root.join("std/ptr.sta")).map_err(LoadDiagnostic::compiler)?;
+        self.load_file(&ptr)?;
         self.standard_library_io = canonical_file(&root.join("std/io.sta"))
             .ok()
             .and_then(|io| self.paths.get(&io).copied());

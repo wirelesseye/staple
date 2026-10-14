@@ -93,9 +93,9 @@ pub enum BuiltinType {
     Slice,
     Buffer,
     CChar,
-    COpaquePointer,
+    RawOpaquePtr,
     CString,
-    CPointer,
+    RawPtr,
     IO,
     Reactive,
     Syntax,
@@ -1688,6 +1688,13 @@ impl NameResolver {
                 BuiltinType::String,
             ),
             ("std/slice.sta", "std.slice", "Slice", BuiltinType::Slice),
+            ("std/ptr.sta", "std.ptr", "RawPtr", BuiltinType::RawPtr),
+            (
+                "std/ptr.sta",
+                "std.ptr",
+                "RawOpaquePtr",
+                BuiltinType::RawOpaquePtr,
+            ),
             (
                 "std/buffer.sta",
                 "std.buffer",
@@ -1749,13 +1756,6 @@ impl NameResolver {
         if let Some(cinterop) = program.standard_library_cinterop() {
             self.register_builtin_type(cinterop, "std.cinterop", "CChar", BuiltinType::CChar);
             self.register_builtin_type(cinterop, "std.cinterop", "CString", BuiltinType::CString);
-            self.register_builtin_type(cinterop, "std.cinterop", "CPointer", BuiltinType::CPointer);
-            self.register_builtin_type(
-                cinterop,
-                "std.cinterop",
-                "COpaquePointer",
-                BuiltinType::COpaquePointer,
-            );
             self.register_primitive_macro(cinterop, "c_string", PrimitiveMacro::CString);
         }
         if let Some(io) = program.standard_library_io() {
@@ -1908,22 +1908,22 @@ impl NameResolver {
         }
         for (module, name, intrinsic) in [
             (
-                "std.cinterop",
+                "std.ptr",
                 "__pointer_opaque",
                 IntrinsicFunction::PointerCast,
             ),
             (
-                "std.cinterop",
+                "std.ptr",
                 "__opaque_pointer",
                 IntrinsicFunction::PointerCast,
             ),
             (
-                "std.cinterop",
+                "std.ptr",
                 "__opaque_address",
                 IntrinsicFunction::PointerAddress,
             ),
             (
-                "std.cinterop",
+                "std.ptr",
                 "__address_opaque",
                 IntrinsicFunction::AddressPointer,
             ),
@@ -1933,12 +1933,12 @@ impl NameResolver {
                 IntrinsicFunction::StringHasNul,
             ),
             (
-                "std.cinterop",
+                "std.ptr",
                 "__pointer_address",
                 IntrinsicFunction::PointerAddress,
             ),
             (
-                "std.cinterop",
+                "std.ptr",
                 "__address_pointer",
                 IntrinsicFunction::AddressPointer,
             ),
@@ -2337,7 +2337,7 @@ impl NameResolver {
         }
         if matches!(
             builtin,
-            BuiltinType::CPointer | BuiltinType::Ref | BuiltinType::Slice | BuiltinType::Buffer
+            BuiltinType::RawPtr | BuiltinType::Ref | BuiltinType::Slice | BuiltinType::Buffer
         ) && declaration.type_parameters.len() != 1
         {
             self.diagnostics.push(Diagnostic::new(
@@ -2377,7 +2377,7 @@ impl NameResolver {
         }
         if matches!(
             builtin,
-            BuiltinType::COpaquePointer
+            BuiltinType::RawOpaquePtr
                 | BuiltinType::Cancelled
                 | BuiltinType::Scheduler
                 | BuiltinType::Tasks

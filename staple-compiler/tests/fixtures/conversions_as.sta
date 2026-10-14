@@ -1,4 +1,5 @@
-use std.cinterop.(CString, CPointer, c_string)
+use std.cinterop.(CString, c_string)
+use std.ptr.(RawPtr)
 use std.slice.Slice
 use std.syntax.*
 
@@ -54,9 +55,9 @@ def run: () -> () = () => {
     let owned = c_string "owned"
     let moved = owned as CString
     match (CString.to_string moved) { Ok text => require (text == "owned"), _ => panic "identity lost ownership", }
-    let pointer = (USize :: 4096) as CPointer I32
+    let pointer = (USize :: 4096) as RawPtr I32
     require (pointer as USize == 4096)
-    let inferred_pointer: CPointer I32 = (USize :: 4096) as CPointer _
+    let inferred_pointer: RawPtr I32 = (USize :: 4096) as RawPtr _
     require (inferred_pointer as USize == 4096)
     let inferred_pair: (I32, String) = (I32 :: 1, "inferred") as (I32, _)
     let (inferred_number, inferred_label) = inferred_pair

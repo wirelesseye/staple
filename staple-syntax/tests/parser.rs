@@ -1276,7 +1276,7 @@ fn parses_bodyless_types_as_singletons() {
 #[test]
 fn parses_generic_opaque_type_declarations() {
     let root =
-        parse("pub type CPointer Pointee = opaque\n").expect("generic opaque type should parse");
+        parse("pub type RawPtr Pointee = opaque\n").expect("generic opaque type should parse");
     assert!(matches!(
         root.items[0],
         Item::TypeDeclaration(ref declaration)
@@ -1750,7 +1750,7 @@ fn conversion_syntax_desugars_to_an_ascribed_convert_call() {
     for (source, target) in [
         ("value as I64", "I64"),
         ("value as Slice U8", "Slice U8"),
-        ("value as CPointer I32", "CPointer I32"),
+        ("value as RawPtr I32", "RawPtr I32"),
         ("value as (I32, String)", "(I32, String)"),
         ("value as I32 -> I32", "I32 -> I32"),
         ("value as I32 | String", "I32 | String"),

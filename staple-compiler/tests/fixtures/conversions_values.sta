@@ -1,4 +1,5 @@
-use std.cinterop.(CPointer, CChar, CString, InteriorNul)
+use std.cinterop.(CChar, CString, InteriorNul)
+use std.ptr.(RawPtr)
 use std.slice.Slice
 use std.buffer.Buffer
 
@@ -6,13 +7,13 @@ def require: Bool -> () = condition => if condition { () } else { panic "convers
 
 def run: () -> () = () => {
     let address: USize = 4096
-    let pointer: CPointer I32 = Convert.convert address
+    let pointer: RawPtr I32 = Convert.convert address
     let restored: USize = Convert.convert pointer
     require (restored == address)
-    let advanced: CPointer I32 = Convert.convert (restored + 4)
+    let advanced: RawPtr I32 = Convert.convert (restored + 4)
     let advanced_address: USize = Convert.convert advanced
     require (advanced_address == 4100)
-    let null: CPointer CChar = Convert.convert (USize :: 0)
+    let null: RawPtr CChar = Convert.convert (USize :: 0)
     let null_address: USize = Convert.convert null
     require (null_address == 0)
 

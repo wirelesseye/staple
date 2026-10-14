@@ -3,13 +3,14 @@ pub mod
 use std.core.sized.sized_opaque
 
 use std.cinterop.*
+use std.ptr.*
 
 /// The capability required for standard output operations.
 @sized_opaque
 pub type IO = opaque
 
 pub(package) extern "c" {
-    printf: (CPointer CChar, ...) -> I32
+    printf: (RawPtr CChar, ...) -> I32
 }
 
 /// Writes a string to standard output without a trailing newline.

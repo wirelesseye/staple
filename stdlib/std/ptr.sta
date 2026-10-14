@@ -1,0 +1,50 @@
+pub mod
+
+use std.core.sized.sized_opaque
+
+/// A non-owning, low-level pointer to a value of type `Pointee`.
+/// Copying or converting the pointer does not validate its address, alignment,
+/// or allocation lifetime, and does not transfer ownership.
+@sized_opaque
+pub type RawPtr Pointee = opaque
+/// An untyped, non-owning, low-level pointer.
+/// Conversions preserve the pointer, including null, without validating its
+/// target or transferring ownership. Compatible with C `void *` in foreign calls.
+@sized_opaque
+pub type RawOpaquePtr = opaque
+
+extern "staple-intrinsic" {
+    __pointer_address: <T> RawPtr T -> USize
+    __address_pointer: <T> USize -> RawPtr T
+}
+
+impl<T> Convert (RawPtr T) USize {
+    convert = move value => __pointer_address value
+}
+
+impl<T> Convert USize (RawPtr T) {
+    convert = move value => __address_pointer value
+}
+
+extern "staple-intrinsic" {
+    __pointer_opaque: <T> RawPtr T -> RawOpaquePtr
+    __opaque_pointer: <T> RawOpaquePtr -> RawPtr T
+    __opaque_address: RawOpaquePtr -> USize
+    __address_opaque: USize -> RawOpaquePtr
+}
+
+impl<T> Convert (RawPtr T) RawOpaquePtr {
+    convert = move value => __pointer_opaque value
+}
+
+impl<T> Convert RawOpaquePtr (RawPtr T) {
+    convert = move value => __opaque_pointer value
+}
+
+impl Convert RawOpaquePtr USize {
+    convert = move value => __opaque_address value
+}
+
+impl Convert USize RawOpaquePtr {
+    convert = move value => __address_opaque value
+}

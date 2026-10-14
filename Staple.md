@@ -3383,7 +3383,7 @@ Slice T
 Buffer T
 CString
 CChar
-CPointer CChar
+RawPtr CChar
 Ordering
 Option T
 ```
@@ -3704,16 +3704,18 @@ it, not only its start. A `Ref` to one element of a slice or buffer, or a slice
 over a frozen buffer, keeps the whole allocation alive, including the other
 elements, until no such pointer remains.
 
-`CChar`, `CString`, `COpaquePointer`, and the generic `CPointer` constructor are public opaque
-types in `std.cinterop`. Source code must import them explicitly, for example
-with `use std.cinterop.*`. `CPointer T` is the language's C pointer type; the
-pointee is a compile-time argument with no runtime field. There are no `*T` or
-`*const T` type forms and Staple does not distinguish mutable and const C
-pointers.
+`CChar` and `CString` are public opaque types in `std.cinterop`.
+`RawOpaquePtr` and the generic `RawPtr` constructor are public opaque types in
+`std.ptr`. Source code must import them explicitly, for example with
+`use std.cinterop.*` and `use std.ptr.*`. `RawPtr T` is a non-owning, low-level
+pointer type; the pointee is a compile-time argument with no runtime field.
+Raw pointers are `Copy` and do not manage allocation lifetime or validate their
+targets. They can also be used for C interop. There are no `*T` or `*const T`
+type forms and Staple does not distinguish mutable and const raw pointers.
 
 `CString` is an owned, move-only pointer to NUL-terminated bytes and drops with
-`free`. It is compatible with `CPointer CChar`, but an arbitrary
-`CPointer CChar` is not assumed to be NUL terminated. Passing a `CString` to a
+`free`. It is compatible with `RawPtr CChar`, but an arbitrary
+`RawPtr CChar` is not assumed to be NUL terminated. Passing a `CString` to a
 C function creates a call-scoped view rather than transferring ownership, and
 C declarations may not return `CString`. `CString.to_string` takes its argument
 as `move CString`: it validates and copies UTF-8 into a `String`, returning
@@ -3735,9 +3737,9 @@ The currently supported type syntax also includes type application, product
 types, variadic markers in external function signatures, and function types:
 
 ```staple
-CPointer CChar
+RawPtr CChar
 (I32, String)
-(CPointer CChar, ...) -> I32
+(RawPtr CChar, ...) -> I32
 ```
 
 `...` denotes the variadic portion of an external function parameter product. Its
@@ -3796,23 +3798,23 @@ Checked `String` to `CString` conversion rejects embedded NULs with
 `std.cinterop.InteriorNul`; checked `CString` to `String` validates UTF-8 and frees the
 consumed C string on both success and failure.
 
-`CPointer T` and `USize` convert in both directions. An unchanged round trip
+`RawPtr T` and `USize` convert in both directions. An unchanged round trip
 preserves the pointer. Integer-to-pointer conversion does not validate the
 address, alignment, allocation lifetime, or whether dereferencing is permitted.
 Address arithmetic follows the existing `USize` arithmetic rules.
 
-`COpaquePointer` is a non-owning, `Copy` C pointer with no pointee type,
+`RawOpaquePtr` is a non-owning, `Copy` low-level pointer with no pointee type,
 compatible with C `void *` in parameters and returns. It implements `Convert`
-to and from every `CPointer T`, and to and from `USize`. These explicit
+to and from every `RawPtr T`, and to and from `USize`. These explicit
 conversions preserve the pointer, including null, without allocation,
 validation, or ownership transfer. A typed result does not establish that the
 pointer is valid or aligned for its pointee. The blanket `TryConvert`
 implementation supplies `Error = Never` for all these conversions.
 
 ```staple
-let opaque = pointer as COpaquePointer
-let restored = opaque as CPointer I32
-let inferred: CPointer I32 = opaque as _
+let opaque = pointer as RawOpaquePtr
+let restored = opaque as RawPtr I32
+let inferred: RawPtr I32 = opaque as _
 let address = opaque as USize
 ```
 
@@ -3845,7 +3847,7 @@ An opaque type may also accept compile-time arguments when its body is the
 `opaque` marker:
 
 ```staple
-pub type CPointer Pointee = opaque
+pub type RawPtr Pointee = opaque
 ```
 
 Arguments are part of nominal identity, so two applications with different
@@ -3856,7 +3858,7 @@ but cannot be used by value or satisfy implicit `Sized` bounds.
 The standard-library-only intrinsic modifier `@sized_opaque`, declared in
 `std.core.sized` with `pub(package)` visibility, marks opaque types with
 compiler-supplied sized representations. Compiler-known sized opaque types such as `std.core.I32` and
-`std.cinterop.CPointer` must carry this modifier. The modifier grants sizedness;
+`std.ptr.RawPtr` must carry this modifier. The modifier grants sizedness;
 sized opaque types are `Copy` by default. The stdlib explicitly declares
 `impl !Copy` for opaque types that own resources or must be consumed once.
 Negative implementations may quantify effect parameters, for example
@@ -4325,9 +4327,10 @@ string following `extern`:
 
 ```staple
 use std.cinterop.*
+use std.ptr.*
 
 extern "c" {
-    printf: (CPointer CChar, ...) -> I32
+    printf: (RawPtr CChar, ...) -> I32
 }
 ```
 

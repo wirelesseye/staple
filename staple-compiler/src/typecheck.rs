@@ -493,7 +493,7 @@ pub enum CheckedType {
     },
     CString,
     CChar,
-    COpaquePointer,
+    RawOpaquePtr,
     Parameter {
         id: TypeParameterId,
         name: String,
@@ -510,7 +510,7 @@ pub enum CheckedType {
         name: String,
         arguments: Vec<CheckedType>,
     },
-    CPointer {
+    RawPtr {
         pointee: Box<CheckedType>,
     },
     Product(CheckedProductType),
@@ -627,7 +627,7 @@ fn compact_type_template(value_type: CheckedType) -> CheckedType {
         CheckedType::Ref(inner) => CheckedType::Ref(Box::new(compact_type_template(*inner))),
         CheckedType::Slice(inner) => CheckedType::Slice(Box::new(compact_type_template(*inner))),
         CheckedType::Buffer(inner) => CheckedType::Buffer(Box::new(compact_type_template(*inner))),
-        CheckedType::CPointer { pointee } => CheckedType::CPointer {
+        CheckedType::RawPtr { pointee } => CheckedType::RawPtr {
             pointee: Box::new(compact_type_template(*pointee)),
         },
         CheckedType::Array { element, count } => CheckedType::Array {
@@ -1264,7 +1264,7 @@ impl CheckedType {
         match self {
             Self::Forall(scheme) => scheme.body.is_fully_known(),
             Self::Inferred | Self::Error | Self::TypeConstructor { .. } => false,
-            Self::CPointer { pointee } => pointee.is_fully_known(),
+            Self::RawPtr { pointee } => pointee.is_fully_known(),
             Self::Ref(value) | Self::Slice(value) | Self::Buffer(value) => value.is_fully_known(),
             Self::Array { element, count } => element.is_fully_known() && count.is_fully_known(),
             Self::Product(product) => {
@@ -1302,7 +1302,7 @@ impl CheckedType {
             | Self::String
             | Self::StringLiteralSet(_)
             | Self::CString
-            | Self::COpaquePointer
+            | Self::RawOpaquePtr
             | Self::CChar
             | Self::Opaque { .. }
             | Self::Parameter { .. } => true,
@@ -1328,7 +1328,7 @@ impl CheckedType {
             | Self::Ref(_)
             | Self::Slice(_)
             | Self::Buffer(_)
-            | Self::CPointer { .. }
+            | Self::RawPtr { .. }
             | Self::Forall(_)
             | Self::Function(_)
             | Self::I32
@@ -1346,7 +1346,7 @@ impl CheckedType {
             | Self::String
             | Self::StringLiteralSet(_)
             | Self::CString
-            | Self::COpaquePointer
+            | Self::RawOpaquePtr
             | Self::CChar => true,
             Self::NumberLiteral(_) => true,
         }
@@ -1390,7 +1390,7 @@ impl fmt::Display for CheckedType {
                 write!(formatter, "({element} ^ {count})")
             }
             Self::CString => formatter.write_str("CString"),
-            Self::COpaquePointer => formatter.write_str("COpaquePointer"),
+            Self::RawOpaquePtr => formatter.write_str("RawOpaquePtr"),
             Self::CChar => formatter.write_str("CChar"),
             Self::Parameter { name, .. } => formatter.write_str(name),
             Self::TypeConstructor {
@@ -1411,7 +1411,7 @@ impl fmt::Display for CheckedType {
                 }
                 Ok(())
             }
-            Self::CPointer { pointee } => write!(formatter, "CPointer {pointee}"),
+            Self::RawPtr { pointee } => write!(formatter, "RawPtr {pointee}"),
             Self::Product(product) => {
                 formatter.write_str("(")?;
                 for (index, element) in product.elements.iter().enumerate() {
@@ -16036,8 +16036,8 @@ impl TypeChecker {
         if module.builtin_type(id) == Some(BuiltinType::String) {
             return CheckedType::String;
         }
-        if module.builtin_type(id) == Some(BuiltinType::CPointer) {
-            return CheckedType::CPointer {
+        if module.builtin_type(id) == Some(BuiltinType::RawPtr) {
+            return CheckedType::RawPtr {
                 pointee: Box::new(arguments[0].clone()),
             };
         }
@@ -16412,12 +16412,12 @@ impl TypeChecker {
                     name: "Buffer".to_owned(),
                     arguments: Vec::new(),
                 },
-                BuiltinType::COpaquePointer => CheckedType::COpaquePointer,
+                BuiltinType::RawOpaquePtr => CheckedType::RawOpaquePtr,
                 BuiltinType::CChar => CheckedType::CChar,
                 BuiltinType::CString => CheckedType::CString,
-                BuiltinType::CPointer => CheckedType::TypeConstructor {
+                BuiltinType::RawPtr => CheckedType::TypeConstructor {
                     id,
-                    name: "CPointer".to_owned(),
+                    name: "RawPtr".to_owned(),
                     arguments: Vec::new(),
                 },
                 BuiltinType::IO => CheckedType::Opaque {
@@ -16710,7 +16710,7 @@ pub(crate) fn types_equivalent(actual: &CheckedType, expected: &CheckedType) -> 
         (CheckedType::Ref(a), CheckedType::Ref(b))
         | (CheckedType::Slice(a), CheckedType::Slice(b))
         | (CheckedType::Buffer(a), CheckedType::Buffer(b))
-        | (CheckedType::CPointer { pointee: a }, CheckedType::CPointer { pointee: b }) => {
+        | (CheckedType::RawPtr { pointee: a }, CheckedType::RawPtr { pointee: b }) => {
             types_equivalent(a, b)
         }
         (
@@ -16894,7 +16894,7 @@ fn schemes_well_formed(ty: &CheckedType) -> bool {
         CheckedType::Ref(ty)
         | CheckedType::Slice(ty)
         | CheckedType::Buffer(ty)
-        | CheckedType::CPointer { pointee: ty } => schemes_well_formed(ty),
+        | CheckedType::RawPtr { pointee: ty } => schemes_well_formed(ty),
         CheckedType::Array { element, count } => {
             schemes_well_formed(element) && schemes_well_formed(count)
         }
@@ -16931,9 +16931,7 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
             Some(CheckedType::StringLiteralSet(expected))
         }
         (CheckedType::CString, CheckedType::CString) => Some(CheckedType::CString),
-        (CheckedType::COpaquePointer, CheckedType::COpaquePointer) => {
-            Some(CheckedType::COpaquePointer)
-        }
+        (CheckedType::RawOpaquePtr, CheckedType::RawOpaquePtr) => Some(CheckedType::RawOpaquePtr),
         (CheckedType::CChar, CheckedType::CChar) => Some(CheckedType::CChar),
         (CheckedType::NumberLiteral(_), CheckedType::USize) => Some(CheckedType::USize),
         (CheckedType::NumberLiteral(actual), CheckedType::NumberLiteral(expected))
@@ -16981,17 +16979,16 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
                     .collect::<Option<Vec<_>>>()?,
             })
         }
-        (CheckedType::CString, CheckedType::CPointer { pointee })
+        (CheckedType::CString, CheckedType::RawPtr { pointee })
             if *pointee == CheckedType::CChar =>
         {
             Some(CheckedType::CString)
         }
-        (
-            CheckedType::CPointer { pointee: actual },
-            CheckedType::CPointer { pointee: expected },
-        ) => merge_types(*actual, *expected).map(|pointee| CheckedType::CPointer {
-            pointee: Box::new(pointee),
-        }),
+        (CheckedType::RawPtr { pointee: actual }, CheckedType::RawPtr { pointee: expected }) => {
+            merge_types(*actual, *expected).map(|pointee| CheckedType::RawPtr {
+                pointee: Box::new(pointee),
+            })
+        }
         (CheckedType::Ref(actual), CheckedType::Ref(expected)) => {
             merge_types(*actual, *expected).map(|value| CheckedType::Ref(Box::new(value)))
         }
@@ -17558,7 +17555,7 @@ pub(crate) fn substitute_type(
             .get(&id)
             .cloned()
             .unwrap_or(CheckedType::Parameter { id, name, sized }),
-        CheckedType::CPointer { pointee } => CheckedType::CPointer {
+        CheckedType::RawPtr { pointee } => CheckedType::RawPtr {
             pointee: Box::new(substitute_type(*pointee, substitutions)),
         },
         CheckedType::Ref(value) => {
@@ -17782,7 +17779,7 @@ fn erase_type_parameters_in(
 ) -> CheckedType {
     match value_type {
         CheckedType::Parameter { .. } => CheckedType::Inferred,
-        CheckedType::CPointer { pointee } => CheckedType::CPointer {
+        CheckedType::RawPtr { pointee } => CheckedType::RawPtr {
             pointee: Box::new(erase_type_parameters_in(pointee, solvable)),
         },
         CheckedType::Ref(value) => {
@@ -17890,7 +17887,7 @@ pub(crate) fn type_contains_scheme(ty: &CheckedType) -> bool {
         CheckedType::Ref(ty)
         | CheckedType::Slice(ty)
         | CheckedType::Buffer(ty)
-        | CheckedType::CPointer { pointee: ty } => type_contains_scheme(ty),
+        | CheckedType::RawPtr { pointee: ty } => type_contains_scheme(ty),
         CheckedType::Array { element, count } => {
             type_contains_scheme(element) || type_contains_scheme(count)
         }
@@ -17910,7 +17907,7 @@ pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Forall(scheme) => !scheme.free_ids(false).is_empty(),
         CheckedType::Parameter { .. } => true,
-        CheckedType::CPointer { pointee } => contains_type_parameter(pointee),
+        CheckedType::RawPtr { pointee } => contains_type_parameter(pointee),
         CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
             contains_type_parameter(value)
         }
@@ -17954,7 +17951,7 @@ fn contains_effect_parameter(value_type: &CheckedType) -> bool {
                 || contains_effect_parameter(&function.parameter)
                 || contains_effect_parameter(&function.result)
         }
-        CheckedType::CPointer { pointee }
+        CheckedType::RawPtr { pointee }
         | CheckedType::Ref(pointee)
         | CheckedType::Slice(pointee)
         | CheckedType::Buffer(pointee) => contains_effect_parameter(pointee),
@@ -17988,7 +17985,7 @@ fn contains_type_parameter_id(value_type: &CheckedType, expected: TypeParameterI
 pub(crate) fn contains_inferred_type(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Inferred | CheckedType::TypeConstructor { .. } => true,
-        CheckedType::CPointer { pointee } => contains_inferred_type(pointee),
+        CheckedType::RawPtr { pointee } => contains_inferred_type(pointee),
         CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
             contains_inferred_type(value)
         }
@@ -18026,7 +18023,7 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
             CheckedType::Parameter { id, .. } => {
                 ids.insert(*id);
             }
-            CheckedType::CPointer { pointee } => collect(pointee, ids),
+            CheckedType::RawPtr { pointee } => collect(pointee, ids),
             CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
                 collect(value, ids)
             }
@@ -18177,7 +18174,7 @@ fn unify_impl_headers(
             substitutions.insert(*id, left);
             true
         }
-        (CheckedType::CPointer { pointee: left }, CheckedType::CPointer { pointee: right }) => {
+        (CheckedType::RawPtr { pointee: left }, CheckedType::RawPtr { pointee: right }) => {
             unify_impl_headers(left, right, free_parameters, substitutions)
         }
         (CheckedType::Ref(left), CheckedType::Ref(right))
@@ -18366,7 +18363,7 @@ fn sized_type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId
                 ids.insert(*id);
             }
             CheckedType::Parameter { .. } => {}
-            CheckedType::CPointer { pointee } => collect(pointee, ids),
+            CheckedType::RawPtr { pointee } => collect(pointee, ids),
             CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
                 collect(value, ids)
             }
@@ -18460,7 +18457,7 @@ fn collect_rigid_parameters(
         CheckedType::Ref(ty)
         | CheckedType::Slice(ty)
         | CheckedType::Buffer(ty)
-        | CheckedType::CPointer { pointee: ty } => {
+        | CheckedType::RawPtr { pointee: ty } => {
             collect_rigid_parameters(ty, declared, substitutions)
         }
         CheckedType::TypeConstructor { arguments, .. } | CheckedType::Opaque { arguments, .. } => {
@@ -18533,8 +18530,8 @@ fn infer_type_parameters_mode(
                 }
             }
         }
-        CheckedType::CPointer { pointee } => {
-            matches!(actual, CheckedType::CPointer { pointee: actual_pointee }
+        CheckedType::RawPtr { pointee } => {
+            matches!(actual, CheckedType::RawPtr { pointee: actual_pointee }
             if infer_type_parameters_mode(allow_schemes, pointee, actual_pointee, substitutions))
         }
         CheckedType::Ref(value) => {
@@ -18823,7 +18820,7 @@ fn merge_trait_arguments(left: &[CheckedType], right: &[CheckedType]) -> Option<
 
 fn clear_function_effects(value_type: &mut CheckedType) {
     match value_type {
-        CheckedType::CPointer { pointee }
+        CheckedType::RawPtr { pointee }
         | CheckedType::Ref(pointee)
         | CheckedType::Slice(pointee)
         | CheckedType::Buffer(pointee) => clear_function_effects(pointee),
@@ -18984,7 +18981,7 @@ fn array_lengths_are_natural(
             };
             count_is_natural && array_lengths_are_natural(element, bounds, natural_trait)
         }
-        CheckedType::CPointer { pointee }
+        CheckedType::RawPtr { pointee }
         | CheckedType::Ref(pointee)
         | CheckedType::Slice(pointee)
         | CheckedType::Buffer(pointee) => array_lengths_are_natural(pointee, bounds, natural_trait),
@@ -20129,7 +20126,7 @@ fn checked_type_contains_sum(value_type: &CheckedType) -> bool {
             checked_type_contains_sum(&function.parameter)
                 || checked_type_contains_sum(&function.result)
         }
-        CheckedType::CPointer { pointee } => checked_type_contains_sum(pointee),
+        CheckedType::RawPtr { pointee } => checked_type_contains_sum(pointee),
         CheckedType::Ref(value) | CheckedType::Buffer(value) => checked_type_contains_sum(value),
         CheckedType::Wrapper {
             arguments,
@@ -20151,7 +20148,7 @@ fn checked_type_contains_slice(value_type: &CheckedType) -> bool {
         CheckedType::Slice(_) => true,
         CheckedType::Ref(value)
         | CheckedType::Buffer(value)
-        | CheckedType::CPointer { pointee: value } => checked_type_contains_slice(value),
+        | CheckedType::RawPtr { pointee: value } => checked_type_contains_slice(value),
         CheckedType::Product(product) => product
             .elements
             .iter()
@@ -20439,12 +20436,12 @@ pub(crate) fn is_copy_type(
         | CheckedType::NumberLiteral(_)
         | CheckedType::String
         | CheckedType::StringLiteralSet(_)
-        | CheckedType::COpaquePointer
+        | CheckedType::RawOpaquePtr
         | CheckedType::CChar
         | CheckedType::CString
         | CheckedType::Buffer(_)
         | CheckedType::Opaque { .. }
-        | CheckedType::CPointer { .. }
+        | CheckedType::RawPtr { .. }
         | CheckedType::Ref(_)
         | CheckedType::Slice(_)
         | CheckedType::Function(_) => true,
@@ -20794,21 +20791,21 @@ fn valid_conversion_intrinsic_type(
         crate::IntrinsicFunction::PointerCast => {
             matches!(
                 (function.parameter.as_ref(), function.result.as_ref()),
-                (CheckedType::CPointer { .. }, CheckedType::COpaquePointer)
-                    | (CheckedType::COpaquePointer, CheckedType::CPointer { .. })
+                (CheckedType::RawPtr { .. }, CheckedType::RawOpaquePtr)
+                    | (CheckedType::RawOpaquePtr, CheckedType::RawPtr { .. })
             )
         }
         crate::IntrinsicFunction::PointerAddress => {
             matches!(
                 function.parameter.as_ref(),
-                CheckedType::CPointer { .. } | CheckedType::COpaquePointer
+                CheckedType::RawPtr { .. } | CheckedType::RawOpaquePtr
             ) && *function.result == CheckedType::USize
         }
         crate::IntrinsicFunction::AddressPointer => {
             *function.parameter == CheckedType::USize
                 && matches!(
                     function.result.as_ref(),
-                    CheckedType::CPointer { .. } | CheckedType::COpaquePointer
+                    CheckedType::RawPtr { .. } | CheckedType::RawOpaquePtr
                 )
         }
         crate::IntrinsicFunction::ValidateUtf8 => {

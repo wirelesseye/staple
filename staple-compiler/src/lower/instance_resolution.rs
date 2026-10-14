@@ -392,7 +392,7 @@ pub(super) fn collect_referenced_parameters(
         CheckedType::Ref(payload)
         | CheckedType::Slice(payload)
         | CheckedType::Buffer(payload)
-        | CheckedType::CPointer { pointee: payload } => collect_referenced_parameters(payload, out),
+        | CheckedType::RawPtr { pointee: payload } => collect_referenced_parameters(payload, out),
         CheckedType::Array { element, count } => {
             collect_referenced_parameters(element, out);
             collect_referenced_parameters(count, out);
@@ -446,7 +446,7 @@ pub(super) fn collect_referenced_parameters(
         | CheckedType::String
         | CheckedType::StringLiteralSet(_)
         | CheckedType::CString
-        | CheckedType::COpaquePointer
+        | CheckedType::RawOpaquePtr
         | CheckedType::CChar => {}
     }
 }
@@ -976,7 +976,7 @@ fn contains_placeholder(value_type: &CheckedType) -> bool {
         CheckedType::Ref(payload)
         | CheckedType::Slice(payload)
         | CheckedType::Buffer(payload)
-        | CheckedType::CPointer { pointee: payload } => contains_placeholder(payload),
+        | CheckedType::RawPtr { pointee: payload } => contains_placeholder(payload),
         CheckedType::Array { element, count } => {
             contains_placeholder(element) || contains_placeholder(count)
         }
@@ -2930,13 +2930,13 @@ impl<'a> ParameterCollector<'a> {
             | CheckedType::String
             | CheckedType::StringLiteralSet(_)
             | CheckedType::CString
-            | CheckedType::COpaquePointer
+            | CheckedType::RawOpaquePtr
             | CheckedType::CChar => {}
             CheckedType::Parameter { id, name, .. } => self.relevant.notice_type(*id, name),
             CheckedType::Ref(payload)
             | CheckedType::Slice(payload)
             | CheckedType::Buffer(payload)
-            | CheckedType::CPointer { pointee: payload } => self.collect_type(payload),
+            | CheckedType::RawPtr { pointee: payload } => self.collect_type(payload),
             CheckedType::Array { element, count } => {
                 self.collect_type(element);
                 self.collect_type(count);
@@ -3955,7 +3955,7 @@ mod tests {
     #[test]
     fn coverage_fixture_exercises_every_collector_family() {
         let (_, program) = lower(concat!(
-            "use std.cinterop.*\n",
+            "use std.cinterop.*\nuse std.ptr.*\n",
             "use std.coroutine.(Coroutine)\n",
             "use std.fmt.Formatter\n",
             "trait TestShow T { test_show: T -> Bool }\n",
