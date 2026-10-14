@@ -15513,23 +15513,60 @@ fn function_value_type_parameters_require_recursive_results() {
 
 #[test]
 fn function_value_type_parameters_check_kinds_sizedness_and_extra_bounds() {
-    for source in [
-        "def f: <T> move T -> T = <effect E> x: I32 => I32 :: x",
-        "def f: <T where ?Sized T> Ref T -> Ref T = <U> x: Ref U => x",
-        "def f: <T> T -> T = <U where Copy U> x: U => x",
-        "trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => value }",
-        "trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = <B, C> (_, move value: B) => value }",
+    const SHAPE: &str =
+        "function value compile-time parameters differ in count, kind, or sizedness";
+    for (source, expected) in [
+        ("def f: <T> move T -> T = <effect E> x: I32 => I32 :: x", SHAPE),
+        ("def f: <T where ?Sized T> Ref T -> Ref T = <U> x: Ref U => x", SHAPE),
+        (
+            "def f: <T> T -> T = <U where Copy U> x: U => x",
+            "function value compile-time parameter bounds differ from the function type",
+        ),
+        (
+            "def f: <T> T -> T = x => x",
+            "the function type declares compile-time parameters `<T>`, but the function value \
+             declares none",
+        ),
+        (
+            "trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => value }",
+            "trait member `Visit.visit` must implement scheme",
+        ),
+        (
+            "trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = <B, C> (_, move value: B) => value }",
+            SHAPE,
+        ),
+        (
+            "trait Show T { show: T -> I32 }\nimpl Show I32 { show = <B> x: I32 => I32 :: 1 }",
+            "trait member `Show.show` is not generic: the function type has no compile-time \
+             parameters",
+        ),
+        (
+            "trait Show T { show: T -> I32 = <B> x: T => I32 :: 2 }\nimpl Show I32 {}",
+            "trait member `Show.show` is not generic: the function type has no compile-time \
+             parameters",
+        ),
+        (
+            "def f: I32 -> I32 = <T> x: I32 => x",
+            "the function type has no compile-time parameters, but the function value declares \
+             parameters",
+        ),
     ] {
         let diagnostics = TypeChecker::new()
             .check(resolve(source))
             .expect_err_diagnostics("generic contracts must match");
         assert!(
-            diagnostics
-                .iter()
-                .any(|d| d.message.contains("compile-time parameter")),
-            "{source}: {diagnostics:?}"
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "{source}: expected `{expected}` in {diagnostics:?}"
         );
     }
+    // The hint names the annotation's parameters and adds no `move` of its own.
+    let diagnostics = TypeChecker::new()
+        .check(resolve("def f: <T> T -> T = x => x"))
+        .expect_err_diagnostics("missing value parameters");
+    assert!(
+        diagnostics.iter().all(|d| !d.message.contains("move")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]

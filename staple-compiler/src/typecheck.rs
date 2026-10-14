@@ -5341,8 +5341,24 @@ impl TypeChecker {
                         diagnostic.message = format!("{context}: {}", diagnostic.message);
                     }
                 }
-            } else if function.generics.is_some() && function.binding_annotation.is_some() {
-                self.diagnostics.push(Diagnostic::new(function.generics.as_ref().unwrap().syntax.span.clone(), "the function type has no compile-time parameters, but the function value declares parameters"));
+            } else if let Some(generics) = &function.generics
+                && (function.binding_annotation.is_some()
+                    || self.impl_function_types.contains_key(&function.id)
+                    || self.default_function_traits.contains_key(&function.id))
+            {
+                // Trait members supply the expected type of implementations and
+                // default methods, so a monomorphic member is a contract too.
+                let message = "the function type has no compile-time parameters, but the \
+                               function value declares parameters";
+                self.diagnostics.push(Diagnostic::new(
+                    generics.syntax.span.clone(),
+                    match implemented_trait_member_name(module, function.id) {
+                        Some(member) => {
+                            format!("trait member `{member}` is not generic: {message}")
+                        }
+                        None => message.to_owned(),
+                    },
+                ));
             }
             let parameter_symbols = function_parameter_symbols(module, &function.pattern);
             let parameter_mutations = pattern_parameter_mutations(&function.pattern);
@@ -5738,21 +5754,8 @@ impl TypeChecker {
         function: FunctionId,
     ) -> Option<String> {
         let scheme = self.function_schemes.get(&function)?;
-        module
-            .trait_implementations()
-            .iter()
-            .find_map(|implementation| {
-                let method = implementation
-                    .methods
-                    .iter()
-                    .find_map(|(method, candidate)| (*candidate == function).then_some(*method))?;
-                let trait_ = &module.traits()[&implementation.trait_id];
-                let member = module.trait_method(method)?;
-                Some(format!(
-                    "trait member `{}.{}` must implement scheme `{scheme}`",
-                    trait_.declaration.name, member.name
-                ))
-            })
+        let member = implemented_trait_member_name(module, function)?;
+        Some(format!("trait member `{member}` must implement scheme `{scheme}`"))
     }
 
     fn ensure_function_checked(&mut self, module: &ResolvedModule, function_id: FunctionId) {
@@ -16765,6 +16768,30 @@ fn alpha_renaming(
         }
     }
     Some(substitutions)
+}
+
+/// `Trait.member` for a function implementing a trait member, either in an
+/// implementation or as the trait's default method.
+fn implemented_trait_member_name(module: &ResolvedModule, function: FunctionId) -> Option<String> {
+    let implemented = module.trait_implementations().iter().find_map(|implementation| {
+        let method = implementation
+            .methods
+            .iter()
+            .find_map(|(method, candidate)| (*candidate == function).then_some(*method))?;
+        Some((implementation.trait_id, method))
+    });
+    let (trait_id, method) = implemented.or_else(|| {
+        module.traits().iter().find_map(|(trait_id, trait_)| {
+            trait_
+                .default_methods
+                .iter()
+                .find_map(|(method, candidate)| (*candidate == function).then_some(*method))
+                .map(|method| (*trait_id, method))
+        })
+    })?;
+    let trait_ = &module.traits()[&trait_id];
+    let member = module.trait_method(method)?;
+    Some(format!("{}.{}", trait_.declaration.name, member.name))
 }
 
 fn schemes_alpha_equivalent(actual: &CheckedScheme, expected: &CheckedScheme) -> bool {
