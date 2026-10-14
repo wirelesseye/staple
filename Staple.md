@@ -1767,8 +1767,10 @@ implicitly generalized.
 
 Only the outermost function in a curried chain may declare parameters:
 `<T where Copy T> x: T => y: T => x` declares `T` for both arrows; `x => <T> y: T => y` is
-rejected. Separate function values in higher-rank arguments and type ascriptions
-may declare their own lists.
+rejected. A function value that is not the direct body of another arrow is a
+separate value and may declare its own list: in higher-rank arguments, type
+ascriptions, and blocks, as in `x => { <T> move y: T => y }`, which returns a
+polymorphic value.
 
 #### With an explicit type annotation
 
