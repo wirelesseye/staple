@@ -4252,6 +4252,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .backend
                 .build_numeric_conversion(from, to, values[0])?
                 .as_basic_value_enum(),
+            crate::IntrinsicFunction::PointerOffset => self
+                .backend
+                .dynamic_byte_offset(values[0].into_pointer_value(), values[1].into_int_value())?
+                .as_basic_value_enum(),
             crate::IntrinsicFunction::PointerCast => values[0],
             crate::IntrinsicFunction::PointerAddress => self
                 .backend

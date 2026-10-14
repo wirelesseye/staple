@@ -4834,6 +4834,7 @@ impl TypeChecker {
             let expected = match intrinsic {
                 crate::IntrinsicFunction::NumericConvert { .. }
                 | crate::IntrinsicFunction::ParseNumber { .. }
+                | crate::IntrinsicFunction::PointerOffset
                 | crate::IntrinsicFunction::PointerCast
                 | crate::IntrinsicFunction::PointerAddress
                 | crate::IntrinsicFunction::AddressPointer
@@ -20787,6 +20788,15 @@ fn valid_conversion_intrinsic_type(
         }
         crate::IntrinsicFunction::ParseNumber { to } => {
             *function.parameter == CheckedType::String && checked_result(to)
+        }
+        crate::IntrinsicFunction::PointerOffset => {
+            matches!(function.parameter.as_ref(), CheckedType::Product(product)
+                if !product.variadic && matches!(product.elements.as_slice(), [pointer, count]
+                    if pointer.name.is_none() && count.name.is_none()
+                    && pointer.default.is_none() && count.default.is_none()
+                    && count.value_type == CheckedType::ISize
+                    && pointer.value_type == *function.result
+                    && matches!(pointer.value_type, CheckedType::RawPtr { .. } | CheckedType::RawOpaquePtr)))
         }
         crate::IntrinsicFunction::PointerCast => {
             matches!(

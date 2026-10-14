@@ -7748,6 +7748,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .as_any_value_enum())
             }
 
+            IntrinsicFunction::PointerOffset => {
+                let [
+                    BasicMetadataValueEnum::PointerValue(pointer),
+                    BasicMetadataValueEnum::IntValue(count),
+                ] = arguments
+                else {
+                    return Err(unsupported("pointer offset operands"));
+                };
+                Ok(self
+                    .backend
+                    .dynamic_byte_offset(*pointer, *count)?
+                    .as_any_value_enum())
+            }
             IntrinsicFunction::PointerCast => {
                 let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
                     return Err(unsupported("pointer cast operand"));

@@ -285,6 +285,7 @@ pub enum IntrinsicFunction {
     ParseNumber {
         to: NumericType,
     },
+    PointerOffset,
     PointerCast,
     PointerAddress,
     AddressPointer,
@@ -1907,6 +1908,16 @@ impl NameResolver {
             ));
         }
         for (module, name, intrinsic) in [
+            (
+                "std.ptr",
+                "__pointer_offset",
+                IntrinsicFunction::PointerOffset,
+            ),
+            (
+                "std.ptr",
+                "__opaque_offset",
+                IntrinsicFunction::PointerOffset,
+            ),
             (
                 "std.ptr",
                 "__pointer_opaque",

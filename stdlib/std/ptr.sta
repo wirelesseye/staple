@@ -16,6 +16,12 @@ pub type RawOpaquePtr = opaque
 extern "staple-intrinsic" {
     __pointer_address: <T> RawPtr T -> USize
     __address_pointer: <T> USize -> RawPtr T
+    __pointer_opaque: <T> RawPtr T -> RawOpaquePtr
+    __opaque_pointer: <T> RawOpaquePtr -> RawPtr T
+    __opaque_address: RawOpaquePtr -> USize
+    __address_opaque: USize -> RawOpaquePtr
+    __pointer_offset: <T> (RawPtr T, ISize) -> RawPtr T
+    __opaque_offset: (RawOpaquePtr, ISize) -> RawOpaquePtr
 }
 
 impl<T> Convert (RawPtr T) USize {
@@ -24,13 +30,6 @@ impl<T> Convert (RawPtr T) USize {
 
 impl<T> Convert USize (RawPtr T) {
     convert = move value => __address_pointer value
-}
-
-extern "staple-intrinsic" {
-    __pointer_opaque: <T> RawPtr T -> RawOpaquePtr
-    __opaque_pointer: <T> RawOpaquePtr -> RawPtr T
-    __opaque_address: RawOpaquePtr -> USize
-    __address_opaque: USize -> RawOpaquePtr
 }
 
 impl<T> Convert (RawPtr T) RawOpaquePtr {
@@ -47,4 +46,20 @@ impl Convert RawOpaquePtr USize {
 
 impl Convert USize RawOpaquePtr {
     convert = move value => __address_opaque value
+}
+
+companion<T> RawPtr T {
+    /// Returns a new pointer offset by a signed number of bytes.
+    /// Does not validate the resulting address, alignment, or allocation lifetime.
+    /// Does not dereference the pointer or transfer ownership.
+    pub def offset = (pointer: RawPtr T; bytes: ISize) =>
+        RawPtr T :: __pointer_offset (pointer, bytes)
+}
+
+companion RawOpaquePtr {
+    /// Returns a new pointer offset by a signed number of bytes.
+    /// Does not validate the resulting address, alignment, or allocation lifetime.
+    /// Does not dereference the pointer or transfer ownership.
+    pub def offset = (pointer: RawOpaquePtr; bytes: ISize) =>
+        RawOpaquePtr :: __opaque_offset (pointer, bytes)
 }

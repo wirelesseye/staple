@@ -227,3 +227,17 @@ fn panicking_binding_continues_on_match_and_reports_location_on_mismatch() {
     );
     assert!(stderr.ends_with(":4:1\n"), "{stderr}");
 }
+
+#[test]
+fn raw_pointer_byte_offsets_run_and_emit_for_32_and_64_bit_targets() {
+    let lowered = lower(include_str!("fixtures/pointer_offset.sta"));
+    let context = Context::create();
+    let generator = CodeGenerator::new(&context);
+    for target in ["i386-unknown-linux-gnu", "x86_64-unknown-linux-gnu"] {
+        generator
+            .compile_module_for_target(&lowered, Some(target))
+            .unwrap_or_else(|errors| panic!("{target}: {errors:?}"));
+    }
+    #[cfg(unix)]
+    run(&lowered);
+}

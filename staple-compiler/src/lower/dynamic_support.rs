@@ -162,6 +162,7 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::ResolverCancel => RejectionReason::AsyncIntrinsic,
         IntrinsicFunction::NumericConvert { .. }
         | IntrinsicFunction::ParseNumber { .. }
+        | IntrinsicFunction::PointerOffset
         | IntrinsicFunction::PointerCast
         | IntrinsicFunction::PointerAddress
         | IntrinsicFunction::AddressPointer
@@ -494,6 +495,7 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::StringToCString
             | IntrinsicFunction::StringAdd
             | IntrinsicFunction::NumericConvert { .. }
+            | IntrinsicFunction::PointerOffset
             | IntrinsicFunction::PointerCast
             | IntrinsicFunction::PointerAddress
             | IntrinsicFunction::AddressPointer

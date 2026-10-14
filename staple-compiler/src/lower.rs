@@ -13688,6 +13688,7 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         )),
         Intrinsic::NumericConvert { .. }
         | Intrinsic::ParseNumber { .. }
+        | Intrinsic::PointerOffset
         | Intrinsic::PointerCast
         | Intrinsic::PointerAddress
         | Intrinsic::AddressPointer

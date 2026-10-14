@@ -1,0 +1,20 @@
+use std.ptr.(RawPtr, RawOpaquePtr)
+
+def require: Bool -> () = condition => if condition { () } else { panic "pointer offset assertion failed" }
+def advance = <T> (pointer: RawPtr T; bytes: ISize) => RawPtr T :: RawPtr.offset pointer bytes
+
+let pointer = (USize :: 4096) as RawPtr I32
+require (((RawPtr.offset pointer 3) as USize) == 4099)
+require (((RawPtr.offset pointer (-(ISize :: 3))) as USize) == 4093)
+require (((RawPtr.offset pointer 0) as USize) == 4096)
+require ((pointer as USize) == 4096)
+require (((advance pointer 3) as USize) == 4099)
+let byte_pointer = (USize :: 4096) as RawPtr U8
+require (((RawPtr.offset byte_pointer 3) as USize) == 4099)
+let opaque = pointer as RawOpaquePtr
+require (((RawOpaquePtr.offset opaque 3) as USize) == 4099)
+require (((RawOpaquePtr.offset opaque (-(ISize :: 3))) as USize) == 4093)
+require (((RawOpaquePtr.offset opaque 0) as USize) == 4096)
+require ((opaque as USize) == 4096)
+let null = (USize :: 0) as RawOpaquePtr
+require (((RawOpaquePtr.offset null 0) as USize) == 0)

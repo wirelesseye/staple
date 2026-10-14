@@ -3803,6 +3803,13 @@ preserves the pointer. Integer-to-pointer conversion does not validate the
 address, alignment, allocation lifetime, or whether dereferencing is permitted.
 Address arithmetic follows the existing `USize` arithmetic rules.
 
+`RawPtr.offset pointer bytes` and `RawOpaquePtr.offset pointer bytes` return a
+new pointer of the same type, offset by `bytes: ISize`. Both count bytes,
+regardless of the pointee type; negative offsets move backward. They do not
+dereference the pointer, validate its address or allocation lifetime, or
+transfer ownership.
+
+
 `RawOpaquePtr` is a non-owning, `Copy` low-level pointer with no pointee type,
 compatible with C `void *` in parameters and returns. It implements `Convert`
 to and from every `RawPtr T`, and to and from `USize`. These explicit
