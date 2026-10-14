@@ -390,15 +390,31 @@ impl fmt::Display for CheckedSchemeParameter {
 
 impl fmt::Display for CheckedScheme {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} {}", self.header(), self.body)
+    }
+}
+
+/// A scheme's `<…>` parameter list and bounds, without its body.
+pub struct CheckedSchemeHeader<'a>(&'a CheckedScheme);
+
+impl CheckedScheme {
+    pub fn header(&self) -> CheckedSchemeHeader<'_> {
+        CheckedSchemeHeader(self)
+    }
+}
+
+impl fmt::Display for CheckedSchemeHeader<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let scheme = self.0;
         formatter.write_str("<")?;
-        for (index, parameter) in self.parameters.iter().enumerate() {
+        for (index, parameter) in scheme.parameters.iter().enumerate() {
             if index > 0 {
                 formatter.write_str(", ")?;
             }
             write!(formatter, "{parameter}")?;
         }
         let mut first = true;
-        for parameter in &self.parameters {
+        for parameter in &scheme.parameters {
             if let CheckedSchemeParameter::Type {
                 name, sized: false, ..
             } = parameter
@@ -408,10 +424,10 @@ impl fmt::Display for CheckedScheme {
                 write!(formatter, "?Sized {name}")?;
             }
         }
-        for (index, bound) in self.trait_bounds.iter().enumerate() {
+        for (index, bound) in scheme.trait_bounds.iter().enumerate() {
             formatter.write_str(if first { " where " } else { ", " })?;
             first = false;
-            match self.trait_bound_names.get(index) {
+            match scheme.trait_bound_names.get(index) {
                 Some(name) => formatter.write_str(name)?,
                 None => write!(formatter, "{:?}", bound.trait_id)?,
             }
@@ -423,10 +439,10 @@ impl fmt::Display for CheckedScheme {
                 }
             }
         }
-        for bound in &self.subtype_bounds {
+        for bound in &scheme.subtype_bounds {
             formatter.write_str(if first { " where " } else { ", " })?;
             first = false;
-            let name = self
+            let name = scheme
                 .parameters
                 .iter()
                 .find_map(|parameter| match parameter {
@@ -441,7 +457,7 @@ impl fmt::Display for CheckedScheme {
                 write!(formatter, "{:?} <: {}", bound.parameter, bound.supertype)?;
             }
         }
-        write!(formatter, "> {}", self.body)
+        formatter.write_str(">")
     }
 }
 
@@ -5308,7 +5324,15 @@ impl TypeChecker {
                         .insert(function.id, scheme.subtype_bounds.clone());
                     self.function_schemes.insert(function.id, scheme);
                 } else {
-                    self.diagnostics.push(Diagnostic::new(function.pattern.syntax().span.clone(), "the function type declares compile-time parameters, but the function value declares none; write `<T> move x: T => …`"));
+                    self.diagnostics.push(Diagnostic::new(
+                        function.pattern.syntax().span.clone(),
+                        format!(
+                            "the function type declares compile-time parameters `{}`, but the \
+                             function value declares none; declare them before its parameter \
+                             pattern",
+                            expected.header()
+                        ),
+                    ));
                     self.function_schemes.insert(function.id, expected);
                 }
                 if let Some(context) = self.generic_member_conformance_context(module, function.id)
