@@ -594,6 +594,13 @@ iteration, formatting traits, defaults, results, and flow macros. Lower-level
 modules such as `std.buffer`, `std.slice`, `std.io`, `std.syntax`, and
 `std.cinterop` require explicit imports.
 
+`staple build` and `staple run` compile the standard library, like every other
+non-root package, into its own cached object (see README.md, "Incremental
+builds"). Installing the standard library prebuilds it into
+`<stdlib>/target/<triple>/`; the cache is keyed on the compiler executable, so
+it only serves the `staple` that built it. `--no-incremental` or
+`STAPLE_INCREMENTAL=0` compiles one whole-program module instead.
+
 A package disables its implicit prelude with `prelude #false` in `staple.kdl`.
 A file module may opt out independently:
 

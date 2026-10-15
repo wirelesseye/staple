@@ -47,6 +47,20 @@ a source file or `--manifest-path`, honours `--emit llvm|object|exe` (default
 The project commands invoke the compiler in-process; the only child process
 `staple run` starts is the program it just built.
 
+## Incremental builds
+
+`build` and `run` compile each non-root package to its own object file and
+reuse it while nothing it depends on changes. An object's file name is a
+fingerprint of the compiler executable, the target triple, the package's
+sources and resolved features, and its dependencies' fingerprints, so a stale
+object is never linked. Objects live in `<package>/target/staple/<triple>/`, and
+in `$XDG_CACHE_HOME/staple/<triple>/` (else `~/.cache/staple/<triple>/`) for the
+standard library when it has no installed objects and for packages whose
+directory is not writable.
+`staple build` on a library package populates these caches without producing an
+executable. `--no-incremental` (or `STAPLE_INCREMENTAL=0`) compiles one
+whole-program module instead.
+
 ## Manifest
 
 A package is described by `staple.kdl`:
@@ -132,7 +146,12 @@ copy to the default per-user location with:
 ```
 
 This installs to `~/.local/lib/staple/stdlib`; an optional first argument selects
-a different destination. `--stdlib <path>` selects the root explicitly and
+a different destination. It also prebuilds the standard library's objects into
+`<destination>/target/<triple>/` with `staple` from `PATH` (or `$STAPLE`; it
+falls back to building the compiler from the repository), so ordinary builds
+skip compiling `std`. Set `STAPLE_INSTALL_OBJECTS=0` to copy sources only.
+Objects are fingerprinted against the compiler executable, so reinstall after
+upgrading `staple` and install with the `staple` you will run. `--stdlib <path>` selects the root explicitly and
 `STAPLE_STDLIB` provides the same path through the environment. Otherwise the
 executable looks in `../lib/staple/stdlib` relative to itself and then in the
 per-user default location.
