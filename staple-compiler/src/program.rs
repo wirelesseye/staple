@@ -168,6 +168,8 @@ impl Program {
             &program.imported_modules,
             &program.additional_imported_namespaces,
             &program.root_qualified_modules,
+            &program.module_packages,
+            &package_dependency_order(program.package_graph.as_ref()),
         );
         program
     }
@@ -426,6 +428,8 @@ impl Program {
             &self.imported_modules,
             &self.additional_imported_namespaces,
             &self.root_qualified_modules,
+            &self.module_packages,
+            &package_dependency_order(self.package_graph.as_ref()),
         );
     }
 
@@ -716,6 +720,8 @@ impl Program {
             &self.imported_modules,
             &self.additional_imported_namespaces,
             &self.root_qualified_modules,
+            &self.module_packages,
+            &package_dependency_order(self.package_graph.as_ref()),
         );
         ambiguous
     }
@@ -2062,6 +2068,8 @@ impl ProgramLoader {
             &self.imported_modules,
             &HashMap::new(),
             &self.root_qualified_modules,
+            &self.module_packages,
+            &package_dependency_order(self.package_graph.as_ref()),
         );
         let module_prelude = self
             .modules
@@ -2659,11 +2667,58 @@ fn find_block_use_declarations_in_block(block: &BlockExpression, out: &mut Vec<U
     }
 }
 
+/// The packages of a graph, each after the packages it depends on. Ties keep
+/// the graph's own order.
+pub(crate) fn package_dependency_order(
+    graph: Option<&staple_project::PackageGraph>,
+) -> Vec<staple_project::PackageId> {
+    let Some(graph) = graph else {
+        return Vec::new();
+    };
+    fn visit(
+        graph: &staple_project::PackageGraph,
+        id: staple_project::PackageId,
+        visited: &mut [bool],
+        order: &mut Vec<staple_project::PackageId>,
+    ) {
+        if std::mem::replace(&mut visited[id.0], true) {
+            return;
+        }
+        for dependency in &graph.package(id).dependencies {
+            visit(graph, dependency.package, visited, order);
+        }
+        order.push(id);
+    }
+    let mut visited = vec![false; graph.packages.len()];
+    let mut order = Vec::new();
+    for index in 0..graph.packages.len() {
+        visit(
+            graph,
+            staple_project::PackageId(index),
+            &mut visited,
+            &mut order,
+        );
+    }
+    order
+}
+
+/// The order modules initialize in: every module after the modules it imports,
+/// except within a cycle.
+///
+/// The order is built one package at a time, dependencies first, and a
+/// package's own order depends only on its own modules and their paths. The
+/// standard library therefore initializes in the same order whatever program
+/// it is part of, which matters because initialization order decides which
+/// module-level reads need a run-time initialization check. That check is
+/// part of the symbols a separately compiled package exports. Modules outside
+/// every package come last.
 fn initialization_order(
     modules: &[SourceModule],
     imports: &HashMap<SyntaxId, ModuleId>,
     additional_imports: &HashMap<SyntaxId, ModuleId>,
     root_qualified_modules: &HashMap<(ModuleId, String), ModuleId>,
+    module_packages: &[Option<staple_project::PackageId>],
+    package_order: &[staple_project::PackageId],
 ) -> Vec<ModuleId> {
     let mut edges = vec![Vec::new(); modules.len()];
     for module in modules {
@@ -2689,55 +2744,122 @@ fn initialization_order(
                 edges[module.id.0].push(*imported);
             }
         }
-        edges[module.id.0].sort();
-        edges[module.id.0].dedup();
     }
     // Dependency aliases loaded by staple-cli can feed this same logical-root
     // map in the future; initialization should depend on resolved package
     // identities, not on how their source directories happen to be laid out.
     for ((source, _), target) in root_qualified_modules {
         edges[source.0].push(*target);
-        edges[source.0].sort();
-        edges[source.0].dedup();
     }
 
-    fn visit(node: usize, edges: &[Vec<ModuleId>], seen: &mut [bool], order: &mut Vec<usize>) {
+    let package_of = |module: ModuleId| module_packages.get(module.0).copied().flatten();
+    let mut groups = package_order
+        .iter()
+        .map(|package| Some(*package))
+        .chain([None])
+        .map(|package| {
+            modules
+                .iter()
+                .map(|module| module.id)
+                .filter(|module| package_of(*module) == package)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    // A package missing from the order (no graph) still initializes.
+    let ordered = groups.iter().map(Vec::len).sum::<usize>();
+    if ordered < modules.len() {
+        groups.push(
+            modules
+                .iter()
+                .map(|module| module.id)
+                .filter(|module| {
+                    package_of(*module).is_some_and(|package| !package_order.contains(&package))
+                })
+                .collect(),
+        );
+    }
+    groups
+        .into_iter()
+        .flat_map(|group| group_initialization_order(modules, &edges, group))
+        .collect()
+}
+
+/// Orders one package's modules, considering only the imports between them.
+/// Modules are numbered by path rather than by load order (companion modules,
+/// which the loader discovers last, after the rest), so the result does not
+/// change with the order the loader happened to read files in.
+fn group_initialization_order(
+    modules: &[SourceModule],
+    edges: &[Vec<ModuleId>],
+    mut group: Vec<ModuleId>,
+) -> Vec<ModuleId> {
+    group.sort_by(|left, right| {
+        modules[left.0]
+            .companion
+            .cmp(&modules[right.0].companion)
+            .then_with(|| modules[left.0].path.cmp(&modules[right.0].path))
+            .then_with(|| {
+                modules[left.0]
+                    .qualified_name
+                    .cmp(&modules[right.0].qualified_name)
+            })
+    });
+    let local = group
+        .iter()
+        .enumerate()
+        .map(|(index, module)| (*module, index))
+        .collect::<HashMap<_, _>>();
+    let edges = group
+        .iter()
+        .map(|module| {
+            let mut targets = edges[module.0]
+                .iter()
+                .filter_map(|target| local.get(target).copied())
+                .collect::<Vec<_>>();
+            targets.sort_unstable();
+            targets.dedup();
+            targets
+        })
+        .collect::<Vec<_>>();
+    let count = group.len();
+
+    fn visit(node: usize, edges: &[Vec<usize>], seen: &mut [bool], order: &mut Vec<usize>) {
         if std::mem::replace(&mut seen[node], true) {
             return;
         }
         for dependency in &edges[node] {
-            visit(dependency.0, edges, seen, order);
+            visit(*dependency, edges, seen, order);
         }
         order.push(node);
     }
     let mut finish = Vec::new();
-    let mut seen = vec![false; modules.len()];
-    for node in 0..modules.len() {
+    let mut seen = vec![false; count];
+    for node in 0..count {
         visit(node, &edges, &mut seen, &mut finish);
     }
 
-    let mut reverse = vec![Vec::new(); modules.len()];
+    let mut reverse = vec![Vec::new(); count];
     for (node, dependencies) in edges.iter().enumerate() {
         for dependency in dependencies {
-            reverse[dependency.0].push(ModuleId(node));
+            reverse[*dependency].push(node);
         }
     }
-    let mut component_of = vec![usize::MAX; modules.len()];
-    let mut components: Vec<Vec<ModuleId>> = Vec::new();
+    let mut component_of = vec![usize::MAX; count];
+    let mut components: Vec<Vec<usize>> = Vec::new();
     fn collect(
         node: usize,
-        reverse: &[Vec<ModuleId>],
+        reverse: &[Vec<usize>],
         component: usize,
         component_of: &mut [usize],
-        members: &mut Vec<ModuleId>,
+        members: &mut Vec<usize>,
     ) {
         if component_of[node] != usize::MAX {
             return;
         }
         component_of[node] = component;
-        members.push(ModuleId(node));
+        members.push(node);
         for next in &reverse[node] {
-            collect(next.0, reverse, component, component_of, members);
+            collect(*next, reverse, component, component_of, members);
         }
     }
     for node in finish.into_iter().rev() {
@@ -2745,16 +2867,8 @@ fn initialization_order(
             let component = components.len();
             let mut members = Vec::new();
             collect(node, &reverse, component, &mut component_of, &mut members);
-            members.sort_by(|left, right| {
-                modules[left.0]
-                    .path
-                    .cmp(&modules[right.0].path)
-                    .then_with(|| {
-                        modules[left.0]
-                            .qualified_name
-                            .cmp(&modules[right.0].qualified_name)
-                    })
-            });
+            // Local numbers follow the path order.
+            members.sort_unstable();
             components.push(members);
         }
     }
@@ -2763,7 +2877,7 @@ fn initialization_order(
     for (node, dependencies) in edges.iter().enumerate() {
         for dependency in dependencies {
             let from = component_of[node];
-            let to = component_of[dependency.0];
+            let to = component_of[*dependency];
             if from != to {
                 component_edges[from].insert(to);
             }
@@ -2797,7 +2911,7 @@ fn initialization_order(
     }
     component_order
         .into_iter()
-        .flat_map(|component| components[component].iter().copied())
+        .flat_map(|component| components[component].iter().map(|member| group[*member]))
         .collect()
 }
 

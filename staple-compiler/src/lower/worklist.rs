@@ -2385,33 +2385,65 @@ impl LoweredProgram {
     }
 
     /// The resolver that names non-generic instances. It computes the
-    /// reserved symbol set once, so a naming pass stays linear.
+    /// reserved symbol set and the declared names once, so a naming pass
+    /// stays linear.
     pub(crate) fn declared_name_resolver(&self) -> impl Fn(&InstanceKey) -> Option<String> + '_ {
-        let reserved = self.reserved_symbol_names();
-        move |key| self.declared_instance_name(key, &reserved)
+        let names = self.declared_function_names(&self.reserved_symbol_names());
+        move |key| {
+            if !key.runtime().is_empty()
+                || !key.substitutions().is_empty()
+                || key.evidence().is_some()
+            {
+                return None;
+            }
+            names.get(&key.function()).cloned()
+        }
     }
 
-    /// The declared name of an instance of a non-generic template (empty
-    /// substitutions and evidence). The resolver already mangled
-    /// `LoweredFunction::name` (`__staple_m…` for the standard library and
-    /// multi-module programs, the bare name for single-module code), so it is
-    /// used verbatim. A name some symbol outside the catalog already owns (see
-    /// [`Self::reserved_symbol_names`]) is not available, and the instance
-    /// falls back to its ordinal name. Generic instances have no declared name
-    /// and keep their ordinal name.
-    fn declared_instance_name(
-        &self,
-        key: &InstanceKey,
-        reserved: &HashSet<String>,
-    ) -> Option<String> {
-        if !key.runtime().is_empty() || !key.substitutions().is_empty() || key.evidence().is_some()
-        {
-            return None;
+    /// The declared name of every function template. The resolver already
+    /// mangled `LoweredFunction::name` (`__staple_m…` for the standard library
+    /// and multi-module programs, the bare name for single-module code), so a
+    /// template keeps it verbatim. A name some symbol outside the catalog
+    /// already owns (see [`Self::reserved_symbol_names`]) is not available, and
+    /// that template has no declared name: its instance falls back to its
+    /// ordinal name. Generic instances have no declared name either.
+    ///
+    /// Two templates can share a mangled name (for example two nested
+    /// functions named `first`). Names are claimed in a fixed order that does
+    /// not depend on which instances the program reaches or on any other
+    /// package: module-level templates first, then local ones, each in
+    /// template order. The first claimant keeps the name and later ones take
+    /// `{name}.{n}`, so the same source always yields the same symbols, whatever
+    /// program it is compiled into.
+    fn declared_function_names(&self, reserved: &HashSet<String>) -> HashMap<FunctionId, String> {
+        let module_level = |function: &super::LoweredFunction| {
+            function
+                .binding_symbol
+                .and_then(|symbol| self.symbols.get(symbol))
+                .is_some_and(|symbol| symbol.module_symbol)
+        };
+        let mut templates = self
+            .functions
+            .iter()
+            .map(|(_, id, function)| (id, function))
+            .collect::<Vec<_>>();
+        templates.sort_by_key(|(_, function)| !module_level(function));
+        let mut claimed = HashSet::new();
+        let mut names = HashMap::new();
+        for (id, function) in templates {
+            let base = &function.name;
+            if base.is_empty() || reserved.contains(base) {
+                continue;
+            }
+            let mut name = base.clone();
+            let mut suffix = 0;
+            while !claimed.insert(name.clone()) {
+                suffix += 1;
+                name = format!("{base}.{suffix}");
+            }
+            names.insert(id, name);
         }
-        self.functions
-            .get(key.function())
-            .map(|function| function.name.clone())
-            .filter(|name| !reserved.contains(name))
+        names
     }
 
     /// Symbol names that exist in the emitted module before any catalog

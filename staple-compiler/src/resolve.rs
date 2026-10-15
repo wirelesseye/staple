@@ -4913,7 +4913,11 @@ impl NameResolver {
                     .map(|(name, _)| name.to_owned())
                     .unwrap_or_else(|| format!("function.{}", function_id.0));
                 let base_name = mangle_function_name(&base_name);
+                // A packaged module is mangled whatever else the program holds:
+                // other objects refer to its symbols by name, and its
+                // package must name them the same way in every program.
                 let name = if self.multiple_modules
+                    || self.module_packages[self.current_module.0].is_some()
                     || base_name == "main"
                     || Some(self.current_module) == self.standard_library_core
                     || Some(self.current_module) == self.standard_library_syntax

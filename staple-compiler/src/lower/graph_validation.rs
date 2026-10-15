@@ -2622,8 +2622,9 @@ pub(crate) mod tests {
         assert!(product_debug_plans > 0);
     }
 
-    /// Non-generic declarations keep their available names verbatim;
-    /// reserved, duplicate and generic instances use catalog ordinal names.
+    /// Non-generic declarations keep their available names verbatim; a
+    /// duplicate takes a per-name `.{n}` suffix, and reserved and generic
+    /// instances use catalog ordinal names.
     #[test]
     fn planned_names_preserve_unreserved_declarations() {
         let source = concat!(
@@ -2652,14 +2653,19 @@ pub(crate) mod tests {
                 .name;
             let planned = program.planned_name(id).expect("planned name");
             if key.substitutions().is_empty() && key.evidence().is_none() {
-                if !reserved.contains(declared) && !taken.contains(declared) {
-                    assert_eq!(planned, declared, "an available declaration keeps its name");
-                } else {
+                if reserved.contains(declared) {
                     assert_eq!(
                         planned,
                         format!("__staple_instance_{}", instance.ordinal.index())
                     );
                     fallbacks.push(declared.clone());
+                } else if taken.contains(declared) {
+                    assert!(
+                        planned.starts_with(&format!("{declared}.")),
+                        "a duplicate declaration takes a numbered name: {planned}"
+                    );
+                } else {
+                    assert_eq!(planned, declared, "an available declaration keeps its name");
                 }
                 compared.push(planned.to_owned());
             }
@@ -2686,8 +2692,11 @@ pub(crate) mod tests {
             assert!(found, "{shape}: {compared:?}");
         }
         assert!(
-            fallbacks.iter().any(|name| name == "write"),
-            "the standard-library `write` method clashes with the reactive runtime's libc `write`: {fallbacks:?}"
+            fallbacks.iter().all(|name| name != "write")
+                && compared
+                    .iter()
+                    .any(|name| name.starts_with("__staple_mstd.") && name.ends_with(".write")),
+            "the standard-library `write` method is mangled, so it cannot clash with the reactive runtime's libc `write`: {fallbacks:?}"
         );
         let generic = function_id(program, "generic");
         let (generic_instance, _) = program

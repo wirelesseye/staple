@@ -727,14 +727,25 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             })
     }
 
-    fn unique_global_name(&self, base: String, symbol: SymbolId) -> String {
-        if self.backend.llvm_module.get_function(&base).is_some()
-            || self.backend.llvm_module.get_global(&base).is_some()
-        {
-            format!("{base}.global.{}", symbol.0)
-        } else {
-            base
+    /// A global's name: the base when free, else `{base}.global` and then
+    /// `{base}.global.{n}`. The suffix counts only collisions on this base
+    /// (claimed in symbol order within a module), never a program-wide ID, so
+    /// the name is the same however the module is compiled.
+    fn unique_global_name(&self, base: String) -> String {
+        let taken = |name: &str| {
+            self.backend.llvm_module.get_function(name).is_some()
+                || self.backend.llvm_module.get_global(name).is_some()
+        };
+        if !taken(&base) {
+            return base;
         }
+        let mut name = format!("{base}.global");
+        let mut suffix = 0;
+        while taken(&name) {
+            suffix += 1;
+            name = format!("{base}.global.{suffix}");
+        }
+        name
     }
 
     fn declare_storage(&mut self) -> CodeGenerationResult<()> {
@@ -749,7 +760,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let binding_name = symbol.name.clone();
             let base = format!("__staple_m{prefix}.{binding_name}");
             if symbol.requires_initialization_check {
-                let name = self.unique_global_name(format!("{base}_state"), id);
+                let name = self.unique_global_name(format!("{base}_state"));
                 let state = self.backend.llvm_module.add_global(
                     self.backend.context.i8_type(),
                     None,
@@ -763,14 +774,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 continue;
             }
             let llvm_type = self.backend.compile_type(&symbol.value_type)?;
-            let name = self.unique_global_name(base, id);
+            let name = self.unique_global_name(base);
             let global = self.backend.llvm_module.add_global(llvm_type, None, &name);
             global.set_initializer(&llvm_type.const_zero());
             global.set_linkage(Linkage::Internal);
             self.storage.insert(id, global);
             if symbol.signal || symbol.derived {
                 let suffix = if symbol.signal { "signal" } else { "derived" };
-                let name = self.unique_global_name(format!("{name}_{suffix}"), id);
+                let name = self.unique_global_name(format!("{name}_{suffix}"));
                 let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
                 let metadata = self
                     .backend
