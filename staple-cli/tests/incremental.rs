@@ -295,3 +295,44 @@ fn library_builds_cache_their_own_and_their_dependencies_objects() {
     assert_eq!(String::from_utf8_lossy(&incremental.stdout), "43\n");
     assert_eq!(incremental.stdout, whole.stdout);
 }
+
+#[test]
+fn the_install_script_prebuilds_the_stdlib_and_replaces_stale_objects() {
+    if Command::new("sh").arg("-c").arg("true").output().is_err() {
+        return;
+    }
+    let scratch = Scratch::new("install");
+    let destination = scratch.0.join("installed");
+    // A stale object from an earlier install must not survive.
+    scratch.write("installed/target/old/stale.o", "");
+    let install = || {
+        Command::new("sh")
+            .arg(repo_root().join("scripts/install-stdlib.sh"))
+            .arg(&destination)
+            .env("STAPLE", env!("CARGO_BIN_EXE_staple"))
+            .env("XDG_CACHE_HOME", scratch.cache())
+            .env_remove("STAPLE_INSTALL_OBJECTS")
+            .output()
+            .unwrap()
+    };
+    let output = install();
+    succeeded(&output);
+    assert!(destination.join("std").is_dir());
+    assert!(!destination.join("target/old").exists());
+    let installed = names(&objects(&destination.join("target")));
+    assert_eq!(installed.len(), 2, "{installed:?}");
+
+    succeeded(&install());
+    assert_eq!(names(&objects(&destination.join("target"))), installed);
+
+    let file = repo_root().join("staple-compiler/examples/hello_world.sta");
+    let run = staple(
+        &scratch,
+        &destination,
+        &scratch.0,
+        &["run", file.to_str().unwrap()],
+    );
+    succeeded(&run);
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "Hello, world!\n");
+    assert!(objects(&scratch.cache()).is_empty());
+}
