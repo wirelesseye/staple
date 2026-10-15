@@ -16,10 +16,16 @@ fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
 }
 
-fn lower(program: staple_compiler::Program) -> LoweredModule {
+/// Lowers a program in full, or (`prebuilt`) as an incremental build does:
+/// only what the root unit defines, with every other package linked from its
+/// own object.
+fn lower(program: staple_compiler::Program, prebuilt: bool) -> LoweredModule {
     let resolved = NameResolver::new().resolve_program(program).unwrap();
     let typed = TypeChecker::new().check(resolved).unwrap();
-    Lowerer::new().lower(&typed).unwrap()
+    Lowerer::new()
+        .with_prebuilt_dependencies(prebuilt)
+        .lower(&typed)
+        .unwrap()
 }
 
 /// The standard library on its own: a library package graph with no entry.
@@ -32,24 +38,27 @@ fn lower_std() -> LoweredModule {
             .with_package_graph(graph)
             .load_package_graph()
             .unwrap(),
+        false,
     )
 }
 
-fn lower_file(path: &Path) -> LoweredModule {
+fn lower_file(path: &Path, prebuilt: bool) -> LoweredModule {
     lower(
         ProgramLoader::new()
             .with_standard_library_root(repo_root().join("stdlib"))
             .load_path(path)
             .unwrap(),
+        prebuilt,
     )
 }
 
-fn lower_source(source: &str) -> LoweredModule {
+fn lower_source(source: &str, prebuilt: bool) -> LoweredModule {
     lower(
         ProgramLoader::new()
             .with_standard_library_root(repo_root().join("stdlib"))
             .load_source(source, repo_root())
             .unwrap(),
+        prebuilt,
     )
 }
 
@@ -247,13 +256,15 @@ fn the_standard_library_unit_exports_what_a_program_declares() {
         "list_and_collections.sta",
         "modules_and_imports.sta",
     ];
-    for source in sources {
-        assert_root_symbols_resolve(source, &lower_file(&examples.join(source)));
+    for prebuilt in [false, true] {
+        for source in sources {
+            assert_root_symbols_resolve(source, &lower_file(&examples.join(source), prebuilt));
+        }
+        assert_root_symbols_resolve(
+            "game_loop",
+            &lower_file(&examples.join("game_loop/main.sta"), prebuilt),
+        );
     }
-    assert_root_symbols_resolve(
-        "game_loop",
-        &lower_file(&examples.join("game_loop/main.sta")),
-    );
 }
 
 #[test]
@@ -302,9 +313,10 @@ fn run(executable: &Path) -> Outcome {
     }
 }
 
-/// Builds `lowered` as one module and as std + runtime + root objects, and
-/// requires the two executables to behave the same.
-fn assert_same_behavior(name: &str, lowered: &LoweredModule) {
+/// Builds `lowered` as one module, and `root` (the same program lowered with
+/// prebuilt dependencies) as std + runtime + root objects, and requires the
+/// two executables to behave the same.
+fn assert_same_behavior(name: &str, lowered: &LoweredModule, root: &LoweredModule) {
     let context = Context::create();
     let generator = CodeGenerator::new(&context);
     let shared = shared();
@@ -316,7 +328,7 @@ fn assert_same_behavior(name: &str, lowered: &LoweredModule) {
 
     let root_object = scratch(&format!("{name}.root.o"));
     generator
-        .emit_unit_object(lowered, &EmissionUnit::root(lowered), &root_object, None)
+        .emit_unit_object(root, &EmissionUnit::root(root), &root_object, None)
         .unwrap();
     let separate = scratch(&format!("{name}.separate"));
     link(
@@ -348,7 +360,11 @@ fn separately_compiled_examples_match_the_single_module_build() {
         } else {
             source.file_stem().unwrap().to_string_lossy().into_owned()
         };
-        assert_same_behavior(&name, &lower_file(&source));
+        assert_same_behavior(
+            &name,
+            &lower_file(&source, false),
+            &lower_file(&source, true),
+        );
     }
 }
 
@@ -363,11 +379,11 @@ fn separately_compiled_corpus_matches_the_single_module_build() {
             continue;
         }
         let outcome = std::panic::catch_unwind(|| {
-            let lowered = match program.source {
-                CorpusSource::Inline(source) => lower_source(source),
-                CorpusSource::File(path) => lower_file(&repo_root().join(path)),
+            let lower = |prebuilt| match program.source {
+                CorpusSource::Inline(source) => lower_source(source, prebuilt),
+                CorpusSource::File(path) => lower_file(&repo_root().join(path), prebuilt),
             };
-            assert_same_behavior(program.name, &lowered);
+            assert_same_behavior(program.name, &lower(false), &lower(true));
         });
         if outcome.is_err() {
             failures.push(program.name);
@@ -376,7 +392,7 @@ fn separately_compiled_corpus_matches_the_single_module_build() {
     assert!(failures.is_empty(), "differing programs: {failures:?}");
 }
 
-fn lower_manifest(manifest: &Path) -> LoweredModule {
+fn lower_manifest(manifest: &Path, prebuilt: bool) -> LoweredModule {
     let graph = staple_project::load_package_graph(manifest).unwrap();
     lower(
         ProgramLoader::new()
@@ -384,6 +400,7 @@ fn lower_manifest(manifest: &Path) -> LoweredModule {
             .with_package_graph(graph)
             .load_package_graph()
             .unwrap(),
+        prebuilt,
     )
 }
 
@@ -444,7 +461,7 @@ fn a_dependency_package_object_links_with_its_consumer() {
     let shared = shared();
 
     // The dependency, compiled without its consumer.
-    let library_program = lower_manifest(&library.join("staple.kdl"));
+    let library_program = lower_manifest(&library.join("staple.kdl"), false);
     let package = library_program
         .packages()
         .iter()
@@ -460,7 +477,8 @@ fn a_dependency_package_object_links_with_its_consumer() {
         )
         .unwrap();
 
-    let program = lower_manifest(&application.join("staple.kdl"));
+    let program = lower_manifest(&application.join("staple.kdl"), false);
+    let root_program = lower_manifest(&application.join("staple.kdl"), true);
     let whole_object = directory.join("whole.o");
     generator
         .emit_object(&program, &whole_object, None)
@@ -470,7 +488,12 @@ fn a_dependency_package_object_links_with_its_consumer() {
 
     let root_object = directory.join("root.o");
     generator
-        .emit_unit_object(&program, &EmissionUnit::root(&program), &root_object, None)
+        .emit_unit_object(
+            &root_program,
+            &EmissionUnit::root(&root_program),
+            &root_object,
+            None,
+        )
         .unwrap();
     let separate = directory.join("separate");
     link(

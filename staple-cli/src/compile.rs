@@ -144,7 +144,14 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
     if options.mode == Mode::Check {
         return Ok(Outcome::Completed(None));
     }
-    let lowered = Lowerer::new().lower(&module).map_err(format_diagnostics)?;
+    let links_executable = options.mode == Mode::Run || options.emit == EmitKind::Executable;
+    let links_package_objects = graph.is_some() && links_executable && options.incremental;
+    // Dependency objects come from their own standalone lowering, so the
+    // program lowers only what its root unit defines.
+    let lowered = Lowerer::new()
+        .with_prebuilt_dependencies(links_package_objects)
+        .lower(&module)
+        .map_err(format_diagnostics)?;
     let context = inkwell::context::Context::create();
     let generator = CodeGenerator::new(&context);
     let program_packages = graph.as_ref().map(|graph| ProgramPackages {
@@ -158,8 +165,7 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
         return Ok(Outcome::Completed(None));
     }
 
-    let links_executable = options.mode == Mode::Run || options.emit == EmitKind::Executable;
-    let incremental = match (&program_packages, links_executable && options.incremental) {
+    let incremental = match (&program_packages, links_package_objects) {
         (Some(packages), true) if !lowered.packages().is_empty() => Some(packages),
         _ => None,
     };

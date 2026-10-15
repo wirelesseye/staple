@@ -715,11 +715,18 @@ impl<'a> EmissionView<'a> {
         &self,
         instance: FunctionInstanceId,
     ) -> Option<&'a CheckedFunctionType> {
-        self.program
-            .instances
-            .get(instance)
-            .and_then(|record| record.body.as_ref())
-            .map(LoweredInstanceBody::signature)
+        let record = self.program.instances.get(instance)?;
+        match &record.body {
+            Some(body) => Some(body.signature()),
+            // A prebuilt instance has no substitutions, so its signature is
+            // its template's.
+            None if self.program.is_prebuilt(record) => self
+                .program
+                .functions
+                .get(record.template)
+                .map(|function| &function.signature),
+            None => None,
+        }
     }
 
     /// The closure-phase artifact uses of one owner, in scan order: the drop

@@ -458,6 +458,14 @@ impl LoweredProgram {
         Vec::new()
     }
 
+    /// Whether the instance is declared from a prebuilt object and so is
+    /// never given a body.
+    pub(super) fn is_prebuilt(&self, instance: &super::LoweredFunctionInstance) -> bool {
+        self.specializations
+            .instance(instance.ordinal)
+            .is_some_and(|key| self.is_prebuilt_instance(key))
+    }
+
     /// Validates every installed instance body: local-arena reachability and
     /// bounds, concrete checked metadata, complete target bindings, and
     /// agreement with the recorded specialization dependency and artifact edges.
@@ -467,6 +475,7 @@ impl LoweredProgram {
             let Some(body) = &instance.body else {
                 if let Some(function) = self.functions.get(instance.template)
                     && function.body.is_some()
+                    && !self.is_prebuilt(instance)
                 {
                     diagnostics.push(Diagnostic::new(
                         instance.origin.span.clone(),
@@ -535,6 +544,7 @@ impl<'a> BodyMaterializer<'a> {
             .instances
             .iter()
             .filter(|(_, instance)| instance.body.is_none())
+            .filter(|(_, instance)| !self.program.is_prebuilt(instance))
             .map(|(id, _)| id)
             .collect::<Vec<_>>();
         let mut bodies = Vec::with_capacity(ids.len());

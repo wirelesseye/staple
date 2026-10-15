@@ -856,6 +856,9 @@ impl<'a> WorklistBuilder<'a> {
             // construction site's environment, so it stays demand-driven
             // instead of becoming a root without an enclosing instance.
             .filter(|(_, id, _)| self.program.relevant_parameters(*id).is_empty())
+            // A prebuilt package's object already defines its own functions;
+            // the root unit instantiates only those it reaches.
+            .filter(|(_, _, function)| !self.program.is_prebuilt_module(function.module))
             .map(|(_, id, function)| (id, function.signature.clone()))
             .collect::<Vec<_>>();
         let mut roots = Vec::new();
@@ -913,6 +916,10 @@ impl<'a> WorklistBuilder<'a> {
             record.traversed = true;
         }
         let enclosing = self.resolved_request(instance);
+        // A prebuilt function's callees are its object's business.
+        if self.program.is_prebuilt_instance(&enclosing.key) {
+            return;
+        }
         let function = enclosing.key.function();
         let body = self
             .program
@@ -2382,6 +2389,56 @@ impl LoweredProgram {
             }
             Err(diagnostics) => diagnostics,
         }
+    }
+
+    /// Records the templates a prebuilt package's object defines by name:
+    /// module-level, non-generic templates with a declared name, the same
+    /// functions the emitter exports from a package unit.
+    pub(super) fn record_prebuilt_templates(&mut self) {
+        if !self.prebuilt_dependencies {
+            return;
+        }
+        self.prebuilt_packages = self
+            .packages
+            .iter()
+            .filter(|package| !package.is_root)
+            .map(|package| package.id)
+            .collect();
+        let names = self.declared_function_names(&self.reserved_symbol_names());
+        self.prebuilt_templates = self
+            .functions
+            .iter()
+            .filter(|(_, id, function)| {
+                names.contains_key(id)
+                    && !function.class.coroutine_body
+                    && !contains_type_parameter(&CheckedType::Function(function.signature.clone()))
+                    && self.relevant_parameters(*id).is_empty()
+                    && function
+                        .binding_symbol
+                        .and_then(|symbol| self.symbols.get(symbol))
+                        .is_some_and(|symbol| symbol.module_symbol)
+                    && self.is_prebuilt_module(function.module)
+            })
+            .map(|(_, id, _)| id)
+            .collect();
+    }
+
+    /// Whether a module belongs to a package linked from a prebuilt object.
+    pub(super) fn is_prebuilt_module(&self, module: crate::ModuleId) -> bool {
+        self.modules
+            .get(module)
+            .and_then(|module| module.package)
+            .is_some_and(|package| self.prebuilt_packages.contains(&package))
+    }
+
+    /// Whether an instance is a plain instance of a prebuilt template, which
+    /// is declared by name and has no lowered body.
+    pub(super) fn is_prebuilt_instance(&self, key: &InstanceKey) -> bool {
+        !key.is_dynamic()
+            && key.runtime().is_empty()
+            && key.substitutions().is_empty()
+            && key.evidence().is_none()
+            && self.prebuilt_templates.contains(&key.function())
     }
 
     /// The resolver that names non-generic instances. It computes the

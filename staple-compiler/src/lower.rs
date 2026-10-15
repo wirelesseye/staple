@@ -3155,6 +3155,15 @@ pub(crate) struct LoweredProgram {
     /// The effect-row variant of the differential option: make every
     /// effect parameter of a routed generic call a run-time bundle.
     dictionary_pass_effect_rows: bool,
+    /// Whether every package but the root links a prebuilt object, so its
+    /// exported functions need only their signatures.
+    prebuilt_dependencies: bool,
+    /// The packages linked from prebuilt objects: every package but the root
+    /// when `prebuilt_dependencies` is set.
+    prebuilt_packages: HashSet<staple_project::PackageId>,
+    /// Module-level, non-generic templates of prebuilt packages. Their plain
+    /// instances are declared by name and never get a lowered body.
+    prebuilt_templates: HashSet<FunctionId>,
     /// Per-template transitive dynamic support, computed once per lowering.
     dynamic_support: std::collections::HashMap<FunctionId, dynamic_support::DynamicSupport>,
     /// Every exclusion reason per template, including the transitive reason.
@@ -15425,6 +15434,9 @@ pub struct Lowerer {
     /// functions through dynamic implementations whose effect parameters
     /// arrive as run-time bundles. Never exposed through the CLI.
     dictionary_pass_effect_rows: bool,
+    /// Lower only the root package's functions in full. See
+    /// [`Lowerer::with_prebuilt_dependencies`].
+    prebuilt_dependencies: bool,
 }
 
 impl Lowerer {
@@ -15432,7 +15444,18 @@ impl Lowerer {
         Self {
             dictionary_pass_generic_calls: false,
             dictionary_pass_effect_rows: false,
+            prebuilt_dependencies: false,
         }
+    }
+
+    /// Treats every package except the root as linked from a prebuilt object.
+    /// Their module-level, non-generic functions keep their signatures, so
+    /// the root emission unit can declare them, but their bodies are not
+    /// lowered; only the root unit may be emitted from the result. Generic
+    /// templates of those packages are still specialized for the root.
+    pub fn with_prebuilt_dependencies(mut self, enabled: bool) -> Self {
+        self.prebuilt_dependencies = enabled;
+        self
     }
 
     /// Enables the effect-row differential option used by the differential
@@ -15455,6 +15478,7 @@ impl Lowerer {
         let mut program = LoweredProgram::default();
         program.dictionary_pass_generic_calls = self.dictionary_pass_generic_calls;
         program.dictionary_pass_effect_rows = self.dictionary_pass_effect_rows;
+        program.prebuilt_dependencies = self.prebuilt_dependencies;
         let mut diagnostics = validate_checked_module(module);
         if diagnostics.is_empty() {
             diagnostics.extend(program.snapshot(module));
@@ -15465,6 +15489,9 @@ impl Lowerer {
             program.compute_dynamic_support();
         }
         diagnostics.extend(program.validate());
+        if diagnostics.is_empty() {
+            program.record_prebuilt_templates();
+        }
         if diagnostics.is_empty() {
             diagnostics.extend(program.build_specialization_worklist());
         }
