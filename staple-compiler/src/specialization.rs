@@ -1417,7 +1417,7 @@ impl SpecializationCatalog {
     }
 }
 
-fn instance_ordinal_name(ordinal: InstanceOrdinal) -> String {
+pub(crate) fn instance_ordinal_name(ordinal: InstanceOrdinal) -> String {
     format!("__staple_instance_{}", ordinal.0)
 }
 

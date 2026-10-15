@@ -2843,6 +2843,43 @@ pub(crate) struct LoweredInitializer {
     pub executable_entry: bool,
 }
 
+/// The program's packages, dependencies before dependents.
+fn snapshot_packages(program: &crate::Program) -> Vec<LoweredPackage> {
+    let Some(graph) = program.package_graph() else {
+        return Vec::new();
+    };
+    let root = program.package_of(program.entry());
+    crate::program::package_dependency_order(Some(graph))
+        .into_iter()
+        .map(|id| {
+            let package = graph.package(id);
+            LoweredPackage {
+                id,
+                name: package.name.clone(),
+                is_root: root == Some(id),
+                dependencies: package
+                    .dependencies
+                    .iter()
+                    .map(|dependency| dependency.package)
+                    .filter(|dependency| *dependency != id)
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+/// One package of a lowered program, as the emission units see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoweredPackage {
+    pub id: staple_project::PackageId,
+    pub name: String,
+    /// The package that holds the program's entry module. A single-file
+    /// program has no root package: its modules belong to no package.
+    pub is_root: bool,
+    /// The packages this one depends on, excluding itself.
+    pub dependencies: Vec<staple_project::PackageId>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredModuleInfo {
     pub origin: Origin,
@@ -2853,6 +2890,9 @@ pub(crate) struct LoweredModuleInfo {
     pub parent: Option<ModuleId>,
     pub initialization_index: usize,
     pub initializer: InitializerId,
+    /// The package that owns the module. `None` for a module outside every
+    /// manifest package (a single-file or standard-input program).
+    pub package: Option<staple_project::PackageId>,
     /// Tests identify modules by their qualified name.
     #[cfg(test)]
     pub qualified_name: String,
@@ -2933,8 +2973,6 @@ pub(crate) struct LoweredTypeMetadata {
     pub parameters: Vec<TypeParameterId>,
     pub origin: Origin,
     pub semantic_id: TypeId,
-    /// Tests locate a type's metadata by its declared name.
-    #[cfg(test)]
     pub name: String,
     pub module: ModuleId,
     pub builtin: Option<BuiltinType>,
@@ -3025,6 +3063,9 @@ pub(crate) struct LoweredSemanticIds {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LoweredProgram {
     modules: Catalog<ModuleId, LoweredModuleInfo, LoweredModuleId>,
+    /// The program's packages in dependency order, each after the packages it
+    /// depends on.
+    packages: Vec<LoweredPackage>,
     expressions: Arena<LoweredExpression, ExpressionId>,
     /// Lookup only; traversal always uses the expression arena. Repeated
     /// lowering of the same occurrence key returns the first allocated ID.
@@ -3253,7 +3294,6 @@ impl LoweredProgram {
                     .collect(),
                 origin: origin.clone(),
                 semantic_id: id,
-                #[cfg(test)]
                 name: declaration.name.clone(),
                 module: module_id,
                 builtin: resolved.builtin_type(id),
@@ -3942,6 +3982,7 @@ impl LoweredProgram {
                 parent: source.parent,
                 initialization_index: index,
                 initializer,
+                package: program.package_of(module_id),
                 #[cfg(test)]
                 qualified_name: source.qualified_name.clone(),
                 #[cfg(test)]
@@ -3953,6 +3994,7 @@ impl LoweredProgram {
                 diagnostics.push(diagnostic);
             }
         }
+        self.packages = snapshot_packages(program);
         diagnostics
     }
 
@@ -15264,6 +15306,21 @@ impl LoweredModule {
             }
         }
         names
+    }
+
+    /// The program's packages in dependency order. Empty when the program was
+    /// loaded without a package graph.
+    pub fn packages(&self) -> &[LoweredPackage] {
+        &self.program.packages
+    }
+
+    /// Whether some module belongs to no package (a single-file program). The
+    /// root emission unit owns those modules.
+    pub fn has_unpackaged_modules(&self) -> bool {
+        self.program
+            .modules
+            .iter()
+            .any(|(_, _, module)| module.package.is_none())
     }
 
     /// The read-only backend view of the owned lowered program.

@@ -216,6 +216,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// The key global of one resource type. Its address is the key.
+    ///
+    /// A bundle built in one object can be looked up in another, so a unit
+    /// names the key after the type's module path rather than its program
+    /// numbering and gives it `linkonce_odr` linkage: the linker keeps one
+    /// copy, and every object's references agree on its address.
     fn resource_key(
         &self,
         value_type: &CheckedType,
@@ -226,17 +231,63 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             syntax: staple_syntax::SyntaxId::COMPILER,
         };
         let canonical = crate::specialization::CanonicalType::concrete(value_type, &origin)?;
-        let name = format!("__staple_effect_key.{canonical:?}");
+        let shared = !self.unit.is_whole_program();
+        let name = if shared {
+            format!(
+                "__staple_effect_key.{}",
+                self.stable_canonical_name(&format!("{canonical:?}"))
+            )
+        } else {
+            format!("__staple_effect_key.{canonical:?}")
+        };
         let module = &self.backend.llvm_module;
         let global = module.get_global(&name).unwrap_or_else(|| {
             let byte = self.backend.context.i8_type();
             let global = module.add_global(byte, None, &name);
-            global.set_linkage(inkwell::module::Linkage::Internal);
+            global.set_linkage(if shared {
+                inkwell::module::Linkage::LinkOnceODR
+            } else {
+                inkwell::module::Linkage::Internal
+            });
             global.set_constant(true);
             global.set_initializer(&byte.const_zero());
             global
         });
         Ok(global.as_pointer_value())
+    }
+
+    /// A canonical type's debug text with each nominal `TypeId(n)` replaced by
+    /// the type's path-based name.
+    fn stable_canonical_name(&self, text: &str) -> String {
+        const MARKER: &str = "TypeId(";
+        let mut result = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(start) = rest.find(MARKER) {
+            let digits_start = start + MARKER.len();
+            let digits = rest[digits_start..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .count();
+            let end = digits_start + digits;
+            let name = rest[digits_start..end]
+                .parse::<usize>()
+                .ok()
+                .filter(|_| rest[end..].starts_with(')'))
+                .and_then(|id| self.view.stable_type_name(crate::TypeId(id)));
+            result.push_str(&rest[..start]);
+            match name {
+                Some(name) => {
+                    result.push_str(&name);
+                    rest = &rest[end + 1..];
+                }
+                None => {
+                    result.push_str(MARKER);
+                    rest = &rest[digits_start..];
+                }
+            }
+        }
+        result.push_str(rest);
+        result
     }
 
     /// `ptr __staple_effect_row_lookup(ptr bundle, ptr key)`, built on first use.

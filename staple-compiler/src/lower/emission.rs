@@ -182,6 +182,74 @@ impl<'a> EmissionView<'a> {
         self.program.instance_runtime_order(id)
     }
 
+    /// The module of the template an instance specializes.
+    pub(crate) fn instance_module(&self, id: FunctionInstanceId) -> Option<ModuleId> {
+        let instance = self.program.instances.get(id)?;
+        Some(self.program.functions.get(instance.template)?.module)
+    }
+
+    /// Whether the instance is a module-level function with a declared,
+    /// path-based symbol (`__staple_m{module}.{name}`). Only these are
+    /// defined once, by the object that owns their module, and referenced by
+    /// name from other objects. Every other instance (generic, dynamic,
+    /// local or anonymous, or renamed to an ordinal) is private to the
+    /// object that emits it.
+    pub(crate) fn instance_exported(&self, id: FunctionInstanceId) -> bool {
+        let Some(instance) = self.program.instances.get(id) else {
+            return false;
+        };
+        let Some(key) = self.program.specializations.instance(instance.ordinal) else {
+            return false;
+        };
+        let Some(function) = self.program.functions.get(instance.template) else {
+            return false;
+        };
+        !instance.requires_internal_linkage
+            && !key.is_dynamic()
+            && key.runtime().is_empty()
+            && key.substitutions().is_empty()
+            && key.evidence().is_none()
+            && !function.class.coroutine_body
+            && function
+                .binding_symbol
+                .and_then(|symbol| self.program.symbols.get(symbol))
+                .is_some_and(|symbol| symbol.module_symbol)
+            && instance.name != crate::specialization::instance_ordinal_name(instance.ordinal)
+    }
+
+    /// The package that owns a module, `None` outside every package.
+    pub(crate) fn module_package(&self, id: ModuleId) -> Option<staple_project::PackageId> {
+        self.program.modules.get(id)?.package
+    }
+
+    /// A type's name for symbols shared between objects: its module prefix and
+    /// declared name, numbered only among types that share both. Unlike the
+    /// type's semantic ID it does not depend on the other packages in the
+    /// program.
+    pub(crate) fn stable_type_name(&self, id: crate::TypeId) -> Option<String> {
+        let metadata = self.program.types.get(id)?;
+        let prefix = &self.program.modules.get(metadata.module)?.symbol_prefix;
+        let ordinal = self
+            .program
+            .types
+            .iter()
+            .filter(|(_, _, other)| {
+                other.name == metadata.name
+                    && self
+                        .program
+                        .modules
+                        .get(other.module)
+                        .is_some_and(|module| &module.symbol_prefix == prefix)
+            })
+            .position(|(_, other, _)| other == id)
+            .unwrap_or(0);
+        Some(if ordinal == 0 {
+            format!("{prefix}.{}", metadata.name)
+        } else {
+            format!("{prefix}.{}.{ordinal}", metadata.name)
+        })
+    }
+
     /// Every interned generated artifact in ordinal order.
     pub(crate) fn artifacts(
         &self,

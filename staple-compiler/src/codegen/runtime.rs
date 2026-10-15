@@ -46,104 +46,43 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 
     pub(crate) fn install_gc_runtime(&self) -> CodeGenerationResult<()> {
-        let pointer_bytes = self.target_data.get_pointer_byte_size(None) as u64;
-        let header_bytes = gc_header_bytes(self.context, &self.target_data);
-        let pointer_shift = pointer_bytes.trailing_zeros();
-        let bits = pointer_bytes * 8;
-        let size = format!("i{bits}");
-        let maximum = if bits == 64 {
-            u64::MAX.to_string()
-        } else {
-            ((1_u64 << bits) - 1).to_string()
-        };
-        let maximum_half = if bits == 64 {
-            (u64::MAX / 2).to_string()
-        } else {
-            (((1_u64 << bits) - 1) / 2).to_string()
-        };
-        let maximum_allocation = if bits == 64 {
-            (u64::MAX - header_bytes).to_string()
-        } else {
-            (((1_u64 << bits) - 1) - header_bytes).to_string()
-        };
-        let runtime = include_str!("../gc.ll")
-            .replace("{{SIZE}}", &size)
-            .replace("{{PTR_BYTES}}", &pointer_bytes.to_string())
-            .replace("{{PTR_SHIFT}}", &pointer_shift.to_string())
-            .replace("{{HEADER_BYTES}}", &header_bytes.to_string())
-            .replace("{{ROOT_BYTES}}", &(pointer_bytes * 3).to_string())
-            .replace("{{REGISTER_BYTES}}", &(pointer_bytes * 64).to_string())
-            .replace("{{MAX_HALF}}", &maximum_half)
-            .replace("{{MAX_ALLOC}}", &maximum_allocation)
-            .replace("{{MAX}}", &maximum);
-        let buffer = MemoryBuffer::create_from_memory_range_copy(runtime.as_bytes(), "staple-gc");
-        let module = self
-            .context
-            .create_module_from_ir(buffer)
-            .map_err(|error| {
-                Diagnostic::new(
-                    Span::Compiler,
-                    format!("could not build garbage collector runtime: {error}"),
-                )
-            })?;
-        self.llvm_module.link_in_module(module).map_err(|error| {
-            Diagnostic::new(
-                Span::Compiler,
-                format!("could not link garbage collector runtime: {error}"),
-            )
-        })
+        link_gc_runtime(self.context, &self.target_data, &self.llvm_module)
     }
 
     pub(crate) fn install_coroutine_runtime(&self) -> CodeGenerationResult<()> {
-        let pointer_bytes = self.target_data.get_pointer_byte_size(None) as u64;
-        let bits = pointer_bytes * 8;
-        let runtime = include_str!("../coroutine.ll").replace("{{SIZE}}", &format!("i{bits}"));
-        let buffer =
-            MemoryBuffer::create_from_memory_range_copy(runtime.as_bytes(), "staple-coroutine");
-        let module = self
-            .context
-            .create_module_from_ir(buffer)
-            .map_err(|error| {
-                Diagnostic::new(
-                    Span::Compiler,
-                    format!("could not build coroutine runtime: {error}"),
-                )
-            })?;
-        self.llvm_module.link_in_module(module).map_err(|error| {
-            Diagnostic::new(
-                Span::Compiler,
-                format!("could not link coroutine runtime: {error}"),
-            )
-        })
+        link_coroutine_runtime(self.context, &self.target_data, &self.llvm_module)
     }
 
     pub(crate) fn install_reactive_runtime(&self) -> CodeGenerationResult<()> {
-        let pointer_bytes = self.target_data.get_pointer_byte_size(None) as u64;
-        let bits = pointer_bytes * 8;
-        let runtime = include_str!("../reactive.ll")
-            .replace("{{SIZE}}", &format!("i{bits}"))
-            .replace("{{SCOPE_BYTES}}", &pointer_bytes.to_string())
-            .replace("{{SIGNAL_BYTES}}", &pointer_bytes.to_string())
-            .replace("{{REACTION_BYTES}}", &(pointer_bytes * 8).to_string())
-            .replace("{{DEP_BYTES}}", &(pointer_bytes * 5).to_string())
-            .replace("{{WORK_BYTES}}", &(pointer_bytes * 3).to_string());
-        let buffer =
-            MemoryBuffer::create_from_memory_range_copy(runtime.as_bytes(), "staple-reactive");
-        let module = self
-            .context
-            .create_module_from_ir(buffer)
-            .map_err(|error| {
-                Diagnostic::new(
-                    Span::Compiler,
-                    format!("could not build reactive runtime: {error}"),
-                )
-            })?;
-        self.llvm_module.link_in_module(module).map_err(|error| {
-            Diagnostic::new(
-                Span::Compiler,
-                format!("could not link reactive runtime: {error}"),
-            )
-        })
+        link_reactive_runtime(self.context, &self.target_data, &self.llvm_module)
+    }
+
+    /// Declares the functions the runtime modules define, for a unit whose
+    /// runtime lives in a separate object (`emit_runtime_object`). That object
+    /// exports every function, internal helpers included, because emitted code
+    /// calls some of them by name. The runtime's state stays internal to it.
+    pub(crate) fn declare_runtime_symbols(&self) -> CodeGenerationResult<()> {
+        for link in [
+            link_gc_runtime,
+            link_coroutine_runtime,
+            link_reactive_runtime,
+        ] {
+            let scratch = self.context.create_module("staple-runtime-declarations");
+            link(self.context, &self.target_data, &scratch)?;
+            for function in scratch.get_functions() {
+                if function.count_basic_blocks() == 0 {
+                    continue;
+                }
+                let Ok(name) = function.get_name().to_str() else {
+                    continue;
+                };
+                if self.llvm_module.get_function(name).is_none() {
+                    self.llvm_module
+                        .add_function(name, function.get_type(), None);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Declares (once) an external symbol the emitted code calls by name: a
@@ -473,6 +412,108 @@ fn gc_header_bytes(
         .max(target.get_abi_alignment(&context.i64_type()) as u64)
         .max(target.get_abi_alignment(&context.f64_type()) as u64);
     (pointer_bytes * 5).div_ceil(alignment) * alignment
+}
+
+/// Gives every function the runtime defines external linkage, so a unit that
+/// declares the runtime (`Backend::declare_runtime_symbols`) can call it.
+pub(crate) fn export_runtime_functions(module: &inkwell::module::Module<'_>) {
+    for function in module.get_functions() {
+        if function.count_basic_blocks() > 0 {
+            function.set_linkage(inkwell::module::Linkage::External);
+        }
+    }
+}
+
+/// Links the garbage collector runtime into `module`, specialized to the
+/// target's pointer width.
+pub(crate) fn link_gc_runtime<'context>(
+    context: &'context inkwell::context::Context,
+    target_data: &inkwell::targets::TargetData,
+    module: &inkwell::module::Module<'context>,
+) -> CodeGenerationResult<()> {
+    let pointer_bytes = target_data.get_pointer_byte_size(None) as u64;
+    let header_bytes = gc_header_bytes(context, target_data);
+    let pointer_shift = pointer_bytes.trailing_zeros();
+    let bits = pointer_bytes * 8;
+    let size = format!("i{bits}");
+    let maximum = if bits == 64 {
+        u64::MAX.to_string()
+    } else {
+        ((1_u64 << bits) - 1).to_string()
+    };
+    let maximum_half = if bits == 64 {
+        (u64::MAX / 2).to_string()
+    } else {
+        (((1_u64 << bits) - 1) / 2).to_string()
+    };
+    let maximum_allocation = if bits == 64 {
+        (u64::MAX - header_bytes).to_string()
+    } else {
+        (((1_u64 << bits) - 1) - header_bytes).to_string()
+    };
+    let runtime = include_str!("../gc.ll")
+        .replace("{{SIZE}}", &size)
+        .replace("{{PTR_BYTES}}", &pointer_bytes.to_string())
+        .replace("{{PTR_SHIFT}}", &pointer_shift.to_string())
+        .replace("{{HEADER_BYTES}}", &header_bytes.to_string())
+        .replace("{{ROOT_BYTES}}", &(pointer_bytes * 3).to_string())
+        .replace("{{REGISTER_BYTES}}", &(pointer_bytes * 64).to_string())
+        .replace("{{MAX_HALF}}", &maximum_half)
+        .replace("{{MAX_ALLOC}}", &maximum_allocation)
+        .replace("{{MAX}}", &maximum);
+    link_runtime_source(context, module, &runtime, "garbage collector", "staple-gc")
+}
+
+/// Links the coroutine runtime into `module`.
+pub(crate) fn link_coroutine_runtime<'context>(
+    context: &'context inkwell::context::Context,
+    target_data: &inkwell::targets::TargetData,
+    module: &inkwell::module::Module<'context>,
+) -> CodeGenerationResult<()> {
+    let pointer_bytes = target_data.get_pointer_byte_size(None) as u64;
+    let bits = pointer_bytes * 8;
+    let runtime = include_str!("../coroutine.ll").replace("{{SIZE}}", &format!("i{bits}"));
+    link_runtime_source(context, module, &runtime, "coroutine", "staple-coroutine")
+}
+
+/// Links the reactive runtime into `module`.
+pub(crate) fn link_reactive_runtime<'context>(
+    context: &'context inkwell::context::Context,
+    target_data: &inkwell::targets::TargetData,
+    module: &inkwell::module::Module<'context>,
+) -> CodeGenerationResult<()> {
+    let pointer_bytes = target_data.get_pointer_byte_size(None) as u64;
+    let bits = pointer_bytes * 8;
+    let runtime = include_str!("../reactive.ll")
+        .replace("{{SIZE}}", &format!("i{bits}"))
+        .replace("{{SCOPE_BYTES}}", &pointer_bytes.to_string())
+        .replace("{{SIGNAL_BYTES}}", &pointer_bytes.to_string())
+        .replace("{{REACTION_BYTES}}", &(pointer_bytes * 8).to_string())
+        .replace("{{DEP_BYTES}}", &(pointer_bytes * 5).to_string())
+        .replace("{{WORK_BYTES}}", &(pointer_bytes * 3).to_string());
+    link_runtime_source(context, module, &runtime, "reactive", "staple-reactive")
+}
+
+fn link_runtime_source<'context>(
+    context: &'context inkwell::context::Context,
+    module: &inkwell::module::Module<'context>,
+    source: &str,
+    description: &str,
+    buffer_name: &str,
+) -> CodeGenerationResult<()> {
+    let buffer = MemoryBuffer::create_from_memory_range_copy(source.as_bytes(), buffer_name);
+    let runtime = context.create_module_from_ir(buffer).map_err(|error| {
+        Diagnostic::new(
+            Span::Compiler,
+            format!("could not build {description} runtime: {error}"),
+        )
+    })?;
+    module.link_in_module(runtime).map_err(|error| {
+        Diagnostic::new(
+            Span::Compiler,
+            format!("could not link {description} runtime: {error}"),
+        )
+    })
 }
 
 #[cfg(test)]

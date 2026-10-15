@@ -38,7 +38,7 @@ use crate::{
 
 use super::abi::flattened_parameter_types;
 use super::{
-    Backend, CodeGenerationResult, Diagnostic, LayoutContext, compiler_diagnostic,
+    Backend, CodeGenerationResult, Diagnostic, EmissionUnit, LayoutContext, compiler_diagnostic,
     ir::value_as_basic,
 };
 use crate::lower::EmissionOwner;
@@ -139,6 +139,7 @@ struct LoopContext<'context> {
 
 pub(super) struct LoweredEmitter<'program, 'context> {
     view: EmissionView<'program>,
+    unit: EmissionUnit,
     backend: Backend<'program, 'context>,
     instances: HashMap<FunctionInstanceId, FunctionValue<'context>>,
     artifacts: HashMap<ArtifactOrdinal, Vec<FunctionValue<'context>>>,
@@ -162,9 +163,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         context: &'context inkwell::context::Context,
         view: EmissionView<'program>,
         target_machine: &TargetMachine,
+        unit: &EmissionUnit,
     ) -> Self {
         Self {
             view,
+            unit: unit.clone(),
             backend: Backend::new(context, target_machine, LayoutContext::new(view)),
             instances: HashMap::new(),
             artifacts: HashMap::new(),
@@ -193,7 +196,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.emit_instance_bodies(&mut diagnostics);
         self.emit_artifact_bodies(&mut diagnostics);
         self.emit_initializers(&mut diagnostics);
-        if let Err(diagnostic) = self.emit_main() {
+        if self.unit.emits_main()
+            && let Err(diagnostic) = self.emit_main()
+        {
             diagnostics.push(diagnostic);
         }
         if !diagnostics.is_empty() {
@@ -203,6 +208,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .llvm_module
             .verify()
             .map_err(|message| vec![invalid_module_diagnostic(message)])?;
+        if !self.unit.is_whole_program() {
+            // Every object carries its own internal copies of the instances
+            // and artifacts it references; keep only those its definitions
+            // reach.
+            self.backend
+                .llvm_module
+                .run_passes(
+                    "globaldce",
+                    target_machine,
+                    inkwell::passes::PassBuilderOptions::create(),
+                )
+                .map_err(|message| vec![invalid_module_diagnostic(message)])?;
+        }
         Ok(self.backend.llvm_module)
     }
 
@@ -214,14 +232,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .llvm_module
             .set_data_layout(&target_machine.get_target_data().get_data_layout());
 
-        // An executable always needs the collector for its entry harness.
-        self.backend.install_gc_runtime()?;
         let requirements = self.view.runtime_requirements();
-        if requirements.contains(RuntimeRequirement::ReactiveRuntime) {
-            self.backend.install_reactive_runtime()?;
-        }
-        if requirements.contains(RuntimeRequirement::CoroutineRuntime) {
-            self.backend.install_coroutine_runtime()?;
+        if self.unit.includes_runtime() {
+            // An executable always needs the collector for its entry harness.
+            self.backend.install_gc_runtime()?;
+            if requirements.contains(RuntimeRequirement::ReactiveRuntime) {
+                self.backend.install_reactive_runtime()?;
+            }
+            if requirements.contains(RuntimeRequirement::CoroutineRuntime) {
+                self.backend.install_coroutine_runtime()?;
+            }
+        } else {
+            self.backend.declare_runtime_symbols()?;
         }
         self.declare_required_runtime_symbols()?;
 
@@ -331,9 +353,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .map_or(0, <[_]>::len),
                     )?
             };
-            let linkage = instance
-                .requires_internal_linkage
-                .then_some(Linkage::Internal);
+            let linkage = if self.unit.is_whole_program() {
+                instance.requires_internal_linkage
+            } else {
+                !self.view.instance_exported(id)
+            }
+            .then_some(Linkage::Internal);
             let function = self
                 .backend
                 .llvm_module
@@ -341,6 +366,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             self.instances.insert(id, function);
         }
         Ok(())
+    }
+
+    /// Whether the unit being emitted owns the module's package.
+    fn owns_module(&self, module: Option<ModuleId>) -> bool {
+        self.unit
+            .owns(module.and_then(|module| self.view.module_package(module)))
+    }
+
+    /// The linkage of a generated artifact that is external in a
+    /// single-module build. Ordinal names are private to an object, so a unit
+    /// keeps its copy internal.
+    fn artifact_linkage(&self) -> Option<Linkage> {
+        (!self.unit.is_whole_program()).then_some(Linkage::Internal)
     }
 
     fn declare_required_runtime_symbols(&mut self) -> CodeGenerationResult<()> {
@@ -447,7 +485,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // Linkage rule per family: constructor adapters, extern adapters,
         // runners, and the coroutine `resume`/`cleanup` pair are `Internal`;
         // structural methods and GC finalizers keep the default (external)
-        // linkage; drop glue emits no function. Coroutine pair names come from
+        // linkage in a single-module build and are `Internal` in a unit; drop
+        // glue emits no function. Coroutine pair names come from
         // the catalog, where `planned_names_with` collision-checks them with
         // every other planned name. The remaining names are the artifact's
         // planned name.
@@ -494,7 +533,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let ty = self
                         .backend
                         .compile_closure_function_type(&plan.callable_type)?;
-                    vec![self.backend.llvm_module.add_function(name, ty, None)]
+                    vec![
+                        self.backend
+                            .llvm_module
+                            .add_function(name, ty, self.artifact_linkage()),
+                    ]
                 }
                 LoweredArtifactPlan::TraitDictionary(plan) => {
                     let count = plan.layout.environment + 2 * plan.methods.len();
@@ -656,7 +699,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .context
                         .void_type()
                         .fn_type(&[pointer.into()], false);
-                    vec![self.backend.llvm_module.add_function(name, ty, None)]
+                    vec![
+                        self.backend
+                            .llvm_module
+                            .add_function(name, ty, self.artifact_linkage()),
+                    ]
                 }
                 LoweredArtifactPlan::CoroutineCodes(_) => {
                     let (resume_name, cleanup_name) = self
@@ -748,6 +795,25 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         name
     }
 
+    /// Declares a module global. A single-module build keeps it internal. A
+    /// unit defines its own package's globals with external linkage and
+    /// declares the others, which another object defines.
+    fn declare_global(
+        &self,
+        owner: ModuleId,
+        llvm_type: BasicTypeEnum<'context>,
+        name: &str,
+    ) -> GlobalValue<'context> {
+        let global = self.backend.llvm_module.add_global(llvm_type, None, name);
+        if self.unit.is_whole_program() || self.owns_module(Some(owner)) {
+            global.set_initializer(&llvm_type.const_zero());
+            if self.unit.is_whole_program() {
+                global.set_linkage(Linkage::Internal);
+            }
+        }
+        global
+    }
+
     fn declare_storage(&mut self) -> CodeGenerationResult<()> {
         for (id, symbol) in self.view.symbols() {
             if symbol.owner.is_some()
@@ -761,13 +827,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let base = format!("__staple_m{prefix}.{binding_name}");
             if symbol.requires_initialization_check {
                 let name = self.unique_global_name(format!("{base}_state"));
-                let state = self.backend.llvm_module.add_global(
-                    self.backend.context.i8_type(),
-                    None,
+                let state = self.declare_global(
+                    symbol.module,
+                    self.backend.context.i8_type().into(),
                     &name,
                 );
-                state.set_initializer(&self.backend.context.i8_type().const_zero());
-                state.set_linkage(Linkage::Internal);
                 self.initialization_states.insert(id, state);
             }
             if !symbol.has_global {
@@ -775,20 +839,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             let llvm_type = self.backend.compile_type(&symbol.value_type)?;
             let name = self.unique_global_name(base);
-            let global = self.backend.llvm_module.add_global(llvm_type, None, &name);
-            global.set_initializer(&llvm_type.const_zero());
-            global.set_linkage(Linkage::Internal);
+            let global = self.declare_global(symbol.module, llvm_type, &name);
             self.storage.insert(id, global);
             if symbol.signal || symbol.derived {
                 let suffix = if symbol.signal { "signal" } else { "derived" };
                 let name = self.unique_global_name(format!("{name}_{suffix}"));
                 let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
-                let metadata = self
-                    .backend
-                    .llvm_module
-                    .add_global(pointer_type, None, &name);
-                metadata.set_initializer(&pointer_type.const_null());
-                metadata.set_linkage(Linkage::Internal);
+                let metadata = self.declare_global(symbol.module, pointer_type.into(), &name);
                 if symbol.signal {
                     self.signal_metadata.insert(id, metadata);
                 } else {
@@ -809,10 +866,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     format!("initializer name `{name}` collides with a function"),
                 ));
             }
-            let function =
-                self.backend
-                    .llvm_module
-                    .add_function(name, function_type, Some(Linkage::Internal));
+            // A unit exports its own package's initializers for the entry to
+            // call and declares the rest.
+            let linkage = self.unit.is_whole_program().then_some(Linkage::Internal);
+            let function = self
+                .backend
+                .llvm_module
+                .add_function(name, function_type, linkage);
             self.initializers.insert(id, function);
         }
         Ok(())
@@ -1202,6 +1262,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// failure.
     fn emit_instance_bodies(&mut self, diagnostics: &mut Vec<Diagnostic>) {
         for (id, _) in self.view.instances() {
+            // An exported function of another unit's package is only declared.
+            if self.view.instance_exported(id) && !self.owns_module(self.view.instance_module(id)) {
+                continue;
+            }
             if let Err(diagnostic) = self.emit_instance_body(id) {
                 diagnostics.push(diagnostic);
             }
@@ -2029,7 +2093,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// Strict: attempt every initializer body, collecting one diagnostic per
     /// failure.
     fn emit_initializers(&mut self, diagnostics: &mut Vec<Diagnostic>) {
-        for (id, _) in self.view.initializers() {
+        for (id, initializer) in self.view.initializers() {
+            if !self.owns_module(Some(initializer.module)) {
+                continue;
+            }
             if let Err(diagnostic) = self.emit_initializer_body(id) {
                 diagnostics.push(diagnostic);
             }
