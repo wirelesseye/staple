@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use inkwell::context::Context;
-use staple_compiler::{CodeGenerator, Lowerer, NameResolver, ProgramLoader, TypeChecker};
+use staple_compiler::{
+    CodeGenerator, EmissionUnit, Lowerer, NameResolver, ProgramLoader, TypeChecker,
+};
 use staple_syntax::Item;
 
 struct Fixture {
@@ -45,7 +47,13 @@ impl Fixture {
         fs::write(path, source).expect("module should be written");
     }
 
+    /// Lowers the program's own code, with the standard library treated as
+    /// a prebuilt object.
     fn lower(&self) -> Result<staple_compiler::LoweredModule, String> {
+        self.lower_with(true)
+    }
+
+    fn lower_with(&self, prebuilt: bool) -> Result<staple_compiler::LoweredModule, String> {
         let program = ProgramLoader::new()
             .with_standard_library_root(
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -60,11 +68,29 @@ impl Fixture {
         let typed = TypeChecker::new()
             .check(resolved)
             .map_err(format_diagnostics)?;
-        Lowerer::new().lower(&typed).map_err(format_diagnostics)
+        Lowerer::new()
+            .with_prebuilt_dependencies(prebuilt)
+            .lower(&typed)
+            .map_err(format_diagnostics)
     }
 
+    /// The IR of the program's own code: the root unit with the runtime, the
+    /// standard library declared rather than defined.
     fn compile(&self) -> Result<String, String> {
         let lowered = self.lower()?;
+        let context = Context::create();
+        CodeGenerator::new(&context)
+            .compile_unit_for_target(
+                &lowered,
+                &EmissionUnit::root(&lowered).with_runtime(true),
+                None,
+            )
+            .map_err(format_diagnostics)
+    }
+
+    /// The single-module IR, standard library included.
+    fn compile_whole(&self) -> Result<String, String> {
+        let lowered = self.lower_with(false)?;
         let context = Context::create();
         CodeGenerator::new(&context)
             .compile_module(&lowered)
@@ -146,7 +172,8 @@ fn imports_standard_io_print_functions() {
         ),
     );
 
-    let llvm = fixture.compile().expect("std.io should compile");
+    // The bodies of `print` and `println` live in the standard library.
+    let llvm = fixture.compile_whole().expect("std.io should compile");
     assert!(llvm.contains("__staple_mstd.io.print"));
     assert!(llvm.contains("__staple_mstd.io.println"));
     assert!(llvm.contains("@printf"));

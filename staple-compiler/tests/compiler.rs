@@ -1,7 +1,7 @@
 use inkwell::context::Context;
 use staple_compiler::{
-    CheckedMutation, CheckedType, CodeGenerator, LoweredModule, Lowerer, NameResolver,
-    PlannedArtifactFamily, ProgramLoader, RecursiveConstruction, TypeChecker,
+    CheckedMutation, CheckedType, CodeGenerator, EmissionUnit, LoweredModule, Lowerer,
+    NameResolver, PlannedArtifactFamily, ProgramLoader, RecursiveConstruction, TypeChecker,
 };
 use staple_syntax::{Diagnostic, Item, Type, parse};
 use std::path::Path;
@@ -144,10 +144,35 @@ fn type_check(source: &str) -> staple_compiler::TypedModule {
         .expect("source should type-check")
 }
 
+/// Lowers the program's own code. The standard library is treated as a
+/// prebuilt object, as an incremental build links it, so only what the
+/// program reaches is lowered. Emit the result with [`CompileRoot`].
 fn lower(module: &staple_compiler::TypedModule) -> LoweredModule {
+    Lowerer::new()
+        .with_prebuilt_dependencies(true)
+        .lower(module)
+        .expect("checked module should lower")
+}
+
+/// Lowers the whole program, standard library included, for the
+/// single-module build: tests that JIT-run the program, inspect standard
+/// library code, or emit a complete object.
+fn lower_whole(module: &staple_compiler::TypedModule) -> LoweredModule {
     Lowerer::new()
         .lower(module)
         .expect("checked module should lower")
+}
+
+/// Emits the IR of the program's own code: the root unit with the runtime.
+/// Standard library functions are declared, not defined.
+trait CompileRoot {
+    fn compile_root(&self, module: &LoweredModule) -> Result<String, Vec<Diagnostic>>;
+}
+
+impl CompileRoot for CodeGenerator<'_> {
+    fn compile_root(&self, module: &LoweredModule) -> Result<String, Vec<Diagnostic>> {
+        self.compile_unit_for_target(module, &EmissionUnit::root(module).with_runtime(true), None)
+    }
 }
 
 /// D2 assertions use the planned names of defined catalog artifacts.
@@ -186,7 +211,7 @@ fn implicitly_thunks_call_arguments_and_preserves_callback_effects() {
 
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("implicit thunks should lower as ordinary callbacks");
     assert!(llvm.contains("implicit_thunk"));
 }
@@ -209,7 +234,7 @@ fn phantom_type_parameter_generics_route_through_instances() {
 
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("phantom-parameter generic calls and values should emit");
 }
 
@@ -239,7 +264,7 @@ fn signals_and_scoped_reactions_type_check_and_lower() {
 
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("signals and reactions should lower");
     assert!(llvm.contains("__staple_signal_track"));
     assert!(llvm.contains("__staple_signal_notify"));
@@ -256,7 +281,7 @@ fn reactive_batches_type_check_and_lower_through_implicit_thunking() {
 
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("reactive batches should lower");
     assert!(llvm.contains("__staple_batch_begin"));
     assert!(llvm.contains("__staple_batch_end"));
@@ -285,7 +310,7 @@ fn infers_persistent_signal_derivations_and_respects_snapshot() {
 
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("derived bindings should lower");
     assert!(llvm.contains("__staple_derived_create"));
     assert!(llvm.contains("__staple_derived_read"));
@@ -347,7 +372,7 @@ fn implicitly_thunks_fixed_product_argument_positions() {
 
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("fixed product slots should lower implicit thunks independently");
 }
 
@@ -391,7 +416,7 @@ fn trait_methods_fall_back_to_implicit_thunking() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("trait dispatch should use thunking when no direct match exists");
 }
 
@@ -408,7 +433,7 @@ fn specializes_generic_effect_parameters() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("effect-polymorphic calls should monomorphize");
 }
 
@@ -429,7 +454,7 @@ fn infers_type_parameters_through_function_typed_tuple_slots() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("type-and-effect generic calls should compile");
 }
 
@@ -442,7 +467,7 @@ fn effect_bundles_exist_only_for_run_time_rows() {
         let module = type_check(source);
         let context = Context::create();
         CodeGenerator::new(&context)
-            .compile_module(&lower(&module))
+            .compile_root(&lower(&module))
             .expect("effect programs should compile")
     };
     let direct = emit(concat!(
@@ -507,7 +532,7 @@ fn coroutines_lower_to_resume_and_cleanup_functions() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("coroutines should lower");
     // One state-machine `resume` (with a `state.0` entry block) and one
     // `cleanup` (with a `not.freed` block) per user coroutine body.
@@ -534,7 +559,7 @@ fn a_parenthesized_effectful_call_lowers() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a parenthesized effectful call should lower and compile");
 }
 
@@ -548,7 +573,7 @@ fn a_block_tail_coroutine_is_returned_instead_of_destroyed() {
     let context = Context::create();
     let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lowered)
+        .compile_root(&lowered)
         .expect("a block-tail coroutine should lower");
     let body = function_definition(&llvm, "f");
     // Storing the `cleanup` pointer into the frame header is construction;
@@ -582,7 +607,7 @@ fn dropping_an_unstarted_coroutine_emits_a_cleanup_call() {
     let context = Context::create();
     let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lowered)
+        .compile_root(&lowered)
         .expect("an unstarted coroutine should lower");
     // The coroutine's cleanup exists and its drop path calls the closure
     // finalizer that frees the captured CString.
@@ -612,7 +637,7 @@ fn awaiting_a_task_lowers_to_a_waiter_park_and_outcome_branch() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("`await <Task>` should lower");
     // The awaiting body reads the external record and forks on whether it
     // completed or was cancelled.
@@ -645,7 +670,7 @@ fn completion_await_lowers_to_an_external_wait_with_a_fast_path() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("`await <Wait>` should lower");
     // Registration (with the already-resolved fast path), the shared outcome
     // branch, and the resolver/drop runtime shims.
@@ -681,7 +706,7 @@ fn completion_with_cancel_arms_a_callback_and_the_unwind_abandons_it() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("`completion_with_cancel` should lower");
     // The callback halves are stored and the armed bit is set at creation.
     assert!(llvm.contains("completion.cancel.fn"));
@@ -713,7 +738,7 @@ fn completion_tokens_expose_c_entry_points_and_a_staple_facade() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lower_whole(&module))
         .expect("`completion_token` should lower");
     // The three host entry points are emitted with external linkage, and the
     // Staple `CompletionToken` facade calls into them / the shared cancel path.
@@ -741,7 +766,7 @@ fn until_lowers_to_a_reaction_backed_completion_coroutine() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("`until` should lower");
     // The `until` coroutine has its own resume/cleanup and an internal reaction
     // runner that resolves a completion.
@@ -793,7 +818,7 @@ fn a_return_inside_a_task_scope_closes_it() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("an early return from a task scope should lower");
     let body = function_definition(&llvm, "early");
     assert_eq!(
@@ -856,7 +881,7 @@ fn a_declared_coroutine_row_bounds_its_body() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("an over-declared coroutine should lower and compile");
 }
 
@@ -919,7 +944,7 @@ fn spawned_coroutines_lower_a_cancellation_unwind_path() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("cancellation should lower");
     // Every coroutine `resume` checks its task record for a cancel request and
     // branches to an unwind that reports CANCELLED.
@@ -946,7 +971,7 @@ fn the_coroutine_driver_isolates_reactive_tracking_and_guards_pump() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("coroutine reactive integration should lower");
     // The trampoline detaches dependency tracking around every `resume`.
     assert!(llvm.contains("__staple_tracking_suspend"));
@@ -1194,7 +1219,7 @@ fn infers_checks_and_lowers_typed_resources() {
 
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("typed resources should lower to hidden parameters");
     assert!(llvm.contains("define i32 @read"));
 }
@@ -1434,7 +1459,7 @@ fn mutable_and_non_copy_resources_follow_parameter_ownership() {
 
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("borrowed resources should lower through the hidden ABI");
 
     let diagnostics = TypeChecker::new()
@@ -1507,7 +1532,7 @@ fn standard_io_is_a_compiler_provided_resource_and_propagates_to_main() {
     }
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("generic calls should remain specialized during resource inference");
 }
 
@@ -1580,7 +1605,7 @@ fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
     }
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("trait and specialized resource calls should lower");
 
     let diagnostics = TypeChecker::new()
@@ -1832,7 +1857,7 @@ fn supports_repeated_spread_and_slice_references() {
     let context = Context::create();
     let generator = CodeGenerator::new(&context);
     let llvm = generator
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("product extensions should generate LLVM");
     assert!(llvm.contains("slice.length"));
     assert!(llvm.contains("index.out_of_bounds"));
@@ -1854,7 +1879,7 @@ fn from_ref_accepts_generic_arrays_and_is_first_class() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("`from_ref` should accept a generic array and be first-class");
 }
 
@@ -1866,7 +1891,7 @@ fn checks_nullary_calls_inside_argument_positions() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a nullary call should check inside a call argument");
 }
 
@@ -1883,7 +1908,7 @@ fn supports_number_literal_types_as_generic_product_sizes() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("dependent product sizes should specialize before code generation");
 }
 
@@ -1940,7 +1965,7 @@ fn natural_count_parameters_drive_repeated_product_values() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("Natural-typed count parameters should specialize before code generation");
 
     let diagnostics = TypeChecker::new()
@@ -1982,7 +2007,7 @@ fn spreads_fixed_product_values_and_call_arguments() {
     let module = type_check(source);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("product value spreads should generate LLVM");
     assert!(llvm.contains("product.spread.element"));
 }
@@ -2024,7 +2049,7 @@ fn repeated_product_values_expand_to_fixed_products() {
 
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("repeated product values should generate LLVM");
 }
 
@@ -2116,7 +2141,7 @@ fn fills_named_type_field_defaults_at_calls_and_construction() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("defaulted named-type fields should generate LLVM");
 }
 
@@ -2157,7 +2182,7 @@ fn juxtaposed_functions_apply_extra_arguments_to_the_result() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("arguments after juxtaposed parameters should apply to its result");
 }
 
@@ -2251,7 +2276,7 @@ fn field_defaults_apply_in_products_nested_in_a_representation() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("nested representation defaults should generate LLVM");
 }
 
@@ -2264,7 +2289,7 @@ fn field_defaults_may_name_singleton_values() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("singleton defaults should generate LLVM");
 }
 
@@ -2279,7 +2304,7 @@ fn named_type_field_defaults_combine_with_spread_fields() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("defaults after spread fields should generate LLVM");
 }
 
@@ -2387,7 +2412,7 @@ fn spreads_named_product_values_by_name_and_overrides_fields() {
     let module = type_check(source);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("named product value spreads should generate LLVM");
     assert!(llvm.contains("product.spread.element"));
 }
@@ -2464,7 +2489,7 @@ fn constructs_products_with_contextual_named_initializers() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("designated product should generate LLVM");
 }
 
@@ -2536,7 +2561,7 @@ fn designated_initializers_override_earlier_values() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("designated override should generate LLVM");
 }
 
@@ -2549,7 +2574,7 @@ fn keeps_named_spread_override_behavior() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("named spread overrides should remain valid");
 }
 
@@ -2571,7 +2596,7 @@ fn type_checks_and_lowers_mutable_places_and_ref_replace() {
     let module = type_check(source);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("mutable places should generate LLVM");
     assert!(llvm.contains("binding.cell"));
     assert!(llvm.contains("place.field"));
@@ -2664,7 +2689,7 @@ fn captures_a_mut_binding_in_a_shared_cell_for_field_writes() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("captured mut binding should generate LLVM");
     assert!(llvm.contains("binding.cell"));
 }
@@ -2864,7 +2889,7 @@ fn a_mut_effect_adds_no_hidden_parameter_to_the_abi() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("mut effects should not affect the ABI");
     let base = llvm_parameter_count(&llvm, "f");
     let with_resource = llvm_parameter_count(&llvm, "g");
@@ -2882,7 +2907,7 @@ fn a_mutated_ref_parameter_lowers_and_the_caller_observes_the_write() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a mutated Ref parameter should lower");
 }
 
@@ -2899,7 +2924,7 @@ fn a_mut_parameter_can_replace_the_callers_value() {
     );
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a replaced scalar parameter should lower by address");
     assert!(llvm.contains("define") && llvm.contains("@update_data(ptr"));
     assert!(llvm.contains("store i32 42"));
@@ -3003,7 +3028,7 @@ fn whole_and_positional_product_parameters_can_be_replaced() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("whole and positional product replacements should lower");
 }
 
@@ -3017,7 +3042,7 @@ fn a_first_class_mutating_function_preserves_writeback() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("indirect mutating calls should use the address-passing ABI");
 }
 
@@ -3029,7 +3054,7 @@ fn a_mut_call_materializes_and_discards_a_temporary_argument() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a temporary mut argument should get call-scoped storage");
     assert!(llvm.contains("mutation.temporary"));
 }
@@ -3043,7 +3068,7 @@ fn a_move_only_mut_temporary_drops_replaced_and_final_values() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("move-only mutation temporaries should lower with ownership cleanup");
     assert!(llvm.contains("mutation.temporary.final"));
     assert!(llvm.contains("assignment.old"));
@@ -3100,7 +3125,7 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
     let context = Context::create();
     let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lowered)
+        .compile_root(&lowered)
         .expect("move-only mutable cells should generate LLVM");
     assert!(llvm.contains("cell.drop.is_live"));
     assert_artifact_definition(&llvm, &lowered, PlannedArtifactFamily::GcCellFinalizer);
@@ -3191,7 +3216,7 @@ fn derives_trait_delegated_product_indexing() {
     let context = Context::create();
     let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lowered)
+        .compile_root(&lowered)
         .expect("derived indexing traits should generate LLVM");
     assert_artifact_definition(&llvm, &lowered, PlannedArtifactFamily::StructuralIndex);
     assert_artifact_definition(
@@ -3214,7 +3239,7 @@ fn delegates_brackets_to_explicit_indexing_implementations() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("custom indexing traits should generate LLVM");
 }
 
@@ -3225,7 +3250,7 @@ fn allows_by_value_indexed_assignment_for_mut_bindings() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("by-value indexed assignment through a `mut` binding should generate LLVM");
 }
 
@@ -3266,7 +3291,7 @@ fn derives_mutate_index_for_move_only_homogeneous_products() {
     let module = type_check(source);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("move-only indexed replacement should generate LLVM");
     assert!(llvm.contains("index.old"));
 }
@@ -3310,7 +3335,7 @@ fn delegates_indexing_through_refs_to_the_payload() {
     let module = type_check(source);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("indexing through a Ref should generate LLVM");
     assert!(llvm.contains("index.deref"));
 }
@@ -3333,7 +3358,7 @@ fn delegates_indexed_assignment_through_refs_to_the_payload() {
     let module = type_check(source);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("indexed assignment through a Ref should generate LLVM");
     assert!(llvm.contains("mutate_index.deref"));
 }
@@ -3377,7 +3402,7 @@ fn indexes_slices_through_the_standard_library_implementation() {
     let module = type_check(source);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("slice indexing should use the standard-library implementation");
     assert!(!llvm.contains("structural_Index"));
     assert!(!llvm.contains("structural_MutateIndex"));
@@ -3401,7 +3426,7 @@ fn iterates_slices_through_the_standard_library_implementations() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("slice iteration should use the standard-library implementation");
 }
 
@@ -3430,7 +3455,7 @@ fn compares_slices_and_strings_through_the_standard_library_eq_implementations()
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("slice and string equality should use the standard-library implementations");
 }
 
@@ -3529,7 +3554,7 @@ fn derives_structural_iteration_for_products() {
     let context = Context::create();
     let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lowered)
+        .compile_root(&lowered)
         .expect("derived iteration traits should generate LLVM");
     assert_artifact_definition(
         &llvm,
@@ -3686,7 +3711,7 @@ fn allows_local_trait_implementations_for_products() {
     let module = type_check(source);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("local trait implementations for products should generate LLVM");
     assert!(llvm.contains("trait.call"));
 }
@@ -3859,7 +3884,7 @@ fn infers_and_lowers_nominal_sums_with_propagation() {
 
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("sum propagation should generate LLVM");
     assert!(llvm.contains("propagate.ok"));
     assert!(llvm.contains("propagate.return"));
@@ -3889,7 +3914,7 @@ fn exhaustively_matches_sum_values_and_destructures_payloads() {
     );
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("match should generate LLVM");
     assert!(llvm.contains("match.tag"));
     assert!(llvm.contains("match.tag.matches"));
@@ -3922,7 +3947,7 @@ fn matches_singletons_and_joins_nominal_arm_results() {
     assert_eq!(sum.alternatives.len(), 2);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("singleton match should generate LLVM");
 }
 
@@ -3950,7 +3975,7 @@ fn supports_match_catch_alls_wildcard_parameters_and_returning_arms() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("catch-all and returning matches should generate LLVM");
 }
 
@@ -3972,7 +3997,7 @@ fn matches_values_of_any_runtime_type() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("matches over arbitrary runtime values should generate LLVM");
 }
 
@@ -4070,7 +4095,7 @@ fn exhaustively_matches_product_combinations() {
     assert_eq!(result.alternatives.len(), 2);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("product match should generate LLVM");
     assert!(llvm.matches("match.element").count() >= 2);
     assert!(llvm.contains("match.next"));
@@ -4129,7 +4154,7 @@ fn injects_and_widens_sum_values() {
     let context = Context::create();
     let generator = CodeGenerator::new(&context);
     generator
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("sum injection and widening should generate valid LLVM");
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4137,7 +4162,7 @@ fn injects_and_widens_sum_values() {
         .as_nanos();
     let output = std::env::temp_dir().join(format!("staple-compiler-sum-test-{nonce}.o"));
     generator
-        .emit_object(&lower(&module), &output, None)
+        .emit_object(&lower_whole(&module), &output, None)
         .expect("sum values should emit a native object");
     std::fs::remove_file(output).expect("temporary sum object should be removable");
 }
@@ -4167,7 +4192,7 @@ fn propagates_each_residual_variant_and_joins_explicit_returns() {
     assert_eq!(sum.alternatives.len(), 2);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("residual-only propagation widening should generate LLVM");
 }
 
@@ -4193,7 +4218,7 @@ fn supports_arbitrary_sized_sum_alternatives_and_typed_matches() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("arbitrary sized sum alternatives should lower to LLVM");
 }
 
@@ -4340,7 +4365,7 @@ fn permits_deferred_mutual_recursion_with_selective_state() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("capturing a forward binding must remain legal");
     assert!(llvm.contains(".g_state"));
     assert!(llvm.contains("binding.uninitialized"));
@@ -4358,7 +4383,7 @@ fn captures_potentially_unsafe_local_defs_by_binding_cell() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("unsafe local captures should share a binding cell");
     assert!(llvm.contains("binding.cell"));
     assert!(llvm.contains("binding.uninitialized"));
@@ -4374,7 +4399,7 @@ fn applies_initialization_state_to_recursive_local_generics() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("generic functions use the same initialization state model");
     assert!(llvm.contains("binding.state.cell"));
     assert!(llvm.contains("binding.uninitialized"));
@@ -4385,7 +4410,7 @@ fn does_not_add_state_metadata_to_safe_bindings() {
     let module = type_check("def answer = 42\nanswer\n");
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("safe bindings should compile without state metadata");
     assert!(!llvm.contains(".answer_state"));
 }
@@ -4438,7 +4463,7 @@ fn treats_singleton_products_as_their_element() {
 
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("singleton products should compile as their element");
     assert!(llvm.contains("define i32 @identity(ptr %0, i32 %value)"));
     assert!(!llvm.contains("define i32 @identity(ptr %0, { i32 }"));
@@ -4452,7 +4477,7 @@ fn destructures_nested_product_patterns() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("nested product pattern should compile");
 
     assert!(llvm.contains("define i32 @add_nested(ptr %0, i32 %x, { i32, i32 }"));
@@ -4467,7 +4492,7 @@ fn binds_a_product_without_destructuring_it() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a product binding pattern should compile");
 
     assert!(llvm.contains("define i32 @sum(ptr %0, i32 %1, i32 %2)"));
@@ -4488,7 +4513,7 @@ fn binds_whole_copy_values_while_destructuring_them() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("at-patterns over Copy products should compile");
 
     assert!(llvm.contains("define i32 @parameter(ptr %0, i32 %1, i32 %2)"));
@@ -4511,7 +4536,7 @@ fn at_patterns_are_structural_in_matches_and_propagation() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("at-patterns should preserve match and propagation lowering");
     assert!(llvm.contains("match.tag"));
     assert!(llvm.contains("propagate.ok"));
@@ -4551,7 +4576,7 @@ fn compile_time_at_patterns_bind_whole_syntax_values() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("compile-time at-patterns should clone syntax values");
 }
 
@@ -4599,7 +4624,7 @@ fn arithmetic_operators_work_without_trait_imports() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("arithmetic without trait imports should compile");
 
     assert!(llvm.contains("add i32"));
@@ -4634,7 +4659,7 @@ fn compares_all_standard_library_integer_types() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("integer comparisons should compile");
 
     for predicate in [
@@ -4673,7 +4698,7 @@ fn supports_contextual_float_literals_arithmetic_and_partial_ordering() {
 
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lower_whole(&module))
         .expect("float operations should compile");
     for instruction in [
         "fadd float",
@@ -4770,7 +4795,7 @@ fn requires_only_the_core_equality_method() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("the default `ne` should back `!=`");
 }
 
@@ -4786,7 +4811,7 @@ fn compares_library_defined_bool_values() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("Bool equality should dispatch through its standard-library implementation");
     assert!(llvm.contains("match.tag.matches"));
 }
@@ -4833,7 +4858,7 @@ fn bool_is_an_auto_loaded_standard_library_type() {
 
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("library-defined Bool should use ordinary sum lowering");
 }
 
@@ -5034,7 +5059,7 @@ fn buffer_intrinsics_type_check_and_compile() {
     let context = Context::create();
     let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lowered)
+        .compile_root(&lowered)
         .expect("Buffer operations should compile");
     assert!(llvm.contains("buffer.allocate"));
     assert!(llvm.contains("buffer.push.slot"));
@@ -5052,7 +5077,7 @@ fn buffer_intrinsics_type_check_and_compile() {
     ));
     let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lowered)
+        .compile_root(&lowered)
         .expect("Buffer should own non-Default, non-Copy elements");
     assert_artifact_definition(&llvm, &lowered, PlannedArtifactFamily::GcBufferFinalizer);
 }
@@ -5080,7 +5105,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("Buffer and List deep clones should compile");
     assert!(llvm.contains("buffer.clone.allocate"));
     assert!(llvm.contains("buffer.clone.element"));
@@ -5153,7 +5178,7 @@ fn buffer_transfer_type_checks_and_compiles() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("Buffer.transfer should compile");
     assert!(llvm.contains("buffer.transfer.aliased"));
     assert!(llvm.contains("buffer.transfer.insufficient_capacity"));
@@ -5183,7 +5208,7 @@ fn list_grows_past_initial_capacity_and_type_checks() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("List operations should compile");
     assert!(llvm.contains("buffer.transfer.dest.write"));
 }
@@ -5205,7 +5230,7 @@ fn migrated_stdlib_methods_accept_pipe_method_call_syntax() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("caret method calls on migrated stdlib methods should compile");
 }
 
@@ -5248,7 +5273,7 @@ fn companion_where_bound_resolves_independently_for_every_member() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("every member of a where-bounded companion should resolve its own bound");
 }
 
@@ -5276,7 +5301,7 @@ fn macro_declared_inside_a_companion_resolves_as_type_dot_macro() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a macro declared inside a companion should resolve as Type.macro");
 }
 
@@ -5299,7 +5324,7 @@ fn dispatches_generic_implementations_of_traits_with_associated_types() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a generic impl of a trait with an associated type should dispatch and compile");
 }
 
@@ -5348,7 +5373,7 @@ fn list_supports_bracket_indexing_mutation_and_iteration() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("List Index/MutateIndex/Iterator/IntoIterator should compile");
 }
 
@@ -5391,7 +5416,7 @@ fn list_of_macro_builds_a_list_from_values() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("List.of should compile for the empty, singleton, and multi-element cases");
 }
 
@@ -5418,7 +5443,7 @@ fn wrapping_a_curried_mut_effect_call_attributes_the_right_argument() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("wrapped curried Buffer.push should compile");
 }
 
@@ -5473,7 +5498,7 @@ fn c_string_is_an_imported_primitive_macro() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lower_whole(&module))
         .expect("String operations should compile");
 
     assert!(llvm.contains("string.pointer"));
@@ -5500,7 +5525,7 @@ fn a_c_string_temporary_passed_to_a_borrowing_callback_is_freed() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("callback calls should lower");
     let borrowed = function_definition(&llvm, "apply");
     let call = borrowed
@@ -5526,7 +5551,7 @@ fn a_block_tail_c_string_is_moved_out_instead_of_freed() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a block-tail CString should lower");
     let body = function_definition(&llvm, "text");
     assert!(
@@ -5652,7 +5677,7 @@ fn inspects_identifier_and_call_syntax() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("structured syntax inspection should generate code");
 }
 
@@ -5669,7 +5694,7 @@ fn constructs_identifier_and_call_syntax() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("constructed syntax should generate code");
 }
 
@@ -5684,7 +5709,7 @@ fn bare_ident_defaults_spelling_to_string() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("bare `Ident` should default its spelling to `String` and generate code");
 }
 
@@ -5726,7 +5751,7 @@ fn structured_syntax_overloads_use_leaf_specificity() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("structured syntax overloads should select a unique leaf");
 }
 
@@ -5744,7 +5769,7 @@ fn constructed_identifiers_use_definition_hygiene_and_children_keep_caller_hygie
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("constructed syntax should retain the appropriate hygiene context");
 }
 
@@ -5800,7 +5825,7 @@ fn mutates_call_syntax_with_value_semantics_and_shared_capture_cells() {
 
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("mutated syntax should generate code");
 }
 
@@ -5906,7 +5931,7 @@ fn expands_explicit_and_inferred_item_macros() {
     }));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("generated bindings and types should generate code");
 }
 
@@ -5945,7 +5970,7 @@ fn modifier_arguments_support_expression_type_and_pattern_syntax() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("modifier arguments and generated items should compile");
 }
 
@@ -5959,7 +5984,7 @@ fn expands_modifier_lists_generated_by_item_macros() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("generated modifier lists should expand before resolution");
 }
 
@@ -5998,7 +6023,7 @@ fn modifier_macro_produces_multiple_items_as_the_outermost_modifier() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("modifier producing a Sequence Item result should compile");
 }
 
@@ -6015,7 +6040,7 @@ fn modifier_macro_produces_multiple_items_via_raw_syntax() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("modifier producing raw Syntax that reparses to multiple items should compile");
 }
 
@@ -6051,7 +6076,7 @@ fn block_modifiers_replace_splice_and_delete_items() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("block modifier output should splice and compile");
 }
 
@@ -6073,7 +6098,7 @@ fn block_modifiers_may_generate_supported_declarations() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("supported declarations generated in a block should compile");
 }
 
@@ -6126,7 +6151,7 @@ fn outermost_modifier_can_discard_remaining_modifiers() {
     }));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("the discarded inner modifier should not run");
 }
 
@@ -6148,7 +6173,7 @@ fn outermost_multi_item_result_discards_remaining_modifiers() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("the outer modifier's items should replace the entire modified item");
 }
 
@@ -6188,7 +6213,7 @@ fn modified_item_can_be_destructured_and_reconstructed_losslessly() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("reconstructing `ModifiedItem` should preserve and continue its modifier");
 }
 
@@ -6225,7 +6250,7 @@ fn expands_metadata_aware_macros_and_contextual_visibility_splices() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("metadata-aware macro output should compile");
 }
 
@@ -6244,7 +6269,7 @@ fn expands_standard_typegroup_into_module_variants_and_alias() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("generated typegroup variants and alias should compile");
 }
 
@@ -6438,7 +6463,7 @@ fn type_checks_companion_method_call_syntax() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("companion method calls should lower as ordinary calls");
 }
 
@@ -6461,7 +6486,7 @@ fn type_checks_method_call_syntax_for_juxtaposed_companion_methods() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("juxtaposed companion method calls should lower as ordinary juxtaposed calls");
 }
 
@@ -6505,7 +6530,7 @@ fn typegroup_supports_generic_groups_and_reexports_their_variants() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("generic typegroup variants and their reexports should compile");
 }
 
@@ -6574,7 +6599,7 @@ fn equals_and_fat_arrow_are_structured_syntax_nodes() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("equals and fat-arrow syntax should match and construct");
 }
 
@@ -6593,7 +6618,7 @@ fn parse_quote_produces_punctuation_result_types() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("comma, equals, and fat-arrow parse_quote results should construct");
 }
 
@@ -6613,7 +6638,7 @@ fn parse_quote_produces_visibility_result_type() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("private, package, and public parse_quote results should construct");
 }
 
@@ -6637,7 +6662,7 @@ fn parse_quote_produces_delimited_result_types() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect(
             "fixed, sequence, and separated parse_quote results should construct, including a \
              nested same-kind delimiter captured opaquely as Syntax",
@@ -6768,7 +6793,7 @@ fn typegroup_supports_private_construction_compound_types_and_trailing_commas() 
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("private and compound typegroups should compile");
 }
 
@@ -7050,7 +7075,7 @@ fn accepts_opaque_type_and_pattern_macro_inputs_and_contextual_splices() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("type and pattern splices should generate valid code");
 }
 
@@ -7068,7 +7093,7 @@ fn accepts_product_type_and_pattern_macro_inputs_without_extra_grouping() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("product category arguments should not require extra grouping");
 }
 
@@ -7085,7 +7110,7 @@ fn splices_types_and_patterns_through_expression_quotation_contexts() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("contextual type and pattern splices should compile in expressions");
 }
 
@@ -7106,7 +7131,7 @@ fn quote_uses_contextual_results_and_reinterprets_opaque_fragments() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("opaque syntax should reparse according to its later quote context");
 }
 
@@ -7253,7 +7278,7 @@ fn opaque_syntax_captures_whole_delimiter_contents_and_is_the_broadest_overload(
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("whole-fragment capture and SyntaxNode overload precedence should compile");
 }
 
@@ -7297,7 +7322,7 @@ fn contextual_item_sequence_quotes_flatten_empty_single_and_multiple_results() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("contextual item sequences should flatten in source order");
 }
 
@@ -7349,7 +7374,7 @@ fn type_and_pattern_macro_inputs_support_atomic_and_compound_forms() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("atomic and grouped category arguments should compile");
 }
 
@@ -7433,7 +7458,7 @@ fn type_and_pattern_overloads_are_more_specific_than_syntax() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("category overloads should beat Syntax");
 }
 
@@ -7449,7 +7474,7 @@ fn expands_macros_and_splices_inside_generated_items() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("nested macros in generated items should expand");
 }
 
@@ -7472,7 +7497,7 @@ fn generates_extern_trait_and_implementation_items() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("generated resolver-safe declaration items should generate code");
 }
 
@@ -7490,7 +7515,7 @@ fn generates_generic_conditional_trait_implementation_items() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a macro-generated conditional trait implementation should generate code");
 }
 
@@ -7506,7 +7531,7 @@ fn generates_traits_with_associated_types() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("generated functional dependencies should resolve and specialize");
 }
 
@@ -7568,7 +7593,7 @@ fn evaluates_pure_syntax_helpers_and_conditional_macros() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("expanded macros should generate code");
 }
 
@@ -7590,7 +7615,7 @@ fn expands_typed_macros_with_literal_identifier_parameters() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("typed macro should expand to an ordinary expression");
 }
 
@@ -7607,7 +7632,7 @@ fn expands_macros_with_delimited_syntax_parameters() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("delimited macro parameters should expand");
 }
 
@@ -7624,7 +7649,7 @@ fn delimited_macro_overloads_use_structural_specificity() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("delimiter overloads should be ordered by structural specificity");
 }
 
@@ -7650,7 +7675,7 @@ fn constructs_and_destructures_delimited_syntax_values() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("delimiter values should support constructors and nominal patterns");
 }
 
@@ -7705,7 +7730,7 @@ fn top_level_macro_sequences_capture_zero_one_and_many_arguments() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("top-level macro sequences should compile");
 }
 
@@ -7728,7 +7753,7 @@ fn top_level_macro_sequences_backtrack_for_visibility_and_fixed_suffixes() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("sequence suffix matching should handle implicit and explicit visibility");
 }
 
@@ -7748,7 +7773,7 @@ fn top_level_macro_sequence_may_be_the_final_parameter() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a trailing top-level sequence should greedily capture the remaining arguments");
 }
 
@@ -7762,7 +7787,7 @@ fn longer_complete_overload_still_beats_a_trailing_sequence_overload() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("the longer overload wins when its suffix is present, the trailing sequence matches otherwise");
 }
 
@@ -7777,7 +7802,7 @@ fn fixed_and_more_specific_overloads_beat_top_level_sequences() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("fixed and category-specific overloads should win");
 }
 
@@ -7790,7 +7815,7 @@ fn annotated_top_level_sequences_compile_and_incomparable_sequences_are_ambiguou
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("annotated top-level sequences should compile");
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -7897,7 +7922,7 @@ fn matches_comma_and_separated_delimited_syntax() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("comma and separated syntax should match");
 }
 
@@ -7913,7 +7938,7 @@ fn separated_overloads_use_structural_specificity() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("fixed, separated, and ordinary sequence overloads should be ordered");
 }
 
@@ -7933,7 +7958,7 @@ fn constructs_and_destructures_separated_syntax() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("separated syntax should support construction and patterns");
 }
 
@@ -7986,7 +8011,7 @@ fn expands_standard_braced_when_clauses() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("standard braced when should expand and generate code");
 }
 
@@ -8018,7 +8043,7 @@ fn expands_if_else_if_chain() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("if/else if/else should expand and generate code");
 }
 
@@ -8033,7 +8058,7 @@ fn expands_standard_while_with_loop_control() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("standard while should expand and generate valid LLVM");
     assert!(llvm.contains("loop.body"));
     assert!(llvm.contains("loop.exit"));
@@ -8065,7 +8090,7 @@ fn expands_standard_for_over_ranges_and_product_iterators() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("for loops over ranges and custom iterators should generate LLVM");
     assert!(llvm.contains("loop.body"));
     assert!(llvm.contains("trait.call"));
@@ -8102,7 +8127,7 @@ fn macro_overloads_choose_longest_then_most_specific() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("selected overloads should generate code");
 }
 
@@ -8293,7 +8318,7 @@ fn default_type_bound_fills_omitted_type_argument() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("defaulted and explicit instantiations should compile");
 }
 
@@ -8316,7 +8341,7 @@ fn default_type_bound_may_reference_an_earlier_parameter() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("chained default should compile");
 }
 
@@ -8373,7 +8398,7 @@ fn trait_default_type_bound_fills_missing_implementation_and_bound_arguments() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("defaulted trait argument should compile");
     assert!(llvm.contains("trait.call"));
 }
@@ -8387,7 +8412,7 @@ fn inline_default_type_bound_introduces_and_defaults_in_one_clause() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("inline default should compile just like the two-clause form");
 }
 
@@ -8400,7 +8425,7 @@ fn inline_default_type_bound_combines_with_a_trailing_subtype_bound() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("inline default combined with a trailing subtype bound should compile");
 }
 
@@ -8414,7 +8439,7 @@ fn inline_default_type_bound_for_trait_parameter_fills_missing_argument() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("inline trait default should compile just like the two-clause form");
     assert!(llvm.contains("trait.call"));
 }
@@ -8445,7 +8470,7 @@ fn evaluates_pure_compile_time_control_flow_and_arithmetic() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("pure compile-time arithmetic should select syntax");
 }
 
@@ -8461,7 +8486,7 @@ fn composes_nested_macros_and_applies_excess_arguments() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("nested and excess-argument macro calls should compile");
 }
 
@@ -8478,7 +8503,7 @@ fn applies_excess_arguments_to_a_bare_quote_invoked_as_a_top_level_item() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("excess arguments after a top-level `quote` expansion should still apply");
     assert!(
         llvm.contains("call {} %closure.code"),
@@ -8728,7 +8753,7 @@ fn a_shadowing_let_produces_the_later_value_at_codegen() {
     let module = type_check("let value = 1\nlet value = value + 1\nvalue\n");
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a shadowing `let` should compile");
     assert!(llvm.contains("add"));
 }
@@ -8738,7 +8763,7 @@ fn generates_a_named_function_after_predeclaring_it() {
     let module = type_check("let first = (a: I32, b: I32) => a\nfirst (1, 2)\n");
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("module should compile");
 
     assert!(llvm.contains("define i32 @first(ptr %0, i32 %a, i32 %b)"));
@@ -8750,7 +8775,7 @@ fn predeclares_functions_for_recursion() {
     let module = type_check("def recurse: (n: I32) -> I32 = (n: I32) => recurse (n)\n");
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("recursive function should compile");
 
     assert!(llvm.contains("binding.uninitialized"));
@@ -8770,7 +8795,7 @@ fn preserves_the_environment_for_recursive_closures() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("recursive closure should compile");
     assert!(llvm.contains("binding.cell"));
     assert!(llvm.contains("closure.call"));
@@ -8787,7 +8812,7 @@ fn lowers_captured_locals_into_closure_environments() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("captured locals should use closure lowering");
 
     assert!(llvm.contains("@malloc"));
@@ -8811,7 +8836,7 @@ fn type_checks_and_lowers_managed_refs() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("Ref values should generate valid LLVM");
     assert!(llvm.contains("call ptr @__staple_gc_alloc"));
     assert!(llvm.contains("ref.payload"));
@@ -8841,7 +8866,7 @@ fn compares_refs_through_the_standard_library_eq_implementation() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("comparing Refs should use the standard-library Eq implementation");
 }
 
@@ -8873,7 +8898,7 @@ fn preserves_literal_nominal_ref_container_semantics() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("nominal Ref containers should compile");
 }
 
@@ -8934,7 +8959,7 @@ fn type_checks_and_generates_curried_functions() {
 
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("curried functions should compile");
     assert!(llvm.contains("closure.call"));
     assert!(llvm.contains("@malloc"));
@@ -8949,7 +8974,7 @@ fn type_checks_and_generates_non_curried_juxtaposed_functions() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("juxtaposed functions should generate LLVM");
 }
 
@@ -8977,7 +9002,7 @@ fn completes_a_juxtaposed_call_before_calling_its_result() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("remaining arguments should call the completed result");
 }
 
@@ -9005,7 +9030,7 @@ fn supports_patterns_in_juxtaposed_parameter_slots() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("juxtaposed slots should support ordinary parameter patterns");
 }
 
@@ -9019,7 +9044,7 @@ fn lowers_mutation_markers_on_juxtaposed_parameter_slots() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("juxtaposed mutation slots should use the flattened parameter ABI");
 }
 
@@ -9071,7 +9096,7 @@ fn lowers_transitive_captures_across_curried_layers() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("transitive captures should compile");
     assert!(llvm.matches("@malloc").count() >= 3);
     assert!(llvm.contains("load { i32 }"));
@@ -9089,7 +9114,7 @@ fn adapts_non_variadic_externs_used_as_function_values() {
     let context = Context::create();
     let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lowered)
+        .compile_root(&lowered)
         .expect("external function adapter should compile");
     assert_artifact_definition(&llvm, &lowered, PlannedArtifactFamily::ExternAdapter);
     assert!(
@@ -9106,7 +9131,7 @@ fn compiles_builtin_arithmetic_via_trait_dispatch() {
     let module = type_check("let answer: I32 = 1 + 2\n");
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("builtin `+` should compile via ordinary trait dispatch");
     // "operator.2b" is the mangled symbol a binding literally named `+` would
     // get; since `+` is fixed grammar now, not a binding, it must not appear.
@@ -9126,7 +9151,7 @@ fn compiles_arithmetic_negation_via_neg_trait() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("prefix `-` should compile via `Neg` trait dispatch");
 }
 
@@ -9151,7 +9176,7 @@ fn compiles_singleton_product_literals_wrapping_products() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("singleton product literals around products should compile");
 }
 
@@ -9166,7 +9191,7 @@ fn compiles_logical_not_via_not_trait() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("prefix `!` should compile via `Not` trait dispatch");
 }
 
@@ -9185,7 +9210,7 @@ fn prefix_operators_dispatch_to_user_defined_impls() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("user `Neg`/`Not` implementations should back the prefix operators");
 }
 
@@ -9198,7 +9223,7 @@ fn folds_const_prefix_negation_at_compile_time() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("const prefix negation should fold and compile");
 }
 
@@ -9225,7 +9250,7 @@ fn decodes_source_string_literals_before_llvm_generation() {
     let module = type_check(source);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("module should compile");
 
     assert!(llvm.contains("c\"hello\\0A\\00\""));
@@ -9250,7 +9275,7 @@ fn type_checks_generic_aliases_and_functions() {
     let context = Context::create();
     let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lowered)
+        .compile_root(&lowered)
         .expect("generic functions should be monomorphized");
     let names = lowered.planned_instance_names("identity");
     assert!(names.len() >= 2);
@@ -9279,7 +9304,7 @@ fn type_checks_static_traits_and_bounded_generic_functions() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("static trait calls should compile");
     assert!(llvm.contains("trait.call"));
 }
@@ -9299,7 +9324,7 @@ fn provides_to_string_for_prelude_scalar_types() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("ToString implementations should generate LLVM");
 }
 
@@ -9330,7 +9355,7 @@ fn provides_formatter_display_debug_and_structural_product_debug() {
     let context = Context::create();
     let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lowered)
+        .compile_root(&lowered)
         .expect("formatting protocols should generate LLVM");
     assert_artifact_definition(&llvm, &lowered, PlannedArtifactFamily::StructuralDebug);
     assert!(llvm.contains("formatter.write"));
@@ -9348,7 +9373,7 @@ fn provides_structural_debug_for_sum_types() {
     let context = Context::create();
     let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lowered)
+        .compile_root(&lowered)
         .expect("sum Debug should generate LLVM");
     assert_artifact_definition(&llvm, &lowered, PlannedArtifactFamily::StructuralDebug);
     assert!(llvm.contains("debug.sum.fmt"));
@@ -9368,7 +9393,7 @@ fn derives_debug_for_nominal_representations() {
     let context = Context::create();
     let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lowered)
+        .compile_root(&lowered)
         .expect("derived Debug implementations should generate LLVM");
     assert!(llvm.contains("formatter.write"));
     assert_artifact_definition(&llvm, &lowered, PlannedArtifactFamily::StructuralDebug);
@@ -9386,7 +9411,7 @@ fn derives_debug_for_bodyless_singleton_types() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("derived singleton Debug implementations should generate LLVM");
     // Each singleton's name is emitted as a string literal for its Debug impl,
     // and the sum reuses those per-variant impls through structural sum Debug.
@@ -9415,7 +9440,7 @@ fn quoted_type_declarations_from_one_template_get_distinct_identity() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("distinct per-variant Debug implementations should generate LLVM");
     assert!(llvm.contains("c\"Enabled\\00\""));
     assert!(llvm.contains("c\"Disabled\\00\""));
@@ -9435,7 +9460,7 @@ fn exposes_type_declarations_as_structured_items() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("structured and fallback item views should round-trip");
 }
 
@@ -9457,7 +9482,7 @@ fn type_checks_and_generates_string_templates() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("string templates should generate LLVM");
     assert!(llvm.contains("template.formatter"));
     assert!(llvm.contains("template.fmt"));
@@ -9529,7 +9554,7 @@ fn uses_generic_default_trait_members_and_concrete_overrides() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("default trait members should specialize and compile");
     assert!(llvm.contains("trait.call"));
 }
@@ -9549,7 +9574,7 @@ fn default_trait_members_use_prerequisites_multiple_arguments_and_macros() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("prerequisite and macro-using defaults should compile");
 }
 
@@ -9562,7 +9587,7 @@ fn explicit_trait_members_override_defaults() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("explicit overrides should compile");
 }
 
@@ -9575,7 +9600,7 @@ fn specializes_recursive_default_trait_members() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("recursive defaults should reuse their specialization");
 }
 
@@ -9620,7 +9645,7 @@ fn type_checks_product_and_curried_multi_parameter_traits() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("multi-parameter trait calls should compile");
     assert!(llvm.contains("trait.call"));
 }
@@ -9651,7 +9676,7 @@ fn infers_trait_associated_type_arguments() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("associated type dispatch should compile");
 }
 
@@ -9697,7 +9722,7 @@ fn resolves_associated_type_projections() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("associated type projections should compile");
 }
 
@@ -9792,7 +9817,7 @@ fn preserves_applied_types_as_unary_trait_arguments() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("legacy unary applied trait arguments should compile");
 }
 
@@ -9810,7 +9835,7 @@ fn enforces_and_propagates_transitive_trait_prerequisites() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("transitive prerequisite dispatch should compile");
     assert!(llvm.contains("trait.call"));
 
@@ -10004,7 +10029,7 @@ fn generic_conditional_trait_implementation_dispatches_and_compiles() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a conditional trait implementation should monomorphize and compile");
     assert!(llvm.contains("trait.call"));
 }
@@ -10122,7 +10147,7 @@ fn constructs_wrapper_and_generic_wrapper_values() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("constructors should compile as zero-cost conversions");
 }
 
@@ -10154,7 +10179,7 @@ fn constructs_and_propagates_singleton_nominal_values() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("singleton values should generate valid LLVM");
 }
 
@@ -10192,7 +10217,7 @@ fn contextually_specializes_first_class_generic_functions() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("contextually specialized generic functions should compile");
 }
 
@@ -10208,7 +10233,7 @@ fn contextually_specializes_first_class_constructors() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("first-class constructors should compile");
 }
 
@@ -10227,7 +10252,7 @@ fn destructures_nominal_values_in_lets_and_functions() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("nominal destructuring should be zero-cost");
 }
 
@@ -10247,7 +10272,7 @@ fn accesses_visible_nominal_representations_explicitly_and_by_shortcut() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("representation projections should be zero-cost and preserve places");
 }
 
@@ -10284,7 +10309,7 @@ fn destructures_contextually_typed_generic_nominal_patterns() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("generic nominal patterns should monomorphize");
 }
 
@@ -10301,7 +10326,7 @@ fn captures_values_bound_by_nominal_patterns() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("destructured leaves should be captured normally");
 }
 
@@ -10362,7 +10387,7 @@ fn monomorphizes_nested_and_recursive_generic_calls() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("nested generic calls should discover concrete specializations");
 }
 
@@ -10377,7 +10402,7 @@ fn monomorphizes_generic_closures_with_captures() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("generic closures should retain their captured environment");
 }
 
@@ -10392,7 +10417,7 @@ fn infers_product_and_result_only_compile_time_parameters() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("multiple compile-time parameters should specialize");
 }
 
@@ -10404,7 +10429,7 @@ fn monomorphizes_curried_generic_function_layers() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("curried generic layers should specialize together");
 }
 
@@ -10439,7 +10464,7 @@ fn allows_generic_locals_inside_a_nested_closure() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a nested closure should inherit the enclosing generic scope");
 }
 
@@ -10555,7 +10580,7 @@ fn returns_from_nested_expression_blocks() {
 
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("nested return should generate valid LLVM");
     assert!(llvm.contains("ret i32 42"));
 }
@@ -10626,7 +10651,7 @@ fn supports_contextual_literals_and_arithmetic_for_all_integer_types() {
 
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("all integer arithmetic should generate valid LLVM");
 }
 
@@ -10685,7 +10710,7 @@ fn emits_a_native_object_file() {
     let output = std::env::temp_dir().join(format!("staple-compiler-test-{nonce}.o"));
 
     CodeGenerator::new(&context)
-        .emit_object(&lower(&module), &output, None)
+        .emit_object(&lower_whole(&module), &output, None)
         .expect("native object emission should succeed");
     let length = std::fs::metadata(&output)
         .expect("object should exist")
@@ -10745,7 +10770,7 @@ fn borrowed_curried_closures_are_lexically_scoped() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("borrowed curried closures should lower through pointer captures");
     assert!(!llvm.contains("closure.borrow"));
 
@@ -10781,7 +10806,7 @@ fn borrowed_curried_closures_enforce_escape_and_borrow_conflicts() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&mutable))
+        .compile_root(&lower(&mutable))
         .expect("mutable borrowed captures should lower through caller storage");
 
     for source in [
@@ -10999,7 +11024,7 @@ fn lowers_custom_drop_and_gc_finalizer_glue() {
     let context = Context::create();
     let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lowered)
+        .compile_root(&lowered)
         .expect("Drop glue should compile");
 
     assert!(llvm.contains("drop.call"));
@@ -11047,7 +11072,7 @@ fn allows_move_only_globals_borrowed_from_top_level_statements_and_functions() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("borrowing a move-only global should compile");
 }
 
@@ -11093,7 +11118,7 @@ fn moves_resources_into_managed_closures_and_borrows_ref_payloads() {
     let context = Context::create();
     let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lowered)
+        .compile_root(&lowered)
         .expect("a move-only capture should get managed finalizer glue");
     assert_artifact_definition(&llvm, &lowered, PlannedArtifactFamily::GcClosureFinalizer);
 
@@ -11132,7 +11157,7 @@ fn lowers_path_sensitive_drop_flags() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("conditional ownership should lower through a runtime drop flag");
     assert!(llvm.contains("drop.is_live"));
     assert!(llvm.contains("drop.call"));
@@ -11218,7 +11243,7 @@ fn matches_literal_sets_strings_and_mixed_nominal_unions() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("literal and mixed matches should generate LLVM");
     assert!(llvm.contains("match.string.length_matches"));
     assert!(llvm.contains("@memcmp"));
@@ -11302,7 +11327,7 @@ fn infers_and_generates_loop_result_values() {
     }
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("loops should generate valid LLVM");
     assert!(llvm.contains("loop.body"));
     assert!(llvm.contains("loop.exit"));
@@ -11321,7 +11346,7 @@ fn supports_loop_control_through_matches_and_function_returns() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("nested loop control should generate valid LLVM");
 }
 
@@ -11359,7 +11384,7 @@ fn accepts_divergent_loops_in_typed_contexts() {
     let module = type_check("def forever: () -> I32 = () => loop { continue }\n");
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a divergent loop should satisfy its expected type");
 }
 
@@ -11403,7 +11428,7 @@ fn supports_never_as_the_bottom_type_and_tracks_divergence() {
 
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("Never functions and calls should generate valid LLVM");
     assert!(llvm.contains("unreachable"));
 }
@@ -11432,7 +11457,7 @@ fn panic_diverges_and_unifies_with_any_expected_type() {
 
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("panic call should generate valid LLVM");
     assert!(llvm.contains("unreachable"));
 }
@@ -11451,7 +11476,7 @@ fn a_diverging_top_level_statement_does_not_double_terminate_its_module_initiali
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a diverging top-level statement should compile to a valid module");
     assert!(llvm.contains("unreachable"));
 }
@@ -11466,7 +11491,7 @@ fn deduplicates_matching_extern_declarations_across_modules() {
     let module = type_check(concat!("extern \"c\" { exit: I32 -> () }\n", "exit 5\n",));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a matching duplicate extern declaration should be deduplicated");
     assert!(
         !llvm.contains("@exit.1"),
@@ -11503,7 +11528,7 @@ fn rejects_conflicting_extern_declarations_of_the_same_symbol() {
     ));
     let context = Context::create();
     let diagnostics = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect_err("a conflicting extern redeclaration of `exit` should be rejected");
     assert!(
         diagnostics.iter().any(|diagnostic| diagnostic
@@ -11531,7 +11556,7 @@ fn checks_reachability_correctly_after_a_top_level_loop_with_break() {
     let module = type_check(source);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("code after a top-level loop with a break should still be checked and generated");
     assert!(llvm.contains("loop.body"));
 }
@@ -11551,7 +11576,7 @@ fn checks_ownership_across_loop_exits_and_back_edges() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("loop exits should preserve moved results and drop iteration locals");
     assert!(llvm.contains("loop.value"));
     assert!(llvm.contains("drop.call"));
@@ -11581,7 +11606,7 @@ fn pub_repr_type_constructor_satisfies_its_own_subtype_bound() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("wrapper type whose representation is a bare bounded parameter should compile");
 }
 
@@ -11599,7 +11624,7 @@ fn checks_and_generates_short_circuiting_logical_operators() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("`&&`/`||` should compile to short-circuiting branches");
     assert!(llvm.contains("logical.short_circuit"));
     assert!(llvm.contains("logical.right"));
@@ -11631,7 +11656,7 @@ fn folds_const_arithmetic_and_recursive_calls_at_compile_time() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("const bindings should fold and compile");
     // `x` and `y` are folded to plain literals by the compiler, not
     // computed by generated code at program startup: the initializer
@@ -11650,7 +11675,7 @@ fn folds_const_strings_and_products() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("string and product consts should fold and compile");
     assert!(llvm.contains("hello, const!"));
 }
@@ -11664,7 +11689,7 @@ fn folds_const_float_arithmetic_at_compile_time() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("float const bindings should fold and compile");
     // `x` and `y` fold directly to literal constants. `z`'s negative
     // result instead goes through the same zero-minus-magnitude
@@ -11812,7 +11837,7 @@ fn standard_library_conversion_blankets_consume_non_copy_values() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("identity conversion blankets should consume non-Copy values");
 }
 
@@ -11832,7 +11857,7 @@ fn standard_library_try_convert_delegates_to_convert() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("infallible conversions should provide TryConvert with Never errors");
 }
 
@@ -11854,7 +11879,7 @@ fn standard_library_try_convert_supports_fallible_implementations() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("manual fallible conversions should compile");
 }
 
@@ -11868,7 +11893,7 @@ fn every_copy_type_gets_a_blanket_clone_implementation() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("the blanket `Clone` impl for `Copy` types should compile");
     assert!(llvm.contains("trait.call"));
 }
@@ -11883,7 +11908,7 @@ fn a_non_copy_type_can_implement_clone_manually() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a manual `Clone` implementation for a non-`Copy` type should compile");
     assert!(llvm.contains("trait.call"));
 }
@@ -12324,7 +12349,7 @@ fn slotted_product_aliases_normalize_function_parameters() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("aliases generate LLVM");
 }
 
@@ -12344,7 +12369,7 @@ fn slotted_products_survive_nominal_type_arguments_and_specialization() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("nominal slotted products specialize");
 }
 
@@ -12358,7 +12383,7 @@ fn slotted_product_spreads_preserve_slots() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("spreads compile");
 }
 
@@ -12380,7 +12405,7 @@ fn slotted_products_are_values_in_nested_and_nominal_positions() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("slotted values compile");
 }
 
@@ -12396,7 +12421,7 @@ fn slotted_generic_signatures_accept_juxtaposed_callbacks() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("capable generics specialize");
 }
 
@@ -12428,7 +12453,7 @@ fn slotted_generic_expected_types_and_forwarding_work() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("expected-type and forwarded generics specialize");
 }
 
@@ -12463,7 +12488,7 @@ fn slotted_companion_members_infer_parameter_types() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("capable companion specializes");
     let diagnostics = TypeChecker::new()
         .check(resolve(&format!("{prefix}Handler.evaluate handler 1\n")))
@@ -12487,7 +12512,7 @@ fn slotted_product_template_spreads_and_markers_normalize_after_substitution() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("spread templates and markers compile");
 }
 
@@ -12540,7 +12565,7 @@ fn single_slot_slotted_products_collapse_names_and_markers() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("one-slot functions compile with plain ABI");
 }
 
@@ -12575,7 +12600,7 @@ fn slotted_products_pass_through_generic_impl_headers() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("a capable impl specializes its header and members together");
 }
 
@@ -12642,7 +12667,7 @@ fn from_types_introduce_their_representation_contextually() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("implicit `from` introductions should compile");
 }
 
@@ -12796,7 +12821,7 @@ fn patterns_see_through_one_from_layer() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("see-through patterns should compile");
     let messages = type_check_errors(
         concat!(
@@ -12884,7 +12909,7 @@ fn named_types_are_indexed_only_through_their_own_implementations() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("explicit representation indexing and user `Index` should compile");
 }
 #[test]
@@ -13161,7 +13186,7 @@ fn call_site_type_arguments_specialize_functions_and_constructors() {
     let context = Context::create();
     let lowered = lower(&module);
     CodeGenerator::new(&context)
-        .compile_module(&lowered)
+        .compile_root(&lowered)
         .expect("explicit generic arguments should lower and generate code");
     assert!(lowered.planned_instance_names("identity").len() >= 2);
 }
@@ -13229,7 +13254,7 @@ fn call_site_type_arguments_work_in_generic_bodies_and_macro_quotes() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("explicit arguments should survive generic and macro expansion");
 }
 
@@ -14006,7 +14031,7 @@ fn trait_member_parameters_admit_slotted_values() {
         let module = type_check(&format!("{declarations}{use_site}"));
         let context = Context::create();
         CodeGenerator::new(&context)
-            .compile_module(&lower(&module))
+            .compile_root(&lower(&module))
             .expect("trait-member generics admit slotted callback parameters and type arguments");
     }
 }
@@ -14060,7 +14085,7 @@ fn generic_trait_members_infer_skipped_own_arguments_and_keep_phantom_arguments(
     )));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&stored)
+        .compile_root(&stored)
         .expect("explicit phantom arguments reach instantiation adapters");
     for use_site in [
         "let result = Read.read 1\n",
@@ -14146,7 +14171,7 @@ fn generic_trait_members_preserve_product_trait_parameters() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("product trait parameters remain grouped before member arguments");
 }
 
@@ -14185,7 +14210,7 @@ fn pipe_stages_resolve_companions_traits_and_qualified_members() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("pipes should lower");
 }
 
@@ -14285,7 +14310,7 @@ fn slotted_products_typecheck_as_distinct_values_and_function_parameters() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("slotted products should lower as products");
     let errors = type_check_errors(
         "let wrong: (I32; I32) = (1, 2)\n",
@@ -14312,7 +14337,7 @@ fn slotted_type_spreads_preserve_target_kind_and_validate_substitutions() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("type spreads should specialize to fixed products");
     for source in [
         "type Append P = alias (...P; I32)\nlet bad: Append I32 = (1; 2)\n",
@@ -14341,7 +14366,7 @@ fn slotted_function_markers_follow_expanded_type_slots() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("expanded slot markers compile");
 }
 
@@ -14431,7 +14456,7 @@ fn generic_constructors_take_slotted_values_as_one_slot() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("boxed slotted values compile");
     let messages = type_check_errors(
         "type Box T = wrap (value: T)\nlet slots: (I32; I32) = (1; 2)\nlet b: Box (I32; I32) = Box ...slots\n",
@@ -14489,7 +14514,7 @@ fn slotted_direct_calls_spread_fixed_products_into_consecutive_slots() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("call spreads emit LLVM");
 }
 
@@ -14531,7 +14556,7 @@ fn generic_constructor_values_keep_their_expected_callable_types() {
         let module = type_check(&source);
         let context = Context::create();
         CodeGenerator::new(&context)
-            .compile_module(&lower(&module))
+            .compile_root(&lower(&module))
             .unwrap_or_else(|diagnostics| panic!("{name}: {diagnostics:?}"));
     }
 }
@@ -14551,7 +14576,7 @@ fn slotted_trait_calls_spread_operands_and_keep_pipeline_first_slots() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("trait spreads emit LLVM");
 }
 
@@ -14586,7 +14611,7 @@ fn slotted_call_spreads_apply_extra_arguments_to_returned_functions() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("returned slotted functions use fresh call groups");
 }
 
@@ -14610,7 +14635,7 @@ fn slotted_companion_calls_spread_remaining_slots() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("companion spreads preserve receiver-first calls and literal context");
 }
 
@@ -14651,7 +14676,7 @@ fn overloaded_slotted_trait_calls_contextualize_candidate_slots() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("each overload supplies its own ordinary slot context");
     let messages = type_check_errors(
         concat!(
@@ -14686,7 +14711,7 @@ fn slotted_trait_calls_contextualize_each_ordinary_slot() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("trait slots apply literal context and implicit thunking independently");
 }
 
@@ -14707,7 +14732,7 @@ fn slotted_values_support_patterns_access_and_designated_initializers() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("slotted value patterns and access emit LLVM");
 }
 
@@ -14742,7 +14767,7 @@ fn slotted_constant_products_fold_and_convert_in_both_directions() {
     }
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("slotted constant products fold through conversion spreads");
     assert!(llvm.contains("i32 2"));
     assert!(llvm.contains("i32 4"));
@@ -14759,7 +14784,7 @@ fn slotted_values_support_structural_copy_and_debug() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("slotted values synthesize structural trait implementations");
 }
 
@@ -14781,7 +14806,7 @@ fn product_display_is_structural_for_plain_and_slotted_values() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("product Display derives delegates through generic dictionaries");
 }
 
@@ -14833,7 +14858,7 @@ fn structural_product_equality_supports_plain_slotted_and_generic_values() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("product Eq derives element delegates through generic dictionaries");
 }
 
@@ -14869,7 +14894,7 @@ fn slotted_values_derive_indexing_mutation_and_iteration() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("slotted products derive the full product indexing and iteration paths");
 }
 
@@ -14906,7 +14931,7 @@ fn slotted_generic_opaque_calls_and_specialized_function_values_emit() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("opaque generic calls adapt aggregate arguments to the shared slotted ABI");
 }
 
@@ -14951,7 +14976,7 @@ fn slotted_macro_parameters_match_atomic_syntax() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("annotated and inferred slotted macros emit expanded code");
 }
 
@@ -14969,7 +14994,7 @@ fn polymorphic_callback_values_admit_slotted_instantiations() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect(
             "polymorphic callback values no longer carry parameter-product capability restrictions",
         );
@@ -15005,7 +15030,7 @@ fn generic_whole_mutation_preserves_slotted_writeback() {
              record (pair.0 + pair.1)\n"
         ));
         let context = Context::create();
-        let text = match CodeGenerator::new(&context).compile_module(&lower(&module)) {
+        let text = match CodeGenerator::new(&context).compile_module(&lower_whole(&module)) {
             Ok(text) => text,
             Err(diagnostics) => {
                 failures.push(format!("{call}: {diagnostics:?}"));
@@ -15057,7 +15082,7 @@ fn higher_order_functions_accept_parenthesized_mutating_callbacks() {
     );
     let context = Context::create();
     let text = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lower_whole(&module))
         .expect("mutating callbacks should compile");
     let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
         text.as_bytes(),
@@ -15124,7 +15149,7 @@ fn slotted_returned_mutation_closures_drop_non_copy_slots_once() {
         ));
         let context = Context::create();
         let text = CodeGenerator::new(&context)
-            .compile_module(&lower(&module))
+            .compile_module(&lower_whole(&module))
             .unwrap();
         let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
             text.as_bytes(),
@@ -15218,7 +15243,7 @@ fn slotted_function_storage_composition_and_polymorphic_apply_run() {
     ));
     let context = Context::create();
     let text = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lower_whole(&module))
         .unwrap();
     let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
         text.as_bytes(),
@@ -15247,7 +15272,7 @@ fn slotted_specialized_direct_calls_preserve_the_baseline_abi() {
     ));
     let context = Context::create();
     let text = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .unwrap();
     let caller = text
         .split("define i32 @invoke(ptr %0, i32 %value) {\n")
@@ -15317,7 +15342,7 @@ fn function_effect_lower_bounds_merge_and_propagate() {
     assert_eq!(effects("duplicate").resources.len(), 1);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .unwrap();
     assert!(
         llvm.contains("@unused("),
@@ -15437,7 +15462,7 @@ fn function_effect_lower_bounds_preserve_open_rows_and_nested_function_purity() 
     assert_eq!(inner.effects.resources.len(), 1);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .unwrap();
 }
 
@@ -15469,7 +15494,7 @@ fn function_effect_lower_bounds_survive_macro_expansion_and_rendering() {
     staple_syntax::parse(&expanded).unwrap();
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .unwrap();
 }
 
@@ -15492,7 +15517,7 @@ fn function_effect_lower_bounds_pass_unused_and_mutable_resources_at_runtime() {
     ));
     let context = Context::create();
     let text = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lower_whole(&module))
         .unwrap();
     let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
         text.as_bytes(),
@@ -15901,7 +15926,7 @@ fn unique_constructs_dereferences_and_transfers_raw_ownership() {
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("Unique should emit");
     assert!(llvm.contains("@malloc"));
     assert!(llvm.contains("@free"));
@@ -15945,14 +15970,14 @@ fn unique_and_raw_pointers_accept_unsized_pointees() {
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_root(&lower(&module))
         .expect("unsized pointer handles should emit without a pointee layout");
     let dynamic = Lowerer::new()
         .with_dictionary_pass_generic_calls(true)
         .lower(&module)
         .expect("unsized handles should lower with generic dictionary passing enabled");
     CodeGenerator::new(&context)
-        .compile_module(&dynamic)
+        .compile_root(&dynamic)
         .expect("unsized handles should emit with generic dictionary passing enabled");
     for source in [
         "use std.ptr.*\ndef invalid = move value: Unique I32 => RawMutPtr I32 :: Convert.convert value\n",
