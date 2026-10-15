@@ -3306,7 +3306,7 @@ mod tests {
             &source,
             concat!(
                 "use std.buffer.Buffer\n",
-                "use std.slice.Slice\n",
+                "use std.shared_buffer.SharedBuffer\n",
                 "extern \"c\" { exit: I32 -> () }\n",
                 "def churn: I32 -> () = n => match n == 0 {\n",
                 "  True() => (),\n",
@@ -3317,7 +3317,7 @@ mod tests {
                 "  Buffer.push values 7\n",
                 "  Buffer.push values 8\n",
                 "  let popped = Buffer.pop values\n",
-                "  Buffer.freeze values\n",
+                "  Buffer.into_shared values\n",
                 "}\n",
                 "let mut empty: Buffer I32 = Buffer.with_capacity 4\n",
                 "match Buffer.get empty 0 { None() => (), Some _ => exit 1 }\n",
@@ -3333,7 +3333,7 @@ mod tests {
                 "churn 40000\n",
                 "churn 40000\n",
                 "let result = kept_slice[USize :: 0] - 7\n",
-                "match Slice.length kept_slice == 1 {\n",
+                "match SharedBuffer.length kept_slice == 1 {\n",
                 "  True() => exit result,\n",
                 "  False() => exit 1,\n",
                 "}\n",
@@ -3643,7 +3643,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn runs_slice_length_and_indexing() {
+    fn runs_shared_buffer_length_and_indexing() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -3653,20 +3653,17 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "use std.slice.Slice\n",
+                "use std.shared_buffer.SharedBuffer\n",
                 "extern \"c\" { exit: I32 -> () }\n",
                 "let index: USize = 1\n",
                 "let mut product: (I32 ^ 3) = (10, 20, 30)\n",
                 "product[index] = 21\n",
-                "let fixed: Ref (I32 ^ 3) = Ref product\n",
-                "let mut slice: Slice I32 = Slice.from_ref fixed\n",
+                "let mut slice: SharedBuffer I32 = SharedBuffer.from_array product\n",
                 "slice[index] = 22\n",
-                "match Slice.get_ref slice 0 { Some (Ref value) => if (value != 10) { exit 1 }, None() => exit 1 }\n",
+                "match SharedBuffer.get_ref slice 0 { Some (Ref value) => if (value != 10) { exit 1 }, None() => exit 1 }\n",
                 "match slice |> get_ref 2 { Some (Ref value) => if (value != 30) { exit 1 }, None() => exit 1 }\n",
-                "match Slice.get_ref slice 3 { None() => (), Some _ => exit 1 }\n",
-                "match Slice.get_ref slice 100 { None() => (), Some _ => exit 1 }\n",
-                "let empty: Slice I32 = Slice.from_ref (Ref ())\n",
-                "match Slice.get_ref empty 0 { None() => (), Some _ => exit 1 }\n",
+                "match SharedBuffer.get_ref slice 3 { None() => (), Some _ => exit 1 }\n",
+                "match SharedBuffer.get_ref slice 100 { None() => (), Some _ => exit 1 }\n",
 
                 "def score: ((I32, String, Bool), USize) -> I32 = (values, position) => match values[position] {\n",
                 "  value: I32 => value,\n",
@@ -3676,8 +3673,8 @@ mod tests {
                 "}\n",
                 "let mixed: (I32, String, Bool) = (7, \"text\", False)\n",
                 "let mixed_result = (score (mixed, 0) - 7) + score (mixed, 1) + (score (mixed, 2) - 1)\n",
-                "let result = mixed_result + (slice[index] - 22) + (fixed[index] - 22) + (product[index] - 21)\n",
-                "match Slice.length slice == 3 { True() => exit result, False() => exit 1 }\n",
+                "let result = mixed_result + (slice[index] - 22) + (product[index] - 21)\n",
+                "match SharedBuffer.length slice == 3 { True() => exit result, False() => exit 1 }\n",
             ),
         )
         .expect("temporary slice source should be writable");
@@ -3705,7 +3702,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn runs_slice_iteration() {
+    fn runs_shared_buffer_iteration() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -3715,11 +3712,11 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "use std.slice.Slice\n",
+                "use std.shared_buffer.SharedBuffer\n",
                 "extern \"c\" { exit: I32 -> () }\n",
                 "def run = () => {\n",
-                "let fixed: Ref (I32 ^ 4) = Ref (10, 20, 30, 40)\n",
-                "let values: Slice I32 = Slice.from_ref fixed\n",
+                "let fixed: (I32 ^ 4) = (10, 20, 30, 40)\n",
+                "let values: SharedBuffer I32 = SharedBuffer.from_array fixed\n",
                 "let mut sum: I32 = 0\n",
                 "for value in values { sum = sum + value }\n",
                 "let mut again: I32 = 0\n",
@@ -3762,7 +3759,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn runs_slice_and_string_equality() {
+    fn runs_shared_buffer_and_string_equality() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -3772,17 +3769,17 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "use std.slice.Slice\n",
+                "use std.shared_buffer.SharedBuffer\n",
                 "extern \"c\" { exit: I32 -> () }\n",
                 "def run = () => {\n",
-                "let first: Ref (I32 ^ 3) = Ref (1, 2, 3)\n",
-                "let same: Ref (I32 ^ 3) = Ref (1, 2, 3)\n",
-                "let different: Ref (I32 ^ 3) = Ref (1, 2, 4)\n",
-                "let shorter: Ref (I32 ^ 2) = Ref (1, 2)\n",
-                "let left: Slice I32 = Slice.from_ref first\n",
-                "let right: Slice I32 = Slice.from_ref same\n",
-                "let other: Slice I32 = Slice.from_ref different\n",
-                "let short: Slice I32 = Slice.from_ref shorter\n",
+                "let first: (I32 ^ 3) = (1, 2, 3)\n",
+                "let same: (I32 ^ 3) = (1, 2, 3)\n",
+                "let different: (I32 ^ 3) = (1, 2, 4)\n",
+                "let shorter: (I32 ^ 2) = (1, 2)\n",
+                "let left: SharedBuffer I32 = SharedBuffer.from_array first\n",
+                "let right: SharedBuffer I32 = SharedBuffer.from_array same\n",
+                "let other: SharedBuffer I32 = SharedBuffer.from_array different\n",
+                "let short: SharedBuffer I32 = SharedBuffer.from_array shorter\n",
                 "let first_text: String = \"staple\"\n",
                 "let second_text: String = \"staple\"\n",
                 "let other_text: String = \"staples\"\n",

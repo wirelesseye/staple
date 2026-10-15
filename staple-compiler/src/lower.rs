@@ -2180,8 +2180,8 @@ pub(crate) enum LoweredAccessKind {
         index: usize,
         dereference: Vec<CheckedType>,
     },
-    /// Element `index` of a `Slice`, bounds-checked at runtime.
-    Slice {
+    /// Element `index` of a `SharedBuffer`, bounds-checked at runtime.
+    SharedBuffer {
         index: usize,
         dereference: Vec<CheckedType>,
     },
@@ -2561,7 +2561,7 @@ pub(crate) enum LoweredPlaceKind {
         reference: ExpressionId,
         dereference: Vec<CheckedType>,
     },
-    /// Element `index` of a product place. `slice` marks a `Slice` base,
+    /// Element `index` of a product place. `slice` marks a `SharedBuffer` base,
     /// whose pointer is loaded from the slice representation and bounds
     /// checked rather than projected directly.
     ProductElement {
@@ -5007,7 +5007,7 @@ impl LoweredProgram {
 
     /// The root symbol of an assignment target's place, whose initialization
     /// state the assignment writes back: a direct symbol or captured cell, or a
-    /// representation/product projection of one. Slice and dereference places
+    /// representation/product projection of one. SharedBuffer and dereference places
     /// have none.
     ///
     /// A field write resolves to its base's root symbol for notification, so a
@@ -6007,7 +6007,7 @@ impl LoweredProgram {
                 if scalar {
                     LoweredAccessKind::Scalar { dereference }
                 } else if slice {
-                    LoweredAccessKind::Slice { index, dereference }
+                    LoweredAccessKind::SharedBuffer { index, dereference }
                 } else {
                     LoweredAccessKind::Product { index, dereference }
                 }
@@ -13792,16 +13792,16 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::StringFromCString
         | Intrinsic::StringToCString
         | Intrinsic::StringAdd
-        | Intrinsic::SliceLength
-        | Intrinsic::SliceGetRef
-        | Intrinsic::SliceFromRef
+        | Intrinsic::SharedBufferLength
+        | Intrinsic::SharedBufferGetRef
         | Intrinsic::BufferWithCapacity
         | Intrinsic::BufferLength
         | Intrinsic::BufferCapacity
         | Intrinsic::BufferPush
         | Intrinsic::BufferPop
         | Intrinsic::BufferGet
-        | Intrinsic::BufferFreeze
+        | Intrinsic::BufferIntoShared
+        | Intrinsic::BufferFromArray
         | Intrinsic::BufferTransfer
         | Intrinsic::BufferClone
         | Intrinsic::RefReplace
@@ -14146,10 +14146,10 @@ fn collect_pattern_facts(
 /// `Unique` and `Buffer` storage is a GC allocation reachable only through its
 /// owner, so a global owner must be rooted like a `Ref`.
 ///
-/// FIXME(gc-roots): this misses GC pointers other than `Ref`, `Slice`,
+/// FIXME(gc-roots): this misses GC pointers other than `Ref`, `SharedBuffer`,
 /// `Unique` and `Buffer`, so a module global holding one is never registered
 /// as a root and its data can be freed while still live. Known cases: `String`
-/// values, which have their own checked type rather than their `Slice U8`
+/// values, which have their own checked type rather than their `SharedBuffer U8`
 /// representation, and function values, whose closure environment is a GC
 /// allocation whatever their parameter and result types. For example, a
 /// top-level `let mut cell = "a"` assigned through a closure, or
@@ -14160,7 +14160,7 @@ fn collect_pattern_facts(
 fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Ref(_)
-        | CheckedType::Slice(_)
+        | CheckedType::SharedBuffer(_)
         | CheckedType::Unique(_)
         | CheckedType::Buffer(_) => true,
         CheckedType::Product(product) => product
@@ -19184,7 +19184,7 @@ mod tests {
     fn callable_value_fixture() -> &'static str {
         concat!(
             "use std.cinterop.*\n",
-            "use std.slice.Slice\n",
+            "use std.shared_buffer.SharedBuffer\n",
             "use std.fmt.Formatter\n",
             "extern \"c\" { external_identity: I32 -> I32 }\n",
             "trait TestShow T { test_show: T -> Bool }\n",
@@ -19192,7 +19192,7 @@ mod tests {
             "def generic_identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "def declared: I32 -> I32 = value => value\n",
             "type TestBox = wrap (value: I32)\n",
-            "def make_borrower: String -> () -> Slice U8 = value => () => String.bytes value\n",
+            "def make_borrower: String -> () -> SharedBuffer U8 = value => () => String.bytes value\n",
             "type MyString = wrap String\n",
             "impl !Copy MyString {}\n",
             "companion MyString {\n",
@@ -20880,7 +20880,7 @@ mod tests {
     #[test]
     fn structural_access_lowers_representation_product_slice_and_scalar() {
         let module = checked_program(concat!(
-            "use std.slice.Slice\n",
+            "use std.shared_buffer.SharedBuffer\n",
             "type MyString = wrap String\n",
             "type Pair = wrap (left: I32, right: I32)\n",
             "type Scalar = wrap (value: I32)\n",
@@ -20892,7 +20892,7 @@ mod tests {
             "let inner = text.*\n",
             "let scalar = Scalar (value: 5)\n",
             "let shortcut = scalar.value\n",
-            "def slice_field: Ref (Slice I32) -> I32 = values => values.0\n",
+            "def slice_field: Ref (SharedBuffer I32) -> I32 = values => values.0\n",
             "def through_ref: Ref Pair -> I32 = reference => reference.left\n",
         ));
         let mut program = LoweredProgram::default();
@@ -20926,7 +20926,7 @@ mod tests {
         assert!(
             accesses
                 .iter()
-                .any(|access| matches!(access.kind, LoweredAccessKind::Slice { index: 0, .. }))
+                .any(|access| matches!(access.kind, LoweredAccessKind::SharedBuffer { index: 0, .. }))
         );
         assert!(
             accesses
@@ -20936,7 +20936,7 @@ mod tests {
         assert!(
             accesses.iter().any(|access| match &access.kind {
                 LoweredAccessKind::Product { dereference, .. }
-                | LoweredAccessKind::Slice { dereference, .. }
+                | LoweredAccessKind::SharedBuffer { dereference, .. }
                 | LoweredAccessKind::Scalar { dereference } => !dereference.is_empty(),
                 LoweredAccessKind::Representation { dereference } => !dereference.is_empty(),
             }),
@@ -20971,7 +20971,7 @@ mod tests {
                     assert_eq!(dereference, checked_dereference);
                 }
                 (
-                    LoweredAccessKind::Slice { index, dereference },
+                    LoweredAccessKind::SharedBuffer { index, dereference },
                     CheckedAccess::Product {
                         index: checked_index,
                         dereference: checked_dereference,
@@ -21367,14 +21367,14 @@ mod tests {
     #[test]
     fn type_ascription_lowers_as_wrapper_and_keeps_checked_coercions() {
         let module = checked_program(concat!(
-            "use std.slice.Slice\n",
+            "use std.shared_buffer.SharedBuffer\n",
             "let widened = I8 :: 42\n",
             "let text: String = \"literal\"\n",
             "type Ok T = wrap T\n",
             "type IOError = wrap String\n",
             "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
             "let sum: Ok I32 | IOError = Ok (41)\n",
-            "let slice: Slice I32 = Slice.from_ref (Ref 8)\n",
+            "let slice: SharedBuffer I32 = SharedBuffer.from_array 8\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -21704,14 +21704,14 @@ mod tests {
     #[test]
     fn coercion_and_pattern_plans_match_checked_decisions() {
         let module = checked_program(concat!(
-            "use std.slice.Slice\n",
+            "use std.shared_buffer.SharedBuffer\n",
             "type Ok T = wrap T\n",
             "type IOError = wrap String\n",
             "type Other = wrap String\n",
             "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
             "def widen: () -> Ok I32 | IOError | Other = () => read()\n",
             "let injected: Ok I32 | IOError = Ok (41)\n",
-            "let slice: Slice I32 = Slice.from_ref (Ref 8)\n",
+            "let slice: SharedBuffer I32 = SharedBuffer.from_array 8\n",
             "def describe = (value: String) => match value {\n",
             "  \"literal\" => 1,\n",
             "  text => 2,\n",
@@ -21961,7 +21961,7 @@ mod tests {
     #[test]
     fn index_reads_copy_checked_dispatch_recipes_and_temporaries() {
         let module = checked_program(concat!(
-            "use std.slice.Slice\n",
+            "use std.shared_buffer.SharedBuffer\n",
             "type Counter = wrap I32\n",
             "impl Index Counter String { type Output = I32; index = (counter, key) => 0 }\n",
             "impl MutateIndex Counter String { type Value = I32; mutate_index = (mut counter, key, move value) => () }\n",
@@ -21973,7 +21973,7 @@ mod tests {
             "(make_counter())[\"key\"] = 1\n",
             "let values: (I32 ^ 2) = (10, 20)\n",
             "let element = values[0]\n",
-            "def slice_read: (Slice I32, USize) -> I32 = (values, position) => values[position]\n",
+            "def slice_read: (SharedBuffer I32, USize) -> I32 = (values, position) => values[position]\n",
             "def ref_read: (Ref (I32 ^ 2), USize) -> I32 = (values, position) => values[position]\n",
         ));
         let mut program = LoweredProgram::default();
@@ -22840,7 +22840,7 @@ mod tests {
                             if scalar {
                                 LoweredAccessKind::Scalar { dereference }
                             } else if slice {
-                                LoweredAccessKind::Slice { index, dereference }
+                                LoweredAccessKind::SharedBuffer { index, dereference }
                             } else {
                                 LoweredAccessKind::Product { index, dereference }
                             }

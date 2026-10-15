@@ -1,6 +1,6 @@
 use std.cinterop.(CChar, CString, InteriorNul)
 use std.ptr.(RawPtr)
-use std.slice.Slice
+use std.shared_buffer.SharedBuffer
 use std.buffer.Buffer
 
 def require: Bool -> () = condition => if condition { () } else { panic "conversion assertion failed" }
@@ -18,26 +18,25 @@ def run: () -> () = () => {
     require (null_address == 0)
 
     let text = "héllo"
-    let bytes: Slice U8 = Convert.convert text
-    require (Slice.length bytes == 6)
+    let bytes: SharedBuffer U8 = Convert.convert text
+    require (SharedBuffer.length bytes == 6)
     let decoded: Ok String | InvalidUtf8 = TryConvert.try_convert bytes
     match decoded { Ok value => require (value == text), _ => panic "valid UTF-8 rejected", }
-    let invalid: Ref (U8 ^ 2) = Ref (U8 :: 195, U8 :: 40)
-    let invalid_bytes: Slice U8 = Convert.convert invalid
+    let invalid_bytes: SharedBuffer U8 = SharedBuffer.from_array (U8 :: 195, U8 :: 40)
     let checked_bytes: Ok String | InvalidUtf8 = String.from_utf8 invalid_bytes
     match checked_bytes { InvalidUtf8 => (), _ => panic "String.from_utf8 accepted invalid bytes", }
     let invalid_result: Ok String | InvalidUtf8 = TryConvert.try_convert invalid_bytes
     match invalid_result { InvalidUtf8 => (), _ => panic "invalid UTF-8 accepted", }
-    let empty: Ref (U8 ^ 0) = Ref ()
-    let empty_bytes: Slice U8 = Convert.convert empty
+    let empty_buffer: Buffer U8 = Buffer.with_capacity 0
+    let empty_bytes: SharedBuffer U8 = Buffer.into_shared empty_buffer
     let empty_result: Ok String | InvalidUtf8 = TryConvert.try_convert empty_bytes
     match empty_result { Ok value => require (value == ""), _ => panic "empty UTF-8 rejected", }
 
     let mut buffer: Buffer I32 = Buffer.with_capacity 2
     Buffer.push buffer 10
     Buffer.push buffer 20
-    let frozen: Slice I32 = Convert.convert buffer
-    require (Slice.length frozen == 2)
+    let frozen: SharedBuffer I32 = Buffer.into_shared buffer
+    require (SharedBuffer.length frozen == 2)
     require (frozen[0] == 10)
     require (frozen[1] == 20)
 

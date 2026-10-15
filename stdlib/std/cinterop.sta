@@ -4,7 +4,7 @@ pub mod
 pub type InteriorNul
 
 use std.string.InvalidUtf8
-use std.slice.Slice
+use std.shared_buffer.SharedBuffer
 
 use std.core.sized.sized_opaque
 
@@ -52,7 +52,7 @@ companion CString {
 }
 
 extern "staple-intrinsic" {
-    __c_string_bytes: CString -> Slice U8
+    __c_string_bytes: CString -> SharedBuffer U8
     __has_interior_nul: String -> U8
 }
 

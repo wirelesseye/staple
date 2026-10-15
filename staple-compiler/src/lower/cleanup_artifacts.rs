@@ -1124,8 +1124,8 @@ impl<'a> LoweredWalker<'a> {
                 }
                 // Freezing copies the buffer into a GC allocation that owns the
                 // elements, so the element finalizer is installed here.
-                IntrinsicFunction::BufferFreeze => {
-                    if let CheckedType::Slice(element) = &result_type
+                IntrinsicFunction::BufferIntoShared => {
+                    if let CheckedType::SharedBuffer(element) = &result_type
                         && !crate::contains_type_parameter(element)
                         && self.program.concrete_needs_drop(element)
                     {

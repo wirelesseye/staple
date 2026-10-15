@@ -3772,7 +3772,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // Descriptor-sized intrinsics operate on storage pointers, not on
         // loaded SSA values.
         match intrinsic {
-            crate::IntrinsicFunction::SliceLength => {
+            crate::IntrinsicFunction::SharedBufferLength => {
                 let slice = slot_pointer(0)?;
                 let length = self
                     .backend
@@ -3788,7 +3788,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 return Ok(storage);
             }
-            crate::IntrinsicFunction::SliceGetRef => {
+            crate::IntrinsicFunction::SharedBufferGetRef => {
                 let slice = slot_pointer(0)?;
                 let position = slot_pointer(1)?;
                 let slice_type = self.backend.slice_type();
@@ -4149,13 +4149,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 return Ok(storage);
             }
-            crate::IntrinsicFunction::BufferFreeze => {
+            crate::IntrinsicFunction::BufferIntoShared => {
                 let buffer = self.load_buffer_pointer(slot_pointer(0)?)?;
                 let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
                 let length = self.load_buffer_metadata(buffer, 0)?;
                 let element = self.intrinsic_element_descriptor(call, environment, span)?;
                 let layout = self.dynamic_buffer_layout(element)?;
-                // The slice owns a GC copy of the elements; the malloc-backed
+                // The shared buffer owns a GC copy of the elements; the malloc-backed
                 // source is released without dropping them.
                 let element_copy = self.copy_descriptor_to_gc(element, span)?;
                 let frozen = self.allocate_dynamic_buffer(length, element_copy, false, span)?;
@@ -8741,7 +8741,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     crate::LoweredAccessKind::Product { dereference, .. }
                     | crate::LoweredAccessKind::Scalar { dereference }
                     | crate::LoweredAccessKind::Representation { dereference }
-                    | crate::LoweredAccessKind::Slice { dereference, .. } => dereference,
+                    | crate::LoweredAccessKind::SharedBuffer { dereference, .. } => dereference,
                 };
                 let container_type = dereference
                     .last()
@@ -8771,7 +8771,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     }
                     crate::LoweredAccessKind::Scalar { .. }
                     | crate::LoweredAccessKind::Representation { .. } => base,
-                    crate::LoweredAccessKind::Slice { index, .. } => {
+                    crate::LoweredAccessKind::SharedBuffer { index, .. } => {
                         let slice = self.backend.slice_type();
                         let data = self
                             .backend
@@ -9550,7 +9550,7 @@ fn is_static_layout_type(value_type: &CheckedType) -> bool {
         value_type,
         CheckedType::Ref(_)
             | CheckedType::Unique(_)
-            | CheckedType::Slice(_)
+            | CheckedType::SharedBuffer(_)
             | CheckedType::Buffer(_)
             | CheckedType::RawMutPtr { .. }
             | CheckedType::RawPtr { .. }

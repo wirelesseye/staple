@@ -91,7 +91,7 @@ pub enum BuiltinType {
     String,
     Ref,
     Unique,
-    Slice,
+    SharedBuffer,
     Buffer,
     CChar,
     RawOpaquePtr,
@@ -123,7 +123,7 @@ pub enum BuiltinType {
 pub enum RecursiveConstruction {
     ManagedReference,
     Unique,
-    Slice,
+    SharedBuffer,
     Syntax,
 }
 
@@ -320,16 +320,16 @@ pub enum IntrinsicFunction {
     StringFromCString,
     StringToCString,
     StringAdd,
-    SliceLength,
-    SliceGetRef,
-    SliceFromRef,
+    SharedBufferLength,
+    SharedBufferGetRef,
     BufferWithCapacity,
     BufferLength,
     BufferCapacity,
     BufferPush,
     BufferPop,
     BufferGet,
-    BufferFreeze,
+    BufferIntoShared,
+    BufferFromArray,
     BufferTransfer,
     BufferClone,
     RefReplace,
@@ -1697,7 +1697,7 @@ impl NameResolver {
                 "String",
                 BuiltinType::String,
             ),
-            ("std/slice.sta", "std.slice", "Slice", BuiltinType::Slice),
+            ("std/shared_buffer.sta", "std.shared_buffer", "SharedBuffer", BuiltinType::SharedBuffer),
             ("std/ptr.sta", "std.ptr", "RawPtr", BuiltinType::RawPtr),
             (
                 "std/ptr.sta",
@@ -2095,8 +2095,8 @@ impl NameResolver {
             ("std.buffer", "__buffer_get", IntrinsicFunction::BufferGet),
             (
                 "std.buffer",
-                "__buffer_freeze",
-                IntrinsicFunction::BufferFreeze,
+                "__buffer_into_shared",
+                IntrinsicFunction::BufferIntoShared,
             ),
             (
                 "std.buffer",
@@ -2109,19 +2109,19 @@ impl NameResolver {
                 IntrinsicFunction::BufferClone,
             ),
             (
-                "std.slice",
-                "__slice_length",
-                IntrinsicFunction::SliceLength,
+                "std.shared_buffer",
+                "__shared_buffer_length",
+                IntrinsicFunction::SharedBufferLength,
             ),
             (
-                "std.slice",
-                "__slice_get_ref",
-                IntrinsicFunction::SliceGetRef,
+                "std.shared_buffer",
+                "__shared_buffer_get_ref",
+                IntrinsicFunction::SharedBufferGetRef,
             ),
             (
-                "std.slice",
-                "__slice_from_ref",
-                IntrinsicFunction::SliceFromRef,
+                "std.buffer",
+                "__buffer_from_array",
+                IntrinsicFunction::BufferFromArray,
             ),
             (
                 "std.core.reference",
@@ -2441,7 +2441,7 @@ impl NameResolver {
             let valid_kind = if matches!(builtin, BuiltinType::Ref | BuiltinType::Unique) {
                 declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper
                     && declaration.representation_visibility() == Visibility::Public
-            } else if builtin == BuiltinType::Slice {
+            } else if builtin == BuiltinType::SharedBuffer {
                 declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper
                     && declaration.representation_visibility() == Visibility::Private
             } else if matches!(builtin, BuiltinType::Completed | BuiltinType::Cancelled) {
@@ -2474,7 +2474,7 @@ impl NameResolver {
                 | BuiltinType::RawMutPtr
                 | BuiltinType::Ref
                 | BuiltinType::Unique
-                | BuiltinType::Slice
+                | BuiltinType::SharedBuffer
                 | BuiltinType::Buffer
         ) && declaration.type_parameters.len() != 1
         {
@@ -2542,7 +2542,7 @@ impl NameResolver {
         let recursive_construction = match builtin {
             BuiltinType::Ref => Some(RecursiveConstruction::ManagedReference),
             BuiltinType::Unique => Some(RecursiveConstruction::Unique),
-            BuiltinType::Slice => Some(RecursiveConstruction::Slice),
+            BuiltinType::SharedBuffer => Some(RecursiveConstruction::SharedBuffer),
             BuiltinType::Syntax
                 if declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper =>
             {

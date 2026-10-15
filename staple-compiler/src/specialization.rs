@@ -51,7 +51,7 @@ pub(crate) enum CanonicalType {
     StringLiteralSet(Vec<String>),
     Ref(Box<CanonicalType>),
     Unique(Box<CanonicalType>),
-    Slice(Box<CanonicalType>),
+    SharedBuffer(Box<CanonicalType>),
     Buffer(Box<CanonicalType>),
     Array {
         element: Box<CanonicalType>,
@@ -172,7 +172,7 @@ impl CanonicalType {
             CanonicalType::Forall { body, .. } => body.nesting_depth(),
             CanonicalType::Ref(inner)
             | CanonicalType::Unique(inner)
-            | CanonicalType::Slice(inner)
+            | CanonicalType::SharedBuffer(inner)
             | CanonicalType::Buffer(inner)
             | CanonicalType::RawMutPtr { pointee: inner }
             | CanonicalType::RawPtr { pointee: inner } => inner.nesting_depth(),
@@ -300,8 +300,8 @@ impl CanonicalType {
             CheckedType::Unique(payload) => {
                 CanonicalType::Unique(Box::new(Self::convert(payload, origin, runtime, binders)?))
             }
-            CheckedType::Slice(payload) => {
-                CanonicalType::Slice(Box::new(Self::convert(payload, origin, runtime, binders)?))
+            CheckedType::SharedBuffer(payload) => {
+                CanonicalType::SharedBuffer(Box::new(Self::convert(payload, origin, runtime, binders)?))
             }
             CheckedType::Buffer(payload) => {
                 CanonicalType::Buffer(Box::new(Self::convert(payload, origin, runtime, binders)?))
@@ -1670,7 +1670,7 @@ mod tests {
         match value_type {
             CanonicalType::Ref(payload)
             | CanonicalType::Unique(payload)
-            | CanonicalType::Slice(payload)
+            | CanonicalType::SharedBuffer(payload)
             | CanonicalType::Buffer(payload)
             | CanonicalType::RawMutPtr { pointee: payload }
             | CanonicalType::RawPtr { pointee: payload } => 1 + node_count(payload),

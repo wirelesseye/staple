@@ -686,7 +686,7 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 
     /// Field 1 of the `{pointer, length}` slice.
-    pub(crate) fn build_slice_length(
+    pub(crate) fn build_shared_buffer_length(
         &self,
         slice: inkwell::values::StructValue<'context>,
     ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
@@ -698,7 +698,7 @@ impl<'program, 'context> Backend<'program, 'context> {
 
     /// Extract the slice's pointer and length and
     /// return the bounds-checked element pointer.
-    pub(crate) fn build_slice_get_ref(
+    pub(crate) fn build_shared_buffer_get_ref(
         &self,
         slice: inkwell::values::StructValue<'context>,
         position: inkwell::values::IntValue<'context>,
@@ -1246,32 +1246,6 @@ impl<'program, 'context> Backend<'program, 'context> {
         self.builder
             .build_load(alternative_type, alternative_slot, "sum.extract.result")
             .map_err(|error| Diagnostic::new(span, error.to_string()))
-    }
-
-    /// Build a
-    /// `{pointer, length}` slice from a fixed-reference pointer.
-    pub(crate) fn build_slice_ref_value(
-        &self,
-        pointer: inkwell::values::PointerValue<'context>,
-        length: usize,
-    ) -> CodeGenerationResult<inkwell::values::AnyValueEnum<'context>> {
-        let mut result = self.slice_type().const_zero();
-        result = self
-            .builder
-            .build_insert_value(result, pointer, 0, "slice.pointer")
-            .map_err(compiler_diagnostic)?
-            .into_struct_value();
-        result = self
-            .builder
-            .build_insert_value(
-                result,
-                self.size_type.const_int(length as u64, false),
-                1,
-                "slice.length",
-            )
-            .map_err(compiler_diagnostic)?
-            .into_struct_value();
-        Ok(result.as_any_value_enum())
     }
 
     /// Tests a String against a literal using a length check and memcmp,
@@ -1879,7 +1853,7 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 
     /// Allocates the header shared by Buffer.with_capacity, Buffer.clone and
-    /// Buffer.freeze. The prefix distinguishes their SSA names. An `owned`
+    /// Buffer.into_shared. The prefix distinguishes their SSA names. An `owned`
     /// buffer is a `Unique` allocation, released eagerly when dropped; a
     /// frozen buffer is a plain GC allocation.
     pub(crate) fn build_buffer_allocation(

@@ -297,7 +297,7 @@ impl<'program, 'context> Backend<'program, 'context> {
                     )
                 })
                 .and_then(|representation| self.compile_type(representation)),
-            CheckedType::Slice(_) => Ok(self.slice_type().into()),
+            CheckedType::SharedBuffer(_) => Ok(self.slice_type().into()),
             CheckedType::Ref(_) | CheckedType::Unique(_) => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }

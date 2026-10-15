@@ -475,7 +475,7 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
                 IntrinsicFunction::BufferWithCapacity
                 | IntrinsicFunction::BufferClone
                 | IntrinsicFunction::BufferGet
-                | IntrinsicFunction::BufferFreeze => {
+                | IntrinsicFunction::BufferIntoShared => {
                     // Buffers are malloc-backed and rooted for the GC.
                     self.requirements.record(RuntimeRequirement::CStringFree);
                     self.gc();

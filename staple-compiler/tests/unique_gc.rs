@@ -196,3 +196,145 @@ fn collects_list_storage_in_cycles_through_managed_references() {
         "only {dropped} of 100 cyclic List payloads were collected"
     );
 }
+
+/// Declares a `Tag` whose drop prints its identifier.
+const TAG: &str = concat!(
+    "use std.cinterop.*\n",
+    "use std.ptr.*\n",
+    "use std.buffer.Buffer\n",
+    "use std.shared_buffer.SharedBuffer\n",
+    "extern \"c\" {\n",
+    "    printf: (RawPtr CChar, ...) -> I32\n",
+    "}\n",
+    "type Tag = wrap I32\n",
+    "impl ! Copy Tag {}\n",
+    "impl Drop Tag {\n",
+    "    cleanup = Tag id => {\n",
+    "        printf (c_string \"dropped %d\\n\", id)\n",
+    "        ()\n",
+    "    }\n",
+    "}\n",
+);
+
+#[cfg(unix)]
+#[test]
+fn buffer_from_array_owns_and_drops_non_copy_elements_once() {
+    let source = format!(
+        "{TAG}{}",
+        concat!(
+            "def scoped = () => () :: {\n",
+            "    let buffer: Buffer Tag = Buffer.from_array (Tag 1, Tag 2, Tag 3)\n",
+            "    printf (c_string \"length %d capacity %d\\n\", Buffer.length buffer, Buffer.capacity buffer)\n",
+            "    ()\n",
+            "}\n",
+            "scoped ()\n",
+            "printf (c_string \"done\\n\")\n",
+        ),
+    );
+    let output = run(&source);
+    assert_eq!(
+        output,
+        "length 3 capacity 3\ndropped 1\ndropped 2\ndropped 3\ndone\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_buffer_set_drops_the_old_value_and_rejects_out_of_bounds() {
+    let source = format!(
+        "{TAG}{}",
+        concat!(
+            "def run = () => () :: {\n",
+            "    let mut buffer: SharedBuffer Tag = SharedBuffer.from_array (Tag 1, Tag 2)\n",
+            "    match SharedBuffer.set buffer 0 (Tag 10) {\n",
+            "        Some _ => printf (c_string \"replaced\\n\"),\n",
+            "        None() => printf (c_string \"missing\\n\"),\n",
+            "    }\n",
+            "    match SharedBuffer.set buffer 2 (Tag 20) {\n",
+            "        Some _ => printf (c_string \"replaced\\n\"),\n",
+            "        None() => printf (c_string \"out of bounds\\n\"),\n",
+            "    }\n",
+            "    printf (c_string \"length %d\\n\", SharedBuffer.length buffer)\n",
+            "    ()\n",
+            "}\n",
+            "run ()\n",
+        ),
+    );
+    let output = run(&source);
+    // The replaced element and the rejected value are each dropped
+    // immediately; the buffer's remaining elements wait for collection.
+    assert_eq!(
+        output,
+        "dropped 1\nreplaced\ndropped 20\nout of bounds\nlength 2\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_buffer_get_and_set_share_writes_between_handles() {
+    let source = concat!(
+        "use std.cinterop.*\n",
+        "use std.ptr.*\n",
+        "use std.shared_buffer.SharedBuffer\n",
+        "extern \"c\" {\n",
+        "    printf: (RawPtr CChar, ...) -> I32\n",
+        "}\n",
+        "def run = () => () :: {\n",
+        "    let mut first: SharedBuffer I32 = SharedBuffer.from_array (10, 20, 30)\n",
+        "    let second = first\n",
+        "    match SharedBuffer.get first 1 {\n",
+        "        Some value => printf (c_string \"get %d\\n\", value),\n",
+        "        None() => printf (c_string \"get missing\\n\"),\n",
+        "    }\n",
+        "    match SharedBuffer.get first 3 {\n",
+        "        Some value => printf (c_string \"get %d\\n\", value),\n",
+        "        None() => printf (c_string \"get out of bounds\\n\"),\n",
+        "    }\n",
+        "    match SharedBuffer.set first 1 21 {\n",
+        "        Some _ => printf (c_string \"set\\n\"),\n",
+        "        None() => printf (c_string \"set missing\\n\"),\n",
+        "    }\n",
+        "    match SharedBuffer.set first 3 99 {\n",
+        "        Some _ => printf (c_string \"set\\n\"),\n",
+        "        None() => printf (c_string \"set out of bounds\\n\"),\n",
+        "    }\n",
+        "    first[2] = 31\n",
+        "    printf (c_string \"seen %d %d %d\\n\", second[0], second[1], second[2])\n",
+        "    ()\n",
+        "}\n",
+        "run ()\n",
+    );
+    assert_eq!(
+        run(source),
+        "get 20\nget out of bounds\nset\nset out of bounds\nseen 10 21 31\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_buffer_from_array_collects_non_copy_elements() {
+    let source = format!(
+        "{TAG}{}{}",
+        concat!(
+            "def make = tag: I32 => () :: {\n",
+            "    let buffer: SharedBuffer Tag = SharedBuffer.from_array (Tag tag, Tag (tag + 1000))\n",
+            "    ()\n",
+            "}\n",
+            "def make_all = () => () :: {\n",
+            "    for index in (0 .. 100) { make index }\n",
+            "}\n",
+        ),
+        CHURN,
+    ) + concat!("make_all ()\n", "churn ()\n", "churn ()\n");
+    let output = run(&source);
+    let mut dropped: Vec<&str> = output.lines().filter(|line| line.starts_with("dropped ")).collect();
+    let total = dropped.len();
+    dropped.sort_unstable();
+    dropped.dedup();
+    assert_eq!(dropped.len(), total, "an element was dropped more than once");
+    // A conservative stack scan may retain a stray buffer.
+    assert!(
+        total >= 180,
+        "only {total} of 200 shared buffer elements were dropped"
+    );
+}

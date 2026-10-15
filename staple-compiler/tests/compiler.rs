@@ -1803,7 +1803,7 @@ fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
     copy_directory(&root.join("stdlib"), &temporary);
     let production_string = include_str!("../../stdlib/std/string.sta");
     let (production_prefix, production_body) = production_string
-        .split_once("pub type String = wrap Slice U8\n")
+        .split_once("pub type String = wrap SharedBuffer U8\n")
         .expect("production String module has its canonical declaration");
     std::fs::write(
         temporary.join("std/string.sta"),
@@ -1837,16 +1837,15 @@ fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
 #[test]
 fn supports_repeated_spread_and_slice_references() {
     let source = concat!(
-        "use std.slice.Slice\n",
+        "use std.shared_buffer.SharedBuffer\n",
         "let explicit: (I32 ^ 3) = (1, 2, 3)\n",
         "let spread: (String, ...(I32 ^ 2)) = (\"x\", 4, 5)\n",
-        "let fixed: Ref (I32 ^ 3) = Ref explicit\n",
-        "let erased: Slice I32 = Slice.from_ref fixed\n",
-        "let constructed: Slice I32 = Slice.from_ref (Ref (6, 7))\n",
-        "let singleton: Slice I32 = Slice.from_ref (Ref 8)\n",
-        "let empty: Slice I32 = Slice.from_ref (Ref ())\n",
-        "let count: USize = Slice.length erased\n",
-        "let fixed_count: USize = Slice.length (Slice.from_ref fixed)\n",
+        "let fixed: (I32 ^ 3) = explicit\n",
+        "let erased: SharedBuffer I32 = SharedBuffer.from_array fixed\n",
+        "let constructed: SharedBuffer I32 = SharedBuffer.from_array (6, 7)\n",
+        "let singleton: SharedBuffer I32 = SharedBuffer.from_array 8\n",
+        "let count: USize = SharedBuffer.length erased\n",
+        "let fixed_count: USize = SharedBuffer.length (SharedBuffer.from_array fixed)\n",
         "let literal: I32 = erased.1\n",
         "let index: USize = 2\n",
         "let dynamic: I32 = erased[index]\n",
@@ -1865,22 +1864,21 @@ fn supports_repeated_spread_and_slice_references() {
 }
 
 #[test]
-fn from_ref_accepts_generic_arrays_and_is_first_class() {
+fn from_array_accepts_generic_arrays_and_is_first_class() {
     let module = type_check(concat!(
-        "use std.slice.Slice\n",
-        "let fixed: Ref (I32 ^ 3) = Ref (1, 2, 3)\n",
-        "let direct: Slice I32 = Slice.from_ref fixed\n",
-        "let singleton: Slice I32 = Slice.from_ref (Ref 8)\n",
-        "let empty: Slice I32 = Slice.from_ref (Ref ())\n",
-        "let operation: (Ref (I32 ^ 3)) -> Slice I32 = Slice.from_ref\n",
-        "let applied: Slice I32 = operation fixed\n",
-        "def forward: <T, N where Natural N> Ref (T ^ N) -> Slice T = <T, N where Natural N> value => Slice.from_ref value\n",
-        "let forwarded: Slice I32 = forward fixed\n",
+        "use std.shared_buffer.SharedBuffer\n",
+        "let fixed: (I32 ^ 3) = (1, 2, 3)\n",
+        "let direct: SharedBuffer I32 = SharedBuffer.from_array fixed\n",
+        "let singleton: SharedBuffer I32 = SharedBuffer.from_array 8\n",
+        "let operation: (I32 ^ 3) -> SharedBuffer I32 = SharedBuffer.from_array\n",
+        "let applied: SharedBuffer I32 = operation fixed\n",
+        "def forward: <T, N where Natural N> move (T ^ N) -> SharedBuffer T = <T, N where Natural N> move value => SharedBuffer.from_array value\n",
+        "let forwarded: SharedBuffer I32 = forward fixed\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_root(&lower(&module))
-        .expect("`from_ref` should accept a generic array and be first-class");
+        .expect("`from_array` should accept a generic array and be first-class");
 }
 
 #[test]
@@ -3192,7 +3190,7 @@ fn rejects_invalid_product_spreads_and_indices() {
 #[test]
 fn derives_trait_delegated_product_indexing() {
     let source = concat!(
-        "use std.slice.Slice\n",
+        "use std.shared_buffer.SharedBuffer\n",
         "def select: <A, B where Copy A, Copy B> ((A, B), USize) -> A | B = <A, B where Copy A, Copy B> (pair, position) => pair[position]\n",
         "let pair = (1, \"two\")\n",
         "let position: USize = 1\n",
@@ -3209,7 +3207,7 @@ fn derives_trait_delegated_product_indexing() {
         "let mutate_operation: (mut Ref (I32 ^ 3), USize, I32) -> () = MutateIndex.mutate_index\n",
         "mutate_operation (fixed, position, 6)\n",
         "fixed[position] = 7\n",
-        "let mut erased: Slice I32 = Slice.from_ref fixed\n",
+        "let mut erased: SharedBuffer I32 = SharedBuffer.from_array updated\n",
         "erased[position] = 8\n",
     );
     let module = type_check(source);
@@ -3316,12 +3314,12 @@ fn rejects_overlapping_structural_indexing_implementations() {
 fn delegates_indexing_through_refs_to_the_payload() {
     let source = concat!(
         "use std.list.List\n",
-        "use std.slice.Slice\n",
+        "use std.shared_buffer.SharedBuffer\n",
         "def mixed_at: (Ref (I32, Bool), USize) -> I32 | Bool = (pair, position) => pair[position]\n",
         "def list_at: (Ref (List I32), USize) -> I32 = (list, position) => list[position]\n",
-        "let fixed: Ref (I32 ^ 3) = Ref (1, 2, 3)\n",
-        "let values: Slice I32 = Slice.from_ref fixed\n",
-        "def slice_at: (Ref (Slice I32), USize) -> I32 = (slice, position) => slice[position]\n",
+        "let fixed: (I32 ^ 3) = (1, 2, 3)\n",
+        "let values: SharedBuffer I32 = SharedBuffer.from_array fixed\n",
+        "def slice_at: (Ref (SharedBuffer I32), USize) -> I32 = (slice, position) => slice[position]\n",
         "type Keyed = wrap (key: String, value: I32)\n",
         "impl Index Keyed String { type Output = I32; index = (entry, key) => entry.value }\n",
         "def keyed_at: (Ref Keyed, String) -> I32 = (entry, key) => entry[key]\n",
@@ -3391,12 +3389,12 @@ fn rejects_out_of_bounds_indices_known_through_a_ref() {
 #[test]
 fn indexes_slices_through_the_standard_library_implementation() {
     let source = concat!(
-        "use std.slice.Slice\n",
-        "let fixed: Ref (I32 ^ 3) = Ref (1, 2, 3)\n",
-        "let mut values: Slice I32 = Slice.from_ref fixed\n",
+        "use std.shared_buffer.SharedBuffer\n",
+        "let fixed: (I32 ^ 3) = (1, 2, 3)\n",
+        "let mut values: SharedBuffer I32 = SharedBuffer.from_array fixed\n",
         "let value: I32 = values[0]\n",
         "values[1] = 9\n",
-        "let operation: (Slice I32, USize) -> I32 = Index.index\n",
+        "let operation: (SharedBuffer I32, USize) -> I32 = Index.index\n",
         "let same: I32 = operation (values, 2)\n",
     );
     let module = type_check(source);
@@ -3411,12 +3409,12 @@ fn indexes_slices_through_the_standard_library_implementation() {
 #[test]
 fn iterates_slices_through_the_standard_library_implementations() {
     let source = concat!(
-        "use std.slice.(Slice, SliceIter)\n",
-        "let fixed: Ref (I32 ^ 3) = Ref (10, 20, 30)\n",
-        "let values: Slice I32 = Slice.from_ref fixed\n",
-        "let iterator: SliceIter I32 = IntoIterator.into_iterator values\n",
-        "let step: IterStep (SliceIter I32, I32) = Iterator.next iterator\n",
-        "def sum: Slice I32 -> I32 = slice => {\n",
+        "use std.shared_buffer.(SharedBuffer, SharedBufferIter)\n",
+        "let fixed: (I32 ^ 3) = (10, 20, 30)\n",
+        "let values: SharedBuffer I32 = SharedBuffer.from_array fixed\n",
+        "let iterator: SharedBufferIter I32 = IntoIterator.into_iterator values\n",
+        "let step: IterStep (SharedBufferIter I32, I32) = Iterator.next iterator\n",
+        "def sum: SharedBuffer I32 -> I32 = slice => {\n",
         "  let mut total = 0\n",
         "  for value in slice { total = total + value }\n",
         "  total\n",
@@ -3433,19 +3431,19 @@ fn iterates_slices_through_the_standard_library_implementations() {
 #[test]
 fn compares_slices_and_strings_through_the_standard_library_eq_implementations() {
     let module = type_check(concat!(
-        "use std.slice.Slice\n",
-        "let first: Ref (I32 ^ 3) = Ref (1, 2, 3)\n",
-        "let same: Ref (I32 ^ 3) = Ref (1, 2, 3)\n",
-        "let different: Ref (I32 ^ 3) = Ref (1, 2, 4)\n",
-        "let shorter: Ref (I32 ^ 2) = Ref (1, 2)\n",
-        "let left: Slice I32 = Slice.from_ref first\n",
-        "let right: Slice I32 = Slice.from_ref same\n",
-        "let other: Slice I32 = Slice.from_ref different\n",
-        "let short: Slice I32 = Slice.from_ref shorter\n",
+        "use std.shared_buffer.SharedBuffer\n",
+        "let first: (I32 ^ 3) = (1, 2, 3)\n",
+        "let same: (I32 ^ 3) = (1, 2, 3)\n",
+        "let different: (I32 ^ 3) = (1, 2, 4)\n",
+        "let shorter: (I32 ^ 2) = (1, 2)\n",
+        "let left: SharedBuffer I32 = SharedBuffer.from_array first\n",
+        "let right: SharedBuffer I32 = SharedBuffer.from_array same\n",
+        "let other: SharedBuffer I32 = SharedBuffer.from_array different\n",
+        "let short: SharedBuffer I32 = SharedBuffer.from_array shorter\n",
         "let same_values: Bool = left == right\n",
         "let different_values: Bool = left != other\n",
         "let different_lengths: Bool = left != short\n",
-        "def generic_equal: <T where Eq T> (Slice T, Slice T) -> Bool = <T where Eq T> (x, y) => x == y\n",
+        "def generic_equal: <T where Eq T> (SharedBuffer T, SharedBuffer T) -> Bool = <T where Eq T> (x, y) => x == y\n",
         "let generic: Bool = generic_equal (left, right)\n",
         "let first_text: String = \"staple\"\n",
         "let second_text: String = \"staple\"\n",
@@ -3463,9 +3461,9 @@ fn compares_slices_and_strings_through_the_standard_library_eq_implementations()
 fn rejects_slice_equality_when_the_element_is_not_eq() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "use std.slice.Slice\n",
+            "use std.shared_buffer.SharedBuffer\n",
             "use std.cinterop.CString\n",
-            "def invalid: (Slice CString, Slice CString) -> Bool = (left, right) => left == right\n",
+            "def invalid: (SharedBuffer CString, SharedBuffer CString) -> Bool = (left, right) => left == right\n",
         )))
         .expect_err_diagnostics("a slice of a non-Eq element must not be comparable");
     assert!(
@@ -3479,9 +3477,9 @@ fn rejects_slice_equality_when_the_element_is_not_eq() {
 fn rejects_slice_iteration_for_non_copy_elements() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "use std.slice.Slice\n",
+            "use std.shared_buffer.SharedBuffer\n",
             "use std.cinterop.CString\n",
-            "def invalid: Slice CString -> () = values => {\n",
+            "def invalid: SharedBuffer CString -> () = values => {\n",
             "  for value in values { () }\n",
             "}\n",
         )))
@@ -3512,8 +3510,8 @@ fn rejects_explicit_indexing_implementations_for_ref_targets() {
 #[test]
 fn auto_derefs_fields_through_nested_refs_and_slices() {
     type_check(concat!(
-        "use std.slice.Slice\n",
-        "def slice_field: Ref (Slice I32) -> I32 = values => values.0\n",
+        "use std.shared_buffer.SharedBuffer\n",
+        "def slice_field: Ref (SharedBuffer I32) -> I32 = values => values.0\n",
         "def nested_field = (point: Ref (Ref (x: I32, y: I32))) => point.x\n",
         "def nested_write = (mut point: Ref (Ref (x: I32, y: I32))) => { point.x = 1; () }\n",
     ));
@@ -3607,7 +3605,7 @@ fn rejects_overlapping_structural_iterator_implementations() {
 fn rejects_slice_ref_destructuring() {
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "use std.slice.Slice\nlet fixed: Ref (I32 ^ 2) = Ref (1, 2)\nlet values: Slice I32 = Slice.from_ref fixed\nlet Ref payload = values\n",
+            "use std.shared_buffer.SharedBuffer\nlet fixed: (I32 ^ 2) = (1, 2)\nlet values: SharedBuffer I32 = SharedBuffer.from_array fixed\nlet Ref payload = values\n",
         ))
         .expect_err_diagnostics("a slice cannot be destructured as a Ref");
     assert!(
@@ -3645,35 +3643,35 @@ fn handles_array_edges_and_limits() {
 #[test]
 fn aliases_complete_slice_references_and_reject_ffi() {
     type_check(concat!(
-        "use std.slice.Slice\n",
-        "type Ints = alias Slice I32\n",
-        "let fixed: Ref (I32 ^ 2) = Ref (1, 2)\n",
-        "let values: Ints = Slice.from_ref fixed\n",
-        "let count: USize = Slice.length values\n",
+        "use std.shared_buffer.SharedBuffer\n",
+        "type Ints = alias SharedBuffer I32\n",
+        "let fixed: (I32 ^ 2) = (1, 2)\n",
+        "let values: Ints = SharedBuffer.from_array fixed\n",
+        "let count: USize = SharedBuffer.length values\n",
     ));
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "use std.slice.Slice\nextern \"c\" { invalid: Slice I32 -> I32 }\n",
+            "use std.shared_buffer.SharedBuffer\nextern \"c\" { invalid: SharedBuffer I32 -> I32 }\n",
         ))
         .expect_err_diagnostics("slices must not cross the FFI");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("external binding types cannot contain `Slice` values")
+            .contains("external binding types cannot contain `SharedBuffer` values")
     }));
 }
 
 #[test]
 fn enforces_implicit_sized_and_supports_question_sized_parameters() {
     type_check(concat!(
-        "use std.slice.Slice\n",
-        "def preserve_slice: <T> Slice T -> Slice T = <T> value => value\n",
+        "use std.shared_buffer.SharedBuffer\n",
+        "def preserve_slice: <T> SharedBuffer T -> SharedBuffer T = <T> value => value\n",
         "def explicitly_sized: <T where ?Sized T, Sized T> Ref T -> Ref T = <T where ?Sized T, Sized T> value => value\n",
-        "let fixed: Ref (I32 ^ 2) = Ref (1, 2)\n",
-        "let erased: Slice I32 = Slice.from_ref fixed\n",
-        "let same: Slice I32 = preserve_slice erased\n",
-        "let same_fixed: Ref (I32 ^ 2) = explicitly_sized fixed\n",
+        "let fixed: (I32 ^ 2) = (1, 2)\n",
+        "let erased: SharedBuffer I32 = SharedBuffer.from_array fixed\n",
+        "let same: SharedBuffer I32 = preserve_slice erased\n",
+        "let same_fixed: Ref (I32 ^ 2) = explicitly_sized (Ref fixed)\n",
     ));
 
     let diagnostics = TypeChecker::new()
@@ -5040,7 +5038,7 @@ fn string_literals_have_the_canonical_string_type() {
 #[test]
 fn buffer_intrinsics_type_check_and_compile() {
     let module = type_check(concat!(
-        "use std.buffer.Buffer\nuse std.slice.Slice\n",
+        "use std.buffer.Buffer\nuse std.shared_buffer.SharedBuffer\n",
         "def exercise: () -> () = () => {\n",
         "let mut values: Buffer I32 = Buffer.with_capacity (USize :: 2)\n",
         "let empty_length: USize = Buffer.length values\n",
@@ -5052,9 +5050,9 @@ fn buffer_intrinsics_type_check_and_compile() {
         "let replaced: Option () = Buffer.set values (USize :: 1) 30\n",
         "Buffer.set_unchecked values (USize :: 0) 40\n",
         "let popped: Option I32 = Buffer.pop values\n",
-        "let frozen: Slice I32 = Buffer.freeze values\n",
-        "let frozen_length: USize = Slice.length frozen\n",
-        "let safe_frozen: Option (Ref I32) = Slice.get_ref frozen (USize :: 0)\n",
+        "let frozen: SharedBuffer I32 = Buffer.into_shared values\n",
+        "let frozen_length: USize = SharedBuffer.length frozen\n",
+        "let safe_frozen: Option (Ref I32) = SharedBuffer.get_ref frozen (USize :: 0)\n",
         "()\n",
         "}\n",
     ));
@@ -5071,12 +5069,12 @@ fn buffer_intrinsics_type_check_and_compile() {
 
     let module = type_check(concat!(
         "use std.buffer.Buffer\n",
-        "use std.slice.Slice\n",
+        "use std.shared_buffer.SharedBuffer\n",
         "use std.cinterop.*\n",
         "def exercise: () -> () = () => {\n",
         "let mut owned: Buffer CString = Buffer.with_capacity (USize :: 1)\n",
         "Buffer.push owned (c_string \"owned\")\n",
-        "let frozen: Slice CString = Buffer.freeze owned\n",
+        "let frozen: SharedBuffer CString = Buffer.into_shared owned\n",
         "()\n",
         "}\n",
     ));
@@ -5090,7 +5088,7 @@ fn buffer_intrinsics_type_check_and_compile() {
 #[test]
 fn buffer_and_list_are_move_only_and_clone_their_elements() {
     let module = type_check(concat!(
-        "use std.buffer.Buffer\nuse std.slice.Slice\n",
+        "use std.buffer.Buffer\nuse std.shared_buffer.SharedBuffer\n",
         "type Resource = wrap I32\n",
         "impl !Copy Resource {}\n",
         "impl Clone Resource { clone = Resource value => Resource value }\n",
@@ -5126,7 +5124,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
             "}\n",
         ),
         concat!(
-            "use std.buffer.Buffer\nuse std.slice.Slice\n",
+            "use std.buffer.Buffer\nuse std.shared_buffer.SharedBuffer\n",
             "def invalid: () -> USize = () => {\n",
             "let list: List I32 = List.new ()\n",
             "let moved = list\n",
@@ -5134,10 +5132,10 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
             "}\n",
         ),
         concat!(
-            "use std.buffer.Buffer\nuse std.slice.Slice\n",
+            "use std.buffer.Buffer\nuse std.shared_buffer.SharedBuffer\n",
             "def invalid: () -> USize = () => {\n",
             "let buffer: Buffer I32 = Buffer.with_capacity (USize :: 1)\n",
-            "let frozen: Slice I32 = Buffer.freeze buffer\n",
+            "let frozen: SharedBuffer I32 = Buffer.into_shared buffer\n",
             "Buffer.length buffer\n",
             "}\n",
         ),
@@ -5455,9 +5453,9 @@ fn wrapping_a_curried_mut_effect_call_attributes_the_right_argument() {
 #[test]
 fn validates_the_standard_library_string_representation() {
     let valid_diagnostics = string_contract_diagnostics(concat!(
-        "pub type String = wrap Slice U8\n",
-        "def exposed_bytes: String -> Slice U8 = String value => value\n",
-        "def matched_bytes: String -> Slice U8 = value => match value { String bytes => bytes, }\n",
+        "pub type String = wrap SharedBuffer U8\n",
+        "def exposed_bytes: String -> SharedBuffer U8 = String value => value\n",
+        "def matched_bytes: String -> SharedBuffer U8 = value => match value { String bytes => bytes, }\n",
     ));
     assert!(
         valid_diagnostics.is_empty(),
@@ -5470,16 +5468,16 @@ fn validates_the_standard_library_string_representation() {
             "standard library type `String` must be a represented wrapper type",
         ),
         (
-            "pub type String = pub wrap Slice U8\n",
+            "pub type String = pub wrap SharedBuffer U8\n",
             "standard library type `String` must keep its representation private",
         ),
         (
-            "pub type String T = wrap Slice U8\n",
+            "pub type String T = wrap SharedBuffer U8\n",
             "standard library type `String` must not accept compile-time arguments",
         ),
         (
-            "pub type String = wrap Slice I8\n",
-            "standard library type `String` must be represented by `Slice U8`, found `Slice I8`",
+            "pub type String = wrap SharedBuffer I8\n",
+            "standard library type `String` must be represented by `SharedBuffer U8`, found `SharedBuffer I8`",
         ),
     ] {
         let diagnostics = string_contract_diagnostics(declaration);
@@ -11112,9 +11110,9 @@ fn accepts_moving_a_mut_parameter_out_when_it_is_reassigned() {
 fn rejects_moving_a_move_only_global_out_of_top_level_statements() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "use std.buffer.Buffer\nuse std.slice.Slice\n",
+            "use std.buffer.Buffer\nuse std.shared_buffer.SharedBuffer\n",
             "let mut data: Buffer I32 = Buffer.with_capacity (USize :: 4)\n",
-            "let frozen: Slice I32 = Buffer.freeze data\n",
+            "let frozen: SharedBuffer I32 = Buffer.into_shared data\n",
         )))
         .expect_err_diagnostics("moving a global out at top level should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -11130,7 +11128,7 @@ fn rejects_moving_a_move_only_global_out_of_a_function() {
         .check(resolve(concat!(
             "use std.buffer.Buffer\n",
             "let mut data: Buffer I32 = Buffer.with_capacity (USize :: 4)\n",
-            "def take = () => Buffer.freeze data\n",
+            "def take = () => Buffer.into_shared data\n",
         )))
         .expect_err_diagnostics("moving a global out of a function should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -13109,7 +13107,7 @@ fn wrapped_intrinsics_are_registered_once() {
         IntrinsicFunction::ResolverCancel,
         IntrinsicFunction::CompletionTokenCancel,
         IntrinsicFunction::RefReplace,
-        IntrinsicFunction::SliceLength,
+        IntrinsicFunction::SharedBufferLength,
     ] {
         assert_eq!(
             intrinsics
@@ -13176,23 +13174,23 @@ fn drop_cleanup_cannot_be_referenced_directly() {
 }
 
 #[test]
-fn fixed_references_do_not_convert_to_slices_implicitly() {
+fn fixed_arrays_do_not_convert_to_shared_buffers_implicitly() {
     for source in [
-        "use std.slice.Slice\nlet fixed: Ref (I32 ^ 2) = Ref (1, 2)\nlet values: Slice I32 = fixed\n",
-        "use std.slice.Slice\nlet values: Slice I32 = Ref 8\n",
-        "use std.slice.Slice\nlet fixed: Ref (I32 ^ 2) = Ref (1, 2)\nlet count = Slice.length fixed\n",
-        "use std.slice.Slice\ndef coerce: <T, N where Natural N> Ref (T ^ N) -> Slice T = <T, N where Natural N> value => value\n",
+        "use std.shared_buffer.SharedBuffer\nlet fixed: (I32 ^ 2) = (1, 2)\nlet values: SharedBuffer I32 = fixed\n",
+        "use std.shared_buffer.SharedBuffer\nlet values: SharedBuffer I32 = 8\n",
+        "use std.shared_buffer.SharedBuffer\nlet fixed: (I32 ^ 2) = (1, 2)\nlet count = SharedBuffer.length fixed\n",
+        "use std.shared_buffer.SharedBuffer\ndef coerce: <T, N where Natural N> (T ^ N) -> SharedBuffer T = <T, N where Natural N> value => value\n",
     ] {
         TypeChecker::new()
             .check(resolve(source))
-            .expect_err_diagnostics("a Ref must be converted with `Slice.from_ref`");
+            .expect_err_diagnostics("an array must be converted with `SharedBuffer.from_array`");
     }
     // The explicit conversion infers the element type for generic callers.
     type_check(concat!(
-        "use std.slice.Slice\n",
-        "let fixed: Ref (I32 ^ 3) = Ref (1, 2, 3)\n",
-        "let first: Ref I32 = Slice.get_ref_unchecked (Slice.from_ref fixed) 0\n",
-        "let count: USize = Slice.length (Slice.from_ref fixed)\n",
+        "use std.shared_buffer.SharedBuffer\n",
+        "let fixed: (I32 ^ 3) = (1, 2, 3)\n",
+        "let first: Ref I32 = SharedBuffer.get_ref_unchecked (SharedBuffer.from_array fixed) 0\n",
+        "let count: USize = SharedBuffer.length (SharedBuffer.from_array fixed)\n",
     ));
 }
 
@@ -13472,8 +13470,8 @@ fn checked_schemes_expose_templates_and_explicit_effect_arguments() {
 #[test]
 fn checked_schemes_preserve_concrete_constructor_residuals() {
     type_check(concat!(
-        "use std.slice.Slice\n",
-        "let empty: Slice I32 = Slice.from_ref (Ref ())\n",
+        "use std.shared_buffer.SharedBuffer\n",
+        "let empty: SharedBuffer I32 = SharedBuffer.from_array ()\n",
     ));
 }
 

@@ -7,8 +7,8 @@ use crate::{CheckedFunctionType, CheckedType, IntrinsicFunction};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LoweredRuntimeCallFacts {
     pub completion_value_type: Option<CheckedType>,
-    /// The concrete element count of a `Slice.from_ref` source.
-    pub slice_length: Option<usize>,
+    /// The concrete element count of a `Buffer.from_array` source.
+    pub array_length: Option<usize>,
     pub coroutine: Option<LoweredCoroutineActivation>,
 }
 
@@ -116,15 +116,15 @@ impl LoweredRuntimeCallFacts {
                     tasks_resource,
                 });
             }
-            IntrinsicFunction::SliceFromRef => {
+            IntrinsicFunction::BufferFromArray => {
                 let source = arguments
                     .first()
                     .filter(|_| arguments.len() == 1)
-                    .ok_or("slice conversion is missing its reference argument")?;
+                    .ok_or("array conversion is missing its array argument")?;
                 // Still-generic templates have no concrete count yet; only
                 // substituted instances reach emission.
-                facts.slice_length =
-                    crate::typecheck::slice_ref_length(&source.expected, &function.result);
+                facts.array_length =
+                    crate::typecheck::array_length(&source.expected, &function.result);
             }
             _ => {}
         }

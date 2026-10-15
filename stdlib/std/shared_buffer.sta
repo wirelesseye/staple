@@ -1,0 +1,125 @@
+pub mod
+
+use std.buffer.Buffer
+
+use std.core.recursive_constructor.recursive_constructor
+
+use std.core.index.(Index, MutateIndex)
+use std.iterator.(IntoIterator, Iterator)
+use std.iterator.IterStep.(Done, Yield)
+
+/// A garbage-collected, fixed-length sequence whose handles share one mutable
+/// allocation. The buffer owns its elements.
+@recursive_constructor
+pub type SharedBuffer T = wrap T
+
+extern "staple-intrinsic" {
+    __shared_buffer_length: <T> SharedBuffer T -> USize
+    __shared_buffer_get_ref: <T> (SharedBuffer T, USize) -> Ref T
+}
+
+companion<T> SharedBuffer T {
+    /// Moves the elements of a fixed array into a new shared buffer.
+    pub def from_array = <N where Natural N> move value: (T ^ N) => SharedBuffer T ::
+        Buffer.into_shared (Buffer.from_array value)
+
+    /// Returns the number of elements in the buffer.
+    pub def length = value: SharedBuffer T => USize :: __shared_buffer_length value
+
+    /// Borrows an element by position, or `None` if out of bounds.
+    pub def get_ref = (buffer: SharedBuffer T; position: USize) => Option (Ref T) :: {
+        if (position < SharedBuffer.length buffer) {
+            Some (SharedBuffer.get_ref_unchecked buffer position)
+        } else {
+            None
+        }
+    }
+
+    /// Borrows an element by position, trapping if out of bounds.
+    pub def get_ref_unchecked = (buffer: SharedBuffer T; position: USize) =>
+        Ref T :: __shared_buffer_get_ref (buffer, position)
+
+    /// Replaces the element at a position and drops the old value; `None` if out of bounds.
+    pub def set = (mut buffer: SharedBuffer T; position: USize; move value: T) => Option () :: {
+        if (position < SharedBuffer.length buffer) {
+            SharedBuffer.set_unchecked buffer position value
+            Some ()
+        } else {
+            None
+        }
+    }
+
+    /// Replaces the element at a position and drops the old value, trapping if out of bounds.
+    pub def set_unchecked = (mut buffer: SharedBuffer T; position: USize; move value: T) => () :: {
+        let mut reference = SharedBuffer.get_ref_unchecked buffer position
+        Ref.replace reference value
+        ()
+    }
+}
+
+companion<T where Copy T> SharedBuffer T {
+    /// Copies the element at a position, or `None` if out of bounds.
+    pub def get = (buffer: SharedBuffer T; position: USize) => Option T :: {
+        if (position < SharedBuffer.length buffer) {
+            Some (SharedBuffer.get_unchecked buffer position)
+        } else {
+            None
+        }
+    }
+
+    /// Copies the element at a position, trapping if out of bounds.
+    pub def get_unchecked = (buffer: SharedBuffer T; position: USize) => T :: {
+        let Ref value = SharedBuffer.get_ref_unchecked buffer position
+        value
+    }
+}
+
+impl<T where Copy T> Index (SharedBuffer T) USize {
+    type Output = T
+    index = (values, position) => SharedBuffer.get_unchecked values position
+}
+
+impl<T> MutateIndex (SharedBuffer T) USize {
+    type Value = T
+    mutate_index = (mut values, position, move value) => {
+        SharedBuffer.set_unchecked values position value
+    }
+}
+
+pub type SharedBufferIter T = pub wrap (buffer: SharedBuffer T, index: USize)
+
+impl<T where Copy T> Iterator (SharedBufferIter T) {
+    type Item = T
+    next = move SharedBufferIter (buffer, index) => if (index < SharedBuffer.length buffer) {
+        let Ref value = SharedBuffer.get_ref_unchecked buffer index
+        Yield (value, SharedBufferIter (buffer: buffer, index: index + 1))
+    } else {
+        Done (SharedBufferIter (buffer: buffer, index: index))
+    }
+}
+
+impl<T where Copy T> IntoIterator (SharedBuffer T) {
+    type Iter = SharedBufferIter T
+    into_iterator = move buffer => SharedBufferIter (buffer: buffer, index: 0)
+}
+
+impl<T where Eq T> Eq (SharedBuffer T) {
+    eq = (left, right) => {
+        let length = SharedBuffer.length left
+        if (length == SharedBuffer.length right) {
+            let mut index: USize = 0
+            let mut equal: Bool = True
+            while (index < length) {
+                if (Eq.eq (SharedBuffer.get_ref_unchecked left index, SharedBuffer.get_ref_unchecked right index)) {
+                    index = index + 1
+                } else {
+                    equal = False
+                    break
+                }
+            }
+            equal
+        } else {
+            False
+        }
+    }
+}

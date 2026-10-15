@@ -73,7 +73,7 @@ fn invalid_spread_substitution(
         }
         CheckedType::Ref(ty)
         | CheckedType::Unique(ty)
-        | CheckedType::Slice(ty)
+        | CheckedType::SharedBuffer(ty)
         | CheckedType::Buffer(ty)
         | CheckedType::RawMutPtr { pointee: ty }
         | CheckedType::RawPtr { pointee: ty } => visit(ty),

@@ -638,7 +638,7 @@ pub(super) fn scan_instance(
         matches!(
             &call.target,
             super::LoweredCallableTarget::Intrinsic {
-                intrinsic: crate::IntrinsicFunction::BufferFreeze,
+                intrinsic: crate::IntrinsicFunction::BufferIntoShared,
                 ..
             }
         )

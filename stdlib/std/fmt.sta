@@ -2,7 +2,7 @@ pub mod
 
 use std.buffer.(Buffer)
 use std.string.(String, ToString)
-use std.slice.Slice
+use std.shared_buffer.SharedBuffer
 use std.flow.while
 use std.syntax.*
 
@@ -129,7 +129,7 @@ def write_byte = mut formatter: Formatter => byte: U8 => () :: {
 def formatter_write = (mut formatter: Formatter, value: String) => () :: {
     let bytes = String.bytes value
     let mut index: USize = 0
-    while (index < Slice.length bytes) {
+    while (index < SharedBuffer.length bytes) {
         write_byte formatter bytes[index]
         index = index + 1
     }
@@ -139,7 +139,7 @@ def formatter_write_debug = (mut formatter: Formatter, value: String) => () :: {
     formatter |> write "\""
     let bytes = String.bytes value
     let mut index: USize = 0
-    while (index < Slice.length bytes) {
+    while (index < SharedBuffer.length bytes) {
         let byte = bytes[index]
         when {
             byte == 0 => formatter |> write "\\0",
@@ -157,7 +157,7 @@ def formatter_write_debug = (mut formatter: Formatter, value: String) => () :: {
 
 def formatter_finish = move formatter: Formatter => String :: {
     let Formatter buffer = formatter
-    String.from_utf8_unchecked (Buffer.freeze buffer)
+    String.from_utf8_unchecked (Buffer.into_shared buffer)
 }
 
 def formatter_new = () => Formatter :: Formatter (Buffer.with_capacity 16)

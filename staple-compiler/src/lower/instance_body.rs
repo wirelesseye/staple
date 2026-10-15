@@ -1271,8 +1271,8 @@ impl<'a> BodyCloner<'a> {
                             dereference: dereference.iter().map(|ty| self.ty(ty)).collect(),
                         }
                     }
-                    super::LoweredAccessKind::Slice { index, dereference } => {
-                        super::LoweredAccessKind::Slice {
+                    super::LoweredAccessKind::SharedBuffer { index, dereference } => {
+                        super::LoweredAccessKind::SharedBuffer {
                             index,
                             dereference: dereference.iter().map(|ty| self.ty(ty)).collect(),
                         }
@@ -2124,7 +2124,7 @@ impl<'a> BodyCloner<'a> {
                 super::LoweredAccessKind::Product { dereference, .. } => {
                     !dereference.is_empty() || self.body_value_has_place(access.base)
                 }
-                super::LoweredAccessKind::Slice { .. } => true,
+                super::LoweredAccessKind::SharedBuffer { .. } => true,
                 super::LoweredAccessKind::Scalar { .. } => false,
             },
             _ => false,
@@ -4694,7 +4694,7 @@ impl<'a> BodyValidator<'a> {
                 match &access.kind {
                     super::LoweredAccessKind::Representation { dereference }
                     | super::LoweredAccessKind::Product { dereference, .. }
-                    | super::LoweredAccessKind::Slice { dereference, .. }
+                    | super::LoweredAccessKind::SharedBuffer { dereference, .. }
                     | super::LoweredAccessKind::Scalar { dereference } => {
                         for value_type in dereference {
                             self.check_concrete_type(&origin, value_type, "dereference type");

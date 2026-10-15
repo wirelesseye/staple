@@ -41,7 +41,7 @@ impl DynamicSupport {
 pub(crate) enum RejectionReason {
     /// A callable value expression (`CallableValue`).
     CallableValue,
-    /// Recursive (`Ref`/`Slice`/`Syntax`) construction.
+    /// Recursive (`Ref`/`SharedBuffer`/`Syntax`) construction.
     RecursiveConstruction,
     /// A deferred callable expression reached the scanner.
     Deferred,
@@ -76,8 +76,6 @@ pub(crate) enum RejectionReason {
     BufferClone,
     /// A run-time `Natural` count (a restriction).
     RuntimeNaturalCount,
-    /// `__slice_from_ref` (a restriction).
-    SliceFromRef,
     /// A function value behind a reference, slice, buffer, or shared cell
     /// (a restriction).
     #[allow(dead_code)]
@@ -101,7 +99,6 @@ impl RejectionReason {
                 | RejectionReason::SignalAssignment
                 | RejectionReason::BufferClone
                 | RejectionReason::RuntimeNaturalCount
-                | RejectionReason::SliceFromRef
                 | RejectionReason::FunctionBehindReference
         )
     }
@@ -128,7 +125,6 @@ impl RejectionReason {
             RejectionReason::SignalAssignment => "signal assignment",
             RejectionReason::BufferClone => "buffer clone",
             RejectionReason::RuntimeNaturalCount => "run-time Natural count",
-            RejectionReason::SliceFromRef => "slice from ref",
             RejectionReason::FunctionBehindReference => "function value behind a reference",
         }
     }
@@ -139,7 +135,7 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
     use crate::IntrinsicFunction;
     match intrinsic {
         IntrinsicFunction::BufferClone => RejectionReason::BufferClone,
-        IntrinsicFunction::SliceFromRef => RejectionReason::SliceFromRef,
+        IntrinsicFunction::BufferFromArray => RejectionReason::RuntimeNaturalCount,
         IntrinsicFunction::ReactiveScope
         | IntrinsicFunction::Reaction
         | IntrinsicFunction::Batch
@@ -179,15 +175,15 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::StringFromCString
         | IntrinsicFunction::StringToCString
         | IntrinsicFunction::StringAdd
-        | IntrinsicFunction::SliceLength
-        | IntrinsicFunction::SliceGetRef
+        | IntrinsicFunction::SharedBufferLength
+        | IntrinsicFunction::SharedBufferGetRef
         | IntrinsicFunction::BufferWithCapacity
         | IntrinsicFunction::BufferLength
         | IntrinsicFunction::BufferCapacity
         | IntrinsicFunction::BufferPush
         | IntrinsicFunction::BufferPop
         | IntrinsicFunction::BufferGet
-        | IntrinsicFunction::BufferFreeze
+        | IntrinsicFunction::BufferIntoShared
         | IntrinsicFunction::BufferTransfer
         | IntrinsicFunction::RefReplace
         | IntrinsicFunction::UniqueIntoRaw
@@ -440,7 +436,7 @@ impl LoweredProgram {
             AsyncIntrinsic => "functions with async bodies cannot be used as polymorphic values yet".to_owned(),
             ReactiveIntrinsic | ReactiveNameRead | ReactiveCall | SignalBinding | ReactiveBinding | SignalAssignment => "functions with reactive bodies cannot be used as polymorphic values yet".to_owned(),
             BufferClone => "`__buffer_clone` cannot be used in a polymorphic value's implementation yet".to_owned(),
-            RuntimeNaturalCount | SliceFromRef => "array lengths cannot depend on a polymorphic value's type parameters yet".to_owned(),
+            RuntimeNaturalCount => "array lengths cannot depend on a polymorphic value's type parameters yet".to_owned(),
             FunctionBehindReference => "function values inside references cannot be passed to a polymorphic value's implementation".to_owned(),
             reason => format!("internal invariant violated: polymorphic implementation rejected for {}", reason.description()),
         }).collect::<BTreeSet<_>>();
@@ -522,8 +518,8 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::IntegerCompare { .. }
             | IntrinsicFunction::FloatBinary { .. }
             | IntrinsicFunction::FloatCompare { .. }
-            | IntrinsicFunction::SliceLength
-            | IntrinsicFunction::SliceGetRef
+            | IntrinsicFunction::SharedBufferLength
+            | IntrinsicFunction::SharedBufferGetRef
             | IntrinsicFunction::RefReplace
             | IntrinsicFunction::UniqueIntoRaw
             | IntrinsicFunction::UniqueFromRaw
@@ -533,7 +529,7 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::BufferPush
             | IntrinsicFunction::BufferPop
             | IntrinsicFunction::BufferGet
-            | IntrinsicFunction::BufferFreeze
+            | IntrinsicFunction::BufferIntoShared
             | IntrinsicFunction::BufferTransfer
     )
 }
@@ -547,7 +543,7 @@ fn contains_polymorphic_function(ty: &CheckedType) -> bool {
         CheckedType::RawMutPtr { pointee } => contains_polymorphic_function(pointee),
         CheckedType::Ref(value)
         | CheckedType::Unique(value)
-        | CheckedType::Slice(value)
+        | CheckedType::SharedBuffer(value)
         | CheckedType::Buffer(value) => contains_polymorphic_function(value),
         CheckedType::Array { element, count } => {
             contains_polymorphic_function(element) || contains_polymorphic_function(count)
@@ -579,7 +575,7 @@ fn contains_function_behind_reference(ty: &CheckedType) -> bool {
     match ty {
         CheckedType::Ref(value)
         | CheckedType::Unique(value)
-        | CheckedType::Slice(value)
+        | CheckedType::SharedBuffer(value)
         | CheckedType::Buffer(value) => {
             contains_polymorphic_function(value) || contains_function_behind_reference(value)
         }
@@ -1847,7 +1843,7 @@ fn collect_parameter_ids(ty: &CheckedType, ids: &mut HashSet<crate::TypeParamete
         CheckedType::Wrapper { representation, .. } => collect_parameter_ids(representation, ids),
         CheckedType::Ref(inner)
         | CheckedType::Unique(inner)
-        | CheckedType::Slice(inner)
+        | CheckedType::SharedBuffer(inner)
         | CheckedType::Buffer(inner) => collect_parameter_ids(inner, ids),
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             for argument in arguments {

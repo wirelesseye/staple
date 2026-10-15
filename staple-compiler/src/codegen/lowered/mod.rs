@@ -3861,7 +3861,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map(|value| value.as_any_value_enum())
                     .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))
             }
-            crate::LoweredAccessKind::Slice { index, dereference } => {
+            crate::LoweredAccessKind::SharedBuffer { index, dereference } => {
                 let value = if dereference.is_empty() {
                     value_as_basic(base)
                 } else {
@@ -8129,24 +8129,81 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.build_intrinsic_bool(condition, result_type, span)
             }
 
-            IntrinsicFunction::SliceLength => {
+            IntrinsicFunction::SharedBufferLength => {
                 let [BasicMetadataValueEnum::StructValue(slice)] = arguments else {
                     return Err(Diagnostic::new(span, "length requires a slice"));
                 };
                 self.backend
-                    .build_slice_length(*slice)
+                    .build_shared_buffer_length(*slice)
                     .map(|value| value.as_any_value_enum())
             }
-            IntrinsicFunction::SliceFromRef => {
-                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
-                    return Err(Diagnostic::new(span, "from_ref requires a reference"));
+            IntrinsicFunction::BufferFromArray => {
+                let CheckedType::Buffer(element) = result_type else {
+                    return Err(Diagnostic::new(span, "invalid Buffer result type"));
                 };
-                let length = call.runtime.slice_length.ok_or_else(|| {
-                    Diagnostic::new(span.clone(), "from_ref is missing its concrete length")
+                // The array parameter is passed spread, one argument per element.
+                let length = call.runtime.array_length.ok_or_else(|| {
+                    Diagnostic::new(
+                        span.clone(),
+                        "Buffer.from_array is missing its concrete length",
+                    )
                 })?;
-                self.backend.build_slice_ref_value(*pointer, length)
+                if arguments.len() != length {
+                    return Err(Diagnostic::new(
+                        span,
+                        "Buffer.from_array operands do not match the array length",
+                    ));
+                }
+                let llvm_element = self.backend.compile_type(element)?;
+                let header = self.backend.buffer_header_type(llvm_element);
+                let capacity = self.backend.size_type.const_int(length as u64, false);
+                self.backend.trap_if_buffer_capacity_overflows(
+                    capacity,
+                    llvm_element,
+                    header,
+                    span.clone(),
+                )?;
+                let buffer = self.backend.build_buffer_allocation(
+                    capacity,
+                    llvm_element,
+                    header,
+                    "buffer.from_array",
+                    true,
+                    span.clone(),
+                )?;
+                self.backend.build_buffer_capacity_store(
+                    buffer,
+                    header,
+                    capacity,
+                    "buffer.capacity.slot",
+                )?;
+                let length_slot = self
+                    .backend
+                    .builder
+                    .build_struct_gep(header, buffer, 0, "buffer.length.slot")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(length_slot, capacity)
+                    .map_err(compiler_diagnostic)?;
+                // The array's elements move into the buffer, which owns them.
+                let data = self.backend.buffer_data_pointer(buffer, llvm_element)?;
+                for (index, argument) in arguments.iter().enumerate() {
+                    let value = BasicValueEnum::try_from(*argument).map_err(|_| {
+                        Diagnostic::new(span.clone(), "Buffer element is not storable")
+                    })?;
+                    self.backend.build_buffer_element_store(
+                        data,
+                        llvm_element,
+                        self.backend.size_type.const_int(index as u64, false),
+                        value,
+                        "buffer.from_array.slot",
+                        span.clone(),
+                    )?;
+                }
+                Ok(buffer.as_any_value_enum())
             }
-            IntrinsicFunction::SliceGetRef => {
+            IntrinsicFunction::SharedBufferGetRef => {
                 let [
                     BasicMetadataValueEnum::StructValue(slice),
                     BasicMetadataValueEnum::IntValue(position),
@@ -8163,7 +8220,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let element_type = self.backend.compile_type(payload)?;
                 let pointer =
                     self.backend
-                        .build_slice_get_ref(*slice, *position, element_type, span)?;
+                        .build_shared_buffer_get_ref(*slice, *position, element_type, span)?;
                 Ok(pointer.as_any_value_enum())
             }
             IntrinsicFunction::BufferWithCapacity => {
@@ -8316,7 +8373,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(reference.as_any_value_enum())
             }
             IntrinsicFunction::BufferPop => self.emit_buffer_pop(call, arguments, &span),
-            IntrinsicFunction::BufferFreeze => {
+            IntrinsicFunction::BufferIntoShared => {
                 let [BasicMetadataValueEnum::PointerValue(buffer)] = arguments else {
                     return Err(Diagnostic::new(span, "invalid Buffer handle"));
                 };
@@ -8329,7 +8386,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     "buffer.length.slot",
                     "buffer.length",
                 )?;
-                // The slice owns a GC copy of the elements; the malloc-backed
+                // The shared buffer owns a GC copy of the elements; the malloc-backed
                 // source is released without dropping them.
                 let frozen = self.backend.build_buffer_allocation(
                     length,

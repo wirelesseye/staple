@@ -591,7 +591,7 @@ always-imported language interface: booleans, numbers, comparison and indexing p
 references, reactive primitives, ranges, and compiler modifiers. The separate
 `std.prelude` interface is imported by default and provides strings, lists,
 iteration, formatting traits, defaults, results, and flow macros. Lower-level
-modules such as `std.buffer`, `std.slice`, `std.io`, `std.syntax`, and
+modules such as `std.buffer`, `std.shared_buffer`, `std.io`, `std.syntax`, and
 `std.cinterop` require explicit imports.
 
 `staple build` and `staple run` compile the standard library, like every other
@@ -1485,8 +1485,8 @@ position type. The compiler derives `Index P USize Output` for every non-empty
 fixed product whose elements are all `Copy`; `Output` is the duplicate-free sum
 of its element types. Thus indexing `(I32, String, I32)` produces
 `I32 | String`, while indexing `(I32 ^ N)` produces `I32`. The standard library
-implements `Index (Slice T) USize` with `type Output = T` when `T` is `Copy`, backed by
-`Slice.get_ref_unchecked`, so a `Slice T` is indexed like a fixed product of `T`. Known
+implements `Index (SharedBuffer T) USize` with `type Output = T` when `T` is `Copy`, backed by
+`SharedBuffer.get_unchecked`, so a `SharedBuffer T` is indexed like a fixed product of `T`. Known
 bad fixed-product indices are rejected and dynamic out-of-bounds indices trap.
 
 A `Ref T` is transparent for indexing, the same way it is for field access:
@@ -1505,8 +1505,8 @@ target[index] = replacement
 ```
 
 The compiler derives `MutateIndex` for non-empty arrays, by
-value. The standard library implements `MutateIndex (Slice T) USize T` for
-every `T`, backed by `Slice.get_ref_unchecked` and `Ref.replace`. The mutable `Target`
+value. The standard library implements `MutateIndex (SharedBuffer T) USize T` for
+every `T`, backed by `SharedBuffer.set_unchecked`, which replaces the element through `Ref.replace`. The mutable `Target`
 parameter passes by address either way (see the "Mutable parameters" subsection
 under "Functions"), so a by-value target's root binding must be declared
 `mut` just as a `Ref` target's must. These structural implementations cannot
@@ -1935,7 +1935,7 @@ called directly:
 * a scheme that names an associated type of its parameters, such as
   `<Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter)`;
 * a coroutine, async, or reactive body;
-* a function value behind `Ref`, `Slice`, `Buffer`, or a shared cell that
+* a function value behind `Ref`, `SharedBuffer`, `Buffer`, or a shared cell that
   crosses into the implementation.
 
 The checker also rejects schemes in signals and in ordinary `extern`
@@ -3386,7 +3386,7 @@ Never
 Bool
 String
 Ref T
-Slice T
+SharedBuffer T
 Buffer T
 CString
 CChar
@@ -3446,7 +3446,7 @@ Scalar `ToString` implementations delegate to `Display`.
 
 `String` is an immutable garbage-collected UTF-8 byte sequence. The standard
 library declares it as a nominal type with the private representation
-`Slice U8`. At runtime it contains a managed byte pointer and a byte length; it
+`SharedBuffer U8`. At runtime it currently contains a managed byte pointer and a byte length; it
 has no capacity field or separate descriptor allocation. Copying a `String`
 copies those two words and keeps the managed byte storage shared.
 Two strings can be concatenated with `+`; this dispatches through the standard
@@ -3493,38 +3493,48 @@ let point = RefPoint (Ref (x: 10, y: 20))
 let RefPoint (Ref (x, y)) = point
 ```
 
-An array can be viewed as a `Slice`:
+An array can be moved into a `SharedBuffer`:
 
 ```staple
-let fixed: Ref (I32 ^ 3) = Ref (10, 20, 30)
-let values: Slice I32 = Slice.from_ref fixed
-let count: USize = Slice.length values
-let second = values.1
+let values: SharedBuffer I32 = SharedBuffer.from_array (10, 20, 30)
+let count: USize = SharedBuffer.length values
 let index: USize = 2
 let third = values[index]
+let second = SharedBuffer.get values 1
 ```
 
-`Slice T` is a pointer-and-length view of an allocation whose concrete length
-is still fixed. It is not a dynamic array and is not equal to any `Ref (T ^ N)`,
-and a fixed reference never converts to a slice implicitly: the companion
-function `Slice.from_ref: <N where Natural N> Ref (T ^ N) -> Slice T` performs the
-conversion explicitly, as in the `Slice.from_ref fixed` binding above. A
-singleton `Ref T` (a `(T ^ 1)`, normalized to `T`) becomes a length-1 slice, and
-an empty `Ref ()` becomes a length-0 slice, requiring an expected `Slice` type to
-infer its element type. Literal and variable indexing
-perform runtime bounds checks.
-`Slice.get_ref: <T> (Slice T; USize) -> Option (Ref T)` returns a reference
-to an element, or `None` when out of bounds.
-`Slice.get_ref_unchecked: <T> (Slice T; USize) -> Ref T` borrows an element by position,
-trapping when out of bounds; it is the primitive behind the standard library's
-`Index`/`MutateIndex` implementations for slices. Where `Copy T`, the standard
-library also implements `IntoIterator`/`Iterator` for `Slice T` through
-`SliceIter T`, so `for item in slice` yields owned copies. Where `Eq T`, the
-standard library also implements `Eq (Slice T)`: slices of different lengths
-are unequal, and equal-length slices are compared element by element. A slice
-is a copyable view, so it stays usable — and iterable again — after a loop. A
-`Slice T` is a sized view value, not a product: it cannot be spread or
-destructured, and it cannot cross a foreign ABI.
+`SharedBuffer T` is a garbage-collected, fixed-length sequence of `T`. It is
+not a dynamic array and is not equal to any `T ^ N`, and an array never
+converts to a `SharedBuffer` implicitly: the companion function
+`SharedBuffer.from_array: <N where Natural N> move (T ^ N) -> SharedBuffer T`
+performs the conversion explicitly by moving the array's elements into a new
+allocation, so `T` need not be `Copy`. An empty `()` becomes a length-0
+buffer, requiring an expected `SharedBuffer` type to infer its element type.
+The buffer owns its elements and drops each exactly once when it becomes
+unreachable.
+
+A `SharedBuffer T` is a copyable handle whose copies share one allocation, so
+it is shared-mutable: a write through one copy is visible through every other
+copy. `SharedBuffer.length` reports the number of elements. Where `Copy T`,
+`SharedBuffer.get: (SharedBuffer T; USize) -> Option T` returns a copy of an
+element, or `None` when out of bounds, and `SharedBuffer.get_unchecked` returns
+it directly, trapping when out of bounds. `SharedBuffer.set` replaces an
+element through a `mut` handle binding, dropping the old value, and returns
+`Some ()`, or `None` (dropping the new value) for an out-of-bounds position;
+`SharedBuffer.set_unchecked` traps instead.
+`SharedBuffer.get_ref: <T> (SharedBuffer T; USize) -> Option (Ref T)` returns a
+reference to an element, or `None` when out of bounds, and
+`SharedBuffer.get_ref_unchecked: <T> (SharedBuffer T; USize) -> Ref T` borrows
+an element by position, trapping when out of bounds; these give access to
+non-`Copy` elements. Literal and variable indexing perform runtime bounds
+checks through the standard library's `Index`/`MutateIndex` implementations.
+Where `Copy T`, the standard library also implements `IntoIterator`/`Iterator`
+for `SharedBuffer T` through `SharedBufferIter T`, so `for item in values`
+yields owned copies and the handle stays usable, and iterable again, after a
+loop. Where `Eq T`, the standard library also implements `Eq (SharedBuffer T)`:
+buffers of different lengths are unequal, and equal-length buffers are compared
+element by element. A `SharedBuffer T` is not a product: it cannot be spread
+or destructured, and it cannot cross a foreign ABI.
 
 `Buffer T` is low-level, fixed-capacity contiguous storage with an initialized
 prefix. `Buffer.with_capacity` allocates space without constructing any `T`
@@ -3549,11 +3559,14 @@ index. `Buffer.set` replaces an element, dropping the old value, and returns
 `Buffer.set_unchecked` traps instead. Buffers hand out no references to their
 elements.
 
-`Buffer.freeze` consumes the buffer and returns a `Slice T` over a managed
-copy of its initialized prefix; the original allocation is released without
-dropping the moved elements. The consumed buffer cannot subsequently be used
-or frozen again. The managed copy drops exactly its initialized elements when
-unreachable; a frozen slice or a `Ref` to one of its elements keeps it alive.
+`Buffer.from_array: <N where Natural N> move (T ^ N) -> Buffer T` moves the
+elements of a fixed array into a new buffer whose capacity and length are both
+`N`; the buffer owns the moved elements. `Buffer.into_shared` consumes the
+buffer and returns a `SharedBuffer T` over a managed copy of its initialized
+prefix; the original allocation is released without dropping the moved
+elements. The consumed buffer cannot subsequently be used or shared again.
+The managed copy drops exactly its initialized elements when unreachable; a
+`SharedBuffer` or a `Ref` to one of its elements keeps it alive.
 
 `Buffer.transfer` moves every initialized element of one buffer onto the end
 of another's initialized prefix, in order, and empties the source. Both
@@ -3713,8 +3726,8 @@ still exist, resurrection does not retain those objects, and allocation is
 allowed while nested collection is suppressed.
 
 A managed allocation stays reachable through a pointer to any position inside
-it, not only its start. A `Ref` to one element of a slice, or a slice over a
-frozen buffer, keeps the whole allocation alive, including the other
+it, not only its start. A `Ref` to one element of a `SharedBuffer`, or a
+`SharedBuffer` made by `Buffer.into_shared`, keeps the whole allocation alive, including the other
 elements, until no such pointer remains.
 
 `CChar` and `CString` are public opaque types in `std.cinterop`.
@@ -3804,9 +3817,10 @@ to the target precision. Syntax failures return `InvalidNumber`; overflow
 and underflow reported by the parser return `OutOfRange`. Boolean parsing
 accepts `True`, `true`, `False`, and `false`, otherwise returning `std.core.boolean.InvalidBool`.
 
-`String` converts to its `Slice U8` bytes, `Ref (T ^ N)` converts to `Slice T`,
-and consuming a `Buffer T` converts it to a `Slice T` over a managed copy of its elements. Checked byte
-slice-to-string conversion uses `String.from_utf8`, which returns
+`String` converts to its `SharedBuffer U8` bytes. Arrays and buffers have no
+`Convert` implementations; use `SharedBuffer.from_array`, `Buffer.from_array`,
+and `Buffer.into_shared` explicitly. Checked byte
+buffer-to-string conversion uses `String.from_utf8`, which returns
 `Result String std.string.InvalidUtf8`. `String.from_utf8_unchecked` constructs
 a string without validation when the caller knows the bytes are valid UTF-8.
 Checked `String` to `CString` conversion rejects embedded NULs with
@@ -4110,7 +4124,7 @@ applies to a self-reference too: a recursive `type Node T` must still write its
 own ordinary arguments, as `Node T` or `Node I32`, never a bare `Node`.
 
 A represented type may refer to itself, directly or mutually, only where the
-reference passes through a managed indirection — `Ref`, `Slice`, or a
+reference passes through a managed indirection — `Ref`, `SharedBuffer`, or a
 `Syntax` value — so that every instance has a finite layout. A representation
 that would contain itself by value (`type Loop = wrap (head: I32, tail: Loop)`) is
 rejected as a cyclic definition; routing the back-edge through `Ref`

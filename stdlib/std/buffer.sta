@@ -2,7 +2,7 @@ pub mod
 
 use std.core.sized.sized_opaque
 
-use std.slice.Slice
+use std.shared_buffer.SharedBuffer
 use std.clone.Clone
 
 /// A mutable, fixed-capacity buffer of values.
@@ -17,13 +17,14 @@ extern "staple-intrinsic" {
     __buffer_push: <T> (mut Buffer T, move T) -> ()
     __buffer_pop: <T> mut Buffer T -> Option T
     __buffer_get: <T> (Buffer T, USize) -> Ref T
-    __buffer_freeze: <T> move Buffer T -> Slice T
+    __buffer_into_shared: <T> move Buffer T -> SharedBuffer T
+    __buffer_from_array: <T, N where Natural N> move (T ^ N) -> Buffer T
     __buffer_transfer: <T> (mut Buffer T, mut Buffer T) -> ()
     __buffer_clone: <T where Clone T> Buffer T -> Buffer T
 }
 
 companion<T> Buffer T {
-    use std.slice.Slice
+    use std.shared_buffer.SharedBuffer
     /// Allocates storage for exactly capacity elements without initialising values.
     pub def with_capacity = capacity: USize => Buffer T :: __buffer_with_capacity capacity
 
@@ -56,8 +57,11 @@ companion<T> Buffer T {
         ()
     }
 
-    /// Consumes the buffer, moving its elements into a garbage-collected slice.
-    pub def freeze = move buffer: Buffer T => Slice T :: __buffer_freeze buffer
+    /// Moves the elements of a fixed array into a new buffer whose capacity is the array length.
+    pub def from_array = <N where Natural N> move value: (T ^ N) => Buffer T :: __buffer_from_array value
+
+    /// Consumes the buffer, moving its elements into a garbage-collected shared buffer.
+    pub def into_shared = move buffer: Buffer T => SharedBuffer T :: __buffer_into_shared buffer
 
     /// Moves every initialised source element to destination and empties source.
     /// Traps for overlapping or insufficient-capacity buffers.
@@ -84,8 +88,4 @@ companion<T where Copy T> Buffer T {
 
 impl<T where Clone T> Clone (Buffer T) {
     clone = buffer => __buffer_clone buffer
-}
-
-impl<T> Convert (Buffer T) (Slice T) {
-    convert = move value => Buffer.freeze value
 }

@@ -391,7 +391,7 @@ pub(super) fn collect_referenced_parameters(
         }
         CheckedType::Ref(payload)
         | CheckedType::Unique(payload)
-        | CheckedType::Slice(payload)
+        | CheckedType::SharedBuffer(payload)
         | CheckedType::Buffer(payload)
         | CheckedType::RawMutPtr { pointee: payload }
         | CheckedType::RawPtr { pointee: payload } => collect_referenced_parameters(payload, out),
@@ -978,7 +978,7 @@ fn contains_placeholder(value_type: &CheckedType) -> bool {
         CheckedType::Inferred | CheckedType::Error => true,
         CheckedType::Ref(payload)
         | CheckedType::Unique(payload)
-        | CheckedType::Slice(payload)
+        | CheckedType::SharedBuffer(payload)
         | CheckedType::Buffer(payload)
         | CheckedType::RawMutPtr { pointee: payload }
         | CheckedType::RawPtr { pointee: payload } => contains_placeholder(payload),
@@ -3016,7 +3016,7 @@ impl<'a> ParameterCollector<'a> {
             CheckedType::Parameter { id, name, .. } => self.relevant.notice_type(*id, name),
             CheckedType::Ref(payload)
             | CheckedType::Unique(payload)
-            | CheckedType::Slice(payload)
+            | CheckedType::SharedBuffer(payload)
             | CheckedType::Buffer(payload)
             | CheckedType::RawMutPtr { pointee: payload }
             | CheckedType::RawPtr { pointee: payload } => self.collect_type(payload),
@@ -3180,7 +3180,7 @@ impl<'a> ParameterCollector<'a> {
                 match &access.kind {
                     LoweredAccessKind::Representation { dereference }
                     | LoweredAccessKind::Product { dereference, .. }
-                    | LoweredAccessKind::Slice { dereference, .. }
+                    | LoweredAccessKind::SharedBuffer { dereference, .. }
                     | LoweredAccessKind::Scalar { dereference } => {
                         for value_type in dereference {
                             self.collect_type(value_type);
