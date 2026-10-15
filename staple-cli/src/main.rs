@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::process::{ExitCode, ExitStatus};
 
+mod cache;
 mod compile;
 mod expand;
 mod fmt;

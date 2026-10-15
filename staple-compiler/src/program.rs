@@ -459,7 +459,7 @@ impl Program {
     pub fn package_graph(&self) -> Option<&staple_project::PackageGraph> {
         self.package_graph.as_ref()
     }
-    pub(crate) fn active_features(&self) -> &staple_project::ActiveFeatures {
+    pub fn active_features(&self) -> &staple_project::ActiveFeatures {
         &self.active_features
     }
 
