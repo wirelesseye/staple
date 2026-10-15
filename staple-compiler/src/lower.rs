@@ -20923,11 +20923,10 @@ mod tests {
                 .iter()
                 .any(|access| matches!(access.kind, LoweredAccessKind::Product { index: 1, .. }))
         );
-        assert!(
-            accesses
-                .iter()
-                .any(|access| matches!(access.kind, LoweredAccessKind::SharedBuffer { index: 0, .. }))
-        );
+        assert!(accesses.iter().any(|access| matches!(
+            access.kind,
+            LoweredAccessKind::SharedBuffer { index: 0, .. }
+        )));
         assert!(
             accesses
                 .iter()

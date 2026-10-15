@@ -456,6 +456,7 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
                 }
                 IntrinsicFunction::CStringBytes => {
                     self.requirements.record(RuntimeRequirement::CStringLength);
+                    self.gc();
                 }
                 IntrinsicFunction::ToString { .. } => {
                     self.requirements

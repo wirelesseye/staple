@@ -3664,6 +3664,8 @@ mod tests {
                 "match slice |> get_ref 2 { Some (Ref value) => if (value != 30) { exit 1 }, None() => exit 1 }\n",
                 "match SharedBuffer.get_ref slice 3 { None() => (), Some _ => exit 1 }\n",
                 "match SharedBuffer.get_ref slice 100 { None() => (), Some _ => exit 1 }\n",
+                "let empty: SharedBuffer I32 = SharedBuffer.from_array ()\n",
+                "match SharedBuffer.get_ref empty 0 { None() => (), Some _ => exit 1 }\n",
 
                 "def score: ((I32, String, Bool), USize) -> I32 = (values, position) => match values[position] {\n",
                 "  value: I32 => value,\n",

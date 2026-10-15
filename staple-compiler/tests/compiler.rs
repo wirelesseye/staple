@@ -1858,7 +1858,7 @@ fn supports_repeated_spread_and_slice_references() {
     let llvm = generator
         .compile_root(&lower(&module))
         .expect("product extensions should generate LLVM");
-    assert!(llvm.contains("slice.length"));
+    assert!(llvm.contains("shared_buffer.length"));
     assert!(llvm.contains("index.out_of_bounds"));
     assert!(llvm.contains("llvm.trap"));
 }
@@ -5062,10 +5062,10 @@ fn buffer_intrinsics_type_check_and_compile() {
         .compile_root(&lowered)
         .expect("Buffer operations should compile");
     assert!(llvm.contains("unique.allocate"));
-    assert!(llvm.contains("buffer.freeze.allocate"));
+    assert!(llvm.contains("buffer.into_shared.allocate"));
     assert!(llvm.contains("buffer.push.slot"));
     assert!(llvm.contains("buffer.pop.option"));
-    assert!(llvm.contains("buffer.slice.pointer"));
+    assert!(llvm.contains("shared_buffer.length"));
 
     let module = type_check(concat!(
         "use std.buffer.Buffer\n",
@@ -5504,10 +5504,8 @@ fn c_string_is_an_imported_primitive_macro() {
         .compile_module(&lower_whole(&module))
         .expect("String operations should compile");
 
-    assert!(llvm.contains("string.pointer"));
+    assert!(llvm.contains("string.allocate"));
     assert!(llvm.contains("string.length"));
-    assert!(!llvm.contains("string.capacity"));
-    assert!(!llvm.contains("string.allocate"));
     assert!(llvm.contains("@strlen"));
     assert!(llvm.contains("@memchr"));
     assert!(llvm.contains("@llvm.trap"));

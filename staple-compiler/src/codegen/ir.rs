@@ -341,45 +341,68 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(pointer.as_any_value_enum())
     }
 
-    /// The emitter's String literal: copy a global byte string to a GC allocation
-    /// and build the `{pointer, length}` value. The caller decodes literal text.
+    /// The emitter's String literal: copy a global byte string to a fresh GC
+    /// String allocation. The caller decodes literal text.
     pub(crate) fn build_string_literal(
         &self,
         value: &str,
         span: Span,
-    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
         let source = self
             .builder
             .build_global_string_ptr(value, "string")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
             .as_pointer_value();
         let length = self.size_type.const_int(value.len() as u64, false);
-        let pointer = self.build_gc_allocation(length, "string.data", span.clone())?;
+        let (string, data) = self.build_string_allocation(length, span.clone())?;
         self.builder
-            .build_memcpy(pointer, 1, source, 1, length)
+            .build_memcpy(data, 1, source, 1, length)
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        self.build_string_value(pointer, length, span)
+        Ok(string)
     }
 
-    /// The `{pointer, length}` slice value.
-    pub(crate) fn build_string_value(
+    /// Allocates a String: a GC buffer header of U8 whose length and capacity
+    /// are both `length`. Returns the header pointer and its (zeroed) data
+    /// pointer for the caller to fill. U8 needs no finalizer.
+    pub(crate) fn build_string_allocation(
         &self,
-        pointer: inkwell::values::PointerValue<'context>,
         length: inkwell::values::IntValue<'context>,
         span: Span,
-    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
-        let mut value = self.slice_type().const_zero();
-        value = self
+    ) -> CodeGenerationResult<(
+        inkwell::values::PointerValue<'context>,
+        inkwell::values::PointerValue<'context>,
+    )> {
+        let byte: BasicTypeEnum<'context> = self.context.i8_type().into();
+        let header = self.buffer_header_type(byte);
+        self.trap_if_buffer_capacity_overflows(length, byte, header, span.clone())?;
+        let string =
+            self.build_buffer_allocation(length, byte, header, "string", false, span.clone())?;
+        self.build_buffer_capacity_store(string, header, length, "string.capacity.slot")?;
+        let length_slot = self
             .builder
-            .build_insert_value(value, pointer, 0, "string.pointer")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-            .into_struct_value();
-        value = self
-            .builder
-            .build_insert_value(value, length, 1, "string.length")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-            .into_struct_value();
-        Ok(value)
+            .build_struct_gep(header, string, 0, "string.length.slot")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(length_slot, length)
+            .map_err(compiler_diagnostic)?;
+        let data = self.buffer_data_pointer(string, byte)?;
+        Ok((string, data))
+    }
+
+    /// The data pointer and byte length of a String.
+    pub(crate) fn string_parts(
+        &self,
+        string: inkwell::values::PointerValue<'context>,
+    ) -> CodeGenerationResult<(
+        inkwell::values::PointerValue<'context>,
+        inkwell::values::IntValue<'context>,
+    )> {
+        let byte: BasicTypeEnum<'context> = self.context.i8_type().into();
+        let header = self.buffer_header_type(byte);
+        let length =
+            self.build_buffer_length(string, header, "string.length.slot", "string.length")?;
+        let data = self.buffer_data_pointer(string, byte)?;
+        Ok((data, length))
     }
 
     /// Copies a C string to an owned GC String without UTF-8 validation.
@@ -388,7 +411,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         &self,
         source: inkwell::values::PointerValue<'context>,
         span: Span,
-    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
         let strlen_type = self.size_type.fn_type(
             &[self.context.ptr_type(AddressSpace::default()).into()],
             false,
@@ -401,12 +424,11 @@ impl<'program, 'context> Backend<'program, 'context> {
             .try_as_basic_value()
             .unwrap_basic()
             .into_int_value();
-        let pointer = self.build_gc_allocation(length, "string.data", span.clone())?;
+        let (string, data) = self.build_string_allocation(length, span.clone())?;
         self.builder
-            .build_memcpy(pointer, 1, source, 1, length)
+            .build_memcpy(data, 1, source, 1, length)
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        let result = self.build_string_value(pointer, length, span.clone())?;
-        Ok(result)
+        Ok(string)
     }
 
     /// Releases an owned CString through free.
@@ -429,19 +451,10 @@ impl<'program, 'context> Backend<'program, 'context> {
     /// Allocates a NUL-terminated String copy without checking for interior NULs.
     pub(crate) fn build_string_to_c_string(
         &self,
-        string: inkwell::values::StructValue<'context>,
+        string: inkwell::values::PointerValue<'context>,
         span: Span,
     ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
-        let pointer = self
-            .builder
-            .build_extract_value(string, 0, "string.pointer")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-            .into_pointer_value();
-        let length = self
-            .builder
-            .build_extract_value(string, 1, "string.length")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-            .into_int_value();
+        let (pointer, length) = self.string_parts(string)?;
         let allocation_length = self
             .builder
             .build_int_add(
@@ -685,37 +698,32 @@ impl<'program, 'context> Backend<'program, 'context> {
         .map_err(compiler_diagnostic)
     }
 
-    /// Field 1 of the `{pointer, length}` slice.
+    /// The length field of a SharedBuffer's header.
     pub(crate) fn build_shared_buffer_length(
         &self,
-        slice: inkwell::values::StructValue<'context>,
+        buffer: inkwell::values::PointerValue<'context>,
+        element_type: inkwell::types::BasicTypeEnum<'context>,
     ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
-        self.builder
-            .build_extract_value(slice, 1, "slice.length")
-            .map(|value| value.into_int_value())
-            .map_err(compiler_diagnostic)
+        let header = self.buffer_header_type(element_type);
+        self.build_buffer_length(
+            buffer,
+            header,
+            "shared_buffer.length.slot",
+            "shared_buffer.length",
+        )
     }
 
-    /// Extract the slice's pointer and length and
-    /// return the bounds-checked element pointer.
+    /// Bounds-check against the header length and return the element pointer.
     pub(crate) fn build_shared_buffer_get_ref(
         &self,
-        slice: inkwell::values::StructValue<'context>,
+        buffer: inkwell::values::PointerValue<'context>,
         position: inkwell::values::IntValue<'context>,
         element_type: inkwell::types::BasicTypeEnum<'context>,
         span: Span,
     ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
-        let pointer = self
-            .builder
-            .build_extract_value(slice, 0, "slice.pointer")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let length = self
-            .builder
-            .build_extract_value(slice, 1, "slice.length")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        self.build_index_pointer(pointer, position, length, element_type, span)
+        let length = self.build_shared_buffer_length(buffer, element_type)?;
+        let data = self.buffer_data_pointer(buffer, element_type)?;
+        self.build_index_pointer(data, position, length, element_type, span)
     }
 
     /// The emitter's `{code, environment}` closure value.
@@ -949,42 +957,22 @@ impl<'program, 'context> Backend<'program, 'context> {
             .builder
             .build_int_z_extend(length, self.size_type, "to_string.size")
             .map_err(compiler_diagnostic)?;
-        let pointer = self.build_gc_allocation(length, "to_string.data", span.clone())?;
+        let (string, data) = self.build_string_allocation(length, span)?;
         self.builder
-            .build_memcpy(pointer, 1, buffer, 1, length)
+            .build_memcpy(data, 1, buffer, 1, length)
             .map_err(compiler_diagnostic)?;
-        Ok(self
-            .build_string_value(pointer, length, span)?
-            .as_any_value_enum())
+        Ok(string.as_any_value_enum())
     }
 
     /// Concatenates two Strings into one GC allocation, checking length overflow.
     pub(crate) fn build_string_add(
         &self,
-        left: inkwell::values::StructValue<'context>,
-        right: inkwell::values::StructValue<'context>,
+        left: inkwell::values::PointerValue<'context>,
+        right: inkwell::values::PointerValue<'context>,
         span: Span,
     ) -> CodeGenerationResult<inkwell::values::AnyValueEnum<'context>> {
-        let left_pointer = self
-            .builder
-            .build_extract_value(left, 0, "string.add.left.pointer")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let left_length = self
-            .builder
-            .build_extract_value(left, 1, "string.add.left.length")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let right_pointer = self
-            .builder
-            .build_extract_value(right, 0, "string.add.right.pointer")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let right_length = self
-            .builder
-            .build_extract_value(right, 1, "string.add.right.length")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
+        let (left_pointer, left_length) = self.string_parts(left)?;
+        let (right_pointer, right_length) = self.string_parts(right)?;
         let length = self
             .builder
             .build_int_add(left_length, right_length, "string.add.length")
@@ -999,7 +987,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             )
             .map_err(compiler_diagnostic)?;
         self.build_trap_if(overflow, span.clone())?;
-        let pointer = self.build_gc_allocation(length, "string.add.data", span.clone())?;
+        let (string, pointer) = self.build_string_allocation(length, span.clone())?;
         self.builder
             .build_memcpy(pointer, 1, left_pointer, 1, left_length)
             .map_err(compiler_diagnostic)?;
@@ -1015,9 +1003,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         self.builder
             .build_memcpy(right_target, 1, right_pointer, 1, right_length)
             .map_err(compiler_diagnostic)?;
-        Ok(self
-            .build_string_value(pointer, length, span)?
-            .as_any_value_enum())
+        Ok(string.as_any_value_enum())
     }
 
     /// Loads the value reached by following `payloads` (outermost first),
@@ -1252,22 +1238,13 @@ impl<'program, 'context> Backend<'program, 'context> {
     /// branching to the supplied success or failure block.
     pub(crate) fn build_string_literal_pattern_compare(
         &self,
-        value: inkwell::values::StructValue<'context>,
+        value: inkwell::values::PointerValue<'context>,
         literal: &str,
         success: inkwell::basic_block::BasicBlock<'context>,
         failure: inkwell::basic_block::BasicBlock<'context>,
         _span: Span,
     ) -> CodeGenerationResult<()> {
-        let pointer = self
-            .builder
-            .build_extract_value(value, 0, "match.string.pointer")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let length = self
-            .builder
-            .build_extract_value(value, 1, "match.string.length")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
+        let (pointer, length) = self.string_parts(value)?;
         let expected_length = self.size_type.const_int(literal.len() as u64, false);
         let length_matches = self
             .builder
@@ -1569,11 +1546,10 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)?
             .as_pointer_value();
         let length = self.size_type.const_int(literal.len() as u64, false);
-        let pointer = self.build_gc_allocation(length, "debug.literal.data", span.clone())?;
+        let (string, data) = self.build_string_allocation(length, span)?;
         self.builder
-            .build_memcpy(pointer, 1, source, 1, length)
+            .build_memcpy(data, 1, source, 1, length)
             .map_err(compiler_diagnostic)?;
-        let string = self.build_string_value(pointer, length, span)?;
         self.builder
             .build_direct_call(
                 function,

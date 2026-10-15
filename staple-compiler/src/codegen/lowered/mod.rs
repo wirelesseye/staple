@@ -3870,30 +3870,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .load_ref_payloads(base, dereference, span.clone())?,
                     )
                 };
-                let Some(BasicValueEnum::StructValue(reference)) = value else {
+                let Some(BasicValueEnum::PointerValue(buffer)) = value else {
                     return Err(Diagnostic::new(
                         span.clone(),
-                        "slice has an invalid representation",
+                        "SharedBuffer has an invalid representation",
                     ));
                 };
-                let pointer = self
-                    .backend
-                    .builder
-                    .build_extract_value(reference, 0, "slice.pointer")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                let length = self
-                    .backend
-                    .builder
-                    .build_extract_value(reference, 1, "slice.length")
-                    .map_err(compiler_diagnostic)?
-                    .into_int_value();
                 let position = self.backend.size_type.const_int(*index as u64, false);
                 let element_type = self.backend.compile_type(&expression.value_type)?;
-                let pointer = self.backend.build_index_pointer(
-                    pointer,
+                let pointer = self.backend.build_shared_buffer_get_ref(
+                    buffer,
                     position,
-                    length,
                     element_type,
                     span.clone(),
                 )?;
@@ -4576,7 +4563,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 } else {
                     value.as_any_value_enum()
                 };
-                let Some(BasicValueEnum::StructValue(string)) = value_as_basic(value) else {
+                let Some(BasicValueEnum::PointerValue(string)) = value_as_basic(value) else {
                     return Err(Diagnostic::new(
                         span.clone(),
                         "string match value has an invalid representation",
@@ -5740,10 +5727,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         &call.origin.span,
                     )?;
                     match record.slot {
-                        Some(slot) => {
+                        // An empty product parameter (`T ^ 0`) flattens to no
+                        // slots; its single empty argument has nowhere to go.
+                        Some(slot) if parameter_count > 0 => {
                             place_argument_slot(&mut slots, slot, value, &call.origin.span)?
                         }
-                        None => unplaced.push(value),
+                        _ => unplaced.push(value),
                     }
                 }
                 LoweredCallStep::ProductElement {
@@ -6805,8 +6794,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     });
                 }
                 if *slice {
-                    // The emitter evaluates the slice value, then loads its pointer
-                    // and length and bounds-checks the fixed index.
+                    // The emitter evaluates the SharedBuffer value, then loads its
+                    // header length and bounds-checks the fixed index.
                     let value = match &base_place.kind {
                         crate::LoweredPlaceKind::Symbol { symbol }
                         | crate::LoweredPlaceKind::CapturedCell { symbol } => {
@@ -6827,51 +6816,25 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             let llvm_type = self.backend.compile_type(&base_place.value_type)?;
                             self.backend
                                 .builder
-                                .build_load(llvm_type, pointer, "slice.place.value")
+                                .build_load(llvm_type, pointer, "shared_buffer.place.value")
                                 .map(|value| value.as_any_value_enum())
                                 .map_err(compiler_diagnostic)?
                         }
                     };
-                    let Some(BasicValueEnum::StructValue(reference)) = value_as_basic(value) else {
+                    let Some(BasicValueEnum::PointerValue(buffer)) = value_as_basic(value) else {
                         return Err(Diagnostic::new(
                             place.origin.span.clone(),
-                            "invalid slice place",
+                            "invalid SharedBuffer place",
                         ));
                     };
-                    let pointer = self
-                        .backend
-                        .builder
-                        .build_extract_value(reference, 0, "place.pointer")
-                        .map_err(compiler_diagnostic)?
-                        .into_pointer_value();
-                    let length = self
-                        .backend
-                        .builder
-                        .build_extract_value(reference, 1, "place.length")
-                        .map_err(compiler_diagnostic)?
-                        .into_int_value();
                     let position = self.backend.size_type.const_int(*index as u64, false);
-                    let out = self
-                        .backend
-                        .builder
-                        .build_int_compare(
-                            inkwell::IntPredicate::UGE,
-                            position,
-                            length,
-                            "place.out_of_bounds",
-                        )
-                        .map_err(compiler_diagnostic)?;
-                    self.backend.build_trap_if(out, place.origin.span.clone())?;
                     let element_type = self.backend.compile_type(&place.value_type)?;
-                    return unsafe {
-                        self.backend.builder.build_gep(
-                            element_type,
-                            pointer,
-                            &[position],
-                            "place.element",
-                        )
-                    }
-                    .map_err(compiler_diagnostic);
+                    return self.backend.build_shared_buffer_get_ref(
+                        buffer,
+                        position,
+                        element_type,
+                        place.origin.span.clone(),
+                    );
                 }
                 // The emitter checks a mutable symbol base's initialization before
                 // projecting a field.
@@ -7847,7 +7810,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let unsupported = |family| Diagnostic::new(span.clone(), format!("malformed {family}"));
         match intrinsic {
             IntrinsicFunction::ParseNumber { to } => {
-                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
+                let [BasicMetadataValueEnum::PointerValue(string)] = arguments else {
                     return Err(unsupported("numeric parsing operand"));
                 };
                 Ok(self
@@ -7856,7 +7819,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .as_any_value_enum())
             }
             IntrinsicFunction::ValidateUtf8 => {
-                let [BasicMetadataValueEnum::StructValue(bytes)] = arguments else {
+                let [BasicMetadataValueEnum::PointerValue(bytes)] = arguments else {
                     return Err(unsupported("UTF-8 operand"));
                 };
                 Ok(self
@@ -7865,7 +7828,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .as_any_value_enum())
             }
             IntrinsicFunction::StringHasNul => {
-                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
+                let [BasicMetadataValueEnum::PointerValue(string)] = arguments else {
                     return Err(unsupported("interior-NUL operand"));
                 };
                 Ok(self
@@ -7917,7 +7880,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(result.as_any_value_enum())
             }
             IntrinsicFunction::StringToCString => {
-                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
+                let [BasicMetadataValueEnum::PointerValue(string)] = arguments else {
                     return Err(Diagnostic::new(
                         span,
                         "String conversion requires a String value",
@@ -7931,8 +7894,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             IntrinsicFunction::StringAdd => {
                 let [
-                    BasicMetadataValueEnum::StructValue(left),
-                    BasicMetadataValueEnum::StructValue(right),
+                    BasicMetadataValueEnum::PointerValue(left),
+                    BasicMetadataValueEnum::PointerValue(right),
                 ] = arguments
                 else {
                     return Err(Diagnostic::new(
@@ -8130,11 +8093,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
 
             IntrinsicFunction::SharedBufferLength => {
-                let [BasicMetadataValueEnum::StructValue(slice)] = arguments else {
-                    return Err(Diagnostic::new(span, "length requires a slice"));
+                let [BasicMetadataValueEnum::PointerValue(buffer)] = arguments else {
+                    return Err(Diagnostic::new(span, "length requires a SharedBuffer"));
                 };
+                let element = intrinsic_buffer_element(call, 0, &span)?;
+                let llvm_element = self.backend.compile_type(&element)?;
                 self.backend
-                    .build_shared_buffer_length(*slice)
+                    .build_shared_buffer_length(*buffer, llvm_element)
                     .map(|value| value.as_any_value_enum())
             }
             IntrinsicFunction::BufferFromArray => {
@@ -8205,22 +8170,25 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             IntrinsicFunction::SharedBufferGetRef => {
                 let [
-                    BasicMetadataValueEnum::StructValue(slice),
+                    BasicMetadataValueEnum::PointerValue(buffer),
                     BasicMetadataValueEnum::IntValue(position),
                 ] = arguments
                 else {
                     return Err(Diagnostic::new(
                         span,
-                        "get_ref requires a slice and a position",
+                        "get_ref requires a SharedBuffer and a position",
                     ));
                 };
                 let CheckedType::Ref(payload) = result_type else {
                     return Err(Diagnostic::new(span, "unchecked get_ref result"));
                 };
                 let element_type = self.backend.compile_type(payload)?;
-                let pointer =
-                    self.backend
-                        .build_shared_buffer_get_ref(*slice, *position, element_type, span)?;
+                let pointer = self.backend.build_shared_buffer_get_ref(
+                    *buffer,
+                    *position,
+                    element_type,
+                    span,
+                )?;
                 Ok(pointer.as_any_value_enum())
             }
             IntrinsicFunction::BufferWithCapacity => {
@@ -8392,7 +8360,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     length,
                     llvm_element,
                     header,
-                    "buffer.freeze",
+                    "buffer.into_shared",
                     false,
                     span.clone(),
                 )?;
@@ -8400,12 +8368,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     frozen,
                     header,
                     length,
-                    "buffer.freeze.capacity.slot",
+                    "buffer.into_shared.capacity.slot",
                 )?;
                 let length_slot = self
                     .backend
                     .builder
-                    .build_struct_gep(header, frozen, 0, "buffer.freeze.length.slot")
+                    .build_struct_gep(header, frozen, 0, "buffer.into_shared.length.slot")
                     .map_err(compiler_diagnostic)?;
                 self.backend
                     .builder
@@ -8420,7 +8388,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_int_mul(
                         length,
                         self.backend.size_type.const_int(stride, false),
-                        "buffer.freeze.bytes",
+                        "buffer.into_shared.bytes",
                     )
                     .map_err(compiler_diagnostic)?;
                 let alignment = self.backend.target_data.get_abi_alignment(&llvm_element);
@@ -8436,20 +8404,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 {
                     self.backend.set_gc_finalizer(frozen, finalizer)?;
                 }
-                let mut result = self.backend.slice_type().const_zero();
-                result = self
-                    .backend
-                    .builder
-                    .build_insert_value(result, data, 0, "buffer.slice.pointer")
-                    .map_err(compiler_diagnostic)?
-                    .into_struct_value();
-                result = self
-                    .backend
-                    .builder
-                    .build_insert_value(result, length, 1, "buffer.slice.length")
-                    .map_err(compiler_diagnostic)?
-                    .into_struct_value();
-                Ok(result.as_any_value_enum())
+                Ok(frozen.as_any_value_enum())
             }
             IntrinsicFunction::BufferTransfer => self.emit_buffer_transfer(call, arguments, &span),
             IntrinsicFunction::BufferClone => {
@@ -9243,7 +9198,7 @@ fn intrinsic_buffer_element(
         other => other,
     };
     match buffer_type {
-        CheckedType::Buffer(element) => Ok(element.clone()),
+        CheckedType::Buffer(element) | CheckedType::SharedBuffer(element) => Ok(element.clone()),
         _ => Err(Diagnostic::new(span.clone(), "invalid Buffer type")),
     }
 }

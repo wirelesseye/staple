@@ -297,7 +297,9 @@ impl<'program, 'context> Backend<'program, 'context> {
                     )
                 })
                 .and_then(|representation| self.compile_type(representation)),
-            CheckedType::SharedBuffer(_) => Ok(self.slice_type().into()),
+            CheckedType::SharedBuffer(_) => {
+                Ok(self.context.ptr_type(AddressSpace::default()).into())
+            }
             CheckedType::Ref(_) | CheckedType::Unique(_) => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
@@ -787,16 +789,6 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(self
             .context
             .struct_type(&[self.context.i32_type().into(), payload.into()], false))
-    }
-
-    pub(crate) fn slice_type(&self) -> inkwell::types::StructType<'context> {
-        self.context.struct_type(
-            &[
-                self.context.ptr_type(AddressSpace::default()).into(),
-                self.size_type.into(),
-            ],
-            false,
-        )
     }
 
     pub(crate) fn buffer_header_type(

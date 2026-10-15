@@ -631,7 +631,9 @@ fn compact_type_template(value_type: CheckedType) -> CheckedType {
         },
         CheckedType::Ref(inner) => CheckedType::Ref(Box::new(compact_type_template(*inner))),
         CheckedType::Unique(inner) => CheckedType::Unique(Box::new(compact_type_template(*inner))),
-        CheckedType::SharedBuffer(inner) => CheckedType::SharedBuffer(Box::new(compact_type_template(*inner))),
+        CheckedType::SharedBuffer(inner) => {
+            CheckedType::SharedBuffer(Box::new(compact_type_template(*inner)))
+        }
         CheckedType::Buffer(inner) => CheckedType::Buffer(Box::new(compact_type_template(*inner))),
         CheckedType::RawPtr { pointee } => CheckedType::RawPtr {
             pointee: Box::new(compact_type_template(*pointee)),
@@ -1275,9 +1277,10 @@ impl CheckedType {
             Self::Inferred | Self::Error | Self::TypeConstructor { .. } => false,
             Self::RawPtr { pointee } => pointee.is_fully_known(),
             Self::RawMutPtr { pointee } => pointee.is_fully_known(),
-            Self::Ref(value) | Self::Unique(value) | Self::SharedBuffer(value) | Self::Buffer(value) => {
-                value.is_fully_known()
-            }
+            Self::Ref(value)
+            | Self::Unique(value)
+            | Self::SharedBuffer(value)
+            | Self::Buffer(value) => value.is_fully_known(),
             Self::Array { element, count } => element.is_fully_known() && count.is_fully_known(),
             Self::Product(product) => {
                 product.spreads.is_empty()

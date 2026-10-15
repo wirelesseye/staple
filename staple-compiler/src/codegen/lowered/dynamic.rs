@@ -3773,15 +3773,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // loaded SSA values.
         match intrinsic {
             crate::IntrinsicFunction::SharedBufferLength => {
-                let slice = slot_pointer(0)?;
-                let length = self
-                    .backend
-                    .builder
-                    .build_struct_gep(self.backend.slice_type(), slice, 1, "slice.length.slot")
-                    .map_err(compiler_diagnostic)?;
-                let length = self
-                    .load_dynamic_storage(self.backend.size_type, length, "slice.length")
-                    .map_err(compiler_diagnostic)?;
+                let buffer = self.load_buffer_pointer(slot_pointer(0)?)?;
+                let length = self.load_buffer_metadata(buffer, 0)?;
                 self.backend
                     .builder
                     .build_store(storage, length)
@@ -3789,33 +3782,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 return Ok(storage);
             }
             crate::IntrinsicFunction::SharedBufferGetRef => {
-                let slice = slot_pointer(0)?;
+                let buffer = self.load_buffer_pointer(slot_pointer(0)?)?;
                 let position = slot_pointer(1)?;
-                let slice_type = self.backend.slice_type();
-                let data = self
-                    .backend
-                    .builder
-                    .build_struct_gep(slice_type, slice, 0, "slice.data")
-                    .map_err(compiler_diagnostic)?;
-                let data = self
-                    .load_dynamic_storage(
-                        self.backend.context.ptr_type(AddressSpace::default()),
-                        data,
-                        "slice.pointer",
-                    )
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                let length = self
-                    .backend
-                    .builder
-                    .build_struct_gep(slice_type, slice, 1, "slice.length.slot")
-                    .map_err(compiler_diagnostic)?;
-                let length = self
-                    .load_dynamic_storage(self.backend.size_type, length, "slice.length")
-                    .map_err(compiler_diagnostic)?
-                    .into_int_value();
+                let length = self.load_buffer_metadata(buffer, 0)?;
                 let position = self
-                    .load_dynamic_storage(self.backend.size_type, position, "slice.position")
+                    .load_dynamic_storage(self.backend.size_type, position, "buffer.position")
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
                 let out_of_bounds = self
@@ -3825,7 +3796,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         inkwell::IntPredicate::UGE,
                         position,
                         length,
-                        "slice.out_of_bounds",
+                        "buffer.out_of_bounds",
                     )
                     .map_err(compiler_diagnostic)?;
                 self.backend.build_trap_if(out_of_bounds, span.clone())?;
@@ -3833,11 +3804,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     return Err(Diagnostic::new(span.clone(), "get_ref result is not a Ref"));
                 };
                 let descriptor = self.dynamic_descriptor(payload, environment, span)?;
-                let layout = self.backend.load_descriptor_layout(descriptor)?;
+                let layout = self.dynamic_buffer_layout(descriptor)?;
+                let data = self
+                    .backend
+                    .dynamic_byte_offset(buffer, layout.header_offset)?;
                 let offset = self
                     .backend
                     .builder
-                    .build_int_mul(position, layout.stride, "slice.offset")
+                    .build_int_mul(position, layout.stride, "buffer.offset")
                     .map_err(compiler_diagnostic)?;
                 let element = self.backend.dynamic_byte_offset(data, offset)?;
                 self.backend
@@ -4151,7 +4125,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             crate::IntrinsicFunction::BufferIntoShared => {
                 let buffer = self.load_buffer_pointer(slot_pointer(0)?)?;
-                let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
                 let length = self.load_buffer_metadata(buffer, 0)?;
                 let element = self.intrinsic_element_descriptor(call, environment, span)?;
                 let layout = self.dynamic_buffer_layout(element)?;
@@ -4172,7 +4145,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let bytes = self
                     .backend
                     .builder
-                    .build_int_mul(length, layout.stride, "buffer.freeze.bytes")
+                    .build_int_mul(length, layout.stride, "buffer.into_shared.bytes")
                     .map_err(compiler_diagnostic)?;
                 // Element alignment is runtime-only; LLVM memcpy needs constant alignment.
                 self.backend
@@ -4182,15 +4155,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.backend.build_unique_free(buffer, span.clone())?;
                 self.backend
                     .builder
-                    .build_store(storage, data)
-                    .map_err(compiler_diagnostic)?;
-                let length_slot = self.backend.dynamic_byte_offset(
-                    storage,
-                    self.backend.size_type.const_int(pointer_bytes, false),
-                )?;
-                self.backend
-                    .builder
-                    .build_store(length_slot, length)
+                    .build_store(storage, frozen)
                     .map_err(compiler_diagnostic)?;
                 return Ok(storage);
             }
@@ -7391,7 +7356,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )
                     .map_err(compiler_diagnostic)?;
                 self.backend.build_string_literal_pattern_compare(
-                    string.into_struct_value(),
+                    string.into_pointer_value(),
                     literal,
                     success,
                     failure,
@@ -7765,26 +7730,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 slice: true,
             } => {
                 let (slice, _) = self.emit_dynamic_place(owner, *base, environment)?;
-                let slice_type = self.backend.slice_type();
-                let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
-                let data = self
-                    .backend
-                    .builder
-                    .build_struct_gep(slice_type, slice, 0, "mutation.slice.data")
-                    .map_err(compiler_diagnostic)?;
-                let data = self
-                    .load_dynamic_storage(pointer_type, data, "mutation.slice.pointer")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                let length = self
-                    .backend
-                    .builder
-                    .build_struct_gep(slice_type, slice, 1, "mutation.slice.length")
-                    .map_err(compiler_diagnostic)?;
-                let length = self
-                    .load_dynamic_storage(self.backend.size_type, length, "mutation.slice.count")
-                    .map_err(compiler_diagnostic)?
-                    .into_int_value();
+                let buffer = self.load_buffer_pointer(slice)?;
+                let length = self.load_buffer_metadata(buffer, 0)?;
                 let position = self.backend.size_type.const_int(*index as u64, false);
                 let out_of_bounds = self
                     .backend
@@ -7793,18 +7740,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         inkwell::IntPredicate::UGE,
                         position,
                         length,
-                        "mutation.slice.out_of_bounds",
+                        "mutation.buffer.out_of_bounds",
                     )
                     .map_err(compiler_diagnostic)?;
                 self.backend
                     .build_trap_if(out_of_bounds, place.origin.span.clone())?;
                 let descriptor =
                     self.dynamic_descriptor(&place.value_type, environment, &place.origin.span)?;
-                let layout = self.backend.load_descriptor_layout(descriptor)?;
+                let layout = self.dynamic_buffer_layout(descriptor)?;
+                let data = self
+                    .backend
+                    .dynamic_byte_offset(buffer, layout.header_offset)?;
                 let offset = self
                     .backend
                     .builder
-                    .build_int_mul(position, layout.stride, "mutation.slice.offset")
+                    .build_int_mul(position, layout.stride, "mutation.buffer.offset")
                     .map_err(compiler_diagnostic)?;
                 Ok((self.backend.dynamic_byte_offset(data, offset)?, descriptor))
             }
@@ -8772,29 +8722,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     crate::LoweredAccessKind::Scalar { .. }
                     | crate::LoweredAccessKind::Representation { .. } => base,
                     crate::LoweredAccessKind::SharedBuffer { index, .. } => {
-                        let slice = self.backend.slice_type();
-                        let data = self
-                            .backend
-                            .builder
-                            .build_struct_gep(slice, base, 0, "slice.data")
-                            .map_err(compiler_diagnostic)?;
-                        let data = self
-                            .load_dynamic_storage(
-                                self.backend.context.ptr_type(AddressSpace::default()),
-                                data,
-                                "slice.pointer",
-                            )
-                            .map_err(compiler_diagnostic)?
-                            .into_pointer_value();
-                        let length = self
-                            .backend
-                            .builder
-                            .build_struct_gep(slice, base, 1, "slice.length.slot")
-                            .map_err(compiler_diagnostic)?;
-                        let length = self
-                            .load_dynamic_storage(self.backend.size_type, length, "slice.length")
-                            .map_err(compiler_diagnostic)?
-                            .into_int_value();
+                        let buffer = self.load_buffer_pointer(base)?;
+                        let length = self.load_buffer_metadata(buffer, 0)?;
                         let position = self.backend.size_type.const_int(*index as u64, false);
                         let out_of_bounds = self
                             .backend
@@ -8813,11 +8742,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             environment,
                             &expression.origin.span,
                         )?;
-                        let layout = self.backend.load_descriptor_layout(element_descriptor)?;
+                        let layout = self.dynamic_buffer_layout(element_descriptor)?;
+                        let data = self
+                            .backend
+                            .dynamic_byte_offset(buffer, layout.header_offset)?;
                         let offset = self
                             .backend
                             .builder
-                            .build_int_mul(position, layout.stride, "slice.offset")
+                            .build_int_mul(position, layout.stride, "buffer.offset")
                             .map_err(compiler_diagnostic)?;
                         self.backend.dynamic_byte_offset(data, offset)?
                     }

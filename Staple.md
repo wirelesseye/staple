@@ -3446,9 +3446,10 @@ Scalar `ToString` implementations delegate to `Display`.
 
 `String` is an immutable garbage-collected UTF-8 byte sequence. The standard
 library declares it as a nominal type with the private representation
-`SharedBuffer U8`. At runtime it currently contains a managed byte pointer and a byte length; it
-has no capacity field or separate descriptor allocation. Copying a `String`
-copies those two words and keeps the managed byte storage shared.
+`SharedBuffer U8`. At runtime it is one pointer to a managed header holding
+the byte length, a capacity (always equal to the length), and the bytes; there
+is no separate descriptor allocation. Copying a `String` copies the pointer and
+shares the bytes.
 Two strings can be concatenated with `+`; this dispatches through the standard
 `Add String` implementation and returns a newly allocated `String`. The
 standard library implements `Eq String`, comparing the two UTF-8 byte
@@ -3513,7 +3514,9 @@ buffer, requiring an expected `SharedBuffer` type to infer its element type.
 The buffer owns its elements and drops each exactly once when it becomes
 unreachable.
 
-A `SharedBuffer T` is a copyable handle whose copies share one allocation, so
+At runtime a `SharedBuffer T` is one pointer to a managed header holding the
+element count, a capacity equal to that count, and the elements. A
+`SharedBuffer T` is a copyable handle whose copies share that allocation, so
 it is shared-mutable: a write through one copy is visible through every other
 copy. `SharedBuffer.length` reports the number of elements. Where `Copy T`,
 `SharedBuffer.get: (SharedBuffer T; USize) -> Option T` returns a copy of an

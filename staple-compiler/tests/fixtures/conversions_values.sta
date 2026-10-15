@@ -27,8 +27,7 @@ def run: () -> () = () => {
     match checked_bytes { InvalidUtf8 => (), _ => panic "String.from_utf8 accepted invalid bytes", }
     let invalid_result: Ok String | InvalidUtf8 = TryConvert.try_convert invalid_bytes
     match invalid_result { InvalidUtf8 => (), _ => panic "invalid UTF-8 accepted", }
-    let empty_buffer: Buffer U8 = Buffer.with_capacity 0
-    let empty_bytes: SharedBuffer U8 = Buffer.into_shared empty_buffer
+    let empty_bytes: SharedBuffer U8 = SharedBuffer.from_array ()
     let empty_result: Ok String | InvalidUtf8 = TryConvert.try_convert empty_bytes
     match empty_result { Ok value => require (value == ""), _ => panic "empty UTF-8 rejected", }
 

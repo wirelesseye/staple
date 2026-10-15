@@ -7,7 +7,7 @@ use super::{Backend, CodeGenerationResult, Span, compiler_diagnostic};
 use crate::{FloatType, IntegerType, NumericType};
 use inkwell::{
     AddressSpace, FloatPredicate, IntPredicate,
-    values::{BasicValueEnum, FloatValue, IntValue, StructValue},
+    values::{BasicValueEnum, FloatValue, IntValue, PointerValue, StructValue},
 };
 
 impl<'program, 'context> Backend<'program, 'context> {
@@ -327,16 +327,9 @@ impl<'program, 'context> Backend<'program, 'context> {
 
     pub(crate) fn build_validate_utf8(
         &self,
-        bytes: StructValue<'context>,
+        bytes: PointerValue<'context>,
     ) -> CodeGenerationResult<IntValue<'context>> {
-        let pointer = self
-            .builder
-            .build_extract_value(bytes, 0, "utf8.pointer")
-            .map_err(compiler_diagnostic)?;
-        let length = self
-            .builder
-            .build_extract_value(bytes, 1, "utf8.length")
-            .map_err(compiler_diagnostic)?;
+        let (pointer, length) = self.string_parts(bytes)?;
         let validator = self
             .llvm_module
             .get_function("__staple_is_valid_utf8")
@@ -355,16 +348,9 @@ impl<'program, 'context> Backend<'program, 'context> {
 
     pub(crate) fn build_string_has_nul(
         &self,
-        string: StructValue<'context>,
+        string: PointerValue<'context>,
     ) -> CodeGenerationResult<IntValue<'context>> {
-        let pointer = self
-            .builder
-            .build_extract_value(string, 0, "string.pointer")
-            .map_err(compiler_diagnostic)?;
-        let length = self
-            .builder
-            .build_extract_value(string, 1, "string.length")
-            .map_err(compiler_diagnostic)?;
+        let (pointer, length) = self.string_parts(string)?;
         let memchr = self
             .llvm_module
             .get_function("memchr")
@@ -393,23 +379,14 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
+    /// Copies a C string into a fresh GC String so its bytes can be validated
+    /// and wrapped; the CString itself is left untouched.
     pub(crate) fn build_c_string_bytes(
         &self,
         pointer: inkwell::values::PointerValue<'context>,
         span: Span,
-    ) -> CodeGenerationResult<StructValue<'context>> {
-        let strlen = self
-            .llvm_module
-            .get_function("strlen")
-            .expect("CString length is recorded");
-        let length = self
-            .builder
-            .build_direct_call(strlen, &[pointer.into()], "c_string.length")
-            .map_err(compiler_diagnostic)?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_int_value();
-        self.build_string_value(pointer, length, span)
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        self.build_string_from_c_string(pointer, span)
     }
 
     fn errno_function_name(&self) -> &'static str {
@@ -454,19 +431,10 @@ impl<'program, 'context> Backend<'program, 'context> {
     pub(crate) fn build_parse_number(
         &self,
         to: NumericType,
-        string: StructValue<'context>,
+        string: PointerValue<'context>,
         span: Span,
     ) -> CodeGenerationResult<StructValue<'context>> {
-        let pointer = self
-            .builder
-            .build_extract_value(string, 0, "parse.pointer")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let length = self
-            .builder
-            .build_extract_value(string, 1, "parse.length")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
+        let (pointer, length) = self.string_parts(string)?;
         let overflow = self
             .builder
             .build_int_compare(

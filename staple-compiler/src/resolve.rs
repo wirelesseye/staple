@@ -1697,7 +1697,12 @@ impl NameResolver {
                 "String",
                 BuiltinType::String,
             ),
-            ("std/shared_buffer.sta", "std.shared_buffer", "SharedBuffer", BuiltinType::SharedBuffer),
+            (
+                "std/shared_buffer.sta",
+                "std.shared_buffer",
+                "SharedBuffer",
+                BuiltinType::SharedBuffer,
+            ),
             ("std/ptr.sta", "std.ptr", "RawPtr", BuiltinType::RawPtr),
             (
                 "std/ptr.sta",

@@ -2,7 +2,9 @@
 //! raw, or part of a cycle through managed references.
 
 use inkwell::context::Context;
-use staple_compiler::{CodeGenerator, LoweredModule, Lowerer, NameResolver, ProgramLoader, TypeChecker};
+use staple_compiler::{
+    CodeGenerator, LoweredModule, Lowerer, NameResolver, ProgramLoader, TypeChecker,
+};
 use std::{
     path::Path,
     process::Command,
@@ -327,11 +329,18 @@ fn shared_buffer_from_array_collects_non_copy_elements() {
         CHURN,
     ) + concat!("make_all ()\n", "churn ()\n", "churn ()\n");
     let output = run(&source);
-    let mut dropped: Vec<&str> = output.lines().filter(|line| line.starts_with("dropped ")).collect();
+    let mut dropped: Vec<&str> = output
+        .lines()
+        .filter(|line| line.starts_with("dropped "))
+        .collect();
     let total = dropped.len();
     dropped.sort_unstable();
     dropped.dedup();
-    assert_eq!(dropped.len(), total, "an element was dropped more than once");
+    assert_eq!(
+        dropped.len(),
+        total,
+        "an element was dropped more than once"
+    );
     // A conservative stack scan may retain a stray buffer.
     assert!(
         total >= 180,

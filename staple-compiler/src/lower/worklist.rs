@@ -4801,17 +4801,16 @@ mod tests {
                             allocation =
                                 closure.environment.add(2 * word).cast::<*const u8>().read();
                         } else {
-                            // A frozen buffer returns a slice over its payload; the
-                            // data pointer sits one header past the allocation.
-                            let mut slice = [0usize; 2];
+                            // A frozen buffer returns its header pointer, which is the
+                            // start of the allocation.
+                            let mut shared = 0usize;
                             make.call(
                                 std::ptr::null(),
                                 &descriptor,
-                                slice.as_mut_ptr().cast(),
+                                (&mut shared as *mut usize).cast(),
                                 (&capacity as *const usize).cast(),
                             );
-                            let header = (2 * word).div_ceil(align) * align;
-                            allocation = (slice[0] - header) as *const u8;
+                            allocation = shared as *const u8;
                         }
                     }
                     assert!(!allocation.is_null());
@@ -5489,18 +5488,21 @@ mod tests {
             drop: 0,
             count: 0,
         };
-        let data = 42i32;
+        // A SharedBuffer is a pointer to a `{length, capacity, data...}` header.
         #[repr(C)]
-        struct Slice {
-            data: *const u8,
+        struct Header {
             length: usize,
+            capacity: usize,
+            data: i32,
         }
-        let slice = Slice {
-            data: &data as *const i32 as *const u8,
+        let header = Header {
             length: 1,
+            capacity: 1,
+            data: 42,
         };
-        let payload: *const Slice = &slice;
-        let storage: *const *const Slice = &payload;
+        let buffer: *const Header = &header;
+        let payload: *const *const Header = &buffer;
+        let storage: *const *const *const Header = &payload;
         let mut result = 0;
         unsafe {
             head.call(
