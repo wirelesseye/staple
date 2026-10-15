@@ -1880,7 +1880,7 @@ impl<'program, 'context> Backend<'program, 'context> {
 
     /// Allocates the header shared by Buffer.with_capacity, Buffer.clone and
     /// Buffer.freeze. The prefix distinguishes their SSA names. An `owned`
-    /// buffer is malloc-backed and rooted for the GC until it is dropped; a
+    /// buffer is a `Unique` allocation, released eagerly when dropped; a
     /// frozen buffer is a plain GC allocation.
     pub(crate) fn build_buffer_allocation(
         &self,

@@ -14143,15 +14143,20 @@ fn collect_pattern_facts(
 /// Records `checked_type_contains_ref` so
 /// `LoweredSymbol::global_root` records the decision lowering-side.
 ///
-/// FIXME(gc-roots): this misses GC pointers other than `Ref`, `Slice` and
-/// `Buffer`, so a module global holding one is never registered as a root and
-/// its data can be freed while still live. Known cases: `String` values, and
-/// function values, whose closure environment is a GC allocation whatever
-/// their parameter and result types. For example, a top-level
-/// `let mut cell = "a"` assigned through a closure, or
+/// `Unique` and `Buffer` storage is a GC allocation reachable only through its
+/// owner, so a global owner must be rooted like a `Ref`.
+///
+/// FIXME(gc-roots): this misses GC pointers other than `Ref`, `Slice`,
+/// `Unique` and `Buffer`, so a module global holding one is never registered
+/// as a root and its data can be freed while still live. Known cases: `String`
+/// values, which have their own checked type rather than their `Slice U8`
+/// representation, and function values, whose closure environment is a GC
+/// allocation whatever their parameter and result types. For example, a
+/// top-level `let mut cell = "a"` assigned through a closure, or
 /// `let reader = make_reader "text"` where `make_reader` returns a capturing
 /// closure, reads freed memory after a collection. Root every global whose
-/// layout can hold a GC pointer, runtime handle types included.
+/// layout can hold a GC pointer. Coroutine and reactive handles need no root
+/// today only because their frames register themselves as roots.
 fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Ref(_)

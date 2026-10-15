@@ -3529,10 +3529,11 @@ destructured, and it cannot cross a foreign ABI.
 `Buffer T` is low-level, fixed-capacity contiguous storage with an initialized
 prefix. `Buffer.with_capacity` allocates space without constructing any `T`
 values, so it does not require `Default T`. Buffers are move-only owners of
-their allocation, which is not garbage collected: it is `malloc`-backed and
-released, after dropping every initialized element in index order, when the
-buffer goes out of scope or is consumed. Any managed pointers held by its
-elements stay reachable while it lives. `Buffer.length` and `Buffer.capacity`
+their allocation, which they release eagerly rather than leaving to the garbage
+collector: after dropping every initialized element in index order, the
+allocation is freed when the buffer goes out of scope or is consumed, like a
+`Unique` payload. The collector traces it through its owner, so a buffer held
+in a managed object can be part of a collectable cycle. `Buffer.length` and `Buffer.capacity`
 report its current initialized length and fixed capacity. Where `Clone T`, cloning a
 buffer clones every initialized element into an independent allocation while
 preserving the original capacity.
@@ -3593,8 +3594,8 @@ source — and yields owned copies. Iteration requires `Copy T`, the same as
 `List.get`; clone the list with `Clone.clone` first when it must remain
 usable.
 
-`List` is move-only like its underlying `Buffer`, and likewise not garbage
-collected: dropping a list drops its elements and frees its storage. Where `Clone T`, cloning a
+`List` is move-only like its underlying `Buffer`, and likewise owned rather
+than garbage collected: dropping a list drops its elements and frees its storage. Where `Clone T`, cloning a
 list clones every initialized element into independent storage and preserves
 the source list's capacity; subsequent growth or mutation of either list does
 not affect the other.

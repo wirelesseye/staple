@@ -150,3 +150,49 @@ fn unique_payloads_survive_collections_while_owned_or_raw() {
     );
     assert_eq!(run(&source), "42 42\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn collects_list_storage_in_cycles_through_managed_references() {
+    // Ref Holder -> List Payload storage -> Ref (Option closure) -> closure
+    // environment -> Ref Holder. A closure closes the cycle because a type
+    // cannot recurse through `List`.
+    let source = format!(
+        "{}{}",
+        concat!(
+            "use std.cinterop.*\n",
+            "use std.ptr.*\n",
+            "extern \"c\" {\n",
+            "    printf: (RawPtr CChar, ...) -> I32\n",
+            "}\n",
+            "type Payload = wrap (tag: I32, back: Ref (Option (() -> I32)))\n",
+            "type Holder = wrap (items: List Payload)\n",
+            "impl Drop Payload {\n",
+            "    cleanup = Payload (tag, back) => {\n",
+            "        printf (c_string \"dropped\\n\")\n",
+            "        ()\n",
+            "    }\n",
+            "}\n",
+            "def make_cycle = tag: I32 => () :: {\n",
+            "    let empty: Option (() -> I32) = None\n",
+            "    let mut back: Ref (Option (() -> I32)) = Ref empty\n",
+            "    let mut items: List Payload = List.new ()\n",
+            "    List.push items (Payload (tag: tag, back: back))\n",
+            "    let holder: Ref Holder = Ref (Holder (items: items))\n",
+            "    let closure: () -> I32 = () => { let kept = holder; tag }\n",
+            "    let previous = Ref.replace back (Some closure)\n",
+            "    ()\n",
+            "}\n",
+            "def make_cycles = () => () :: {\n",
+            "    for index in (0 .. 100) { make_cycle index }\n",
+            "}\n",
+        ),
+        CHURN,
+    ) + concat!("make_cycles ()\n", "churn ()\n", "churn ()\n");
+    let output = run(&source);
+    let dropped = output.lines().filter(|line| *line == "dropped").count();
+    assert!(
+        dropped >= 90,
+        "only {dropped} of 100 cyclic List payloads were collected"
+    );
+}

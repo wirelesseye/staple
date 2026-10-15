@@ -2666,8 +2666,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
     /// The element descriptor of a buffer intrinsic, from its `T` argument.
     /// A fresh dynamic buffer with the given capacity: its header and the
-    /// element area. An `owned` buffer is malloc-backed and GC-rooted; a frozen
-    /// one is a GC allocation with the element descriptor in a trailing word
+    /// element area. An `owned` buffer is a `Unique` allocation, released when
+    /// dropped; a frozen one is a GC allocation with the element descriptor in a trailing word
     /// (the descriptor must already be GC-stable) and the shared finalizer.
     fn allocate_dynamic_buffer(
         &self,
