@@ -3728,9 +3728,9 @@ converted to typed pointers before accessing memory.
 C function creates a call-scoped view rather than transferring ownership, and
 C declarations may not return `CString`. `CString.to_string` takes its argument
 as `move CString`: it validates and copies UTF-8 into a `String`, returning
-`Ok String | InvalidUtf8`. It frees the C string on success and failure, so the
-argument cannot be used afterward. `CString.from_string` returns
-`Ok CString | InteriorNul`, rejecting embedded NUL bytes before allocating an
+`Result String InvalidUtf8`. It frees the C string on success and failure, so
+the argument cannot be used afterward. `CString.from_string` returns
+`Result CString InteriorNul`, rejecting embedded NUL bytes before allocating an
 owned, terminated copy. `CString.to_string_unchecked` and
 `CString.from_string_unchecked` perform the same copies without validation;
 their callers must ensure valid UTF-8 and absence of embedded NULs, respectively.
@@ -3773,7 +3773,7 @@ Staple does not provide implicit numeric conversions.
 
 Explicit conversions use `Convert From To` and `TryConvert From To` from
 `std.convert`, also available through the prelude. `Convert.convert` consumes
-its input and returns `To`. `TryConvert.try_convert` returns `Ok To | Error`,
+its input and returns `To`. `TryConvert.try_convert` returns `Result To Error`,
 where `Error` is an associated type. Every type converts to itself, and every
 `Convert` implementation also implements `TryConvert` with `Error = Never`.
 
@@ -3801,8 +3801,8 @@ accepts `True`, `true`, `False`, and `false`, otherwise returning `std.core.bool
 `String` converts to its `Slice U8` bytes, `Ref (T ^ N)` converts to `Slice T`,
 and consuming a `Buffer T` converts it to a frozen `Slice T`. Checked byte
 slice-to-string conversion uses `String.from_utf8`, which returns
-`Ok String | std.string.InvalidUtf8`. `String.from_utf8_unchecked` constructs a
-string without validation when the caller knows the bytes are valid UTF-8.
+`Result String std.string.InvalidUtf8`. `String.from_utf8_unchecked` constructs
+a string without validation when the caller knows the bytes are valid UTF-8.
 Checked `String` to `CString` conversion rejects embedded NULs with
 `std.cinterop.InteriorNul`; checked `CString` to `String` validates UTF-8 and frees the
 consumed C string on both success and failure.
@@ -4217,12 +4217,16 @@ Ok Tree | IOError | ParseError
 ```
 
 Variants do not share a declaration. Modules may define represented nominal
-types independently and combine them wherever a type is accepted. `Ok` is a
-public represented type from `std.core`:
+types independently and combine them wherever a type is accepted. `Ok` and
+`Result` are public types from `std.result`, also available through the prelude:
 
 ```staple
 pub type Ok T = pub wrap T
+pub type Result T E = alias Ok T | E
 ```
+
+`Result T E` is therefore exactly the sum `Ok T | E`, with the error case
+unwrapped.
 
 Every alternative must be a sized value type. Primitive, product,
 function, opaque, reference, and fully applied nominal types may all be
@@ -4331,9 +4335,9 @@ same juxtaposed syntax as generic type declarations. Product parameter patterns
 and multiple parameter atoms may be mixed freely:
 
 ```staple
-pub typegroup Result T E {
-    Ok = pub wrap T,
-    Err = pub wrap E,
+pub typegroup Exchange T E {
+    Request = pub wrap T,
+    Response = pub wrap E,
 }
 
 pub typegroup Mixed A (B, C) D {

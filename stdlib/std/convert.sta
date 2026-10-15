@@ -12,7 +12,7 @@ pub trait TryConvert From To {
     type Error
 
     /// Consumes the source value and returns a success or an error.
-    try_convert: move From -> Ok To | Error
+    try_convert: move From -> Result To Error
 }
 
 impl<T> Convert T T {

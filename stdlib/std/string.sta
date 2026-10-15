@@ -35,7 +35,7 @@ companion String {
     pub def bytes = value: String => Slice U8 :: string_bytes value
 
     /// Constructs a String from bytes, returning InvalidUtf8 on validation failure.
-    pub def from_utf8 = bytes: Slice U8 => Ok String | InvalidUtf8 ::
+    pub def from_utf8 = bytes: Slice U8 => Result String InvalidUtf8 ::
         if (__valid_utf8 bytes == 1) {
             Ok (String.from_utf8_unchecked bytes)
         } else {
