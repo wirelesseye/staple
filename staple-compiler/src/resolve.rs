@@ -296,7 +296,7 @@ pub enum IntrinsicFunction {
     PointerAddress,
     AddressPointer,
     ValidateUtf8,
-    CStringBytes,
+    CStringValidUtf8,
     StringHasNul,
     ToString {
         value: NumericType,
@@ -2077,8 +2077,8 @@ impl NameResolver {
             ),
             (
                 "std.cinterop",
-                "__c_string_bytes",
-                IntrinsicFunction::CStringBytes,
+                "__c_string_valid_utf8",
+                IntrinsicFunction::CStringValidUtf8,
             ),
             (
                 "std.buffer",

@@ -7836,13 +7836,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_string_has_nul(*string)?
                     .as_any_value_enum())
             }
-            IntrinsicFunction::CStringBytes => {
+            IntrinsicFunction::CStringValidUtf8 => {
                 let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
-                    return Err(unsupported("CString bytes operand"));
+                    return Err(unsupported("CString UTF-8 operand"));
                 };
                 Ok(self
                     .backend
-                    .build_c_string_bytes(*pointer, span)?
+                    .build_c_string_valid_utf8(*pointer)?
                     .as_any_value_enum())
             }
             IntrinsicFunction::ToString { value: numeric } => {
@@ -7932,7 +7932,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             IntrinsicFunction::ParseNumber { .. }
             | IntrinsicFunction::ValidateUtf8
             | IntrinsicFunction::StringHasNul
-            | IntrinsicFunction::CStringBytes
+            | IntrinsicFunction::CStringValidUtf8
             | IntrinsicFunction::ToString { .. }
             | IntrinsicFunction::StringFromCString
             | IntrinsicFunction::StringToCString

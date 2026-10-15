@@ -4,7 +4,6 @@ pub mod
 pub type InteriorNul
 
 use std.string.InvalidUtf8
-use std.shared_buffer.SharedBuffer
 
 use std.core.sized.sized_opaque
 
@@ -52,7 +51,7 @@ companion CString {
 }
 
 extern "staple-intrinsic" {
-    __c_string_bytes: CString -> SharedBuffer U8
+    __c_string_valid_utf8: CString -> U8
     __has_interior_nul: String -> U8
 }
 
@@ -69,8 +68,9 @@ impl TryConvert String CString {
 
 impl TryConvert CString String {
     type Error = InvalidUtf8
-    try_convert = move value => match (String.from_utf8 (__c_string_bytes value)) {
-        Ok _ => Ok (CString.to_string_unchecked value),
-        InvalidUtf8 => InvalidUtf8,
+    try_convert = move value => if (__c_string_valid_utf8 value == 1) {
+        Ok (CString.to_string_unchecked value)
+    } else {
+        InvalidUtf8
     }
 }

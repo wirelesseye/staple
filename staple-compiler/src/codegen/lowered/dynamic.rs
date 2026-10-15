@@ -4335,7 +4335,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             crate::IntrinsicFunction::ParseNumber { .. }
             | crate::IntrinsicFunction::ValidateUtf8
             | crate::IntrinsicFunction::StringHasNul
-            | crate::IntrinsicFunction::CStringBytes
+            | crate::IntrinsicFunction::CStringValidUtf8
             | crate::IntrinsicFunction::ToString { .. }
             | crate::IntrinsicFunction::StringFromCString
             | crate::IntrinsicFunction::StringToCString

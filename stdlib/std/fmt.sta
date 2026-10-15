@@ -1,13 +1,15 @@
 pub mod
 
-use std.buffer.(Buffer)
+// Imported first so `Buffer`'s `!Copy` implementation registers before `List`'s
+// implementations are checked against the blanket `Clone` for `Copy` types.
+use std.buffer.Buffer
+use std.list.List
 use std.string.(String, ToString)
-use std.shared_buffer.SharedBuffer
-use std.flow.while
+use std.flow.for
 use std.syntax.*
 
 /// A growable UTF-8 output buffer used by formatting traits.
-pub type Formatter = wrap Buffer U8
+pub type Formatter = wrap List U8
 
 /// Formats a value for human-facing output.
 pub trait Display T {
@@ -113,34 +115,17 @@ pub macro @derive_debug: Item -> Sequence Item = item => match item {
     _ => panic "derive_debug item is unsupported",
 }
 
-def grow_formatter = mut formatter: Formatter => () :: {
-    let old_capacity = Buffer.capacity formatter.*
-    let new_capacity: USize = if (old_capacity == 0) { 16 } else { old_capacity * 2 }
-    let mut destination: Buffer U8 = Buffer.with_capacity new_capacity
-    Buffer.transfer formatter.* destination
-    formatter = Formatter destination
-}
-
-def write_byte = mut formatter: Formatter => byte: U8 => () :: {
-    if ((formatter.* |> length) == (formatter.* |> capacity)) { grow_formatter formatter }
-    formatter.* |> push byte
-}
+def write_byte = mut formatter: Formatter => byte: U8 => () :: formatter.* |> push byte
 
 def formatter_write = (mut formatter: Formatter, value: String) => () :: {
-    let bytes = String.bytes value
-    let mut index: USize = 0
-    while (index < SharedBuffer.length bytes) {
-        write_byte formatter bytes[index]
-        index = index + 1
+    for byte in (String.bytes value) {
+        write_byte formatter byte
     }
 }
 
 def formatter_write_debug = (mut formatter: Formatter, value: String) => () :: {
     formatter |> write "\""
-    let bytes = String.bytes value
-    let mut index: USize = 0
-    while (index < SharedBuffer.length bytes) {
-        let byte = bytes[index]
+    for byte in (String.bytes value) {
         when {
             byte == 0 => formatter |> write "\\0",
             byte == 9 => formatter |> write "\\t",
@@ -150,17 +135,16 @@ def formatter_write_debug = (mut formatter: Formatter, value: String) => () :: {
             byte == 92 => formatter |> write "\\\\",
             else => write_byte formatter byte,
         }
-        index = index + 1
     }
     formatter |> write "\""
 }
 
 def formatter_finish = move formatter: Formatter => String :: {
-    let Formatter buffer = formatter
-    String.from_utf8_unchecked (Buffer.into_shared buffer)
+    let Formatter list = formatter
+    String.from_utf8_unchecked list
 }
 
-def formatter_new = () => Formatter :: Formatter (Buffer.with_capacity 16)
+def formatter_new = () => Formatter :: Formatter (List.with_capacity 16)
 
 companion Formatter {
     /// Creates an empty formatter.

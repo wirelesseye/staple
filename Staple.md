@@ -3420,7 +3420,9 @@ human-facing text, while `Debug` is intended for developer-facing structure.
 These formatting types and traits are declared in `std.fmt`; `Display` and `Debug` are re-exported
 by `std.core` into the prelude.
 `Formatter.display value` and `Formatter.debug value` create a formatter,
-dispatch the corresponding trait, and return the finished `String`.
+dispatch the corresponding trait, and return the finished `String`. A
+`Formatter` is a nominal type with the private representation `List U8`; the
+finished string takes ownership of the accumulated bytes.
 
 Manual implementations append text with `Formatter.write` and may delegate
 nested values directly to either formatting trait:
@@ -3454,6 +3456,17 @@ Two strings can be concatenated with `+`; this dispatches through the standard
 `Add String` implementation and returns a newly allocated `String`. The
 standard library implements `Eq String`, comparing the two UTF-8 byte
 sequences.
+
+`String.to_bytes: String => List U8` copies the UTF-8 bytes into a new list, so
+mutating the list never affects the string. `String.bytes: String => StringBytes`
+returns a non-copying iterator over the bytes: `StringBytes` implements
+`Iterator` with `Item = U8` and an identity `IntoIterator`, so
+`for byte in (String.bytes text)` works. `String.from_utf8: move List U8 =>
+Result String std.string.InvalidUtf8` validates the bytes and wraps them
+without copying; the list is moved in, so nothing can mutate the bytes after
+validation. `String.from_utf8_unchecked: move List U8 => String` skips the
+validation when the caller knows the bytes are valid UTF-8. The underlying
+`SharedBuffer U8` is private to the standard library.
 
 `Ref T` is a garbage-collected reference to a value of type `T`. Its standard
 declaration is `pub type Ref T where ?Sized T = pub wrap T`, so its payload may be
@@ -3609,6 +3622,9 @@ behavior it has elsewhere in the language; `for item in list` consumes the list 
 source — and yields owned copies. Iteration requires `Copy T`, the same as
 `List.get`; clone the list with `Clone.clone` first when it must remain
 usable.
+
+`List.into_shared: move List T => SharedBuffer T` consumes the list and
+returns its elements as a `SharedBuffer T`, like `Buffer.into_shared`.
 
 `List` is move-only like its underlying `Buffer`, and likewise owned rather
 than garbage collected: dropping a list drops its elements and frees its storage. Where `Clone T`, cloning a
@@ -3820,10 +3836,12 @@ to the target precision. Syntax failures return `InvalidNumber`; overflow
 and underflow reported by the parser return `OutOfRange`. Boolean parsing
 accepts `True`, `true`, `False`, and `false`, otherwise returning `std.core.boolean.InvalidBool`.
 
-`String` converts to its `SharedBuffer U8` bytes. Arrays and buffers have no
+`String` has no `Convert` implementation to a byte sequence; `String.to_bytes`
+is the explicit copy into a `List U8`. Arrays and buffers have no
 `Convert` implementations; use `SharedBuffer.from_array`, `Buffer.from_array`,
 and `Buffer.into_shared` explicitly. Checked byte
-buffer-to-string conversion uses `String.from_utf8`, which returns
+list-to-string conversion is `TryConvert (List U8) String` (or
+`String.from_utf8`), which consumes the list and returns
 `Result String std.string.InvalidUtf8`. `String.from_utf8_unchecked` constructs
 a string without validation when the caller knows the bytes are valid UTF-8.
 Checked `String` to `CString` conversion rejects embedded NULs with

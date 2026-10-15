@@ -330,6 +330,16 @@ impl<'program, 'context> Backend<'program, 'context> {
         bytes: PointerValue<'context>,
     ) -> CodeGenerationResult<IntValue<'context>> {
         let (pointer, length) = self.string_parts(bytes)?;
+        self.build_validate_utf8_range(pointer, length)
+    }
+
+    /// Validates `length` bytes at `pointer` through the runtime UTF-8
+    /// validator, returning a status of 1 for valid input.
+    fn build_validate_utf8_range(
+        &self,
+        pointer: PointerValue<'context>,
+        length: IntValue<'context>,
+    ) -> CodeGenerationResult<IntValue<'context>> {
         let validator = self
             .llvm_module
             .get_function("__staple_is_valid_utf8")
@@ -379,14 +389,24 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Copies a C string into a fresh GC String so its bytes can be validated
-    /// and wrapped; the CString itself is left untouched.
-    pub(crate) fn build_c_string_bytes(
+    /// Validates the bytes of a NUL-terminated C string in place, without
+    /// allocating; the CString itself is left untouched.
+    pub(crate) fn build_c_string_valid_utf8(
         &self,
-        pointer: inkwell::values::PointerValue<'context>,
-        span: Span,
-    ) -> CodeGenerationResult<PointerValue<'context>> {
-        self.build_string_from_c_string(pointer, span)
+        pointer: PointerValue<'context>,
+    ) -> CodeGenerationResult<IntValue<'context>> {
+        let strlen = self
+            .llvm_module
+            .get_function("strlen")
+            .expect("C string length is recorded before emission");
+        let length = self
+            .builder
+            .build_direct_call(strlen, &[pointer.into()], "c_string.length")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        self.build_validate_utf8_range(pointer, length)
     }
 
     fn errno_function_name(&self) -> &'static str {

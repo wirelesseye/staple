@@ -4913,7 +4913,7 @@ impl TypeChecker {
                 | crate::IntrinsicFunction::AddressPointer
                 | crate::IntrinsicFunction::ValidateUtf8
                 | crate::IntrinsicFunction::StringHasNul
-                | crate::IntrinsicFunction::CStringBytes => {
+                | crate::IntrinsicFunction::CStringValidUtf8 => {
                     self.symbol_value_type(*symbol)
                         .cloned()
                         .filter(|value| valid_conversion_intrinsic_type(value, *intrinsic))
@@ -21130,9 +21130,8 @@ fn valid_conversion_intrinsic_type(
         crate::IntrinsicFunction::StringHasNul => {
             *function.parameter == CheckedType::String && *function.result == CheckedType::U8
         }
-        crate::IntrinsicFunction::CStringBytes => {
-            *function.parameter == CheckedType::CString
-                && *function.result == CheckedType::SharedBuffer(Box::new(CheckedType::U8))
+        crate::IntrinsicFunction::CStringValidUtf8 => {
+            *function.parameter == CheckedType::CString && *function.result == CheckedType::U8
         }
         _ => false,
     }

@@ -454,9 +454,9 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
                 IntrinsicFunction::ValidateUtf8 => {
                     self.requirements.record(RuntimeRequirement::Utf8Validator);
                 }
-                IntrinsicFunction::CStringBytes => {
+                IntrinsicFunction::CStringValidUtf8 => {
+                    self.requirements.record(RuntimeRequirement::Utf8Validator);
                     self.requirements.record(RuntimeRequirement::CStringLength);
-                    self.gc();
                 }
                 IntrinsicFunction::ToString { .. } => {
                     self.requirements

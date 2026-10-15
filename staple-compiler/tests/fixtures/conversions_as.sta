@@ -1,6 +1,5 @@
 use std.cinterop.(CString, c_string)
 use std.ptr.(RawPtr)
-use std.shared_buffer.SharedBuffer
 use std.syntax.*
 
 def require: Bool -> () = condition => if condition { () } else { panic "as conversion failed" }
@@ -63,8 +62,6 @@ def run: () -> () = () => {
     let (inferred_number, inferred_label) = inferred_pair
     require (inferred_number == 1)
     require (inferred_label == "inferred")
-    let bytes = "hello" as SharedBuffer U8
-    require (SharedBuffer.length bytes == 5)
     require (widen small == 42)
     require (identity (small as I64) == 42)
     require ((identity small) as I64 == 42)

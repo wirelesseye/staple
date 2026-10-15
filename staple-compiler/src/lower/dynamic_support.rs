@@ -165,7 +165,7 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::PointerAddress
         | IntrinsicFunction::AddressPointer
         | IntrinsicFunction::ValidateUtf8
-        | IntrinsicFunction::CStringBytes
+        | IntrinsicFunction::CStringValidUtf8
         | IntrinsicFunction::StringHasNul
         | IntrinsicFunction::ToString { .. }
         | IntrinsicFunction::IntegerBinary { .. }
@@ -502,7 +502,7 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
         IntrinsicFunction::ParseNumber { .. }
             | IntrinsicFunction::ValidateUtf8
             | IntrinsicFunction::StringHasNul
-            | IntrinsicFunction::CStringBytes
+            | IntrinsicFunction::CStringValidUtf8
             | IntrinsicFunction::ToString { .. }
             | IntrinsicFunction::StringFromCString
             | IntrinsicFunction::StringToCString

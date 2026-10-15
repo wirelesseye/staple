@@ -13783,7 +13783,7 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::AddressPointer
         | Intrinsic::ValidateUtf8
         | Intrinsic::StringHasNul
-        | Intrinsic::CStringBytes
+        | Intrinsic::CStringValidUtf8
         | Intrinsic::ToString { .. }
         | Intrinsic::IntegerBinary { .. }
         | Intrinsic::IntegerCompare { .. }
@@ -15918,6 +15918,15 @@ mod tests {
                 1 << index
             );
         }
+    }
+
+    /// Whether an artifact was requested by standard-library source, whose
+    /// eagerly lowered bodies are not part of the program under test.
+    fn originates_in_standard_library(artifact: &LoweredArtifactRequest) -> bool {
+        matches!(
+            &artifact.origin.span,
+            staple_syntax::Span::User { source: Some(source), .. } if source.contains("/stdlib/")
+        )
     }
 
     fn checked_program(source: &str) -> TypedModule {
@@ -19184,7 +19193,7 @@ mod tests {
     fn callable_value_fixture() -> &'static str {
         concat!(
             "use std.cinterop.*\n",
-            "use std.shared_buffer.SharedBuffer\n",
+            "use std.list.List\n",
             "use std.fmt.Formatter\n",
             "extern \"c\" { external_identity: I32 -> I32 }\n",
             "trait TestShow T { test_show: T -> Bool }\n",
@@ -19192,7 +19201,7 @@ mod tests {
             "def generic_identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "def declared: I32 -> I32 = value => value\n",
             "type TestBox = wrap (value: I32)\n",
-            "def make_borrower: String -> () -> SharedBuffer U8 = value => () => String.bytes value\n",
+            "def make_borrower: String -> () -> List U8 = value => () => String.to_bytes value\n",
             "type MyString = wrap String\n",
             "impl !Copy MyString {}\n",
             "companion MyString {\n",
@@ -24184,10 +24193,13 @@ mod tests {
             let diagnostics = program.close_artifact_catalog(&artifact_closure::ProductionHooks);
             assert!(diagnostics.is_empty(), "{diagnostics:?}");
             assert!(
-                !program.artifacts.iter().any(|(_, artifact)| matches!(
-                    artifact.plan,
-                    Some(LoweredArtifactPlan::DescriptorBoundEntry(_))
-                )),
+                !program.artifacts.iter().any(|(_, artifact)| {
+                    !originates_in_standard_library(artifact)
+                        && matches!(
+                            artifact.plan,
+                            Some(LoweredArtifactPlan::DescriptorBoundEntry(_))
+                        )
+                }),
                 "top-level polymorphic values need no forwarding entry"
             );
             program.assign_initializer_names();
@@ -24529,10 +24541,13 @@ mod tests {
             let diagnostics = program.close_artifact_catalog(&artifact_closure::ProductionHooks);
             assert!(diagnostics.is_empty(), "{diagnostics:?}");
             assert!(
-                !program.artifacts.iter().any(|(_, artifact)| matches!(
-                    artifact.plan,
-                    Some(LoweredArtifactPlan::DescriptorBoundEntry(_))
-                )),
+                !program.artifacts.iter().any(|(_, artifact)| {
+                    !originates_in_standard_library(artifact)
+                        && matches!(
+                            artifact.plan,
+                            Some(LoweredArtifactPlan::DescriptorBoundEntry(_))
+                        )
+                }),
                 "top-level polymorphic values need no forwarding entry"
             );
             program.assign_initializer_names();

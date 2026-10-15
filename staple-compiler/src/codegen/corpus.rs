@@ -153,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 158] = [
+static CORPUS: [CorpusProgram; 159] = [
     expect_stdout(
         must_run(emits(
             inline(
@@ -1078,7 +1078,7 @@ debug_pair 5
             inline(
                 "numeric_intrinsics",
                 concat!(
-                    "use std.shared_buffer.SharedBuffer\n",
+                    "use std.list.List\n",
                     "use std.string.ToString\n",
                     "def integers: (I32, I32) -> I32 = (left, right) => left + right * left - right / left\n",
                     "def compare: (I32, I32) -> Bool = (left, right) => left < right\n",
@@ -1086,7 +1086,7 @@ debug_pair 5
                     "def float_compare: (F32, F32) -> Bool = (left, right) => left >= right\n",
                     "def describe: I32 -> String = value => ToString.to_string value\n",
                     "def combine: (String, String) -> String = (left, right) => left + right\n",
-                    "def bytes_length: String -> USize = text => SharedBuffer.length (String.bytes text)\n",
+                    "def bytes_length: String -> USize = text => List.length (String.to_bytes text)\n",
                     "let first = describe 41\n",
                     "let second = combine (\"staple\", \"!\")\n",
                     "let third = bytes_length second\n",
@@ -3071,6 +3071,65 @@ let value = at (Ref (1, 2), (USize :: 5))
             "emission",
         ),
         "4\n5\n4\n2.5\n1.5\n2.5\nnested clone\n4\n2.5\n",
+    )),
+    // String bytes: `to_bytes` returns an independent copy, `bytes` iterates
+    // without copying (including empty and multi-byte strings), `from_utf8` takes a
+    // moved list, a C string validates in place, and Display/Debug output is
+    // unchanged when the formatter grows past its initial 16 bytes.
+    must_run(expect_stdout(
+        inline(
+            "string_bytes_and_formatting",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "use std.cinterop.(CString, c_string)\n",
+                "use std.fmt.Formatter\n",
+                "use std.list.List\n",
+                "use std.string.InvalidUtf8\n",
+                "def sum: String -> String = text => {\n",
+                "    let mut count: USize = 0\n",
+                "    let mut total: USize = 0\n",
+                "    for byte in (String.bytes text) {\n",
+                "        count = count + 1\n",
+                "        total = total + (byte as USize)\n",
+                "    }\n",
+                "    \"${count}/${total}\"\n",
+                "}\n",
+                "def invalid: () -> List U8 = () => {\n",
+                "    let mut bytes: List U8 = List.new ()\n",
+                "    List.push bytes 195\n",
+                "    List.push bytes 40\n",
+                "    bytes\n",
+                "}\n",
+                "def run: () ->{IO} () = () => {\n",
+                "    let text = \"héllo\"\n",
+                "    let mut copy = String.to_bytes text\n",
+                "    List.set_unchecked copy 0 72\n",
+                "    println \"${List.length copy} ${text == \"héllo\"}\"\n",
+                "    println (sum text)\n",
+                "    println (sum \"\")\n",
+                "    println (sum \"日€\")\n",
+                "    match (String.from_utf8 copy) { Ok s => println s, InvalidUtf8 => println \"invalid\", }\n",
+                "    match (String.from_utf8 (invalid ())) { Ok s => println s, InvalidUtf8 => println \"invalid\", }\n",
+                "    let converted: Ok String | InvalidUtf8 = TryConvert.try_convert (String.to_bytes \"abc\")\n",
+                "    match converted { Ok s => println s, InvalidUtf8 => println \"invalid\", }\n",
+                "    let c = c_string \"cstr\"\n",
+                "    match (CString.to_string c) { Ok s => println s, InvalidUtf8 => println \"invalid\", }\n",
+                "    let bad_c = CString.from_string_unchecked (String.from_utf8_unchecked (invalid ()))\n",
+                "    match (CString.to_string bad_c) { Ok s => println s, InvalidUtf8 => println \"invalid\", }\n",
+                "    println (Formatter.debug \"tab\\t \\\"q\\\" back\\\\ nl\\n\")\n",
+                "    println (Formatter.display \"0123456789abcdef0123456789abcdef0123456789\")\n",
+                "    println (Formatter.debug \"0123456789abcdef0123456789abcdef0123456789\")\n",
+                "}\n",
+                "run ()\n",
+            ),
+            "emission",
+        ),
+        concat!(
+            "6 True\n6/795\n0/0\n6/1074\nHéllo\ninvalid\nabc\ncstr\ninvalid\n",
+            "\"tab\\t \\\"q\\\" back\\\\ nl\\n\"\n",
+            "0123456789abcdef0123456789abcdef0123456789\n",
+            "\"0123456789abcdef0123456789abcdef0123456789\"\n",
+        ),
     )),
     // Index reads of a plain `let` local inside a function: the read-only place is
     // a stack copy of the local's value.
