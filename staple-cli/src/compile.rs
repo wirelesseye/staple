@@ -5,18 +5,23 @@ use std::process::{Command, ExitCode, ExitStatus};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use staple_compiler::{
-    CodeGenerator, Lowerer, NameResolver, Program, ProgramLoader, TypeChecker, TypedModule,
-    expand_macros, render_expanded_module,
+    CodeGenerator, EmissionUnit, LoweredModule, Lowerer, NameResolver, Program, ProgramLoader,
+    TypeChecker, TypedModule, expand_macros, render_expanded_module,
 };
+use staple_project::{ActiveFeatures, PackageGraph};
 use staple_syntax::{Diagnostic, format_source};
 
 use crate::Outcome;
+use crate::cache::{self, Destination, Placement};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmitKind {
     Llvm,
     Object,
     Executable,
+    /// Write a library package's cached objects. Selected by `staple build`
+    /// on a package without an entry module; not a user-facing `--emit` kind.
+    Packages,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +53,8 @@ struct Options {
     all_features: bool,
     no_default_features: bool,
     format_check: bool,
+    /// Link cached per-package objects instead of one whole-program module.
+    incremental: bool,
 }
 
 pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String> {
@@ -95,7 +102,10 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
     });
     let program = if let Some(manifest) = &options.manifest_path {
         let graph = staple_project::load_package_graph(manifest)?;
-        if options.mode != Mode::Check && graph.root_package().entry.is_none() {
+        if options.mode != Mode::Check
+            && options.emit != EmitKind::Packages
+            && graph.root_package().entry.is_none()
+        {
             return Err(format!(
                 "library package `{}` has no entry module and cannot emit an executable",
                 graph.root_package().name
@@ -127,6 +137,9 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
         };
     }
 
+    // Dropped by name resolution, but incremental builds fingerprint from it.
+    let graph = program.package_graph().cloned();
+    let active_features = program.active_features().clone();
     let module = compile_program(program)?;
     if options.mode == Mode::Check {
         return Ok(Outcome::Completed(None));
@@ -134,6 +147,43 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
     let lowered = Lowerer::new().lower(&module).map_err(format_diagnostics)?;
     let context = inkwell::context::Context::create();
     let generator = CodeGenerator::new(&context);
+    let program_packages = graph.as_ref().map(|graph| ProgramPackages {
+        graph,
+        active_features: &active_features,
+    });
+
+    if options.emit == EmitKind::Packages {
+        let packages = program_packages.ok_or("a library build requires a package manifest")?;
+        build_library_objects(&lowered, &generator, &packages, &options)?;
+        return Ok(Outcome::Completed(None));
+    }
+
+    let links_executable = options.mode == Mode::Run || options.emit == EmitKind::Executable;
+    let incremental = match (&program_packages, links_executable && options.incremental) {
+        (Some(packages), true) if !lowered.packages().is_empty() => Some(packages),
+        _ => None,
+    };
+    if let Some(packages) = incremental {
+        let mut objects = package_objects(&lowered, &generator, packages, &options)?;
+        let root = TemporaryArtifact::new("object", "o");
+        generator
+            .emit_unit_object(
+                &lowered,
+                &EmissionUnit::root(&lowered),
+                root.path(),
+                options.target.as_deref(),
+            )
+            .map_err(format_diagnostics)?;
+        objects.push(root.path().to_owned());
+        if options.mode == Mode::Run {
+            let executable = TemporaryArtifact::new("executable", executable_extension());
+            link_executable(&objects, executable.path(), &options)?;
+            return run_executable(executable.path(), &options);
+        }
+        let output = artifact_output(&options, executable_extension())?;
+        link_executable(&objects, &output, &options)?;
+        return Ok(Outcome::Completed(None));
+    }
 
     if options.mode == Mode::Run {
         let object = TemporaryArtifact::new("object", "o");
@@ -141,17 +191,8 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
             .emit_object(&lowered, object.path(), None)
             .map_err(format_diagnostics)?;
         let executable = TemporaryArtifact::new("executable", executable_extension());
-        link_executable(object.path(), executable.path(), &options)?;
-        let status = Command::new(executable.path())
-            .args(&options.program_arguments)
-            .status()
-            .map_err(|error| {
-                format!(
-                    "could not run temporary executable `{}`: {error}",
-                    executable.path().display()
-                )
-            })?;
-        return Ok(Outcome::Executed(status));
+        link_executable(&[object.path().to_owned()], executable.path(), &options)?;
+        return run_executable(executable.path(), &options);
     }
 
     match options.emit {
@@ -180,10 +221,318 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
             generator
                 .emit_object(&lowered, object.path(), options.target.as_deref())
                 .map_err(format_diagnostics)?;
-            link_executable(object.path(), &output, &options)?;
+            link_executable(&[object.path().to_owned()], &output, &options)?;
             Ok(Outcome::Completed(None))
         }
+        EmitKind::Packages => unreachable!("library builds return before whole-program emission"),
     }
+}
+
+fn run_executable(executable: &Path, options: &Options) -> Result<Outcome, String> {
+    let status = Command::new(executable)
+        .args(&options.program_arguments)
+        .status()
+        .map_err(|error| {
+            format!(
+                "could not run temporary executable `{}`: {error}",
+                executable.display()
+            )
+        })?;
+    Ok(Outcome::Executed(status))
+}
+
+/// The package graph a lowered program came from, for fingerprinting.
+struct ProgramPackages<'a> {
+    graph: &'a PackageGraph,
+    active_features: &'a ActiveFeatures,
+}
+
+/// Where the objects of one build live.
+struct CacheLayout {
+    triple: String,
+    /// `<stdlib>/target/<triple>`, populated by building the stdlib package.
+    installed_std: Option<PathBuf>,
+    /// `$XDG_CACHE_HOME/staple/<triple>`.
+    user: Option<PathBuf>,
+}
+
+impl CacheLayout {
+    fn new(packages: &ProgramPackages, triple: String) -> Self {
+        let installed_std = cache::standard_library_package(packages.graph).and_then(|id| {
+            let source_root = packages.graph.package(id).source_root();
+            source_root
+                .parent()
+                .map(|root| root.join("target").join(&triple))
+        });
+        let user = cache::user_cache_root().map(|root| root.join(&triple));
+        Self {
+            triple,
+            installed_std,
+            user,
+        }
+    }
+
+    /// `<package dir>/target/staple/<triple>`, or the installed standard
+    /// library's directory for the standard library package itself.
+    fn package_directory(
+        &self,
+        packages: &ProgramPackages,
+        id: staple_project::PackageId,
+    ) -> PathBuf {
+        if cache::standard_library_package(packages.graph) == Some(id)
+            && let Some(installed) = &self.installed_std
+        {
+            return installed.clone();
+        }
+        packages
+            .graph
+            .package(id)
+            .directory
+            .join("target/staple")
+            .join(&self.triple)
+    }
+
+    fn user_destination(&self) -> Option<Destination> {
+        self.user.clone().map(|directory| Destination {
+            directory,
+            prune: false,
+        })
+    }
+
+    /// A dependency: the installed stdlib when present, else its own
+    /// directory, else the user cache. The stdlib is never written next to
+    /// its sources by an ordinary build; it goes to the user cache.
+    fn dependency(&self, packages: &ProgramPackages, id: staple_project::PackageId) -> Placement {
+        let mut placement = Placement::default();
+        let is_std = cache::standard_library_package(packages.graph) == Some(id);
+        if is_std {
+            placement.read.extend(self.installed_std.clone());
+        } else {
+            let directory = self.package_directory(packages, id);
+            placement.read.push(directory.clone());
+            placement.write.push(Destination {
+                directory,
+                prune: false,
+            });
+        }
+        placement.read.extend(self.user.clone());
+        placement.write.extend(self.user_destination());
+        placement
+    }
+}
+
+/// Emits (or finds cached) objects for every non-root package, then the
+/// runtime, returning their paths in link order.
+fn package_objects(
+    lowered: &LoweredModule,
+    generator: &CodeGenerator,
+    packages: &ProgramPackages,
+    options: &Options,
+) -> Result<Vec<PathBuf>, String> {
+    let layout = CacheLayout::new(packages, cache::target_triple(options.target.as_deref()));
+    let identity = cache::compiler_identity()?;
+    let fingerprints = cache::package_fingerprints(
+        packages.graph,
+        packages.active_features,
+        lowered.packages(),
+        identity,
+        &layout.triple,
+    )?;
+    let mut objects = Vec::new();
+    for package in lowered.packages().iter().filter(|package| !package.is_root) {
+        let placement = layout.dependency(packages, package.id);
+        objects.push(emit_dependency_object(
+            generator,
+            packages,
+            package,
+            fingerprints[&package.id],
+            &placement,
+            options,
+        )?);
+    }
+
+    // The runtime sits beside the installed stdlib when there is one, else in
+    // the root package's directory, else in the user cache.
+    let runtime = cache::runtime_fingerprint(identity, &layout.triple);
+    let root_directory = lowered
+        .packages()
+        .iter()
+        .find(|package| package.is_root)
+        .map(|package| layout.package_directory(packages, package.id));
+    let mut placement = Placement::default();
+    placement.read.extend(layout.installed_std.clone());
+    placement.read.extend(root_directory.clone());
+    placement.read.extend(layout.user.clone());
+    placement
+        .write
+        .extend(root_directory.map(|directory| Destination {
+            directory,
+            prune: true,
+        }));
+    placement.write.extend(layout.user_destination());
+    objects.push(emit_runtime(generator, runtime, &placement, options)?);
+    Ok(objects)
+}
+
+/// `staple build` on a library package: writes the package's own object, its
+/// dependencies' objects, and the runtime object into the cache layout.
+fn build_library_objects(
+    lowered: &LoweredModule,
+    generator: &CodeGenerator,
+    packages: &ProgramPackages,
+    options: &Options,
+) -> Result<(), String> {
+    let layout = CacheLayout::new(packages, cache::target_triple(options.target.as_deref()));
+    let identity = cache::compiler_identity()?;
+    let fingerprints = cache::package_fingerprints(
+        packages.graph,
+        packages.active_features,
+        lowered.packages(),
+        identity,
+        &layout.triple,
+    )?;
+    let root = lowered
+        .packages()
+        .iter()
+        .find(|package| package.is_root)
+        .ok_or("the library package is not part of the lowered program")?;
+    for package in lowered.packages().iter().filter(|package| !package.is_root) {
+        let placement = layout.dependency(packages, package.id);
+        emit_dependency_object(
+            generator,
+            packages,
+            package,
+            fingerprints[&package.id],
+            &placement,
+            options,
+        )?;
+    }
+
+    // The package's own objects go beside its sources, with nowhere else to
+    // fall back to: the build exists to produce them.
+    let directory = layout.package_directory(packages, root.id);
+    let placement = Placement {
+        read: vec![directory.clone()],
+        write: vec![Destination {
+            directory,
+            prune: true,
+        }],
+    };
+    emit_package_object(
+        lowered,
+        generator,
+        root,
+        fingerprints[&root.id],
+        &placement,
+        options,
+    )?;
+    emit_runtime(
+        generator,
+        cache::runtime_fingerprint(identity, &layout.triple),
+        &placement,
+        options,
+    )?;
+    Ok(())
+}
+
+/// A dependency's object is emitted from a lowering of that package alone,
+/// not from the program being built: a program lowers only the modules and
+/// functions it reaches, so its view of the package is incomplete, while the
+/// object is shared by every program that links the package.
+fn emit_dependency_object(
+    generator: &CodeGenerator,
+    packages: &ProgramPackages,
+    package: &staple_compiler::LoweredPackage,
+    fingerprint: cache::Fingerprint,
+    placement: &Placement,
+    options: &Options,
+) -> Result<PathBuf, String> {
+    cache::ensure_object(placement, &package.name, fingerprint, &mut |path| {
+        let info = packages.graph.package(package.id);
+        // The features the program enabled, and no others: the package's
+        // defaults are already part of that set when they apply.
+        let mut features = packages
+            .active_features
+            .get(&package.id)
+            .map(|features| features.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        features.sort();
+        let mut loader = ProgramLoader::new()
+            .with_package_graph(staple_project::load_package_graph(&info.manifest)?)
+            .with_feature_selection(staple_project::FeatureSelection {
+                features,
+                all_features: false,
+                no_default_features: true,
+            });
+        if let Some(root) = standard_library_root(packages) {
+            loader = loader.with_standard_library_root(root);
+        }
+        let module = compile_program(loader.load_package_graph()?)?;
+        let lowered = Lowerer::new().lower(&module).map_err(format_diagnostics)?;
+        let root = lowered
+            .packages()
+            .iter()
+            .find(|package| package.is_root)
+            .ok_or_else(|| format!("package `{}` did not lower as a root", info.name))?;
+        generator
+            .emit_unit_object(
+                &lowered,
+                &EmissionUnit::packages([root.id]),
+                path,
+                options.target.as_deref(),
+            )
+            .map_err(format_diagnostics)
+    })
+    .map_err(|error| cache_error(&package.name, error))
+}
+
+fn standard_library_root(packages: &ProgramPackages) -> Option<PathBuf> {
+    let id = cache::standard_library_package(packages.graph)?;
+    Some(
+        packages
+            .graph
+            .package(id)
+            .source_root()
+            .parent()?
+            .to_owned(),
+    )
+}
+
+fn emit_package_object(
+    lowered: &LoweredModule,
+    generator: &CodeGenerator,
+    package: &staple_compiler::LoweredPackage,
+    fingerprint: cache::Fingerprint,
+    placement: &Placement,
+    options: &Options,
+) -> Result<PathBuf, String> {
+    let unit = EmissionUnit::packages([package.id]);
+    cache::ensure_object(placement, &package.name, fingerprint, &mut |path| {
+        generator
+            .emit_unit_object(lowered, &unit, path, options.target.as_deref())
+            .map_err(format_diagnostics)
+    })
+    .map_err(|error| cache_error(&package.name, error))
+}
+
+fn emit_runtime(
+    generator: &CodeGenerator,
+    fingerprint: cache::Fingerprint,
+    placement: &Placement,
+    options: &Options,
+) -> Result<PathBuf, String> {
+    cache::ensure_object(placement, "runtime", fingerprint, &mut |path| {
+        generator
+            .emit_runtime_object(path, options.target.as_deref())
+            .map_err(format_diagnostics)
+    })
+    .map_err(|error| cache_error("runtime", error))
+}
+
+fn cache_error(name: &str, error: String) -> String {
+    format!(
+        "could not cache the `{name}` object: {error} (use `--no-incremental` to skip the cache)"
+    )
 }
 
 fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Options, String> {
@@ -226,6 +575,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         all_features: false,
         no_default_features: false,
         format_check: false,
+        incremental: std::env::var_os("STAPLE_INCREMENTAL").is_none_or(|value| value != "0"),
     };
     let mut positional_only = false;
     let mut emit_specified = false;
@@ -295,6 +645,10 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         }
         if !positional_only && argument == "--all-features" {
             options.all_features = true;
+            continue;
+        }
+        if !positional_only && argument == "--no-incremental" {
+            options.incremental = false;
             continue;
         }
         if !positional_only && argument == "--no-default-features" {
@@ -552,6 +906,7 @@ fn parse_emit(value: &OsStr) -> Result<EmitKind, String> {
         Some("llvm" | "ir") => Ok(EmitKind::Llvm),
         Some("object" | "obj") => Ok(EmitKind::Object),
         Some("executable" | "exe") => Ok(EmitKind::Executable),
+        Some("packages") => Ok(EmitKind::Packages),
         _ => Err(format!(
             "unknown emission kind `{}`; expected `llvm`, `object`, or `exe`",
             value.to_string_lossy()
@@ -639,14 +994,14 @@ impl Drop for TemporaryArtifact {
     }
 }
 
-fn link_executable(object: &Path, output: &Path, options: &Options) -> Result<(), String> {
+fn link_executable(objects: &[PathBuf], output: &Path, options: &Options) -> Result<(), String> {
     let linker = options
         .linker
         .clone()
         .or_else(|| std::env::var_os("CC"))
         .unwrap_or_else(|| "cc".into());
     let mut command = Command::new(&linker);
-    command.arg(object).arg("-o").arg(output);
+    command.args(objects).arg("-o").arg(output);
     if let Some(target) = &options.target {
         command.arg(format!("--target={target}"));
     }
@@ -724,6 +1079,7 @@ pub(crate) fn usage() -> String {
         "  --features <names>        enable package features\n",
         "  --all-features            enable every package feature\n",
         "  --no-default-features     disable default package features\n",
+        "  --no-incremental          compile one whole-program module (or set STAPLE_INCREMENTAL=0)\n",
         "  -L <path>                 add a library search path when linking\n",
         "  -l <name>                 link a library\n",
         "  --                         stop parsing options\n",
@@ -747,6 +1103,7 @@ fn run_usage() -> String {
         "  --features <names>        enable package features\n",
         "  --all-features            enable every package feature\n",
         "  --no-default-features     disable default package features\n",
+        "  --no-incremental          compile one whole-program module (or set STAPLE_INCREMENTAL=0)\n",
         "  -L <path>                 add a library search path when linking\n",
         "  -l <name>                 link a library\n",
         "  --                         pass remaining arguments to the program\n",
@@ -5138,7 +5495,7 @@ mod tests {
         staple_compiler::CodeGenerator::new(&context)
             .emit_object(lowered, object.path(), None)
             .map_err(format_diagnostics)?;
-        link_executable(object.path(), executable.path(), options)?;
+        link_executable(&[object.path().to_owned()], executable.path(), options)?;
         let output = Command::new(executable.path())
             .output()
             .map_err(|error| format!("could not run `{}`: {error}", executable.path().display()))?;

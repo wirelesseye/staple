@@ -28,6 +28,7 @@ struct Options {
     features: Vec<String>,
     all_features: bool,
     no_default_features: bool,
+    incremental: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -72,6 +73,7 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
     // vector that the `staple compile`/`staple check` front-end accepts, and we
     // hand it straight to `compile::run` rather than spawning a child process.
     if package.entry.is_none() {
+        // `check` type-checks the library; `build` caches its objects.
         return compile::run(compiler_argv(&package, &options, None));
     }
 
@@ -135,6 +137,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         features: Vec::new(),
         all_features: false,
         no_default_features: false,
+        incremental: true,
     };
 
     if mode == Mode::New {
@@ -215,6 +218,10 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         }
         if argument == "--no-default-features" {
             options.no_default_features = true;
+            continue;
+        }
+        if argument == "--no-incremental" {
+            options.incremental = false;
             continue;
         }
         if argument == "-L" {
@@ -308,12 +315,11 @@ fn validate_package_options(package: &Package, options: &Options) -> Result<(), 
         ));
     }
     if options.output.is_some()
-        || options.target.is_some()
         || options.linker.is_some()
         || !options.library_paths.is_empty()
         || !options.libraries.is_empty()
     {
-        return Err("artifact and linker options are not supported when building a library without an entry module".to_owned());
+        return Err("`-o` and linker options are not supported when building a library without an entry module".to_owned());
     }
     Ok(())
 }
@@ -430,7 +436,7 @@ fn canonical_file(path: &Path, label: &str) -> Result<PathBuf, String> {
 
 fn compiler_argv(package: &Package, options: &Options, output: Option<&Path>) -> Vec<OsString> {
     let mut arguments = Vec::new();
-    if options.mode == Mode::Check || package.entry.is_none() {
+    if options.mode == Mode::Check {
         arguments.push("check".into());
     }
     arguments.push("--manifest-path".into());
@@ -449,6 +455,12 @@ fn compiler_argv(package: &Package, options: &Options, output: Option<&Path>) ->
         arguments.extend([OsString::from("--emit"), OsString::from("exe")]);
         arguments.push("-o".into());
         arguments.push(output.as_os_str().to_owned());
+    } else if options.mode != Mode::Check {
+        // A library has no executable; building it fills the object cache.
+        arguments.extend([OsString::from("--emit"), OsString::from("packages")]);
+    }
+    if !options.incremental {
+        arguments.push("--no-incremental".into());
     }
     if let Some(target) = &options.target {
         arguments.push("--target".into());
@@ -539,6 +551,7 @@ fn command_usage(command: &str) -> String {
             "  --features <names>       enable package features\n",
             "  --all-features           enable every package feature\n",
             "  --no-default-features    disable default package features\n",
+            "  --no-incremental         compile one whole-program module (or set STAPLE_INCREMENTAL=0)\n",
             "  -L <path>                add a linker search path\n",
             "  -l <name>                link a library",
         ),
@@ -562,6 +575,7 @@ fn command_usage(command: &str) -> String {
             "  --features <names>       enable package features\n",
             "  --all-features           enable every package feature\n",
             "  --no-default-features    disable default package features\n",
+            "  --no-incremental         compile one whole-program module (or set STAPLE_INCREMENTAL=0)\n",
             "  -L <path>                add a linker search path\n",
             "  -l <name>                link a library\n",
             "  --                        pass remaining arguments to the program",
@@ -847,7 +861,9 @@ mod tests {
         let build = parse_options(["build".into()]).unwrap();
         assert!(validate_package_options(&package, &check).is_ok());
         assert!(validate_package_options(&package, &build).is_ok());
-        assert_eq!(compiler_argv(&package, &build, None)[0], "check");
+        let argv = compiler_argv(&package, &build, None);
+        assert_eq!(argv[2..], ["--emit", "packages"]);
+        assert_eq!(compiler_argv(&package, &check, None)[0], "check");
         let run = parse_options(["run".into()]).unwrap();
         assert!(
             validate_package_options(&package, &run)
