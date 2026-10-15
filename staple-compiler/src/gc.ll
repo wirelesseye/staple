@@ -2,8 +2,11 @@
 ; alignment and HEADER_BYTES is rounded to the target scalar alignment, at least
 ; PTR_BYTES, so every GC payload preserves natural alignment. Pointer-holding fields must preserve that alignment.
 ; The header fields are:
-; next allocation, requested payload size, mark bit, finalizer, finalized bit.
-%GcHeader = type { ptr, {{SIZE}}, {{SIZE}}, ptr, {{SIZE}} }
+; next allocation, requested payload size, flags, finalizer, previous allocation.
+; The allocation list is doubly linked so an owner can release its allocation
+; in O(1). Flags hold the mark bit (1), the finalized bit (2) and the pinned
+; bit (4); a pinned allocation is a root until it is unpinned.
+%GcHeader = type { ptr, {{SIZE}}, {{SIZE}}, ptr, ptr }
 ; Explicit roots form a linked list of byte ranges: start, size, next root.
 %GcRoot = type { ptr, {{SIZE}}, ptr }
 
@@ -23,6 +26,8 @@
 @__staple_gc_table_capacity = internal global {{SIZE}} 0
 @__staple_gc_table_count = internal global {{SIZE}} 0
 @__staple_gc_collecting = internal global i1 false
+; Number of pinned allocations, so collection can skip the pinned-root pass.
+@__staple_gc_pinned = internal global {{SIZE}} 0
 ; Payload pointers sorted by address, rebuilt at the start of every mark phase,
 ; and the inclusive address bounds they span. Marking resolves a pointer into
 ; the middle of an allocation by binary search, so interior views need no
@@ -411,12 +416,14 @@ lookup.done:
 mark.check:
   %header = getelementptr i8, ptr %payload, {{SIZE}} -{{HEADER_BYTES}}
   %mark.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 2
-  %mark = load {{SIZE}}, ptr %mark.slot
+  %flags = load {{SIZE}}, ptr %mark.slot
+  %mark = and {{SIZE}} %flags, 1
   %already.marked = icmp ne {{SIZE}} %mark, 0
   br i1 %already.marked, label %return, label %mark.object
 
 mark.object:
-  store {{SIZE}} 1, ptr %mark.slot
+  %marked.flags = or {{SIZE}} %flags, 1
+  store {{SIZE}} %marked.flags, ptr %mark.slot
   %size.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 1
   %size = load {{SIZE}}, ptr %size.slot
   call void @__staple_gc_scan_region(ptr %payload, {{SIZE}} %size)
@@ -474,7 +481,9 @@ clear.loop:
 
 clear.body:
   %clear.mark = getelementptr %GcHeader, ptr %clear.header, i32 0, i32 2
-  store {{SIZE}} 0, ptr %clear.mark
+  %clear.flags = load {{SIZE}}, ptr %clear.mark
+  %cleared.flags = and {{SIZE}} %clear.flags, -2
+  store {{SIZE}} %cleared.flags, ptr %clear.mark
   %clear.next.slot = getelementptr %GcHeader, ptr %clear.header, i32 0, i32 0
   %clear.next = load ptr, ptr %clear.next.slot
   br label %clear.loop
@@ -504,7 +513,7 @@ roots.start:
 roots.loop:
   %root = phi ptr [ %roots, %roots.start ], [ %root.next, %roots.body ]
   %roots.done = icmp eq ptr %root, null
-  br i1 %roots.done, label %finalize.start, label %roots.body
+  br i1 %roots.done, label %pinned.start, label %roots.body
 
 roots.body:
   %root.start.slot = getelementptr %GcRoot, ptr %root, i32 0, i32 0
@@ -515,6 +524,35 @@ roots.body:
   %root.next.slot = getelementptr %GcRoot, ptr %root, i32 0, i32 2
   %root.next = load ptr, ptr %root.next.slot
   br label %roots.loop
+
+pinned.start:
+  %pinned.count = load {{SIZE}}, ptr @__staple_gc_pinned
+  %any.pinned = icmp ne {{SIZE}} %pinned.count, 0
+  %pinned.head = load ptr, ptr @__staple_gc_head
+  br i1 %any.pinned, label %pinned.loop, label %finalize.start
+
+pinned.loop:
+  %pinned.header = phi ptr [ %pinned.head, %pinned.start ], [ %pinned.next, %pinned.continue ]
+  %pinned.done = icmp eq ptr %pinned.header, null
+  br i1 %pinned.done, label %finalize.start, label %pinned.check
+
+pinned.check:
+  %pinned.flags.slot = getelementptr %GcHeader, ptr %pinned.header, i32 0, i32 2
+  %pinned.flags = load {{SIZE}}, ptr %pinned.flags.slot
+  %pinned.bit = and {{SIZE}} %pinned.flags, 4
+  %is.pinned = icmp ne {{SIZE}} %pinned.bit, 0
+  br i1 %is.pinned, label %pinned.mark, label %pinned.continue
+
+pinned.mark:
+  %pinned.payload = getelementptr i8, ptr %pinned.header, {{SIZE}} {{HEADER_BYTES}}
+  %pinned.address = ptrtoint ptr %pinned.payload to {{SIZE}}
+  call void @__staple_gc_mark_candidate({{SIZE}} %pinned.address)
+  br label %pinned.continue
+
+pinned.continue:
+  %pinned.next.slot = getelementptr %GcHeader, ptr %pinned.header, i32 0, i32 0
+  %pinned.next = load ptr, ptr %pinned.next.slot
+  br label %pinned.loop
 
 finalize.start:
   ; Finalizers run before sweeping, and the finalized flag prevents repeat calls.
@@ -528,20 +566,21 @@ finalize.loop:
 
 finalize.check:
   %finalize.mark.slot = getelementptr %GcHeader, ptr %finalize.header, i32 0, i32 2
-  %finalize.mark = load {{SIZE}}, ptr %finalize.mark.slot
+  %finalize.flags = load {{SIZE}}, ptr %finalize.mark.slot
+  %finalize.mark = and {{SIZE}} %finalize.flags, 1
   %finalize.dead = icmp eq {{SIZE}} %finalize.mark, 0
   %finalizer.slot = getelementptr %GcHeader, ptr %finalize.header, i32 0, i32 3
   %finalizer = load ptr, ptr %finalizer.slot
   %has.finalizer = icmp ne ptr %finalizer, null
-  %finalized.slot = getelementptr %GcHeader, ptr %finalize.header, i32 0, i32 4
-  %finalized = load {{SIZE}}, ptr %finalized.slot
+  %finalized = and {{SIZE}} %finalize.flags, 2
   %not.finalized = icmp eq {{SIZE}} %finalized, 0
   %needs.finalize.1 = and i1 %finalize.dead, %has.finalizer
   %needs.finalize = and i1 %needs.finalize.1, %not.finalized
   br i1 %needs.finalize, label %finalize.call, label %finalize.continue
 
 finalize.call:
-  store {{SIZE}} 1, ptr %finalized.slot
+  %finalized.flags = or {{SIZE}} %finalize.flags, 2
+  store {{SIZE}} %finalized.flags, ptr %finalize.mark.slot
   %finalize.payload = getelementptr i8, ptr %finalize.header, {{SIZE}} {{HEADER_BYTES}}
   call void %finalizer(ptr %finalize.payload)
   br label %finalize.continue
@@ -557,14 +596,15 @@ sweep.start:
   br label %sweep.loop
 
 sweep.loop:
-  %link = phi ptr [ @__staple_gc_head, %sweep.start ], [ %next.link, %keep ], [ %link, %discard ]
+  %link = phi ptr [ @__staple_gc_head, %sweep.start ], [ %next.link, %keep ], [ %link, %discard.free ]
   %header = load ptr, ptr %link
   %sweep.done = icmp eq ptr %header, null
   br i1 %sweep.done, label %threshold, label %sweep.check
 
 sweep.check:
   %mark.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 2
-  %mark = load {{SIZE}}, ptr %mark.slot
+  %flags = load {{SIZE}}, ptr %mark.slot
+  %mark = and {{SIZE}} %flags, 1
   %live = icmp ne {{SIZE}} %mark, 0
   br i1 %live, label %keep, label %discard
 
@@ -576,6 +616,17 @@ discard:
   %dead.next.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 0
   %dead.next = load ptr, ptr %dead.next.slot
   store ptr %dead.next, ptr %link
+  %dead.has.next = icmp ne ptr %dead.next, null
+  br i1 %dead.has.next, label %discard.relink, label %discard.free
+
+discard.relink:
+  %dead.previous.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 4
+  %dead.previous = load ptr, ptr %dead.previous.slot
+  %dead.next.previous = getelementptr %GcHeader, ptr %dead.next, i32 0, i32 4
+  store ptr %dead.previous, ptr %dead.next.previous
+  br label %discard.free
+
+discard.free:
   %dead.size.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 1
   %dead.size = load {{SIZE}}, ptr %dead.size.slot
   %dead.payload = getelementptr i8, ptr %header, {{SIZE}} {{HEADER_BYTES}}
@@ -678,8 +729,17 @@ initialize:
   store {{SIZE}} %initial.mark, ptr %mark.slot
   %finalizer.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 3
   store ptr null, ptr %finalizer.slot
-  %finalized.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 4
-  store {{SIZE}} 0, ptr %finalized.slot
+  %previous.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 4
+  store ptr null, ptr %previous.slot
+  %has.head = icmp ne ptr %head, null
+  br i1 %has.head, label %link.head, label %install
+
+link.head:
+  %head.previous = getelementptr %GcHeader, ptr %head, i32 0, i32 4
+  store ptr %header, ptr %head.previous
+  br label %install
+
+install:
   store ptr %header, ptr @__staple_gc_head
   %old.bytes = load {{SIZE}}, ptr @__staple_gc_bytes
   %new.bytes = add {{SIZE}} %old.bytes, %charge
@@ -699,6 +759,110 @@ entry:
   %header = getelementptr i8, ptr %payload, {{SIZE}} -{{HEADER_BYTES}}
   %slot = getelementptr %GcHeader, ptr %header, i32 0, i32 3
   store ptr %finalizer, ptr %slot
+  ret void
+}
+
+; Free an allocation whose single owner has dropped it, without waiting for a
+; collection. The owner has already cleaned up the payload. Finalizers may
+; release allocations; unlinking updates the neighbours' links, so the
+; finalize loop's next read stays valid. Never called during marking.
+define void @__staple_gc_release(ptr %payload) {
+entry:
+  %header = getelementptr i8, ptr %payload, {{SIZE}} -{{HEADER_BYTES}}
+  %next.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 0
+  %next = load ptr, ptr %next.slot
+  %previous.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 4
+  %previous = load ptr, ptr %previous.slot
+  %at.head = icmp eq ptr %previous, null
+  br i1 %at.head, label %unlink.head, label %unlink.after
+
+unlink.head:
+  store ptr %next, ptr @__staple_gc_head
+  br label %relink
+
+unlink.after:
+  %previous.next = getelementptr %GcHeader, ptr %previous, i32 0, i32 0
+  store ptr %next, ptr %previous.next
+  br label %relink
+
+relink:
+  %has.next = icmp ne ptr %next, null
+  br i1 %has.next, label %relink.next, label %unpin.check
+
+relink.next:
+  %next.previous = getelementptr %GcHeader, ptr %next, i32 0, i32 4
+  store ptr %previous, ptr %next.previous
+  br label %unpin.check
+
+unpin.check:
+  %flags.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 2
+  %flags = load {{SIZE}}, ptr %flags.slot
+  %pinned.bit = and {{SIZE}} %flags, 4
+  %pinned = icmp ne {{SIZE}} %pinned.bit, 0
+  br i1 %pinned, label %unpin, label %account
+
+unpin:
+  %pinned.count = load {{SIZE}}, ptr @__staple_gc_pinned
+  %pinned.remaining = sub {{SIZE}} %pinned.count, 1
+  store {{SIZE}} %pinned.remaining, ptr @__staple_gc_pinned
+  br label %account
+
+account:
+  call void @__staple_gc_hash_remove(ptr %payload)
+  %size.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 1
+  %size = load {{SIZE}}, ptr %size.slot
+  %has.payload = icmp ne {{SIZE}} %size, 0
+  %payload.size = select i1 %has.payload, {{SIZE}} %size, {{SIZE}} 1
+  %charge = add {{SIZE}} %payload.size, {{HEADER_BYTES}}
+  %bytes = load {{SIZE}}, ptr @__staple_gc_bytes
+  %remaining.bytes = sub {{SIZE}} %bytes, %charge
+  store {{SIZE}} %remaining.bytes, ptr @__staple_gc_bytes
+  call void @free(ptr %header)
+  ret void
+}
+
+; Make an allocation a root, for example while its only reference is a raw
+; pointer the collector cannot see. Its payload is scanned as well.
+define void @__staple_gc_pin(ptr %payload) {
+entry:
+  %header = getelementptr i8, ptr %payload, {{SIZE}} -{{HEADER_BYTES}}
+  %flags.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 2
+  %flags = load {{SIZE}}, ptr %flags.slot
+  %pinned.bit = and {{SIZE}} %flags, 4
+  %already = icmp ne {{SIZE}} %pinned.bit, 0
+  br i1 %already, label %return, label %pin
+
+pin:
+  %pinned.flags = or {{SIZE}} %flags, 4
+  store {{SIZE}} %pinned.flags, ptr %flags.slot
+  %count = load {{SIZE}}, ptr @__staple_gc_pinned
+  %incremented = add {{SIZE}} %count, 1
+  store {{SIZE}} %incremented, ptr @__staple_gc_pinned
+  br label %return
+
+return:
+  ret void
+}
+
+; Undo __staple_gc_pin.
+define void @__staple_gc_unpin(ptr %payload) {
+entry:
+  %header = getelementptr i8, ptr %payload, {{SIZE}} -{{HEADER_BYTES}}
+  %flags.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 2
+  %flags = load {{SIZE}}, ptr %flags.slot
+  %pinned.bit = and {{SIZE}} %flags, 4
+  %pinned = icmp ne {{SIZE}} %pinned.bit, 0
+  br i1 %pinned, label %unpin, label %return
+
+unpin:
+  %unpinned.flags = and {{SIZE}} %flags, -5
+  store {{SIZE}} %unpinned.flags, ptr %flags.slot
+  %count = load {{SIZE}}, ptr @__staple_gc_pinned
+  %decremented = sub {{SIZE}} %count, 1
+  store {{SIZE}} %decremented, ptr @__staple_gc_pinned
+  br label %return
+
+return:
   ret void
 }
 

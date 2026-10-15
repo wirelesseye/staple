@@ -8362,21 +8362,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     return Err(unsupported("Unique raw conversion"));
                 };
                 if intrinsic == IntrinsicFunction::UniqueIntoRaw {
-                    self.backend
-                        .unregister_unique_payload(pointer, span.clone())?;
+                    self.backend.pin_unique_payload(pointer, span.clone())?;
                 } else {
-                    let CheckedType::Unique(payload) = result_type else {
-                        return Err(unsupported("Unique result"));
-                    };
-                    if payload.is_sized() {
-                        let ty = self.backend.compile_type(payload)?;
-                        let size = self.backend.target_data.get_store_size(&ty);
-                        self.backend.register_unique_payload(
-                            pointer,
-                            self.backend.size_type.const_int(size, false),
-                            span.clone(),
-                        )?;
-                    }
+                    self.backend.unpin_unique_payload(pointer, span.clone())?;
                 }
                 Ok(pointer.as_any_value_enum())
             }

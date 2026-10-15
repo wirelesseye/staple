@@ -4,7 +4,9 @@ use std.core.recursive_constructor.recursive_constructor
 use std.ptr.(RawMutPtr)
 
 /// A unique, affine heap owner. Dropping it cleans up its payload and frees
-/// its allocation. The allocation is not managed by the garbage collector.
+/// its allocation immediately. The allocation lives on the managed heap and is
+/// traced through its owner, so an owner reachable only from an unreachable
+/// cycle of managed references is finalized and freed by collection.
 /// Unsized payload types may be used in handles and generic signatures;
 /// construction requires a concrete payload layout.
 @recursive_constructor
@@ -18,7 +20,7 @@ extern "staple-intrinsic" {
 companion<T where ?Sized T> Unique T {
     use std.ptr.(RawMutPtr)
     /// Transfers ownership to the caller without cleanup or deallocation.
-    /// While raw, the caller must keep any GC-managed payload values alive.
+    /// While raw, the allocation and its payload stay alive as collector roots.
     /// The caller must eventually reconstruct the owner or clean up and free
     /// the allocation using the same allocator and payload layout.
     pub def unsafe_into_raw = move value: Unique T => RawMutPtr T :: __unique_into_raw value

@@ -3836,19 +3836,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?
                     .into_pointer_value();
                 if intrinsic == crate::IntrinsicFunction::UniqueIntoRaw {
-                    self.backend
-                        .unregister_unique_payload(pointer, span.clone())?;
+                    self.backend.pin_unique_payload(pointer, span.clone())?;
                 } else {
-                    let CheckedType::Unique(payload) = &call.result_type else {
-                        return Err(Diagnostic::new(span.clone(), "invalid Unique raw result"));
-                    };
-                    let descriptor = self.dynamic_descriptor(payload, environment, span)?;
-                    let layout = self.backend.load_descriptor_layout(descriptor)?;
-                    self.backend.register_unique_payload(
-                        pointer,
-                        layout.store_size,
-                        span.clone(),
-                    )?;
+                    self.backend.unpin_unique_payload(pointer, span.clone())?;
                 }
                 self.backend
                     .builder
