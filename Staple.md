@@ -3422,7 +3422,7 @@ by `std.core` into the prelude.
 `Formatter.display value` and `Formatter.debug value` create a formatter,
 dispatch the corresponding trait, and return the finished `String`. A
 `Formatter` is a nominal type with the private representation `List U8`; the
-finished string takes ownership of the accumulated bytes.
+finished string holds a copy of the accumulated bytes, without spare capacity.
 
 Manual implementations append text with `Formatter.write` and may delegate
 nested values directly to either formatting trait:
@@ -3462,8 +3462,9 @@ mutating the list never affects the string. `String.bytes: String => StringBytes
 returns a non-copying iterator over the bytes: `StringBytes` implements
 `Iterator` with `Item = U8` and an identity `IntoIterator`, so
 `for byte in (String.bytes text)` works. `String.from_utf8: move List U8 =>
-Result String std.string.InvalidUtf8` validates the bytes and wraps them
-without copying; the list is moved in, so nothing can mutate the bytes after
+Result String std.string.InvalidUtf8` consumes the list, copies its bytes
+into the string's managed storage as `List.into_shared` does, and validates
+them; because the list is moved in, nothing can mutate the bytes after
 validation. `String.from_utf8_unchecked: move List U8 => String` skips the
 validation when the caller knows the bytes are valid UTF-8. The underlying
 `SharedBuffer U8` is private to the standard library.
