@@ -2963,7 +2963,7 @@ pub(crate) struct LoweredSymbol {
     /// an already-declared external symbol.
     pub has_global: bool,
     /// The harness registers a GC root region for this symbol's module global
-    /// (`has_global` and the value type contains a managed reference).
+    /// (`has_global` and the value type can hold a GC pointer).
     pub global_root: bool,
 }
 
@@ -3600,7 +3600,7 @@ impl LoweredProgram {
             mutable,
         );
         let has_global = facts.globals.contains(&symbol);
-        let global_root = has_global && checked_type_contains_ref(&value_type);
+        let global_root = has_global && checked_type_holds_gc_pointer(&value_type);
         let value = LoweredSymbol {
             initialization_state_type: module
                 .type_of_symbol(symbol)
@@ -13250,7 +13250,7 @@ impl LoweredProgram {
                     format!("symbol {key:?} has a module global without a declared name"),
                 ));
             }
-            let expected_root = symbol.has_global && checked_type_contains_ref(&symbol.value_type);
+            let expected_root = symbol.has_global && checked_type_holds_gc_pointer(&symbol.value_type);
             if symbol.global_root != expected_root {
                 diagnostics.push(Diagnostic::new(
                     symbol.origin.span.clone(),
@@ -14139,53 +14139,70 @@ fn collect_pattern_facts(
     }
 }
 
-/// Whether one checked type contains a garbage-collector-managed reference.
-/// Records `checked_type_contains_ref` so
+/// Whether a value of one checked type can hold a garbage-collector-managed
+/// pointer, so a module global of that type must be registered as a root.
 /// `LoweredSymbol::global_root` records the decision lowering-side.
 ///
-/// `Unique` and `Buffer` storage is a GC allocation reachable only through its
-/// owner, so a global owner must be rooted like a `Ref`.
-///
-/// FIXME(gc-roots): this misses GC pointers other than `Ref`, `SharedBuffer`,
-/// `Unique` and `Buffer`, so a module global holding one is never registered
-/// as a root and its data can be freed while still live. Known cases: `String`
-/// values, which have their own checked type rather than their `SharedBuffer U8`
-/// representation, and function values, whose closure environment is a GC
-/// allocation whatever their parameter and result types. For example, a
-/// top-level `let mut cell = "a"` assigned through a closure, or
-/// `let reader = make_reader "text"` where `make_reader` returns a capturing
-/// closure, reads freed memory after a collection. Root every global whose
-/// layout can hold a GC pointer. Coroutine and reactive handles need no root
-/// today only because their frames register themselves as roots.
-fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
+/// Roots are scanned conservatively, so rooting a global that turns out to
+/// hold no GC pointer is harmless, while missing one lets the collector free
+/// live data. Only types whose layout provably holds no GC pointer are
+/// excluded. `String` is a pointer to its managed byte header; a function
+/// value carries a GC closure environment whatever its parameter and result
+/// types; `Unique` and `Buffer` storage is a GC allocation reachable only
+/// through its owner. Opaque types are rooted because a runtime handle may
+/// wrap a GC pointer.
+fn checked_type_holds_gc_pointer(value_type: &CheckedType) -> bool {
     match value_type {
-        CheckedType::Ref(_)
+        CheckedType::Inferred
+        | CheckedType::Error
+        | CheckedType::Never
+        | CheckedType::I8
+        | CheckedType::I16
+        | CheckedType::I32
+        | CheckedType::I64
+        | CheckedType::U8
+        | CheckedType::U16
+        | CheckedType::U32
+        | CheckedType::U64
+        | CheckedType::ISize
+        | CheckedType::USize
+        | CheckedType::F32
+        | CheckedType::F64
+        | CheckedType::NumberLiteral(_)
+        | CheckedType::CString
+        | CheckedType::CChar
+        | CheckedType::RawOpaquePtr
+        | CheckedType::RawOpaqueMutPtr
+        | CheckedType::Parameter { .. } => false,
+        CheckedType::String
+        | CheckedType::StringLiteralSet(_)
+        | CheckedType::Ref(_)
         | CheckedType::SharedBuffer(_)
         | CheckedType::Unique(_)
-        | CheckedType::Buffer(_) => true,
+        | CheckedType::Buffer(_)
+        | CheckedType::Function(_)
+        | CheckedType::Forall(_)
+        | CheckedType::Opaque { .. } => true,
+        CheckedType::Array { element, .. } => checked_type_holds_gc_pointer(element),
         CheckedType::Product(product) => product
             .elements
             .iter()
-            .any(|element| checked_type_contains_ref(&element.value_type)),
-        CheckedType::Sum(sum) => sum.alternatives.iter().any(checked_type_contains_ref),
-        CheckedType::Function(function) => {
-            checked_type_contains_ref(&function.parameter)
-                || checked_type_contains_ref(&function.result)
-        }
+            .any(|element| checked_type_holds_gc_pointer(&element.value_type)),
+        CheckedType::Sum(sum) => sum.alternatives.iter().any(checked_type_holds_gc_pointer),
         CheckedType::Wrapper {
             arguments,
             representation,
             ..
         } => {
-            arguments.iter().any(checked_type_contains_ref)
-                || checked_type_contains_ref(representation)
+            arguments.iter().any(checked_type_holds_gc_pointer)
+                || checked_type_holds_gc_pointer(representation)
         }
-        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
-            arguments.iter().any(checked_type_contains_ref)
+        CheckedType::TypeConstructor { arguments, .. } => {
+            arguments.iter().any(checked_type_holds_gc_pointer)
         }
-        CheckedType::RawPtr { pointee } => checked_type_contains_ref(pointee),
-        CheckedType::RawMutPtr { pointee } => checked_type_contains_ref(pointee),
-        _ => false,
+        CheckedType::RawPtr { pointee } | CheckedType::RawMutPtr { pointee } => {
+            checked_type_holds_gc_pointer(pointee)
+        }
     }
 }
 

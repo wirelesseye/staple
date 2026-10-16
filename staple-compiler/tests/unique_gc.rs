@@ -347,3 +347,52 @@ fn shared_buffer_from_array_collects_non_copy_elements() {
         "only {total} of 200 shared buffer elements were dropped"
     );
 }
+
+/// Allocates many short strings and capturing closures, reusing any freed
+/// global storage with different contents.
+const REFILL: &str = concat!(
+    "def refill = () => () :: {\n",
+    "    for index in (0 .. 200000) {\n",
+    "        let text = \"zzzz\" + \"zzzz\"\n",
+    "        let other = \"yyyy\" + \"yyyy\"\n",
+    "        let closure = () => other\n",
+    "        ()\n",
+    "    }\n",
+    "}\n",
+);
+
+#[cfg(unix)]
+#[test]
+fn module_globals_keep_strings_closures_and_arrays_alive() {
+    let source = format!(
+        "{}{}{}",
+        concat!(
+            "use std.cinterop.*\n",
+            "use std.ptr.*\n",
+            "extern \"c\" {\n",
+            "    printf: (RawPtr CChar, ...) -> I32\n",
+            "}\n",
+            "def make_reader = text: String => (() -> String) :: () => text\n",
+        ),
+        CHURN,
+        REFILL,
+    ) + concat!(
+        "let text = \"abcd\" + \"efgh\"\n",
+        "let mut cell = \"a\"\n",
+        "let set_cell = () => { cell = \"ijkl\" + \"mnop\" }\n",
+        "let reader = make_reader (\"qrst\" + \"uvwx\")\n",
+        "let pair: (Ref I32 ^ 2) = (Ref 40, Ref 2)\n",
+        "set_cell ()\n",
+        "churn ()\n",
+        "refill ()\n",
+        "churn ()\n",
+        "refill ()\n",
+        "let (Ref first, Ref second) = pair\n",
+        "printf (c_string \"%d %d %d %d\\n\",\n",
+        "    if (text == \"abcdefgh\") { 1 } else { 0 },\n",
+        "    if (cell == \"ijklmnop\") { 1 } else { 0 },\n",
+        "    if (reader () == \"qrstuvwx\") { 1 } else { 0 },\n",
+        "    first + second)\n",
+    );
+    assert_eq!(run(&source), "1 1 1 42\n");
+}
