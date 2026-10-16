@@ -8059,6 +8059,32 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_integer_compare(integer, operation, *left, *right)?;
                 self.build_intrinsic_bool(condition, result_type, span)
             }
+            IntrinsicFunction::IntegerBitwise { integer, operation } => {
+                let [
+                    BasicMetadataValueEnum::IntValue(left),
+                    BasicMetadataValueEnum::IntValue(right),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "integer bitwise operands must be integers",
+                    ));
+                };
+                let value = self
+                    .backend
+                    .build_integer_bitwise(integer, operation, *left, *right)?;
+                Ok(value.as_any_value_enum())
+            }
+            IntrinsicFunction::IntegerNot { integer } => {
+                let [BasicMetadataValueEnum::IntValue(value)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "integer bitwise negation operand must be an integer",
+                    ));
+                };
+                let value = self.backend.build_integer_not(integer, *value)?;
+                Ok(value.as_any_value_enum())
+            }
             IntrinsicFunction::FloatBinary { float, operation } => {
                 let [
                     BasicMetadataValueEnum::FloatValue(left),

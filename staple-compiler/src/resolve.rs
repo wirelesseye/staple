@@ -247,6 +247,15 @@ pub enum IntegerCompareOperation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntegerBitwiseOperation {
+    And,
+    Or,
+    Xor,
+    ShiftLeft,
+    ShiftRight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrimitiveMacro {
     CString,
 }
@@ -309,6 +318,13 @@ pub enum IntrinsicFunction {
     IntegerCompare {
         integer: IntegerType,
         operation: IntegerCompareOperation,
+    },
+    IntegerBitwise {
+        integer: IntegerType,
+        operation: IntegerBitwiseOperation,
+    },
+    IntegerNot {
+        integer: IntegerType,
     },
     FloatBinary {
         float: FloatType,
@@ -1862,6 +1878,22 @@ impl NameResolver {
                     IntrinsicFunction::IntegerCompare { integer, operation },
                 ));
             }
+            for (suffix, operation) in [
+                ("and", IntegerBitwiseOperation::And),
+                ("or", IntegerBitwiseOperation::Or),
+                ("xor", IntegerBitwiseOperation::Xor),
+                ("shift_left", IntegerBitwiseOperation::ShiftLeft),
+                ("shift_right", IntegerBitwiseOperation::ShiftRight),
+            ] {
+                expected.push((
+                    format!("__{}_{}", integer.intrinsic_name(), suffix),
+                    IntrinsicFunction::IntegerBitwise { integer, operation },
+                ));
+            }
+            expected.push((
+                format!("__{}_not", integer.intrinsic_name()),
+                IntrinsicFunction::IntegerNot { integer },
+            ));
         }
         for float in FloatType::ALL {
             expected.push((

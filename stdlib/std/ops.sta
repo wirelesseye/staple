@@ -35,3 +35,39 @@ pub trait Not T {
     /// Returns the logical inverse of a value.
     not: T -> T
 }
+
+/// Provides bitwise conjunction.
+pub trait BitAnd T {
+    /// Returns the bitwise conjunction of two values.
+    bit_and: (T; T) -> T
+}
+
+/// Provides bitwise disjunction.
+pub trait BitOr T {
+    /// Returns the bitwise disjunction of two values.
+    bit_or: (T; T) -> T
+}
+
+/// Provides bitwise exclusive disjunction.
+pub trait BitXor T {
+    /// Returns the bitwise exclusive disjunction of two values.
+    bit_xor: (T; T) -> T
+}
+
+/// Provides bitwise negation.
+pub trait BitNot T {
+    /// Returns the bitwise inverse of a value.
+    bit_not: T -> T
+}
+
+/// Provides left shifts.
+pub trait ShiftLeft T {
+    /// Returns the left value shifted left by the right value.
+    shift_left: (T; T) -> T
+}
+
+/// Provides right shifts.
+pub trait ShiftRight T {
+    /// Returns the left value shifted right by the right value.
+    shift_right: (T; T) -> T
+}

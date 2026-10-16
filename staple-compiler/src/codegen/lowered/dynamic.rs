@@ -4400,6 +4400,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 )?;
                 self.dynamic_bool_value(condition, &call.result_type, span)?
             }
+            crate::IntrinsicFunction::IntegerBitwise { integer, operation } => self
+                .backend
+                .build_integer_bitwise(
+                    integer,
+                    operation,
+                    values[0].into_int_value(),
+                    values[1].into_int_value(),
+                )?
+                .as_basic_value_enum(),
+            crate::IntrinsicFunction::IntegerNot { integer } => self
+                .backend
+                .build_integer_not(integer, values[0].into_int_value())?
+                .as_basic_value_enum(),
             crate::IntrinsicFunction::FloatBinary { float, operation } => self
                 .backend
                 .build_float_binary(

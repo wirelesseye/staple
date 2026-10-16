@@ -5097,7 +5097,7 @@ mod tests {
         let standard_library = workspace_root.join("stdlib");
         let options = parse_options([std::ffi::OsString::from("corpus.sta")])
             .expect("corpus link options should parse");
-        const SUBSET: [&str; 24] = [
+        const SUBSET: [&str; 25] = [
             "trait_dictionary_values",
             "trait_dictionary_adapters",
             "trait_dictionary_builder",
@@ -5115,6 +5115,7 @@ mod tests {
             "match_sums_products",
             "destructuring",
             "numeric_intrinsics",
+            "bitwise_intrinsics",
             "example_traits_and_generics",
             "polymorphic_goal",
             "polymorphic_inside_generic_body",

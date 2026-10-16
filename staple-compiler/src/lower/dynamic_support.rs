@@ -170,6 +170,8 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::ToString { .. }
         | IntrinsicFunction::IntegerBinary { .. }
         | IntrinsicFunction::IntegerCompare { .. }
+        | IntrinsicFunction::IntegerBitwise { .. }
+        | IntrinsicFunction::IntegerNot { .. }
         | IntrinsicFunction::FloatBinary { .. }
         | IntrinsicFunction::FloatCompare { .. }
         | IntrinsicFunction::StringFromCString
@@ -516,6 +518,8 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::AddressPointer
             | IntrinsicFunction::IntegerBinary { .. }
             | IntrinsicFunction::IntegerCompare { .. }
+            | IntrinsicFunction::IntegerBitwise { .. }
+            | IntrinsicFunction::IntegerNot { .. }
             | IntrinsicFunction::FloatBinary { .. }
             | IntrinsicFunction::FloatCompare { .. }
             | IntrinsicFunction::SharedBufferLength

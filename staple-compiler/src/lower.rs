@@ -13787,6 +13787,8 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::ToString { .. }
         | Intrinsic::IntegerBinary { .. }
         | Intrinsic::IntegerCompare { .. }
+        | Intrinsic::IntegerBitwise { .. }
+        | Intrinsic::IntegerNot { .. }
         | Intrinsic::FloatBinary { .. }
         | Intrinsic::FloatCompare { .. }
         | Intrinsic::StringFromCString

@@ -4592,6 +4592,12 @@ fn operator_traits_and_methods_require_explicit_imports() {
         ("Divide", "divide", "(8; 2)"),
         ("Neg", "negate", "operand"),
         ("Not", "not", "flag"),
+        ("BitAnd", "bit_and", "(1; 2)"),
+        ("BitOr", "bit_or", "(1; 2)"),
+        ("BitXor", "bit_xor", "(1; 2)"),
+        ("BitNot", "bit_not", "operand"),
+        ("ShiftLeft", "shift_left", "(1; 2)"),
+        ("ShiftRight", "shift_right", "(1; 2)"),
     ] {
         for usage in [
             format!("let answer = {trait_name}.{method} {arguments}\n"),
@@ -4630,6 +4636,73 @@ fn arithmetic_operators_work_without_trait_imports() {
     assert!(llvm.contains("mul i32"));
     assert!(llvm.contains("sdiv i32"));
     assert!(!llvm.contains("declare i32 @__i32_add"));
+}
+
+#[test]
+fn bitwise_traits_lower_to_intrinsics_for_every_integer_type() {
+    let types = [
+        "I8", "I16", "I32", "I64", "U8", "U16", "U32", "U64", "ISize", "USize",
+    ];
+    let mut source =
+        String::from("use std.ops.(BitAnd, BitOr, BitXor, BitNot, ShiftLeft, ShiftRight)\n");
+    for ty in types {
+        let lower = ty.to_lowercase();
+        for (op, method) in [
+            ("and", "BitAnd.bit_and (left; right)"),
+            ("or", "BitOr.bit_or (left; right)"),
+            ("xor", "BitXor.bit_xor (left; right)"),
+            ("shift_left", "ShiftLeft.shift_left (left; right)"),
+            ("shift_right", "ShiftRight.shift_right (left; right)"),
+        ] {
+            source.push_str(&format!(
+                "let {op}_{lower} = (left: {ty}, right: {ty}) => {method}\n"
+            ));
+        }
+        source.push_str(&format!(
+            "let not_{lower} = (value: {ty}) => BitNot.bit_not value\n"
+        ));
+        source.push_str(&format!("let call_{lower} = and_{lower} (6, 3)\n"));
+        source.push_str(&format!("let call_not_{lower} = not_{lower} 0\n"));
+        source.push_str(&format!(
+            "let call_right_{lower} = shift_right_{lower} (8, 1)\n"
+        ));
+    }
+    let module = type_check(&source);
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("bitwise operations should compile");
+
+    for ty in types {
+        let lower = ty.to_lowercase();
+        for operation in ["and", "or", "xor", "shift_left", "shift_right"] {
+            let name = format!("{lower}.{operation}");
+            assert!(llvm.contains(&name), "missing `{name}` in LLVM");
+        }
+        let name = format!("{lower}.not");
+        assert!(llvm.contains(&name), "missing `{name}` in LLVM");
+    }
+    assert!(
+        llvm.contains("ashr i32"),
+        "signed shifts must be arithmetic"
+    );
+    assert!(llvm.contains("lshr i32"), "unsigned shifts must be logical");
+    assert!(!llvm.contains("declare i32 @__i32_and"));
+}
+
+#[test]
+fn bitwise_traits_reject_unsupported_types() {
+    for ty in ["F32", "F64", "Bool"] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(&format!(
+                "use std.ops.(BitAnd, BitNot, ShiftLeft)\n\
+                 let unsupported_and = (left: {ty}, right: {ty}) => BitAnd.bit_and (left; right)\n\
+                 let unsupported_not = (value: {ty}) => BitNot.bit_not value\n\
+                 let unsupported_shift = (value: {ty}) => ShiftLeft.shift_left (value; value)\n"
+            )))
+            .expect_err_diagnostics("bitwise operations must reject unsupported types");
+        assert!(!diagnostics.is_empty());
+    }
 }
 
 #[test]

@@ -4962,7 +4962,8 @@ impl TypeChecker {
                         result: Box::new(CheckedType::String),
                     })
                 }
-                crate::IntrinsicFunction::IntegerBinary { integer, .. } => {
+                crate::IntrinsicFunction::IntegerBinary { integer, .. }
+                | crate::IntrinsicFunction::IntegerBitwise { integer, .. } => {
                     let integer = CheckedType::integer(*integer);
                     CheckedType::Function(CheckedFunctionType {
                         default: None,
@@ -4983,6 +4984,16 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
+                        mutations: Vec::new(),
+                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
+                        result: Box::new(integer),
+                    })
+                }
+                crate::IntrinsicFunction::IntegerNot { integer } => {
+                    let integer = CheckedType::integer(*integer);
+                    CheckedType::Function(CheckedFunctionType {
+                        default: None,
+                        parameter: Box::new(integer.clone()),
                         mutations: Vec::new(),
                         moves: Vec::new(),                        effects: CheckedEffectSet::default(),
                         result: Box::new(integer),

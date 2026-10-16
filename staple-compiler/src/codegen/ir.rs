@@ -534,6 +534,54 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(value)
     }
 
+    /// The emitter's integer bitwise builder with its SSA names
+    /// (`{type}.and`/`.or`/`.xor`/`.shift_left`/`.shift_right`). Right shifts
+    /// are arithmetic for signed integers and logical for unsigned integers.
+    pub(crate) fn build_integer_bitwise(
+        &self,
+        integer: crate::IntegerType,
+        operation: crate::IntegerBitwiseOperation,
+        left: inkwell::values::IntValue<'context>,
+        right: inkwell::values::IntValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        use crate::IntegerBitwiseOperation;
+        let name = format!(
+            "{}.{}",
+            integer.intrinsic_name(),
+            match operation {
+                IntegerBitwiseOperation::And => "and",
+                IntegerBitwiseOperation::Or => "or",
+                IntegerBitwiseOperation::Xor => "xor",
+                IntegerBitwiseOperation::ShiftLeft => "shift_left",
+                IntegerBitwiseOperation::ShiftRight => "shift_right",
+            }
+        );
+        let value = match operation {
+            IntegerBitwiseOperation::And => self.builder.build_and(left, right, &name),
+            IntegerBitwiseOperation::Or => self.builder.build_or(left, right, &name),
+            IntegerBitwiseOperation::Xor => self.builder.build_xor(left, right, &name),
+            IntegerBitwiseOperation::ShiftLeft => self.builder.build_left_shift(left, right, &name),
+            IntegerBitwiseOperation::ShiftRight => {
+                self.builder
+                    .build_right_shift(left, right, integer.is_signed(), &name)
+            }
+        }
+        .map_err(compiler_diagnostic)?;
+        Ok(value)
+    }
+
+    /// The emitter's integer bitwise negation builder with its SSA name
+    /// (`{type}.not`).
+    pub(crate) fn build_integer_not(
+        &self,
+        integer: crate::IntegerType,
+        value: inkwell::values::IntValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        self.builder
+            .build_not(value, &format!("{}.not", integer.intrinsic_name()))
+            .map_err(compiler_diagnostic)
+    }
+
     /// The emitter's integer compare builder with its SSA name
     /// (`{type}.compare`).
     pub(crate) fn build_integer_compare(

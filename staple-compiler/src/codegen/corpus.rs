@@ -153,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 159] = [
+static CORPUS: [CorpusProgram; 160] = [
     expect_stdout(
         must_run(emits(
             inline(
@@ -1104,6 +1104,32 @@ debug_pair 5
             ],
         )),
         "",
+    ),
+    expect_stdout(
+        must_run(emits(
+            inline(
+                "bitwise_intrinsics",
+                concat!(
+                    "use std.io.println\n",
+                    "use std.ops.(BitAnd, BitNot, BitOr, BitXor, ShiftLeft, ShiftRight)\n",
+                    "def combine: <T where Copy T, BitAnd T, BitOr T> (T, T) -> T = <T where Copy T, BitAnd T, BitOr T> (left, right) => BitOr.bit_or (BitAnd.bit_and (left; right); right)\n",
+                    "def signed_right = (value: I8, count: I8) => ShiftRight.shift_right (value; count)\n",
+                    "def unsigned_right = (value: U8, count: U8) => ShiftRight.shift_right (value; count)\n",
+                    "let and_value = BitAnd.bit_and (6; 3)\n",
+                    "let or_value = BitOr.bit_or (6; 3)\n",
+                    "let xor_value = BitXor.bit_xor (6; 3)\n",
+                    "let not_value = BitNot.bit_not (I8 :: 0)\n",
+                    "let left = ShiftLeft.shift_left ((U8 :: 3); 2)\n",
+                    "let shifted_signed = signed_right ((I8 :: 0) - (I8 :: 8), I8 :: 3)\n",
+                    "let shifted_unsigned = unsigned_right (8, 3)\n",
+                    "let generic = combine ((U64 :: 65280), (U64 :: 255))\n",
+                    "println \"${and_value} ${or_value} ${xor_value} ${not_value} ${left} ${shifted_signed} ${shifted_unsigned} ${generic}\"\n",
+                ),
+                "calls",
+            ),
+            &["combine", "signed_right", "unsigned_right"],
+        )),
+        "2 7 5 -1 12 -1 1 255\n",
     ),
     expect_stdout(
         must_run(emits(

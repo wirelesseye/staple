@@ -3807,6 +3807,14 @@ uses unsigned semantics. All integer types implement `Eq` for `==` and `!=`, and
 `Ordering.Greater` and requires both `Eq` and `PartialOrd`. Integer ordering uses signed semantics for signed types
 and unsigned semantics for unsigned types.
 
+Every integer type also implements the bitwise traits from `std.ops`:
+`BitAnd`, `BitOr`, and `BitXor` for `bit_and`, `bit_or`, and `bit_xor`;
+`BitNot` for `bit_not`; and `ShiftLeft` and `ShiftRight` for `shift_left` and
+`shift_right`. These traits have no operator syntax and, like the operator
+traits, their methods require explicit imports. They are homogeneous: the
+shift amount has the same type as the shifted value. Right shifts are
+arithmetic for signed integers and logical for unsigned integers.
+
 `F32` and `F64` use IEEE-754 single and double precision. Both implement the
 arithmetic traits, `Eq`, and `PartialOrd`, but not `Ord`. A comparison involving
 NaN makes `partial_cmp` return `None`; ordered boolean comparisons are false,

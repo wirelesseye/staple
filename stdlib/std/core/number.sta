@@ -119,6 +119,66 @@ extern "staple-intrinsic" {
     __f64_not_equal: (F64, F64) -> Bool
     __f64_lt: (F64, F64) -> Bool
     __f64_gt: (F64, F64) -> Bool
+    __i8_and: (I8, I8) -> I8
+    __i8_or: (I8, I8) -> I8
+    __i8_xor: (I8, I8) -> I8
+    __i8_not: I8 -> I8
+    __i8_shift_left: (I8, I8) -> I8
+    __i8_shift_right: (I8, I8) -> I8
+    __i16_and: (I16, I16) -> I16
+    __i16_or: (I16, I16) -> I16
+    __i16_xor: (I16, I16) -> I16
+    __i16_not: I16 -> I16
+    __i16_shift_left: (I16, I16) -> I16
+    __i16_shift_right: (I16, I16) -> I16
+    __i32_and: (I32, I32) -> I32
+    __i32_or: (I32, I32) -> I32
+    __i32_xor: (I32, I32) -> I32
+    __i32_not: I32 -> I32
+    __i32_shift_left: (I32, I32) -> I32
+    __i32_shift_right: (I32, I32) -> I32
+    __i64_and: (I64, I64) -> I64
+    __i64_or: (I64, I64) -> I64
+    __i64_xor: (I64, I64) -> I64
+    __i64_not: I64 -> I64
+    __i64_shift_left: (I64, I64) -> I64
+    __i64_shift_right: (I64, I64) -> I64
+    __u8_and: (U8, U8) -> U8
+    __u8_or: (U8, U8) -> U8
+    __u8_xor: (U8, U8) -> U8
+    __u8_not: U8 -> U8
+    __u8_shift_left: (U8, U8) -> U8
+    __u8_shift_right: (U8, U8) -> U8
+    __u16_and: (U16, U16) -> U16
+    __u16_or: (U16, U16) -> U16
+    __u16_xor: (U16, U16) -> U16
+    __u16_not: U16 -> U16
+    __u16_shift_left: (U16, U16) -> U16
+    __u16_shift_right: (U16, U16) -> U16
+    __u32_and: (U32, U32) -> U32
+    __u32_or: (U32, U32) -> U32
+    __u32_xor: (U32, U32) -> U32
+    __u32_not: U32 -> U32
+    __u32_shift_left: (U32, U32) -> U32
+    __u32_shift_right: (U32, U32) -> U32
+    __u64_and: (U64, U64) -> U64
+    __u64_or: (U64, U64) -> U64
+    __u64_xor: (U64, U64) -> U64
+    __u64_not: U64 -> U64
+    __u64_shift_left: (U64, U64) -> U64
+    __u64_shift_right: (U64, U64) -> U64
+    __isize_and: (ISize, ISize) -> ISize
+    __isize_or: (ISize, ISize) -> ISize
+    __isize_xor: (ISize, ISize) -> ISize
+    __isize_not: ISize -> ISize
+    __isize_shift_left: (ISize, ISize) -> ISize
+    __isize_shift_right: (ISize, ISize) -> ISize
+    __usize_and: (USize, USize) -> USize
+    __usize_or: (USize, USize) -> USize
+    __usize_xor: (USize, USize) -> USize
+    __usize_not: USize -> USize
+    __usize_shift_left: (USize, USize) -> USize
+    __usize_shift_right: (USize, USize) -> USize
 }
 
 impl Display I8 { fmt = (value, mut formatter) => formatter |> write (__i8_to_string value) }
@@ -306,6 +366,70 @@ impl Multiply USize {
 impl Divide USize {
     divide = (left; right) => __usize_divide (left, right)
 }
+
+// Bitwise operations. Like arithmetic, they are homogeneous: the shift amount
+// has the same type as the shifted value. Signed integers use arithmetic right
+// shifts and unsigned integers use logical right shifts.
+impl BitAnd I8 { bit_and = (left; right) => __i8_and (left, right) }
+impl BitOr I8 { bit_or = (left; right) => __i8_or (left, right) }
+impl BitXor I8 { bit_xor = (left; right) => __i8_xor (left, right) }
+impl BitNot I8 { bit_not = value => __i8_not value }
+impl ShiftLeft I8 { shift_left = (left; right) => __i8_shift_left (left, right) }
+impl ShiftRight I8 { shift_right = (left; right) => __i8_shift_right (left, right) }
+impl BitAnd I16 { bit_and = (left; right) => __i16_and (left, right) }
+impl BitOr I16 { bit_or = (left; right) => __i16_or (left, right) }
+impl BitXor I16 { bit_xor = (left; right) => __i16_xor (left, right) }
+impl BitNot I16 { bit_not = value => __i16_not value }
+impl ShiftLeft I16 { shift_left = (left; right) => __i16_shift_left (left, right) }
+impl ShiftRight I16 { shift_right = (left; right) => __i16_shift_right (left, right) }
+impl BitAnd I32 { bit_and = (left; right) => __i32_and (left, right) }
+impl BitOr I32 { bit_or = (left; right) => __i32_or (left, right) }
+impl BitXor I32 { bit_xor = (left; right) => __i32_xor (left, right) }
+impl BitNot I32 { bit_not = value => __i32_not value }
+impl ShiftLeft I32 { shift_left = (left; right) => __i32_shift_left (left, right) }
+impl ShiftRight I32 { shift_right = (left; right) => __i32_shift_right (left, right) }
+impl BitAnd I64 { bit_and = (left; right) => __i64_and (left, right) }
+impl BitOr I64 { bit_or = (left; right) => __i64_or (left, right) }
+impl BitXor I64 { bit_xor = (left; right) => __i64_xor (left, right) }
+impl BitNot I64 { bit_not = value => __i64_not value }
+impl ShiftLeft I64 { shift_left = (left; right) => __i64_shift_left (left, right) }
+impl ShiftRight I64 { shift_right = (left; right) => __i64_shift_right (left, right) }
+impl BitAnd U8 { bit_and = (left; right) => __u8_and (left, right) }
+impl BitOr U8 { bit_or = (left; right) => __u8_or (left, right) }
+impl BitXor U8 { bit_xor = (left; right) => __u8_xor (left, right) }
+impl BitNot U8 { bit_not = value => __u8_not value }
+impl ShiftLeft U8 { shift_left = (left; right) => __u8_shift_left (left, right) }
+impl ShiftRight U8 { shift_right = (left; right) => __u8_shift_right (left, right) }
+impl BitAnd U16 { bit_and = (left; right) => __u16_and (left, right) }
+impl BitOr U16 { bit_or = (left; right) => __u16_or (left, right) }
+impl BitXor U16 { bit_xor = (left; right) => __u16_xor (left, right) }
+impl BitNot U16 { bit_not = value => __u16_not value }
+impl ShiftLeft U16 { shift_left = (left; right) => __u16_shift_left (left, right) }
+impl ShiftRight U16 { shift_right = (left; right) => __u16_shift_right (left, right) }
+impl BitAnd U32 { bit_and = (left; right) => __u32_and (left, right) }
+impl BitOr U32 { bit_or = (left; right) => __u32_or (left, right) }
+impl BitXor U32 { bit_xor = (left; right) => __u32_xor (left, right) }
+impl BitNot U32 { bit_not = value => __u32_not value }
+impl ShiftLeft U32 { shift_left = (left; right) => __u32_shift_left (left, right) }
+impl ShiftRight U32 { shift_right = (left; right) => __u32_shift_right (left, right) }
+impl BitAnd U64 { bit_and = (left; right) => __u64_and (left, right) }
+impl BitOr U64 { bit_or = (left; right) => __u64_or (left, right) }
+impl BitXor U64 { bit_xor = (left; right) => __u64_xor (left, right) }
+impl BitNot U64 { bit_not = value => __u64_not value }
+impl ShiftLeft U64 { shift_left = (left; right) => __u64_shift_left (left, right) }
+impl ShiftRight U64 { shift_right = (left; right) => __u64_shift_right (left, right) }
+impl BitAnd ISize { bit_and = (left; right) => __isize_and (left, right) }
+impl BitOr ISize { bit_or = (left; right) => __isize_or (left, right) }
+impl BitXor ISize { bit_xor = (left; right) => __isize_xor (left, right) }
+impl BitNot ISize { bit_not = value => __isize_not value }
+impl ShiftLeft ISize { shift_left = (left; right) => __isize_shift_left (left, right) }
+impl ShiftRight ISize { shift_right = (left; right) => __isize_shift_right (left, right) }
+impl BitAnd USize { bit_and = (left; right) => __usize_and (left, right) }
+impl BitOr USize { bit_or = (left; right) => __usize_or (left, right) }
+impl BitXor USize { bit_xor = (left; right) => __usize_xor (left, right) }
+impl BitNot USize { bit_not = value => __usize_not value }
+impl ShiftLeft USize { shift_left = (left; right) => __usize_shift_left (left, right) }
+impl ShiftRight USize { shift_right = (left; right) => __usize_shift_right (left, right) }
 
 impl Eq I8 {
     eq = (left; right) => __i8_equal (left, right)
