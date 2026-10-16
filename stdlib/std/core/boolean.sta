@@ -1,6 +1,7 @@
 pub mod
 
 use package.ops.(Not)
+use package.default.Default
 
 /// The input is not a supported boolean representation.
 pub type InvalidBool
@@ -77,3 +78,5 @@ impl Convert Bool USize {
 }
 
 impl Convert Bool String { convert = move value => ToString.to_string value }
+
+impl Default Bool { default = () => False }

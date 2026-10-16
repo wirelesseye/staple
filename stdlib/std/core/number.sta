@@ -4,6 +4,7 @@ use package.ops.*
 
 use package.convert.checked_conversion
 
+use package.default.Default
 use package.string.String
 use package.fmt.(Display, Debug, Formatter)
 
@@ -587,6 +588,19 @@ impl Neg I64 { negate = value => 0 - value }
 impl Neg ISize { negate = value => 0 - value }
 impl Neg F32 { negate = value => 0.0 - value }
 impl Neg F64 { negate = value => 0.0 - value }
+
+impl Default I8 { default = () => 0 }
+impl Default I16 { default = () => 0 }
+impl Default I32 { default = () => 0 }
+impl Default I64 { default = () => 0 }
+impl Default U8 { default = () => 0 }
+impl Default U16 { default = () => 0 }
+impl Default U32 { default = () => 0 }
+impl Default U64 { default = () => 0 }
+impl Default ISize { default = () => 0 }
+impl Default USize { default = () => 0 }
+impl Default F32 { default = () => 0.0 }
+impl Default F64 { default = () => 0.0 }
 
 extern "staple-intrinsic" {
     __i8_to_i16: I8 -> (U8, I16)

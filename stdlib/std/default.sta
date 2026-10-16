@@ -5,18 +5,3 @@ pub trait Default T {
     /// Creates the default value.
     default: () -> T
 }
-
-impl Default I8 { default = () => 0 }
-impl Default I16 { default = () => 0 }
-impl Default I32 { default = () => 0 }
-impl Default I64 { default = () => 0 }
-impl Default U8 { default = () => 0 }
-impl Default U16 { default = () => 0 }
-impl Default U32 { default = () => 0 }
-impl Default U64 { default = () => 0 }
-impl Default ISize { default = () => 0 }
-impl Default USize { default = () => 0 }
-impl Default F32 { default = () => 0.0 }
-impl Default F64 { default = () => 0.0 }
-impl Default Bool { default = () => False }
-impl Default String { default = () => "" }

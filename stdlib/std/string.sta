@@ -6,6 +6,7 @@ use package.ops.(Add)
 pub type InvalidUtf8
 
 use package.convert.checked_conversion
+use package.default.Default
 
 use package.shared_buffer.(SharedBuffer)
 use package.buffer.(Buffer)
@@ -90,6 +91,8 @@ impl Add String {
 impl Eq String {
     eq = (String left, String right) => Eq.eq (left, right)
 }
+
+impl Default String { default = () => "" }
 
 extern "staple-intrinsic" {
     __parse_i8: String -> (U8, I8)
