@@ -3024,108 +3024,165 @@ when it becomes `False`.
 
 ## Coroutines
 
-A coroutine is a lazily constructed, suspendable computation. `std.coroutine`
-declares the two compiler-known types:
+A coroutine is a computation that can **pause in the middle and resume
+later**. Use one whenever a piece of logic has to wait — for the next frame, a
+timer, a reply from the host, a change to a signal, or another job — and you
+want to write it as a straight sequence of steps rather than as a state
+machine or a chain of callbacks.
+
+For example, a game tutorial that waits for the player is three steps written
+in order:
+
+```staple
+use std.coroutine.*
+use std.io.(IO, println)
+
+let signal jumps = 0
+let signal coins = 0
+
+def tutorial = () => Coroutine{Reactive, IO} () :: coro {
+    println "Press the jump button."
+    await (until { jumps > 0 })
+    println "Nice! Now collect a coin."
+    await (until { coins > 0 })
+    println "Tutorial complete."
+}
+```
+
+Each `await` parks the tutorial until its condition holds; the rest of the
+program keeps running in the meantime. Without coroutines the same logic would
+be a `step` variable plus a per-frame `match` on it, and every new step would
+have to be threaded through that state by hand.
+
+Typical uses are:
+
+- **Scripted behaviour** — cutscenes, AI routines, tutorials, and animations
+  that wait for frames, time, or game state (see [`until`](#until)).
+- **Waiting on the outside world** — a request whose answer arrives later
+  from the host, a timer, or an event (see [Completions](#completions)).
+- **Running several jobs at once** — interleaving independent jobs on one
+  thread, waiting for their results, and cancelling the ones no longer needed
+  (see [Coroutines and tasks](#coroutines-and-tasks)).
+
+Everything is cooperative and single-threaded: a coroutine runs until it
+reaches an `await`, and nothing runs at all until a program explicitly drives
+it. `std.coroutine` declares the two compiler-known types; import them (or
+`std.coroutine.*`) to use them:
 
 ```staple
 pub type Coroutine{E} T = opaque
 pub type Task T = opaque
 ```
 
-`coro { block }` constructs a `Coroutine{E} T`. The braces delimit a block whose
-tail expression is the coroutine's result `T`; the body does not run when the
-coroutine value is constructed. `await expression` suspends the current
-coroutine until `expression` completes. `await` binds a call or postfix
-expression — `await run ()` is `await (run ())` — and a larger operand must be
-parenthesized, as in `await (a + b)`. Both `coro` and `await` are contextual
-keywords: an identifier named `coro` or `await` is still valid everywhere the
-keyword form does not apply.
+### Building and awaiting coroutines
 
-### Deferred effects
+`coro { block }` builds a `Coroutine{E} T`. The braces delimit a block whose
+tail expression is the coroutine's result `T`, and `E` records the effects the
+body will perform (see [Deferred effects](#deferred-effects)). Building a
+coroutine **does not run it**: a coroutine value is a description of work, much
+like a function that has not been called yet.
 
-`coro { … }` is a pure construction expression. Its body's effects are
-*deferred* and recorded on the coroutine's effect row `E` rather than
-contributed to the enclosing function:
+`await expression` runs a coroutine as part of the current one, pausing the
+current coroutine wherever the awaited one pauses, and yields its result.
+Coroutines therefore compose the way functions do:
 
 ```staple
+use std.coroutine.(Coroutine, block_on)
 use std.io.(IO, println)
 
-// Building the coroutine is pure; the `IO` effect rides on the type.
-def build = () => Coroutine{IO} () :: coro { println "hi" }
+def greet = name: String => Coroutine{IO} () :: coro {
+    println "hello, ${name}"
+}
+
+def add_later = (a: I32, b: I32) => Coroutine I32 :: coro { a + b }
+
+def main_flow = () => Coroutine{IO} I32 :: coro {
+    await (greet "Ada")
+    let x = await (add_later (1, 2))
+    let y = await (add_later (x, 10))
+    y
+}
+
+let job = main_flow ()
+println "built, nothing printed yet"
+let total = block_on job          // prints "hello, Ada"
+println "total = ${total:?}"      // total = 13
 ```
 
-Omitting the row is the empty set, exactly as for an effect-parameterized type
-declaration: `Coroutine T` is `Coroutine{} T`.
+`std.coroutine.block_on` is the simplest way to run a coroutine: it runs it to
+completion on the current thread and yields its result. It is only for
+coroutines that never park themselves on a scheduler — `yield_now`, `until`,
+awaiting a `Task`, or awaiting a `Wait` all need a [scheduler](#schedulers-and-pumping).
 
-When a `coro` is checked against an expected `Coroutine{E} T`, such as a declared
-result type, `E` is an upper bound on the body's effects, exactly as a function
-declaration's effect row bounds its body. The coroutine takes the declared row,
-so starting or awaiting it supplies every effect in `E` even if the body uses
-fewer. A body that needs an effect outside `E` is an error:
+`await` binds a call or postfix expression — `await run ()` is
+`await (run ())` — and a larger operand must be parenthesized, as in
+`await (a + b)`. Both `coro` and `await` are contextual keywords: an
+identifier named `coro` or `await` is still valid everywhere the keyword form
+does not apply.
+
+### Coroutines and tasks
+
+`Coroutine` and `Task` are the two halves of running concurrent work:
+
+| | `Coroutine{E} T` | `Task T` |
+| --- | --- | --- |
+| What it is | A description of work that has not started | A handle to work that is already scheduled |
+| Created by | `coro { … }` (or a function returning one) | `spawn coroutine` |
+| Runs | Only when something `await`s or `spawn`s it | Independently, whenever its scheduler is pumped |
+| `await` it | Runs it *inline*: the awaiter continues only once it finishes | Waits for the already-running task to finish |
+| `await` yields | `T` | `Completed T \| Cancelled` |
+| Can be cancelled | No — drop it instead and it never runs | Yes, with `Task.cancel` |
+
+The difference shows up as soon as two pieces of work pause. Here `count`
+prints a line, then gives other tasks a turn with `yield_now`:
 
 ```staple
-// Accepted: the body is pure, but the declared row may be larger.
-def quiet = () => Coroutine{IO} I32 :: coro { 5 }
+use std.coroutine.*
+use std.io.(IO, println)
+
+def count = (name: String, n: I32) => Coroutine{Tasks, IO} () :: coro {
+    for i in (1 ..= n) {
+        println "${name} ${i:?}"
+        await (yield_now ())
+    }
+}
+
+// Awaiting coroutines runs them one after another, inside one task.
+def one_after_another = () => Coroutine{Tasks, IO} () :: coro {
+    await (count ("a", 2))
+    await (count ("b", 2))
+}
+
+def run_all = sched: Scheduler => {
+    while ((pump (sched, 64)).ready > 0) {}
+}
+
+let sched = scheduler ()
+with Tasks = task_scope (sched) {
+    let _ = spawn (one_after_another ())
+    run_all sched                     // a 1, a 2, b 1, b 2
+
+    let _ = spawn (count ("a", 2))    // two separate tasks...
+    let _ = spawn (count ("b", 2))
+    run_all sched                     // ...interleave: a 1, b 1, a 2, b 2
+}
 ```
 
-Without an expected type, or when the expected row is still an effect variable to
-infer (as for a generic parameter such as `block_on`'s), the row is exactly the
-body's inferred effects.
+Awaiting a coroutine is like calling a function: the caller waits for the
+callee. Spawning is like starting a thread: the spawner gets a handle back
+immediately and both make progress. Reach for `await (some_coroutine ())` to
+split a behaviour into helpers, and for `spawn` when work should proceed on its
+own, be observed, or be cancelled.
 
-`await` on a `Coroutine{E} T` runs it as a child continuation of the current
-coroutine, yields `T`, and folds `E` into the awaiting body's effect row:
+Because a task can be cancelled before it produces a value, awaiting a `Task T`
+yields `Completed T | Cancelled` rather than a bare `T`. Awaiting a
+`Coroutine` cannot be interrupted that way, so it yields `T` directly.
 
-```staple
-def run = () => Coroutine{IO} () :: coro { await (build ()) }
-```
+### Schedulers and pumping
 
-`await` on a `Task T` yields `Completed T | Cancelled`.
-
-### Suspension and captures
-
-`await` is allowed only directly inside a `coro` body. An ordinary nested
-function does not inherit that permission, and `await` is rejected inside
-reactions, derived bindings, batching callbacks, and compile-time evaluation.
-
-`Coroutine` and `Task` values are affine. Constructing a coroutine copies its
-`Copy` captures and moves its owned non-`Copy` captures; a captured borrowed
-view is rejected. `await` consumes its operand, so awaiting the same handle
-twice is a use-after-move. Dropping a coroutine that was never awaited destroys
-its captures without running the body.
-
-### Running a coroutine
-
-`std.coroutine.block_on` runs a coroutine to completion on the current thread
-and yields its result:
-
-```staple
-use std.coroutine.(block_on)
-
-let value = block_on (driver ())
-```
-
-Each coroutine `resume` is a state machine: it `switch`es on the frame's resume
-state to the point after its last `await`. A coroutine's body-local `let`
-bindings live in its GC-rooted frame so they survive a suspension; `await`
-records the point, hands the awaited child to the driver, and returns. The
-driver trampolines the parent chain, so an arbitrarily deep nest of `await`s
-costs no native stack. Deferred effects are discharged against the driving
-caller's resources; the frame holds the coroutine's moved captures until it
-completes or is dropped, and completion and drop each run a deterministic
-cleanup exactly once.
-
-`await` must be a **statement** in the coroutine body — `let x = await e` or a
-bare `await e` — including inside `match` arms and `loop` bodies, but not as a
-sub-expression (`f (await a)`, `await a + await b`). Bind each `await` to a
-`let` and combine the results afterwards.
-
-`block_on` runs a single coroutine on the current thread; it requires that
-coroutine to finish without parking itself on a scheduler.
-
-### Schedulers and tasks
-
-`std.coroutine` exposes an explicitly driven scheduler. Nothing runs
-automatically.
+A **scheduler** owns a queue of ready tasks, and nothing runs until the
+program **pumps** it. This puts the host — typically a game or UI loop — in
+charge of when coroutine code executes.
 
 ```staple
 use std.coroutine.*
@@ -3137,133 +3194,201 @@ with Tasks = task_scope (sched) {
 }
 ```
 
-- `scheduler ()` creates a scheduler; destroying it closes its scopes and
-  cancels their tasks.
-- `with Tasks = task_scope (sched) { ... }` opens an affine task scope that
-  provides the implicit `Tasks` capability, exactly as `with Reactive = ...`
-  provides `Reactive`. `spawn` requires it.
-  Normal exit closes the task scope. `return`, `break`, and `continue` close
-  every task scope opened since their target, in reverse order, just as they
-  dispose reactive scopes. A `return` targets the function exit; `break` and
-  `continue` target their loop. Closing a scope cancels its unfinished tasks.
-- `spawn coroutine` consumes the coroutine, schedules it, and returns a
-  `Task T` handle. It also requires the coroutine's own effects `E` at the
-  spawn site so its resources are captured then.
-- `pump (sched, limit)` runs a bounded snapshot of the ready coroutines and
-  returns `(executed, ready)`. Tasks that suspend, and tasks spawned during the
-  pump, become eligible only for a **later** pump; carried-over work is pumped
-  ahead of newly spawned work. A `pump` while another `pump` is running, while a
-  reaction is executing, or inside an open `batch` traps — a reaction must never
-  drive coroutines, and a batch means to defer effects a pump would run. The
-  `limit` bounds *resumes*, not instructions — a coroutine that loops forever
-  without an `await` still hangs the pump.
-- Dependency tracking is detached around every coroutine `resume`: a signal read
+- `scheduler ()` creates a scheduler. Several schedulers can coexist — for
+  example one for per-frame updates and one for fixed-rate physics ticks.
+  Destroying a scheduler closes its scopes and cancels their tasks.
+- `with Tasks = task_scope (sched) { ... }` opens an affine task scope bound to
+  `sched` that provides the implicit `Tasks` capability, exactly as
+  `with Reactive = ...` provides `Reactive`. `spawn` requires it, so a function
+  or coroutine that spawns lists `Tasks` in its effects. Normal exit closes the
+  task scope. `return`, `break`, and `continue` close every task scope opened
+  since their target, in reverse order, just as they dispose reactive scopes. A
+  `return` targets the function exit; `break` and `continue` target their loop.
+  Closing a scope cancels its unfinished tasks (see
+  [Cancellation](#cancellation)).
+- `spawn coroutine` consumes the coroutine, schedules it on the current scope's
+  scheduler, and returns a `Task T` handle. It also requires the coroutine's own
+  effects `E` at the spawn site, so its resources are captured then. Dropping
+  the handle does not cancel the task.
+- `pump (sched, limit)` runs a bounded snapshot of the ready tasks and returns
+  `(executed, ready)`: how many resumes it performed and how many tasks are
+  still ready. Tasks that suspend, and tasks spawned during the pump, become
+  eligible only for a **later** pump; carried-over work is pumped ahead of newly
+  spawned work. A host usually pumps once per frame or tick, or loops until
+  `ready` is zero, as `run_all` does above.
+  The `limit` bounds *resumes*, not instructions — a coroutine that loops
+  forever without an `await` still hangs the pump. A `pump` while another
+  `pump` is running, while a reaction is executing, or inside an open `batch`
+  traps: a reaction must never drive coroutines, and a batch means to defer
+  effects a pump would run.
+- `await (yield_now ())` suspends the current task until a later pump. Use it
+  to spread long work across frames or to let other tasks take a turn.
+- `Task.is_finished handle` reports whether the task has finished (completed or
+  cancelled) without consuming the handle.
+- Dependency tracking is detached around every coroutine resume: a signal read
   inside a coroutine body never subscribes an enclosing reaction, so driving a
   coroutine from a `derived` or reaction computation does not entangle the two.
-- `await (yield_now ())` inside a coroutine body suspends the task until a
-  later pump.
-- `Task.is_finished handle` reports whether the task has finished (completed or
-  cancelled) without consuming the result.
-- `await handle` inside a coroutine body suspends the current task until
-  `handle`'s task finishes, then yields `Completed value | Cancelled`. The
-  awaiting task registers itself as the target's sole waiter and is re-queued on
-  the target's own scheduler when it completes — so a pump loop makes progress
-  even across an `await` on another task. `await` consumes the handle; awaiting
-  the same handle twice is a use-after-move. Driving such a coroutine with
-  `block_on` traps: a task-awaiting coroutine needs a real pump loop.
+
+### Waiting for a task
+
+`await handle` inside a coroutine suspends the current task until the task
+behind `handle` finishes, then yields `Completed value` or `Cancelled`. A
+coroutine can start several tasks, carry on with its own work, and collect the
+results later:
 
 ```staple
-def consumer = () => Coroutine{Tasks, IO} () :: coro {
-    let work = spawn (worker ())
-    match await work {
-        Completed value => println "worker produced ${value:?}",
-        Cancelled() => println "worker was cancelled",
+use std.coroutine.*
+use std.io.(IO, println)
+
+def slow_square = n: I32 => Coroutine{Tasks, IO} I32 :: coro {
+    for _ in (0 .. 3) {
+        await (yield_now ())
+    }
+    n * n
+}
+
+def supervisor = () => Coroutine{Tasks, IO} () :: coro {
+    let kept = spawn (slow_square 3)
+    let dropped = spawn (slow_square 4)
+    println "both spawned; supervisor keeps going"
+    await (yield_now ())
+    Task.cancel dropped               // no longer needed
+
+    let a = await kept
+    match a {
+        Completed value => println "kept: ${value:?}",       // kept: 9
+        Cancelled() => println "kept: cancelled",
+    }
+    let b = await dropped
+    match b {
+        Completed value => println "dropped: ${value:?}",
+        Cancelled() => println "dropped: cancelled",         // this one
     }
 }
 ```
 
-- `Task.cancel handle` requests cancellation. It is idempotent and a no-op once
-  the task has finished. A not-yet-started task never runs its body; a running
-  task unwinds at its **next** `await` / `yield_now` / return boundary — dropping
-  the frame locals it has initialised — rather than delivering a value to its
-  body. `is_finished` turns true only once the task has actually been driven
-  through that unwind (a plain `cancel` re-queues it; a `pump` completes it).
+The awaiting task registers itself as the target's sole waiter and is
+re-queued on the target's own scheduler when it finishes, so a pump loop makes
+progress even across an `await` on another task. `await` consumes the handle:
+awaiting the same handle twice is a use-after-move. Driving a task-awaiting
+coroutine with `block_on` traps; it needs a real pump loop.
+
+### Cancellation
+
+`Task.cancel handle` requests that a task stop. It borrows the handle, so the
+task can still be awaited afterwards to observe `Cancelled`, as `supervisor`
+does above.
+
+- Cancellation is idempotent, and a no-op once the task has finished.
+- A task that has not started yet never runs its body.
+- A running task is not interrupted mid-step. It unwinds at its **next**
+  `await` / `yield_now` / return boundary — dropping the frame locals it has
+  initialised — rather than delivering a value. `is_finished` turns true only
+  once the task has actually been driven through that unwind: `cancel`
+  re-queues the task, and a `pump` completes it.
 - Closing a `with Tasks` scope cancels every task still running under it,
-  youngest first, and drives each through its unwind before the block exits, so
-  teardown is deterministic. Destroying the scheduler is not required for this.
-- Partly handled: a task cancelled while it is `await`-ing a plain **child
-  coroutine** (`yield_now`, an ordinary `coro`) lets that child run to
-  completion before the parent unwinds — the exception is `until`, whose
-  subscription *is* torn down at the cancellation boundary. A parent task that
-  finishes while it still has un-finished child *tasks* leaves them for the
-  scope to clean up rather than cancelling them eagerly, and drop-needing
-  captures of a coroutine cancelled *after* it started running are reclaimed by
-  the collector rather than dropped at the unwind.
+  youngest first, and drives each through its unwind before the block exits,
+  so teardown is deterministic. Destroying the scheduler is not required for
+  this. Giving an object its own task scope, or keeping its task handles and
+  cancelling them when it is destroyed, makes all of its behaviours stop with
+  it.
+
+Some cases are only partly handled today:
+
+- A task cancelled while it is awaiting a plain **child coroutine**
+  (`yield_now`, an ordinary `coro`) lets that child run to completion before
+  the parent unwinds. The exception is `until`, whose subscription *is* torn
+  down at the cancellation boundary.
+- A parent task that finishes while it still has unfinished child *tasks*
+  leaves them for the scope to clean up rather than cancelling them eagerly.
+- Drop-needing captures of a coroutine cancelled *after* it started running are
+  reclaimed by the collector rather than dropped at the unwind.
 
 ### Completions
 
-A `completion` is a one-shot wait a task can `await` and anything can resolve —
-a host tick, a timer, an event.
+A `completion` connects a task to something outside the scheduler. It is a
+one-shot pair: a `Wait T` that a task awaits, and a `Resolver T` that anyone —
+the host, a timer, an event handler — uses to deliver the value later.
 
 ```staple
 use std.coroutine.*
+use std.io.(IO, println)
 
-// `completion`'s `T` is not inferred from `sched` alone; give it a typed home.
-def signal_completion = s: Scheduler =>
-    (wait: Wait I32, resolver: Resolver I32) :: completion s
+// `completion`'s `T` is not inferred from the scheduler alone; give it a typed home.
+def name_request: Scheduler -> (wait: Wait String, resolver: Resolver String) =
+    s => completion s
 
-let (wait, resolver) = signal_completion (sched)
-
-// in a task:
-match await wait {
-    Completed value => use value,
-    Cancelled() => (),
+def greet_user = move wait: Wait String => Coroutine{IO} () :: coro {
+    println "waiting for the name..."
+    let outcome = await wait
+    match outcome {
+        Completed name => println "hello, ${name}",
+        Cancelled() => println "request failed",
+    }
 }
 
-// elsewhere, when the result is ready:
-Resolver.complete resolver value
+let sched = scheduler ()
+with Tasks = task_scope (sched) {
+    let (wait, resolver) = name_request sched
+    let _ = spawn (greet_user wait)
+
+    let _ = pump (sched, 64)          // waiting for the name...
+    Resolver.complete resolver "Ada"  // the reply arrives
+    let _ = pump (sched, 64)          // hello, Ada
+}
 ```
 
 - `completion sched` returns an affine `Wait T` and `Resolver T`, both bound to
-  `sched`. Inference needs `T` from context (annotate the binding or wrap the
-  call in a typed helper).
-- `await wait` consumes the `Wait` and yields `Completed T | Cancelled`, exactly
-  like `await` on a `Task`. It may only be `await`ed from a task **on the same
-  scheduler** — doing otherwise traps.
+  `sched`. Inference needs `T` from context: annotate the binding or wrap the
+  call in a typed helper, as `name_request` does.
+- `await wait` consumes the `Wait` and yields `Completed T | Cancelled`,
+  exactly like `await` on a `Task`. It may only be awaited from a task **on the
+  same scheduler**; doing otherwise traps.
 - `Resolver.complete resolver value` consumes the resolver, stores the value,
   and wakes a registered waiter on the next pump. Completing *before* the
   `await` registers is fine: the value is stored, and the `await` returns it in
   the same resume without suspending.
 - `Resolver.cancel resolver`, and dropping an unresolved resolver, wake the
-  waiter with `Cancelled`. Dropping an unconsumed `Wait` abandons the operation;
-  a later `complete` then reports the consumer is gone and drops the value.
-- Cancelling a task that is parked on a `Wait` unwinds it at that boundary (like
-  any await); a subsequent `complete` on that completion is a no-op.
+  waiter with `Cancelled`. Dropping an unconsumed `Wait` abandons the
+  operation; a later `complete` then finds the consumer gone and drops the
+  value.
+- Cancelling a task that is parked on a `Wait` unwinds it at that boundary
+  (like any await); a subsequent `complete` on that completion is a no-op.
 - `completion_with_cancel (sched, on_cancel)` attaches an owned `() -> ()`
-  callback (it may not suspend). It runs **exactly once** if the consumer
+  callback, which may not suspend. It runs **exactly once** if the consumer
   abandons the wait before it resolves — the `Wait` is dropped unconsumed, or a
-  task parked on it is cancelled. A successful `complete` / `cancel` releases the
-  callback without running it. Libraries use it to unregister a timer or an
-  external subscription.
+  task parked on it is cancelled. A successful `complete` / `cancel` releases
+  the callback without running it. Libraries use it to unregister a timer or
+  an external subscription when nobody is waiting any more.
 - `completion_token sched` returns `(Wait (), CompletionToken)` for host
-  integration: the `CompletionToken` is an opaque, C-compatible handle a host
+  integration. The `CompletionToken` is an opaque, C-compatible handle a host
   holds across the FFI boundary and wakes with the C entry points
   `__staple_completion_token_resolve` / `_cancel` / `_release` (unit-valued;
   called on the runtime thread — the host marshals worker-thread notifications
-  first). From Staple, `CompletionToken.resolve` / `.cancel` drive it and
-  dropping it releases it (which cancels an unresolved completion).
+  first). From Staple, `CompletionToken.resolve` / `.cancel` drive it, and
+  dropping it releases it, which cancels an unresolved completion.
 
 ### `until`
 
 `until { predicate }` returns a `Coroutine{Reactive} ()` that suspends the
-current task until `predicate` first observes `True`.
+current task until `predicate` first observes `True`. It turns any condition
+over [signals](#signals-and-reactions) into something a task can wait for — the `tutorial`
+example at the top of this section is built from it:
 
 ```staple
-let _ = await (until { health <= 0 })
+let signal health = 3
+
+def death_watch = () => Coroutine{Reactive, IO} () :: coro {
+    await (until { health <= 0 })
+    println "game over"
+}
 ```
 
+Spawned under a `with Reactive` scope, `death_watch` stays parked while the
+program lowers `health`, and prints once it reaches zero.
+
 - The predicate may only **read signals** — no writes, other effects, or
-  suspension (enforced by its `() ->{state.read} Bool` type).
+  suspension, as enforced by its `() ->{state.read} Bool` type.
 - It is evaluated synchronously once when the coroutine runs (an
   already-`True` predicate proceeds without suspending), then again on each
   change to a signal it read, refreshing its dependencies each time. Only
@@ -3271,11 +3396,97 @@ let _ = await (until { health <= 0 })
   an event.
 - The first `True` latches, unsubscribes, and resumes the task. Cancelling the
   task while it is parked in `until` tears the subscription down at that
-  boundary. `until` may be `await`ed through intervening helper coroutines — it
+  boundary. `until` may be awaited through intervening helper coroutines — it
   finds its scheduler by walking the parent chain to the spawned task.
 - Implementation caveat: each `until` leaks a small reaction record (the
   subscription is cleared but the struct is not freed); a proper
   executor-cooperative detach is a follow-on.
+
+### Deferred effects
+
+`coro { … }` is a pure construction expression. Its body's effects are
+*deferred*: they are recorded on the coroutine's effect row `E` instead of
+being contributed to the enclosing function, and they happen only when the
+coroutine runs:
+
+```staple
+use std.io.(IO, println)
+
+// Building the coroutine is pure; the `IO` effect rides on the type.
+def build = () => Coroutine{IO} () :: coro { println "hi" }
+```
+
+Omitting the row is the empty set, exactly as for an effect-parameterized type
+declaration: `Coroutine T` is `Coroutine{} T`.
+
+When a `coro` is checked against an expected `Coroutine{E} T`, such as a
+declared result type, `E` is an upper bound on the body's effects, exactly as a
+function declaration's effect row bounds its body. The coroutine takes the
+declared row, so starting or awaiting it supplies every effect in `E` even if
+the body uses fewer. A body that needs an effect outside `E` is an error:
+
+```staple
+// Accepted: the body is pure, but the declared row may be larger.
+def quiet = () => Coroutine{IO} I32 :: coro { 5 }
+
+// Rejected: the body prints, but the declared row is empty.
+def loud = () => Coroutine I32 :: coro {
+    println "x"
+    5
+}
+```
+
+Without an expected type, or when the expected row is still an effect variable
+to infer (as for a generic parameter such as `block_on`'s), the row is exactly
+the body's inferred effects.
+
+The row comes due wherever the coroutine is started:
+
+- `await` on a `Coroutine{E} T` folds `E` into the awaiting body's own row, so
+  `def run = () => Coroutine{IO} () :: coro { await (build ()) }` needs `IO`.
+- `spawn` requires `E` at the spawn site, alongside `Tasks`.
+- `block_on` requires `E` from its caller.
+
+Deferred effects are discharged against the resources of whoever drives the
+coroutine.
+
+### Rules for `await` and ownership
+
+**Where `await` may appear.** `await` is allowed only directly inside a `coro`
+body. An ordinary nested function does not inherit that permission, and `await`
+is rejected inside reactions, derived bindings, batching callbacks, and
+compile-time evaluation.
+
+Within the body, `await` must be a **statement** — `let x = await e` or a bare
+`await e` — including inside `match` arms and `loop` bodies, but not as a
+sub-expression (`f (await a)`, `await a + await b`, `match await t { … }`).
+Bind each `await` to a `let` and combine the results afterwards:
+
+```staple
+// Rejected: `let total = await a + await b`
+let x = await a
+let y = await b
+let total = x + y
+```
+
+**Ownership.** `Coroutine`, `Task`, `Wait`, and `Resolver` values are affine.
+Building a coroutine copies its `Copy` captures and moves its owned non-`Copy`
+captures; a captured borrowed view is rejected, so a function that builds a
+coroutine around a non-`Copy` parameter takes it with `move`, as `greet_user`
+does above. `await` consumes its operand, so awaiting the same value twice is
+a use-after-move. Dropping a coroutine that was never awaited or spawned
+destroys its captures without running the body.
+
+### How coroutines execute
+
+Each coroutine `resume` is a state machine: it `switch`es on the frame's resume
+state to the point after its last `await`. A coroutine's body-local `let`
+bindings live in its GC-rooted frame so they survive a suspension; `await`
+records the point, hands the awaited child to the driver, and returns. The
+driver trampolines the parent chain, so an arbitrarily deep nest of `await`s
+costs no native stack. The frame holds the coroutine's moved captures until it
+completes or is dropped, and completion and drop each run a deterministic
+cleanup exactly once.
 
 ### Worked examples
 
@@ -3284,11 +3495,11 @@ manual scheduler surface — a `scheduler`, a `with Tasks` scope, a
 producer/consumer pair joined by `await`, a `completion` resolved from outside
 the scheduler, `Task.cancel`, and scope teardown.
 
-`staple-compiler/examples/game_loop/` builds a small host adapter — `next_frame`
-/ `next_fixed_tick`, scaled and unscaled clocks with `sleep`, timer
-cancellation, and entity-owned behaviour scopes — entirely on the primitives
-above, with no game concept in the compiler or the executor. It is the
-reference for wiring a real update loop to Staple coroutines.
+`staple-compiler/examples/game_loop/` builds a small host adapter — per-frame
+and fixed-tick waits, scaled and unscaled clocks with deadline sleeps, separate
+schedulers for update and fixed update, and entity-owned behaviours cancelled
+on destruction — entirely on `until` and the other primitives above, with no game concept in the compiler or the executor. It is
+the reference for wiring a real update loop to Staple coroutines.
 
 ## Iteration and ranges
 
