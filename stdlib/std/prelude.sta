@@ -1,13 +1,13 @@
 pub mod
 
-pub use std.clone.*
-pub use std.convert.*
-pub use std.default.*
-pub use std.flow.*
-pub use std.iterator.*
-pub use std.list.(List, ListIter)
-pub use std.process.(panic)
-pub use std.result.*
-pub use std.string.*
-pub use std.fmt.(Display, Debug)
-pub use std.typegroup.*
+pub use package.clone.*
+pub use package.convert.*
+pub use package.default.*
+pub use package.flow.*
+pub use package.iterator.*
+pub use package.list.(List, ListIter)
+pub use package.process.(panic)
+pub use package.result.*
+pub use package.string.*
+pub use package.fmt.(Display, Debug)
+pub use package.typegroup.*

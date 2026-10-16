@@ -1,9 +1,9 @@
 pub mod
 
-use std.list.List
-use std.string.(String, ToString)
-use std.flow.for
-use std.syntax.*
+use package.list.List
+use package.string.(String, ToString)
+use package.flow.for
+use package.syntax.*
 
 /// A growable UTF-8 output buffer used by formatting traits.
 pub type Formatter = wrap List U8

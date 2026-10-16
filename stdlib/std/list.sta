@@ -1,11 +1,11 @@
 pub mod
 
-use std.iterator.(Iterator, IntoIterator)
-use std.iterator.IterStep.(Done, Yield)
-use std.buffer.(Buffer)
-use std.clone.Clone
-use std.core.index.(Index, MutateIndex)
-use std.syntax.*
+use package.iterator.(Iterator, IntoIterator)
+use package.iterator.IterStep.(Done, Yield)
+use package.buffer.(Buffer)
+use package.clone.Clone
+use package.core.index.(Index, MutateIndex)
+use package.syntax.*
 
 /// A growable sequence backed by a mutable buffer.
 pub type List T = wrap Buffer T
@@ -25,7 +25,7 @@ def grow = <T> mut list: List T => () :: {
 }
 
 companion<T> List T {
-    use std.buffer.(Buffer)
+    use package.buffer.(Buffer)
     /// Returns the number of elements in the list.
     pub def length = list: List T => USize :: list.* |> length
 
@@ -55,7 +55,7 @@ companion<T> List T {
 }
 
 companion<T> List T {
-    use std.shared_buffer.SharedBuffer
+    use package.shared_buffer.SharedBuffer
     /// Consumes the list and returns its elements as a `SharedBuffer`.
     pub def into_shared = move list: List T => SharedBuffer T :: {
         let List buffer = list

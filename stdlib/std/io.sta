@@ -1,9 +1,9 @@
 pub mod
 
-use std.core.sized.sized_opaque
+use package.core.sized.sized_opaque
 
-use std.cinterop.*
-use std.ptr.*
+use package.cinterop.*
+use package.ptr.*
 
 /// The capability required for standard output operations.
 @sized_opaque

@@ -1,10 +1,10 @@
 pub mod
 
-use std.core.sized.sized_opaque
-use std.core.recursive_constructor.recursive_constructor
+use package.core.sized.sized_opaque
+use package.core.recursive_constructor.recursive_constructor
 
-use std.shared_buffer.SharedBuffer
-use std.clone.Clone
+use package.shared_buffer.SharedBuffer
+use package.clone.Clone
 
 /// A mutable, fixed-capacity buffer of values.
 @sized_opaque
@@ -26,7 +26,7 @@ extern "staple-intrinsic" {
 }
 
 companion<T> Buffer T {
-    use std.shared_buffer.SharedBuffer
+    use package.shared_buffer.SharedBuffer
     /// Allocates storage for exactly capacity elements without initialising values.
     pub def with_capacity = capacity: USize => Buffer T :: __buffer_with_capacity capacity
 

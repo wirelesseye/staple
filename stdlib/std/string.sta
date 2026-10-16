@@ -1,16 +1,16 @@
 pub mod
 
-use std.ops.(Add)
+use package.ops.(Add)
 
 /// The bytes are not valid UTF-8.
 pub type InvalidUtf8
 
-use std.convert.checked_conversion
+use package.convert.checked_conversion
 
-use std.shared_buffer.(SharedBuffer)
-use std.list.List
-use std.iterator.(Iterator, IntoIterator)
-use std.iterator.IterStep.(Done, Yield)
+use package.shared_buffer.(SharedBuffer)
+use package.list.List
+use package.iterator.(Iterator, IntoIterator)
+use package.iterator.IterStep.(Done, Yield)
 
 /// A UTF-8 byte sequence used as Staple's string type.
 pub type String = wrap SharedBuffer U8

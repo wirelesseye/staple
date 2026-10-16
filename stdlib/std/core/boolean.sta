@@ -1,11 +1,11 @@
 pub mod
 
-use std.ops.(Not)
+use package.ops.(Not)
 
 /// The input is not a supported boolean representation.
 pub type InvalidBool
 
-use std.fmt.(Display, Debug, Formatter)
+use package.fmt.(Display, Debug, Formatter)
 
 /// A logical value that is either true or false.
 pub typegroup Bool {

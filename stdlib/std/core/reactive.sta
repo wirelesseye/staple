@@ -1,6 +1,6 @@
 pub mod
 
-use std.core.sized.sized_opaque
+use package.core.sized.sized_opaque
 
 /// The lexical owner of reactions created within a reactive scope.
 @sized_opaque

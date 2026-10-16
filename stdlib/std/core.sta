@@ -1,17 +1,17 @@
 pub mod
 
-pub use std.core.boolean.*
-pub use std.core.copy.*
-pub use std.core.drop.*
-pub use std.core.doc.*
-pub use std.core.cmp.*
-pub use std.core.feature.*
-pub use std.core.index.*
-pub use std.core.number.*
-pub use std.core.range.*
-pub use std.core.reactive.*
-pub use std.core.reference.(Ref)
-pub use std.core.sized.*
-pub use std.core.no_prelude.*
-pub use std.core.never.*
-pub use std.core.unique.(Unique)
+pub use package.core.boolean.*
+pub use package.core.copy.*
+pub use package.core.drop.*
+pub use package.core.doc.*
+pub use package.core.cmp.*
+pub use package.core.feature.*
+pub use package.core.index.*
+pub use package.core.number.*
+pub use package.core.range.*
+pub use package.core.reactive.*
+pub use package.core.reference.(Ref)
+pub use package.core.sized.*
+pub use package.core.no_prelude.*
+pub use package.core.never.*
+pub use package.core.unique.(Unique)

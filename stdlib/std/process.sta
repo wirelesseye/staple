@@ -1,7 +1,7 @@
 pub mod
 
-use std.io.printf
-use std.cinterop.(c_string, CString, InteriorNul)
+use package.io.printf
+use package.cinterop.(c_string, CString, InteriorNul)
 
 // Nested so the raw C `exit` symbol (extern bindings are always named
 // exactly after their C symbol) doesn't collide with the `exit` wrapper

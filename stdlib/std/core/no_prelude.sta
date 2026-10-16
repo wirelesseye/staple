@@ -1,6 +1,6 @@
 pub mod
 
-use std.syntax.Item
+use package.syntax.Item
 
 /// Disables the implicit standard prelude for the current module.
 ///

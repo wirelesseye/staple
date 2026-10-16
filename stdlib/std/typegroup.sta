@@ -1,6 +1,6 @@
 pub mod
 
-use std.syntax.*
+use package.syntax.*
 
 def typegroup_apply_modifiers = (
     modifiers: Sequence Modifier,

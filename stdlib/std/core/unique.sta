@@ -1,7 +1,7 @@
 pub mod
 
-use std.core.recursive_constructor.recursive_constructor
-use std.ptr.(RawMutPtr)
+use package.core.recursive_constructor.recursive_constructor
+use package.ptr.(RawMutPtr)
 
 /// A unique, affine heap owner. Dropping it cleans up its payload and frees
 /// its allocation immediately. The allocation lives on the managed heap and is
@@ -18,7 +18,7 @@ extern "staple-intrinsic" {
 }
 
 companion<T where ?Sized T> Unique T {
-    use std.ptr.(RawMutPtr)
+    use package.ptr.(RawMutPtr)
     /// Transfers ownership to the caller without cleanup or deallocation.
     /// While raw, the allocation and its payload stay alive as collector roots.
     /// The caller must eventually reconstruct the owner or clean up and free

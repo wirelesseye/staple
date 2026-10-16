@@ -1,6 +1,6 @@
 pub mod
 
-use std.syntax.(Expr, Item, Parenthesized)
+use package.syntax.(Expr, Item, Parenthesized)
 
 /// Attaches documentation text to an item.
 ///

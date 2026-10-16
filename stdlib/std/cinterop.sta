@@ -3,11 +3,11 @@ pub mod
 /// A C string cannot contain an embedded NUL byte.
 pub type InteriorNul
 
-use std.string.InvalidUtf8
+use package.string.InvalidUtf8
 
-use std.core.sized.sized_opaque
+use package.core.sized.sized_opaque
 
-use std.syntax.(Expr)
+use package.syntax.(Expr)
 
 /// A C-compatible character.
 @sized_opaque

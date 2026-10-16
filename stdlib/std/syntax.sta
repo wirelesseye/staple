@@ -1,8 +1,8 @@
 pub mod
 
-use std.core.recursive_constructor.recursive_constructor
+use package.core.recursive_constructor.recursive_constructor
 
-use std.core.sized.sized_opaque
+use package.core.sized.sized_opaque
 
 /// Compiler-owned, compile-time-only syntax values. Identifiers and calls expose
 /// their data in the first structured-syntax slice; remaining expressions round-trip

@@ -1,13 +1,13 @@
 pub mod
 
-use std.ops.*
+use package.ops.*
 
-use std.convert.checked_conversion
+use package.convert.checked_conversion
 
-use std.string.String
-use std.fmt.(Display, Debug, Formatter)
+use package.string.String
+use package.fmt.(Display, Debug, Formatter)
 
-pub use std.core.number.types.*
+pub use package.core.number.types.*
 
 extern "staple-intrinsic" {
     __i8_to_string: I8 -> String
