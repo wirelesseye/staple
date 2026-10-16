@@ -11997,6 +11997,32 @@ fn accepts_types_that_recurse_through_shared_buffer_or_buffer() {
 }
 
 #[test]
+fn accepts_types_that_recurse_through_wrappers_storing_their_parameter_indirectly() {
+    type_check(concat!(
+        "use std.buffer.Buffer\n",
+        "use std.list.List\n",
+        "type Stack T = wrap Buffer T\n",
+        "type ListTree = wrap (value: I32, children: List ListTree)\n",
+        "impl !Copy ListTree {}\n",
+        "type StackTree = wrap (value: I32, children: Stack StackTree)\n",
+        "impl !Copy StackTree {}\n",
+    ));
+}
+
+#[test]
+fn rejects_types_that_recurse_through_wrappers_storing_their_parameter_inline() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Pair T = wrap (first: T, second: I32)\n",
+            "type Loop = wrap (pair: Pair Loop)\n",
+        )))
+        .expect_err_diagnostics("`Pair` stores its parameter inline, so `Loop` contains itself");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("cyclic type definition")
+    }));
+}
+
+#[test]
 fn rejects_constructing_a_shared_buffer_from_one_value() {
     let diagnostics = resolve_result(concat!(
         "use std.shared_buffer.SharedBuffer\n",

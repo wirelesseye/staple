@@ -4154,9 +4154,12 @@ finite layout. A representation that would contain itself by value
 definition; routing the back-edge through `Ref`
 (`type Loop = wrap (head: I32, tail: Option (Ref Loop))`) or a buffer
 (`type Tree = wrap (value: I32, children: Buffer Tree)`) is well-founded and
-accepted. The indirection must be written directly: a back-edge through a
-nominal type built on one of these, such as `List Tree`, is still rejected
-as cyclic.
+accepted. A represented type whose parameters all occur in its
+representation only behind such an indirection guards a back-edge the same
+way, so `type Tree = wrap (value: I32, children: List Tree)` is accepted
+because `List T` wraps `Buffer T`. A type that stores a parameter inline,
+such as `type Pair T = wrap (first: T, second: I32)`, does not:
+`type Loop = wrap (pair: Pair Loop)` is rejected as cyclic.
 
 Product types and values may have a trailing comma.
 

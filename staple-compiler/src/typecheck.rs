@@ -2858,6 +2858,11 @@ pub struct TypeChecker {
     /// not need its argument's representation to be laid out, so it breaks an
     /// otherwise-cyclic type definition instead of being rejected.
     recursive_construction_depth: usize,
+    /// Memoized `type_parameters_are_indirect` answers: whether every type
+    /// parameter of a represented type occurs in its representation only
+    /// behind an out-of-line indirection, so an application of that type
+    /// guards a self-reference in its arguments like a recursive constructor.
+    indirect_parameter_types: HashMap<TypeId, bool>,
     /// Set while resolving a type synthesized from a pattern (e.g. the bare
     /// `Node` in the parameter pattern `Node value => ...`), where an
     /// under-applied constructor is expected and its arguments are recovered
@@ -15631,11 +15636,13 @@ impl TypeChecker {
 
             Type::Application(application) => {
                 let callee = self.resolve_type_application_callee(module, &application.callee);
-                let guarded = matches!(
-                    &callee,
-                    CheckedType::TypeConstructor { id, .. }
-                        if module.recursive_construction(*id).is_some()
-                );
+                let guarded = match &callee {
+                    CheckedType::TypeConstructor { id, .. } => {
+                        module.recursive_construction(*id).is_some()
+                            || self.type_parameters_are_indirect(module, *id)
+                    }
+                    _ => false,
+                };
                 if guarded {
                     self.recursive_construction_depth += 1;
                 }
@@ -16125,6 +16132,61 @@ impl TypeChecker {
             ),
         ));
         CheckedType::Error
+    }
+
+    /// Whether every type parameter of the represented type `id` occurs in its
+    /// representation only behind an out-of-line indirection, as `T` does in
+    /// `List T = wrap Buffer T`. An application of such a type then guards a
+    /// self-reference in its arguments exactly as a `@recursive_constructor`
+    /// does, so `type Tree = wrap (children: List Tree)` is well-founded.
+    /// Answers `false` for a type whose representation is still being
+    /// resolved, so mutually recursive wrappers stay conservative.
+    fn type_parameters_are_indirect(&mut self, module: &ResolvedModule, id: TypeId) -> bool {
+        if let Some(indirect) = self.indirect_parameter_types.get(&id) {
+            return *indirect;
+        }
+        let declaration = self.type_declarations[&id].clone();
+        if module.builtin_type(id).is_some()
+            || !declaration.kind().is_wrapper()
+            || declaration.type_parameters.is_empty()
+            || self.resolving_named_types.contains(&id)
+        {
+            return false;
+        }
+        // Resolve the generic representation once, discarding diagnostics:
+        // they are reported wherever the declaration itself is resolved.
+        let diagnostics = self.diagnostics.len();
+        let parameters = declaration
+            .type_parameters
+            .iter()
+            .map(|pattern| self.checked_type_parameter_pattern(module, pattern))
+            .collect::<Vec<_>>();
+        let mut declaration_bounds = Vec::new();
+        for bound in &declaration.trait_bounds {
+            if let Some(bound) = self.resolve_trait_bound(module, bound) {
+                declaration_bounds.push(bound);
+            }
+        }
+        let declaration_bounds = self.expand_trait_bounds(declaration_bounds);
+        self.active_function_bounds.push(declaration_bounds);
+        self.active_subtype_bounds.push(Vec::new());
+        let instantiated = self.instantiate_type_declaration(module, id, parameters.clone());
+        self.active_subtype_bounds.pop();
+        self.active_function_bounds.pop();
+        self.diagnostics.truncate(diagnostics);
+        let parameter_ids = parameters
+            .iter()
+            .flat_map(type_parameter_ids)
+            .collect::<HashSet<_>>();
+        let indirect = match instantiated {
+            CheckedType::Wrapper { representation, .. } => {
+                !parameter_ids.is_empty()
+                    && parameters_only_behind_indirection(&representation, &parameter_ids)
+            }
+            _ => false,
+        };
+        self.indirect_parameter_types.insert(id, indirect);
+        indirect
     }
 
     /// When a type declaration refers to itself while its own representation is
@@ -18265,6 +18327,49 @@ pub(crate) fn contains_inferred_type(value_type: &CheckedType) -> bool {
             ..
         } => arguments.iter().any(contains_inferred_type) || contains_inferred_type(representation),
         _ => false,
+    }
+}
+
+/// Whether every occurrence of `parameters` in a representation sits behind
+/// an out-of-line indirection (`Ref`, `Unique`, `SharedBuffer`, `Buffer`, or a
+/// function value), so the representation's layout does not depend on them.
+/// An opaque or unresolved application mentioning one is assumed to store it
+/// inline.
+fn parameters_only_behind_indirection(
+    value_type: &CheckedType,
+    parameters: &HashSet<TypeParameterId>,
+) -> bool {
+    match value_type {
+        CheckedType::Parameter { id, .. } => !parameters.contains(id),
+        CheckedType::Ref(_)
+        | CheckedType::Unique(_)
+        | CheckedType::SharedBuffer(_)
+        | CheckedType::Buffer(_)
+        | CheckedType::Function(_)
+        | CheckedType::Forall(_)
+        | CheckedType::RawPtr { .. }
+        | CheckedType::RawMutPtr { .. } => true,
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .all(|element| parameters_only_behind_indirection(&element.value_type, parameters)),
+        CheckedType::Sum(sum) => sum
+            .alternatives
+            .iter()
+            .all(|alternative| parameters_only_behind_indirection(alternative, parameters)),
+        CheckedType::Array { element, count } => {
+            parameters_only_behind_indirection(element, parameters)
+                && parameters_only_behind_indirection(count, parameters)
+        }
+        CheckedType::Wrapper { representation, .. } => {
+            parameters_only_behind_indirection(representation, parameters)
+        }
+        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
+            arguments
+                .iter()
+                .all(|argument| type_parameter_ids(argument).is_disjoint(parameters))
+        }
+        _ => true,
     }
 }
 

@@ -456,3 +456,43 @@ fn trees_recursing_through_buffers_drop_every_node_once() {
     assert_eq!(drops, ["1", "2", "3", "4", "5"], "{output}");
     assert!(output.contains("total 6\n"), "{output}");
 }
+
+#[cfg(unix)]
+#[test]
+fn trees_recursing_through_lists_drop_every_node_once() {
+    let source = concat!(
+        "use std.list.List\n",
+        "use std.cinterop.*\n",
+        "use std.ptr.*\n",
+        "extern \"c\" {\n",
+        "    printf: (RawPtr CChar, ...) -> I32\n",
+        "}\n",
+        "type Tag = wrap I32\n",
+        "impl Drop Tag {\n",
+        "    cleanup = Tag value => {\n",
+        "        printf (c_string \"drop %d\\n\", value)\n",
+        "        ()\n",
+        "    }\n",
+        "}\n",
+        "type Node = wrap (tag: Tag, children: List Node)\n",
+        "def leaf = value: I32 => Node :: Node (tag: Tag value, children: List.new ())\n",
+        "def run = () => () :: {\n",
+        "    let mut middle: List Node = List.new ()\n",
+        "    List.push middle (leaf 3)\n",
+        "    List.push middle (leaf 4)\n",
+        "    let mut top: List Node = List.new ()\n",
+        "    List.push top (leaf 2)\n",
+        "    List.push top (Node (tag: Tag 5, children: middle))\n",
+        "    let root = Node (tag: Tag 1, children: top)\n",
+        "    ()\n",
+        "}\n",
+        "run ()\n",
+    );
+    let output = run(source);
+    let mut drops = output
+        .lines()
+        .filter_map(|line| line.strip_prefix("drop "))
+        .collect::<Vec<_>>();
+    drops.sort();
+    assert_eq!(drops, ["1", "2", "3", "4", "5"], "{output}");
+}
