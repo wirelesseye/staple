@@ -19941,7 +19941,7 @@ mod tests {
 
     fn step4_fixture() -> &'static str {
         concat!(
-            "use std.core.reference.(Ref)\n",
+            "use std.reference.(Ref)\n",
             "let pair_add: (x: I32; y: I32) -> I32 = (x; y) => x + y\n",
             "type Defaulted = wrap (String, x: I32 = 0, y: I32 = 0)\n",
             "def juxtaposed_samples: () -> I32 = () => {\n",
@@ -20215,7 +20215,7 @@ mod tests {
     #[test]
     fn constructor_calls_and_values_record_explicit_targets() {
         let module = checked_program(concat!(
-            "use std.core.reference.(Ref)\n",
+            "use std.reference.(Ref)\n",
             "type TestBox = wrap (value: I32)\n",
             "type TestEnabled\n",
             "let enabled: TestEnabled = TestEnabled\n",
@@ -20430,7 +20430,7 @@ mod tests {
     fn transition_fixture() -> &'static str {
         concat!(
             "use std.cinterop.*\n",
-            "use std.core.reference.(Ref)\n",
+            "use std.reference.(Ref)\n",
             "use std.io.IO\n",
             "extern \"c\" { external_identity: I32 -> I32 }\n",
             "trait TestShow T { test_show: T -> Bool }\n",
@@ -25386,7 +25386,7 @@ mod tests {
             "def different: <T where Eq T> (T, T) -> Bool = <T where Eq T> (a, b) => Eq.ne (a; b)\nlet eq_poly: <V where Eq V> (V, V) -> Bool = different\nlet ord_poly: <U where Ord U> (U, U) -> Bool = eq_poly\n",
         ] {
             let (_, _, adapters) = polymorphic_census(&format!(
-                "use std.core.cmp.(Eq, Ord)\n{source}let answer = ord_poly (1, 2)\n"
+                "use std.cmp.(Eq, Ord)\n{source}let answer = ord_poly (1, 2)\n"
             ));
             assert_eq!(adapters, 1, "{source}");
         }

@@ -1,6 +1,6 @@
 pub mod
 
-use package.core.sized.sized_opaque
+use package.sized.sized_opaque
 
 use package.cinterop.*
 use package.ptr.*

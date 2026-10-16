@@ -1808,12 +1808,12 @@ impl NameResolver {
         if let Some(reactive) = program
             .modules()
             .iter()
-            .find(|module| module.path.ends_with("std/core/reactive.sta"))
+            .find(|module| module.path.ends_with("std/reactive.sta"))
             .map(|module| module.id)
         {
             self.register_builtin_type(
                 reactive,
-                "std.core.reactive",
+                "std.reactive",
                 "Reactive",
                 BuiltinType::Reactive,
             );
@@ -1943,7 +1943,7 @@ impl NameResolver {
                         "std.cinterop"
                     }
                     IntrinsicFunction::StringAdd => "std.string",
-                    _ => "std.core.number",
+                    _ => "std.number",
                 };
                 (module.to_owned(), None, name, intrinsic)
             })
@@ -1952,7 +1952,7 @@ impl NameResolver {
             for to in NumericType::ALL {
                 if from != to {
                     declarations.push((
-                        "std.core.number".to_owned(),
+                        "std.number".to_owned(),
                         None,
                         format!("__{}_to_{}", from.intrinsic_name(), to.intrinsic_name()),
                         IntrinsicFunction::NumericConvert { from, to },
@@ -2162,30 +2162,30 @@ impl NameResolver {
                 IntrinsicFunction::BufferFromArray,
             ),
             (
-                "std.core.reference",
+                "std.reference",
                 "__ref_replace",
                 IntrinsicFunction::RefReplace,
             ),
             (
-                "std.core.unique",
+                "std.unique",
                 "__unique_into_raw",
                 IntrinsicFunction::UniqueIntoRaw,
             ),
             (
-                "std.core.unique",
+                "std.unique",
                 "__unique_from_raw",
                 IntrinsicFunction::UniqueFromRaw,
             ),
             (
-                "std.core.reactive",
+                "std.reactive",
                 "__reactive_scope",
                 IntrinsicFunction::ReactiveScope,
             ),
             // Call-site-sensitive intrinsics are public API themselves; the
             // rest sit behind ordinary `def` wrappers so they stay first-class.
-            ("std.core.reactive", "reaction", IntrinsicFunction::Reaction),
-            ("std.core.reactive", "batch", IntrinsicFunction::Batch),
-            ("std.core.reactive", "snapshot", IntrinsicFunction::Snapshot),
+            ("std.reactive", "reaction", IntrinsicFunction::Reaction),
+            ("std.reactive", "batch", IntrinsicFunction::Batch),
+            ("std.reactive", "snapshot", IntrinsicFunction::Snapshot),
             (
                 "std.coroutine",
                 "block_on",

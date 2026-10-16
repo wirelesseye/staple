@@ -4,7 +4,7 @@ use package.iterator.(Iterator, IntoIterator)
 use package.iterator.IterStep.(Done, Yield)
 use package.buffer.(Buffer)
 use package.clone.Clone
-use package.core.index.(Index, MutateIndex)
+use package.index.(Index, MutateIndex)
 use package.syntax.*
 
 /// A growable sequence backed by a mutable buffer.

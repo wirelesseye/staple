@@ -1,6 +1,6 @@
 pub mod
 
-use package.core.recursive_constructor.recursive_constructor
+use package.recursive_constructor.recursive_constructor
 use package.ptr.(RawMutPtr)
 
 /// A unique, affine heap owner. Dropping it cleans up its payload and frees

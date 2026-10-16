@@ -1614,7 +1614,7 @@ mod tests {
         assert!(
             doc.targets
                 .iter()
-                .any(|target| target.path.ends_with("std/core/doc.sta"))
+                .any(|target| target.path.ends_with("std/doc.sta"))
         );
     }
 
@@ -1843,7 +1843,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .unwrap()
-                .join("stdlib/std/core/boolean.sta"),
+                .join("stdlib/std/boolean.sta"),
         )
         .unwrap();
         assert!(

@@ -8,7 +8,7 @@ use package.default.Default
 use package.string.String
 use package.fmt.(Display, Debug, Formatter)
 
-pub use package.core.number.types.*
+pub use package.number.types.*
 
 extern "staple-intrinsic" {
     __i8_to_string: I8 -> String

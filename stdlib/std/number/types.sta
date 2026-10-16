@@ -1,6 +1,6 @@
 pub mod
 
-use package.core.sized.sized_opaque
+use package.sized.sized_opaque
 
 /// Marks non-negative integer singleton types.
 pub trait Natural T {}

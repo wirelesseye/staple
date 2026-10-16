@@ -1998,9 +1998,9 @@ mod tests {
             dotted_module_path(
                 Some("std"),
                 Path::new("/std"),
-                Path::new("/std/core/list.sta")
+                Path::new("/std/number/types.sta")
             ),
-            Some("std.core.list".to_owned())
+            Some("std.number.types".to_owned())
         );
         // A dependency `root.sta` collapses to the package name.
         assert_eq!(

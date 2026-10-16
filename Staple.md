@@ -4057,7 +4057,7 @@ an optional `+`. Floating-point parsing uses the C library's floating-point
 syntax, including exponents, hexadecimal floats, NaN, and infinity, and rounds
 to the target precision. Syntax failures return `InvalidNumber`; overflow
 and underflow reported by the parser return `OutOfRange`. Boolean parsing
-accepts `True`, `true`, `False`, and `false`, otherwise returning `std.core.boolean.InvalidBool`.
+accepts `True`, `true`, `False`, and `false`, otherwise returning `std.boolean.InvalidBool`.
 
 `String` has no `Convert` implementation to a byte sequence; `String.to_bytes`
 is the explicit copy into a `List U8`. Arrays and buffers have no
@@ -4165,7 +4165,7 @@ They may be referenced through `Ref`, whose parameter accepts unsized types,
 but cannot be used by value or satisfy implicit `Sized` bounds.
 
 The standard-library-only intrinsic modifier `@sized_opaque`, declared in
-`std.core.sized` with `pub(package)` visibility, marks opaque types with
+`std.sized` with `pub(package)` visibility, marks opaque types with
 compiler-supplied sized representations. Compiler-known sized opaque types such as `std.core.I32` and
 `std.ptr.RawPtr` must carry this modifier. The modifier grants sizedness;
 sized opaque types are `Copy` by default. The stdlib explicitly declares

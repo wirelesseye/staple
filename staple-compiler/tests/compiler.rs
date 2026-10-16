@@ -12320,10 +12320,10 @@ fn sized_opaque_modifier_is_package_visible_in_stdlib() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for source in [
         "@sized_opaque\ntype Token = opaque\n",
-        "@std.core.sized.sized_opaque\ntype Token = opaque\n",
-        "use std.core.sized.(sized_opaque)\n@sized_opaque\ntype Token = opaque\n",
-        "use std.core.sized.*\n@sized_opaque\ntype Token = opaque\n",
-        "pub use std.core.sized.sized_opaque\n@sized_opaque\ntype Token = opaque\n",
+        "@std.sized.sized_opaque\ntype Token = opaque\n",
+        "use std.sized.(sized_opaque)\n@sized_opaque\ntype Token = opaque\n",
+        "use std.sized.*\n@sized_opaque\ntype Token = opaque\n",
+        "pub use std.sized.sized_opaque\n@sized_opaque\ntype Token = opaque\n",
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
@@ -12362,10 +12362,10 @@ fn recursive_constructor_modifier_is_package_visible_in_stdlib() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for source in [
         "@recursive_constructor\ntype Token = opaque\n",
-        "@std.core.recursive_constructor.recursive_constructor\ntype Token = opaque\n",
-        "use std.core.recursive_constructor.(recursive_constructor)\n@recursive_constructor\ntype Token = opaque\n",
-        "use std.core.recursive_constructor.*\n@recursive_constructor\ntype Token = opaque\n",
-        "pub use std.core.recursive_constructor.recursive_constructor\n@recursive_constructor\ntype Token = opaque\n",
+        "@std.recursive_constructor.recursive_constructor\ntype Token = opaque\n",
+        "use std.recursive_constructor.(recursive_constructor)\n@recursive_constructor\ntype Token = opaque\n",
+        "use std.recursive_constructor.*\n@recursive_constructor\ntype Token = opaque\n",
+        "pub use std.recursive_constructor.recursive_constructor\n@recursive_constructor\ntype Token = opaque\n",
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
@@ -12430,7 +12430,7 @@ fn stdlib_modifier_diagnostics(path: &str, original: &str, replacement: &str) ->
 fn sized_opaque_stdlib_contract_and_validation() {
     for (path, original, replacement, expected) in [
         (
-            "std/core/number/types.sta",
+            "std/number/types.sta",
             "@sized_opaque\npub type I32 = opaque",
             "pub type I32 = opaque",
             "type `I32` must be marked `@sized_opaque`",
@@ -12442,19 +12442,19 @@ fn sized_opaque_stdlib_contract_and_validation() {
             "type `IO` must be marked `@sized_opaque`",
         ),
         (
-            "std/core/number/types.sta",
+            "std/number/types.sta",
             "@sized_opaque\npub type I32 = opaque",
             "@sized_opaque(1)\npub type I32 = opaque",
             "does not accept an argument",
         ),
         (
-            "std/core/number/types.sta",
+            "std/number/types.sta",
             "@sized_opaque\npub type I32 = opaque",
             "@sized_opaque\npub type I32 = alias I64",
             "may only modify an opaque type declaration",
         ),
         (
-            "std/core/sized.sta",
+            "std/sized.sta",
             "pub trait Sized T {}",
             "@sized_opaque\npub trait Sized T {}",
             "may only modify an opaque type declaration",
@@ -12467,9 +12467,9 @@ fn sized_opaque_stdlib_contract_and_validation() {
         );
     }
     let diagnostics = stdlib_modifier_diagnostics(
-        "std/core/number/types.sta",
+        "std/number/types.sta",
         "@sized_opaque\npub type I32 = opaque",
-        "@std.core.sized.sized_opaque\n@identity\npub type I32 = opaque\nuse std.syntax.Item\nmacro @identity: Item -> Item = item => item",
+        "@std.sized.sized_opaque\n@identity\npub type I32 = opaque\nuse std.syntax.Item\nmacro @identity: Item -> Item = item => item",
     );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
@@ -13099,7 +13099,7 @@ fn named_types_are_indexed_only_through_their_own_implementations() {
 #[test]
 fn from_types_reject_recursive_constructors() {
     let diagnostics = stdlib_modifier_diagnostics(
-        "std/core/reference.sta",
+        "std/reference.sta",
         "pub type Ref T where ?Sized T = pub wrap T",
         "pub type Ref T where ?Sized T = pub from T",
     );
@@ -13115,25 +13115,25 @@ fn from_types_reject_recursive_constructors() {
 fn recursive_constructor_stdlib_contract_and_validation() {
     for (path, original, replacement, expected) in [
         (
-            "std/core/reference.sta",
+            "std/reference.sta",
             "@recursive_constructor\npub type Ref",
             "@recursive_constructor(1)\npub type Ref",
             "`@recursive_constructor` does not accept an argument",
         ),
         (
-            "std/core/reference.sta",
+            "std/reference.sta",
             "@recursive_constructor\npub type Ref",
             "pub type Ref",
             "type `Ref` must be marked `@recursive_constructor`",
         ),
         (
-            "std/core/reference.sta",
+            "std/reference.sta",
             "@recursive_constructor\npub type Ref",
             "@recursive_constructor\nlet value = 1\npub type Ref",
             "`@recursive_constructor` may only modify a type declaration",
         ),
         (
-            "std/core/recursive_constructor.sta",
+            "std/recursive_constructor.sta",
             "macro @recursive_constructor: Item -> Item",
             "macro @recursive_constructor: Item -> Item = item => item",
             "compiler-provided modifier `@recursive_constructor` must be bodyless",
@@ -13146,9 +13146,9 @@ fn recursive_constructor_stdlib_contract_and_validation() {
         );
     }
     let diagnostics = stdlib_modifier_diagnostics(
-        "std/core/reference.sta",
+        "std/reference.sta",
         "@recursive_constructor\npub type Ref",
-        "@std.core.recursive_constructor.recursive_constructor\npub type Ref",
+        "@std.recursive_constructor.recursive_constructor\npub type Ref",
     );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
@@ -13211,10 +13211,10 @@ fn intrinsic_registration_checks_names_and_loaded_modules() {
             "unknown Staple intrinsic `__unknown`",
         ),
         (
-            "std/core/reference.sta",
+            "std/reference.sta",
             "    __ref_replace: <T> (mut Ref T; move T) -> T\n",
             "",
-            "standard library `std.core.reference` does not declare intrinsic `__ref_replace`",
+            "standard library `std.reference` does not declare intrinsic `__ref_replace`",
         ),
         (
             "std/coroutine.sta",
@@ -13276,7 +13276,7 @@ fn wrapped_intrinsics_are_registered_once() {
 #[test]
 fn generic_intrinsic_trait_bounds_are_checked_at_calls() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let path = root.join("stdlib/std/core/reactive.sta");
+    let path = root.join("stdlib/std/reactive.sta");
     let source = std::fs::read_to_string(&path)
         .unwrap()
         .replace("snapshot: <T>", "snapshot: <T where Eq T>")

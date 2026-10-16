@@ -1,8 +1,8 @@
 pub mod
 
-use package.core.recursive_constructor.recursive_constructor
+use package.recursive_constructor.recursive_constructor
 
-use package.core.cmp.(Eq)
+use package.cmp.(Eq)
 
 /// A managed mutable reference to a value.
 @recursive_constructor

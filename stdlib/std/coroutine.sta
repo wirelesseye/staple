@@ -1,8 +1,8 @@
 pub mod
 
-use package.core.sized.sized_opaque
+use package.sized.sized_opaque
 
-use package.core.reactive.Reactive
+use package.reactive.Reactive
 
 /// A lazily-constructed, suspendable computation.
 ///

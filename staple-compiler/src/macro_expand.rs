@@ -1231,33 +1231,33 @@ impl MacroExpander {
                                 MacroKind::CString
                             } else if source_module
                                 .path
-                                .ends_with(std::path::Path::new("std/core/doc.sta"))
+                                .ends_with(std::path::Path::new("std/doc.sta"))
                                 && declaration.modifier
                                 && declaration.name == "doc"
                             {
                                 MacroKind::Doc
                             } else if source_module
                                 .path
-                                .ends_with(std::path::Path::new("std/core/feature.sta"))
+                                .ends_with(std::path::Path::new("std/feature.sta"))
                                 && declaration.modifier
                                 && declaration.name == "feature"
                             {
                                 MacroKind::Feature
                             } else if source_module
                                 .path
-                                .ends_with(std::path::Path::new("std/core/no_prelude.sta"))
+                                .ends_with(std::path::Path::new("std/no_prelude.sta"))
                                 && declaration.modifier
                                 && declaration.name == "no_prelude"
                             {
                                 MacroKind::NoPrelude
                             } else if standard_library_directory.as_ref().is_some_and(|root| {
-                                source_module.path == root.join("core/sized.sta")
+                                source_module.path == root.join("sized.sta")
                             }) && declaration.modifier
                                 && declaration.name == "sized_opaque"
                             {
                                 MacroKind::SizedOpaque
                             } else if standard_library_directory.as_ref().is_some_and(|root| {
-                                source_module.path == root.join("core/recursive_constructor.sta")
+                                source_module.path == root.join("recursive_constructor.sta")
                             }) && declaration.modifier
                                 && declaration.name == "recursive_constructor"
                             {

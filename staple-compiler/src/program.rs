@@ -486,7 +486,7 @@ impl Program {
     }
 
     /// The `use`-path-style dotted name of a module, e.g. `std.io`,
-    /// `std.core.list`, or `example.tools.text` — the package name followed by
+    /// `std.number.types`, or `example.tools.text` — the package name followed by
     /// the file path relative to the package source root (extension dropped,
     /// separators turned into dots) and then any enclosing inline `mod`
     /// segments. When there is no manifest at all, the package name is dropped
@@ -2982,8 +2982,8 @@ mod tests {
             Some("std.ops".to_owned())
         );
         assert_eq!(
-            program.module_dotted_name(module_by_suffix(&program, "std/core/number/types.sta")),
-            Some("std.core.number.types".to_owned())
+            program.module_dotted_name(module_by_suffix(&program, "std/number/types.sta")),
+            Some("std.number.types".to_owned())
         );
     }
 

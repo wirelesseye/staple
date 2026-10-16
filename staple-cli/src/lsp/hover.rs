@@ -2311,7 +2311,7 @@ mod tests {
             .find(|entry| entry.range.start == start)
             .expect("intrinsic definition");
         assert!(definition.targets.iter().any(|target| {
-            target.path.ends_with("std/core/reference.sta")
+            target.path.ends_with("std/reference.sta")
                 && std::fs::read_to_string(&target.path).unwrap()[target.selection_range.clone()]
                     == *"replace"
         }));

@@ -1,17 +1,17 @@
 pub mod
 
-pub use package.core.boolean.*
-pub use package.core.copy.*
-pub use package.core.drop.*
-pub use package.core.doc.*
-pub use package.core.cmp.*
-pub use package.core.feature.*
-pub use package.core.index.*
-pub use package.core.number.*
-pub use package.core.range.*
-pub use package.core.reactive.*
-pub use package.core.reference.(Ref)
-pub use package.core.sized.*
-pub use package.core.no_prelude.*
-pub use package.core.never.*
-pub use package.core.unique.(Unique)
+pub use package.boolean.*
+pub use package.copy.*
+pub use package.drop.*
+pub use package.doc.*
+pub use package.cmp.*
+pub use package.feature.*
+pub use package.index.*
+pub use package.number.*
+pub use package.range.*
+pub use package.reactive.*
+pub use package.reference.(Ref)
+pub use package.sized.*
+pub use package.no_prelude.*
+pub use package.never.*
+pub use package.unique.(Unique)

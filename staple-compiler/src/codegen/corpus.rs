@@ -281,7 +281,7 @@ static CORPUS: [CorpusProgram; 160] = [
             "trait_dictionary_adapters",
             r#"use std.io.(IO, println)
 use std.fmt.Display
-use std.core.cmp.(Eq, Ord)
+use std.cmp.(Eq, Ord)
 def show: <T where Display T> move T ->{IO} () = <T where Display T> move value => println "${value}"
 let stored: <T where Display T> move T ->{IO} () = show
 let int_show: move I32 ->{IO} () = stored
@@ -307,7 +307,7 @@ println "${ord_poly (1, 2):?} ${ord_poly (3, 3):?}"
             "trait_dictionary_captures",
             r#"use std.io.(IO, println)
 use std.fmt.Display
-use std.core.cmp.(Eq, Ord)
+use std.cmp.(Eq, Ord)
 let lam: <T where Display T> move T ->{IO} () = <T where Display T> move value => println "lambda ${value}"
 lam 3
 def compare: <T where Ord T> (T, T) -> Bool = <T where Ord T> (a, b) => Eq.ne (a; b)
@@ -464,7 +464,7 @@ println (described 7)
 use std.fmt.Display
 use std.string.ToString
 use std.clone.Clone
-use std.core.cmp.Eq
+use std.cmp.Eq
 trait Measure T { measure: T -> I32 }
 type MeasuredBox T = wrap T
 impl Measure I32 { measure = value => value }
@@ -483,7 +483,7 @@ println "${nested 4} ${twice 4} ${describe 42} ${describe 7}"
         must_run(inline(
             "trait_dictionary_environment",
             r#"use std.io.(IO, println)
-use std.core.cmp.(Eq, Ord)
+use std.cmp.(Eq, Ord)
 trait Measure T { measure: T -> I32 }
 impl Measure I32 { measure = value => value }
 type Boxed = wrap I32
@@ -504,8 +504,8 @@ println "${measured 5} ${forward (Boxed 7)} ${twice (1, 2)} ${compare (1, 2):?} 
             r#"use std.io.(IO, println)
 use std.clone.Clone
 use std.fmt.(Display, Debug)
-use std.core.cmp.Eq
-use std.core.index.(Index, MutateIndex)
+use std.cmp.Eq
+use std.index.(Index, MutateIndex)
 trait Measure T { measure: T -> I32 }
 type MeasuredBox T = wrap T
 impl<T where Measure T> Measure (MeasuredBox T) { measure = MeasuredBox value => Measure.measure value }
@@ -555,7 +555,7 @@ run ()
 use std.clone.Clone
 use std.fmt.(Display, Debug)
 use std.string.ToString
-use std.core.cmp.(Eq, Ord)
+use std.cmp.(Eq, Ord)
 def describe: <T where Display T> T -> String = <T where Display T> value => ToString.to_string value
 def forward: <T where Display T> T -> String = <T where Display T> value => describe value
 def compare: <T where Ord T> (T, T) -> Bool = <T where Ord T> (a, b) => Eq.ne (a; b)

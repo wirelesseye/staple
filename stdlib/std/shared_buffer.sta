@@ -2,10 +2,10 @@ pub mod
 
 use package.buffer.Buffer
 
-use package.core.recursive_constructor.recursive_constructor
-use package.core.sized.sized_opaque
+use package.recursive_constructor.recursive_constructor
+use package.sized.sized_opaque
 
-use package.core.index.(Index, MutateIndex)
+use package.index.(Index, MutateIndex)
 use package.iterator.(IntoIterator, Iterator)
 use package.iterator.IterStep.(Done, Yield)
 
