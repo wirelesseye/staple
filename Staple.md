@@ -3518,7 +3518,8 @@ let third = values[index]
 let second = SharedBuffer.get values 1
 ```
 
-`SharedBuffer T` is a garbage-collected, fixed-length sequence of `T`. It is
+`SharedBuffer T` is a garbage-collected, fixed-length sequence of `T`,
+declared as a sized opaque type with no constructor. It is
 not a dynamic array and is not equal to any `T ^ N`, and an array never
 converts to a `SharedBuffer` implicitly: the companion function
 `SharedBuffer.from_array: <N where Natural N> move (T ^ N) -> SharedBuffer T`
@@ -4146,12 +4147,16 @@ applies to a self-reference too: a recursive `type Node T` must still write its
 own ordinary arguments, as `Node T` or `Node I32`, never a bare `Node`.
 
 A represented type may refer to itself, directly or mutually, only where the
-reference passes through a managed indirection — `Ref`, `SharedBuffer`, or a
-`Syntax` value — so that every instance has a finite layout. A representation
-that would contain itself by value (`type Loop = wrap (head: I32, tail: Loop)`) is
-rejected as a cyclic definition; routing the back-edge through `Ref`
-(`type Loop = wrap (head: I32, tail: Option (Ref Loop))`) is well-founded and
-accepted.
+reference passes through an out-of-line indirection — `Ref`, `Unique`,
+`SharedBuffer`, `Buffer`, or a `Syntax` value — so that every instance has a
+finite layout. A representation that would contain itself by value
+(`type Loop = wrap (head: I32, tail: Loop)`) is rejected as a cyclic
+definition; routing the back-edge through `Ref`
+(`type Loop = wrap (head: I32, tail: Option (Ref Loop))`) or a buffer
+(`type Tree = wrap (value: I32, children: Buffer Tree)`) is well-founded and
+accepted. The indirection must be written directly: a back-edge through a
+nominal type built on one of these, such as `List Tree`, is still rejected
+as cyclic.
 
 Product types and values may have a trailing comma.
 
@@ -4218,8 +4223,8 @@ representation visibility:
 
 Because a public conversion names its source, every named type directly
 referenced by the source of a public (or package-visible) `from` type must be
-at least as visible as the type. `@recursive_constructor` types must use
-`wrap`.
+at least as visible as the type. `@recursive_constructor` types cannot use
+`from`.
 
 Patterns see through one `from` layer. When a pattern does not select the
 `from` type itself, it is checked against the type's visible representation,

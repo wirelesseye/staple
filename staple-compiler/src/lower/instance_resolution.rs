@@ -2084,7 +2084,7 @@ impl LoweredProgram {
             CheckedType::Wrapper { representation, .. } => {
                 self.contains_recursive_payload(representation)
             }
-            CheckedType::Unique(payload) | CheckedType::Ref(payload) => {
+            CheckedType::Unique(payload) | CheckedType::Ref(payload) | CheckedType::Buffer(payload) => {
                 self.contains_recursive_payload(payload)
             }
             CheckedType::Product(product) => product

@@ -3,6 +3,7 @@ pub mod
 use std.buffer.Buffer
 
 use std.core.recursive_constructor.recursive_constructor
+use std.core.sized.sized_opaque
 
 use std.core.index.(Index, MutateIndex)
 use std.iterator.(IntoIterator, Iterator)
@@ -10,8 +11,9 @@ use std.iterator.IterStep.(Done, Yield)
 
 /// A garbage-collected, fixed-length sequence whose handles share one mutable
 /// allocation. The buffer owns its elements.
+@sized_opaque
 @recursive_constructor
-pub type SharedBuffer T = wrap T
+pub type SharedBuffer T = opaque
 
 extern "staple-intrinsic" {
     __shared_buffer_length: <T> SharedBuffer T -> USize

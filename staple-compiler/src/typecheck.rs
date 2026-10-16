@@ -16248,9 +16248,6 @@ impl TypeChecker {
                 pointee: Box::new(arguments[0].clone()),
             };
         }
-        if module.builtin_type(id) == Some(BuiltinType::Buffer) {
-            return CheckedType::Buffer(Box::new(arguments[0].clone()));
-        }
         match module.recursive_construction(id) {
             Some(crate::RecursiveConstruction::ManagedReference) => {
                 return CheckedType::Ref(Box::new(arguments[0].clone()));
@@ -16260,6 +16257,9 @@ impl TypeChecker {
             }
             Some(crate::RecursiveConstruction::SharedBuffer) => {
                 return CheckedType::SharedBuffer(Box::new(arguments[0].clone()));
+            }
+            Some(crate::RecursiveConstruction::Buffer) => {
+                return CheckedType::Buffer(Box::new(arguments[0].clone()));
             }
             Some(crate::RecursiveConstruction::Syntax) => {
                 return CheckedType::Opaque {

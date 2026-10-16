@@ -1,12 +1,14 @@
 pub mod
 
 use std.core.sized.sized_opaque
+use std.core.recursive_constructor.recursive_constructor
 
 use std.shared_buffer.SharedBuffer
 use std.clone.Clone
 
 /// A mutable, fixed-capacity buffer of values.
 @sized_opaque
+@recursive_constructor
 pub type Buffer T = opaque
 impl<T> !Copy (Buffer T) {}
 

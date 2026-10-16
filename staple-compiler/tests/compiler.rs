@@ -11986,6 +11986,29 @@ fn accepts_a_concrete_impl_beside_a_copy_blanket_impl_before_its_negative_copy()
 }
 
 #[test]
+fn accepts_types_that_recurse_through_shared_buffer_or_buffer() {
+    type_check(concat!(
+        "use std.buffer.Buffer\n",
+        "use std.shared_buffer.SharedBuffer\n",
+        "type SharedTree = wrap (value: I32, children: SharedBuffer SharedTree)\n",
+        "type OwnedTree = wrap (value: I32, children: Buffer OwnedTree)\n",
+        "impl !Copy OwnedTree {}\n",
+    ));
+}
+
+#[test]
+fn rejects_constructing_a_shared_buffer_from_one_value() {
+    let diagnostics = resolve_result(concat!(
+        "use std.shared_buffer.SharedBuffer\n",
+        "let fake: SharedBuffer I32 = SharedBuffer 5\n",
+    ))
+    .expect_err_diagnostics("an opaque SharedBuffer has no constructor");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("`SharedBuffer` is not a value")
+    }));
+}
+
+#[test]
 fn rejects_a_blanket_impl_whose_bound_is_implemented_after_it() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(

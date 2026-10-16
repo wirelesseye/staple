@@ -124,6 +124,7 @@ pub enum RecursiveConstruction {
     ManagedReference,
     Unique,
     SharedBuffer,
+    Buffer,
     Syntax,
 }
 
@@ -2446,9 +2447,6 @@ impl NameResolver {
             let valid_kind = if matches!(builtin, BuiltinType::Ref | BuiltinType::Unique) {
                 declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper
                     && declaration.representation_visibility() == Visibility::Public
-            } else if builtin == BuiltinType::SharedBuffer {
-                declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper
-                    && declaration.representation_visibility() == Visibility::Private
             } else if matches!(builtin, BuiltinType::Completed | BuiltinType::Cancelled) {
                 // `await Task` yields `Completed T | Cancelled`, a sum the body
                 // can `match`; both alternatives are represented wrapper types
@@ -2548,6 +2546,7 @@ impl NameResolver {
             BuiltinType::Ref => Some(RecursiveConstruction::ManagedReference),
             BuiltinType::Unique => Some(RecursiveConstruction::Unique),
             BuiltinType::SharedBuffer => Some(RecursiveConstruction::SharedBuffer),
+            BuiltinType::Buffer => Some(RecursiveConstruction::Buffer),
             BuiltinType::Syntax
                 if declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper =>
             {

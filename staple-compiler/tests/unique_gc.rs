@@ -396,3 +396,63 @@ fn module_globals_keep_strings_closures_and_arrays_alive() {
     );
     assert_eq!(run(&source), "1 1 1 42\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn trees_recursing_through_buffers_drop_every_node_once() {
+    let source = concat!(
+        "use std.buffer.Buffer\n",
+        "use std.shared_buffer.SharedBuffer\n",
+        "use std.cinterop.*\n",
+        "use std.ptr.*\n",
+        "extern \"c\" {\n",
+        "    printf: (RawPtr CChar, ...) -> I32\n",
+        "}\n",
+        "type Tag = wrap I32\n",
+        "impl Drop Tag {\n",
+        "    cleanup = Tag value => {\n",
+        "        printf (c_string \"drop %d\\n\", value)\n",
+        "        ()\n",
+        "    }\n",
+        "}\n",
+        "type Owned = wrap (tag: Tag, children: Buffer Owned)\n",
+        "type Shared = wrap (value: I32, children: SharedBuffer Shared)\n",
+        "def leaf = value: I32 => Owned :: Owned (tag: Tag value, children: Buffer.with_capacity 0)\n",
+        "def shared_total = tree: Shared => I32 :: {\n",
+        "    let Shared (value, children) = tree\n",
+        "    let mut sum = value\n",
+        "    let mut index: USize = 0\n",
+        "    while (index < SharedBuffer.length children) {\n",
+        "        let Ref child = SharedBuffer.get_ref_unchecked children index\n",
+        "        sum = sum + shared_total child\n",
+        "        index = index + 1\n",
+        "    }\n",
+        "    sum\n",
+        "}\n",
+        "def run = () => () :: {\n",
+        "    let mut middle: Buffer Owned = Buffer.with_capacity 2\n",
+        "    Buffer.push middle (leaf 3)\n",
+        "    Buffer.push middle (leaf 4)\n",
+        "    let mut top: Buffer Owned = Buffer.with_capacity 2\n",
+        "    Buffer.push top (leaf 2)\n",
+        "    Buffer.push top (Owned (tag: Tag 5, children: middle))\n",
+        "    let root = Owned (tag: Tag 1, children: top)\n",
+        "    let empty: SharedBuffer Shared = SharedBuffer.from_array ()\n",
+        "    let shared = Shared (value: 1, children: SharedBuffer.from_array (\n",
+        "        Shared (value: 2, children: empty),\n",
+        "        Shared (value: 3, children: empty),\n",
+        "    ))\n",
+        "    printf (c_string \"total %d\\n\", shared_total shared)\n",
+        "    ()\n",
+        "}\n",
+        "run ()\n",
+    );
+    let output = run(source);
+    let mut drops = output
+        .lines()
+        .filter_map(|line| line.strip_prefix("drop "))
+        .collect::<Vec<_>>();
+    drops.sort();
+    assert_eq!(drops, ["1", "2", "3", "4", "5"], "{output}");
+    assert!(output.contains("total 6\n"), "{output}");
+}
