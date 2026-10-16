@@ -3791,21 +3791,6 @@ impl TypeChecker {
                 ));
                 continue;
             }
-            if self.trait_implementations.iter().any(|existing| {
-                existing.trait_id == implementation.trait_id
-                    && self.implementation_headers_overlap(
-                        existing,
-                        &declared_parameters,
-                        &arguments,
-                        &bounds,
-                    )
-            }) {
-                self.diagnostics.push(Diagnostic::new(
-                    span,
-                    "duplicate trait implementation for these arguments",
-                ));
-                continue;
-            }
             let dependencies = self
                 .trait_functional_dependencies
                 .get(&implementation.trait_id)
@@ -3905,6 +3890,46 @@ impl TypeChecker {
                 methods,
             });
         }
+        self.reject_overlapping_implementations();
+    }
+
+    /// Rejects each implementation whose header overlaps an earlier one of the
+    /// same trait. This runs once every header is collected, because whether a
+    /// bound such as `Copy T` holds for an overlap candidate depends on
+    /// implementations — `impl !Copy` among them — that a module loaded later
+    /// may declare.
+    fn reject_overlapping_implementations(&mut self) {
+        let mut rejected = HashSet::new();
+        for later in 0..self.trait_implementations.len() {
+            let candidate = &self.trait_implementations[later];
+            let overlaps = self.trait_implementations[..later]
+                .iter()
+                .enumerate()
+                .any(|(earlier, existing)| {
+                    !rejected.contains(&earlier)
+                        && existing.trait_id == candidate.trait_id
+                        && self.implementation_headers_overlap(
+                            existing,
+                            &candidate.parameters,
+                            &candidate.arguments,
+                            &candidate.bounds,
+                        )
+                });
+            if overlaps {
+                let span = candidate.span.clone();
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    "duplicate trait implementation for these arguments",
+                ));
+                rejected.insert(later);
+            }
+        }
+        let mut index = 0;
+        self.trait_implementations.retain(|_| {
+            let keep = !rejected.contains(&index);
+            index += 1;
+            keep
+        });
     }
 
     /// Whether a not-yet-added implementation header (`new_parameters`,

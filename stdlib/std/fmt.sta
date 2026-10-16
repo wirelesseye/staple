@@ -1,8 +1,5 @@
 pub mod
 
-// Imported first so `Buffer`'s `!Copy` implementation registers before `List`'s
-// implementations are checked against the blanket `Clone` for `Copy` types.
-use std.buffer.Buffer
 use std.list.List
 use std.string.(String, ToString)
 use std.flow.for

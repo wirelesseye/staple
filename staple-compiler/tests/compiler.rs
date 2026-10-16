@@ -11972,6 +11972,40 @@ fn rejects_a_blanket_bounded_impl_that_overlaps_an_earlier_concrete_one() {
 }
 
 #[test]
+fn accepts_a_concrete_impl_beside_a_copy_blanket_impl_before_its_negative_copy() {
+    // `Handle` opts out of `Copy` only after its concrete `Greet`
+    // implementation, so the overlap check must see every `impl !Copy`
+    // before deciding whether the blanket impl covers `Handle`.
+    type_check(concat!(
+        "trait Greet T { greet: T -> I32 }\n",
+        "impl<T where Copy T> Greet T { greet = value => 1 }\n",
+        "type Handle = wrap I32\n",
+        "impl Greet Handle { greet = value => 2 }\n",
+        "impl !Copy Handle {}\n",
+    ));
+}
+
+#[test]
+fn rejects_a_blanket_impl_whose_bound_is_implemented_after_it() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Bound T { check: T -> Bool }\n",
+            "trait Target T { act: T -> T }\n",
+            "impl Target I32 { act = value => value }\n",
+            "impl <T where Bound T> Target T { act = value => value }\n",
+            "impl Bound I32 { check = value => True }\n",
+        )))
+        .expect_err_diagnostics(
+            "`Bound I32` makes the blanket impl cover `I32` even though it is declared last",
+        );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("duplicate trait implementation")
+    }));
+}
+
+#[test]
 fn statically_checks_unused_macro_bodies_and_compile_time_helpers() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for source in [
