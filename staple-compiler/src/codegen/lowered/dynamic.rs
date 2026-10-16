@@ -4145,7 +4145,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let bytes = self
                     .backend
                     .builder
-                    .build_int_mul(length, layout.stride, "buffer.into_shared.bytes")
+                    .build_int_mul(length, layout.stride, "buffer.into_shared_buffer.bytes")
                     .map_err(compiler_diagnostic)?;
                 // Element alignment is runtime-only; LLVM memcpy needs constant alignment.
                 self.backend

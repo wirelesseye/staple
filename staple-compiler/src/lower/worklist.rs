@@ -4751,7 +4751,7 @@ mod tests {
             let source = if captured {
                 "def make: <T where Copy T> T -> (() -> T) = <T where Copy T> value => { let mut held = value; () => held }\nlet result = make 42\n"
             } else {
-                "use std.buffer.Buffer\nuse std.shared_buffer.SharedBuffer\ndef make: <T where Copy T> USize -> SharedBuffer T = <T where Copy T> capacity => { let mut buffer: Buffer T = Buffer.with_capacity.<T> capacity; Buffer.into_shared buffer }\nlet result: SharedBuffer I32 = make 3\n"
+                "use std.buffer.Buffer\nuse std.shared_buffer.SharedBuffer\ndef make: <T where Copy T> USize -> SharedBuffer T = <T where Copy T> capacity => { let mut buffer: Buffer T = Buffer.with_capacity.<T> capacity; Buffer.into_shared_buffer buffer }\nlet result: SharedBuffer I32 = make 3\n"
             };
             let (text, name) = dynamic_test_module(source, "make");
             let context = inkwell::context::Context::create();

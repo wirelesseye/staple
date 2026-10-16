@@ -3463,9 +3463,9 @@ returns a non-copying iterator over the bytes: `StringBytes` implements
 `Iterator` with `Item = U8` and an identity `IntoIterator`, so
 `for byte in (String.bytes text)` works. `String.from_utf8: move List U8 =>
 Result String std.string.InvalidUtf8` consumes the list, copies its bytes
-into the string's managed storage as `List.into_shared` does, and validates
-them; because the list is moved in, nothing can mutate the bytes after
-validation. `String.from_utf8_unchecked: move List U8 => String` skips the
+into the string's managed storage with `Buffer.into_shared_buffer`, and
+validates them; because the list is moved in, nothing can mutate the bytes
+after validation. `String.from_utf8_unchecked: move List U8 => String` skips the
 validation when the caller knows the bytes are valid UTF-8. The underlying
 `SharedBuffer U8` is private to the standard library.
 
@@ -3579,7 +3579,7 @@ elements.
 
 `Buffer.from_array: <N where Natural N> move (T ^ N) -> Buffer T` moves the
 elements of a fixed array into a new buffer whose capacity and length are both
-`N`; the buffer owns the moved elements. `Buffer.into_shared` consumes the
+`N`; the buffer owns the moved elements. `Buffer.into_shared_buffer` consumes the
 buffer and returns a `SharedBuffer T` over a managed copy of its initialized
 prefix; the original allocation is released without dropping the moved
 elements. The consumed buffer cannot subsequently be used or shared again.
@@ -3625,8 +3625,10 @@ source — and yields owned copies. Iteration requires `Copy T`, the same as
 `List.get`; clone the list with `Clone.clone` first when it must remain
 usable.
 
-`List.into_shared: move List T => SharedBuffer T` consumes the list and
-returns its elements as a `SharedBuffer T`, like `Buffer.into_shared`.
+`List.into_buffer: move List T => Buffer T` consumes the list and returns its
+backing buffer; move that buffer's elements into a `SharedBuffer T` with
+`Buffer.into_shared_buffer`, as in
+`list |> List.into_buffer |> Buffer.into_shared_buffer`.
 
 `List` is move-only like its underlying `Buffer`, and likewise owned rather
 than garbage collected: dropping a list drops its elements and frees its storage. Where `Clone T`, cloning a
@@ -3748,7 +3750,7 @@ allowed while nested collection is suppressed.
 
 A managed allocation stays reachable through a pointer to any position inside
 it, not only its start. A `Ref` to one element of a `SharedBuffer`, or a
-`SharedBuffer` made by `Buffer.into_shared`, keeps the whole allocation alive, including the other
+`SharedBuffer` made by `Buffer.into_shared_buffer`, keeps the whole allocation alive, including the other
 elements, until no such pointer remains.
 
 `CChar` and `CString` are public opaque types in `std.cinterop`.
@@ -3841,7 +3843,7 @@ accepts `True`, `true`, `False`, and `false`, otherwise returning `std.core.bool
 `String` has no `Convert` implementation to a byte sequence; `String.to_bytes`
 is the explicit copy into a `List U8`. Arrays and buffers have no
 `Convert` implementations; use `SharedBuffer.from_array`, `Buffer.from_array`,
-and `Buffer.into_shared` explicitly. Checked byte
+and `Buffer.into_shared_buffer` explicitly. Checked byte
 list-to-string conversion is `TryConvert (List U8) String` (or
 `String.from_utf8`), which consumes the list and returns
 `Result String std.string.InvalidUtf8`. `String.from_utf8_unchecked` constructs

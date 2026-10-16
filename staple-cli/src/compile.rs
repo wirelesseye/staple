@@ -3317,7 +3317,7 @@ mod tests {
                 "  Buffer.push values 7\n",
                 "  Buffer.push values 8\n",
                 "  let popped = Buffer.pop values\n",
-                "  Buffer.into_shared values\n",
+                "  Buffer.into_shared_buffer values\n",
                 "}\n",
                 "let mut empty: Buffer I32 = Buffer.with_capacity 4\n",
                 "match Buffer.get empty 0 { None() => (), Some _ => exit 1 }\n",

@@ -63,7 +63,7 @@ companion<T> Buffer T {
     pub def from_array = <N where Natural N> move value: (T ^ N) => Buffer T :: __buffer_from_array value
 
     /// Consumes the buffer, moving its elements into a garbage-collected shared buffer.
-    pub def into_shared = move buffer: Buffer T => SharedBuffer T :: __buffer_into_shared buffer
+    pub def into_shared_buffer = move buffer: Buffer T => SharedBuffer T :: __buffer_into_shared buffer
 
     /// Moves every initialised source element to destination and empties source.
     /// Traps for overlapping or insufficient-capacity buffers.

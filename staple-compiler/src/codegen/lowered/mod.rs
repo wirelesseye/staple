@@ -8360,7 +8360,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     length,
                     llvm_element,
                     header,
-                    "buffer.into_shared",
+                    "buffer.into_shared_buffer",
                     false,
                     span.clone(),
                 )?;
@@ -8368,12 +8368,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     frozen,
                     header,
                     length,
-                    "buffer.into_shared.capacity.slot",
+                    "buffer.into_shared_buffer.capacity.slot",
                 )?;
                 let length_slot = self
                     .backend
                     .builder
-                    .build_struct_gep(header, frozen, 0, "buffer.into_shared.length.slot")
+                    .build_struct_gep(header, frozen, 0, "buffer.into_shared_buffer.length.slot")
                     .map_err(compiler_diagnostic)?;
                 self.backend
                     .builder
@@ -8388,7 +8388,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_int_mul(
                         length,
                         self.backend.size_type.const_int(stride, false),
-                        "buffer.into_shared.bytes",
+                        "buffer.into_shared_buffer.bytes",
                     )
                     .map_err(compiler_diagnostic)?;
                 let alignment = self.backend.target_data.get_abi_alignment(&llvm_element);

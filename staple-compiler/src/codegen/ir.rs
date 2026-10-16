@@ -1829,7 +1829,7 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 
     /// Allocates the header shared by Buffer.with_capacity, Buffer.clone and
-    /// Buffer.into_shared. The prefix distinguishes their SSA names. An `owned`
+    /// Buffer.into_shared_buffer. The prefix distinguishes their SSA names. An `owned`
     /// buffer is a `Unique` allocation, released eagerly when dropped; a
     /// frozen buffer is a plain GC allocation.
     pub(crate) fn build_buffer_allocation(

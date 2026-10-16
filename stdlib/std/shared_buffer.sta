@@ -23,7 +23,7 @@ extern "staple-intrinsic" {
 companion<T> SharedBuffer T {
     /// Moves the elements of a fixed array into a new shared buffer.
     pub def from_array = <N where Natural N> move value: (T ^ N) => SharedBuffer T ::
-        Buffer.into_shared (Buffer.from_array value)
+        Buffer.into_shared_buffer (Buffer.from_array value)
 
     /// Returns the number of elements in the buffer.
     pub def length = value: SharedBuffer T => USize :: __shared_buffer_length value

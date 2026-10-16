@@ -5050,7 +5050,7 @@ fn buffer_intrinsics_type_check_and_compile() {
         "let replaced: Option () = Buffer.set values (USize :: 1) 30\n",
         "Buffer.set_unchecked values (USize :: 0) 40\n",
         "let popped: Option I32 = Buffer.pop values\n",
-        "let frozen: SharedBuffer I32 = Buffer.into_shared values\n",
+        "let frozen: SharedBuffer I32 = Buffer.into_shared_buffer values\n",
         "let frozen_length: USize = SharedBuffer.length frozen\n",
         "let safe_frozen: Option (Ref I32) = SharedBuffer.get_ref frozen (USize :: 0)\n",
         "()\n",
@@ -5062,7 +5062,7 @@ fn buffer_intrinsics_type_check_and_compile() {
         .compile_root(&lowered)
         .expect("Buffer operations should compile");
     assert!(llvm.contains("unique.allocate"));
-    assert!(llvm.contains("buffer.into_shared.allocate"));
+    assert!(llvm.contains("buffer.into_shared_buffer.allocate"));
     assert!(llvm.contains("buffer.push.slot"));
     assert!(llvm.contains("buffer.pop.option"));
     assert!(llvm.contains("shared_buffer.length"));
@@ -5074,7 +5074,7 @@ fn buffer_intrinsics_type_check_and_compile() {
         "def exercise: () -> () = () => {\n",
         "let mut owned: Buffer CString = Buffer.with_capacity (USize :: 1)\n",
         "Buffer.push owned (c_string \"owned\")\n",
-        "let frozen: SharedBuffer CString = Buffer.into_shared owned\n",
+        "let frozen: SharedBuffer CString = Buffer.into_shared_buffer owned\n",
         "()\n",
         "}\n",
     ));
@@ -5135,7 +5135,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
             "use std.buffer.Buffer\nuse std.shared_buffer.SharedBuffer\n",
             "def invalid: () -> USize = () => {\n",
             "let buffer: Buffer I32 = Buffer.with_capacity (USize :: 1)\n",
-            "let frozen: SharedBuffer I32 = Buffer.into_shared buffer\n",
+            "let frozen: SharedBuffer I32 = Buffer.into_shared_buffer buffer\n",
             "Buffer.length buffer\n",
             "}\n",
         ),
@@ -11110,7 +11110,7 @@ fn rejects_moving_a_move_only_global_out_of_top_level_statements() {
         .check(resolve(concat!(
             "use std.buffer.Buffer\nuse std.shared_buffer.SharedBuffer\n",
             "let mut data: Buffer I32 = Buffer.with_capacity (USize :: 4)\n",
-            "let frozen: SharedBuffer I32 = Buffer.into_shared data\n",
+            "let frozen: SharedBuffer I32 = Buffer.into_shared_buffer data\n",
         )))
         .expect_err_diagnostics("moving a global out at top level should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -11126,7 +11126,7 @@ fn rejects_moving_a_move_only_global_out_of_a_function() {
         .check(resolve(concat!(
             "use std.buffer.Buffer\n",
             "let mut data: Buffer I32 = Buffer.with_capacity (USize :: 4)\n",
-            "def take = () => Buffer.into_shared data\n",
+            "def take = () => Buffer.into_shared_buffer data\n",
         )))
         .expect_err_diagnostics("moving a global out of a function should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {

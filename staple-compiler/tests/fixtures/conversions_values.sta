@@ -45,7 +45,7 @@ def run: () -> () = () => {
     let mut buffer: Buffer I32 = Buffer.with_capacity 2
     Buffer.push buffer 10
     Buffer.push buffer 20
-    let frozen: SharedBuffer I32 = Buffer.into_shared buffer
+    let frozen: SharedBuffer I32 = Buffer.into_shared_buffer buffer
     require (SharedBuffer.length frozen == 2)
     require (frozen[0] == 10)
     require (frozen[1] == 20)

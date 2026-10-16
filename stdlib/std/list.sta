@@ -55,11 +55,10 @@ companion<T> List T {
 }
 
 companion<T> List T {
-    use package.shared_buffer.SharedBuffer
-    /// Consumes the list and returns its elements as a `SharedBuffer`.
-    pub def into_shared = move list: List T => SharedBuffer T :: {
+    /// Consumes the list and returns its backing buffer.
+    pub def into_buffer = move list: List T => Buffer T :: {
         let List buffer = list
-        Buffer.into_shared buffer
+        buffer
     }
 }
 
