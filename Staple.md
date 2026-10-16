@@ -2445,15 +2445,15 @@ trait Convert (From, To) {
 }
 
 trait PartialOrd T where Copy T {
-    partial_cmp: T -> T -> Option Ordering
-    lt: T -> T -> Bool = left => right => match (partial_cmp left right) {
+    partial_cmp: (T; T) -> Option Ordering
+    lt: (T; T) -> Bool = (left; right) => match (partial_cmp left right) {
         Some Ordering.Less() => True,
         _ => False,
     }
 }
 
 trait Ord T where Eq T, PartialOrd T {
-    cmp: T -> T -> Ordering
+    cmp: (T; T) -> Ordering
 }
 
 trait Increment T {

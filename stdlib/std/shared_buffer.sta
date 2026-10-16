@@ -106,13 +106,13 @@ impl<T where Copy T> IntoIterator (SharedBuffer T) {
 }
 
 impl<T where Eq T> Eq (SharedBuffer T) {
-    eq = (left, right) => {
+    eq = (left; right) => {
         let length = SharedBuffer.length left
         if (length == SharedBuffer.length right) {
             let mut index: USize = 0
             let mut equal: Bool = True
             while (index < length) {
-                if (Eq.eq (SharedBuffer.get_ref_unchecked left index, SharedBuffer.get_ref_unchecked right index)) {
+                if (Eq.eq (SharedBuffer.get_ref_unchecked left index; SharedBuffer.get_ref_unchecked right index)) {
                     index = index + 1
                 } else {
                     equal = False

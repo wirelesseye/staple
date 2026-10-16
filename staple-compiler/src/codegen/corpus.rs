@@ -293,7 +293,7 @@ def apply: <A where Display A> move A ->{IO} () = <A where Display A> move a => 
 apply 6
 let text: String = "seven"
 apply text
-def different: <T where Eq T> (T, T) -> Bool = <T where Eq T> (a, b) => Eq.ne (a, b)
+def different: <T where Eq T> (T, T) -> Bool = <T where Eq T> (a, b) => Eq.ne (a; b)
 let eq_poly: <T where Eq T> (T, T) -> Bool = different
 let ord_poly: <U where Ord U> (U, U) -> Bool = eq_poly
 println "${ord_poly (1, 2):?} ${ord_poly (3, 3):?}"
@@ -310,7 +310,7 @@ use std.fmt.Display
 use std.core.cmp.(Eq, Ord)
 let lam: <T where Display T> move T ->{IO} () = <T where Display T> move value => println "lambda ${value}"
 lam 3
-def compare: <T where Ord T> (T, T) -> Bool = <T where Ord T> (a, b) => Eq.ne (a, b)
+def compare: <T where Ord T> (T, T) -> Bool = <T where Ord T> (a, b) => Eq.ne (a; b)
 let cmp: <T where Ord T> (T, T) -> Bool = compare
 println "${cmp (1, 2):?} ${cmp (2, 2):?}"
 def make: <A where Copy A, Display A> A -> (<T where Display T> move T ->{IO} ()) = <A where Copy A, Display A> prefix => {
@@ -491,7 +491,7 @@ impl Measure Boxed { measure = Boxed value => value + 100 }
 def measured: <T where Measure T> T -> I32 = <T where Measure T> value => Measure.measure value
 def forward: <T where Measure T> T -> I32 = <T where Measure T> value => measured value
 def twice: <T where Measure T> (T, T) -> I32 = <T where Measure T> (a, b) => Measure.measure a + Measure.measure b
-def compare: <T where Ord T> (T, T) -> Bool = <T where Ord T> (a, b) => Eq.ne (a, b)
+def compare: <T where Ord T> (T, T) -> Bool = <T where Ord T> (a, b) => Eq.ne (a; b)
 println "${measured 5} ${forward (Boxed 7)} ${twice (1, 2)} ${compare (1, 2):?} ${compare (3, 3):?}"
 "#,
             "trait-dictionaries",
@@ -512,12 +512,12 @@ impl<T where Measure T> Measure (MeasuredBox T) { measure = MeasuredBox value =>
 impl Measure I32 { measure = value => value }
 type MeasuredNumber = wrap I32
 impl Eq MeasuredNumber {
-    eq = (MeasuredNumber a, MeasuredNumber b) => a == b
-    ne = (a, b) => False
+    eq = (MeasuredNumber a; MeasuredNumber b) => a == b
+    ne = (a; b) => False
 }
 def measured: <T where Measure T> T -> I32 = <T where Measure T> value => Measure.measure value
 def nested: <T where Measure T> move T -> I32 = <T where Measure T> move value => measured (MeasuredBox value)
-def equal: <T where Eq T> (T, T) -> Bool = <T where Eq T> (a, b) => Eq.ne (a, b)
+def equal: <T where Eq T> (T, T) -> Bool = <T where Eq T> (a, b) => Eq.ne (a; b)
 def index: <T where Index T USize> T -> Index.Output T USize = <T where Index T USize> value => value[USize :: 0]
 def replace: <T where MutateIndex T USize> (mut T, move MutateIndex.Value T USize) -> () = <T where MutateIndex T USize> (mut target, move value) => { target[USize :: 0] = value }
 def debug_sum: <T where Debug T> move T ->{IO} () = <T where Debug T> move value => {
@@ -558,7 +558,7 @@ use std.string.ToString
 use std.core.cmp.(Eq, Ord)
 def describe: <T where Display T> T -> String = <T where Display T> value => ToString.to_string value
 def forward: <T where Display T> T -> String = <T where Display T> value => describe value
-def compare: <T where Ord T> (T, T) -> Bool = <T where Ord T> (a, b) => Eq.ne (a, b)
+def compare: <T where Ord T> (T, T) -> Bool = <T where Ord T> (a, b) => Eq.ne (a; b)
 def duplicate: <T where Clone T> T -> T = <T where Clone T> value => Clone.clone value
 def member: <T where Display T> T -> String = <T where Display T> value => {
     let convert: T -> String = ToString.to_string

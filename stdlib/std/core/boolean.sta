@@ -26,7 +26,7 @@ impl Debug Bool {
 }
 
 impl Eq Bool {
-    eq = (left, right) => match (left, right) {
+    eq = (left; right) => match (left, right) {
         (True(), True()) => True,
         (False(), False()) => True,
         _ => False,

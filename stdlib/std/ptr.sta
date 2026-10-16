@@ -133,19 +133,19 @@ impl Convert USize RawOpaqueMutPtr {
 }
 
 impl<T where ?Sized T> Eq (RawPtr T) {
-    eq = (left, right) => ((left as USize) == (right as USize))
+    eq = (left; right) => ((left as USize) == (right as USize))
 }
 
 impl<T where ?Sized T> Eq (RawMutPtr T) {
-    eq = (left, right) => ((left as USize) == (right as USize))
+    eq = (left; right) => ((left as USize) == (right as USize))
 }
 
 impl Eq RawOpaquePtr {
-    eq = (left, right) => ((left as USize) == (right as USize))
+    eq = (left; right) => ((left as USize) == (right as USize))
 }
 
 impl Eq RawOpaqueMutPtr {
-    eq = (left, right) => ((left as USize) == (right as USize))
+    eq = (left; right) => ((left as USize) == (right as USize))
 }
 
 companion<T where ?Sized T> RawPtr T {

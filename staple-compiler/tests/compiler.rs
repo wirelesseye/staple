@@ -4586,10 +4586,10 @@ fn type_checks_transparent_aliases() {
 #[test]
 fn operator_traits_and_methods_require_explicit_imports() {
     for (trait_name, method, arguments) in [
-        ("Add", "add", "(1, 2)"),
-        ("Subtract", "subtract", "(4, 3)"),
-        ("Multiply", "multiply", "(2, 3)"),
-        ("Divide", "divide", "(8, 2)"),
+        ("Add", "add", "(1; 2)"),
+        ("Subtract", "subtract", "(4; 3)"),
+        ("Multiply", "multiply", "(2; 3)"),
+        ("Divide", "divide", "(8; 2)"),
         ("Neg", "negate", "operand"),
         ("Not", "not", "flag"),
     ] {
@@ -4678,10 +4678,10 @@ fn supports_contextual_float_literals_arithmetic_and_partial_ordering() {
         "let less: Bool = 1.0 < 2.0\n",
         "let equal: Bool = 2.0 == 2.0\n",
         "let scaled: F64 = scale_float 2.0\n",
-        "let unordered: Option Ordering = PartialOrd.partial_cmp ((0.0 / 0.0), 1.0)\n",
-        "let ordered_less: Ordering = Ord.cmp (1, 2)\n",
-        "let ordered_equal: Ordering = Ord.cmp (2, 2)\n",
-        "let ordered_greater: Ordering = Ord.cmp (3, 2)\n",
+        "let unordered: Option Ordering = PartialOrd.partial_cmp ((0.0 / 0.0); 1.0)\n",
+        "let ordered_less: Ordering = Ord.cmp (1; 2)\n",
+        "let ordered_equal: Ordering = Ord.cmp (2; 2)\n",
+        "let ordered_greater: Ordering = Ord.cmp (3; 2)\n",
         "single ()\n",
     ));
     let defaulted = module
@@ -4743,7 +4743,7 @@ fn rejects_invalid_float_contexts_and_float_ord() {
     );
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("def compare: <T where Copy T, Ord T> T -> T -> Ordering = <T where Copy T, Ord T> left => right => Ord.cmp (left, right)\nlet invalid = compare 1.0 2.0\n"))
+        .check(resolve("def compare: <T where Copy T, Ord T> T -> T -> Ordering = <T where Copy T, Ord T> left => right => Ord.cmp (left; right)\nlet invalid = compare 1.0 2.0\n"))
         .expect_err_diagnostics("floats should not implement Ord");
     assert!(!diagnostics.is_empty());
 }
@@ -4784,7 +4784,7 @@ fn requires_only_the_core_equality_method() {
 
     let module = type_check(concat!(
         "type Point = wrap (x: I32, y: I32)\n",
-        "impl Eq Point { eq = (left, right) => left.x == right.x && left.y == right.y }\n",
+        "impl Eq Point { eq = (left; right) => left.x == right.x && left.y == right.y }\n",
         "let a: Point = Point (x: 1, y: 2)\n",
         "let b: Point = Point (x: 1, y: 2)\n",
         "let c: Point = Point (x: 3, y: 4)\n",
@@ -8859,7 +8859,7 @@ fn compares_refs_through_the_standard_library_eq_implementation() {
         "let nested: Bool = Ref (Ref 3) == Ref (Ref 3)\n",
         "type Bag = wrap Buffer I32\n",
         "impl Eq Bag {\n",
-        "  eq = (left, right) => Buffer.capacity left.* == Buffer.capacity right.*\n",
+        "  eq = (left; right) => Buffer.capacity left.* == Buffer.capacity right.*\n",
         "}\n",
         "let bags: Bool = Ref (Bag (Buffer.with_capacity 2)) == Ref (Bag (Buffer.with_capacity 2))\n",
         "let bags_differ: Bool = Ref (Bag (Buffer.with_capacity 2)) != Ref (Bag (Buffer.with_capacity 3))\n",
@@ -9563,7 +9563,7 @@ fn uses_generic_default_trait_members_and_concrete_overrides() {
 #[test]
 fn default_trait_members_use_prerequisites_multiple_arguments_and_macros() {
     let module = type_check(concat!(
-        "trait Same T where Copy T, Eq T { same: (T, T) -> Bool = (left, right) => Eq.eq (left, right) }\n",
+        "trait Same T where Copy T, Eq T { same: (T, T) -> Bool = (left, right) => Eq.eq (left; right) }\n",
         "trait Select Value { select: (Bool, move Value, move Value) -> Value = (condition, move left, move right) => when { condition => left, else => right } }\n",
         "trait First (Left, Right) { first: (move Left, Right) -> Left = (move left, right) => left }\n",
         "impl Same I32 {}\n",
@@ -9868,8 +9868,8 @@ fn prerequisite_copy_bounds_are_visible_to_ownership_checking() {
 fn substitutes_product_parameters_into_multiple_prerequisites() {
     type_check(concat!(
         "trait BothEqual (Left, Right) where Eq Left, Eq Right { equal: (Left, Left, Right, Right) -> (Bool, Bool) }\n",
-        "impl BothEqual (I32, I32) { equal = (left_a, left_b, right_a, right_b) => (Eq.eq (left_a, left_b), Eq.eq (right_a, right_b)) }\n",
-        "def compare_both: <Left, Right where Copy Left, Copy Right, BothEqual (Left, Right)> (Left, Left, Right, Right) -> (Bool, Bool) = <Left, Right where Copy Left, Copy Right, BothEqual (Left, Right)> (left_a, left_b, right_a, right_b) => (Eq.eq (left_a, left_b), Eq.eq (right_a, right_b))\n",
+        "impl BothEqual (I32, I32) { equal = (left_a, left_b, right_a, right_b) => (Eq.eq (left_a; left_b), Eq.eq (right_a; right_b)) }\n",
+        "def compare_both: <Left, Right where Copy Left, Copy Right, BothEqual (Left, Right)> (Left, Left, Right, Right) -> (Bool, Bool) = <Left, Right where Copy Left, Copy Right, BothEqual (Left, Right)> (left_a, left_b, right_a, right_b) => (Eq.eq (left_a; left_b), Eq.eq (right_a; right_b))\n",
         "let result: (Bool, Bool) = compare_both (1, 1, 2, 2)\n",
     ));
 }
@@ -13359,9 +13359,9 @@ fn call_site_type_arguments_work_in_generic_bodies_and_macro_quotes() {
         "let value = relay.<I32> 4\n",
         "macro make_list: Type -> Expr = T => parse_quote { std.list.List.new.<$T> () }\n",
         "let list = make_list I32\n",
-        "let same = Eq.eq.<I32> (1, 1)\n",
-        "let equals = Eq.eq.<I32>\n",
-        "let same_again = equals (2, 2)\n",
+        "let same = Eq.eq 1 1\n",
+        "let equals: (I32; I32) -> Bool = Eq.eq\n",
+        "let same_again = equals 2 2\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
@@ -13576,8 +13576,8 @@ fn checked_schemes_preserve_invalid_generic_body_diagnostics() {
 #[test]
 fn checked_schemes_preserve_trait_argument_inference_from_expected_types() {
     type_check(concat!(
-        "let equals: (I32, I32) -> Bool = Eq.eq.<_>\n",
-        "let same: Bool = equals (1, 1)\n",
+        "let equals: (I32; I32) -> Bool = Eq.eq.<_>\n",
+        "let same: Bool = equals 1 1\n",
     ));
 }
 
@@ -14144,6 +14144,27 @@ fn trait_member_parameters_admit_slotted_values() {
         CodeGenerator::new(&context)
             .compile_root(&lower(&module))
             .expect("trait-member generics admit slotted callback parameters and type arguments");
+    }
+}
+
+#[test]
+fn explicitly_instantiated_slotted_trait_members_take_juxtaposed_arguments() {
+    let declarations = concat!(
+        "trait Pick T { pick: (T; T) -> T }\n",
+        "impl Pick I32 { pick = (left; _) => left }\n",
+        "trait Pair T { pair: <A> (T; move A) -> A }\n",
+        "impl Pair I32 { pair = <A> (_; move value) => value }\n",
+    );
+    for use_site in [
+        "let picked = Pick.pick.<I32> 1 2\n",
+        "let picked = Pick.pick.<I32> ...(1; 2)\n",
+        "let paired = Pair.pair.<I32, String> 1 \"text\"\n",
+    ] {
+        let module = type_check(&format!("{declarations}{use_site}"));
+        let context = Context::create();
+        CodeGenerator::new(&context)
+            .compile_root(&lower(&module))
+            .expect("explicit type arguments keep a trait member's slots");
     }
 }
 

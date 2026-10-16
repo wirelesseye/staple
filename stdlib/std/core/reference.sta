@@ -18,5 +18,5 @@ companion<T> Ref T {
 }
 
 impl<T where Eq T> Eq (Ref T) {
-    eq = (Ref left, Ref right) => Eq.eq (left, right)
+    eq = (Ref left; Ref right) => Eq.eq (left; right)
 }

@@ -677,7 +677,9 @@ fn lower_binary_expression(
         named_spread: false,
     };
     let argument = Expression::Product(staple_syntax::ProductExpression {
-        slotted: false,
+        // Every binary operator trait declares a slotted parameter, so the
+        // operands fill separate slots.
+        slotted: true,
         syntax: freshened_syntax(&syntax, next_syntax_id),
         elements: vec![
             element(*left, next_syntax_id),
@@ -6475,11 +6477,12 @@ impl MacroExpander {
     }
 
     /// Folds a lowered builtin arithmetic/comparison operator call (e.g.
-    /// `Add.add left right` for `left + right`), the same way the language's
-    /// former `infix` expression evaluator once folded operator chains
-    /// directly by operator name. Returns `None` when `head`/`arguments`
+    /// `Add.add (left; right)` for `left + right`, or
+    /// `PartialOrd.lt (left; right)` for `left < right`), the same way the
+    /// language's former `infix` expression evaluator once folded operator
+    /// chains directly by operator name. Returns `None` when `head`/`arguments`
     /// doesn't match one of these ten known trait/method pairs with exactly
-    /// two arguments, so the caller falls back to ordinary call evaluation
+    /// two operands, so the caller falls back to ordinary call evaluation
     /// (this also means `..`/`..=`, which lower to plain function calls
     /// rather than a trait method, are left to that fallback and remain
     /// unsupported at compile time, unchanged from before).
@@ -6502,24 +6505,30 @@ impl MacroExpander {
             ("PartialOrd", "gt", ">"),
             ("PartialOrd", "ge", ">="),
         ];
-        // Lowering rewrites `left <op> right` to `Trait.method (left, right)`,
-        // a single call whose argument is a two-element positional product.
-        let [argument] = arguments else {
-            return None;
+        // Lowering rewrites `left <op> right` to `Trait.method (left; right)`:
+        // a single call whose argument is a two-element slotted product. A
+        // directly written juxtaposed call (`Trait.method left right`)
+        // supplies one slot per argument instead.
+        let (left_argument, right_argument) = match arguments {
+            [left, right] => (*left, *right),
+            [argument] => {
+                let Expression::Product(product) = argument else {
+                    return None;
+                };
+                if product.elements.len() != 2
+                    || product.elements.iter().any(|element| {
+                        element.spread || element.named_spread || element.name.is_some()
+                    })
+                {
+                    return None;
+                }
+                (
+                    &product.elements[0].value,
+                    &product.elements[1].value,
+                )
+            }
+            _ => return None,
         };
-        let Expression::Product(product) = argument else {
-            return None;
-        };
-        if product.elements.len() != 2
-            || product
-                .elements
-                .iter()
-                .any(|element| element.spread || element.named_spread || element.name.is_some())
-        {
-            return None;
-        }
-        let left_argument = &product.elements[0].value;
-        let right_argument = &product.elements[1].value;
         let Expression::Access(access) = head else {
             return None;
         };

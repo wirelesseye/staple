@@ -9795,12 +9795,48 @@ impl TypeChecker {
                         return CheckedType::Error;
                     }
                 }
-                if let Expression::TypeApplication(application) = call.callee.as_ref()
-                    && !call.spread
-                    && let [method] = self
-                        .pipe_trait_candidates(module, application.value.syntax().id)
-                        .as_slice()
-                    && let CheckedType::Function(template) = self.trait_method_types[method].clone()
+                let explicit_trait_member = match call.callee.as_ref() {
+                    Expression::TypeApplication(application) if !call.spread => {
+                        match self
+                            .pipe_trait_candidates(module, application.value.syntax().id)
+                            .as_slice()
+                        {
+                            [method] => match self.trait_method_types[method].clone() {
+                                CheckedType::Function(template) => Some((application, template)),
+                                _ => None,
+                            },
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                // A slotted member takes one juxtaposed argument per slot through
+                // the ordinary call path below; only a whole slotted value is
+                // diagnosed here, on a trial so other arguments are checked once.
+                if let Some((application, template)) = &explicit_trait_member
+                    && template.is_slotted()
+                {
+                    let mut trial = self.clone();
+                    let argument = trial.check_expression(module, &call.argument);
+                    let mut expected_function = template.clone();
+                    expected_function.parameter = Box::new(argument.clone());
+                    expected_function.result = Box::new(CheckedType::Inferred);
+                    if let CheckedType::Function(function) = trial.check_explicit_type_application(
+                        module,
+                        application,
+                        Some(&CheckedType::Function(expected_function)),
+                    ) && fills_whole_slotted_parameter(&function.parameter, &argument)
+                    {
+                        *self = trial;
+                        self.diagnostics.push(Diagnostic::new(
+                            call.argument.syntax().span.clone(),
+                            whole_argument_hint(call),
+                        ));
+                        return CheckedType::Error;
+                    }
+                }
+                if let Some((application, template)) = explicit_trait_member
+                    && !template.is_slotted()
                 {
                     let argument = self.check_expression(module, &call.argument);
                     let mut expected_function = template;
@@ -13792,8 +13828,8 @@ impl TypeChecker {
     }
 
     /// Checks the argument of a trait-method call written as a positional
-    /// product literal (`Trait.method (left, right)`, which is how the parser
-    /// desugars the `(T, T)` operators) against a candidate method whose
+    /// product literal (`Trait.method (left; right)`, which is how the parser
+    /// desugars the `(T; T)` operators) against a candidate method whose
     /// parameter is a product of the same arity. Integer and float literal
     /// elements are checked *after* the other elements, once the trait's type
     /// parameters have been inferred, so that e.g. `usize_value == 0` still

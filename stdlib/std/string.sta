@@ -85,11 +85,11 @@ companion String {
 }
 
 impl Add String {
-    add = (left, right) => __string_add (left, right)
+    add = (left; right) => __string_add (left, right)
 }
 
 impl Eq String {
-    eq = (String left, String right) => Eq.eq (left, right)
+    eq = (String left; String right) => Eq.eq (left; right)
 }
 
 impl Default String { default = () => "" }

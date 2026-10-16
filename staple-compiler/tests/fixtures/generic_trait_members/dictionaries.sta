@@ -108,8 +108,8 @@ def nested = <T where Visit T, Fallback T, Show T, Compare T, Convert T String, 
     println (EffectEcho.effect_echo (item, noisy))
     let text = ToString.to_string
     println (consume_text text)
-    let equals: <U where Ord U> (U, U) -> Bool = Eq.eq
-    println "${equals (1, 1)}"
+    let equals: <U where Ord U> (U; U) -> Bool = Eq.eq
+    println "${equals 1 1}"
 }
 let stored_nested = nested
 let int_closure = stored_nested 1
