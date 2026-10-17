@@ -10288,6 +10288,69 @@ fn rejects_a_blanket_implementation_that_overlaps_an_earlier_concrete_one_before
 }
 
 #[test]
+fn rejects_sum_implementations_that_overlap_through_a_row_parameter() {
+    // `Result T E` is `Ok T | E`, and `E` may be `Never`, one alternative,
+    // or a sum, in whichever order the alternatives sort.
+    for concrete in [
+        "Ok I32",
+        "Ok I32 | String",
+        "Ok I32 | Bool",
+        "Bool | Ok I32",
+        "Ok I32 | String | Bool",
+        "Ok I32 | Ok String",
+    ] {
+        let source = format!(
+            "trait Try R {{ name: move R -> String }}\n\
+             impl<T, E> Try (Result T E) {{ name = move value => \"generic\" }}\n\
+             impl Try ({concrete}) {{ name = move value => \"concrete\" }}\n"
+        );
+        let diagnostics = TypeChecker::new()
+            .check(resolve(&source))
+            .expect_err_diagnostics(&format!("`{concrete}` overlaps `Result T E`"));
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("duplicate trait implementation")),
+            "`{concrete}` should be rejected as overlapping `Result T E`",
+        );
+    }
+    for (first, second) in [
+        ("impl<T> Try (Ok T | Bool)", "impl<T, E> Try (Ok T | E | Bool)"),
+        ("impl<T, E> Try (Ok T | E)", "impl<T, E> Try (Ok T | E | Bool)"),
+        ("impl<T> Try (Ok T | String)", "impl<U> Try (Ok I32 | U)"),
+    ] {
+        let source = format!(
+            "trait Try R {{ name: move R -> String }}\n\
+             {first} {{ name = move value => \"first\" }}\n\
+             {second} {{ name = move value => \"second\" }}\n"
+        );
+        let diagnostics = TypeChecker::new()
+            .check(resolve(&source))
+            .expect_err_diagnostics(&format!("`{first}` overlaps `{second}`"));
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("duplicate trait implementation")),
+            "`{first}` should be rejected as overlapping `{second}`",
+        );
+    }
+}
+
+#[test]
+fn accepts_disjoint_sum_implementations_and_binds_a_row_parameter_to_a_sum() {
+    type_check(concat!(
+        "trait Try R { name: move R -> String }\n",
+        "impl<T, E> Try (Result T E) { name = move value => \"generic\" }\n",
+        "impl Try (Bool | String) { name = move value => \"concrete\" }\n",
+        "impl Try I32 { name = move value => \"single\" }\n",
+        "let wide: Ok I32 | String | Bool = Ok 1\n",
+        "let only: Ok I32 = Ok 1\n",
+        "let other: Bool | String = True\n",
+        "let names: (String, String, String) = (Try.name wide, Try.name only, Try.name other)\n",
+    ));
+}
+
+#[test]
 fn cyclic_trait_implementation_bound_fails_without_hanging() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
