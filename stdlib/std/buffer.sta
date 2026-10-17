@@ -1,7 +1,5 @@
 pub mod
 
-use package.sized.sized_opaque
-use package.recursive_constructor.recursive_constructor
 
 use package.shared_buffer.SharedBuffer
 use package.clone.Clone

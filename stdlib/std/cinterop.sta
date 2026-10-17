@@ -5,7 +5,6 @@ pub type InteriorNul
 
 use package.string.InvalidUtf8
 
-use package.sized.sized_opaque
 
 use package.syntax.(Expr)
 

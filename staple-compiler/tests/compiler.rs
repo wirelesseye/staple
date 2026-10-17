@@ -12090,9 +12090,11 @@ fn rejects_types_that_recurse_through_wrappers_storing_their_parameter_inline() 
             "type Loop = wrap (pair: Pair Loop)\n",
         )))
         .expect_err_diagnostics("`Pair` stores its parameter inline, so `Loop` contains itself");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("cyclic type definition")
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("cyclic type definition") })
+    );
 }
 
 #[test]
@@ -12102,9 +12104,11 @@ fn rejects_constructing_a_shared_buffer_from_one_value() {
         "let fake: SharedBuffer I32 = SharedBuffer 5\n",
     ))
     .expect_err_diagnostics("an opaque SharedBuffer has no constructor");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("`SharedBuffer` is not a value")
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("`SharedBuffer` is not a value") })
+    );
 }
 
 #[test]
@@ -12320,10 +12324,10 @@ fn sized_opaque_modifier_is_package_visible_in_stdlib() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for source in [
         "@sized_opaque\ntype Token = opaque\n",
-        "@std.sized.sized_opaque\ntype Token = opaque\n",
-        "use std.sized.(sized_opaque)\n@sized_opaque\ntype Token = opaque\n",
-        "use std.sized.*\n@sized_opaque\ntype Token = opaque\n",
-        "pub use std.sized.sized_opaque\n@sized_opaque\ntype Token = opaque\n",
+        "@std.annotation.sized_opaque\ntype Token = opaque\n",
+        "use std.annotation.(sized_opaque)\n@sized_opaque\ntype Token = opaque\n",
+        "use std.annotation.*\n@sized_opaque\ntype Token = opaque\n",
+        "pub use std.annotation.sized_opaque\n@sized_opaque\ntype Token = opaque\n",
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
@@ -12362,10 +12366,10 @@ fn recursive_constructor_modifier_is_package_visible_in_stdlib() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for source in [
         "@recursive_constructor\ntype Token = opaque\n",
-        "@std.recursive_constructor.recursive_constructor\ntype Token = opaque\n",
-        "use std.recursive_constructor.(recursive_constructor)\n@recursive_constructor\ntype Token = opaque\n",
-        "use std.recursive_constructor.*\n@recursive_constructor\ntype Token = opaque\n",
-        "pub use std.recursive_constructor.recursive_constructor\n@recursive_constructor\ntype Token = opaque\n",
+        "@std.annotation.recursive_constructor\ntype Token = opaque\n",
+        "use std.annotation.(recursive_constructor)\n@recursive_constructor\ntype Token = opaque\n",
+        "use std.annotation.*\n@recursive_constructor\ntype Token = opaque\n",
+        "pub use std.annotation.recursive_constructor\n@recursive_constructor\ntype Token = opaque\n",
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
@@ -12469,7 +12473,7 @@ fn sized_opaque_stdlib_contract_and_validation() {
     let diagnostics = stdlib_modifier_diagnostics(
         "std/number/types.sta",
         "@sized_opaque\npub type I32 = opaque",
-        "@std.sized.sized_opaque\n@identity\npub type I32 = opaque\nuse std.syntax.Item\nmacro @identity: Item -> Item = item => item",
+        "@std.annotation.sized_opaque\n@identity\npub type I32 = opaque\nuse std.syntax.Item\nmacro @identity: Item -> Item = item => item",
     );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
@@ -13133,7 +13137,7 @@ fn recursive_constructor_stdlib_contract_and_validation() {
             "`@recursive_constructor` may only modify a type declaration",
         ),
         (
-            "std/recursive_constructor.sta",
+            "std/annotation.sta",
             "macro @recursive_constructor: Item -> Item",
             "macro @recursive_constructor: Item -> Item = item => item",
             "compiler-provided modifier `@recursive_constructor` must be bodyless",
@@ -13148,7 +13152,7 @@ fn recursive_constructor_stdlib_contract_and_validation() {
     let diagnostics = stdlib_modifier_diagnostics(
         "std/reference.sta",
         "@recursive_constructor\npub type Ref",
-        "@std.recursive_constructor.recursive_constructor\npub type Ref",
+        "@std.annotation.recursive_constructor\npub type Ref",
     );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }

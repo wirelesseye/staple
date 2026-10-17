@@ -1231,33 +1231,33 @@ impl MacroExpander {
                                 MacroKind::CString
                             } else if source_module
                                 .path
-                                .ends_with(std::path::Path::new("std/doc.sta"))
+                                .ends_with(std::path::Path::new("std/annotation.sta"))
                                 && declaration.modifier
                                 && declaration.name == "doc"
                             {
                                 MacroKind::Doc
                             } else if source_module
                                 .path
-                                .ends_with(std::path::Path::new("std/feature.sta"))
+                                .ends_with(std::path::Path::new("std/annotation.sta"))
                                 && declaration.modifier
                                 && declaration.name == "feature"
                             {
                                 MacroKind::Feature
                             } else if source_module
                                 .path
-                                .ends_with(std::path::Path::new("std/no_prelude.sta"))
+                                .ends_with(std::path::Path::new("std/annotation.sta"))
                                 && declaration.modifier
                                 && declaration.name == "no_prelude"
                             {
                                 MacroKind::NoPrelude
                             } else if standard_library_directory.as_ref().is_some_and(|root| {
-                                source_module.path == root.join("sized.sta")
+                                source_module.path == root.join("annotation.sta")
                             }) && declaration.modifier
                                 && declaration.name == "sized_opaque"
                             {
                                 MacroKind::SizedOpaque
                             } else if standard_library_directory.as_ref().is_some_and(|root| {
-                                source_module.path == root.join("recursive_constructor.sta")
+                                source_module.path == root.join("annotation.sta")
                             }) && declaration.modifier
                                 && declaration.name == "recursive_constructor"
                             {
@@ -1625,7 +1625,15 @@ impl MacroExpander {
             if let Some(core) = core
                 && source_module.id != core
             {
-                for ((module, name, modifier), keys) in &public_macros {
+                // The implicit import behaves like a private `use std.core.*`, so
+                // same-package modules also see its package-visible items.
+                let (macros, helpers, namespaces) =
+                    if macro_same_package(program, core, source_module.id) {
+                        (&package_macros, &package_helpers, &package_namespaces)
+                    } else {
+                        (&public_macros, &public_helpers, &public_namespaces)
+                    };
+                for ((module, name, modifier), keys) in macros {
                     if *module != core {
                         continue;
                     }
@@ -1638,7 +1646,7 @@ impl MacroExpander {
                         .entry(name.clone())
                         .or_insert_with(|| keys.clone());
                 }
-                for ((module, name), binding) in &public_helpers {
+                for ((module, name), binding) in helpers {
                     if *module == core {
                         scopes[source_module.id.0]
                             .helpers
@@ -1646,7 +1654,7 @@ impl MacroExpander {
                             .or_insert_with(|| binding.clone());
                     }
                 }
-                for ((module, name), target) in &public_namespaces {
+                for ((module, name), target) in namespaces {
                     if *module == core {
                         scopes[source_module.id.0]
                             .namespaces
@@ -6530,10 +6538,7 @@ impl MacroExpander {
                 {
                     return None;
                 }
-                (
-                    &product.elements[0].value,
-                    &product.elements[1].value,
-                )
+                (&product.elements[0].value, &product.elements[1].value)
             }
             _ => return None,
         };

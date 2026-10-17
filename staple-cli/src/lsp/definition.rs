@@ -1614,7 +1614,7 @@ mod tests {
         assert!(
             doc.targets
                 .iter()
-                .any(|target| target.path.ends_with("std/doc.sta"))
+                .any(|target| target.path.ends_with("std/annotation.sta"))
         );
     }
 

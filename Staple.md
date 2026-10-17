@@ -4165,7 +4165,7 @@ They may be referenced through `Ref`, whose parameter accepts unsized types,
 but cannot be used by value or satisfy implicit `Sized` bounds.
 
 The standard-library-only intrinsic modifier `@sized_opaque`, declared in
-`std.sized` with `pub(package)` visibility, marks opaque types with
+`std.annotation` with `pub(package)` visibility, marks opaque types with
 compiler-supplied sized representations. Compiler-known sized opaque types such as `std.core.I32` and
 `std.ptr.RawPtr` must carry this modifier. The modifier grants sizedness;
 sized opaque types are `Copy` by default. The stdlib explicitly declares

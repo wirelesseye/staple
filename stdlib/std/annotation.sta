@@ -1,0 +1,39 @@
+pub mod
+
+use package.syntax.(Expr, Item, Parenthesized)
+
+/// Attaches documentation text to an item.
+///
+/// # Example
+///
+/// ```staple
+/// @doc("Returns the configured port.")
+/// pub def port = () => 8080
+/// ```
+pub macro @doc: (Parenthesized (Expr); Item) -> Item
+
+/// Includes an item only when the named package feature is enabled.
+///
+/// # Example
+///
+/// ```staple
+/// @feature("tracing")
+/// def trace = value => log value
+/// ```
+pub macro @feature: (Parenthesized (Expr); Item) -> Item
+
+/// Disables the implicit standard prelude for the current module.
+///
+/// # Example
+///
+/// ```staple
+/// @no_prelude
+/// pub mod
+/// ```
+pub macro @no_prelude: Item -> Item
+
+/// Marks a compiler-represented opaque type as sized. Reserved for the standard library.
+pub(package) macro @sized_opaque: Item -> Item
+
+/// Marks a compiler-owned recursive type constructor. Reserved for the standard library.
+pub(package) macro @recursive_constructor: Item -> Item

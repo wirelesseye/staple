@@ -1,6 +1,5 @@
 pub mod
 
-use package.sized.sized_opaque
 
 @sized_opaque
 pub type Never = opaque

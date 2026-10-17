@@ -1,8 +1,6 @@
 pub mod
 
-use package.recursive_constructor.recursive_constructor
 
-use package.sized.sized_opaque
 
 /// Compiler-owned, compile-time-only syntax values. Identifiers and calls expose
 /// their data in the first structured-syntax slice; remaining expressions round-trip

@@ -2,8 +2,6 @@ pub mod
 
 use package.buffer.Buffer
 
-use package.recursive_constructor.recursive_constructor
-use package.sized.sized_opaque
 
 use package.index.(Index, MutateIndex)
 use package.iterator.(IntoIterator, Iterator)
