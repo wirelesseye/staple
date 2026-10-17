@@ -4298,7 +4298,10 @@ pub type Shared = pub(package) wrap (value: I32)
 package identity. `= pub(package) wrap T` keeps representation access inside
 that package while the type name stays public. A package-visible
 re-export uses `pub(package) use`; ordinary `pub use` cannot promote a
-package-visible declaration into an external interface. Package visibility is
+package-visible declaration into an external interface. A `pub use module.*`
+glob carries package-visible names at package visibility: same-package modules
+reach them through the re-export, while the re-exporting module's public
+interface omits them. Package visibility is
 rejected when run without a package manifest. Thus visibility forms
 the lattice `private < package < public`: public representations may reference
 only public types, while package representations may also reference

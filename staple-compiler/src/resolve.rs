@@ -2376,13 +2376,25 @@ impl NameResolver {
                     let Item::UseDeclaration(declaration) = item else {
                         continue;
                     };
-                    if declaration.visibility != Visibility::Package {
-                        continue;
-                    }
                     let Some(imported) = program.imported_module(declaration.syntax.id) else {
                         continue;
                     };
-                    let visible = if self.same_package(source_module.id, imported) {
+                    let same_package = self.same_package(source_module.id, imported);
+                    // A plain `pub use` glob re-exports package-visible items
+                    // too, but only through `package_interfaces`: the public
+                    // interface never gains them, while other modules in the
+                    // same package reach them through the re-export.
+                    let exports_package_items = match declaration.visibility {
+                        Visibility::Package => true,
+                        Visibility::Public => {
+                            same_package && self.use_kind(declaration) == UseKind::Glob
+                        }
+                        Visibility::Private => false,
+                    };
+                    if !exports_package_items {
+                        continue;
+                    }
+                    let visible = if same_package {
                         &previous
                     } else {
                         &self.interfaces

@@ -1513,13 +1513,21 @@ impl MacroExpander {
                     let Item::UseDeclaration(use_) = item else {
                         continue;
                     };
-                    if use_.visibility != Visibility::Package {
-                        continue;
-                    }
                     let Some(imported) = program.imported_module(use_.syntax.id) else {
                         continue;
                     };
-                    if !macro_same_package(program, source_module.id, imported) {
+                    let same_package = macro_same_package(program, source_module.id, imported);
+                    // A plain `pub use` glob also re-exports package-visible
+                    // macros, helpers, and namespaces, but only at package
+                    // visibility; the public maps never gain them.
+                    let exports_package_items = match use_.visibility {
+                        Visibility::Package => same_package,
+                        Visibility::Public => {
+                            same_package && provisional_use_kind(program, use_) == UseKind::Glob
+                        }
+                        Visibility::Private => false,
+                    };
+                    if !exports_package_items {
                         continue;
                     }
                     let names = match provisional_use_kind(program, use_) {

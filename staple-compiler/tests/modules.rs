@@ -2508,6 +2508,140 @@ fn resolves_package_visible_items_within_a_package() {
 }
 
 #[test]
+fn glob_reexports_package_visible_items_within_a_package() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "src/main.sta",
+        concat!(
+            "use package.bridge.(answer, Shared)\n",
+            "let result: I32 = answer\n",
+            "let shared: Shared = Shared result\n",
+        ),
+    );
+    fixture.write(
+        "src/bridge.sta",
+        "pub(package) mod\npub use package.middle.*\n",
+    );
+    fixture.write(
+        "src/middle.sta",
+        "pub(package) mod\npub use package.internal.*\n",
+    );
+    fixture.write(
+        "src/internal.sta",
+        concat!(
+            "pub(package) mod\n",
+            "pub(package) let answer: I32 = 42\n",
+            "pub type Shared = pub(package) wrap I32\n",
+        ),
+    );
+    fs::write(fixture.root.join("staple.kdl"), "package \"app\"\n").unwrap();
+
+    let graph = staple_project::load_package_graph(&fixture.root.join("staple.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
+        .with_package_graph(graph)
+        .load_package_graph()
+        .expect("package-visible modules should load within their package");
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .map_err(format_diagnostics)
+        .expect("a public glob should re-export package-visible items within its package");
+    TypeChecker::new()
+        .check(resolved)
+        .map_err(format_diagnostics)
+        .expect("the glob-re-exported package-visible value should type-check");
+}
+
+#[test]
+fn glob_reexports_package_visible_macros_within_a_package() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "src/main.sta",
+        concat!(
+            "use package.bridge.stamp\n",
+            "@stamp\n",
+            "def imported = () => 1\n",
+        ),
+    );
+    fixture.write(
+        "src/bridge.sta",
+        "pub(package) mod\npub use package.internal.*\n",
+    );
+    fixture.write(
+        "src/internal.sta",
+        "pub(package) mod\npub(package) macro @stamp: Item -> Item = item => item\n",
+    );
+    fs::write(fixture.root.join("staple.kdl"), "package \"app\"\n").unwrap();
+
+    let graph = staple_project::load_package_graph(&fixture.root.join("staple.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
+        .with_package_graph(graph)
+        .load_package_graph()
+        .expect("package-visible modules should load within their package");
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .map_err(format_diagnostics)
+        .expect("a public glob should re-export a package-visible macro within its package");
+    TypeChecker::new()
+        .check(resolved)
+        .map_err(format_diagnostics)
+        .expect("the glob-re-exported macro output should type-check");
+}
+
+#[test]
+fn rejects_glob_reexported_package_visible_items_outside_the_package() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "app/src/main.sta",
+        "use lib.bridge.*\nlet result: I32 = answer\n",
+    );
+    fixture.write("lib/src/bridge.sta", "pub use package.internal.*\n");
+    fixture.write(
+        "lib/src/internal.sta",
+        "pub(package) mod\npub(package) let answer: I32 = 42\n",
+    );
+    fs::write(
+        fixture.root.join("app/staple.kdl"),
+        "package \"app\" { dependencies { lib path=\"../lib\" } }\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("lib/staple.kdl"),
+        "package \"lib\" { kind \"library\" }\n",
+    )
+    .unwrap();
+
+    let graph = staple_project::load_package_graph(&fixture.root.join("app/staple.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
+        .with_package_graph(graph)
+        .load_package_graph()
+        .expect("the dependency package should load");
+    let error = NameResolver::new()
+        .resolve_program(program)
+        .map(|_| ())
+        .map_err(format_diagnostics)
+        .expect_err("package-visible items must stay inside their package");
+    assert!(error.contains("answer"), "{error}");
+}
+
+#[test]
 fn rejects_package_visibility_without_a_manifest() {
     let fixture = Fixture::new();
     fixture.write("main.sta", "pub(package) let secret = 42\nsecret\n");
