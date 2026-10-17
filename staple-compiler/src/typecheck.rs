@@ -18689,18 +18689,80 @@ fn unify_impl_headers(
                         )
                     })
         }
-        (CheckedType::Sum(left), CheckedType::Sum(right)) => {
-            left.alternatives.len() == right.alternatives.len()
-                && left
-                    .alternatives
-                    .iter()
-                    .zip(&right.alternatives)
-                    .all(|(left, right)| {
-                        unify_impl_headers(left, right, free_parameters, substitutions)
-                    })
+        (CheckedType::Sum(_), _) | (_, CheckedType::Sum(_)) => {
+            unify_sum_headers(&left, &right, free_parameters, substitutions)
         }
         _ => left == right,
     }
+}
+
+/// Unifies two implementation header types when at least one is a sum.
+/// Sums are unordered sets, and an unbound bare parameter alternative is a
+/// row standing for any further alternatives — none (`Never`), one, or a
+/// sum — so `Ok T | E` covers both `Ok I32` and `Ok I32 | String | Bool`.
+/// The two sides unify when every concrete alternative on each side
+/// unifies with some concrete alternative on the other side or is absorbed
+/// by the other side's row. Row bindings are left unrecorded, which can
+/// only over-report overlap, matching the check's conservative bias.
+fn unify_sum_headers(
+    left: &CheckedType,
+    right: &CheckedType,
+    free_parameters: &HashSet<TypeParameterId>,
+    substitutions: &mut HashMap<TypeParameterId, CheckedType>,
+) -> bool {
+    fn split(
+        value_type: &CheckedType,
+        free_parameters: &HashSet<TypeParameterId>,
+        substitutions: &HashMap<TypeParameterId, CheckedType>,
+    ) -> (Vec<CheckedType>, bool) {
+        let alternatives = match substitute_type_fixpoint(value_type.clone(), substitutions) {
+            CheckedType::Sum(sum) => match normalize_substituted_sum(sum.alternatives) {
+                CheckedType::Sum(sum) => sum.alternatives,
+                CheckedType::Never => Vec::new(),
+                other => vec![other],
+            },
+            CheckedType::Never => Vec::new(),
+            other => vec![other],
+        };
+        let (rows, concrete): (Vec<_>, Vec<_>) =
+            alternatives.into_iter().partition(|alternative| {
+                matches!(alternative, CheckedType::Parameter { id, .. } if free_parameters.contains(id))
+            });
+        (concrete, !rows.is_empty())
+    }
+
+    fn cover(
+        obligations: &[(&CheckedType, &[CheckedType], bool)],
+        free_parameters: &HashSet<TypeParameterId>,
+        substitutions: &mut HashMap<TypeParameterId, CheckedType>,
+    ) -> bool {
+        let Some(((alternative, targets, row), rest)) = obligations.split_first() else {
+            return true;
+        };
+        for target in *targets {
+            let mut attempt = substitutions.clone();
+            if unify_impl_headers(alternative, target, free_parameters, &mut attempt)
+                && cover(rest, free_parameters, &mut attempt)
+            {
+                *substitutions = attempt;
+                return true;
+            }
+        }
+        *row && cover(rest, free_parameters, substitutions)
+    }
+
+    let (left_concrete, left_row) = split(left, free_parameters, substitutions);
+    let (right_concrete, right_row) = split(right, free_parameters, substitutions);
+    let obligations = left_concrete
+        .iter()
+        .map(|alternative| (alternative, right_concrete.as_slice(), right_row))
+        .chain(
+            right_concrete
+                .iter()
+                .map(|alternative| (alternative, left_concrete.as_slice(), left_row)),
+        )
+        .collect::<Vec<_>>();
+    cover(&obligations, free_parameters, substitutions)
 }
 
 /// Repeatedly applies `substitute_type` until it reaches a fixed point (or
@@ -19179,45 +19241,75 @@ fn infer_type_parameters_mode(
             }
             // Substitution can reorder sum alternatives or remove `Never`.
             // Match concrete shapes before bare parameters so `Ok T | Error`
-            // infers T from Ok and Error from the remaining alternative.
-            let mut remaining = match actual {
-                CheckedType::Sum(sum) => sum.alternatives.iter().collect::<Vec<_>>(),
-                CheckedType::Never => Vec::new(),
-                other => vec![other],
-            };
-            let mut alternatives = template.alternatives.iter().collect::<Vec<_>>();
-            alternatives
-                .sort_by_key(|alternative| matches!(alternative, CheckedType::Parameter { .. }));
-            let mut candidate = substitutions.clone();
-            for alternative in alternatives {
+            // infers T from Ok and Error from the remaining alternatives.
+            fn match_one<'a>(
+                allow_schemes: bool,
+                alternative: &CheckedType,
+                remaining: &mut Vec<&'a CheckedType>,
+                candidate: &mut HashMap<TypeParameterId, CheckedType>,
+            ) -> bool {
                 let matches = remaining
                     .iter()
                     .enumerate()
                     .filter_map(|(index, actual)| {
                         let mut inferred = candidate.clone();
-                        infer_type_parameters_mode(
-                            allow_schemes,
-                            alternative,
-                            actual,
-                            &mut inferred,
-                        )
-                        .then_some((index, inferred))
+                        infer_type_parameters_mode(allow_schemes, alternative, actual, &mut inferred)
+                            .then_some((index, inferred))
                     })
                     .collect::<Vec<_>>();
                 if let [(index, inferred)] = matches.as_slice() {
                     remaining.remove(*index);
-                    candidate = inferred.clone();
-                } else if matches.is_empty()
-                    && infer_type_parameters_mode(
-                        allow_schemes,
-                        alternative,
-                        &CheckedType::Never,
-                        &mut candidate,
-                    )
-                {
-                    continue;
+                    *candidate = inferred.clone();
+                    true
                 } else {
+                    matches.is_empty()
+                        && infer_type_parameters_mode(
+                            allow_schemes,
+                            alternative,
+                            &CheckedType::Never,
+                            candidate,
+                        )
+                }
+            }
+            let mut remaining = match actual {
+                CheckedType::Sum(sum) => sum.alternatives.iter().collect::<Vec<_>>(),
+                CheckedType::Never => Vec::new(),
+                other => vec![other],
+            };
+            let (parameters, concrete): (Vec<_>, Vec<_>) = template
+                .alternatives
+                .iter()
+                .partition(|alternative| matches!(alternative, CheckedType::Parameter { .. }));
+            let mut candidate = substitutions.clone();
+            for alternative in concrete {
+                if !match_one(allow_schemes, alternative, &mut remaining, &mut candidate) {
                     return false;
+                }
+            }
+            let (rows, bound): (Vec<_>, Vec<_>) = parameters.into_iter().partition(|alternative| {
+                matches!(alternative, CheckedType::Parameter { id, .. } if !candidate.contains_key(id))
+            });
+            for alternative in bound {
+                if !match_one(allow_schemes, alternative, &mut remaining, &mut candidate) {
+                    return false;
+                }
+            }
+            // A single unbound parameter is the sum's row: it stands for every
+            // alternative left over, so `Ok T | E` matches `Ok I32 | A | B`
+            // with `E = A | B` and `Ok I32` with `E = Never`.
+            if let [row] = rows.as_slice() {
+                let rest = match remaining.len() {
+                    0 => CheckedType::Never,
+                    _ => normalize_substituted_sum(remaining.drain(..).cloned().collect()),
+                };
+                if !infer_type_parameters_mode(allow_schemes, row, &rest, &mut candidate) {
+                    return false;
+                }
+            } else {
+                for alternative in rows {
+                    if !match_one(allow_schemes, alternative, &mut remaining, &mut candidate) {
+                        return false;
+                    }
                 }
             }
             if !remaining.is_empty() {

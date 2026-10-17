@@ -2660,7 +2660,7 @@ Juxtaposed binders each consume one successive argument and must all be
 supplied together, while a product binder consumes one product argument.
 Parentheses group an applied or otherwise complex type as
 one argument. Implementation arguments may be built-in, nominal, product,
-pointer, or function types, and must be fully concrete except where they
+sum, pointer, or function types, and must be fully concrete except where they
 mention the implementation's own compile-time parameters (see
 [Generic trait implementations](#generic-trait-implementations) below).
 Implementations have no visibility modifier: every implementation in the
@@ -2816,6 +2816,16 @@ declared. Two implementations whose headers unify may coexist only when a bound
 rules the overlap out: `impl<T where Copy T> Clone T` and
 `impl<T where Clone T> Clone (List T)` coexist because `List T` is never
 `Copy`.
+
+Sum headers unify as unordered sets. A sum alternative that is a bare
+compile-time parameter of the implementation acts as a row: it stands for
+every alternative the rest of the header leaves unmatched, which may be none
+(`Never`), one, or several. For a trait `Try`, `impl<T, E> Try (Result T E)`
+therefore applies to
+`Ok I32` (`E = Never`), to `Ok I32 | String`, and to `Ok I32 | String | Bool`
+(`E = String | Bool`), and it overlaps a concrete implementation for any of
+those types, whatever order their alternatives are written in. It does not
+overlap `impl Try (Bool | String)`, which has no `Ok` alternative.
 
 ### Subtype bounds
 
