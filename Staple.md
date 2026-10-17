@@ -606,6 +606,19 @@ constant pointer per call: it travels in the closure environment slot that a
 captureless function leaves unused, so the function's type and calling
 convention do not change.
 
+The prelude's `panic` (from `std.process`) is a `@track_caller` function. It
+writes the message and the location of its call to standard output, then exits
+with status 1; called from a `@track_caller` function, it reports that
+function's caller:
+
+```text
+panic: expected a positive value at src/main.sta:7:9
+```
+
+A binding that is modified only by `@doc` or `@track_caller` remains available
+to compile-time macro evaluation, so macro bodies can still call `panic`, which
+reports a compile-time diagnostic there.
+
 ## Source files
 
 staple source files use the `.sta` extension.

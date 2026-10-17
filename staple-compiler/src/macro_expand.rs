@@ -1438,6 +1438,26 @@ impl MacroExpander {
                             );
                         }
                     }
+                    // `@doc` and `@track_caller` leave a binding's value
+                    // unchanged, so it stays usable at compile time.
+                    Item::Modified(modified)
+                        if modified.modifiers.iter().all(|modifier| {
+                            modifier.namespace.is_none()
+                                && matches!(modifier.name.as_str(), "doc" | "track_caller")
+                        }) =>
+                    {
+                        if let Item::Binding(binding) = modified.item.as_ref()
+                            && binding.value.is_some()
+                        {
+                            scopes[source_module.id.0].helpers.insert(
+                                binding.name.clone(),
+                                HelperDefinition {
+                                    module: source_module.id,
+                                    binding: binding.clone(),
+                                },
+                            );
+                        }
+                    }
                     _ => {}
                 }
             }

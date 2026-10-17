@@ -41,6 +41,20 @@ fn run(source: &str) -> String {
 
 #[cfg(unix)]
 fn run_with(source: &str, dictionary_passing: bool) -> String {
+    let output = execute(source, dictionary_passing);
+    assert!(
+        output.status.success(),
+        "execution: {:?}\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// Builds and runs a program, returning its exit status and output.
+#[cfg(unix)]
+fn execute(source: &str, dictionary_passing: bool) -> std::process::Output {
     let lowered =
         try_lower_with(source, dictionary_passing).unwrap_or_else(|error| panic!("{error}"));
     let nonce = SystemTime::now()
@@ -70,14 +84,7 @@ fn run_with(source: &str, dictionary_passing: bool) -> String {
     let output = Command::new(&base).output().unwrap();
     let _ = std::fs::remove_file(object);
     let _ = std::fs::remove_file(base);
-    assert!(
-        output.status.success(),
-        "execution: {:?}\n{}\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
+    output
 }
 
 #[cfg(unix)]
@@ -445,5 +452,45 @@ fn dictionary_passing_keeps_tracked_functions_static() {
     assert_eq!(
         output.lines().collect::<Vec<_>>(),
         ["5@<stdin>.sta:9:10", "6@<stdin>.sta:8:5"]
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn panic_reports_the_location_of_its_call() {
+    let output = execute(
+        concat!(
+            "use std.io.println\n",
+            "println \"before\"\n",
+            "  panic \"stop\"\n",
+        ),
+        false,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "before\npanic: stop at <stdin>.sta:3:3\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn panic_inside_a_tracked_function_reports_its_caller() {
+    let output = execute(
+        concat!(
+            "use std.source.(track_caller)\n",
+            "@track_caller\n",
+            "def expect_positive = (value: I32) => I32 :: if (value > 0) { value } else {\n",
+            "    panic \"expected a positive value\"\n",
+            "}\n",
+            "let _ = expect_positive 1\n",
+            "let _ = expect_positive (-1)\n",
+        ),
+        false,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "panic: expected a positive value at <stdin>.sta:7:9\n"
     );
 }

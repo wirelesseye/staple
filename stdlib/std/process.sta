@@ -2,6 +2,7 @@ pub mod
 
 use package.io.printf
 use package.cinterop.(c_string, CString, InteriorNul)
+use package.source.(Location, track_caller)
 
 // Nested so the raw C `exit` symbol (extern bindings are always named
 // exactly after their C symbol) doesn't collide with the `exit` wrapper
@@ -20,11 +21,15 @@ pub def exit = code: I32 => Never :: {
     loop { continue }
 }
 
-/// Terminates the program after printing `message`.
+/// Terminates the program after printing `message` and the location of the
+/// call to `panic`. Inside a `@track_caller` function, the location is that
+/// function's caller.
+@track_caller
 pub def panic = message: String => Never :: {
-    match (CString.from_string message) {
-        Ok text => { let _ = printf (c_string "panic: %s\n", text); () },
-        InteriorNul => { let _ = printf (c_string "panic: message contains an embedded NUL byte\n"); () },
+    let location = Location.caller ()
+    match (CString.from_string "panic: ${message} at ${location}") {
+        Ok text => { let _ = printf (c_string "%s\n", text); () },
+        InteriorNul => { let _ = printf (c_string "panic: message contains an embedded NUL byte at %s\n", CString.from_string_unchecked "$location"); () },
     }
     exit 1
 }
