@@ -12945,11 +12945,18 @@ impl TypeChecker {
                             .into_iter()
                             .collect()
                     }
-                    CoveragePattern::Pattern(Pattern::Binding(binding))
-                        if !matches!(binding.ty, Type::Inferred(_)) =>
+                    CoveragePattern::Pattern(Pattern::Binding(staple_syntax::BindingPattern {
+                        syntax,
+                        ty,
+                        ..
+                    }))
+                    | CoveragePattern::Pattern(Pattern::Wildcard(staple_syntax::WildcardPattern {
+                        syntax,
+                        ty,
+                    })) if !matches!(ty, Type::Inferred(_)) =>
                     {
                         self.pattern_types
-                            .get(&binding.syntax.id)
+                            .get(&syntax.id)
                             .and_then(|selected| {
                                 sum.alternatives
                                     .iter()
@@ -13225,10 +13232,13 @@ impl TypeChecker {
             result.extend_from_slice(&row[1..]);
             return Some(result);
         }
-        if let CoveragePattern::Pattern(Pattern::Binding(binding)) = structural
-            && !matches!(binding.ty, Type::Inferred(_))
+        if let CoveragePattern::Pattern(
+            Pattern::Binding(staple_syntax::BindingPattern { syntax, ty, .. })
+            | Pattern::Wildcard(staple_syntax::WildcardPattern { syntax, ty }),
+        ) = structural
+            && !matches!(ty, Type::Inferred(_))
         {
-            let selected = self.pattern_types.get(&binding.syntax.id)?;
+            let selected = self.pattern_types.get(&syntax.id)?;
             if selected != &sum.alternatives[index] {
                 return None;
             }

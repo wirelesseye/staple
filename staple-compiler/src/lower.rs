@@ -2410,7 +2410,24 @@ fn pattern_test_plan(
     };
     let mut children = Vec::new();
     match shape {
-        PatternPlanShape::Structural => {}
+        PatternPlanShape::Structural
+        | PatternPlanShape::Binding { singleton: None } => {
+            // A typed binding or wildcard checked against one alternative of
+            // a sum selects that alternative's tag; an untyped one keeps the
+            // whole subject as its type and tests nothing.
+            if let CheckedType::Sum(sum) = subject
+                && value_type != subject
+            {
+                plan.sum_alternative = Some(
+                    sum.alternatives
+                        .iter()
+                        .position(|alternative| alternative == value_type)
+                        .ok_or_else(|| {
+                            "typed match pattern does not select a sum alternative".to_owned()
+                        })?,
+                );
+            }
+        }
         PatternPlanShape::At => {
             children.push(subject.clone());
             children.push(subject.clone());
@@ -2439,20 +2456,6 @@ fn pattern_test_plan(
                 _ => {
                     return Err("checked singleton pattern has an incompatible value".to_owned());
                 }
-            }
-        }
-        PatternPlanShape::Binding { singleton: None } => {
-            if let CheckedType::Sum(sum) = subject
-                && value_type != subject
-            {
-                plan.sum_alternative = Some(
-                    sum.alternatives
-                        .iter()
-                        .position(|alternative| alternative == value_type)
-                        .ok_or_else(|| {
-                            "typed match pattern does not select a sum alternative".to_owned()
-                        })?,
-                );
             }
         }
         PatternPlanShape::Product { elements } => {

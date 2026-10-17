@@ -4434,7 +4434,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.bind_pattern(owner, *binding, value.as_any_value_enum(), environment)?;
                 self.emit_match_pattern_branch(owner, *nested, value, success, failure, environment)
             }
-            crate::LoweredPatternKind::Binding { .. } => {
+            // A typed wildcard selects its alternative exactly like a typed
+            // binding, then discards the payload instead of binding it.
+            crate::LoweredPatternKind::Binding { .. } | crate::LoweredPatternKind::Wildcard => {
                 if pattern.test.identity == crate::LoweredPatternIdentity::Singleton {
                     // A singleton sum test compares the tag; a singleton
                     // wrapper match succeeds unconditionally.
@@ -4734,14 +4736,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     "checked nominal pattern has an incompatible value",
                 )),
             },
-            crate::LoweredPatternKind::Wildcard => {
-                self.bind_pattern(owner, pattern_id, value.as_any_value_enum(), environment)?;
-                self.backend
-                    .builder
-                    .build_unconditional_branch(success)
-                    .map(|_| ())
-                    .map_err(compiler_diagnostic)
-            }
         }
     }
 

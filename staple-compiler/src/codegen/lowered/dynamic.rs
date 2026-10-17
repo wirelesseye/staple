@@ -7080,7 +7080,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     environment,
                 )
             }
-            LoweredPatternKind::Binding { symbol, .. } => {
+            // A typed wildcard selects its alternative exactly like a typed
+            // binding, then discards the payload instead of binding it.
+            LoweredPatternKind::Binding { .. } | LoweredPatternKind::Wildcard => {
+                let binds = !matches!(
+                    pattern.kind,
+                    LoweredPatternKind::Binding { symbol: None, .. }
+                );
                 if let Some(index) = pattern.test.sum_alternative {
                     let tag = self.dynamic_sum_tag(pointer, span)?;
                     let matches = self
@@ -7096,7 +7102,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             "match.tag",
                         )
                         .map_err(compiler_diagnostic)?;
-                    if symbol.is_some() {
+                    if binds {
                         let function = self.current_dynamic_function(span)?;
                         let selected = self
                             .backend
@@ -7153,16 +7159,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map_err(compiler_diagnostic)?;
                     Ok(())
                 }
-            }
-            LoweredPatternKind::Wildcard => {
-                if owned {
-                    self.backend.drop_dynamic_value(descriptor, pointer)?;
-                }
-                self.backend
-                    .builder
-                    .build_unconditional_branch(success)
-                    .map_err(compiler_diagnostic)?;
-                Ok(())
             }
             LoweredPatternKind::Product { elements, .. } if elements.len() == 1 => self
                 .test_dynamic_pattern(

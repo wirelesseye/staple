@@ -279,7 +279,15 @@ impl<'a> OwnershipChecker<'a> {
             Expression::TypeApplication(value) => self.check_expression(&value.value, consume),
             Expression::TypeAscription(value) => self.check_expression(&value.value, consume),
             Expression::Match(value) => {
-                self.check_expression(&value.subject, true);
+                // A match only inspecting a named subject (wildcards,
+                // singletons, literals, `Copy` bindings) borrows it; any arm
+                // that takes a non-`Copy` part requires ownership.
+                let consume = !matches!(value.subject.as_ref(), Expression::Name(_))
+                    || value
+                        .arms
+                        .iter()
+                        .any(|arm| self.pattern_takes_ownership(&arm.pattern));
+                self.check_expression(&value.subject, consume);
                 let outer = self.states.clone();
                 let mut continuing = vec![];
                 for arm in &value.arms {
@@ -977,6 +985,33 @@ impl<'a> OwnershipChecker<'a> {
         !self.module.is_copy_in_function(value_type, self.function)
             && !self.module.has_mutable_storage(symbol)
             && !self.module.is_move_parameter(symbol)
+    }
+
+    /// Whether matching `pattern` moves part of its subject: it binds a
+    /// non-`Copy` value or takes a `Unique` payload.
+    fn pattern_takes_ownership(&self, pattern: &Pattern) -> bool {
+        match pattern {
+            Pattern::Binding(value) => self
+                .module
+                .symbol_for(value.syntax.id)
+                .and_then(|symbol| self.module.type_of_symbol(symbol))
+                .is_some_and(|ty| !self.module.is_copy_in_function(ty, self.function)),
+            Pattern::At(at) => {
+                self.pattern_takes_ownership(&Pattern::Binding(at.binding.as_ref().clone()))
+                    || self.pattern_takes_ownership(&at.pattern)
+            }
+            Pattern::Product(value) => value
+                .elements
+                .iter()
+                .any(|element| self.pattern_takes_ownership(element)),
+            Pattern::Nominal(value) => {
+                matches!(
+                    self.module.type_of_pattern(value.syntax.id),
+                    Some(crate::CheckedType::Unique(_))
+                ) || self.pattern_takes_ownership(&value.argument)
+            }
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
+        }
     }
 
     fn bind_pattern(&mut self, pattern: &Pattern, freeze: bool) {

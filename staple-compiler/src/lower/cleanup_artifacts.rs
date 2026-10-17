@@ -952,8 +952,18 @@ impl<'a> LoweredWalker<'a> {
             }
             super::LoweredExpressionKind::Match(match_) => {
                 self.walk_expression(match_.subject)?;
+                // A named subject the match does not move stays owned by its
+                // binding, so its patterns discard nothing.
+                let subject_owned = match self.owner.expression(self.program, match_.subject) {
+                    Some(super::LoweredExpression {
+                        kind: super::LoweredExpressionKind::Name(name),
+                        moved_symbols,
+                        ..
+                    }) => moved_symbols.contains(&name.symbol),
+                    _ => true,
+                };
                 for arm in &match_.arms {
-                    self.walk_pattern(arm.pattern)?;
+                    self.walk_pattern_with_ownership(arm.pattern, subject_owned)?;
                     self.walk_expression(arm.body)?;
                 }
             }

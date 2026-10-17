@@ -2515,9 +2515,15 @@ must mark a parameter `move` before moving, returning, or storing it:
 def identity = <T> move value: T => T :: value
 ```
 
-Constructs that consume a value outright — `drop`, a match expression's
-subject, string interpolation, indexed assignment's replacement value, and a
-constructor call's arguments — always require ownership. Capturing an
+Constructs that consume a value outright — `drop`, string interpolation,
+indexed assignment's replacement value, and a constructor call's arguments —
+always require ownership. A match expression consumes its subject when the
+subject is not a plain name, or when some arm's pattern takes part of it:
+binding a non-`Copy` value or destructuring a `Unique`. A match whose patterns
+only inspect a named subject — wildcards, typed wildcards, singletons,
+literals, nominal selections, and `Copy` bindings — borrows it instead, so a
+borrowed parameter can be matched with `Ok _ => ...` and an owned local stays
+usable, and is dropped by its binding as usual. Capturing an
 ordinary non-`Copy` parameter in a curried closure is the exception: the
 closure keeps a shared borrow of that parameter. Capturing a `mut` parameter
 similarly keeps a mutable borrow; `mut` does not transfer ownership.
@@ -4671,7 +4677,8 @@ def describe = value: I32 | String => match value {
 }
 ```
 
-An untyped binding or `_` matches the whole sum.
+A typed wildcard such as `_: I32` likewise selects that alternative without
+binding it. An untyped binding or `_` matches the whole sum.
 
 #### Propagating bindings
 
