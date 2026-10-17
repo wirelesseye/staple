@@ -19290,6 +19290,23 @@ fn infer_type_parameters_mode(
                 matches!(alternative, CheckedType::Parameter { id, .. } if !candidate.contains_key(id))
             });
             for alternative in bound {
+                // A parameter already bound to a sum, such as a row inferred
+                // from an earlier argument, accounts for each of its
+                // alternatives.
+                if let CheckedType::Parameter { id, .. } = alternative
+                    && let Some(CheckedType::Sum(sum)) = candidate.get(id)
+                {
+                    for bound_alternative in sum.alternatives.clone() {
+                        let Some(index) = remaining
+                            .iter()
+                            .position(|actual| types_equivalent(&bound_alternative, actual))
+                        else {
+                            return false;
+                        };
+                        remaining.remove(index);
+                    }
+                    continue;
+                }
                 if !match_one(allow_schemes, alternative, &mut remaining, &mut candidate) {
                     return false;
                 }

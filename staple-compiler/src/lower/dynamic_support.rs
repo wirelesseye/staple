@@ -1126,13 +1126,15 @@ impl SupportWalker<'_> {
         if call.reactive.is_some() {
             self.reject(RejectionReason::ReactiveCall);
         }
-        if matches!(
-            call.target,
-            LoweredCallableTarget::DirectFunction {
-                environment: crate::LoweredCallEnvironment::CallerLocation(_),
-                ..
-            }
-        ) {
+        if call.caller_location.is_some()
+            || matches!(
+                call.target,
+                LoweredCallableTarget::DirectFunction {
+                    environment: crate::LoweredCallEnvironment::CallerLocation(_),
+                    ..
+                }
+            )
+        {
             self.reject(RejectionReason::CallerLocationIntrinsic);
         }
         if let Some(reason) = signature_function_restriction(&call.function_type) {

@@ -3695,6 +3695,7 @@ impl<'a> BodyCloner<'a> {
             result_type: CheckedType::Error,
             substitutions: CallSubstitutions::default(),
             evidence: None,
+            caller_location: None,
             reactive: None,
             buffer_pop: None,
             runtime: Default::default(),

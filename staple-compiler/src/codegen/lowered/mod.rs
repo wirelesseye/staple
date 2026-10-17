@@ -6111,7 +6111,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             | LoweredCallableTarget::StructuralTraitMethod { .. } => {
                 let function =
                     self.bound_function(owner, LoweredBindingSite::Call(id), &call.origin.span)?;
-                self.emit_structural_call(owner, &call, function, &values)
+                let pointer = match call.caller_location {
+                    Some(location) => {
+                        self.caller_location_pointer(location, environment, &call.origin.span)?
+                    }
+                    None => self
+                        .backend
+                        .context
+                        .ptr_type(AddressSpace::default())
+                        .const_null(),
+                };
+                self.emit_structural_call(owner, &call, function, pointer, &values)
             }
         };
         let value = result?;
@@ -6143,22 +6153,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Compile call expression's trait/structural branch: a direct
-    /// call with a null environment (`trait.call`).
+    /// Compile call expression's trait/structural branch: a direct call
+    /// (`trait.call`) whose environment is null, or the caller location for
+    /// a `@track_caller` trait member.
     fn emit_structural_call(
         &mut self,
         _owner: EmissionOwner,
         call: &crate::LoweredCall,
         function: FunctionValue<'context>,
+        environment: inkwell::values::PointerValue<'context>,
         values: &[BasicMetadataValueEnum<'context>],
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let mut arguments = vec![
-            self.backend
-                .context
-                .ptr_type(AddressSpace::default())
-                .const_null()
-                .into(),
-        ];
+        let mut arguments = vec![environment.into()];
         arguments.extend(values.iter().copied());
         let result = self
             .backend

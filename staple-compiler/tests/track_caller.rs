@@ -494,3 +494,136 @@ fn panic_inside_a_tracked_function_reports_its_caller() {
         "panic: expected a positive value at <stdin>.sta:7:9\n"
     );
 }
+
+const TRACKED_TRAIT: &str = concat!(
+    "trait Where T {\n",
+    "    @track_caller\n",
+    "    site: T -> String = value => \"default@${Location.caller ()}\"\n",
+    "}\n",
+    "type A\n",
+    "type B\n",
+    "impl Where A {}\n",
+    "impl Where B { site = value => \"b@${Location.caller ()}\" }\n",
+    "def relay = <T where Where T> value: T => String :: Where.site value\n",
+    "@track_caller\n",
+    "def forward = <T where Where T> value: T => String :: Where.site value\n",
+    "println (Where.site A)\n",
+    "println (B |> site)\n",
+    "println (relay A)\n",
+    "println (forward B)\n",
+    "let f: B -> String = Where.site\n",
+    "println (f B)\n",
+);
+
+const TRACKED_TRAIT_SITES: [&str; 5] = [
+    "default@<stdin>.sta:14:10",
+    "b@<stdin>.sta:15:15",
+    "default@<stdin>.sta:11:53",
+    "b@<stdin>.sta:17:10",
+    "b@<stdin>.sta:18:22",
+];
+
+/// A `@track_caller` trait member tracks its default and every
+/// implementation: direct and piped calls report their own site, a call in
+/// an untracked generic body reports that body, a tracked caller forwards
+/// its own caller, and a value fixes the site at the reference.
+#[cfg(unix)]
+#[test]
+fn trait_members_report_their_callers() {
+    let source = format!("{PRELUDE}{TRACKED_TRAIT}");
+    assert_eq!(run_lines(&source), TRACKED_TRAIT_SITES);
+}
+
+#[cfg(unix)]
+#[test]
+fn dictionary_passing_keeps_tracked_trait_calls_static() {
+    let source = format!("{PRELUDE}{TRACKED_TRAIT}");
+    let output = run_with(&source, true);
+    assert_eq!(output.lines().collect::<Vec<_>>(), TRACKED_TRAIT_SITES);
+}
+
+#[test]
+fn implementation_members_cannot_be_tracked_themselves() {
+    let source = format!(
+        "{PRELUDE}{}",
+        concat!(
+            "trait Where T { site: T -> String }\n",
+            "impl Where I32 {\n",
+            "    @track_caller\n",
+            "    site = value => \"here\"\n",
+            "}\n",
+        )
+    );
+    match try_lower(&source) {
+        Ok(_) => panic!("`@track_caller` on an implementation member should be rejected"),
+        Err(error) => assert!(
+            error.contains("implementation members inherit it"),
+            "{error}"
+        ),
+    }
+}
+
+#[test]
+fn a_polymorphic_tracked_trait_member_value_is_rejected() {
+    let source = format!(
+        "{PRELUDE}{}",
+        concat!(
+            "trait Where T {\n",
+            "    @track_caller\n",
+            "    site: T -> String = value => \"${Location.caller ()}\"\n",
+            "}\n",
+            "impl Where I32 {}\n",
+            "let g = Where.site\n",
+        )
+    );
+    match try_lower(&source) {
+        Ok(_) => panic!("a polymorphic use of a tracked trait member should be rejected"),
+        Err(error) => assert!(
+            error.contains("cannot be used as a polymorphic value"),
+            "{error}"
+        ),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn try_unwraps_results_options_and_wider_sums() {
+    let source = concat!(
+        "use std.io.println\n",
+        "let good: Result I32 String = Ok 1\n",
+        "let wide: Ok I32 | String | Bool = Ok 2\n",
+        "let some: Option I32 = Some 3\n",
+        "let parts = (good |> unwrap, Try.unwrap wide, some |> expect \"needs a value\")\n",
+        "println \"${parts.0} ${parts.1} ${parts.2}\"\n",
+    );
+    assert_eq!(run_lines(source), ["1 2 3"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn try_unwrap_and_expect_panic_at_their_caller() {
+    let unwrap = execute(
+        concat!(
+            "let none: Option I32 = None\n",
+            "let _ = none |> unwrap\n",
+        ),
+        false,
+    );
+    assert_eq!(unwrap.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(unwrap.stdout).unwrap(),
+        "panic: called `unwrap` on a failure at <stdin>.sta:2:17\n"
+    );
+    let expect = execute(
+        concat!(
+            "let bad: Result I32 String = \"boom\"\n",
+            "let _ = Try.expect (bad; \"loading config\")\n",
+        ),
+        false,
+    );
+    assert_eq!(expect.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(expect.stdout).unwrap(),
+        "panic: loading config at <stdin>.sta:2:9\n"
+    );
+}

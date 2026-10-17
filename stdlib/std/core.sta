@@ -7,6 +7,7 @@ pub use package.drop.*
 pub use package.cmp.*
 pub use package.index.*
 pub use package.number.*
+pub use package.option.*
 pub use package.range.*
 pub use package.reactive.*
 pub use package.reference.(Ref)

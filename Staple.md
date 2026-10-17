@@ -557,10 +557,28 @@ Item`, makes a function report where it was called from instead of where it is
 defined. It is not re-exported by `std.core` or the prelude, so it needs
 `use std.source.(track_caller)`, and a `companion` body that uses it imports it
 again. It applies only to a module-level or companion `def` whose value is a
-function literal, takes no argument, and is rejected on `let`, `const`, `extern`,
-type, trait, and impl items, on local `def`s, and on a function that captures
-local variables (module-level values are not captures). Only the outer stage of
-a curried `def` is tracked.
+function literal, or to a trait member. It takes no argument, and is rejected on
+`let`, `const`, `extern`, type, trait, and impl items, on implementation
+members, on local `def`s, and on a function that captures local variables
+(module-level values are not captures). Only the outer stage of a curried `def`
+is tracked.
+
+On a trait member, `@track_caller` is written among the member's modifiers
+like `@doc` and needs no import. It tracks the member's default and every
+implementation of the member, which inherit it and cannot declare it
+themselves, so every call to the member reports its caller whichever
+implementation is selected:
+
+```staple
+trait Check T {
+    @track_caller
+    check: T -> () = value => println "checked at ${Location.caller ()}"
+}
+```
+
+A tracked trait member used as a value fixes the site at the reference, like
+a tracked `def`; the value must have a concrete type whose implementation is
+known.
 
 `std.source.Location` is a `(file, line, column)` value. `Location.caller ()`
 is itself a `@track_caller` function, so it reports the location of its own
@@ -3744,6 +3762,9 @@ import can shadow a prelude name. Integer literals use an expected integer type
 when one is available and otherwise default to `I32`. Mixed-type arithmetic is
 not implicit.
 
+`Option T` is declared in `std.option` as a `typegroup` of `None` and
+`Some T`; `std.core` re-exports it with both variants.
+
 `Never` is the uninhabited bottom type. No expression can normally produce a
 `Never` value, and `Never` is a subtype of every value type, so a divergent
 expression can appear wherever another value type is expected. Joining
@@ -4690,6 +4711,13 @@ def describe = value: I32 | String => match value {
 A typed wildcard such as `_: I32` likewise selects that alternative without
 binding it. An untyped binding or `_` matches the whole sum.
 
+When a generic signature is matched against a sum, a bare compile-time
+parameter alternative stands for every alternative the rest of the sum leaves
+unmatched: none (`Never`), one, or a sum of several. Passing an
+`Ok I32 | String | Bool` to `<T, E> Result T E -> T` infers `T = I32` and
+`E = String | Bool`. With two or more bare parameter alternatives, each must
+match a single alternative or `Never`.
+
 #### Propagating bindings
 
 `let?` followed by a nominal destructuring pattern selects its success
@@ -4788,6 +4816,40 @@ match pattern {
     Pattern.Wildcard => "*",
 }
 ```
+
+#### Unwrapping with `Try`
+
+The prelude's `Try` trait, from `std.try`, splits a value into a success and
+whatever remains of a failure:
+
+```staple
+pub trait Try T {
+    type Output
+    type Residual
+    branch: move T -> Ok Output | Residual
+    @track_caller
+    unwrap: move T -> Output = ...
+    @track_caller
+    expect: (move T; String) -> Output = ...
+}
+```
+
+`branch` returns the success as `Ok` and the failure as its residual, so its
+result is a `Result Output Residual` that `match` and `let?` take apart. The
+default `unwrap` and `expect` return the success value and otherwise
+[panic](#track_caller-and-location) at their caller, `expect` with the given message:
+
+```staple
+let port = read_port () |> expect "reading the port"
+```
+
+The standard library implements `Try (Result T E)`, with `Output = T` and
+`Residual = E`, and `Try (Option T)`, with `Output = T` and `Residual = None`.
+Because `Result T E` is the sum `Ok T | E`, the first implementation covers
+every sum with exactly one `Ok` alternative: `Ok I32` (`E = Never`),
+`Ok I32 | String`, and `Ok I32 | String | Bool` (`E = String | Bool`) all
+implement `Try`. A sum with two `Ok` alternatives does not, because its
+success type would be ambiguous.
 
 ## Foreign declarations
 

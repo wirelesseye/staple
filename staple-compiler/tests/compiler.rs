@@ -16494,7 +16494,8 @@ fn track_caller_flags_only_the_outer_stage() {
     assert!(resolved.is_track_caller(outer[0].id));
     assert!(!resolved.is_track_caller(tracked("plain")[0].id));
     // The curried inner stage and every other function stay untracked, apart
-    // from the standard library's `Location.caller` and `panic`.
+    // from the standard library's `Location.caller`, `panic`, and the
+    // `Try.unwrap` and `Try.expect` defaults.
     assert_eq!(
         resolved
             .functions()
@@ -16503,6 +16504,7 @@ fn track_caller_flags_only_the_outer_stage() {
                 resolved.is_track_caller(function.id)
                     && !function.name.ends_with("caller")
                     && !function.name.ends_with("panic")
+                    && !function.name.contains("std.try.")
             })
             .count(),
         1,

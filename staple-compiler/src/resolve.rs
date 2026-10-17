@@ -944,6 +944,14 @@ impl ResolvedModule {
         self.trait_methods.get(&id)
     }
 
+    /// Whether the trait member is `@track_caller`: every call to it passes
+    /// the caller location to the selected implementation or default.
+    pub fn is_track_caller_method(&self, id: TraitMethodId) -> bool {
+        self.trait_methods
+            .get(&id)
+            .is_some_and(|member| member.track_caller)
+    }
+
     pub fn trait_for_method(&self, id: TraitMethodId) -> Option<TraitId> {
         self.trait_method_traits.get(&id).copied()
     }
@@ -4056,6 +4064,9 @@ impl NameResolver {
                     self.binding_type_parameters
                         .insert(member.syntax.id, parameters);
                     let function_name = format!("trait.default.{}.{}", trait_id.0, member.name);
+                    if member.track_caller {
+                        self.track_caller_bindings.insert(member.syntax.id);
+                    }
                     self.resolve_expression(
                         default,
                         Some(&member.annotation),
@@ -4174,6 +4185,11 @@ impl NameResolver {
                     if let Some(method) = method {
                         self.trait_method_references
                             .insert(member.syntax.id, vec![method]);
+                        // Implementations inherit `@track_caller` from the
+                        // trait member, so every trait call passes a location.
+                        if self.trait_methods[&method].track_caller {
+                            self.track_caller_bindings.insert(member.syntax.id);
+                        }
                     }
                     let function_name = trait_id
                         .map(|id| {

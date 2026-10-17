@@ -8998,6 +8998,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         environment,
                     );
                 }
+                if call.caller_location.is_some() {
+                    return Err(Diagnostic::new(
+                        call.origin.span.clone(),
+                        "a `@track_caller` call is not supported by the dynamic emitter",
+                    ));
+                }
                 if let Some(LoweredBoundTarget::Dictionary(dispatch)) =
                     self.view.binding(owner, LoweredBindingSite::Call(call_id))
                 {

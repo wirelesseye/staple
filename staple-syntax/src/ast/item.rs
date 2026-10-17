@@ -427,6 +427,9 @@ pub struct TraitMember {
     pub name: String,
     pub annotation: Type,
     pub default: Option<Expression>,
+    /// Set by `@track_caller`: the member's default and every
+    /// implementation of it report their caller's location.
+    pub track_caller: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -9,5 +9,6 @@ pub use package.list.(List, ListIter)
 pub use package.process.(panic)
 pub use package.result.*
 pub use package.string.*
+pub use package.try.*
 pub use package.fmt.(Display, Debug)
 pub use package.typegroup.*

@@ -1491,6 +1491,9 @@ pub(crate) struct LoweredCall {
     pub substitutions: CallSubstitutions,
     /// Trait evidence for trait-dispatched calls.
     pub evidence: Option<TraitEvidence>,
+    /// The caller location a call to a `@track_caller` trait member passes
+    /// as the selected implementation's closure environment.
+    pub caller_location: Option<LoweredCallerLocation>,
     /// The reactive operation this intrinsic call performs (`reactive_scope`,
     /// `reaction`, `batch`, `until`, `snapshot`).
     pub reactive: Option<LoweredReactiveOperationId>,
@@ -7254,6 +7257,7 @@ impl LoweredProgram {
                 let (target, adapter, closure, evidence) = self.lower_trait_method_value(
                     module,
                     owner,
+                    syntax,
                     &origin,
                     &dispatch,
                     scheme.is_some(),
@@ -7474,6 +7478,7 @@ impl LoweredProgram {
         &mut self,
         module: &TypedModule,
         owner: ExpressionOwner,
+        syntax: SyntaxId,
         origin: &Origin,
         dispatch: &CheckedTraitDispatch,
         polymorphic: bool,
@@ -7492,6 +7497,13 @@ impl LoweredProgram {
                 format!("trait method {} has no owning trait", dispatch.method.0),
             ));
         };
+        let tracked = module.resolved().is_track_caller_method(dispatch.method);
+        if tracked && polymorphic {
+            return Err(Diagnostic::new(
+                origin.span.clone(),
+                "a `@track_caller` function cannot be used as a polymorphic value",
+            ));
+        }
         if polymorphic {
             return Ok((
                 LoweredCallableTarget::TraitImplementation {
@@ -7514,11 +7526,25 @@ impl LoweredProgram {
         )?;
         match &evidence {
             TraitEvidence::ExplicitImplementation { function, .. } => {
+                // A `@track_caller` member value fixes the location at the
+                // reference, as a tracked `def` value does.
+                let environment = if !tracked {
+                    LoweredClosureEnvironment::Fresh
+                } else if owner == ExpressionOwner::Function(*function) {
+                    LoweredClosureEnvironment::Current
+                } else {
+                    LoweredClosureEnvironment::CallerLocation(self.caller_location(
+                        module,
+                        owner,
+                        syntax,
+                        &origin.span,
+                    ))
+                };
                 let closure = self.closure_construction(
                     module,
                     origin,
                     *function,
-                    LoweredClosureEnvironment::Fresh,
+                    environment,
                     CallSubstitutions::default(),
                 )?;
                 Ok((
@@ -7541,6 +7567,10 @@ impl LoweredProgram {
                 LoweredCallableAdapter::None,
                 None,
                 Some(evidence),
+            )),
+            TraitEvidence::DeclaredBound { .. } if tracked => Err(Diagnostic::new(
+                origin.span.clone(),
+                "a `@track_caller` trait member can be used as a value only where its implementation is known",
             )),
             TraitEvidence::DeclaredBound { .. } => Ok((
                 LoweredCallableTarget::TraitImplementation {
@@ -7859,6 +7889,7 @@ impl LoweredProgram {
         let mut substitutions = CallSubstitutions::default();
         let mut initialization_checks = Vec::new();
         let mut evidence = None;
+        let mut caller_location = None;
         let (target, callee, function_type) = match route {
             CallRoute::GenericDirect => {
                 let symbol = symbol.ok_or_else(|| {
@@ -8096,6 +8127,16 @@ impl LoweredProgram {
                 ));
                 substitutions.types.extend(own.types);
                 substitutions.effects.extend(own.effects);
+                if !matches!(recipe, TraitEvidence::Structural { .. })
+                    && resolved.is_track_caller_method(dispatch.method)
+                {
+                    caller_location = Some(self.caller_location(
+                        module,
+                        owner,
+                        callee_syntax,
+                        &call.callee.syntax().span,
+                    ));
+                }
                 evidence = Some(recipe);
                 (target, None, function_type)
             }
@@ -8184,6 +8225,7 @@ impl LoweredProgram {
             result_type: function_type.result.as_ref().clone(),
             substitutions,
             evidence,
+            caller_location,
             reactive,
             buffer_pop,
             runtime,
@@ -8475,6 +8517,7 @@ impl LoweredProgram {
                 })
                 .unwrap_or_default(),
             evidence: None,
+            caller_location: None,
             reactive,
             buffer_pop,
             runtime,

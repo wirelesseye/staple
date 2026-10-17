@@ -280,6 +280,14 @@ fn fragment_error(syntax: &Syntax, message: &'static str) -> ParseError {
     }
 }
 
+/// Which declaration a member belongs to, for the modifiers it accepts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MemberKind {
+    Trait,
+    Implementation,
+    Other,
+}
+
 #[derive(Clone)]
 struct Grammar {
     tokens: Arc<[SyntaxToken]>,
@@ -649,11 +657,46 @@ impl Grammar {
     }
 
     fn parse_member_docs(&mut self, start: usize) -> Result<Vec<String>, ParseError> {
+        self.parse_member_modifiers(start, MemberKind::Other)
+            .map(|(docs, _)| docs)
+    }
+
+    /// Parses a declaration member's documentation comments and modifiers.
+    /// Trait members also accept `@track_caller`, which the second result
+    /// reports; implementation members inherit it from the trait member.
+    fn parse_member_modifiers(
+        &mut self,
+        start: usize,
+        kind: MemberKind,
+    ) -> Result<(Vec<String>, bool), ParseError> {
         let mut docs = self.leading_doc_comments(start);
+        let mut track_caller = false;
         while self.at(TokenKind::At) {
             let modifier = self.parse_modifier_invocation()?;
+            if modifier.namespace.is_none() && modifier.name == "track_caller" {
+                match kind {
+                    MemberKind::Trait if modifier.argument.is_none() => {
+                        track_caller = true;
+                        continue;
+                    }
+                    MemberKind::Trait => {
+                        return Err(self.error("`@track_caller` takes no argument"));
+                    }
+                    MemberKind::Implementation => {
+                        return Err(self.error(
+                            "`@track_caller` belongs on the trait member; implementation members inherit it",
+                        ));
+                    }
+                    MemberKind::Other => {}
+                }
+            }
             if modifier.namespace.is_some() || modifier.name != "doc" {
-                return Err(self.error("only `@doc` may modify a declaration member"));
+                return Err(self.error(match kind {
+                    MemberKind::Trait => {
+                        "only `@doc` and `@track_caller` may modify a trait member"
+                    }
+                    _ => "only `@doc` may modify a declaration member",
+                }));
             }
             let Some(argument) = modifier.argument else {
                 return Err(self.error("`@doc` requires a parenthesized string literal"));
@@ -665,7 +708,7 @@ impl Grammar {
                 .map_err(|message| self.error(message))?;
             docs.push(doc);
         }
-        Ok(docs)
+        Ok((docs, track_caller))
     }
 
     fn parse_submodule(
@@ -927,8 +970,11 @@ impl Grammar {
                 return Err(self.error("unterminated trait declaration"));
             }
             let member_start = self.position;
-            let docs = self.parse_member_docs(member_start)?;
+            let (docs, track_caller) = self.parse_member_modifiers(member_start, MemberKind::Trait)?;
             if self.at(TokenKind::Type) {
+                if track_caller {
+                    return Err(self.error("`@track_caller` may only modify a trait member function"));
+                }
                 self.bump_token();
                 let associated_name = self
                     .expect(TokenKind::Identifier, "expected associated type name")?
@@ -985,6 +1031,7 @@ impl Grammar {
                 name: member_name,
                 annotation,
                 default,
+                track_caller,
             });
             self.eat(TokenKind::Semicolon);
         }
@@ -1122,7 +1169,7 @@ impl Grammar {
                 return Err(self.error("unterminated trait implementation"));
             }
             let member_start = self.position;
-            let docs = self.parse_member_docs(member_start)?;
+            let (docs, _) = self.parse_member_modifiers(member_start, MemberKind::Implementation)?;
             if self.at(TokenKind::Type) {
                 self.bump_token();
                 let associated_name = self
