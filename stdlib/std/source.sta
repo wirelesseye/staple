@@ -1,0 +1,50 @@
+pub mod
+
+use package.syntax.(Expr)
+
+/// Expands to the 1-based line number of the invocation as an integer literal.
+///
+/// Inside a macro expansion, the line is that of the outermost macro
+/// invocation that led to this call, unless the call was written at that
+/// invocation site itself.
+///
+/// # Example
+///
+/// ```staple
+/// use std.source.(line)
+///
+/// let current = line ()
+/// ```
+pub macro line: () -> Expr
+
+/// Expands to the 1-based column number of the invocation as an integer
+/// literal. Columns count characters, not bytes.
+///
+/// Inside a macro expansion, the column is that of the outermost macro
+/// invocation that led to this call, unless the call was written at that
+/// invocation site itself.
+///
+/// # Example
+///
+/// ```staple
+/// use std.source.(column)
+///
+/// let current = column ()
+/// ```
+pub macro column: () -> Expr
+
+/// Expands to the path of the invoking source file as a string literal. The
+/// path is relative to the containing package's directory when the file lies
+/// inside it.
+///
+/// Inside a macro expansion, the file is that of the outermost macro
+/// invocation that led to this call.
+///
+/// # Example
+///
+/// ```staple
+/// use std.source.(file)
+///
+/// let current = file ()
+/// ```
+pub macro file: () -> Expr

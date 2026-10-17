@@ -6978,6 +6978,68 @@ fn metadata_aware_calls_can_return_expression_syntax() {
 }
 
 #[test]
+fn source_location_macros_expand_to_the_call_site() {
+    let module = type_check(concat!(
+        "use std.source.(line, column, file)\n",
+        "macro here = () => parse_quote { (line (), column ()) }\n",
+        "macro same = (value: Expr) => parse_quote { $value }\n",
+        "let direct = line ()\n",
+        "let indented =    column ()\n",
+        "let path = file ()\n",
+        "let nested =\n",
+        "    here ()\n",
+        "let spliced = same (\n",
+        "  line ())\n",
+    ));
+    let value = |name: &str| {
+        module
+            .resolved()
+            .syntax()
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Binding(binding) if binding.name == name => binding.value.clone(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("binding `{name}` should exist"))
+    };
+    let integer = |expression: &staple_syntax::Expression| match expression {
+        staple_syntax::Expression::Integer(integer) => integer.literal.clone(),
+        other => panic!("expected an integer literal, found {other:?}"),
+    };
+    let elements = |expression: staple_syntax::Expression| match expression {
+        staple_syntax::Expression::Product(product) => product
+            .elements
+            .iter()
+            .map(|element| element.value.clone())
+            .collect::<Vec<_>>(),
+        other => panic!("expected a product, found {other:?}"),
+    };
+
+    assert_eq!(integer(&value("direct")), "4");
+    assert_eq!(integer(&value("indented")), "19");
+    match value("path") {
+        staple_syntax::Expression::String(string) => assert_eq!(string.literal, "\"<stdin>.sta\""),
+        other => panic!("expected a string literal, found {other:?}"),
+    }
+    // Produced by a macro template: the outermost invocation's location.
+    let nested = elements(value("nested"));
+    assert_eq!(integer(&nested[0]), "8");
+    assert_eq!(integer(&nested[1]), "5");
+    // Written at the invocation site and spliced: its own location.
+    assert_eq!(integer(&value("spliced")), "10");
+}
+
+#[test]
+fn source_location_macros_are_not_reexported() {
+    for name in ["line", "column", "file"] {
+        let diagnostics = resolve_result(&format!("let value = {name} ()\n"))
+            .expect_err_diagnostics("source location macros require an explicit import");
+        assert!(!diagnostics.is_empty(), "`{name}` should be unbound");
+    }
+}
+
+#[test]
 fn diagnoses_invalid_metadata_macro_uses() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [

@@ -529,8 +529,26 @@ expression forms remain future work.
 Compiler-provided macros use typed bodyless contracts. `std.syntax` declares
 `pub macro quote: Braced Syntax -> Syntax` and
 `pub macro parse_quote: Braced Syntax -> Syntax`, and
-`std.cinterop` declares `pub macro c_string: Expr -> Expr`. Neither module is
-re-exported by `std.core`; their APIs require explicit imports.
+`std.cinterop` declares `pub macro c_string: Expr -> Expr`. `std.source`
+declares `pub macro line: () -> Expr`, `pub macro column: () -> Expr`, and
+`pub macro file: () -> Expr`. None of these modules is re-exported by
+`std.core` or the prelude; their APIs require explicit imports.
+
+`line ()` and `column ()` expand to integer literals holding the 1-based line
+and column (counted in characters) of the invocation, and `file ()` expands to
+a string literal holding the invoking file's path, relative to the containing
+package's directory when the file lies inside it:
+
+```staple
+use std.source.(line, column, file)
+
+let location = (file (), line (), column ())
+```
+
+A call written at the source site of the outermost macro invocation, such as
+one passed as a macro argument, reports its own location. A call produced by a
+macro definition reports the location of the outermost invocation that led to
+it.
 
 ## Source files
 

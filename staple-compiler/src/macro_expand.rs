@@ -41,6 +41,8 @@ struct MacroKey {
 enum MacroKind {
     User(Expression),
     CString,
+    /// `std.source.line`, `std.source.column`, and `std.source.file`.
+    SourceLocation(SourceLocationMacro),
     Doc,
     Feature,
     NoPrelude,
@@ -48,6 +50,33 @@ enum MacroKind {
     RecursiveConstructor,
     Quote,
     ParseQuote,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceLocationMacro {
+    Line,
+    Column,
+    File,
+}
+
+impl SourceLocationMacro {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Line => "line",
+            Self::Column => "column",
+            Self::File => "file",
+        }
+    }
+}
+
+/// A file-backed module's source, used to answer `std.source` macros.
+struct SourceFile {
+    /// The path reported by `file`.
+    path: String,
+    /// The lossless token stream of the whole file.
+    tokens: Arc<[staple_syntax::SyntaxToken]>,
+    /// The file text, reconstructed from `tokens` on first use.
+    text: Option<String>,
 }
 
 #[derive(Clone)]
@@ -572,6 +601,79 @@ fn source_location_at(source: &str, offset: usize) -> staple_syntax::SourceLocat
     staple_syntax::SourceLocation {
         line,
         column: source[line_start..offset].chars().count() + 1,
+    }
+}
+
+/// Collects the source of every file-backed module, keyed by the source name
+/// its spans carry, for the `std.source` macros. `file` reports a path relative
+/// to the containing package's directory (or the module root when there is no
+/// package) when the file lies inside it.
+fn source_files(program: &Program) -> HashMap<Arc<str>, SourceFile> {
+    let mut files = HashMap::new();
+    for module in program.modules() {
+        let syntax = &module.syntax.syntax;
+        let Span::User {
+            source: Some(name), ..
+        } = &syntax.span
+        else {
+            continue;
+        };
+        files.entry(name.clone()).or_insert_with(|| {
+            let directory = program
+                .package_of(module.id)
+                .and_then(|id| {
+                    program
+                        .package_graph()
+                        .map(|graph| graph.package(id).directory.as_path())
+                })
+                .or_else(|| program.module_root());
+            let path = directory
+                .and_then(|directory| {
+                    module
+                        .path
+                        .strip_prefix(directory)
+                        .ok()
+                        .map(std::path::Path::to_path_buf)
+                        .or_else(|| {
+                            let directory = std::fs::canonicalize(directory).ok()?;
+                            module
+                                .path
+                                .strip_prefix(directory)
+                                .ok()
+                                .map(std::path::Path::to_path_buf)
+                        })
+                })
+                .unwrap_or_else(|| module.path.clone());
+            SourceFile {
+                path: path.display().to_string(),
+                tokens: syntax.tokens.clone(),
+                text: None,
+            }
+        });
+    }
+    files
+}
+
+/// Whether `inner` lies within `outer` in the same source.
+fn span_contains(outer: &Span, inner: &Span) -> bool {
+    match (outer, inner) {
+        (
+            Span::User {
+                source: Some(outer_source),
+                range: outer_range,
+                ..
+            },
+            Span::User {
+                source: Some(inner_source),
+                range: inner_range,
+                ..
+            },
+        ) => {
+            outer_source == inner_source
+                && outer_range.start <= inner_range.start
+                && inner_range.end <= outer_range.end
+        }
+        _ => false,
     }
 }
 
@@ -1165,6 +1267,13 @@ struct MacroExpander {
     /// the macro was *called*, not at the line inside its definition that
     /// happened to trigger the error.
     invocation_spans: Vec<Span>,
+    /// Call-site span of the most recent macro or modifier invocation written
+    /// directly in source (expansion depth 0). Expansion of its result runs at
+    /// a greater depth, so this names the outermost invocation that led to any
+    /// nested `std.source` macro call.
+    root_invocation_span: Option<Span>,
+    /// File-backed module sources, keyed by the source name their spans carry.
+    source_files: HashMap<Arc<str>, SourceFile>,
     /// Set when a compile-time `panic` call has just produced a
     /// diagnostic that already names the panicking macro; consumed by the
     /// nearest enclosing macro-invocation call site so it doesn't also
@@ -1243,6 +1352,19 @@ impl MacroExpander {
                                 && declaration.name == "c_string"
                             {
                                 MacroKind::CString
+                            } else if source_module
+                                .path
+                                .ends_with(std::path::Path::new("std/source.sta"))
+                                && !declaration.modifier
+                                && declaration.value.is_none()
+                                && let Some(primitive) = match declaration.name.as_str() {
+                                    "line" => Some(SourceLocationMacro::Line),
+                                    "column" => Some(SourceLocationMacro::Column),
+                                    "file" => Some(SourceLocationMacro::File),
+                                    _ => None,
+                                }
+                            {
+                                MacroKind::SourceLocation(primitive)
                             } else if source_module
                                 .path
                                 .ends_with(std::path::Path::new("std/annotation.sta"))
@@ -1882,6 +2004,8 @@ impl MacroExpander {
             checking_compile_helpers: HashSet::new(),
             compile_binding_types: HashMap::new(),
             invocation_spans: Vec::new(),
+            root_invocation_span: None,
+            source_files: source_files(program),
         }
     }
 
@@ -3007,6 +3131,18 @@ impl MacroExpander {
                         "compiler-provided macro `c_string` must have signature `Expr -> Expr`",
                     ));
                 }
+                MacroKind::SourceLocation(primitive)
+                    if definition.parameters != [MetaType::Product(Vec::new())]
+                        || definition.result != MetaType::Expr =>
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        definition.declaration.syntax.span.clone(),
+                        format!(
+                            "compiler-provided macro `{}` must have signature `() -> Expr`",
+                            primitive.name()
+                        ),
+                    ));
+                }
                 MacroKind::SizedOpaque | MacroKind::RecursiveConstructor
                     if definition.parameters != [MetaType::Item]
                         || definition.result != MetaType::Item
@@ -3113,6 +3249,7 @@ impl MacroExpander {
             let modified = modified.clone();
             if depth == 0 {
                 self.steps = 0;
+                self.root_invocation_span = Some(modified.syntax.span.clone());
             }
             match self.apply_modifier_chain(module, modified, depth) {
                 Some(ModifierChainResult::Item(expanded)) => {
@@ -3175,6 +3312,9 @@ impl MacroExpander {
         invocation: staple_syntax::VisibilityMacroInvocation,
         depth: usize,
     ) -> Option<Item> {
+        if depth == 0 {
+            self.root_invocation_span = Some(invocation.syntax.span.clone());
+        }
         let (head, arguments) = flatten_call(&invocation.expression);
         let Some(keys) = self.resolve_macro(module, head) else {
             self.diagnostics.push(Diagnostic::new(
@@ -3880,6 +4020,7 @@ impl MacroExpander {
         }
         if depth == 0 {
             self.steps = 0;
+            self.root_invocation_span = Some(expression.syntax().span.clone());
         }
         self.expansion_stack.push(key.clone());
         let diagnostic_start = self.diagnostics.len();
@@ -4109,6 +4250,9 @@ impl MacroExpander {
 
     fn expand_block_item(&mut self, module: ModuleId, item: Item, depth: usize) -> Vec<Item> {
         let generated = if let Item::Modified(modified) = item {
+            if depth == 0 {
+                self.root_invocation_span = Some(modified.syntax.span.clone());
+            }
             match self.apply_modifier_chain(module, modified, depth) {
                 Some(ModifierChainResult::Item(item)) => vec![item],
                 Some(ModifierChainResult::Items(items)) => items,
@@ -4278,6 +4422,7 @@ impl MacroExpander {
             }
             if depth == 0 {
                 self.steps = 0;
+                self.root_invocation_span = Some(expression.syntax().span.clone());
             }
             self.expansion_stack.push(key.clone());
             let diagnostic_start = self.diagnostics.len();
@@ -4684,6 +4829,75 @@ impl MacroExpander {
         None
     }
 
+    /// Expands `std.source.line`, `column`, or `file`. A call written at the
+    /// outermost invocation site reports its own location; one produced by a
+    /// macro definition reports the outermost invocation that led to it.
+    fn expand_source_location(
+        &mut self,
+        primitive: SourceLocationMacro,
+        call_span: Span,
+    ) -> Option<SyntaxValue> {
+        let span = match &self.root_invocation_span {
+            Some(root) if !span_contains(root, &call_span) => root.clone(),
+            _ => call_span,
+        };
+        let Span::User {
+            source: Some(source),
+            range,
+            location,
+        } = &span
+        else {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!(
+                    "`{}` could not determine the source location of its invocation",
+                    primitive.name()
+                ),
+            ));
+            return None;
+        };
+        let Some(file) = self.source_files.get_mut(source) else {
+            self.diagnostics.push(Diagnostic::new(
+                span.clone(),
+                format!(
+                    "`{}` could not determine the source file of its invocation",
+                    primitive.name()
+                ),
+            ));
+            return None;
+        };
+        let expression = match primitive {
+            SourceLocationMacro::Line | SourceLocationMacro::Column => {
+                let location = location.unwrap_or_else(|| {
+                    let text = file.text.get_or_insert_with(|| {
+                        file.tokens
+                            .iter()
+                            .map(|token| token.text.as_str())
+                            .collect()
+                    });
+                    source_location_at(text, range.start)
+                });
+                let value = if primitive == SourceLocationMacro::Line {
+                    location.line
+                } else {
+                    location.column
+                };
+                Expression::Integer(staple_syntax::IntegerExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                    literal: value.to_string(),
+                })
+            }
+            SourceLocationMacro::File => {
+                let literal = staple_syntax::string_literal::encode(&file.path);
+                Expression::String(staple_syntax::StringExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                    literal,
+                })
+            }
+        };
+        Some(SyntaxValue::from_expression(expression))
+    }
+
     fn invoke_macro(
         &mut self,
         definition: &MacroDefinition,
@@ -4725,6 +4939,9 @@ impl MacroExpander {
                         literal: string.literal.clone(),
                     },
                 )))
+            }
+            MacroKind::SourceLocation(primitive) => {
+                self.expand_source_location(*primitive, call_span)
             }
             MacroKind::Doc
             | MacroKind::Feature
