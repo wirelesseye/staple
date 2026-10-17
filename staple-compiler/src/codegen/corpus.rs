@@ -153,7 +153,37 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 160] = [
+static CORPUS: [CorpusProgram; 161] = [
+    // A generic body selects its sum alternative once; an instantiation that
+    // makes two alternatives coincide must not reselect it.
+    expect_stdout(
+        must_run(emits(
+            inline(
+                "implicit_ok_parametric",
+                concat!(
+                    "use std.io.println\n",
+                    "def success = <T, E> move value: T => Result T E :: value\n",
+                    "def success_body = <T, E> move value: T => Result T E :: { value }\n",
+                    "def failure = <T, E> move error: E => Result T E :: error\n",
+                    "def show = (result: Result I32 I32) => match result {\n",
+                    "    Ok n => println \"ok ${n}\",\n",
+                    "    n: I32 => println \"error ${n}\",\n",
+                    "}\n",
+                    "def parse = (flag: Bool) => Result I32 String :: when {\n",
+                    "    flag => 42,\n",
+                    "    else => \"bad\",\n",
+                    "}\n",
+                    "show (success.<I32, I32> 1)\n",
+                    "show (success_body.<I32, I32> 2)\n",
+                    "show (failure.<I32, I32> 3)\n",
+                    "match parse True { Ok n => println \"parsed ${n}\", _ => println \"bad\" }\n",
+                ),
+                "implicit-ok-parametric",
+            ),
+            &["success", "success_body", "failure"],
+        )),
+        "ok 1\nok 2\nerror 3\nparsed 42\n",
+    ),
     expect_stdout(
         must_run(emits(
             inline(

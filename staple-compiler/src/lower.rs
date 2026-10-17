@@ -765,6 +765,103 @@ impl LoweredCoercionPlan {
         Self::plan_with(source, target, FromCoercion::Allowed, substitutions)
     }
 
+    /// Recomputes a generic template's plan at substituted types while keeping
+    /// every sum alternative and `from` introduction the template chose. The
+    /// choice was made once against the generic types, so an instantiation
+    /// must not reselect it: in `<T, E> value: T => Result T E :: value`, `T`
+    /// selects `Ok T` even when `E` is instantiated to `T`. Only the leaves
+    /// are planned afresh; a template whose shape no longer fits the
+    /// substituted types falls back to planning from scratch.
+    pub(crate) fn plan_guided(
+        template: &LoweredCoercionPlan,
+        source: &CheckedType,
+        target: &CheckedType,
+        substitutions: &std::collections::BTreeMap<TypeParameterId, CheckedType>,
+    ) -> Result<Self, String> {
+        Self::follow_template(template, source, target, FromCoercion::Allowed, substitutions)
+            .map_or_else(|| Self::plan_seeded(source, target, substitutions), Ok)
+    }
+
+    fn follow_template(
+        template: &LoweredCoercionPlan,
+        source: &CheckedType,
+        target: &CheckedType,
+        from: FromCoercion,
+        substitutions: &std::collections::BTreeMap<TypeParameterId, CheckedType>,
+    ) -> Option<Self> {
+        match template {
+            LoweredCoercionPlan::SumInject {
+                alternative,
+                payload,
+            } => {
+                let CheckedType::Sum(target_sum) = target else {
+                    return None;
+                };
+                if matches!(source, CheckedType::Sum(_)) {
+                    return None;
+                }
+                let target_alternative = target_sum.alternatives.get(*alternative)?;
+                Some(LoweredCoercionPlan::SumInject {
+                    alternative: *alternative,
+                    payload: Box::new(Self::follow_template(
+                        payload,
+                        source,
+                        target_alternative,
+                        from,
+                        substitutions,
+                    )?),
+                })
+            }
+            LoweredCoercionPlan::Wrap { payload } => {
+                if from == FromCoercion::Forbidden || matches!(target, CheckedType::Sum(_)) {
+                    return None;
+                }
+                let representation = implicit_wrapper_representation(target)?;
+                Some(LoweredCoercionPlan::Wrap {
+                    payload: Box::new(Self::follow_template(
+                        payload,
+                        source,
+                        representation,
+                        FromCoercion::Forbidden,
+                        substitutions,
+                    )?),
+                })
+            }
+            LoweredCoercionPlan::SumWiden { arms } => {
+                let (CheckedType::Sum(source_sum), CheckedType::Sum(target_sum)) = (source, target)
+                else {
+                    return None;
+                };
+                if source_sum.alternatives.len() != arms.len() {
+                    return None;
+                }
+                let arms = arms
+                    .iter()
+                    .zip(&source_sum.alternatives)
+                    .map(|(arm, alternative)| match arm {
+                        Some(arm) => Some(Some(LoweredSumWidenArm {
+                            target: arm.target,
+                            payload: Box::new(Self::follow_template(
+                                &arm.payload,
+                                alternative,
+                                target_sum.alternatives.get(arm.target)?,
+                                from,
+                                substitutions,
+                            )?),
+                        })),
+                        None => Some(None),
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(LoweredCoercionPlan::SumWiden { arms })
+            }
+            LoweredCoercionPlan::Identity
+            | LoweredCoercionPlan::Instantiate { .. }
+            | LoweredCoercionPlan::AdaptScheme { .. } => {
+                Self::plan_with(source, target, from, substitutions).ok()
+            }
+        }
+    }
+
     fn plan_with(
         source: &CheckedType,
         target: &CheckedType,

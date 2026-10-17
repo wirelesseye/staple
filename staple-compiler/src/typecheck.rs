@@ -17659,6 +17659,13 @@ pub(crate) fn select_sum_alternative(
 /// coercion, and only then the unique `from` alternative whose
 /// representation accepts the value. More than one candidate in the first
 /// non-empty tier is ambiguous.
+///
+/// TODO: warn when an earlier tier shadows a `from` alternative that would
+/// also accept the value. With `Ok T = from T`, a value checked against
+/// `Result String String` (or any `Result T E` where `E` overlaps `T`) is
+/// silently injected as the error, so `return "done"` fails instead of
+/// succeeding and success needs an explicit `Ok`. Deferred until the
+/// compiler has a design for warnings and lints.
 pub(crate) fn select_sum_alternative_with(
     source: &CheckedType,
     alternatives: &[CheckedType],

@@ -1,7 +1,7 @@
 pub mod
 
 /// A successful value represented transparently by its payload.
-pub type Ok T = pub wrap T
+pub type Ok T = pub from T
 
 /// The outcome of an operation: success as `Ok`, or an error value.
 pub type Result T E = alias Ok T | E

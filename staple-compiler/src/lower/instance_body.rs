@@ -772,6 +772,7 @@ impl<'a> BodyCloner<'a> {
             .body_coercion
             .as_ref()
             .map(|coercion| self.coercion(coercion));
+        let template_body_plan = function.body_coercion_plan.clone();
         self.body.body_moved_symbols = function.body_moved_symbols.clone();
         self.route_runtime_scheme_instantiations();
         for (call_id, call) in self.body.calls.iter() {
@@ -868,7 +869,16 @@ impl<'a> BodyCloner<'a> {
         }
 
         self.body.body_coercion_plan = self.body.body_coercion.as_ref().and_then(|coercion| {
-            super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target).ok()
+            match &template_body_plan {
+                Some(template) => super::LoweredCoercionPlan::plan_guided(
+                    template,
+                    &coercion.source,
+                    &coercion.target,
+                    &Default::default(),
+                ),
+                None => super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target),
+            }
+            .ok()
         });
         (
             std::mem::take(&mut self.body),
@@ -1447,8 +1457,9 @@ impl<'a> BodyCloner<'a> {
             .as_ref()
             .map(|coercion| self.coercion(coercion));
         // Recompute the coercion plan from the substituted types, like the
-        // other concrete-sensitive derived facts. A concrete pair unsupported
-        // by lowering produces a diagnostic rather than a missing plan.
+        // other concrete-sensitive derived facts, keeping the alternatives the
+        // template selected. A concrete pair unsupported by lowering produces
+        // a diagnostic rather than a missing plan.
         let instantiation_substitutions = expression
             .instantiation_substitutions
             .iter()
@@ -1456,11 +1467,20 @@ impl<'a> BodyCloner<'a> {
             .collect();
         let coercion_plan = match &coercion {
             Some(coercion) => {
-                match super::LoweredCoercionPlan::plan_seeded(
-                    &coercion.source,
-                    &coercion.target,
-                    &instantiation_substitutions,
-                ) {
+                let planned = match &expression.coercion_plan {
+                    Some(template) => super::LoweredCoercionPlan::plan_guided(
+                        template,
+                        &coercion.source,
+                        &coercion.target,
+                        &instantiation_substitutions,
+                    ),
+                    None => super::LoweredCoercionPlan::plan_seeded(
+                        &coercion.source,
+                        &coercion.target,
+                        &instantiation_substitutions,
+                    ),
+                };
+                match planned {
                     Ok(plan) => Some(plan),
                     Err(message) => {
                         self.diagnostics
@@ -4282,7 +4302,12 @@ impl<'a> BodyValidator<'a> {
             self.check_concrete_type(&self.body.origin, &coercion.target, "body coercion target");
             match &self.body.body_coercion_plan {
                 Some(plan) => {
-                    match super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
+                    match super::LoweredCoercionPlan::plan_guided(
+                        plan,
+                        &coercion.source,
+                        &coercion.target,
+                        &Default::default(),
+                    ) {
                         Ok(expected) if *plan == expected => {}
                         _ => self.report(
                             self.body.origin.span.clone(),
@@ -4643,10 +4668,11 @@ impl<'a> BodyValidator<'a> {
             self.check_concrete_type(&origin, &coercion.source, "coercion source");
             self.check_concrete_type(&origin, &coercion.target, "coercion target");
             // A concrete coercion must carry the plan materialization
-            // recomputed, and it must agree with a fresh computation.
+            // recomputed, and replanning along it must reproduce it.
             match &expression.coercion_plan {
                 Some(plan) => {
-                    match super::LoweredCoercionPlan::plan_seeded(
+                    match super::LoweredCoercionPlan::plan_guided(
+                        plan,
                         &coercion.source,
                         &coercion.target,
                         &expression.instantiation_substitutions,

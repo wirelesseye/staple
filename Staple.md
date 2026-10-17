@@ -4495,12 +4495,27 @@ types independently and combine them wherever a type is accepted. `Ok` and
 `Result` are public types from `std.result`, also available through the prelude:
 
 ```staple
-pub type Ok T = pub wrap T
+pub type Ok T = pub from T
 pub type Result T E = alias Ok T | E
 ```
 
 `Result T E` is therefore exactly the sum `Ok T | E`, with the error case
-unwrapped.
+unwrapped. Because `Ok` is a [`from`](#from) type, a success value converts
+implicitly wherever a `Result` is expected:
+
+```staple
+def parse = (flag: Bool) => Result I32 String :: when {
+    flag => 42,       // implicitly `Ok 42`
+    else => "bad",    // the `String` error
+}
+```
+
+An exact alternative still wins over the `from` conversion, so when the error
+type overlaps the success type, as in `Result String String`, a bare `String`
+is the error and success must be written `Ok value`. Inside a generic body
+the alternative is chosen once against the type parameters: in
+`<T, E> value: T => Result T E :: value`, `value` is always `Ok`, even when
+`E` is instantiated to `T`.
 
 Every alternative must be a sized value type. Primitive, product,
 function, opaque, reference, and fully applied nominal types may all be
