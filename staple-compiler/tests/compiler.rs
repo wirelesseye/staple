@@ -16349,3 +16349,39 @@ fn unique_builtin_cleanup_cannot_be_overridden() {
         "{errors:?}"
     );
 }
+
+#[test]
+fn macros_expand_inside_string_interpolation() {
+    let module = type_check(concat!(
+        "use std.source.(line)\n",
+        "macro five = () => parse_quote { 5 }\n",
+        "let message = \"a ${five ()} b ${line ()}\"\n",
+    ));
+    let value = module
+        .resolved()
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "message" => binding.value.clone(),
+            _ => None,
+        })
+        .expect("binding `message` should exist");
+    let staple_syntax::Expression::StringTemplate(template) = value else {
+        panic!("expected a string template");
+    };
+    let literals = template
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            staple_syntax::StringTemplatePart::Interpolation(interpolation) => {
+                match &*interpolation.expression {
+                    staple_syntax::Expression::Integer(integer) => Some(integer.literal.clone()),
+                    other => panic!("expected an integer literal, found {other:?}"),
+                }
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(literals, ["5", "3"]);
+}

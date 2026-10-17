@@ -4603,6 +4603,18 @@ impl MacroExpander {
                 logical.right = Box::new(self.expand_expression(module, *logical.right, depth));
                 Expression::Logical(logical)
             }
+            Expression::StringTemplate(mut template) => {
+                for part in &mut template.parts {
+                    if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
+                        interpolation.expression = Box::new(self.expand_expression(
+                            module,
+                            (*interpolation.expression).clone(),
+                            depth,
+                        ));
+                    }
+                }
+                Expression::StringTemplate(template)
+            }
             Expression::Quote(quote) => {
                 self.diagnostics.push(Diagnostic::new(
                     quote.syntax.span.clone(),
