@@ -74,6 +74,9 @@ pub(crate) enum RejectionReason {
     SignalAssignment,
     /// `__buffer_clone`.
     BufferClone,
+    /// `__caller_file`, `__caller_line`, `__caller_column`, or a reference to
+    /// a `@track_caller` function. Not supported by the dynamic emitter.
+    CallerLocationIntrinsic,
     /// A run-time `Natural` count (a restriction).
     RuntimeNaturalCount,
     /// A function value behind a reference, slice, buffer, or shared cell
@@ -98,6 +101,7 @@ impl RejectionReason {
                 | RejectionReason::ReactiveBinding
                 | RejectionReason::SignalAssignment
                 | RejectionReason::BufferClone
+                | RejectionReason::CallerLocationIntrinsic
                 | RejectionReason::RuntimeNaturalCount
                 | RejectionReason::FunctionBehindReference
         )
@@ -124,6 +128,7 @@ impl RejectionReason {
             RejectionReason::ReactiveBinding => "reactive binding",
             RejectionReason::SignalAssignment => "signal assignment",
             RejectionReason::BufferClone => "buffer clone",
+            RejectionReason::CallerLocationIntrinsic => "caller location intrinsic",
             RejectionReason::RuntimeNaturalCount => "run-time Natural count",
             RejectionReason::FunctionBehindReference => "function value behind a reference",
         }
@@ -136,6 +141,9 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
     match intrinsic {
         IntrinsicFunction::BufferClone => RejectionReason::BufferClone,
         IntrinsicFunction::BufferFromArray => RejectionReason::RuntimeNaturalCount,
+        IntrinsicFunction::CallerFile
+        | IntrinsicFunction::CallerLine
+        | IntrinsicFunction::CallerColumn => RejectionReason::CallerLocationIntrinsic,
         IntrinsicFunction::ReactiveScope
         | IntrinsicFunction::Reaction
         | IntrinsicFunction::Batch
@@ -888,6 +896,14 @@ impl SupportWalker<'_> {
                     .closure
                     .as_ref()
                     .map_or(&[][..], |closure| closure.captures.as_slice());
+                if callable.closure.as_ref().is_some_and(|closure| {
+                    matches!(
+                        closure.environment,
+                        crate::LoweredClosureEnvironment::CallerLocation(_)
+                    )
+                }) {
+                    self.reject(RejectionReason::CallerLocationIntrinsic);
+                }
                 // A generic binding's cell holds only its initialization state,
                 // never a function value, so a closure capturing it (a local
                 // generic `def` referring to itself) converts nothing.
@@ -1109,6 +1125,15 @@ impl SupportWalker<'_> {
         };
         if call.reactive.is_some() {
             self.reject(RejectionReason::ReactiveCall);
+        }
+        if matches!(
+            call.target,
+            LoweredCallableTarget::DirectFunction {
+                environment: crate::LoweredCallEnvironment::CallerLocation(_),
+                ..
+            }
+        ) {
+            self.reject(RejectionReason::CallerLocationIntrinsic);
         }
         if let Some(reason) = signature_function_restriction(&call.function_type) {
             self.reject(reason);

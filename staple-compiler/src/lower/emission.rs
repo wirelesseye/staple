@@ -344,6 +344,14 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.callable_value(self.program, id)
     }
 
+    /// The constant source position of a `@track_caller` reference.
+    pub(crate) fn caller_site(
+        &self,
+        id: super::LoweredCallerSiteId,
+    ) -> Option<&'a super::LoweredCallerSite> {
+        self.program.caller_sites.get(id)
+    }
+
     pub(crate) fn coro(
         &self,
         owner: EmissionOwner,

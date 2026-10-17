@@ -181,6 +181,7 @@ arena_id!(LoweredTraitMethodId);
 arena_id!(LoweredTraitImplementationId);
 arena_id!(LoweredCallId);
 arena_id!(LoweredCallableValueId);
+arena_id!(LoweredCallerSiteId);
 arena_id!(LoweredResourceProviderId);
 arena_id!(LoweredResourceUseId);
 arena_id!(LoweredWithId);
@@ -1244,6 +1245,29 @@ pub(crate) enum LoweredCallEnvironment {
     /// The call reuses the enclosing closure environment (same-function
     /// recursion).
     Current,
+    /// The target is a `@track_caller` function: its closure environment is
+    /// the caller location.
+    CallerLocation(LoweredCallerLocation),
+}
+
+/// A source position baked into the program as a private constant: the
+/// closure environment of a `@track_caller` function reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LoweredCallerSite {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+}
+
+/// The caller location a reference to a `@track_caller` function passes as
+/// its closure environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoweredCallerLocation {
+    /// The reference's own position.
+    Site(LoweredCallerSiteId),
+    /// A callee reference inside a `@track_caller` function's own body: the
+    /// enclosing function's environment, so the location passes through.
+    Forward,
 }
 
 /// The adapter a first-class callable value needs before it can be invoked.
@@ -1275,6 +1299,9 @@ pub(crate) enum LoweredClosureEnvironment {
     /// The value is an existing stored closure; no environment is
     /// constructed at this site.
     Stored,
+    /// The value references a `@track_caller` function: the environment is
+    /// the caller location.
+    CallerLocation(LoweredCallerLocation),
 }
 
 /// One capture of a closure construction, copied from the function catalog in
@@ -3184,6 +3211,12 @@ pub(crate) struct LoweredProgram {
     trait_implementations: Arena<LoweredTraitImplementationMetadata, LoweredTraitImplementationId>,
     calls: Arena<LoweredCall, LoweredCallId>,
     callable_values: Arena<LoweredCallableValue, LoweredCallableValueId>,
+    /// The deduplicated source positions of `@track_caller` references.
+    caller_sites: Arena<LoweredCallerSite, LoweredCallerSiteId>,
+    /// Lookup only: the site of a (file, line, column).
+    caller_site_lookup: HashMap<(String, u32, u32), LoweredCallerSiteId>,
+    /// Transient lowering state: resolved positions per span start.
+    caller_position_cache: HashMap<(std::sync::Arc<str>, usize), Option<crate::SourcePosition>>,
     resource_providers: Arena<LoweredResourceProvider, LoweredResourceProviderId>,
     resource_uses: Arena<LoweredResourceUse, LoweredResourceUseId>,
     withs: Arena<LoweredWith, LoweredWithId>,
@@ -7359,7 +7392,26 @@ impl LoweredProgram {
                 })?;
                 let function_type = checked_function_type.unwrap_or_else(|| template.clone());
                 substitutions = call_substitutions(&template, &function_type);
-                let environment = if route == CallableValueRoute::DeclaredFunction {
+                let tracked =
+                    route != CallableValueRoute::AnonymousFunction && resolved.is_track_caller(function);
+                if tracked && scheme.is_some() {
+                    return Err(Diagnostic::new(
+                        origin.span.clone(),
+                        "a `@track_caller` function cannot be used as a polymorphic value",
+                    ));
+                }
+                let environment = if tracked {
+                    if owner == ExpressionOwner::Function(function) {
+                        LoweredClosureEnvironment::Current
+                    } else {
+                        LoweredClosureEnvironment::CallerLocation(self.caller_location(
+                            module,
+                            owner,
+                            syntax,
+                            &origin.span,
+                        ))
+                    }
+                } else if route == CallableValueRoute::DeclaredFunction {
                     LoweredClosureEnvironment::Stored
                 } else {
                     LoweredClosureEnvironment::Fresh
@@ -7669,6 +7721,59 @@ impl LoweredProgram {
         })
     }
 
+    /// The caller location a reference to a `@track_caller` function passes.
+    /// A callee reference directly in a `@track_caller` function's own body
+    /// forwards that function's environment; coroutine bodies and nested
+    /// closures are separate functions and report their own site. Otherwise
+    /// the location is the start of the reference, or of the outermost macro
+    /// invocation that generated it.
+    fn caller_location(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        syntax: SyntaxId,
+        span: &Span,
+    ) -> LoweredCallerLocation {
+        let resolved = module.resolved();
+        if let ExpressionOwner::Function(function) = owner
+            && resolved.is_track_caller(function)
+            && self.callee_expressions.contains(&syntax)
+        {
+            return LoweredCallerLocation::Forward;
+        }
+        let span = resolved.caller_location_span(syntax).unwrap_or(span);
+        let position = match span {
+            Span::User {
+                source: Some(source),
+                range,
+                ..
+            } => self
+                .caller_position_cache
+                .entry((source.clone(), range.start))
+                .or_insert_with(|| resolved.program().span_position(span))
+                .clone(),
+            _ => None,
+        };
+        let key = match position {
+            Some(position) => (
+                position.file,
+                u32::try_from(position.line).unwrap_or(u32::MAX),
+                u32::try_from(position.column).unwrap_or(u32::MAX),
+            ),
+            None => ("<unknown>".to_owned(), 0, 0),
+        };
+        if let Some(site) = self.caller_site_lookup.get(&key) {
+            return LoweredCallerLocation::Site(*site);
+        }
+        let site = self.caller_sites.push(LoweredCallerSite {
+            file: key.0.clone(),
+            line: key.1,
+            column: key.2,
+        });
+        self.caller_site_lookup.insert(key, site);
+        LoweredCallerLocation::Site(site)
+    }
+
     /// Whether a callee symbol is local at this call site: owned by the
     /// enclosing function or captured by it. Local bindings stay indirect.
     fn call_callee_is_local(&self, owner: ExpressionOwner, symbol: SymbolId) -> bool {
@@ -7780,6 +7885,14 @@ impl LoweredProgram {
                     ExpressionOwner::Function(owner_function) if owner_function == function => {
                         LoweredCallEnvironment::Current
                     }
+                    _ if resolved.is_track_caller(function) => {
+                        LoweredCallEnvironment::CallerLocation(self.caller_location(
+                            module,
+                            owner,
+                            callee_syntax,
+                            &call.callee.syntax().span,
+                        ))
+                    }
                     _ => LoweredCallEnvironment::None,
                 };
                 (
@@ -7812,6 +7925,19 @@ impl LoweredProgram {
                         "selected intrinsic symbol has a registered intrinsic",
                     )
                 })?;
+                if matches!(
+                    intrinsic,
+                    IntrinsicFunction::CallerFile
+                        | IntrinsicFunction::CallerLine
+                        | IntrinsicFunction::CallerColumn
+                ) && !matches!(owner, ExpressionOwner::Function(function)
+                        if resolved.is_track_caller(function))
+                {
+                    return Err(Diagnostic::new(
+                        origin.span.clone(),
+                        "caller location intrinsics may only be used directly in the body of a `@track_caller` function",
+                    ));
+                }
                 let function_type = checked_call_function_type(module, call, &origin)?;
                 if let Some(template) = symbol_function_type(module, symbol) {
                     substitutions = call_substitutions(&template, &function_type);
@@ -13891,6 +14017,9 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::StringFromCString
         | Intrinsic::StringToCString
         | Intrinsic::StringAdd
+        | Intrinsic::CallerFile
+        | Intrinsic::CallerLine
+        | Intrinsic::CallerColumn
         | Intrinsic::SharedBufferLength
         | Intrinsic::SharedBufferGetRef
         | Intrinsic::BufferWithCapacity
@@ -19384,6 +19513,104 @@ mod tests {
                 "the fixture should construct a {expected:?} callable value"
             );
         }
+    }
+
+    /// The caller locations of every reference to the function named `name`,
+    /// sorted: `forward`, or `line:column` of a constant site.
+    fn caller_locations(program: &LoweredProgram, name: &str) -> Vec<String> {
+        let describe = |location: LoweredCallerLocation| match location {
+            LoweredCallerLocation::Forward => "forward".to_owned(),
+            LoweredCallerLocation::Site(id) => {
+                let site = program.caller_sites.get(id).expect("site is interned");
+                format!("{}:{}", site.line, site.column)
+            }
+        };
+        let is_named = |function: FunctionId| {
+            program
+                .functions
+                .get(function)
+                .is_some_and(|function| function.name == name)
+        };
+        let mut locations = Vec::new();
+        for (_, value) in program.callable_values.iter() {
+            let Some(closure) = &value.closure else {
+                continue;
+            };
+            if !is_named(closure.function) {
+                continue;
+            }
+            match closure.environment {
+                LoweredClosureEnvironment::CallerLocation(location) => {
+                    locations.push(describe(location))
+                }
+                // The function literal's own definition-site closure.
+                LoweredClosureEnvironment::Fresh | LoweredClosureEnvironment::None => {}
+                other => panic!("reference to `{name}` has environment {other:?}"),
+            }
+        }
+        for (_, call) in program.calls.iter() {
+            if let LoweredCallableTarget::DirectFunction {
+                function,
+                environment,
+            } = &call.target
+                && is_named(*function)
+                && let LoweredCallEnvironment::CallerLocation(location) = environment
+            {
+                locations.push(describe(*location));
+            }
+        }
+        locations.sort();
+        locations
+    }
+
+    #[test]
+    fn track_caller_references_record_site_or_forward_locations() {
+        let module = checked_program(concat!(
+            "use std.source.(Location, track_caller)\n",
+            "@track_caller\n",
+            "def here = () => Location :: Location.caller ()\n",
+            "@track_caller\n",
+            "def forwards = () => Location :: here ()\n",
+            "def outer = () => Location :: here ()\n",
+            "@track_caller\n",
+            "def in_closure = () => Location :: (() => here ()) ()\n",
+            "@track_caller\n",
+            "def generic_tag: <T where Copy T> T -> T = <T where Copy T> value => value\n",
+            "def use_generic = () => I32 :: generic_tag 1\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        // A direct call reports its own line and column; a callee in a tracked
+        // function's own body forwards; a nested closure is a separate
+        // function and reports its own site.
+        assert_eq!(
+            caller_locations(&program, "here"),
+            ["6:31", "8:43", "forward"]
+        );
+        // A generic target stays monomorphised and takes the site as well.
+        assert_eq!(caller_locations(&program, "generic_tag"), ["11:32"]);
+        assert!(program.calls.iter().any(|(_, call)| matches!(
+            call.target,
+            LoweredCallableTarget::DirectFunction {
+                environment: LoweredCallEnvironment::CallerLocation(
+                    LoweredCallerLocation::Site(_)
+                ),
+                ..
+            }
+        )));
+        // Every constant site is interned once.
+        let mut sites = program
+            .caller_sites
+            .iter()
+            .map(|(_, site)| (site.file.clone(), site.line, site.column))
+            .collect::<Vec<_>>();
+        let count = sites.len();
+        sites.sort();
+        sites.dedup();
+        assert_eq!(sites.len(), count);
     }
 
     #[test]

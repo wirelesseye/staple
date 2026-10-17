@@ -337,6 +337,13 @@ pub enum IntrinsicFunction {
     StringFromCString,
     StringToCString,
     StringAdd,
+    /// `std.source.__caller_file`: the file of the enclosing `@track_caller`
+    /// function's caller, read from its closure environment.
+    CallerFile,
+    /// `std.source.__caller_line`: the line of that caller, as `U32`.
+    CallerLine,
+    /// `std.source.__caller_column`: the column of that caller, as `U32`.
+    CallerColumn,
     SharedBufferLength,
     SharedBufferGetRef,
     BufferWithCapacity,
@@ -421,6 +428,9 @@ pub struct ResolvedFunction {
     pub trait_bounds: Vec<staple_syntax::TraitBound>,
     pub subtype_bounds: Vec<staple_syntax::SubtypeBound>,
     pub captures: Vec<SymbolId>,
+    /// Set on the outermost function stage of a `@track_caller` binding. Its
+    /// closure environment carries the caller's source location.
+    pub track_caller: bool,
     pub body: Expression,
 }
 
@@ -491,6 +501,7 @@ pub struct ResolvedModule {
     mutable_annotations: HashSet<SymbolId>,
     function_parents: HashMap<FunctionId, Option<FunctionId>>,
     expression_function_owners: HashMap<SyntaxId, Option<FunctionId>>,
+    caller_location_spans: HashMap<SyntaxId, Span>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
@@ -522,6 +533,25 @@ impl ResolvedModule {
 
     pub fn functions(&self) -> &[ResolvedFunction] {
         &self.functions
+    }
+
+    /// Whether the function is the outermost stage of a `@track_caller`
+    /// binding. Inner stages of a curried definition, closures and implicit
+    /// thunks are never track-caller functions.
+    pub fn is_track_caller(&self, function: FunctionId) -> bool {
+        self.functions
+            .binary_search_by_key(&function.0, |function| function.id.0)
+            .is_ok_and(|index| self.functions[index].track_caller)
+    }
+
+    /// For a reference produced by macro expansion, the span of the outermost
+    /// macro invocation that generated it. A reference to a `@track_caller`
+    /// function reports the position of this span, like the `std.source`
+    /// macros do, instead of the macro definition's own text. `None` for
+    /// references written directly in source and for references that lie
+    /// inside the outermost invocation (such as macro arguments).
+    pub fn caller_location_span(&self, syntax_id: SyntaxId) -> Option<&Span> {
+        self.caller_location_spans.get(&syntax_id)
     }
 
     pub(crate) fn symbols_in_id_order(&self) -> Vec<ResolvedSymbolInfo> {
@@ -1247,7 +1277,13 @@ pub struct NameResolver {
     function_parents: HashMap<FunctionId, Option<FunctionId>>,
     expression_function_owners: HashMap<SyntaxId, Option<FunctionId>>,
     function_captures: HashMap<FunctionId, Vec<SymbolId>>,
+    /// Module-level bindings marked `@track_caller`.
+    track_caller_bindings: HashSet<SyntaxId>,
+    /// Functions that are the outermost stage of a `@track_caller` binding.
+    track_caller_functions: HashSet<FunctionId>,
     function_stack: Vec<FunctionId>,
+    /// The `function_stack` depth at each open `coro` body.
+    coro_function_depths: Vec<usize>,
     loop_depth: usize,
     builtin_types: HashMap<TypeId, BuiltinType>,
     recursive_constructions: HashMap<TypeId, RecursiveConstruction>,
@@ -1670,6 +1706,7 @@ impl NameResolver {
             symbol_owners: self.symbol_owners,
             function_parents: self.function_parents,
             expression_function_owners: self.expression_function_owners,
+            caller_location_spans: macro_analysis.caller_location_spans,
             symbol_modules: self.symbol_modules,
             symbol_declarations: self.symbol_declarations,
             symbol_declaration_spans: self.symbol_declaration_spans,
@@ -1687,6 +1724,42 @@ impl NameResolver {
         resolved.checked_initialization_symbols = analysis.checked_symbols;
         resolved.checked_initialization_reads = analysis.checked_reads;
         Ok(resolved)
+    }
+
+    /// Rejects a reference to a `std.source` caller intrinsic outside the body
+    /// of a `@track_caller` function. A nested closure does not count: only
+    /// the tracked function's own closure environment holds the location.
+    fn check_intrinsic_reference(&mut self, symbol: SymbolId, span: &Span) {
+        if !matches!(
+            self.intrinsic_functions.get(&symbol),
+            Some(
+                IntrinsicFunction::CallerFile
+                    | IntrinsicFunction::CallerLine
+                    | IntrinsicFunction::CallerColumn
+            )
+        ) {
+            return;
+        }
+        if self.coro_function_depths.last() == Some(&self.function_stack.len())
+            && self
+                .function_stack
+                .last()
+                .is_some_and(|function| self.track_caller_functions.contains(function))
+        {
+            self.diagnostics.push(Diagnostic::new(
+                span.clone(),
+                "caller location intrinsics cannot be used inside a `coro` body, which does not share the `@track_caller` function's environment",
+            ));
+        } else if !self
+            .function_stack
+            .last()
+            .is_some_and(|function| self.track_caller_functions.contains(function))
+        {
+            self.diagnostics.push(Diagnostic::new(
+                span.clone(),
+                "caller location intrinsics may only be used directly in the body of a `@track_caller` function",
+            ));
+        }
     }
 
     fn collect_standard_library_contract(&mut self, program: &Program) {
@@ -2249,6 +2322,21 @@ impl NameResolver {
                 "std.coroutine",
                 "__completion_token_cancel",
                 IntrinsicFunction::CompletionTokenCancel,
+            ),
+            (
+                "std.source",
+                "__caller_file",
+                IntrinsicFunction::CallerFile,
+            ),
+            (
+                "std.source",
+                "__caller_line",
+                IntrinsicFunction::CallerLine,
+            ),
+            (
+                "std.source",
+                "__caller_column",
+                IntrinsicFunction::CallerColumn,
             ),
         ] {
             declarations.push((module.to_owned(), None, name.to_owned(), intrinsic));
@@ -4229,6 +4317,16 @@ impl NameResolver {
     }
 
     fn resolve_binding(&mut self, binding: &Binding) {
+        if binding.track_caller {
+            if self.block_types.is_empty() {
+                self.track_caller_bindings.insert(binding.syntax.id);
+            } else {
+                self.diagnostics.push(Diagnostic::new(
+                    binding.syntax.span.clone(),
+                    "`@track_caller` is only allowed on a module-level or companion `def`, not a local one",
+                ));
+            }
+        }
         self.binding_type_parameters
             .entry(binding.syntax.id)
             .or_insert_with(|| binding.all_type_parameters());
@@ -4930,6 +5028,11 @@ impl NameResolver {
                     .insert(function.syntax.id, function_id);
                 self.function_parents
                     .insert(function_id, self.function_stack.last().copied());
+                let track_caller = suggested_function
+                    .is_some_and(|(_, syntax)| self.track_caller_bindings.contains(&syntax));
+                if track_caller {
+                    self.track_caller_functions.insert(function_id);
+                }
                 self.resolve_pattern_types(&function.pattern);
                 if let Some(effects) = &function.effect_lower_bound {
                     for resource in &effects.resources {
@@ -4983,6 +5086,12 @@ impl NameResolver {
                     .function_captures
                     .remove(&function_id)
                     .unwrap_or_default();
+                if track_caller && !captures.is_empty() {
+                    self.diagnostics.push(Diagnostic::new(
+                        function.syntax.span.clone(),
+                        "a `@track_caller` function cannot capture local variables",
+                    ));
+                }
                 self.functions.push(ResolvedFunction {
                     id: function_id,
                     name,
@@ -5008,6 +5117,7 @@ impl NameResolver {
                         .and_then(|(_, syntax)| self.binding_subtype_bounds.get(&syntax).cloned())
                         .unwrap_or_default(),
                     captures,
+                    track_caller,
                     body: (*function.body).clone(),
                 });
                 self.pop_type_parameter_scope();
@@ -5062,7 +5172,9 @@ impl NameResolver {
                     .insert(coro.body.syntax.id, self.function_stack.last().copied());
                 let outer_loop_depth = self.loop_depth;
                 self.loop_depth = 0;
+                self.coro_function_depths.push(self.function_stack.len());
                 self.resolve_block(&coro.body);
+                self.coro_function_depths.pop();
                 self.loop_depth = outer_loop_depth;
             }
             Expression::Await(await_) => {
@@ -5228,6 +5340,7 @@ impl NameResolver {
                 {
                     self.symbols.insert(name.syntax.id, symbol);
                     self.record_capture(symbol);
+                    self.check_intrinsic_reference(symbol, &name.syntax.span);
                 }
                 (Some(_), methods)
                     if !methods.is_empty()
@@ -5249,6 +5362,7 @@ impl NameResolver {
                 (Some(symbol), _) => {
                     self.symbols.insert(name.syntax.id, symbol);
                     self.record_capture(symbol);
+                    self.check_intrinsic_reference(symbol, &name.syntax.span);
                 }
                 (None, methods) if !methods.is_empty() => {
                     self.trait_method_references.insert(name.syntax.id, methods);

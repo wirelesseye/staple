@@ -65,6 +65,11 @@ pub(crate) struct Backend<'program, 'context> {
     size_type: inkwell::types::IntType<'context>,
     target_data: TargetData,
     layout: LayoutContext<'program>,
+    /// The private constant for each `@track_caller` reference position,
+    /// deduplicated per LLVM module.
+    caller_sites: std::cell::RefCell<
+        std::collections::HashMap<(String, u32, u32), inkwell::values::PointerValue<'context>>,
+    >,
 }
 
 impl<'program, 'context> Backend<'program, 'context> {
@@ -80,6 +85,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             size_type: context.ptr_sized_int_type(&target_machine.get_target_data(), None),
             target_data: target_machine.get_target_data(),
             layout,
+            caller_sites: std::cell::RefCell::default(),
         }
     }
 }

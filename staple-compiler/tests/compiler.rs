@@ -12519,6 +12519,17 @@ fn recursive_constructor_modifier_is_package_visible_in_stdlib() {
 }
 
 fn stdlib_modifier_diagnostics(path: &str, original: &str, replacement: &str) -> Vec<Diagnostic> {
+    stdlib_edit_diagnostics(path, original, replacement, "")
+}
+
+/// Resolves and checks `program_source` against a copy of the standard library
+/// in which the first `original` in `path` is replaced by `replacement`.
+fn stdlib_edit_diagnostics(
+    path: &str,
+    original: &str,
+    replacement: &str,
+    program_source: &str,
+) -> Vec<Diagnostic> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -12535,7 +12546,7 @@ fn stdlib_modifier_diagnostics(path: &str, original: &str, replacement: &str) ->
     std::fs::write(file, source.replacen(original, replacement, 1)).unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(&temporary)
-        .load_source("", root)
+        .load_source(program_source, root)
         .expect("fixture should load");
     let result = NameResolver::new().resolve_program(program);
     std::fs::remove_dir_all(temporary).unwrap();
@@ -16384,4 +16395,286 @@ fn macros_expand_inside_string_interpolation() {
         })
         .collect::<Vec<_>>();
     assert_eq!(literals, ["5", "3"]);
+}
+
+#[test]
+fn track_caller_location_api_resolves_and_type_checks() {
+    type_check(concat!(
+        "use std.source.Location\n",
+        "let here = Location.caller ()\n",
+        "let text = \"${here}\"\n",
+        "let file = Location.file here\n",
+        "let line = Location.line here\n",
+        "let column = Location.column here\n",
+    ));
+}
+
+#[test]
+fn track_caller_flags_only_the_outer_stage() {
+    let resolved = resolve(concat!(
+        "use std.source.(track_caller)\n@track_caller\n",
+        "def outer = a: I32 => b: I32 => a + b\n",
+        "def plain = a: I32 => a\n",
+    ));
+    let tracked = |name: &str| {
+        let functions = resolved
+            .functions()
+            .iter()
+            .filter(|function| function.name.ends_with(name))
+            .collect::<Vec<_>>();
+        assert!(!functions.is_empty(), "`{name}` should resolve");
+        functions
+    };
+    let outer = tracked("outer");
+    assert_eq!(outer.len(), 1);
+    assert!(outer[0].track_caller);
+    assert!(resolved.is_track_caller(outer[0].id));
+    assert!(!resolved.is_track_caller(tracked("plain")[0].id));
+    // The curried inner stage and every other function stay untracked.
+    assert_eq!(
+        resolved
+            .functions()
+            .iter()
+            .filter(|function| {
+                resolved.is_track_caller(function.id) && !function.name.ends_with("caller")
+            })
+            .count(),
+        1,
+    );
+    let std_source = resolve("use std.source.Location\nlet here = Location.caller ()\n");
+    assert!(
+        std_source
+            .functions()
+            .iter()
+            .any(|function| function.track_caller && function.name.ends_with("caller")),
+        "Location.caller should be a track_caller function"
+    );
+}
+
+#[test]
+fn track_caller_is_accepted_on_module_companion_and_generic_defs() {
+    for source in [
+        "use std.source.(track_caller)\n@track_caller\npub def here = () => 1\n",
+        "use std.source.(track_caller)\n@track_caller\ndef identity = <T> value: T => value\n",
+        "use std.source.(track_caller)\n@track_caller\ndef identity: <T> T -> T = value => value\n",
+        "use std.source.(track_caller)\ntype Box = wrap I32\ncompanion Box {\n    use std.source.(track_caller)\n    @track_caller\n    pub def make = () => Box 1\n}\n",
+        "use std.source.(track_caller)\ntype Box = wrap I32\ncompanion Box {\n    use std.source.(track_caller)\n    /// Documented.\n    @track_caller\n    pub def make = () => Box 1\n}\n",
+        "use std.source.(track_caller)\ntype Box T = wrap T\ncompanion<T> Box T {\n    use std.source.(track_caller)\n    /// Documented.\n    @track_caller\n    pub def get = (box: Box T) => box\n}\n",
+        "use std.source.(track_caller)\n/// Documented.\n@track_caller\ndef documented = () => 1\n",
+        "use std.source.(track_caller)\n@track_caller\ndef recursive = n: I32 => if (n == 0) { 0 } else { recursive (n - 1) }\n",
+    ] {
+        let resolved = resolve_result(source)
+            .unwrap_or_else(|diagnostics| panic!("{source:?} should resolve: {diagnostics:?}"));
+        assert!(
+            resolved.functions().iter().any(|function| function.track_caller),
+            "{source:?} should flag a function"
+        );
+    }
+    type_check("use std.source.(track_caller)\n@track_caller\ndef identity = <T> move value: T => value\nlet x = identity 1\n");
+}
+
+#[test]
+fn track_caller_rejects_unsupported_placements() {
+    for (source, expected) in [
+        (
+            "use std.source.(track_caller)\n@track_caller\nlet value = () => 1\n",
+            "`@track_caller` may only modify a `def` whose value is a function",
+        ),
+        (
+            "use std.source.(track_caller)\n@track_caller\nconst value = 1\n",
+            "`@track_caller` may only modify a `def` whose value is a function",
+        ),
+        (
+            "use std.source.(track_caller)\n@track_caller\ndef value = 1\n",
+            "`@track_caller` may only modify a `def` whose value is a function",
+        ),
+        (
+            "use std.source.(track_caller)\n@track_caller\ndef value: () -> I32\n",
+            "`@track_caller` may only modify a `def` whose value is a function",
+        ),
+        (
+            "use std.source.(track_caller)\n@track_caller\nextern \"C\" {\n    puts: () -> I32\n}\n",
+            "`@track_caller` may only modify a `def` whose value is a function",
+        ),
+        (
+            "use std.source.(track_caller)\n@track_caller\ntype Token = wrap I32\n",
+            "`@track_caller` may only modify a `def` whose value is a function",
+        ),
+        (
+            "use std.source.(track_caller)\n@track_caller\ntrait Named T { name: T -> I32 }\n",
+            "`@track_caller` may only modify a `def` whose value is a function",
+        ),
+        (
+            "use std.source.(track_caller)\n@track_caller\nimpl Eq I32 { eq = (a; b) => True }\n",
+            "`@track_caller` may only modify a `def` whose value is a function",
+        ),
+        (
+            "use std.source.(track_caller)\n@track_caller(1)\ndef value = () => 1\n",
+            "`@track_caller`",
+        ),
+        (
+            "use std.source.(track_caller)\ndef outer = () => {\n    @track_caller\n    def inner = () => 1\n    inner ()\n}\n",
+            "not a local one",
+        ),
+        (
+            "use std.source.(track_caller)\ndef outer = x: I32 => {\n    @track_caller\n    def inner = () => x\n    inner ()\n}\n",
+            "not a local one",
+        ),
+        (
+            "use std.source.(track_caller)\nlet value = {\n    @track_caller\n    def inner = () => 1\n    inner ()\n}\n",
+            "not a local one",
+        ),
+    ] {
+        let diagnostics = resolve_result(source)
+            .expect_err_diagnostics(&format!("{source:?} should be rejected"));
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "{source:?}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn track_caller_allows_reading_module_level_values() {
+    resolve("use std.source.(track_caller)\nlet captured = 1\n@track_caller\ndef uses_global = () => captured\n");
+}
+
+#[test]
+fn track_caller_modifier_is_stdlib_reserved() {
+    let diagnostics = resolve_result(&with_syntax_imports(
+        "macro @track_caller: Item -> Item = item => item\n",
+    ))
+    .expect_err_diagnostics("track_caller name is reserved");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("reserved by the compiler")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+#[test]
+fn track_caller_requires_an_import_from_std_source() {
+    for source in [
+        "@track_caller\ndef value = () => 1\n",
+        "use std.core.*\n@track_caller\ndef value = () => 1\n",
+        "use std.annotation.(track_caller)\n@track_caller\ndef value = () => 1\n",
+    ] {
+        resolve_result(source).expect_err_diagnostics("track_caller needs an import");
+    }
+    for source in [
+        "use std.source.(track_caller)\n@track_caller\ndef value = () => 1\n",
+        "use std.source.*\n@track_caller\ndef value = () => 1\n",
+        "@std.source.track_caller\ndef value = () => 1\n",
+    ] {
+        let resolved = resolve_result(source)
+            .unwrap_or_else(|diagnostics| panic!("{source:?}: {diagnostics:?}"));
+        assert!(resolved.functions().iter().any(|f| f.track_caller));
+    }
+}
+
+fn caller_intrinsics_require_a_track_caller_body() {
+    let program = "use std.source.Location\nlet here = Location.caller ()\n";
+    // Baseline: the unmodified standard library is accepted.
+    let diagnostics = stdlib_edit_diagnostics(
+        "std/source.sta",
+        "@track_caller\n    pub def caller",
+        "@track_caller\n    pub def caller",
+        program,
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    for (original, replacement) in [
+        // Not a track_caller function at all.
+        ("@track_caller\n    pub def caller", "pub def caller"),
+        // Inside a nested closure rather than the function's own body.
+        (
+            "file: __caller_file (),",
+            "file: (() => __caller_file ()) (),",
+        ),
+    ] {
+        let diagnostics = stdlib_edit_diagnostics("std/source.sta", original, replacement, program);
+        assert!(
+            diagnostics.iter().any(|d| d
+                .message
+                .contains("may only be used directly in the body of a `@track_caller` function")),
+            "{original:?} -> {replacement:?}: {diagnostics:?}"
+        );
+    }
+    // A `coro` body runs from its own frame, not the function's environment.
+    let diagnostics = stdlib_edit_diagnostics(
+        "std/source.sta",
+        "file: __caller_file (),",
+        "file: coro { __caller_file () },",
+        program,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("cannot be used inside a `coro` body")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn caller_location_span_maps_macro_generated_references_to_the_invocation() {
+    let resolved = resolve(concat!(
+        "use std.source.(track_caller)\n",
+        "@track_caller\n",
+        "def tracked = () => 1\n",
+        "macro call = () => parse_quote { tracked () }\n",
+        "let direct = tracked ()\n",
+        "let generated =\n",
+        "    call ()\n",
+    ));
+    let callee = |name: &str| {
+        let value = resolved
+            .syntax()
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Binding(binding) if binding.name == name => binding.value.clone(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("binding `{name}` should exist"));
+        match value {
+            staple_syntax::Expression::Call(call) => call.callee.syntax().id,
+            other => panic!("expected a call, found {other:?}"),
+        }
+    };
+    // A reference written in source reports its own span.
+    assert!(resolved.caller_location_span(callee("direct")).is_none());
+    // A reference produced by the macro reports the outermost invocation.
+    let span = resolved
+        .caller_location_span(callee("generated"))
+        .expect("generated reference should be mapped");
+    let position = resolved
+        .program()
+        .span_position(span)
+        .expect("invocation span should have a position");
+    assert_eq!((position.line, position.column), (7, 5));
+    assert_eq!(position.file, "<stdin>.sta");
+}
+
+#[test]
+fn span_position_agrees_with_source_location_macros() {
+    let module = type_check(concat!(
+        "use std.source.(line, column, file)\n",
+        "let at = (line (), column (), file ())\n",
+    ));
+    let binding_span = module
+        .resolved()
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "at" => {
+                Some(binding.value.as_ref().unwrap().syntax().span.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let position = module.resolved().program().span_position(&binding_span).unwrap();
+    assert_eq!(position.file, "<stdin>.sta");
+    assert_eq!(position.line, 2);
 }

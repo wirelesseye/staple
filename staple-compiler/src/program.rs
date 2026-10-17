@@ -23,6 +23,43 @@ pub struct SourceModule {
     pub companion: bool,
 }
 
+/// A source position: package-relative file path with 1-based line and column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourcePosition {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+}
+
+/// The 1-based line and column (counted in characters) of a byte offset in
+/// `source`. `\r\n`, `\r` and `\n` each end a line.
+pub(crate) fn source_location_at(source: &str, offset: usize) -> SourceLocation {
+    let offset = offset.min(source.len());
+    let bytes = source.as_bytes();
+    let mut line = 1usize;
+    let mut line_start = 0usize;
+    let mut cursor = 0usize;
+    while cursor < offset {
+        match bytes[cursor] {
+            b'\r' if bytes.get(cursor + 1) == Some(&b'\n') => {
+                cursor += 2;
+                line += 1;
+                line_start = cursor;
+            }
+            b'\r' | b'\n' => {
+                cursor += 1;
+                line += 1;
+                line_start = cursor;
+            }
+            _ => cursor += 1,
+        }
+    }
+    SourceLocation {
+        line,
+        column: source[line_start..offset].chars().count() + 1,
+    }
+}
+
 /// The two module targets a bare dotted `use` declaration may denote.
 ///
 /// `namespace` is the complete path, while `item_module` is the path without
@@ -618,6 +655,84 @@ impl Program {
 
     pub fn modules(&self) -> &[SourceModule] {
         &self.modules
+    }
+
+    /// The path of a module's file as reported by `std.source.file` and
+    /// `Location.file`: relative to the containing package's directory (or the
+    /// module root when there is no package) when the file lies inside it,
+    /// otherwise the module's own path.
+    pub fn module_source_path(&self, id: ModuleId) -> String {
+        let module = self.module(id);
+        let directory = self
+            .package_of(id)
+            .and_then(|id| {
+                self.package_graph()
+                    .map(|graph| graph.package(id).directory.as_path())
+            })
+            .or_else(|| self.module_root());
+        directory
+            .and_then(|directory| {
+                module
+                    .path
+                    .strip_prefix(directory)
+                    .ok()
+                    .map(Path::to_path_buf)
+                    .or_else(|| {
+                        let directory = std::fs::canonicalize(directory).ok()?;
+                        module
+                            .path
+                            .strip_prefix(directory)
+                            .ok()
+                            .map(Path::to_path_buf)
+                    })
+            })
+            .unwrap_or_else(|| module.path.clone())
+            .display()
+            .to_string()
+    }
+
+    /// The package-relative file path and 1-based line and column (columns
+    /// count characters) of the start of a user span, using the same rules as
+    /// the `std.source` macros. `None` when the span is not a user span or its
+    /// source file is not part of this program.
+    ///
+    /// For a reference produced by macro expansion, pass the span recorded in
+    /// `ResolvedModule::caller_location_span` rather than the reference's own
+    /// span. Each call scans the program's modules; callers resolving many
+    /// spans should cache the result per span.
+    pub fn span_position(&self, span: &Span) -> Option<SourcePosition> {
+        let Span::User {
+            source: Some(source),
+            range,
+            location,
+        } = span
+        else {
+            return None;
+        };
+        let module = self.modules.iter().find(|module| {
+            matches!(
+                &module.syntax.syntax.span,
+                Span::User { source: Some(name), .. } if name == source
+            )
+        })?;
+        let location = match location {
+            Some(location) => *location,
+            None => {
+                let text: String = module
+                    .syntax
+                    .syntax
+                    .tokens
+                    .iter()
+                    .map(|token| token.text.as_str())
+                    .collect();
+                source_location_at(&text, range.start)
+            }
+        };
+        Some(SourcePosition {
+            file: self.module_source_path(module.id),
+            line: location.line,
+            column: location.column,
+        })
     }
 
     pub fn module(&self, id: ModuleId) -> &SourceModule {

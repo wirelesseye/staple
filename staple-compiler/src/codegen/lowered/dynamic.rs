@@ -9052,6 +9052,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .ptr_type(AddressSpace::default())
                         .const_null(),
                     LoweredCallEnvironment::Current => environment.closure,
+                    LoweredCallEnvironment::CallerLocation(_) => {
+                        return Err(Diagnostic::new(
+                            call.origin.span.clone(),
+                            "a `@track_caller` call is not supported by the dynamic emitter",
+                        ));
+                    }
                 };
                 let mut arguments = vec![closure.into()];
                 for parameter in &runtime {

@@ -3850,3 +3850,20 @@ fn parenthesized_nominal_patterns_take_type_annotations() {
     // `mut` modifies only bindings, so a whole annotated nominal cannot be `mut`.
     assert!(staple_syntax::parse("def f = mut (Box a): Box I32 => a").is_err());
 }
+
+#[test]
+fn companion_members_wrapped_in_modifiers_keep_companion_context() {
+    let source = "companion<T> Box T {\n    /// Documented.\n    @track_caller\n    pub def first = (b: Box T) => b\n}\n";
+    let module = parse(source).expect("modified companion member should parse");
+    let Item::Submodule(companion) = &module.items[0] else {
+        panic!("companion")
+    };
+    let Item::Modified(modified) = &companion.module.items[0] else {
+        panic!("expected a modified member")
+    };
+    let Item::Binding(binding) = modified.item.as_ref() else {
+        panic!("expected a binding")
+    };
+    assert!(binding.companion_target.is_some());
+    assert!(binding.companion_generics.is_some());
+}

@@ -1,6 +1,8 @@
 pub mod
 
-use package.syntax.(Expr)
+use package.syntax.(Expr, Item)
+use package.fmt.(Display, Formatter)
+use package.string.String
 
 /// Expands to the 1-based line number of the invocation as an integer literal.
 ///
@@ -48,3 +50,79 @@ pub macro column: () -> Expr
 /// let current = file ()
 /// ```
 pub macro file: () -> Expr
+
+/// Makes a function report its caller's source location to
+/// `std.source.Location.caller`, instead of its own.
+///
+/// Applies only to a `def` whose value is a function literal, at module level
+/// or in a companion. The function must not capture local variables.
+///
+/// # Example
+///
+/// ```staple
+/// use std.source.(Location, track_caller)
+///
+/// @track_caller
+/// pub def here = () => Location.caller ()
+/// ```
+pub macro @track_caller: Item -> Item
+
+extern "staple-intrinsic" {
+    __caller_file: () -> String
+    __caller_line: () -> U32
+    __caller_column: () -> U32
+}
+
+/// A position in a source file: the package-relative path with a 1-based line
+/// and column. A `Location` can only be obtained from `Location.caller`.
+///
+/// # Example
+///
+/// ```staple
+/// use std.source.Location
+///
+/// let here = Location.caller ()
+/// ```
+pub type Location = wrap (file: String, line: U32, column: U32)
+
+companion Location {
+    use package.source.(track_caller)
+
+    /// Returns the location of the call to `caller` itself. Inside a
+    /// `@track_caller` function, it returns the location of that function's
+    /// caller instead; nested `@track_caller` calls forward the location.
+    @track_caller
+    pub def caller = () => Location :: Location (
+        file: __caller_file (),
+        line: __caller_line (),
+        column: __caller_column (),
+    )
+
+    /// The package-relative path of the source file.
+    pub def file = location: Location => String :: {
+        let Location (file, _, _) = location
+        file
+    }
+
+    /// The 1-based line number.
+    pub def line = location: Location => U32 :: {
+        let Location (_, line, _) = location
+        line
+    }
+
+    /// The 1-based column number, counting characters.
+    pub def column = location: Location => U32 :: {
+        let Location (_, _, column) = location
+        column
+    }
+}
+
+impl Display Location {
+    fmt = (location, mut formatter) => {
+        formatter |> write (Location.file location)
+        formatter |> write ":"
+        Display.fmt (Location.line location, formatter)
+        formatter |> write ":"
+        Display.fmt (Location.column location, formatter)
+    }
+}

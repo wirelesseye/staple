@@ -550,6 +550,62 @@ one passed as a macro argument, reports its own location. A call produced by a
 macro definition reports the location of the outermost invocation that led to
 it.
 
+#### `@track_caller` and `Location`
+
+`@track_caller`, declared in `std.source` as `pub macro @track_caller: Item ->
+Item`, makes a function report where it was called from instead of where it is
+defined. It is not re-exported by `std.core` or the prelude, so it needs
+`use std.source.(track_caller)`, and a `companion` body that uses it imports it
+again. It applies only to a module-level or companion `def` whose value is a
+function literal, takes no argument, and is rejected on `let`, `const`, `extern`,
+type, trait, and impl items, on local `def`s, and on a function that captures
+local variables (module-level values are not captures). Only the outer stage of
+a curried `def` is tracked.
+
+`std.source.Location` is a `(file, line, column)` value. `Location.caller ()`
+is itself a `@track_caller` function, so it reports the location of its own
+call, and inside a `@track_caller` function the location of that function's
+caller:
+
+```staple
+use std.io.(IO, println)
+use std.source.(Location, track_caller)
+
+@track_caller
+pub def check = condition: Bool =>{IO} () :: match condition {
+    True => (),
+    False => println "check failed at ${Location.caller ()}",
+}
+
+check (1 > 2)   // prints the position of `check` in this call
+```
+
+The location is the start of the referencing expression: `f` in `f x`, `f` in
+`x |> f`, and `Location` in `Location.caller ()`. `Location.file`,
+`Location.line` and `Location.column` read its parts, with `file` and `column`
+counted as in `std.source.file` and `std.source.column`, so `Location.file`
+names the same path as `file ()`. `Location` implements `Display` as
+`file:line:column`. Its representation is private, so a `Location` can only come
+from `Location.caller`.
+
+A `@track_caller` function passes the location through a call to another
+`@track_caller` function only from its own body: such a call reports the same
+caller, so wrappers stay transparent. Closures, implicit thunks, and `coro`
+bodies inside the function are separate functions and report their own sites,
+and `Location.caller ()` inside them reports that site; the compiler-reserved
+`__caller_*` intrinsics are rejected there. A value reference (`let g = f`)
+fixes the site at the reference and does not change the function's type, so
+`g ()` reports the `let`. A function referring to itself, directly or as a
+value, forwards its own caller. A generic `@track_caller` function stays
+monomorphised, but using one as a polymorphic value (for example by binding it
+to a quantified type annotation) is an error.
+
+A reference produced by a macro definition reports the outermost macro
+invocation that led to it, as `std.source` macros do. The location costs one
+constant pointer per call: it travels in the closure environment slot that a
+captureless function leaves unused, so the function's type and calling
+convention do not change.
+
 ## Source files
 
 staple source files use the `.sta` extension.

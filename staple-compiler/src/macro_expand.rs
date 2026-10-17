@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::program::source_location_at;
 use crate::{ModuleId, Program, ResolvedMacro};
 use staple_syntax::{
     Accessor, BinaryOperator, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
@@ -46,6 +47,7 @@ enum MacroKind {
     Doc,
     Feature,
     NoPrelude,
+    TrackCaller,
     SizedOpaque,
     RecursiveConstructor,
     Quote,
@@ -574,36 +576,6 @@ fn append_syntax_tokens(output: &mut Vec<staple_syntax::SyntaxToken>, syntax: &S
     }
 }
 
-/// Resolves a byte offset into `source` to a 1-based line and column, matching
-/// the parser's own line/column convention (`\n`, `\r`, and `\r\n` each end a
-/// line; the column counts characters, not bytes).
-fn source_location_at(source: &str, offset: usize) -> staple_syntax::SourceLocation {
-    let offset = offset.min(source.len());
-    let bytes = source.as_bytes();
-    let mut line = 1usize;
-    let mut line_start = 0usize;
-    let mut cursor = 0usize;
-    while cursor < offset {
-        match bytes[cursor] {
-            b'\r' if bytes.get(cursor + 1) == Some(&b'\n') => {
-                cursor += 2;
-                line += 1;
-                line_start = cursor;
-            }
-            b'\r' | b'\n' => {
-                cursor += 1;
-                line += 1;
-                line_start = cursor;
-            }
-            _ => cursor += 1,
-        }
-    }
-    staple_syntax::SourceLocation {
-        line,
-        column: source[line_start..offset].chars().count() + 1,
-    }
-}
-
 /// Collects the source of every file-backed module, keyed by the source name
 /// its spans carry, for the `std.source` macros. `file` reports a path relative
 /// to the containing package's directory (or the module root when there is no
@@ -618,37 +590,10 @@ fn source_files(program: &Program) -> HashMap<Arc<str>, SourceFile> {
         else {
             continue;
         };
-        files.entry(name.clone()).or_insert_with(|| {
-            let directory = program
-                .package_of(module.id)
-                .and_then(|id| {
-                    program
-                        .package_graph()
-                        .map(|graph| graph.package(id).directory.as_path())
-                })
-                .or_else(|| program.module_root());
-            let path = directory
-                .and_then(|directory| {
-                    module
-                        .path
-                        .strip_prefix(directory)
-                        .ok()
-                        .map(std::path::Path::to_path_buf)
-                        .or_else(|| {
-                            let directory = std::fs::canonicalize(directory).ok()?;
-                            module
-                                .path
-                                .strip_prefix(directory)
-                                .ok()
-                                .map(std::path::Path::to_path_buf)
-                        })
-                })
-                .unwrap_or_else(|| module.path.clone());
-            SourceFile {
-                path: path.display().to_string(),
-                tokens: syntax.tokens.clone(),
-                text: None,
-            }
+        files.entry(name.clone()).or_insert_with(|| SourceFile {
+            path: program.module_source_path(module.id),
+            tokens: syntax.tokens.clone(),
+            text: None,
         });
     }
     files
@@ -682,6 +627,9 @@ pub(crate) struct MacroAnalysis {
     pub invocations: HashMap<SyntaxId, ResolvedMacro>,
     pub helpers: Vec<(ModuleId, Binding)>,
     pub binding_types: HashMap<SyntaxId, String>,
+    /// Macro-generated references mapped to the span of the outermost macro
+    /// invocation that produced them.
+    pub caller_location_spans: HashMap<SyntaxId, Span>,
     pub next_syntax_id: usize,
 }
 
@@ -1272,6 +1220,8 @@ struct MacroExpander {
     /// a greater depth, so this names the outermost invocation that led to any
     /// nested `std.source` macro call.
     root_invocation_span: Option<Span>,
+    /// See `MacroAnalysis::caller_location_spans`.
+    caller_location_spans: HashMap<SyntaxId, Span>,
     /// File-backed module sources, keyed by the source name their spans carry.
     source_files: HashMap<Arc<str>, SourceFile>,
     /// Set when a compile-time `panic` call has just produced a
@@ -1386,6 +1336,13 @@ impl MacroExpander {
                                 && declaration.name == "no_prelude"
                             {
                                 MacroKind::NoPrelude
+                            } else if source_module
+                                .path
+                                .ends_with(std::path::Path::new("std/source.sta"))
+                                && declaration.modifier
+                                && declaration.name == "track_caller"
+                            {
+                                MacroKind::TrackCaller
                             } else if standard_library_directory.as_ref().is_some_and(|root| {
                                 source_module.path == root.join("annotation.sta")
                             }) && declaration.modifier
@@ -2005,6 +1962,7 @@ impl MacroExpander {
             compile_binding_types: HashMap::new(),
             invocation_spans: Vec::new(),
             root_invocation_span: None,
+            caller_location_spans: HashMap::new(),
             source_files: source_files(program),
         }
     }
@@ -2025,6 +1983,7 @@ impl MacroExpander {
                 .map(|helper| (helper.module, helper.binding.clone()))
                 .collect(),
             binding_types: self.compile_binding_types.clone(),
+            caller_location_spans: self.caller_location_spans.clone(),
             next_syntax_id: self.next_syntax_id,
         }
     }
@@ -3037,12 +2996,18 @@ impl MacroExpander {
             if definition.key.modifier {
                 if matches!(
                     definition.key.name.as_str(),
-                    "recursive_constructor" | "doc" | "feature" | "no_prelude" | "sized_opaque"
+                    "recursive_constructor"
+                        | "doc"
+                        | "feature"
+                        | "no_prelude"
+                        | "track_caller"
+                        | "sized_opaque"
                 ) && !matches!(
                     definition.kind,
                     MacroKind::Doc
                         | MacroKind::Feature
                         | MacroKind::NoPrelude
+                        | MacroKind::TrackCaller
                         | MacroKind::SizedOpaque
                         | MacroKind::RecursiveConstructor
                 ) {
@@ -3143,7 +3108,9 @@ impl MacroExpander {
                         ),
                     ));
                 }
-                MacroKind::SizedOpaque | MacroKind::RecursiveConstructor
+                MacroKind::SizedOpaque
+                | MacroKind::RecursiveConstructor
+                | MacroKind::TrackCaller
                     if definition.parameters != [MetaType::Item]
                         || definition.result != MetaType::Item
                         || definition.declaration.value.is_some() =>
@@ -3159,6 +3126,7 @@ impl MacroExpander {
                 MacroKind::Doc
                 | MacroKind::Feature
                 | MacroKind::NoPrelude
+                | MacroKind::TrackCaller
                 | MacroKind::SizedOpaque
                 | MacroKind::RecursiveConstructor => {}
                 MacroKind::User(_) if definition.declaration.value.is_none() => {
@@ -3639,6 +3607,30 @@ impl MacroExpander {
                 return None;
             };
             declaration.recursive_constructor = true;
+            return Some(ModifierChainResult::Item(current));
+        }
+        if matches!(definition.kind, MacroKind::TrackCaller) {
+            let message = "`@track_caller` may only modify a `def` whose value is a function";
+            if argument.is_some() {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span,
+                    "`@track_caller` takes no argument",
+                ));
+                return None;
+            }
+            let Some(binding) = modified_binding_mut(&mut current) else {
+                self.diagnostics
+                    .push(Diagnostic::new(invocation.syntax.span, message));
+                return None;
+            };
+            if binding.kind != staple_syntax::BindingKind::Def
+                || !matches!(binding.value, Some(Expression::Function(_)))
+            {
+                self.diagnostics
+                    .push(Diagnostic::new(invocation.syntax.span, message));
+                return None;
+            }
+            binding.track_caller = true;
             return Some(ModifierChainResult::Item(current));
         }
         if matches!(definition.kind, MacroKind::SizedOpaque) {
@@ -4958,6 +4950,7 @@ impl MacroExpander {
             MacroKind::Doc
             | MacroKind::Feature
             | MacroKind::NoPrelude
+            | MacroKind::TrackCaller
             | MacroKind::SizedOpaque
             | MacroKind::RecursiveConstructor => {
                 unreachable!("built-in modifiers are applied directly")
@@ -7363,6 +7356,18 @@ impl MacroExpander {
 
     fn freshen_expression(&mut self, expression: &mut Expression, module: ModuleId, mark: u64) {
         self.freshen_syntax(expression_syntax_mut(expression), module, mark);
+        // A generated reference that lies outside the outermost invocation
+        // reports that invocation as its caller location, like `std.source`.
+        if matches!(
+            expression,
+            Expression::Name(_) | Expression::Access(_) | Expression::TypeApplication(_)
+        ) && let Some(root) = &self.root_invocation_span
+        {
+            let syntax = expression_syntax_mut(expression);
+            if !span_contains(root, &syntax.span) {
+                self.caller_location_spans.insert(syntax.id, root.clone());
+            }
+        }
         match expression {
             Expression::Function(function) => {
                 if let Some(generics) = &mut function.generics {
@@ -11626,6 +11631,15 @@ fn modified_type_declaration_mut(item: &mut Item) -> Option<&mut staple_syntax::
     match item {
         Item::Modified(modified) => modified_type_declaration_mut(&mut modified.item),
         Item::TypeDeclaration(declaration) => Some(declaration),
+        _ => None,
+    }
+}
+
+fn modified_binding_mut(item: &mut Item) -> Option<&mut Binding> {
+    match item {
+        Item::Modified(modified) => modified_binding_mut(&mut modified.item),
+        Item::VisibilitySplice(splice) => modified_binding_mut(&mut splice.item),
+        Item::Binding(binding) => Some(binding),
         _ => None,
     }
 }

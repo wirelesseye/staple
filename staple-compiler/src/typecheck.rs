@@ -5095,6 +5095,22 @@ impl TypeChecker {
                         result: Box::new(CheckedType::CString),
                     })
                 }
+                crate::IntrinsicFunction::CallerFile
+                | crate::IntrinsicFunction::CallerLine
+                | crate::IntrinsicFunction::CallerColumn => {
+                    let result = match intrinsic {
+                        crate::IntrinsicFunction::CallerFile => CheckedType::String,
+                        _ => CheckedType::U32,
+                    };
+                    CheckedType::Function(CheckedFunctionType {
+                        default: None,
+                        parameter: Box::new(CheckedType::empty_product()),
+                        mutations: Vec::new(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
+                        result: Box::new(result),
+                    })
+                }
                 crate::IntrinsicFunction::StringAdd => CheckedType::Function(CheckedFunctionType {
                     default: None,
                     parameter: Box::new(CheckedType::Product(CheckedProductType {
@@ -15466,6 +15482,7 @@ impl TypeChecker {
             trait_bounds: Vec::new(),
             subtype_bounds: Vec::new(),
             captures,
+            track_caller: false,
             body: expression.clone(),
         };
         self.implicit_thunks

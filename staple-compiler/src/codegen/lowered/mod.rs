@@ -5205,6 +5205,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 LoweredClosureEnvironment::Current => environment
                     .closure_environment
                     .ok_or_else(|| unsupported("current closure environment"))?,
+                LoweredClosureEnvironment::CallerLocation(location) => self
+                    .caller_location_pointer(location, environment, &callable.origin.span)?,
                 LoweredClosureEnvironment::None => self
                     .backend
                     .context
@@ -5220,6 +5222,63 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.backend
             .build_closure_value(code, pointer)
             .map(|closure| closure.as_any_value_enum())
+    }
+
+    /// The closure environment a `@track_caller` reference passes: the
+    /// reference's constant position, or the enclosing function's own
+    /// environment when it forwards.
+    fn caller_location_pointer(
+        &self,
+        location: crate::lower::LoweredCallerLocation,
+        environment: &FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        match location {
+            crate::lower::LoweredCallerLocation::Site(id) => {
+                let site = self.view.caller_site(id).ok_or_else(|| {
+                    internal_invariant(span.clone(), "caller site is in the site arena")
+                })?;
+                Ok(self
+                    .backend
+                    .caller_site_global(&site.file, site.line, site.column))
+            }
+            crate::lower::LoweredCallerLocation::Forward => {
+                environment.closure_environment.ok_or_else(|| {
+                    internal_invariant(
+                        span.clone(),
+                        "a forwarded caller location has an enclosing closure environment",
+                    )
+                })
+            }
+        }
+    }
+
+    /// Reads one field of the current `@track_caller` function's caller site.
+    fn load_caller_site_field(
+        &mut self,
+        environment: &FunctionEnvironment<'context>,
+        index: u32,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let site = environment.closure_environment.ok_or_else(|| {
+            internal_invariant(
+                span.clone(),
+                "a caller location intrinsic has a closure environment",
+            )
+        })?;
+        let site_type = self.backend.caller_site_type();
+        let field = self
+            .backend
+            .builder
+            .build_struct_gep(site_type, site, index, "caller.field")
+            .map_err(compiler_diagnostic)?;
+        let field_type = site_type
+            .get_field_type_at_index(index)
+            .ok_or_else(|| internal_invariant(span.clone(), "caller site field exists"))?;
+        self.backend
+            .builder
+            .build_load(field_type, field, "caller.value")
+            .map_err(compiler_diagnostic)
     }
 
     /// The catalog symbol whose initialization state a callable value checks.
@@ -5935,6 +5994,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     LoweredCallEnvironment::Current => environment
                         .closure_environment
                         .ok_or_else(|| unsupported("current closure environment"))?,
+                    LoweredCallEnvironment::CallerLocation(location) => {
+                        self.caller_location_pointer(*location, environment, &call.origin.span)?
+                    }
                 };
                 if self.view.instance_is_dynamic(*instance) {
                     let value = self.emit_concrete_dynamic_call(
@@ -8435,6 +8497,30 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             IntrinsicFunction::BufferTransfer => self.emit_buffer_transfer(call, arguments, &span),
             IntrinsicFunction::BufferClone => {
                 self.emit_buffer_clone(owner, call, call_id, arguments, &span)
+            }
+            IntrinsicFunction::CallerFile => {
+                let BasicValueEnum::PointerValue(source) =
+                    self.load_caller_site_field(environment, 0, &span)?
+                else {
+                    return Err(unsupported("caller file bytes"));
+                };
+                let BasicValueEnum::IntValue(length) =
+                    self.load_caller_site_field(environment, 1, &span)?
+                else {
+                    return Err(unsupported("caller file length"));
+                };
+                self.backend
+                    .build_string_from_bytes(source, length, span.clone())
+                    .map(|string| string.as_any_value_enum())
+            }
+            IntrinsicFunction::CallerLine | IntrinsicFunction::CallerColumn => {
+                let index = if intrinsic == IntrinsicFunction::CallerLine {
+                    2
+                } else {
+                    3
+                };
+                self.load_caller_site_field(environment, index, &span)
+                    .map(|value| value.as_any_value_enum())
             }
             IntrinsicFunction::UniqueIntoRaw | IntrinsicFunction::UniqueFromRaw => {
                 let BasicMetadataValueEnum::PointerValue(pointer) = arguments[0] else {

@@ -354,11 +354,80 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
             .as_pointer_value();
         let length = self.size_type.const_int(value.len() as u64, false);
+        self.build_string_from_bytes(source, length, span)
+    }
+
+    /// Copies `length` bytes at `source` into a fresh GC String.
+    pub(crate) fn build_string_from_bytes(
+        &self,
+        source: inkwell::values::PointerValue<'context>,
+        length: IntValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
         let (string, data) = self.build_string_allocation(length, span.clone())?;
         self.builder
             .build_memcpy(data, 1, source, 1, length)
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         Ok(string)
+    }
+
+    /// The layout of a `@track_caller` reference position, the closure
+    /// environment of such a function: `{ file bytes, file length, line,
+    /// column }`.
+    pub(crate) fn caller_site_type(&self) -> StructType<'context> {
+        self.context.struct_type(
+            &[
+                self.context.ptr_type(AddressSpace::default()).into(),
+                self.size_type.into(),
+                self.context.i32_type().into(),
+                self.context.i32_type().into(),
+            ],
+            false,
+        )
+    }
+
+    /// The private constant holding one reference position, shared by every
+    /// reference to the same position in this module.
+    pub(crate) fn caller_site_global(
+        &self,
+        file: &str,
+        line: u32,
+        column: u32,
+    ) -> PointerValue<'context> {
+        let key = (file.to_owned(), line, column);
+        if let Some(pointer) = self.caller_sites.borrow().get(&key) {
+            return *pointer;
+        }
+        let bytes = self.context.const_string(file.as_bytes(), false);
+        let file_global = self
+            .llvm_module
+            .add_global(bytes.get_type(), None, "caller.file");
+        file_global.set_constant(true);
+        file_global.set_unnamed_addr(true);
+        file_global.set_linkage(inkwell::module::Linkage::Private);
+        file_global.set_initializer(&bytes);
+        let value = self.context.const_struct(
+            &[
+                file_global.as_pointer_value().into(),
+                self.size_type.const_int(file.len() as u64, false).into(),
+                self.context.i32_type().const_int(u64::from(line), false).into(),
+                self.context
+                    .i32_type()
+                    .const_int(u64::from(column), false)
+                    .into(),
+            ],
+            false,
+        );
+        let global = self
+            .llvm_module
+            .add_global(self.caller_site_type(), None, "caller.site");
+        global.set_constant(true);
+        global.set_unnamed_addr(true);
+        global.set_linkage(inkwell::module::Linkage::Private);
+        global.set_initializer(&value);
+        let pointer = global.as_pointer_value();
+        self.caller_sites.borrow_mut().insert(key, pointer);
+        pointer
     }
 
     /// Allocates a String: a GC buffer header of U8 whose length and capacity

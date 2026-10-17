@@ -510,3 +510,37 @@ fn a_dependency_package_object_links_with_its_consumer() {
     assert!(String::from_utf8_lossy(&expected.stdout).contains("point\nlocal\n3 6\n1 2\n"));
     assert_eq!(run(&separate), expected);
 }
+
+/// A `@track_caller` function's constant site is emitted by the unit that
+/// references it, while `Location.caller` itself lives in the prebuilt
+/// standard library object.
+#[test]
+fn track_caller_locations_survive_separate_compilation() {
+    let source = concat!(
+        "use std.io.println\n",
+        "use std.fmt.Display\n",
+        "use std.source.(Location, track_caller)\n",
+        "@track_caller\n",
+        "def forwards = () => Location :: Location.caller ()\n",
+        "@track_caller\n",
+        "def tagged: <T where Copy T, Display T> T -> String = <T where Copy T, Display T> value =>\n",
+        "    \"${value}@${Location.caller ()}\"\n",
+        "println \"${Location.caller ()}\"\n",
+        "println \"${forwards ()}\"\n",
+        "let held = forwards\n",
+        "println \"${held ()}\"\n",
+        "println (tagged 3)\n",
+    );
+    let expected = [
+        "<stdin>.sta:9:12",
+        "<stdin>.sta:10:12",
+        "<stdin>.sta:11:12",
+        "3@<stdin>.sta:13:10",
+    ];
+    let whole = lower_source(source, false);
+    assert_same_behavior("track_caller", &whole, &lower_source(source, true));
+    let outcome = run(&scratch("track_caller.whole"));
+    assert_eq!(outcome.status, Some(0));
+    let stdout = String::from_utf8_lossy(&outcome.stdout);
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), expected);
+}

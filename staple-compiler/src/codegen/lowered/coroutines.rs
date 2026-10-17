@@ -416,7 +416,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     Diagnostic::new(span.clone(), "missing enclosing coroutine environment")
                 })?
             }
-            LoweredClosureEnvironment::Stored => {
+            LoweredClosureEnvironment::Stored | LoweredClosureEnvironment::CallerLocation(_) => {
                 return Err(Diagnostic::new(
                     span.clone(),
                     "coroutine creation cannot use a stored closure",

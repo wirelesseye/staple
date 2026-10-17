@@ -476,6 +476,8 @@ pub struct Binding {
     pub companion_target: Option<Type>,
     /// Fresh enclosing companion parameters for this member.
     pub companion_generics: Option<super::GenericParameters>,
+    /// Set by `@track_caller`: the function reports its caller's location.
+    pub track_caller: bool,
     pub value: Option<Expression>,
 }
 

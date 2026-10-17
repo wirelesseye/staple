@@ -169,6 +169,9 @@ fn visibility_prefix(visibility: Visibility) -> &'static str {
 
 fn render_binding(program: &Program, binding: &staple_syntax::Binding) -> String {
     let mut out = String::new();
+    if binding.track_caller {
+        out.push_str("@track_caller\n");
+    }
     out.push_str(visibility_prefix(binding.visibility));
     if let Some(keyword) = binding.keyword() {
         out.push_str(keyword);

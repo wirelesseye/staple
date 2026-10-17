@@ -1608,7 +1608,9 @@ impl<'a> WorklistBuilder<'a> {
             } => {
                 let target = match environment {
                     LoweredCallEnvironment::Current => current_target(enclosing),
-                    LoweredCallEnvironment::None => nested_target(enclosing),
+                    LoweredCallEnvironment::None | LoweredCallEnvironment::CallerLocation(_) => {
+                        nested_target(enclosing)
+                    }
                 };
                 self.request_function(
                     *function,

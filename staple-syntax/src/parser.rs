@@ -741,12 +741,7 @@ impl Grammar {
             return Err(self.error("expected `}` after companion items"));
         }
         for item in &mut items {
-            let bindings: Vec<&mut Binding> = match item {
-                Item::Binding(binding) => vec![binding],
-                Item::ExternBlock(block) => block.bindings.iter_mut().collect(),
-                _ => Vec::new(),
-            };
-            for binding in bindings {
+            for binding in companion_member_bindings(item) {
                 // Re-parse the companion's own `<...>` clause fresh for each
                 // member, rather than `.clone()`ing the one parsed above. A
                 // plain clone would give every member's spliced parameters
@@ -1502,6 +1497,7 @@ impl Grammar {
                 annotation: Some(annotation),
                 companion_target: None,
                 companion_generics: None,
+                track_caller: false,
                 value: None,
             });
             self.eat(TokenKind::Semicolon);
@@ -1751,6 +1747,7 @@ impl Grammar {
             annotation,
             companion_target: None,
             companion_generics: None,
+            track_caller: false,
             value,
         })
     }
@@ -4524,6 +4521,18 @@ fn attach_parsed_docs(item: &mut Item, docs: Vec<String>) -> bool {
         _ => return false,
     }
     true
+}
+
+/// The bindings declared by a companion member, looking through modifiers
+/// (`///` docs, `@modifier`) and visibility splices that wrap it.
+fn companion_member_bindings(item: &mut Item) -> Vec<&mut Binding> {
+    match item {
+        Item::Binding(binding) => vec![binding],
+        Item::ExternBlock(block) => block.bindings.iter_mut().collect(),
+        Item::Modified(modified) => companion_member_bindings(&mut modified.item),
+        Item::VisibilitySplice(splice) => companion_member_bindings(&mut splice.item),
+        _ => Vec::new(),
+    }
 }
 
 fn companion_target_name(ty: &Type) -> Option<String> {
