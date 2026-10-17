@@ -60,6 +60,8 @@ struct Candidate {
     available_from: usize,
     namespace: Namespace,
     item: CompletionItem,
+    /// The value the candidate names, for its pipe completions.
+    symbol: Option<SymbolId>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +127,7 @@ impl ExternalSymbol {
 
 #[derive(Debug, Clone)]
 struct MethodSite {
+    receiver_start: usize,
     receiver_end: usize,
     items: Vec<CompletionItem>,
 }
@@ -134,6 +137,14 @@ struct NamedQualifier {
     module: ModuleId,
     name: String,
     items: Vec<CompletionItem>,
+    /// For a local binding or parameter: where its name is visible.
+    scope: Option<LocalScope>,
+}
+
+#[derive(Debug, Clone)]
+struct LocalScope {
+    range: Range<usize>,
+    available_from: usize,
 }
 
 pub fn index(module: &Module, typed: &TypedModule) -> CompletionIndex {
@@ -295,11 +306,15 @@ impl CompletionIndex {
         result
     }
 
+    /// The pipe completions for a receiver ending at `receiver_end`. Several
+    /// nested expressions can end there, as `42` and `Ok 42` do; a pipe takes
+    /// the outermost one as its receiver, because it binds below application
+    /// and every binary operator.
     pub fn method_items(&self, receiver_end: usize) -> Vec<CompletionItem> {
         self.methods
             .iter()
             .filter(|site| site.receiver_end == receiver_end)
-            .max_by_key(|site| site.items.len())
+            .min_by_key(|site| site.receiver_start)
             .map(|site| site.items.clone())
             .unwrap_or_default()
     }
@@ -345,10 +360,29 @@ impl CompletionIndex {
             .filter(|module| contains(&module.range, offset))
             .min_by_key(|module| module.range.end.saturating_sub(module.range.start))
             .map(|module| module.id);
-        candidates
-            .iter()
-            .find(|candidate| {
-                candidate.module == module.unwrap_or(candidate.module) && candidate.name == name
+        let matching = candidates.iter().filter(|candidate| {
+            candidate.module == module.unwrap_or(candidate.module) && candidate.name == name
+        });
+        // The innermost local binding or parameter visible at `offset`
+        // shadows a module-level name.
+        let local = matching
+            .clone()
+            .filter(|candidate| {
+                candidate.scope.as_ref().is_some_and(|scope| {
+                    contains(&scope.range, offset) && offset >= scope.available_from
+                })
+            })
+            .min_by_key(|candidate| {
+                candidate
+                    .scope
+                    .as_ref()
+                    .map_or(usize::MAX, |scope| scope.range.len())
+            });
+        local
+            .or_else(|| {
+                matching
+                    .clone()
+                    .find(|candidate| candidate.scope.is_none())
             })
             .map(|candidate| candidate.items.clone())
             .unwrap_or_default()
@@ -479,6 +513,39 @@ impl Collector<'_> {
         items
     }
 
+    /// Pushes a local scope, registering the pipe completions of each value
+    /// it introduces under its name, for a receiver typed before the file
+    /// type-checks again.
+    fn push_scope(&mut self, module_index: usize, scope: Scope) {
+        let owner = self.index.modules[module_index].id;
+        for candidate in &scope.candidates {
+            let Some(symbol) = candidate.symbol else {
+                continue;
+            };
+            let Some(receiver_type) = self.typed.type_of_symbol(symbol) else {
+                continue;
+            };
+            let items = self.pipe_items(
+                owner,
+                receiver_type,
+                self.typed.companion_type_of_symbol(symbol),
+                None,
+            );
+            if !items.is_empty() {
+                self.index.named_methods.push(NamedQualifier {
+                    module: owner,
+                    name: candidate.item.label.clone(),
+                    items,
+                    scope: Some(LocalScope {
+                        range: scope.range.clone(),
+                        available_from: candidate.available_from,
+                    }),
+                });
+            }
+        }
+        self.index.modules[module_index].scopes.push(scope);
+    }
+
     fn register_named_method(&mut self, owner: ModuleId, name: &str, definitions: &[DefinitionId]) {
         let mut items = Vec::new();
         for definition in definitions {
@@ -502,6 +569,7 @@ impl Collector<'_> {
                 module: owner,
                 name: name.to_owned(),
                 items,
+                scope: None,
             });
         }
     }
@@ -565,6 +633,7 @@ impl Collector<'_> {
                 module: owner,
                 name: name.to_owned(),
                 items,
+                scope: None,
             });
         }
     }
@@ -753,7 +822,15 @@ impl Collector<'_> {
 
     fn expression(&mut self, expression: &Expression, module_index: usize) {
         self.qualified_items(expression, module_index);
-        if let Some(receiver_type) = self.typed.type_of_expression(expression.syntax().id) {
+        // A function or prefix ascription ends in an open expression that
+        // absorbs a following `|>`, so it is never a pipe receiver itself.
+        let pipe_receiver = !matches!(
+            expression,
+            Expression::Function(_) | Expression::TypeAscription(_)
+        );
+        if pipe_receiver
+            && let Some(receiver_type) = self.typed.type_of_expression(expression.syntax().id)
+        {
             let items = self.pipe_items(
                 self.index.modules[module_index].id,
                 receiver_type,
@@ -761,8 +838,10 @@ impl Collector<'_> {
                 Some(expression.syntax().id),
             );
             if !items.is_empty() {
+                let range = syntax_range(expression.syntax());
                 self.index.methods.push(MethodSite {
-                    receiver_end: syntax_range(expression.syntax()).end,
+                    receiver_start: range.start,
+                    receiver_end: range.end,
                     items,
                 });
             }
@@ -780,10 +859,13 @@ impl Collector<'_> {
                     syntax_range(value.body.syntax()).start,
                     &mut candidates,
                 );
-                self.index.modules[module_index].scopes.push(Scope {
-                    range: syntax_range(&value.syntax),
-                    candidates,
-                });
+                self.push_scope(
+                    module_index,
+                    Scope {
+                        range: syntax_range(&value.syntax),
+                        candidates,
+                    },
+                );
                 self.expression(&value.body, module_index);
             }
             Expression::Match(value) => {
@@ -795,10 +877,13 @@ impl Collector<'_> {
                         syntax_range(arm.body.syntax()).start,
                         &mut candidates,
                     );
-                    self.index.modules[module_index].scopes.push(Scope {
-                        range: syntax_range(&arm.syntax),
-                        candidates,
-                    });
+                    self.push_scope(
+                        module_index,
+                        Scope {
+                            range: syntax_range(&arm.syntax),
+                            candidates,
+                        },
+                    );
                     self.expression(&arm.body, module_index);
                 }
             }
@@ -904,8 +989,10 @@ impl Collector<'_> {
         items.sort_by(|left, right| left.label.cmp(&right.label));
         items.dedup_by(|left, right| left.label == right.label && left.kind == right.kind);
         if !items.is_empty() {
+            let range = syntax_range(expression.syntax());
             self.index.qualifiers.push(MethodSite {
-                receiver_end: syntax_range(expression.syntax()).end,
+                receiver_start: range.start,
+                receiver_end: range.end,
                 items,
             });
         }
@@ -928,9 +1015,7 @@ impl Collector<'_> {
         for item in &block.items {
             self.item_declarations(item, &mut candidates, range.start);
         }
-        self.index.modules[module_index]
-            .scopes
-            .push(Scope { range, candidates });
+        self.push_scope(module_index, Scope { range, candidates });
         for item in &block.items {
             self.item(item, module_index);
         }
@@ -1003,6 +1088,7 @@ impl Collector<'_> {
                     detail: Some(format!("type parameter {}", value.name)),
                     ..CompletionItem::default()
                 },
+                symbol: None,
             }),
             TypeParameterPattern::Effect(value) => candidates.push(Candidate {
                 available_from: syntax_range(&value.syntax).end,
@@ -1013,6 +1099,7 @@ impl Collector<'_> {
                     detail: Some(format!("effect parameter {}", value.name)),
                     ..CompletionItem::default()
                 },
+                symbol: None,
             }),
             TypeParameterPattern::Product(value) => {
                 for element in &value.elements {
@@ -1138,6 +1225,10 @@ impl Collector<'_> {
                 detail,
                 documentation: markup_documentation(&docs),
                 ..CompletionItem::default()
+            },
+            symbol: match definition {
+                DefinitionId::Symbol(symbol) => Some(symbol),
+                _ => None,
             },
         })
     }
@@ -2266,5 +2357,41 @@ mod tests {
                 .iter()
                 .any(|item| item.label == "choose")
         );
+    }
+    #[test]
+    fn pipe_completion_uses_the_outermost_receiver() {
+        // `42` and `Ok 42` end together; the pipe's receiver is `Ok 42`. A
+        // function ending at the same place never is: its body takes the pipe.
+        let source = concat!(
+            "Ok 42\n",
+            "let pick = (value: Result I32 String) => value\n",
+        );
+        let path = std::env::temp_dir().join("staple-pipe-outermost.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let typed = TypeChecker::new()
+            .check(NameResolver::new().resolve_program(program).unwrap())
+            .unwrap();
+        let module = parse(source).unwrap();
+        let index = index(&module, &typed);
+        let labels = |end: usize| {
+            index
+                .method_items(end)
+                .into_iter()
+                .map(|item| item.label)
+                .collect::<Vec<_>>()
+        };
+        let literal = labels("Ok 42".len());
+        assert!(literal.contains(&"unwrap".to_owned()), "{literal:?}");
+        assert!(!literal.contains(&"cmp".to_owned()), "{literal:?}");
+        let body = labels(source.len() - 1);
+        assert!(body.contains(&"unwrap".to_owned()), "{body:?}");
     }
 }

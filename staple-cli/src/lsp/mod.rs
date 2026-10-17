@@ -2547,4 +2547,74 @@ mod tests {
         }
         std::fs::remove_dir_all(root).unwrap();
     }
+    /// A receiver typed together with its `|>`, so that it never type-checked
+    /// on its own, falls back to the name of the innermost local binding or
+    /// parameter in the last successful analysis.
+    #[test]
+    fn pipe_completion_falls_back_to_local_names() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-lsp-local-pipe-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("main.sta");
+        std::fs::write(&path, "").unwrap();
+        let path = std::fs::canonicalize(&path).unwrap();
+        let uri = path_to_uri(&path).unwrap();
+        let head = concat!(
+            "let value = 1\n",
+            "def f = (value: Result I32 String) => I32 :: {\n",
+            "    let local: Option I32 = Some 1\n",
+        );
+        let tail = "    0\n}\n";
+        for (receiver, expected) in [("value", "unwrap"), ("local", "Some")] {
+            let (connection, _client) = Connection::memory();
+            let mut server = Server {
+                connection,
+                documents: HashMap::from([(
+                    uri.clone(),
+                    Document {
+                        text: format!("{head}{tail}"),
+                        version: 1,
+                        ..Document::default()
+                    },
+                )]),
+                published_by_root: HashMap::new(),
+                stdlib: Some(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .parent()
+                        .unwrap()
+                        .join("stdlib"),
+                ),
+            };
+            server.analyze(&uri).unwrap();
+            assert!(server.documents[&uri].last_successful.is_some());
+            let typed = format!("{head}    {receiver} |>\n{tail}");
+            server.documents.get_mut(&uri).unwrap().text = typed.clone();
+            server.analyze(&uri).unwrap();
+            let document = &server.documents[&uri];
+            let successful = document.last_successful.as_ref().unwrap();
+            let offset = typed.find("|>").unwrap() + 2;
+            let change = TextChange::between(&successful.source, &document.text);
+            let (receiver_end, _, name) = completion_receiver(&document.text, offset).unwrap();
+            assert!(
+                successful
+                    .completion_index
+                    .method_items(change.old_offset(receiver_end))
+                    .is_empty(),
+                "the receiver is new text",
+            );
+            let labels = successful
+                .completion_index
+                .named_method_items(name, change.old_offset(offset))
+                .into_iter()
+                .map(|item| item.label)
+                .collect::<Vec<_>>();
+            assert!(labels.contains(&expected.to_owned()), "{receiver}: {labels:?}");
+            // The parameter shadows the module-level `value: I32`.
+            assert!(!labels.contains(&"cmp".to_owned()), "{receiver}: {labels:?}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
