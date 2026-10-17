@@ -89,6 +89,22 @@ macro choose = (condition; then; else) => parse_quote {
 }
 ```
 
+A slot whose type is a product consumes one parenthesized argument whose
+elements are separated by commas, and binds it as a product of syntax values.
+The empty product `()` accepts only `()`:
+
+```staple
+macro unit = () => quote {}
+unit ()
+
+macro sum = (a: Expr; b: Expr, c: Expr; d: Expr) => parse_quote { $a + $b + $c + $d }
+sum 1 (2, 3) 4
+```
+
+Here `sum` has three slots, and its second slot is the product `(b: Expr, c:
+Expr)`, so `(2, 3)` is one argument. An annotated macro spells the same
+signature `(Expr; (Expr, Expr); Expr) -> Expr`.
+
 Typed parameters constrain the grammar accepted at an invocation. `Ident` is a
 generic syntax type whose argument constrains its spelling, declared as
 `pub type Ident (Spelling = String) where Spelling <: String = pub wrap Spelling`.
@@ -115,9 +131,20 @@ macro conditional = (
 ```
 
 Delimited syntax parameters match one balanced source argument while exposing
-its contents structurally. Product commas separate expected children and do
-not require commas in the source, so `Parenthesized (Ident String, Ident
-String)` accepts `(left right)`. `Parenthesized`, `Bracketed`, and `Braced` may
+its contents structurally. Slotted contents are juxtaposed in the source, so
+`Parenthesized (Ident String; Ident String)` accepts `(left right)`. Product
+contents are separated by commas, so `Parenthesized (Ident String, Ident
+String)` accepts `(left, right)`, with an optional trailing comma:
+
+```staple
+(1 2 3)   // Parenthesized (Expr; Expr; Expr)
+(1, 2, 3) // Parenthesized (Expr, Expr, Expr)
+```
+
+Matched contents destructure the same way, as in `Parenthesized (left; right)`
+or `Parenthesized (left, right)`. A product nested inside slotted contents is
+itself a parenthesized, comma-separated group, so `Parenthesized (Ident String;
+(Expr, Expr))` accepts `(pair (1, 2))`. `Parenthesized`, `Bracketed`, and `Braced` may
 instead contain `Sequence T`, which accepts zero or more consecutive values of
 `T`; for example, `Bracketed (Sequence Ident String)` accepts `[]` and `[one
 two]`. A function-style macro may also use one `Sequence T` as a top-level
@@ -152,10 +179,10 @@ trivia and syntax that is not yet structurally supported. A single fixed
 content never needs the grouping parens that separate multiple ones, so
 `Parenthesized Expr` and `Parenthesized (Expr)` are read identically; the
 parens are required only once there is more than one fixed element, as in
-`Parenthesized (Ident String, Ident String)`.
+`Parenthesized (Ident String; Ident String)`.
 
 `Comma` is singleton syntax and may be matched explicitly, as in
-`Parenthesized (Ident String, Comma, Ident String)`. A homogeneous sequence
+`Parenthesized (Ident String; Comma; Ident String)`. A homogeneous sequence
 whose elements are separated by commas uses `Separated (T) Comma`, for example
 `Parenthesized (Separated (Ident String) Comma)`. It accepts empty and singleton
 contents, requires one comma between subsequent elements, and permits a
@@ -165,9 +192,9 @@ values use `Separated (separator: Comma, elements: (...), trailing: True)` or
 the corresponding `False` value.
 Like `Sequence`, `Separated` is valid only as the complete contents of a
 delimiter. Its `elements` field is a `Sequence`. A separated element may be a
-fixed product shape. `Optional T` is available only inside such products and
-captures `None` or `Some value`, so
-`Braced (Separated (Ident String, Optional Type) Comma)` accepts both
+slotted product shape. `Optional T` is available only inside such slotted
+products and captures `None` or `Some value`, so
+`Braced (Separated (Ident String; Optional Type) Comma)` accepts both
 `Literal String` and `Wildcard` entries.
 
 `Type` and `Pattern` parameters accept opaque type and pattern syntax. One

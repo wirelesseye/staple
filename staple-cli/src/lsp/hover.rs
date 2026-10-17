@@ -3324,15 +3324,15 @@ mod tests {
         for expected in [
             (
                 "entries",
-                "entries: Sequence (Sequence Modifier, Ident String, Optional (Equals, TypeBody))",
+                "entries: Sequence (Sequence Modifier; Ident String; Optional (Equals; TypeBody))",
             ),
             (
                 "first",
-                "first: (Sequence Modifier, Ident String, Optional (Equals, TypeBody))",
+                "first: (Sequence Modifier; Ident String; Optional (Equals; TypeBody))",
             ),
             (
                 "rest",
-                "rest: Sequence (Sequence Modifier, Ident String, Optional (Equals, TypeBody))",
+                "rest: Sequence (Sequence Modifier; Ident String; Optional (Equals; TypeBody))",
             ),
             ("modifiers", "modifiers: Sequence Modifier"),
             ("variant", "variant: Ident String"),

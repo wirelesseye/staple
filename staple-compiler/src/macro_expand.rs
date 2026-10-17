@@ -112,6 +112,9 @@ pub(crate) enum MetaType {
     Comma,
     Equals,
     FatArrow,
+    /// A slotted product shape `(A; B)`: its elements are juxtaposed.
+    SlottedProduct(Vec<MetaType>),
+    /// A product shape `(A, B)`: a parenthesized, comma-separated group.
     Product(Vec<MetaType>),
     Optional(Box<MetaType>),
     Sequence(Box<MetaType>),
@@ -165,7 +168,10 @@ pub(crate) enum DelimiterKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum DelimitedMetaContents {
-    Fixed(Vec<MetaType>),
+    /// Juxtaposed contents, declared as a slotted product or a single shape.
+    Slotted(Vec<MetaType>),
+    /// Comma-separated contents, declared as a product.
+    Product(Vec<MetaType>),
     Sequence(Box<MetaType>),
     Separated {
         element: Box<MetaType>,
@@ -238,7 +244,8 @@ struct DelimitedSyntaxValue {
 
 #[derive(Clone)]
 enum DelimitedValueContents {
-    Fixed(Vec<(Option<String>, Value)>),
+    Slotted(Vec<(Option<String>, Value)>),
+    Product(Vec<(Option<String>, Value)>),
     Sequence(Vec<Value>),
     Separated {
         elements: Vec<Value>,
@@ -310,11 +317,15 @@ impl DelimitedSyntaxValue {
             DelimiterKind::Bracketed => None,
             DelimiterKind::Parenthesized => {
                 let values = match self.contents {
-                    DelimitedValueContents::Fixed(values) => values,
+                    DelimitedValueContents::Slotted(values) => values,
                     DelimitedValueContents::Sequence(values) => {
                         values.into_iter().map(|value| (None, value)).collect()
                     }
                     DelimitedValueContents::Separated { elements, .. } => {
+                        return separated_parenthesized(self.syntax, elements, &mut generated);
+                    }
+                    DelimitedValueContents::Product(values) => {
+                        let elements = values.into_iter().map(|(_, value)| value).collect();
                         return separated_parenthesized(self.syntax, elements, &mut generated);
                     }
                 };
@@ -356,12 +367,15 @@ impl DelimitedSyntaxValue {
             }
             DelimiterKind::Braced => {
                 let values = match self.contents {
-                    DelimitedValueContents::Fixed(values) => values
+                    DelimitedValueContents::Slotted(values) => values
                         .into_iter()
                         .map(|(_, value)| value)
                         .collect::<Vec<_>>(),
                     DelimitedValueContents::Sequence(values) => values,
-                    DelimitedValueContents::Separated { .. } => return None,
+                    DelimitedValueContents::Separated { .. }
+                    | DelimitedValueContents::Product(_) => {
+                        return None;
+                    }
                 };
                 let items = values
                     .into_iter()
@@ -1305,7 +1319,7 @@ impl MacroExpander {
                                 }
                                 parameters[0] = MetaType::Delimited(
                                     DelimiterKind::Parenthesized,
-                                    DelimitedMetaContents::Fixed(vec![parameters[0].clone()]),
+                                    DelimitedMetaContents::Slotted(vec![parameters[0].clone()]),
                                 );
                             }
                             if let Some(last) = parameters.last_mut() {
@@ -2837,14 +2851,15 @@ impl MacroExpander {
                     },
                 ));
             }
-            if definition
-                .parameters
-                .iter()
-                .any(|parameter| matches!(parameter, MetaType::Optional(_) | MetaType::Product(_)))
-            {
+            if definition.parameters.iter().any(|parameter| {
+                matches!(
+                    parameter,
+                    MetaType::Optional(_) | MetaType::SlottedProduct(_)
+                )
+            }) {
                 self.diagnostics.push(Diagnostic::new(
                     definition.declaration.syntax.span.clone(),
-                    "`Optional` and product syntax shapes may only appear inside delimited contents",
+                    "`Optional` and slotted product syntax shapes may only appear inside delimited contents",
                 ));
             }
             validate_top_level_sequence(definition, &mut self.diagnostics);
@@ -2878,7 +2893,10 @@ impl MacroExpander {
                         && body_parameter.is_some_and(|body_parameter| {
                             body_parameter != *effective_declared
                                 && !(effective_declared == &MetaType::MacroCallMetadata
-                                    && matches!(body_parameter, MetaType::Product(_)))
+                                    && matches!(
+                                        body_parameter,
+                                        MetaType::SlottedProduct(_) | MetaType::Product(_)
+                                    ))
                         })
                     {
                         self.diagnostics.push(Diagnostic::new(
@@ -4740,6 +4758,19 @@ impl MacroExpander {
                         self.eval_expression(definition.key.module, body, &mut Environment::new())?;
                     for (expected, argument) in definition.parameters.iter().zip(arguments) {
                         let argument = match argument {
+                            // A product parameter receives a parenthesized,
+                            // comma-separated argument as a product of syntax.
+                            MacroArgument::Expression(argument)
+                                if matches!(expected, MetaType::Product(_)) =>
+                            {
+                                let argument = match_syntax_fragment(
+                                    expected,
+                                    argument.syntax(),
+                                    &mut self.next_syntax_id,
+                                )?;
+                                value = self.apply_value(value, argument, call_span.clone())?;
+                                continue;
+                            }
                             MacroArgument::Expression(argument) => {
                                 self.meta_argument_value(expected, &argument)?
                             }
@@ -4924,7 +4955,10 @@ impl MacroExpander {
                     MetaType::Comma => "comma syntax".to_owned(),
                     MetaType::Equals => "equals syntax".to_owned(),
                     MetaType::FatArrow => "fat-arrow syntax".to_owned(),
-                    MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => {
+                    MetaType::SlottedProduct(_)
+                    | MetaType::Product(_)
+                    | MetaType::Optional(_)
+                    | MetaType::Sequence(_) => {
                         format!("`{}` syntax", format_meta_type(expected))
                     }
                     MetaType::Syntax | MetaType::SyntaxNode | MetaType::Expr => {
@@ -5970,73 +6004,78 @@ impl MacroExpander {
             }
             "Parenthesized" | "Bracketed" | "Braced" => {
                 let kind = delimiter_kind(constructor).expect("matched delimiter constructor");
-                let contents =
-                    match argument {
-                        Value::Syntax(SyntaxValue::Raw(syntax)) => DelimitedValueContents::Fixed(
-                            vec![(None, Value::Syntax(SyntaxValue::Raw(syntax)))],
-                        ),
-                        Value::Product(mut values, _)
-                            if values.len() == 1 && matches!(values[0].1, Value::Sequence(_)) =>
-                        {
-                            let (_, Value::Sequence(values)) = values.remove(0) else {
-                                unreachable!("guarded sequence contents")
-                            };
-                            DelimitedValueContents::Sequence(values)
-                        }
-                        Value::Product(mut values, _)
-                            if values.len() == 1
-                                && matches!(values[0].1, Value::Separated { .. }) =>
-                        {
-                            let (
-                                _,
-                                Value::Separated {
-                                    elements,
-                                    separator,
-                                    trailing,
-                                },
-                            ) = values.remove(0)
-                            else {
-                                unreachable!("guarded separated contents")
-                            };
-                            DelimitedValueContents::Separated {
+                let contents = match argument {
+                    Value::Syntax(SyntaxValue::Raw(syntax)) => DelimitedValueContents::Slotted(
+                        vec![(None, Value::Syntax(SyntaxValue::Raw(syntax)))],
+                    ),
+                    Value::Product(mut values, _)
+                        if values.len() == 1 && matches!(values[0].1, Value::Sequence(_)) =>
+                    {
+                        let (_, Value::Sequence(values)) = values.remove(0) else {
+                            unreachable!("guarded sequence contents")
+                        };
+                        DelimitedValueContents::Sequence(values)
+                    }
+                    Value::Product(mut values, _)
+                        if values.len() == 1 && matches!(values[0].1, Value::Separated { .. }) =>
+                    {
+                        let (
+                            _,
+                            Value::Separated {
                                 elements,
                                 separator,
                                 trailing,
-                            }
-                        }
-                        Value::Product(values, _) => {
-                            if !values
-                                .iter()
-                                .all(|(_, value)| matches!(value, Value::Syntax(_)))
-                            {
-                                self.diagnostics.push(Diagnostic::new(
-                                    span,
-                                    format!("`{constructor}` contents must contain `Syntax`"),
-                                ));
-                                return None;
-                            }
-                            DelimitedValueContents::Fixed(values)
-                        }
-                        Value::Sequence(values) => DelimitedValueContents::Sequence(values),
-                        Value::Separated {
+                            },
+                        ) = values.remove(0)
+                        else {
+                            unreachable!("guarded separated contents")
+                        };
+                        DelimitedValueContents::Separated {
                             elements,
                             separator,
                             trailing,
-                        } => DelimitedValueContents::Separated {
-                            elements,
-                            separator,
-                            trailing,
-                        },
-                        _ => {
+                        }
+                    }
+                    Value::Product(values, slotted) => {
+                        if !values
+                            .iter()
+                            .all(|(_, value)| matches!(value, Value::Syntax(_)))
+                        {
                             self.diagnostics.push(Diagnostic::new(
                                 span,
-                                format!("`{constructor}` requires product or sequence contents"),
+                                format!("`{constructor}` contents must contain `Syntax`"),
                             ));
                             return None;
                         }
-                    };
+                        // Slotted contents are juxtaposed; product contents
+                        // are separated by commas.
+                        if slotted || values.len() < 2 {
+                            DelimitedValueContents::Slotted(values)
+                        } else {
+                            DelimitedValueContents::Product(values)
+                        }
+                    }
+                    Value::Sequence(values) => DelimitedValueContents::Sequence(values),
+                    Value::Separated {
+                        elements,
+                        separator,
+                        trailing,
+                    } => DelimitedValueContents::Separated {
+                        elements,
+                        separator,
+                        trailing,
+                    },
+                    _ => {
+                        self.diagnostics.push(Diagnostic::new(
+                            span,
+                            format!("`{constructor}` requires product or sequence contents"),
+                        ));
+                        return None;
+                    }
+                };
                 let generated_count = match &contents {
-                    DelimitedValueContents::Fixed(values) => values.len(),
+                    DelimitedValueContents::Slotted(values)
+                    | DelimitedValueContents::Product(values) => values.len(),
                     DelimitedValueContents::Sequence(values) => values.len(),
                     DelimitedValueContents::Separated { elements, .. } => elements.len(),
                 }
@@ -7261,7 +7300,7 @@ fn validate_top_level_sequence(definition: &MacroDefinition, diagnostics: &mut V
     };
     if matches!(
         element.as_ref(),
-        MetaType::Sequence(_) | MetaType::Optional(_) | MetaType::Product(_)
+        MetaType::Sequence(_) | MetaType::Optional(_) | MetaType::SlottedProduct(_)
     ) {
         diagnostics.push(Diagnostic::new(
             definition.declaration.syntax.span.clone(),
@@ -7390,12 +7429,18 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
                 .iter()
                 .all(|element| element.name.is_none() && !element.spread) =>
         {
-            product
+            let elements = product
                 .elements
                 .iter()
                 .map(|element| meta_type(&element.ty))
-                .collect::<Option<Vec<_>>>()
-                .map(MetaType::Product)
+                .collect::<Option<Vec<_>>>()?;
+            // A slotted product juxtaposes its elements; a product is a
+            // parenthesized, comma-separated group.
+            Some(if product.slotted {
+                MetaType::SlottedProduct(elements)
+            } else {
+                MetaType::Product(elements)
+            })
         }
         _ => None,
     }
@@ -7427,7 +7472,7 @@ fn delimiter_contents_meta(ty: &Type) -> Option<DelimitedMetaContents> {
     // multiple fixed contents, so `Parenthesized Expr` is read the same as
     // `Parenthesized (Expr)`.
     let Type::Product(product) = ty else {
-        return meta_type(ty).map(|single| DelimitedMetaContents::Fixed(vec![single]));
+        return meta_type(ty).map(|single| DelimitedMetaContents::Slotted(vec![single]));
     };
     if product.elements.len() == 1
         && !product.elements[0].spread
@@ -7444,7 +7489,7 @@ fn delimiter_contents_meta(ty: &Type) -> Option<DelimitedMetaContents> {
             separator: Box::new(separator),
         });
     }
-    product
+    let elements = product
         .elements
         .iter()
         .map(|element| {
@@ -7452,8 +7497,14 @@ fn delimiter_contents_meta(ty: &Type) -> Option<DelimitedMetaContents> {
                 .then(|| meta_type(&element.ty))
                 .flatten()
         })
-        .collect::<Option<Vec<_>>>()
-        .map(DelimitedMetaContents::Fixed)
+        .collect::<Option<Vec<_>>>()?;
+    // Slotted contents `(A; B)` are juxtaposed, while product contents
+    // `(A, B)` are separated by commas.
+    Some(if product.slotted || elements.len() < 2 {
+        DelimitedMetaContents::Slotted(elements)
+    } else {
+        DelimitedMetaContents::Product(elements)
+    })
 }
 
 fn separated_meta_type(ty: &Type) -> Option<(MetaType, MetaType)> {
@@ -7529,12 +7580,14 @@ fn sequence_meta_type(ty: &Type) -> Option<MetaType> {
 fn meta_type_contains_macro_call_metadata(meta: &MetaType) -> bool {
     match meta {
         MetaType::MacroCallMetadata => true,
-        MetaType::Product(elements) => elements.iter().any(meta_type_contains_macro_call_metadata),
+        MetaType::SlottedProduct(elements) | MetaType::Product(elements) => {
+            elements.iter().any(meta_type_contains_macro_call_metadata)
+        }
         MetaType::Optional(element) | MetaType::Sequence(element) => {
             meta_type_contains_macro_call_metadata(element)
         }
         MetaType::Delimited(_, contents) => match contents {
-            DelimitedMetaContents::Fixed(elements) => {
+            DelimitedMetaContents::Slotted(elements) | DelimitedMetaContents::Product(elements) => {
                 elements.iter().any(meta_type_contains_macro_call_metadata)
             }
             DelimitedMetaContents::Sequence(element) => {
@@ -7592,7 +7645,7 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
         | MetaType::TypeDeclarationItem
         | MetaType::TypeBody
         | MetaType::UnstructuredItem
-        | MetaType::Product(_)
+        | MetaType::SlottedProduct(_)
         | MetaType::Optional(_)
         | MetaType::Sequence(_) => false,
         MetaType::Comma => matches_single_token(argument.syntax(), staple_syntax::TokenKind::Comma),
@@ -7605,6 +7658,10 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
         MetaType::Delimited(_, _) => {
             let mut next_syntax_id = 0;
             delimiter_argument_value(expected, argument.syntax(), &mut next_syntax_id).is_some()
+        }
+        MetaType::Product(_) => {
+            let mut next_syntax_id = 0;
+            match_syntax_fragment(expected, argument.syntax(), &mut next_syntax_id).is_some()
         }
     }
 }
@@ -7636,15 +7693,19 @@ fn delimiter_argument_value(
         return None;
     }
     let contents = match expected_contents {
-        DelimitedMetaContents::Fixed(elements) if elements.as_slice() == [MetaType::Syntax] => {
-            Some(DelimitedValueContents::Fixed(vec![(
+        DelimitedMetaContents::Slotted(elements) if elements.as_slice() == [MetaType::Syntax] => {
+            Some(DelimitedValueContents::Slotted(vec![(
                 None,
                 Value::Syntax(SyntaxValue::Raw(syntax_slice(syntax, first + 1, last))),
             )]))
         }
-        DelimitedMetaContents::Fixed(elements) => {
-            match_fixed_contents(syntax, first + 1, last, elements, next_syntax_id)
-                .map(DelimitedValueContents::Fixed)
+        DelimitedMetaContents::Slotted(elements) => {
+            match_slotted_contents(syntax, first + 1, last, elements, next_syntax_id)
+                .map(DelimitedValueContents::Slotted)
+        }
+        DelimitedMetaContents::Product(elements) => {
+            match_product_contents(syntax, first + 1, last, elements, next_syntax_id)
+                .map(DelimitedValueContents::Product)
         }
         DelimitedMetaContents::Sequence(element) => {
             match_sequence_contents(syntax, first + 1, last, element, next_syntax_id)
@@ -7681,7 +7742,7 @@ fn match_separated_contents(
     separator: &MetaType,
     next_syntax_id: &mut usize,
 ) -> Option<(Vec<Value>, Value, bool)> {
-    let modifier_prefixed = matches!(element, MetaType::Product(elements) if matches!(elements.first(), Some(MetaType::Sequence(element)) if **element == MetaType::Modifier));
+    let modifier_prefixed = matches!(element, MetaType::SlottedProduct(elements) if matches!(elements.first(), Some(MetaType::Sequence(element)) if **element == MetaType::Modifier));
     if !modifier_prefixed {
         cursor = skip_trivia(parent.tokens(), cursor, end);
     }
@@ -7766,7 +7827,45 @@ fn trim_trailing_trivia(
     end
 }
 
-fn match_fixed_contents(
+/// Matches comma-separated contents against a product shape: exactly one
+/// element per expected shape, with an optional trailing comma.
+fn match_product_contents(
+    parent: &Syntax,
+    mut cursor: usize,
+    end: usize,
+    expected: &[MetaType],
+    next_syntax_id: &mut usize,
+) -> Option<Vec<(Option<String>, Value)>> {
+    let checkpoint = *next_syntax_id;
+    let mut values = Vec::with_capacity(expected.len());
+    for (index, element) in expected.iter().enumerate() {
+        cursor = skip_trivia(parent.tokens(), cursor, end);
+        let separator_at = find_top_level_separator(parent.tokens(), cursor, end, &MetaType::Comma);
+        let element_end =
+            trim_trailing_trivia(parent.tokens(), cursor, separator_at.unwrap_or(end));
+        let fragment = syntax_slice(parent, cursor, element_end);
+        let Some(value) = match_syntax_fragment(element, &fragment, next_syntax_id) else {
+            *next_syntax_id = checkpoint;
+            return None;
+        };
+        values.push((None, value));
+        match separator_at {
+            Some(separator_at) => cursor = separator_at + 1,
+            None if index + 1 == expected.len() => cursor = end,
+            None => {
+                *next_syntax_id = checkpoint;
+                return None;
+            }
+        }
+    }
+    if skip_trivia(parent.tokens(), cursor, end) != end {
+        *next_syntax_id = checkpoint;
+        return None;
+    }
+    Some(values)
+}
+
+fn match_slotted_contents(
     parent: &Syntax,
     cursor: usize,
     end: usize,
@@ -7788,7 +7887,7 @@ fn match_fixed_contents(
         {
             let checkpoint = *next_syntax_id;
             if let Some(mut values) =
-                match_fixed_contents(parent, doc_end, end, expected, next_syntax_id)
+                match_slotted_contents(parent, doc_end, end, expected, next_syntax_id)
                 && let Some((_, Value::Sequence(sequence))) = values.first_mut()
             {
                 for doc in docs.into_iter().rev() {
@@ -7807,7 +7906,8 @@ fn match_fixed_contents(
         }
         let cursor = skip_trivia(parent.tokens(), cursor, end);
         let checkpoint = *next_syntax_id;
-        if let Some(mut values) = match_fixed_contents(parent, cursor, end, rest, next_syntax_id) {
+        if let Some(mut values) = match_slotted_contents(parent, cursor, end, rest, next_syntax_id)
+        {
             values.insert(0, (None, Value::Sequence(Vec::new())));
             return Some(values);
         }
@@ -7817,7 +7917,7 @@ fn match_fixed_contents(
             let checkpoint = *next_syntax_id;
             if let Some(value) = match_syntax_fragment(element, &fragment, next_syntax_id)
                 && let Some(mut values) =
-                    match_fixed_contents(parent, candidate_end, end, expected, next_syntax_id)
+                    match_slotted_contents(parent, candidate_end, end, expected, next_syntax_id)
                 && let Some((_, Value::Sequence(sequence))) = values.first_mut()
             {
                 sequence.insert(0, value);
@@ -7829,7 +7929,8 @@ fn match_fixed_contents(
     }
     if matches!(first, MetaType::Optional(_)) {
         let checkpoint = *next_syntax_id;
-        if let Some(mut values) = match_fixed_contents(parent, cursor, end, rest, next_syntax_id) {
+        if let Some(mut values) = match_slotted_contents(parent, cursor, end, rest, next_syntax_id)
+        {
             values.insert(
                 0,
                 (
@@ -7849,7 +7950,7 @@ fn match_fixed_contents(
         let checkpoint = *next_syntax_id;
         if let Some(value) = match_syntax_fragment(first, &fragment, next_syntax_id)
             && let Some(mut values) =
-                match_fixed_contents(parent, candidate_end, end, rest, next_syntax_id)
+                match_slotted_contents(parent, candidate_end, end, rest, next_syntax_id)
         {
             values.insert(0, (None, value));
             return Some(values);
@@ -7947,9 +8048,22 @@ fn match_syntax_fragment(
     next_syntax_id: &mut usize,
 ) -> Option<Value> {
     match expected {
-        MetaType::Product(elements) => {
+        MetaType::SlottedProduct(elements) => {
             let values =
-                match_fixed_contents(syntax, 0, syntax.tokens().len(), elements, next_syntax_id)?;
+                match_slotted_contents(syntax, 0, syntax.tokens().len(), elements, next_syntax_id)?;
+            return Some(Value::Product(values, true));
+        }
+        MetaType::Product(elements) => {
+            let tokens = syntax.tokens();
+            let first = tokens.iter().position(|token| !token.kind.is_trivia())?;
+            let last = tokens.iter().rposition(|token| !token.kind.is_trivia())?;
+            if tokens[first].kind != staple_syntax::TokenKind::LParen
+                || tokens[last].kind != staple_syntax::TokenKind::RParen
+                || matching_close(tokens, first) != Some(last)
+            {
+                return None;
+            }
+            let values = match_product_contents(syntax, first + 1, last, elements, next_syntax_id)?;
             return Some(Value::Product(values, false));
         }
         MetaType::Optional(element) => {
@@ -8082,7 +8196,10 @@ fn match_syntax_fragment(
         }
         MetaType::Syntax => SyntaxValue::Raw(syntax.clone()),
         MetaType::SyntaxNode => structural_syntax_value(syntax, next_syntax_id)?,
-        MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => unreachable!(),
+        MetaType::SlottedProduct(_)
+        | MetaType::Product(_)
+        | MetaType::Optional(_)
+        | MetaType::Sequence(_) => unreachable!(),
         MetaType::TypeBody => unreachable!("type bodies are matched before expression parsing"),
         MetaType::MacroCallMetadata => unreachable!(),
     };
@@ -8169,6 +8286,28 @@ fn skip_trivia(tokens: &[staple_syntax::SyntaxToken], mut cursor: usize, end: us
         cursor += 1;
     }
     cursor
+}
+
+/// Finds the token that closes the delimiter opened at `open`.
+fn matching_close(tokens: &[staple_syntax::SyntaxToken], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open) {
+        match token.kind {
+            staple_syntax::TokenKind::LParen
+            | staple_syntax::TokenKind::LBracket
+            | staple_syntax::TokenKind::LBrace => depth += 1,
+            staple_syntax::TokenKind::RParen
+            | staple_syntax::TokenKind::RBracket
+            | staple_syntax::TokenKind::RBrace => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn candidate_ends(
@@ -8322,7 +8461,7 @@ fn private_visibility() -> VisibilitySyntax {
 /// spelled `Parenthesized (...)` to match how every other delimited macro
 /// argument is declared, down to the single meta type it wraps.
 fn modifier_argument_meta_type(declared: &MetaType) -> Option<&MetaType> {
-    let MetaType::Delimited(DelimiterKind::Parenthesized, DelimitedMetaContents::Fixed(inner)) =
+    let MetaType::Delimited(DelimiterKind::Parenthesized, DelimitedMetaContents::Slotted(inner)) =
         declared
     else {
         return None;
@@ -8421,7 +8560,8 @@ fn meta_type_at_least_as_specific(left: &MetaType, right: &MetaType) -> bool {
         || matches!(left, MetaType::Delimited(_, _))
             && matches!(right, MetaType::Expr | MetaType::Type | MetaType::Pattern)
         || match (left, right) {
-            (MetaType::Product(left), MetaType::Product(right)) => {
+            (MetaType::SlottedProduct(left), MetaType::SlottedProduct(right))
+            | (MetaType::Product(left), MetaType::Product(right)) => {
                 left.len() == right.len()
                     && left
                         .iter()
@@ -8454,7 +8594,8 @@ fn contents_at_least_as_specific(
     right: &DelimitedMetaContents,
 ) -> bool {
     match (left, right) {
-        (DelimitedMetaContents::Fixed(left), DelimitedMetaContents::Fixed(right)) => {
+        (DelimitedMetaContents::Slotted(left), DelimitedMetaContents::Slotted(right))
+        | (DelimitedMetaContents::Product(left), DelimitedMetaContents::Product(right)) => {
             left.len() == right.len()
                 && left
                     .iter()
@@ -8464,10 +8605,10 @@ fn contents_at_least_as_specific(
         (DelimitedMetaContents::Sequence(left), DelimitedMetaContents::Sequence(right)) => {
             meta_type_at_least_as_specific(left, right)
         }
-        (DelimitedMetaContents::Fixed(left), DelimitedMetaContents::Sequence(right)) => left
+        (DelimitedMetaContents::Slotted(left), DelimitedMetaContents::Sequence(right)) => left
             .iter()
             .all(|left| meta_type_at_least_as_specific(left, right)),
-        (DelimitedMetaContents::Sequence(_), DelimitedMetaContents::Fixed(_)) => false,
+        (DelimitedMetaContents::Sequence(_), DelimitedMetaContents::Slotted(_)) => false,
         (
             DelimitedMetaContents::Separated {
                 element: left_element,
@@ -8489,11 +8630,22 @@ fn contents_at_least_as_specific(
                 && meta_type_at_least_as_specific(separator, right)
         }
         (
-            DelimitedMetaContents::Fixed(left),
+            DelimitedMetaContents::Slotted(left),
             DelimitedMetaContents::Separated { element, separator },
         ) => fixed_matches_separated(left, element, separator),
+        (
+            DelimitedMetaContents::Product(left),
+            DelimitedMetaContents::Separated { element, .. },
+        ) => left
+            .iter()
+            .all(|left| meta_type_at_least_as_specific(left, element)),
         (DelimitedMetaContents::Sequence(_), DelimitedMetaContents::Separated { .. })
-        | (DelimitedMetaContents::Separated { .. }, DelimitedMetaContents::Fixed(_)) => false,
+        | (DelimitedMetaContents::Separated { .. }, DelimitedMetaContents::Slotted(_))
+        | (DelimitedMetaContents::Separated { .. }, DelimitedMetaContents::Product(_))
+        | (DelimitedMetaContents::Product(_), DelimitedMetaContents::Slotted(_))
+        | (DelimitedMetaContents::Product(_), DelimitedMetaContents::Sequence(_))
+        | (DelimitedMetaContents::Slotted(_), DelimitedMetaContents::Product(_))
+        | (DelimitedMetaContents::Sequence(_), DelimitedMetaContents::Product(_)) => false,
     }
 }
 
@@ -8553,9 +8705,10 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::Comma => "Comma".to_owned(),
             MetaType::Equals => "Equals".to_owned(),
             MetaType::FatArrow => "FatArrow".to_owned(),
-            MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => {
-                format_meta_type(parameter)
-            }
+            MetaType::SlottedProduct(_)
+            | MetaType::Product(_)
+            | MetaType::Optional(_)
+            | MetaType::Sequence(_) => format_meta_type(parameter),
             MetaType::Delimited(_, _) => format_meta_type(parameter),
         })
         .collect::<Vec<_>>()
@@ -8647,14 +8800,8 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
         MetaType::Comma => "Comma".to_owned(),
         MetaType::Equals => "Equals".to_owned(),
         MetaType::FatArrow => "FatArrow".to_owned(),
-        MetaType::Product(elements) => format!(
-            "({})",
-            elements
-                .iter()
-                .map(format_meta_type)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        MetaType::SlottedProduct(elements) => format_meta_elements(elements, "; "),
+        MetaType::Product(elements) => format_meta_elements(elements, ", "),
         MetaType::Optional(element) => format!("Optional {}", format_meta_type(element)),
         MetaType::Sequence(element) => format!("Sequence {}", format_meta_type(element)),
         MetaType::Delimited(kind, contents) => {
@@ -8664,14 +8811,8 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
                 DelimiterKind::Braced => "Braced",
             };
             let contents = match contents {
-                DelimitedMetaContents::Fixed(elements) => format!(
-                    "({})",
-                    elements
-                        .iter()
-                        .map(format_meta_type)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
+                DelimitedMetaContents::Slotted(elements) => format_meta_elements(elements, "; "),
+                DelimitedMetaContents::Product(elements) => format_meta_elements(elements, ", "),
                 DelimitedMetaContents::Sequence(element) => {
                     format!("(Sequence {})", format_meta_type(element))
                 }
@@ -8684,6 +8825,17 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
             format!("{name} {contents}")
         }
     }
+}
+
+fn format_meta_elements(elements: &[MetaType], separator: &str) -> String {
+    format!(
+        "({})",
+        elements
+            .iter()
+            .map(format_meta_type)
+            .collect::<Vec<_>>()
+            .join(separator)
+    )
 }
 
 fn compile_type(ty: &Type) -> CompileType {
@@ -8852,13 +9004,13 @@ fn compile_constructor_type(name: &str, argument: CompileType) -> CompileType {
 
 fn compile_delimited_contents(argument: &CompileType) -> DelimitedMetaContents {
     match argument {
-        CompileType::Product(elements) => DelimitedMetaContents::Fixed(
+        CompileType::Product(elements) => DelimitedMetaContents::Slotted(
             elements
                 .iter()
                 .map(|element| compile_type_as_meta(element).unwrap_or(MetaType::SyntaxNode))
                 .collect(),
         ),
-        _ => DelimitedMetaContents::Fixed(vec![
+        _ => DelimitedMetaContents::Slotted(vec![
             compile_type_as_meta(argument).unwrap_or(MetaType::SyntaxNode),
         ]),
     }
@@ -8871,7 +9023,7 @@ fn compile_type_as_meta(ty: &CompileType) -> Option<MetaType> {
             .iter()
             .map(compile_type_as_meta)
             .collect::<Option<Vec<_>>>()
-            .map(MetaType::Product),
+            .map(MetaType::SlottedProduct),
         _ => None,
     }
 }
@@ -8901,6 +9053,7 @@ fn compile_types_compatible(actual: &CompileType, expected: &CompileType) -> boo
     match (actual, expected) {
         (CompileType::Meta(actual), CompileType::Meta(expected)) => {
             actual == expected
+                || unslotted_meta_type(actual) == unslotted_meta_type(expected)
                 || matches!((actual, expected), (MetaType::Sequence(actual), MetaType::Sequence(expected))
                     if **actual == MetaType::SyntaxNode || **expected == MetaType::SyntaxNode || actual == expected)
                 || *expected == MetaType::SyntaxNode
@@ -8927,6 +9080,38 @@ fn compile_types_compatible(actual: &CompileType, expected: &CompileType) -> boo
         }
         (CompileType::Named(actual), CompileType::Named(expected)) => actual == expected,
         _ => actual == expected,
+    }
+}
+
+/// Compile-time product values don't record whether they are slotted, so a
+/// constructed value is compared against its declared shape with slotted and
+/// comma-separated products treated alike.
+fn unslotted_meta_type(meta: &MetaType) -> MetaType {
+    let elements = |elements: &[MetaType]| elements.iter().map(unslotted_meta_type).collect();
+    match meta {
+        MetaType::SlottedProduct(values) | MetaType::Product(values) => {
+            MetaType::Product(elements(values))
+        }
+        MetaType::Optional(element) => MetaType::Optional(Box::new(unslotted_meta_type(element))),
+        MetaType::Sequence(element) => MetaType::Sequence(Box::new(unslotted_meta_type(element))),
+        MetaType::Delimited(kind, contents) => MetaType::Delimited(
+            *kind,
+            match contents {
+                DelimitedMetaContents::Slotted(values) | DelimitedMetaContents::Product(values) => {
+                    DelimitedMetaContents::Product(elements(values))
+                }
+                DelimitedMetaContents::Sequence(element) => {
+                    DelimitedMetaContents::Sequence(Box::new(unslotted_meta_type(element)))
+                }
+                DelimitedMetaContents::Separated { element, separator } => {
+                    DelimitedMetaContents::Separated {
+                        element: Box::new(unslotted_meta_type(element)),
+                        separator: Box::new(unslotted_meta_type(separator)),
+                    }
+                }
+            },
+        ),
+        meta => meta.clone(),
     }
 }
 
@@ -9013,7 +9198,7 @@ fn compile_field_type(ty: &CompileType, accessor: &Accessor) -> Option<CompileTy
 fn compile_product_fields(ty: &CompileType, length: usize) -> Vec<CompileType> {
     match ty {
         CompileType::Product(elements) => elements.clone(),
-        CompileType::Meta(MetaType::Product(elements)) => {
+        CompileType::Meta(MetaType::SlottedProduct(elements) | MetaType::Product(elements)) => {
             elements.iter().cloned().map(CompileType::Meta).collect()
         }
         CompileType::Meta(MetaType::MacroCallMetadata) if length == 2 => vec![
@@ -9115,7 +9300,9 @@ fn compile_coverage_pattern(pattern: &Pattern, ty: &CompileType) -> CompileCover
             // fields. Flattening it would disagree with the single payload
             // argument `compile_type_constructors` reports.
             let arguments = match (&representation, argument) {
-                (CompileType::Meta(MetaType::Product(_)), other) => vec![other],
+                (CompileType::Meta(MetaType::SlottedProduct(_) | MetaType::Product(_)), other) => {
+                    vec![other]
+                }
                 (_, CompileCoveragePattern::Constructor(name, arguments)) if name == "$product" => {
                     arguments
                 }
@@ -9162,7 +9349,8 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
         CompileType::Bool => ["True", "False"]
             .iter()
             .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
-        CompileType::Product(_) | CompileType::Meta(MetaType::Product(_)) => {
+        CompileType::Product(_)
+        | CompileType::Meta(MetaType::SlottedProduct(_) | MetaType::Product(_)) => {
             compile_pattern_matrix_is_exhaustive(ty, patterns)
         }
         CompileType::Meta(MetaType::Sequence(_)) => {
@@ -9379,10 +9567,12 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
             ("False".to_owned(), Vec::new()),
         ],
         CompileType::Product(elements) => vec![("$product".to_owned(), elements.clone())],
-        CompileType::Meta(MetaType::Product(elements)) => vec![(
-            "$product".to_owned(),
-            elements.iter().cloned().map(CompileType::Meta).collect(),
-        )],
+        CompileType::Meta(MetaType::SlottedProduct(elements) | MetaType::Product(elements)) => {
+            vec![(
+                "$product".to_owned(),
+                elements.iter().cloned().map(CompileType::Meta).collect(),
+            )]
+        }
         CompileType::Named(name) if name == "TypeDeclarationKind" => vec![
             ("AliasDeclaration".to_owned(), Vec::new()),
             ("WrapperDeclaration".to_owned(), Vec::new()),
@@ -9518,7 +9708,8 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
                 DelimiterKind::Braced => "Braced",
             };
             let contents = match contents {
-                DelimitedMetaContents::Fixed(elements) => {
+                DelimitedMetaContents::Slotted(elements)
+                | DelimitedMetaContents::Product(elements) => {
                     CompileType::Product(elements.iter().cloned().map(CompileType::Meta).collect())
                 }
                 DelimitedMetaContents::Sequence(element) => {
@@ -9788,11 +9979,27 @@ fn macro_body_parameter_types(expression: &Expression) -> Vec<Option<MetaType>> 
     while let Expression::Function(function) = current {
         parameters.push(match &function.pattern {
             Pattern::Binding(binding) if matches!(binding.ty, Type::Inferred(_)) => None,
+            // An unannotated element of a destructured product takes its type
+            // from the annotation, so the product cannot conflict with it.
+            Pattern::Product(product)
+                if product.elements.iter().any(pattern_has_inferred_element) =>
+            {
+                None
+            }
             pattern => pattern_meta_type(pattern),
         });
         current = &function.body;
     }
     parameters
+}
+
+fn pattern_has_inferred_element(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Binding(binding) => matches!(binding.ty, Type::Inferred(_)),
+        Pattern::Wildcard(wildcard) => matches!(wildcard.ty, Type::Inferred(_)),
+        Pattern::Product(product) => product.elements.iter().any(pattern_has_inferred_element),
+        _ => false,
+    }
 }
 
 pub(crate) fn pattern_meta_type(pattern: &Pattern) -> Option<MetaType> {
@@ -9809,12 +10016,18 @@ pub(crate) fn pattern_meta_type(pattern: &Pattern) -> Option<MetaType> {
             Type::Inferred(_) => Some(MetaType::SyntaxNode),
             ty => meta_type(ty),
         },
-        Pattern::Product(product) => product
-            .elements
-            .iter()
-            .map(pattern_meta_type)
-            .collect::<Option<Vec<_>>>()
-            .map(MetaType::Product),
+        Pattern::Product(product) => {
+            let elements = product
+                .elements
+                .iter()
+                .map(pattern_meta_type)
+                .collect::<Option<Vec<_>>>()?;
+            Some(if product.slotted {
+                MetaType::SlottedProduct(elements)
+            } else {
+                MetaType::Product(elements)
+            })
+        }
         Pattern::Nominal(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => None,
     }
 }
@@ -10182,12 +10395,16 @@ fn valid_macro_annotation(annotation: &Type) -> bool {
 
 fn invalid_raw_syntax_shape(meta: &MetaType) -> bool {
     match meta {
-        MetaType::Delimited(_, DelimitedMetaContents::Fixed(elements))
+        MetaType::Delimited(_, DelimitedMetaContents::Slotted(elements))
             if elements.as_slice() == [MetaType::Syntax] =>
         {
             false
         }
-        MetaType::Delimited(_, DelimitedMetaContents::Fixed(elements))
+        MetaType::Delimited(
+            _,
+            DelimitedMetaContents::Slotted(elements) | DelimitedMetaContents::Product(elements),
+        )
+        | MetaType::SlottedProduct(elements)
         | MetaType::Product(elements) => elements.iter().any(|element| {
             matches!(element, MetaType::Syntax) || invalid_raw_syntax_shape(element)
         }),
@@ -10424,7 +10641,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                 && delimited.kind == kind
             {
                 let contents = match &delimited.contents {
-                    DelimitedValueContents::Fixed(values)
+                    DelimitedValueContents::Slotted(values)
                         if matches!(
                             values.as_slice(),
                             [(None, Value::Syntax(SyntaxValue::Raw(_)))]
@@ -10432,7 +10649,10 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                     {
                         values[0].1.clone()
                     }
-                    DelimitedValueContents::Fixed(values) => Value::Product(values.clone(), false),
+                    DelimitedValueContents::Slotted(values) => Value::Product(values.clone(), true),
+                    DelimitedValueContents::Product(values) => {
+                        Value::Product(values.clone(), false)
+                    }
                     DelimitedValueContents::Sequence(values) => Value::Sequence(values.clone()),
                     DelimitedValueContents::Separated {
                         elements,
@@ -10799,14 +11019,18 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
         (MetaType::Comma, Value::Syntax(SyntaxValue::Comma(_))) => true,
         (MetaType::Equals, Value::Syntax(SyntaxValue::Equals(_))) => true,
         (MetaType::FatArrow, Value::Syntax(SyntaxValue::FatArrow(_))) => true,
-        (MetaType::Product(expected), Value::Product(values, _)) => {
+        (MetaType::SlottedProduct(expected), Value::Product(values, _))
+        | (MetaType::Product(expected), Value::Product(values, _)) => {
             expected.len() == values.len()
                 && expected
                     .iter()
                     .zip(values)
                     .all(|(expected, (_, value))| meta_type_matches_value(expected, value))
         }
-        (MetaType::Product(expected), Value::Sequence(values)) => {
+        (
+            MetaType::SlottedProduct(expected) | MetaType::Product(expected),
+            Value::Sequence(values),
+        ) => {
             expected.len() == values.len()
                 && expected
                     .iter()
@@ -10828,8 +11052,12 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
             value.kind == *expected_kind
                 && match (&value.contents, expected_contents) {
                     (
-                        DelimitedValueContents::Fixed(values),
-                        DelimitedMetaContents::Fixed(expected),
+                        DelimitedValueContents::Slotted(values),
+                        DelimitedMetaContents::Slotted(expected),
+                    )
+                    | (
+                        DelimitedValueContents::Product(values),
+                        DelimitedMetaContents::Product(expected),
                     ) => {
                         values.len() == expected.len()
                             && values.iter().zip(expected).all(|((_, value), expected)| {
@@ -11360,7 +11588,8 @@ fn substitute_type(
                 if delimited.kind == DelimiterKind::Parenthesized =>
             {
                 let values = match delimited.contents {
-                    DelimitedValueContents::Fixed(values) => {
+                    DelimitedValueContents::Slotted(values)
+                    | DelimitedValueContents::Product(values) => {
                         values.into_iter().map(|(_, value)| value).collect()
                     }
                     DelimitedValueContents::Sequence(values) => values,

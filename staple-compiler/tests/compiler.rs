@@ -6720,12 +6720,12 @@ fn parse_quote_produces_visibility_result_type() {
 fn parse_quote_produces_delimited_result_types() {
     let module = type_check(concat!(
         "macro delimited: Expr -> Expr = _: Expr => {\n",
-        "    let fixed: Parenthesized (Ident String, Comma, Ident String) = parse_quote { (a, b) }\n",
+        "    let fixed: Parenthesized (Ident String; Comma; Ident String) = parse_quote { (a, b) }\n",
         "    let sequence: Bracketed (Sequence Ident String) = parse_quote { [one two] }\n",
         "    let separated: Braced (Separated (Ident String) Comma) = parse_quote { { x, y, } }\n",
         "    let nested: Parenthesized Syntax = parse_quote { ((a), (b)) }\n",
         "    match (fixed, sequence, separated) {\n",
-        "        (Parenthesized (Ident \"a\", Comma, Ident \"b\"),\n",
+        "        (Parenthesized (Ident \"a\"; Comma; Ident \"b\"),\n",
         "         Bracketed (Sequence (Ident \"one\", Ident \"two\")),\n",
         "         Braced (Separated (separator: Comma, elements: (Ident \"x\", _), trailing: True()))) =>\n",
         "            match nested { Parenthesized _ => parse_quote { 42 } },\n",
@@ -6881,7 +6881,7 @@ fn rejects_empty_typegroups_and_top_level_optional_macro_parameters() {
         ),
         (
             "macro invalid: Optional Type -> Expr = value => parse_quote { 0 }\ninvalid I32\n",
-            "`Optional` and product syntax shapes may only appear inside delimited contents",
+            "`Optional` and slotted product syntax shapes may only appear inside delimited contents",
         ),
     ] {
         let program = ProgramLoader::new()
@@ -7696,7 +7696,7 @@ fn expands_typed_macros_with_literal_identifier_parameters() {
 #[test]
 fn expands_macros_with_delimited_syntax_parameters() {
     let module = type_check(concat!(
-        "macro pair = _: Parenthesized (Ident String, Ident String) => parse_quote { 11 }\n",
+        "macro pair = _: Parenthesized (Ident String; Ident String) => parse_quote { 11 }\n",
         "macro names = _: Bracketed (Sequence Ident String) => parse_quote { 22 }\n",
         "macro body = _: Braced (Sequence SyntaxNode) => parse_quote { 33 }\n",
         "let pair_result: I32 = pair (left right)\n",
@@ -7716,7 +7716,7 @@ fn delimited_macro_overloads_use_structural_specificity() {
         "macro classify = _: Expr => parse_quote { 1 }\n",
         "macro classify = _: Parenthesized (Sequence SyntaxNode) => parse_quote { 2 }\n",
         "macro classify = _: Parenthesized (Sequence Ident String) => parse_quote { 3 }\n",
-        "macro classify = _: Parenthesized (Ident String, Ident String) => parse_quote { 4 }\n",
+        "macro classify = _: Parenthesized (Ident String; Ident String) => parse_quote { 4 }\n",
         "let fixed: I32 = classify (left right)\n",
         "let sequence: I32 = classify (left)\n",
         "let empty: I32 = classify ()\n",
@@ -7973,7 +7973,8 @@ fn rejects_curried_macro_annotations() {
 #[test]
 fn matches_comma_and_separated_delimited_syntax() {
     let module = type_check(concat!(
-        "macro fixed = _: Parenthesized (Ident String, Comma, Ident String) => parse_quote { 1 }\n",
+        "macro fixed = _: Parenthesized (Ident String; Comma; Ident String) => parse_quote { 1 }\n",
+        "macro product = _: Parenthesized (Ident String, Ident String) => parse_quote { 7 }\n",
         "macro separated = _: Parenthesized (Separated (Ident String) Comma) => parse_quote { 2 }\n",
         "macro bracketed = _: Bracketed (Separated (Ident String) Comma) => parse_quote { 5 }\n",
         "macro braced = _: Braced (Separated (Ident String) Comma) => parse_quote { 6 }\n",
@@ -7985,6 +7986,8 @@ fn matches_comma_and_separated_delimited_syntax() {
         "    Parenthesized Comma => parse_quote { 4 },\n",
         "}\n",
         "let fixed_result: I32 = fixed (left, right)\n",
+        "let product_result: I32 = product (left, right)\n",
+        "let product_trailing: I32 = product (left, right,)\n",
         "let empty: I32 = separated ()\n",
         "let single: I32 = separated (one)\n",
         "let multiple: I32 = separated (one, two, three)\n",
@@ -8005,7 +8008,7 @@ fn separated_overloads_use_structural_specificity() {
     let module = type_check(concat!(
         "macro classify = _: Parenthesized (Sequence SyntaxNode) => parse_quote { 1 }\n",
         "macro classify = _: Parenthesized (Separated (Ident String) Comma) => parse_quote { 2 }\n",
-        "macro classify = _: Parenthesized (Ident String, Comma, Ident String) => parse_quote { 3 }\n",
+        "macro classify = _: Parenthesized (Ident String; Comma; Ident String) => parse_quote { 3 }\n",
         "let fixed: I32 = classify (one, two)\n",
         "let separated: I32 = classify (one, two, three)\n",
         "let empty: I32 = classify ()\n",
@@ -8014,6 +8017,56 @@ fn separated_overloads_use_structural_specificity() {
     CodeGenerator::new(&context)
         .compile_root(&lower(&module))
         .expect("fixed, separated, and ordinary sequence overloads should be ordered");
+}
+
+#[test]
+fn matches_product_macro_parameters() {
+    let module = type_check(concat!(
+        "macro unit = () => parse_quote { 1 }\n",
+        "macro sum = (a: Expr; b: Expr, c: Expr; d: Expr) => parse_quote { $a + $b + $c + $d }\n",
+        "macro product: (Expr, Expr) -> Expr = (left, right) => parse_quote { $left * $right }\n",
+        "macro nested = value: Parenthesized (Ident String; (Expr, Expr)) => match value {\n",
+        "    Parenthesized (_; (left, right)) => parse_quote { $left - $right },\n",
+        "}\n",
+        "macro listed = value: Bracketed (Expr, Expr) => match value {\n",
+        "    Bracketed (left, right) => parse_quote { $left + $right },\n",
+        "}\n",
+        "let unit_result: I32 = unit ()\n",
+        "let sum_result: I32 = sum 1 (2, 3) 4\n",
+        "let product_result: I32 = product (6, 7)\n",
+        "let nested_result: I32 = nested (pair (9, 4))\n",
+        "let listed_result: I32 = listed [5, 6]\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("product macro parameters should match comma-separated syntax");
+}
+
+#[test]
+fn product_macro_parameters_reject_juxtaposed_syntax() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for (signature, argument) in [
+        ("_: (Expr, Expr)", "(1 2)"),
+        ("_: (Expr, Expr)", "(1, 2, 3)"),
+        ("_: (Expr, Expr)", "1"),
+        ("()", "1"),
+        ("_: Parenthesized (Expr, Expr)", "(1 2)"),
+        ("_: Parenthesized (Expr; Expr)", "(1, 2)"),
+    ] {
+        let source = format!(
+            "use std.syntax.(Expr, Parenthesized, parse_quote)\n\
+             macro shape = {signature} => parse_quote {{ 0 }}\n\
+             let value: I32 = shape {argument}\n"
+        );
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(&source, root)
+            .expect("source should parse");
+        NameResolver::new()
+            .resolve_program(program)
+            .expect_err_diagnostics("mismatched product syntax should be rejected");
+    }
 }
 
 #[test]

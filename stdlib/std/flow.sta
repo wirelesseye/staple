@@ -5,14 +5,14 @@ use package.iterator.(IntoIterator, Iterator)
 use package.iterator.IterStep.(Done, Yield)
 use package.syntax.*
 
-def when_clauses = clauses: Sequence (Expr, FatArrow, Expr) => Expr :: match clauses {
+def when_clauses = clauses: Sequence (Expr; FatArrow; Expr) => Expr :: match clauses {
     Sequence () => parse_quote { () },
     Sequence (first, rest) => match first {
-        (condition: Ident "else", _, fallback) => match rest {
+        (condition: Ident "else"; _; fallback) => match rest {
             Sequence () => fallback,
             _ => panic "when clauses after else are unsupported",
         },
-        (condition, _, branch) => {
+        (condition; _; branch) => {
             let otherwise = when_clauses rest
             parse_quote {
                 match Bool :: $condition {
@@ -35,7 +35,7 @@ def when_clauses = clauses: Sequence (Expr, FatArrow, Expr) => Expr :: match cla
 /// }
 /// ```
 pub macro when =
-    body: Braced (Separated (Expr, FatArrow, Expr) Comma) => match body {
+    body: Braced (Separated (Expr; FatArrow; Expr) Comma) => match body {
         Braced (Separated (_, clauses, _)) => when_clauses clauses,
     }
 
