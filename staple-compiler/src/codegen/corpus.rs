@@ -123,13 +123,6 @@ const fn expect_trap(mut program: CorpusProgram) -> CorpusProgram {
     program
 }
 
-/// Requires a `MustRun` entry to end in a Staple panic under the default
-/// emitter.
-const fn expect_panic(mut program: CorpusProgram) -> CorpusProgram {
-    program.panics = true;
-    program
-}
-
 /// Pins the exact stdout a `MustRun` entry prints under the default emitter.
 const fn expect_stdout(mut program: CorpusProgram, stdout: &'static str) -> CorpusProgram {
     program.expected_stdout = Some(stdout);
@@ -624,7 +617,7 @@ debug_pair 5
                 "    number: I32 => \"${number}\",\n",
                 "}\n",
                 "def bump: Option I32 -> Option I32 = value => {\n",
-                "    let? Some(number) = value\n",
+                "    let ?Some(number) = value\n",
                 "    Some (number + 1)\n",
                 "}\n",
                 "def unwrap: Option I32 -> I32 = value => match value {\n",
@@ -1408,7 +1401,7 @@ debug_pair 5
                     "def lookup: Bool -> Found I32 | Missing = available => if available { Found (42) } else { Missing \"absent\" }\n",
                     "\n",
                     "def doubled = available: Bool => {\n",
-                    "    let? Found(value) = lookup available\n",
+                    "    let ?Found(value) = lookup available\n",
                     "    Found (value + value)\n",
                     "}\n",
                     "\n",
@@ -1467,7 +1460,7 @@ debug_pair 5
                     "def fails: () -> Ok | Bad = () => Bad (c_string \"failure\")\n",
                     "def propagated: () -> Ok | Bad = () => {\n",
                     "    let c = Tag (c_string \"propagate\")\n",
-                    "    let? Ok(value) = fails ()\n",
+                    "    let ?Ok(value) = fails ()\n",
                     "    Ok value\n",
                     "}\n",
                     "\n",
@@ -1743,18 +1736,60 @@ debug_pair 5
         )),
         "",
     ),
+    // Postfix `?` returns the residual of a `Try` value, in pipe chains, lambdas,
+    // and mixed Option/Result functions.
     expect_stdout(
-        expect_panic(must_run(inline(
-            "dynamic_asserting_trap",
+        must_run(inline(
+            "postfix_try_propagation",
             concat!(
-                "type Found T = wrap T\n",
-                "type Absent = wrap String\n",
-                "def asserted_failure: <T where Copy T> T -> T = <T where Copy T> value => { let maybe: Found T | Absent = Absent \"missing\"; let! Found(next) = maybe; next }\n",
-                "let result = asserted_failure 13\n",
+                "use std.io.println\n",
+                "\n",
+                "trait Step T {step: T -> Ok I32 | String}\n",
+                "\n",
+                "impl Step I32 {step = n => if (n > 0) { Ok (n - 1) } else { \"bad input\" }}\n",
+                "\n",
+                "def parse: I32 -> Ok I32 | String = n => n |> step\n",
+                "def first_positive: I32 -> Option I32 = n => if (n > 0) { Some n } else { None }\n",
+                "\n",
+                "def chain = n: I32 => {\n",
+                "    let a = n |> step ? |> step ?\n",
+                "    Ok (a + 100)\n",
+                "}\n",
+                "\n",
+                "def mixed = n: I32 => {\n",
+                "    let a = first_positive n ?\n",
+                "    let b = parse a ?\n",
+                "    Ok (a + b)\n",
+                "}\n",
+                "\n",
+                "def in_lambda = n: I32 => {\n",
+                "    let f = m: I32 => {\n",
+                "        let v = parse m ?\n",
+                "        Ok (v * 2)\n",
+                "    }\n",
+                "    f n\n",
+                "}\n",
+                "\n",
+                "def arithmetic = n: I32 => Ok (1 + parse n ? * 2)\n",
+                "\n",
+                "def show = result: Ok I32 | String | None => match result {\n",
+                "    Ok value => println \"ok ${value}\",\n",
+                "    None => println \"none\",\n",
+                "    _ => println \"err\",\n",
+                "}\n",
+                "\n",
+                "show (chain 5)\n",
+                "show (chain 1)\n",
+                "show (chain 0)\n",
+                "show (mixed 3)\n",
+                "show (mixed 0)\n",
+                "show (in_lambda 4)\n",
+                "show (arithmetic 4)\n",
+                "show (arithmetic 0)\n",
             ),
             "expressions",
-        ))),
-        "",
+        )),
+        "ok 103\nerr\nerr\nok 5\nnone\nok 6\nok 7\nerr\n",
     ),
     expect_stdout(
         must_run(inline(
@@ -1784,8 +1819,7 @@ debug_pair 5
                 "def summed_literal: <T where Copy T> (T, TextOrHeld T) -> I32 = <T where Copy T> (value, text) => match text { \"yes\" => 3, Held item => 4, _ => 5 }\n",
                 "type Found T = wrap T\n",
                 "type Absent = wrap String\n",
-                "def propagate: <T where Copy T> (T, Bool) -> Found T | Absent = <T where Copy T> (value, flag) => { let maybe: Found T | Absent = if flag { Found value } else { Absent \"missing\" }; let? Found(next) = maybe; Found next }\n",
-                "def asserted: <T where Copy T> T -> T = <T where Copy T> value => { let maybe: Found T | Absent = Found value; let! Found(next) = maybe; next }\n",
+                "def propagate: <T where Copy T> (T, Bool) -> Found T | Absent = <T where Copy T> (value, flag) => { let maybe: Found T | Absent = if flag { Found value } else { Absent \"missing\" }; let ?Found(next) = maybe; Found next }\n",
                 "let (named_value, named_tag, evaluations) = named 6\n",
                 "let default_value = defaults 0\n",
                 "println \"${named_value} ${named_tag} ${evaluations} ${default_value}\"\n",
@@ -1804,15 +1838,14 @@ debug_pair 5
                 "let missing = propagate (11, False)\n",
                 "let found_value = match found { Found value => value, Absent text => 0 }\n",
                 "let missing_value = match missing { Found value => value, Absent text => 12 }\n",
-                "let asserted_value = asserted 13\n",
-                "println \"${found_value} ${missing_value} ${asserted_value}\"\n",
+                "println \"${found_value} ${missing_value}\"\n",
                 "def phantom_argument: <T where Copy T> T -> I32 = <T where Copy T> value => { def phantom: <U where Copy U> () -> I32 = <U where Copy U> () => 4; phantom.<T> () }\n",
                 "let phantom_result = phantom_argument 0\n",
                 "println \"${phantom_result}\"\n",
             ),
             "expressions",
         )),
-        "6 17\n3 7 8\n8 3\n1\n6 7 1 8\n9\n6 6 9\n1 2\n3 5 4\n11 12 13\n4\n",
+        "6 17\n3 7 8\n8 3\n1\n6 7 1 8\n9\n6 6 9\n1 2\n3 5 4\n11 12\n4\n",
     ),
     // A local generic `def` that calls itself captures its own binding's
     // initialization-state cell, which holds no function value, so its

@@ -114,11 +114,10 @@ fn render_item(program: &Program, item: &Item) -> String {
             None => binding.syntax.text().trim().to_owned(),
         },
         Item::PatternBinding(binding) if binding.syntax.is_generated() => format!(
-            "let{} {} = {}",
+            "let {}{} = {}",
             match binding.kind {
                 staple_syntax::PatternBindingKind::Irrefutable => "",
                 staple_syntax::PatternBindingKind::Propagating => "?",
-                staple_syntax::PatternBindingKind::Asserting => "!",
             },
             render_pattern(&binding.pattern),
             render_expr(program, &binding.value),
@@ -491,6 +490,7 @@ fn render_expr(program: &Program, expression: &Expression) -> String {
             unary.operator.text(),
             render_expr(program, &unary.operand),
         ),
+        Expression::Try(try_) => format!("{} ?", render_expr(program, &try_.operand)),
         Expression::Binary(binary) => format!(
             "{} {} {}",
             render_expr(program, &binary.left),
@@ -761,6 +761,7 @@ fn expr_has_generated(expression: &Expression) -> bool {
             expr_has_generated(&binary.left) || expr_has_generated(&binary.right)
         }
         Expression::Unary(unary) => expr_has_generated(&unary.operand),
+        Expression::Try(try_) => expr_has_generated(&try_.operand),
         Expression::Logical(logical) => {
             expr_has_generated(&logical.left) || expr_has_generated(&logical.right)
         }

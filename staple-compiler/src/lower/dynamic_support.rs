@@ -1521,7 +1521,6 @@ mod tests {
             "literals",
             "summed_literal",
             "propagate",
-            "asserted",
             "nested_generic",
             "concrete_capture",
             "compound_capture",

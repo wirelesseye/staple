@@ -18,6 +18,7 @@ pub enum Expression {
     Access(AccessExpression),
     Index(IndexExpression),
     Unary(UnaryExpression),
+    Try(TryExpression),
     Binary(BinaryExpression),
     Logical(LogicalExpression),
     SyntaxArgument(SyntaxArgumentExpression),
@@ -51,6 +52,7 @@ impl Expression {
             Self::Access(expression) => &expression.syntax,
             Self::Index(expression) => &expression.syntax,
             Self::Unary(expression) => &expression.syntax,
+            Self::Try(expression) => &expression.syntax,
             Self::Binary(expression) => &expression.syntax,
             Self::Logical(expression) => &expression.syntax,
             Self::SyntaxArgument(expression) => &expression.syntax,
@@ -270,6 +272,15 @@ pub struct UnaryExpression {
     pub syntax: Syntax,
     pub operator_syntax: Syntax,
     pub operator: UnaryOperator,
+    pub operand: Box<Expression>,
+}
+
+/// A postfix `operand ?`, which propagates a failure through `Try`. It is
+/// rewritten to a `match` over `Try.branch` before name resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TryExpression {
+    pub syntax: Syntax,
+    pub operator_syntax: Syntax,
     pub operand: Box<Expression>,
 }
 

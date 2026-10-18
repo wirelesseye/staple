@@ -1368,6 +1368,7 @@ pub struct NameResolver {
     multiple_modules: bool,
     standard_library_core: Option<ModuleId>,
     standard_library_ops: Option<ModuleId>,
+    standard_library_try: Option<ModuleId>,
     standard_library_prelude: Option<ModuleId>,
     standard_library_syntax: Option<ModuleId>,
     standard_library_cinterop: Option<ModuleId>,
@@ -1402,12 +1403,20 @@ impl NameResolver {
     ) -> Result<ResolvedModule, Vec<Diagnostic>> {
         let (mut program, mut macro_analysis) = crate::macro_expand::expand_program(program)?;
         let mut next_syntax_id = macro_analysis.next_syntax_id;
-        let ops_module = program
-            .modules()
-            .iter()
-            .find(|module| program.module_dotted_name(module.id).as_deref() == Some("std.ops"))
-            .map(|module| module.id);
-        self.standard_library_ops = ops_module;
+        let find_module = |dotted: &str| {
+            program
+                .modules()
+                .iter()
+                .find(|module| program.module_dotted_name(module.id).as_deref() == Some(dotted))
+                .map(|module| module.id)
+        };
+        let ops_module = crate::macro_expand::StdModules {
+            ops: find_module("std.ops"),
+            try_: find_module("std.try"),
+            result: find_module("std.result"),
+        };
+        self.standard_library_ops = ops_module.ops;
+        self.standard_library_try = ops_module.try_;
         crate::macro_expand::desugar_program(&mut program, &mut next_syntax_id, ops_module);
         crate::macro_expand::desugar_macro_analysis(
             &mut macro_analysis,
@@ -4277,7 +4286,7 @@ impl NameResolver {
                     if !matches!(root, Pattern::Nominal(_)) {
                         self.diagnostics.push(Diagnostic::new(
                             binding.pattern.syntax().span.clone(),
-                            "a propagating or asserting binding requires a nominal pattern",
+                            "a propagating binding requires a nominal pattern",
                         ));
                     }
                 }
@@ -4742,6 +4751,7 @@ impl NameResolver {
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression was not desugared"),
             Expression::Unary(_) => unreachable!("unary expression was not desugared"),
+            Expression::Try(_) => unreachable!("try expression was not desugared"),
         }
     }
 
@@ -5434,6 +5444,7 @@ impl NameResolver {
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression was not desugared"),
             Expression::Unary(_) => unreachable!("unary expression was not desugared"),
+            Expression::Try(_) => unreachable!("try expression was not desugared"),
         }
     }
 
@@ -5717,9 +5728,11 @@ impl NameResolver {
     fn trait_id_from_expression(&self, expression: &Expression) -> Option<TraitId> {
         match expression {
             Expression::Name(name)
-                if self.standard_library_ops.is_some()
-                    && name.syntax.definition_module()
-                        == self.standard_library_ops.map(|module| module.0) =>
+                if name.syntax.definition_module().is_some()
+                    && [self.standard_library_ops, self.standard_library_try]
+                        .into_iter()
+                        .flatten()
+                        .any(|module| name.syntax.definition_module() == Some(module.0)) =>
             {
                 self.interfaces[name.syntax.definition_module().unwrap()]
                     .traits
@@ -7243,6 +7256,7 @@ impl<'a> InitializationAnalyzer<'a> {
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression was not desugared"),
             Expression::Unary(_) => unreachable!("unary expression was not desugared"),
+            Expression::Try(_) => unreachable!("try expression was not desugared"),
         }
     }
 
@@ -7452,6 +7466,7 @@ fn find_block_type_declarations_in_expression<'a>(
         | Expression::Float(_) => {}
         Expression::Binary(_) => unreachable!("binary expression was not desugared"),
         Expression::Unary(_) => unreachable!("unary expression was not desugared"),
+        Expression::Try(_) => unreachable!("try expression was not desugared"),
     }
 }
 

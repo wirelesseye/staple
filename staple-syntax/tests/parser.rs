@@ -2754,7 +2754,7 @@ fn rejects_missing_return_values_and_empty_separators() {
 fn parses_sum_types_and_propagating_patterns_losslessly() {
     let source = concat!(
         "def read: String -> Ok String | IOError = path => Ok(path)\n",
-        "def parse = (path: String) => { let? Ok(file) = read(path); Ok(file) }\n",
+        "def parse = (path: String) => { let ?Ok(file) = read(path); Ok(file) }\n",
     );
     let root = parse(source).expect("sum and propagation syntax should parse");
     assert_eq!(root.text(), source);
@@ -3669,6 +3669,110 @@ fn parses_atomic_call_spreads_and_preserves_them_in_pipelines() {
         "let (x;; y) = p\n",
     ] {
         assert!(parse(source).is_err(), "accepted invalid syntax: {source}");
+    }
+}
+
+fn try_operand_text(expression: &Expression) -> Option<String> {
+    let Expression::Try(try_) = expression else {
+        return None;
+    };
+    Some(try_.operand.syntax().text().trim().to_owned())
+}
+
+fn parsed_expression(source: &str) -> Expression {
+    let root = parse(&format!("def f = () => {source}\n")).expect("source should parse");
+    let Item::Binding(binding) = unmodified_item(&root.items[0]) else {
+        panic!("expected binding");
+    };
+    let Some(Expression::Function(function)) = &binding.value else {
+        panic!("expected function");
+    };
+    function.body.as_ref().clone()
+}
+
+#[test]
+fn postfix_try_applies_to_the_whole_call_on_its_left() {
+    assert_eq!(
+        try_operand_text(&parsed_expression("read path ?")).as_deref(),
+        Some("read path")
+    );
+    assert_eq!(
+        try_operand_text(&parsed_expression("await fetch url ?")).as_deref(),
+        Some("await fetch url")
+    );
+    // Each `|>` stage is a call, so `?` applies to the pipeline so far.
+    let Expression::Try(outer) = parsed_expression("x |> parse ? |> validate ?") else {
+        panic!("expected a trailing `?`");
+    };
+    assert!(outer.operand.syntax().text().contains("validate"));
+    // Operators bind looser than `?`; unary operators looser still.
+    let Expression::Binary(binary) = parsed_expression("a + f x ? * 2") else {
+        panic!("expected a binary expression");
+    };
+    let Expression::Binary(product) = binary.right.as_ref() else {
+        panic!("expected a product");
+    };
+    assert_eq!(
+        try_operand_text(&product.left).as_deref(),
+        Some("f x")
+    );
+    let Expression::Unary(negation) = parsed_expression("-f x ?") else {
+        panic!("expected negation");
+    };
+    assert!(matches!(negation.operand.as_ref(), Expression::Try(_)));
+    // `?` can stack and be followed by access.
+    let Expression::Try(stacked) = parsed_expression("f x ? ?") else {
+        panic!("expected stacked `?`");
+    };
+    assert!(matches!(stacked.operand.as_ref(), Expression::Try(_)));
+    let Expression::Access(access) = parsed_expression("load path ?.port") else {
+        panic!("expected access after `?`");
+    };
+    assert!(matches!(access.value.as_ref(), Expression::Try(_)));
+}
+
+#[test]
+fn postfix_try_ends_the_application_on_its_left() {
+    for source in [
+        "def f = () => g x ? y\n",
+        "def f = () => {\n    g x\n    ?\n}\n",
+    ] {
+        assert!(parse(source).is_err(), "accepted invalid syntax: {source}");
+    }
+    assert!(parse("def f = () => g (x ?) y\n").is_ok());
+    assert!(parse("def f = () => (g x ?) y\n").is_ok());
+}
+
+#[test]
+fn propagating_bindings_accept_any_spacing_after_let_and_reject_let_bang() {
+    for source in [
+        "def f = () => { let ?Ok(x) = e; x }\n",
+        "def f = () => { let? Ok(x) = e; x }\n",
+        "def f = () => { let ? Ok(x) = e; x }\n",
+    ] {
+        assert!(parse(source).is_ok(), "rejected: {source}");
+    }
+    let error = parse("def f = () => { let! Ok(x) = e; x }\n").unwrap_err();
+    assert!(error.to_string().contains("`let!` was removed"), "{error}");
+}
+
+#[test]
+fn formats_prefix_and_postfix_question_marks() {
+    for (source, expected) in [
+        ("let? Ok(x)=e\n", "let ?Ok(x) = e\n"),
+        ("let ? Ok(x)=e\n", "let ?Ok(x) = e\n"),
+        ("let a = f x?\n", "let a = f x ?\n"),
+        ("let a = x |> f? |> g?\n", "let a = x |> f ? |> g ?\n"),
+        ("let a = load p?.port\n", "let a = load p ?.port\n"),
+        ("let a = (f x?, g y?)\n", "let a = (f x ?, g y ?)\n"),
+        (
+            "def f: <T where ? Sized T> T -> T = <T where ? Sized T> x => x\n",
+            "def f: <T where ?Sized T> T -> T = <T where ?Sized T> x => x\n",
+        ),
+    ] {
+        let formatted = staple_syntax::format_source(source).unwrap();
+        assert_eq!(formatted, expected);
+        assert_eq!(staple_syntax::format_source(&formatted).unwrap(), formatted);
     }
 }
 

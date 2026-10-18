@@ -3863,7 +3863,7 @@ fn infers_and_lowers_nominal_sums_with_propagation() {
         "pub type Ok T = pub wrap T\n",
         "pub type IOError = pub wrap String\n",
         "def read: String -> Ok String | IOError = path => Ok(path)\n",
-        "def parse = (path: String) => { let? Ok(file) = read(path); Ok(file) }\n",
+        "def parse = (path: String) => { let ?Ok(file) = read(path); Ok(file) }\n",
         "parse \"input\"\n",
     ));
     let parse = module
@@ -4171,7 +4171,7 @@ fn propagates_each_residual_variant_and_joins_explicit_returns() {
         "pub type IOError = pub wrap String\n",
         "pub type ParseError = pub wrap String\n",
         "def fail: () -> Ok I32 | IOError = () => IOError(\"io\")\n",
-        "def parse = () => { let? Ok(value) = fail(); return ParseError(\"parse\"); }\n",
+        "def parse = () => { let ?Ok(value) = fail(); return ParseError(\"parse\"); }\n",
         "parse()\n",
     ));
     let parse = module
@@ -4250,24 +4250,47 @@ fn rejects_unsized_sum_alternatives_and_ambiguous_nominal_patterns() {
 }
 
 #[test]
+fn postfix_try_requires_a_function_and_a_result_that_contains_the_residual() {
+    let diagnostics = resolve_result("let value = Ok(1) ?\n")
+        .expect_err("`?` outside a function should be rejected");
+    assert!(!diagnostics.is_empty());
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def read: () -> Ok I32 | String = () => Ok(1)\n",
+            "def invalid: () -> Ok I32 = () => { let value = read () ?; Ok(value) }\n",
+        )))
+        .expect_err_diagnostics("the residual must be contained in the result type");
+    assert!(!diagnostics.is_empty(), "{diagnostics:?}");
+
+    TypeChecker::new()
+        .check(resolve(concat!(
+            "def read: () -> Ok I32 | String = () => Ok(1)\n",
+            "def forwards = () => { let value = read () ?; Ok(value) }\n",
+            "def explicit: () -> Ok I32 | String = () => { let value = read () ?; Ok(value) }\n",
+        )))
+        .expect("`?` should widen the residual into the result type");
+}
+
+#[test]
 fn rejects_invalid_propagation_and_sum_ffi() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "pub type IOError = pub wrap String\n",
-            "def invalid = () => { let? Ok(value) = Ok(1); Ok(value) }\n",
+            "def invalid = () => { let ?Ok(value) = Ok(1); Ok(value) }\n",
         )))
         .expect_err_diagnostics("propagation requires a sum");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("`let?` binding requires a sum value")
+            .contains("`let ?` binding requires a sum value")
     }));
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "pub type IOError = pub wrap String\n",
             "def read: () -> Ok I32 | IOError = () => Ok(1)\n",
-            "def invalid: () -> Ok I32 = () => { let? Ok(value) = read(); Ok(value) }\n",
+            "def invalid: () -> Ok I32 = () => { let ?Ok(value) = read(); Ok(value) }\n",
         )))
         .expect_err_diagnostics("explicit result should contain propagated variants");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -4297,8 +4320,8 @@ fn rejects_propagation_outside_functions_and_non_nominal_roots() {
         .load_source(
             concat!(
                 "pub type IOError = pub wrap String\n",
-                "let? Ok(value) = Ok(1)\n",
-                "def invalid = () => { let? (Ok(value), other) = (Ok(1), 2); Ok(value) }\n",
+                "let ?Ok(value) = Ok(1)\n",
+                "def invalid = () => { let ?(Ok(value), other) = (Ok(1), 2); Ok(value) }\n",
             ),
             root,
         )
@@ -4528,7 +4551,7 @@ fn at_patterns_are_structural_in_matches_and_propagation() {
         "  whole@(True(), value) => whole.1 + value,\n",
         "  _ => 0,\n",
         "}\n",
-        "def parse = () => { let? result@Ok(value) = read(); result }\n",
+        "def parse = () => { let ?result@Ok(value) = read(); result }\n",
         "choose (True, 1)\n",
         "parse()\n",
     ));
@@ -4910,7 +4933,7 @@ fn bool_is_an_auto_loaded_standard_library_type() {
     let module = type_check(concat!(
         "let yes: Bool = True\n",
         "let no: Bool = False\n",
-        "def require_true = (value: Bool) => { let? True() = value; True }\n",
+        "def require_true = (value: Bool) => { let ?True() = value; True }\n",
         "require_true(yes)\n",
     ));
     let require_true = module
@@ -10412,7 +10435,7 @@ fn constructs_and_propagates_singleton_nominal_values() {
         "let Foo() = foo\n",
         "def identity: Foo -> Foo = value => value\n",
         "let choice: Foo | Bar = Foo\n",
-        "def select = (value: Foo | Bar) => { let? Foo() = value; Foo }\n",
+        "def select = (value: Foo | Bar) => { let ?Foo() = value; Foo }\n",
         "identity(foo)\n",
         "select(choice)\n",
     ));
@@ -13187,7 +13210,7 @@ fn patterns_see_through_one_from_layer() {
         "    None => 0,\n",
         "}\n",
         "def propagate: Option I32 -> Option I32 = value => {\n",
-        "    let? Some(number) = value\n",
+        "    let ?Some(number) = value\n",
         "    Some (number + 1)\n",
         "}\n",
         "type Point = from (I32, I32)\n",

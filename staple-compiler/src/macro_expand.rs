@@ -633,6 +633,18 @@ pub(crate) struct MacroAnalysis {
     pub next_syntax_id: usize,
 }
 
+/// The standard-library modules operator syntax resolves against, independent
+/// of the imports and names in the calling module.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct StdModules {
+    /// `std.ops`, defining the operator traits.
+    pub ops: Option<ModuleId>,
+    /// `std.try`, defining `Try`.
+    pub try_: Option<ModuleId>,
+    /// `std.result`, defining `Ok`.
+    pub result: Option<ModuleId>,
+}
+
 fn freshened_syntax(syntax: &Syntax, next_syntax_id: &mut usize) -> Syntax {
     let mut syntax = syntax.clone();
     syntax.id = SyntaxId(*next_syntax_id);
@@ -643,7 +655,7 @@ fn freshened_syntax(syntax: &Syntax, next_syntax_id: &mut usize) -> Syntax {
 fn lower_binary_expression(
     binary: staple_syntax::BinaryExpression,
     next_syntax_id: &mut usize,
-    ops_module: Option<ModuleId>,
+    ops_module: StdModules,
 ) -> Expression {
     let staple_syntax::BinaryExpression {
         syntax,
@@ -721,7 +733,7 @@ fn lower_binary_expression(
             ) {
                 // Operator syntax resolves at the standard trait definition,
                 // independently of imports and names in the calling module.
-                syntax.definition_module = ops_module.map(|module| module.0);
+                syntax.definition_module = ops_module.ops.map(|module| module.0);
             }
             syntax
         },
@@ -761,7 +773,7 @@ fn lower_binary_expression(
 fn lower_unary_expression(
     unary: staple_syntax::UnaryExpression,
     next_syntax_id: &mut usize,
-    ops_module: Option<ModuleId>,
+    ops_module: StdModules,
 ) -> Expression {
     let staple_syntax::UnaryExpression {
         syntax,
@@ -773,7 +785,7 @@ fn lower_unary_expression(
     let name = Expression::Name(staple_syntax::NameExpression {
         syntax: {
             let mut syntax = freshened_syntax(&operator_syntax, next_syntax_id);
-            syntax.definition_module = ops_module.map(|module| module.0);
+            syntax.definition_module = ops_module.ops.map(|module| module.0);
             syntax
         },
         name: trait_name.to_owned(),
@@ -791,10 +803,91 @@ fn lower_unary_expression(
     })
 }
 
+/// Rewrites `operand ?` into
+/// `match (Try.branch operand) { Ok output => output, residual => return residual }`,
+/// resolving `Try` and `Ok` at their standard-library definitions. The arm
+/// binders use names no source can spell, so nothing in scope can capture them.
+fn lower_try_expression(
+    try_: staple_syntax::TryExpression,
+    next_syntax_id: &mut usize,
+    std_modules: StdModules,
+) -> Expression {
+    let staple_syntax::TryExpression {
+        syntax,
+        operator_syntax,
+        operand,
+    } = try_;
+    let defined_in = |module: Option<ModuleId>, next_syntax_id: &mut usize| {
+        let mut syntax = freshened_syntax(&operator_syntax, next_syntax_id);
+        syntax.definition_module = module.map(|module| module.0);
+        syntax
+    };
+    let name = |text: &str, next_syntax_id: &mut usize| {
+        Expression::Name(staple_syntax::NameExpression {
+            syntax: freshened_syntax(&operator_syntax, next_syntax_id),
+            name: text.to_owned(),
+        })
+    };
+    let binding = |text: &str, next_syntax_id: &mut usize| {
+        Pattern::Binding(staple_syntax::BindingPattern {
+            syntax: freshened_syntax(&operator_syntax, next_syntax_id),
+            mutable: false,
+            moved: false,
+            name: text.to_owned(),
+            resolution_name: None,
+            ty: Type::Inferred(staple_syntax::InferredType {
+                syntax: freshened_syntax(&operator_syntax, next_syntax_id),
+            }),
+        })
+    };
+    let branch = Expression::Access(staple_syntax::AccessExpression {
+        syntax: freshened_syntax(&operator_syntax, next_syntax_id),
+        value: Box::new(Expression::Name(staple_syntax::NameExpression {
+            syntax: defined_in(std_modules.try_, next_syntax_id),
+            name: "Try".to_owned(),
+        })),
+        accessor: Accessor::Name("branch".to_owned()),
+    });
+    let subject = Expression::Call(staple_syntax::CallExpression {
+        spread: false,
+        syntax: freshened_syntax(&syntax, next_syntax_id),
+        callee: Box::new(branch),
+        argument: operand,
+    });
+    let success = staple_syntax::MatchArm {
+        syntax: freshened_syntax(&syntax, next_syntax_id),
+        pattern: Pattern::Nominal(staple_syntax::NominalPattern {
+            syntax: defined_in(std_modules.result, next_syntax_id),
+            namespace: None,
+            name: "Ok".to_owned(),
+            moved: false,
+            argument: Box::new(binding("$output", next_syntax_id)),
+            annotation: None,
+        }),
+        body: name("$output", next_syntax_id),
+    };
+    let failure = staple_syntax::MatchArm {
+        syntax: freshened_syntax(&syntax, next_syntax_id),
+        pattern: binding("$residual", next_syntax_id),
+        body: Expression::Block(staple_syntax::BlockExpression {
+            syntax: freshened_syntax(&syntax, next_syntax_id),
+            items: vec![Item::Return(staple_syntax::ReturnItem {
+                syntax: freshened_syntax(&syntax, next_syntax_id),
+                value: name("$residual", next_syntax_id),
+            })],
+        }),
+    };
+    Expression::Match(staple_syntax::MatchExpression {
+        syntax,
+        subject: Box::new(subject),
+        arms: vec![success, failure],
+    })
+}
+
 pub(crate) fn desugar_program(
     program: &mut Program,
     next_syntax_id: &mut usize,
-    ops_module: Option<ModuleId>,
+    ops_module: StdModules,
 ) {
     for module in program.modules_mut() {
         for item in &mut module.syntax.items {
@@ -806,7 +899,7 @@ pub(crate) fn desugar_program(
 pub(crate) fn desugar_macro_analysis(
     analysis: &mut MacroAnalysis,
     next_syntax_id: &mut usize,
-    ops_module: Option<ModuleId>,
+    ops_module: StdModules,
 ) {
     for (_, binding) in &mut analysis.helpers {
         if let Some(value) = &mut binding.value {
@@ -815,7 +908,7 @@ pub(crate) fn desugar_macro_analysis(
     }
 }
 
-fn desugar_item(item: &mut Item, next_syntax_id: &mut usize, ops_module: Option<ModuleId>) {
+fn desugar_item(item: &mut Item, next_syntax_id: &mut usize, ops_module: StdModules) {
     match item {
         Item::Modified(modified) => {
             for modifier in &mut modified.modifiers {
@@ -902,7 +995,7 @@ fn desugar_item(item: &mut Item, next_syntax_id: &mut usize, ops_module: Option<
 fn desugar_expression(
     expression: &mut Expression,
     next_syntax_id: &mut usize,
-    ops_module: Option<ModuleId>,
+    ops_module: StdModules,
 ) {
     match expression {
         Expression::Binary(_) => {
@@ -959,6 +1052,19 @@ fn desugar_expression(
         }
         Expression::Await(await_) => {
             desugar_expression(&mut await_.operand, next_syntax_id, ops_module)
+        }
+        Expression::Try(_) => {
+            let Expression::Try(mut try_) = std::mem::replace(
+                expression,
+                Expression::Name(staple_syntax::NameExpression {
+                    syntax: Syntax::compiler(),
+                    name: String::new(),
+                }),
+            ) else {
+                unreachable!()
+            };
+            desugar_expression(&mut try_.operand, next_syntax_id, ops_module);
+            *expression = lower_try_expression(try_, next_syntax_id, ops_module);
         }
         Expression::With(with) => {
             desugar_expression(&mut with.value, next_syntax_id, ops_module);
@@ -2430,6 +2536,13 @@ impl MacroExpander {
                 ));
                 CompileType::Error
             }
+            Expression::Try(value) => {
+                self.diagnostics.push(Diagnostic::new(
+                    value.syntax.span.clone(),
+                    "`?` is not available during compile-time macro evaluation",
+                ));
+                CompileType::Error
+            }
             Expression::CString(_) => CompileType::Named("CString".to_owned()),
         };
         if let Some(expected) = expected
@@ -2786,6 +2899,9 @@ impl MacroExpander {
                 }
             }
             Expression::Await(value) => {
+                self.check_quoted_expression(module, &value.operand, environment)
+            }
+            Expression::Try(value) => {
                 self.check_quoted_expression(module, &value.operand, environment)
             }
             Expression::Product(value) => {
@@ -4659,6 +4775,10 @@ impl MacroExpander {
                 await_.operand = Box::new(self.expand_expression(module, *await_.operand, depth));
                 Expression::Await(await_)
             }
+            Expression::Try(mut try_) => {
+                try_.operand = Box::new(self.expand_expression(module, *try_.operand, depth));
+                Expression::Try(try_)
+            }
             other => other,
         }
     }
@@ -5804,6 +5924,13 @@ impl MacroExpander {
                 ));
                 None
             }
+            Expression::Try(try_) => {
+                self.diagnostics.push(Diagnostic::new(
+                    try_.syntax.span.clone(),
+                    "`?` is not available during compile-time macro evaluation",
+                ));
+                None
+            }
             Expression::Block(block) => {
                 let mut local = environment.clone();
                 let mut result = Value::Product(Vec::new(), false);
@@ -6608,7 +6735,7 @@ impl MacroExpander {
         binary: &staple_syntax::BinaryExpression,
         environment: &mut Environment,
     ) -> Option<Value> {
-        let lowered = lower_binary_expression(binary.clone(), &mut self.next_syntax_id, None);
+        let lowered = lower_binary_expression(binary.clone(), &mut self.next_syntax_id, StdModules::default());
         self.eval_expression(module, &lowered, environment)
     }
 
@@ -7435,6 +7562,10 @@ impl MacroExpander {
             }
             Expression::Await(await_) => {
                 self.freshen_expression(&mut await_.operand, module, mark);
+            }
+            Expression::Try(try_) => {
+                self.freshen_syntax(&mut try_.operator_syntax, module, mark);
+                self.freshen_expression(&mut try_.operand, module, mark);
             }
             Expression::Resource(resource) => {
                 freshen_type(self, &mut resource.resource, module, mark);
@@ -10564,6 +10695,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
             obviously_not_syntax(&binary.left, 0) || obviously_not_syntax(&binary.right, 0)
         }
         Expression::Unary(unary) => obviously_not_syntax(&unary.operand, 0),
+        Expression::Try(try_) => obviously_not_syntax(&try_.operand, 0),
         Expression::StringTemplate(_) => true,
         Expression::Loop(_) => true,
         Expression::Coro(_) | Expression::Await(_) => true,
@@ -11453,6 +11585,9 @@ fn substitute_splices(
         }
         Expression::Await(await_) => {
             *await_.operand = substitute_splices(&await_.operand, environment, diagnostics)?;
+        }
+        Expression::Try(try_) => {
+            *try_.operand = substitute_splices(&try_.operand, environment, diagnostics)?;
         }
         Expression::Resource(resource) => {
             substitute_type(&mut resource.resource, environment, diagnostics)?;
@@ -12538,6 +12673,9 @@ fn alpha_rename_expression(
         Expression::Await(await_) => {
             alpha_rename_expression(&mut await_.operand, mark, scopes);
         }
+        Expression::Try(try_) => {
+            alpha_rename_expression(&mut try_.operand, mark, scopes);
+        }
         Expression::Resource(_) => {}
         Expression::With(with) => {
             alpha_rename_expression(&mut with.value, mark, scopes);
@@ -12652,6 +12790,7 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::Loop(value) => &mut value.syntax,
         Expression::Coro(value) => &mut value.syntax,
         Expression::Await(value) => &mut value.syntax,
+        Expression::Try(value) => &mut value.syntax,
         Expression::Resource(value) => &mut value.syntax,
         Expression::With(value) => &mut value.syntax,
         Expression::Block(value) => &mut value.syntax,

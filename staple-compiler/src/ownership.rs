@@ -582,6 +582,7 @@ impl<'a> OwnershipChecker<'a> {
             | Expression::Float(_) => true,
             Expression::Binary(_) => unreachable!("binary expression reached ownership checking"),
             Expression::Unary(_) => unreachable!("unary expression reached ownership checking"),
+            Expression::Try(_) => unreachable!("try expression reached ownership checking"),
         }
     }
 
