@@ -2400,17 +2400,8 @@ impl TypedModule {
             let Some(raw) = self.symbol_types.get(&symbol) else {
                 continue;
             };
-            let CheckedType::Function(function) = raw.scheme_body() else {
+            let Some(parameter) = pipe_receiver_parameter(raw) else {
                 continue;
-            };
-            let parameter = match (function.is_slotted(), function.parameter.as_ref()) {
-                (true, CheckedType::Product(product)) => {
-                    let Some(first) = product.elements.first() else {
-                        continue;
-                    };
-                    &first.value_type
-                }
-                _ => function.parameter.as_ref(),
             };
             let mut substitutions = HashMap::new();
             if !infer_type_parameters(parameter, receiver, &mut substitutions) {
@@ -2434,6 +2425,11 @@ impl TypedModule {
             }
         }
         methods
+    }
+
+    /// The parameter a pipe receiver fills when `symbol` is a pipe stage.
+    pub fn pipe_receiver_parameter_of_symbol(&self, symbol: SymbolId) -> Option<&CheckedType> {
+        pipe_receiver_parameter(self.symbol_types.get(&symbol)?)
     }
 
     /// Receiver-compatible trait functions visible at a pipe completion site.
@@ -2736,6 +2732,9 @@ struct ProjectionParameter {
 #[derive(Debug, Clone, Copy)]
 enum PipeTarget {
     Companion(SymbolId),
+    /// A lexically visible value named like the stage, such as a local
+    /// function, parameter, or imported function.
+    Local(SymbolId),
     Trait(TraitMethodId),
 }
 
@@ -10190,26 +10189,35 @@ impl TypeChecker {
                     if self.did_return {
                         return CheckedType::empty_product();
                     }
-                    let receiver_id = self
-                        .companion_type_for_expression(module, &call.argument)
-                        .or_else(|| checked_type_id(&receiver_type));
-                    let Some(receiver_id) = receiver_id else {
-                        self.diagnostics.push(Diagnostic::new(
-                            selector.syntax.span.clone(),
-                            format!("cannot use companion method `{method}` on a value without a named static type"),
-                        ));
-                        return CheckedType::Error;
+                    let local = match self.pipe_targets.get(&selector.syntax.id) {
+                        Some(PipeTarget::Local(symbol)) => Some(*symbol),
+                        _ => None,
                     };
-                    let Some(symbol) = module.companion_member(
-                        receiver_id,
-                        method,
-                        self.checking_modules.last().copied(),
-                    ) else {
-                        self.diagnostics.push(Diagnostic::new(
-                            selector.syntax.span.clone(),
-                            format!("type has no accessible companion method named `{method}`"),
-                        ));
-                        return CheckedType::Error;
+                    let symbol = if let Some(symbol) = local {
+                        symbol
+                    } else {
+                        let receiver_id = self
+                            .companion_type_for_expression(module, &call.argument)
+                            .or_else(|| checked_type_id(&receiver_type));
+                        let Some(receiver_id) = receiver_id else {
+                            self.diagnostics.push(Diagnostic::new(
+                                selector.syntax.span.clone(),
+                                format!("cannot use companion method `{method}` on a value without a named static type"),
+                            ));
+                            return CheckedType::Error;
+                        };
+                        let Some(symbol) = module.companion_member(
+                            receiver_id,
+                            method,
+                            self.checking_modules.last().copied(),
+                        ) else {
+                            self.diagnostics.push(Diagnostic::new(
+                                selector.syntax.span.clone(),
+                                format!("type has no accessible companion method named `{method}`"),
+                            ));
+                            return CheckedType::Error;
+                        };
+                        symbol
                     };
                     self.method_symbols.insert(selector.syntax.id, symbol);
                     self.ensure_binding_checked(module, symbol);
@@ -10274,7 +10282,11 @@ impl TypeChecker {
                         other => {
                             self.diagnostics.push(Diagnostic::new(
                                 selector.syntax.span.clone(),
-                                format!("companion item `{method}` is not callable: `{other}`"),
+                                if local.is_some() {
+                                    format!("`{method}` is not callable: `{other}`")
+                                } else {
+                                    format!("companion item `{method}` is not callable: `{other}`")
+                                },
                             ));
                             CheckedType::Error
                         }
@@ -11671,7 +11683,7 @@ impl TypeChecker {
                 }
             }
             Expression::Access(access) => {
-                if let Some(PipeTarget::Companion(symbol)) =
+                if let Some(PipeTarget::Companion(symbol) | PipeTarget::Local(symbol)) =
                     self.pipe_targets.get(&access.syntax.id).copied()
                 {
                     self.ensure_binding_checked(module, symbol);
@@ -14489,7 +14501,9 @@ impl TypeChecker {
             })
             .or_else(
                 || match self.pipe_targets.get(&application.value.syntax().id) {
-                    Some(PipeTarget::Companion(symbol)) => Some(*symbol),
+                    Some(PipeTarget::Companion(symbol) | PipeTarget::Local(symbol)) => {
+                        Some(*symbol)
+                    }
                     _ => None,
                 },
             );
@@ -15103,7 +15117,7 @@ impl TypeChecker {
         syntax: SyntaxId,
     ) -> Vec<TraitMethodId> {
         match self.pipe_targets.get(&syntax) {
-            Some(PipeTarget::Companion(_)) => Vec::new(),
+            Some(PipeTarget::Companion(_) | PipeTarget::Local(_)) => Vec::new(),
             Some(PipeTarget::Trait(method)) => vec![*method],
             None => module.trait_methods_for_expression(syntax).to_vec(),
         }
@@ -15132,7 +15146,9 @@ impl TypeChecker {
             return CheckedType::empty_product();
         }
         self.pipe_receivers.insert(receiver.syntax().id);
-        let mut companions = Vec::new();
+        let mut companion = None;
+        let mut companion_type = None;
+        let mut local = None;
         let traits = module
             .trait_methods_for_expression(access.syntax.id)
             .to_vec();
@@ -15140,10 +15156,32 @@ impl TypeChecker {
             if let Some(ty) = self
                 .companion_type_for_expression(module, receiver)
                 .or_else(|| checked_type_id(&receiver_type))
-                && let Some(symbol) =
-                    module.companion_member(ty, name, self.checking_modules.last().copied())
             {
-                companions.push(symbol);
+                companion_type = Some(ty);
+                companion =
+                    module.companion_member(ty, name, self.checking_modules.last().copied());
+            }
+            local = module
+                .pipe_local_for_expression(access.syntax.id)
+                .filter(|symbol| Some(*symbol) != companion);
+            if let Some(symbol) = local {
+                self.ensure_binding_checked(module, symbol);
+                match self.symbol_types.get(&symbol).map(CheckedType::scheme_body) {
+                    // A value that cannot be called never competes for the stage.
+                    Some(CheckedType::Function(_) | CheckedType::Error) => {}
+                    Some(_) => local = None,
+                    None => {
+                        self.pipe_receivers.remove(&receiver.syntax().id);
+                        self.diagnostics.push(Diagnostic::new(
+                            access.syntax.span.clone(),
+                            format!(
+                                "the type of `{name}` is not available here, so it cannot be \
+                                 compared with other pipe candidates"
+                            ),
+                        ));
+                        return CheckedType::Error;
+                    }
+                }
             }
         } else if let Some(symbol) = module.symbol_for(access.syntax.id)
             && module
@@ -15151,21 +15189,23 @@ impl TypeChecker {
                 .and_then(|owner| module.companion_type_for_module(owner))
                 .is_some()
         {
-            companions.push(symbol);
+            companion = Some(symbol);
         }
-        if companions.len() + traits.len() == 1 {
-            let target = companions
-                .first()
-                .map(|symbol| PipeTarget::Companion(*symbol))
-                .unwrap_or_else(|| PipeTarget::Trait(traits[0]));
-            return self.check_pipe_candidate(module, expression, expected, target);
+        let candidates = companion
+            .map(PipeTarget::Companion)
+            .into_iter()
+            .chain(local.map(PipeTarget::Local))
+            .chain(traits.iter().copied().map(PipeTarget::Trait))
+            .collect::<Vec<_>>();
+        if let [target] = candidates.as_slice() {
+            return self.check_pipe_candidate(module, expression, expected, *target);
         }
-        if companions.is_empty() && traits.is_empty() {
+        if candidates.is_empty() {
             self.pipe_receivers.remove(&receiver.syntax().id);
             self.diagnostics.push(Diagnostic::new(
                 access.syntax.span.clone(),
                 if matches!(access.accessor, Accessor::Method(_)) {
-                    "no compatible accessible companion or visible trait method"
+                    "no compatible local function, accessible companion, or visible trait method"
                 } else {
                     "a qualified pipe stage must select a companion or trait function"
                 },
@@ -15174,38 +15214,74 @@ impl TypeChecker {
         }
         let base = self.clone();
         let mut failed = None;
-        for symbol in companions {
+        let mut try_candidate = |target| {
             let mut trial = base.clone();
-            let actual = trial.check_pipe_candidate(
-                module,
-                expression,
-                expected,
-                PipeTarget::Companion(symbol),
-            );
+            let actual = trial.check_pipe_candidate(module, expression, expected, target);
             if actual != CheckedType::Error && trial.diagnostics.len() == diagnostic_start {
-                *self = trial;
-                return actual;
+                Some((trial, actual))
+            } else {
+                if failed.is_none() {
+                    failed = Some(trial);
+                }
+                None
             }
-            failed = Some(trial);
-        }
-        let mut matches = Vec::new();
-        for method in traits {
-            let mut trial = base.clone();
-            let actual =
-                trial.check_pipe_candidate(module, expression, expected, PipeTarget::Trait(method));
-            if actual != CheckedType::Error && trial.diagnostics.len() == diagnostic_start {
-                matches.push((trial, actual));
-            } else if failed.is_none() {
-                failed = Some(trial);
+        };
+        // A compatible companion takes priority over trait methods, so they
+        // are only probed when a local could still make the stage ambiguous.
+        let companion_match =
+            match companion.and_then(|symbol| try_candidate(PipeTarget::Companion(symbol))) {
+                Some((trial, actual)) if local.is_none() => {
+                    *self = trial;
+                    return actual;
+                }
+                matched => matched,
+            };
+        let local_match = local.and_then(|symbol| try_candidate(PipeTarget::Local(symbol)));
+        let mut trait_matches = Vec::new();
+        if companion_match.is_none() {
+            for method in &traits {
+                if let Some(matched) = try_candidate(PipeTarget::Trait(*method)) {
+                    trait_matches.push((*method, matched));
+                }
             }
         }
         self.pipe_receivers.remove(&receiver.syntax().id);
-        if matches.len() == 1 {
-            let (trial, actual) = matches.pop().unwrap();
+        if local_match.is_some() && (companion_match.is_some() || !trait_matches.is_empty()) {
+            let Accessor::Method(name) = &access.accessor else {
+                unreachable!("only bare stages have lexical candidates")
+            };
+            let qualified = if companion_match.is_some() {
+                let owner = companion_type
+                    .and_then(|ty| module.type_name(ty))
+                    .and_then(|name| name.rsplit('.').next())
+                    .unwrap_or("Type");
+                format!("the companion function `{owner}.{name}`")
+            } else {
+                let owner = module
+                    .trait_for_method(trait_matches[0].0)
+                    .and_then(|trait_id| module.traits().get(&trait_id))
+                    .map_or("Trait", |trait_| trait_.declaration.name.as_str());
+                format!("the trait method `{owner}.{name}`")
+            };
+            self.diagnostics.push(Diagnostic::new(
+                access.syntax.span.clone(),
+                format!(
+                    "ambiguous pipe stage `{name}`: both the local `{name}` and {qualified} \
+                     accept this receiver; qualify the stage or call the local directly"
+                ),
+            ));
+            return CheckedType::Error;
+        }
+        if let Some((trial, actual)) = companion_match.or(local_match) {
             *self = trial;
             return actual;
         }
-        if matches.len() > 1 {
+        if trait_matches.len() == 1 {
+            let (_, (trial, actual)) = trait_matches.pop().unwrap();
+            *self = trial;
+            return actual;
+        }
+        if trait_matches.len() > 1 {
             self.diagnostics.push(Diagnostic::new(
                 access.syntax.span.clone(),
                 "ambiguous trait method; qualify the trait name",
@@ -19040,6 +19116,25 @@ fn collect_rigid_parameters(
     }
 }
 
+/// The first slot of a slotted function, or the whole parameter otherwise.
+fn pipe_receiver_parameter(function_type: &CheckedType) -> Option<&CheckedType> {
+    let CheckedType::Function(function) = function_type.scheme_body() else {
+        return None;
+    };
+    match (function.is_slotted(), function.parameter.as_ref()) {
+        (true, CheckedType::Product(product)) => {
+            product.elements.first().map(|first| &first.value_type)
+        }
+        _ => Some(function.parameter.as_ref()),
+    }
+}
+
+/// Whether a receiver of type `receiver` can fill a pipe stage's `parameter`,
+/// ignoring the stage's trait bounds.
+pub fn pipe_parameter_accepts(parameter: &CheckedType, receiver: &CheckedType) -> bool {
+    infer_type_parameters(parameter, receiver, &mut HashMap::new())
+}
+
 pub(crate) fn infer_type_parameters(
     template: &CheckedType,
     actual: &CheckedType,
@@ -20424,7 +20519,10 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
                 visit(module, &value.argument, &declared, captures);
             }
             Expression::Access(value) => {
-                if let Some(symbol) = module.symbol_for(value.syntax.id) {
+                if let Some(symbol) = module
+                    .symbol_for(value.syntax.id)
+                    .or_else(|| module.pipe_local_for_expression(value.syntax.id))
+                {
                     add(module, symbol, &declared, captures);
                 } else {
                     visit(module, &value.value, &declared, captures);

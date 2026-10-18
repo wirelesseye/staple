@@ -925,8 +925,8 @@ let animal: Animal = ...
 let hopped = Animal.teleport animal 1.0 2.0
 ```
 
-Companion and visible trait functions can also be called with pipe syntax. The
-receiver fills the function's first slot, and the stage's application chain
+Companion functions, visible trait functions, and functions in lexical scope
+can also be called with pipe syntax. The receiver fills the function's first slot, and the stage's application chain
 supplies the remaining slots, exactly as in a direct juxtaposed call:
 
 ```staple
@@ -981,15 +981,36 @@ Operator expressions in stage arguments require parentheses; `value |> method
 1 + 2` is rejected. Parenthesized stages such as `value |> (method_a 1)` are
 also accepted. Existing newline rules still separate statements.
 
-A compatible accessible companion function takes priority. If none matches
-the receiver and supplied arguments, lookup searches trait functions visible
-in scope, using existing implementations and generic bounds. Trait methods
-also work for structural receivers. Multiple compatible trait functions are
-ambiguous: select one explicitly with `value |> Trait.method arguments`.
-Qualified companion calls such as `value |> Animal.teleport 1.0 2.0` are also
-supported. Ordinary local functions and arbitrary callable expressions are
-not pipe stages. The receiver only ever fills the first slot; it is never
-combined with the stage's arguments into a product.
+A bare stage name has up to three kinds of candidates: an accessible
+companion function of the receiver's static named type, the value the name
+denotes in lexical scope (a local function, closure, parameter, module item,
+or import), and the trait functions of that name visible in scope. A
+candidate is compatible when the receiver and supplied arguments check
+against it, with trait functions using existing implementations and generic
+bounds; a lexical value that is not a function never competes. Trait methods
+also work for structural receivers.
+
+A compatible companion function takes priority over trait functions, and
+multiple compatible trait functions are ambiguous. A compatible lexical
+function is ambiguous with a compatible companion or trait function of the
+same name, rather than either one silently winning:
+
+```staple
+companion Animal { pub def legs = animal: Animal => 4 }
+
+def count = (animal: Animal; legs: Animal -> I32) => {
+    animal |> legs            // error: ambiguous pipe stage `legs`
+    animal |> Animal.legs     // the companion function
+    legs animal               // the local function
+}
+```
+
+Select a companion with `value |> Animal.teleport 1.0 2.0` and a trait
+function with `value |> Trait.method arguments`; call a shadowed lexical
+function directly, or bind it to another name. The type of a lexical
+candidate must already be known where the stage is checked. Arbitrary
+callable expressions are not pipe stages. The receiver only ever fills the
+first slot; it is never combined with the stage's arguments into a product.
 
 More than one companion block may contribute to the same type. Companion
 blocks have no visibility of their own; visibility is declared on their items.
@@ -1309,7 +1330,7 @@ standard-library definition, so local items or imports named `Convert`, `Eq`,
 | `..`, `..=` | 3 | none | the prelude's `range`/`range_inclusive` functions |
 | `&&` | 2 | left | not a call; see below |
 | `\|\|` | 1 | left | not a call; see below |
-| `\|>` | 0 | left | receiver-first companion/trait call |
+| `\|>` | 0 | left | receiver-first function, companion, or trait call |
 
 Function application and access bind tighter than every operator above, and
 postfix `?` (see [Propagating with `?`](#propagating-with-)) ends the call or pipeline stage

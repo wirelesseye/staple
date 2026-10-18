@@ -62,6 +62,8 @@ struct Candidate {
     item: CompletionItem,
     /// The value the candidate names, for its pipe completions.
     symbol: Option<SymbolId>,
+    /// The parameter a pipe receiver fills when the candidate is a stage.
+    pipe_parameter: Option<CheckedType>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +132,8 @@ struct MethodSite {
     receiver_start: usize,
     receiver_end: usize,
     items: Vec<CompletionItem>,
+    /// For a pipe receiver: its type, matched against local stages.
+    receiver: Option<CheckedType>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +141,8 @@ struct NamedQualifier {
     module: ModuleId,
     name: String,
     items: Vec<CompletionItem>,
+    /// For a pipe receiver: its type, matched against local stages.
+    receiver: Option<CheckedType>,
     /// For a local binding or parameter: where its name is visible.
     scope: Option<LocalScope>,
 }
@@ -315,8 +321,67 @@ impl CompletionIndex {
             .iter()
             .filter(|site| site.receiver_end == receiver_end)
             .min_by_key(|site| site.receiver_start)
-            .map(|site| site.items.clone())
+            .map(|site| {
+                self.with_local_stages(site.items.clone(), site.receiver.as_ref(), receiver_end)
+            })
             .unwrap_or_default()
+    }
+
+    /// Adds the functions visible at `offset` that accept `receiver` as a
+    /// pipe stage. A local named like a companion or trait stage is left
+    /// out: writing it bare would be an ambiguous stage.
+    fn with_local_stages(
+        &self,
+        mut items: Vec<CompletionItem>,
+        receiver: Option<&CheckedType>,
+        offset: usize,
+    ) -> Vec<CompletionItem> {
+        let Some(receiver) = receiver else {
+            return items;
+        };
+        let Some(module) = self
+            .modules
+            .iter()
+            .filter(|module| contains(&module.range, offset))
+            .min_by_key(|module| module.range.end.saturating_sub(module.range.start))
+        else {
+            return items;
+        };
+        let mut scopes = module
+            .scopes
+            .iter()
+            .filter(|scope| contains(&scope.range, offset))
+            .collect::<Vec<_>>();
+        scopes.sort_by_key(|scope| std::cmp::Reverse(scope.range.end - scope.range.start));
+        // Inner scopes come last, so their bindings shadow outer ones.
+        let mut visible = HashMap::<&str, &Candidate>::new();
+        for scope in scopes {
+            for candidate in &scope.candidates {
+                if candidate.namespace == Namespace::Value && candidate.available_from <= offset {
+                    visible.insert(candidate.item.label.as_str(), candidate);
+                }
+            }
+        }
+        let taken = items
+            .iter()
+            .map(|item| item.label.clone())
+            .collect::<HashSet<_>>();
+        for (label, candidate) in visible {
+            if taken.contains(label)
+                || !candidate
+                    .pipe_parameter
+                    .as_ref()
+                    .is_some_and(|parameter| pipe_parameter_accepts(parameter, receiver))
+            {
+                continue;
+            }
+            items.push(CompletionItem {
+                kind: Some(CompletionItemKind::FUNCTION),
+                ..candidate.item.clone()
+            });
+        }
+        items.sort_by(|left, right| left.label.cmp(&right.label));
+        items
     }
 
     pub fn qualifier_items(&self, receiver_end: usize) -> Vec<CompletionItem> {
@@ -346,14 +411,18 @@ impl CompletionIndex {
 
     pub fn named_method_items(&self, name: &str, offset: usize) -> Vec<CompletionItem> {
         self.named_items(&self.named_methods, name, offset)
+            .map(|candidate| {
+                self.with_local_stages(candidate.items.clone(), candidate.receiver.as_ref(), offset)
+            })
+            .unwrap_or_default()
     }
 
-    fn named_items(
+    fn named_items<'a>(
         &self,
-        candidates: &[NamedQualifier],
+        candidates: &'a [NamedQualifier],
         name: &str,
         offset: usize,
-    ) -> Vec<CompletionItem> {
+    ) -> Option<&'a NamedQualifier> {
         let module = self
             .modules
             .iter()
@@ -378,14 +447,7 @@ impl CompletionIndex {
                     .as_ref()
                     .map_or(usize::MAX, |scope| scope.range.len())
             });
-        local
-            .or_else(|| {
-                matching
-                    .clone()
-                    .find(|candidate| candidate.scope.is_none())
-            })
-            .map(|candidate| candidate.items.clone())
-            .unwrap_or_default()
+        local.or_else(|| matching.clone().find(|candidate| candidate.scope.is_none()))
     }
 }
 
@@ -531,23 +593,23 @@ impl Collector<'_> {
                 self.typed.companion_type_of_symbol(symbol),
                 None,
             );
-            if !items.is_empty() {
-                self.index.named_methods.push(NamedQualifier {
-                    module: owner,
-                    name: candidate.item.label.clone(),
-                    items,
-                    scope: Some(LocalScope {
-                        range: scope.range.clone(),
-                        available_from: candidate.available_from,
-                    }),
-                });
-            }
+            self.index.named_methods.push(NamedQualifier {
+                module: owner,
+                name: candidate.item.label.clone(),
+                items,
+                receiver: Some(receiver_type.clone()),
+                scope: Some(LocalScope {
+                    range: scope.range.clone(),
+                    available_from: candidate.available_from,
+                }),
+            });
         }
         self.index.modules[module_index].scopes.push(scope);
     }
 
     fn register_named_method(&mut self, owner: ModuleId, name: &str, definitions: &[DefinitionId]) {
         let mut items = Vec::new();
+        let mut receiver_types = None;
         for definition in definitions {
             let DefinitionId::Symbol(receiver) = definition else {
                 continue;
@@ -555,6 +617,7 @@ impl Collector<'_> {
             let Some(receiver_type) = self.typed.type_of_symbol(*receiver) else {
                 continue;
             };
+            receiver_types.get_or_insert_with(|| receiver_type.clone());
             items.extend(self.pipe_items(
                 owner,
                 receiver_type,
@@ -564,11 +627,12 @@ impl Collector<'_> {
         }
         items.sort_by(|left, right| left.label.cmp(&right.label));
         items.dedup_by(|left, right| left.label == right.label);
-        if !items.is_empty() {
+        if receiver_types.is_some() {
             self.index.named_methods.push(NamedQualifier {
                 module: owner,
                 name: name.to_owned(),
                 items,
+                receiver: receiver_types,
                 scope: None,
             });
         }
@@ -633,6 +697,7 @@ impl Collector<'_> {
                 module: owner,
                 name: name.to_owned(),
                 items,
+                receiver: None,
                 scope: None,
             });
         }
@@ -837,14 +902,13 @@ impl Collector<'_> {
                 self.typed.companion_type_of_expression(expression),
                 Some(expression.syntax().id),
             );
-            if !items.is_empty() {
-                let range = syntax_range(expression.syntax());
-                self.index.methods.push(MethodSite {
-                    receiver_start: range.start,
-                    receiver_end: range.end,
-                    items,
-                });
-            }
+            let range = syntax_range(expression.syntax());
+            self.index.methods.push(MethodSite {
+                receiver_start: range.start,
+                receiver_end: range.end,
+                items,
+                receiver: Some(receiver_type.clone()),
+            });
         }
         match expression {
             Expression::Function(value) => {
@@ -998,6 +1062,7 @@ impl Collector<'_> {
                 receiver_start: range.start,
                 receiver_end: range.end,
                 items,
+                receiver: None,
             });
         }
     }
@@ -1093,6 +1158,7 @@ impl Collector<'_> {
                     ..CompletionItem::default()
                 },
                 symbol: None,
+                pipe_parameter: None,
             }),
             TypeParameterPattern::Effect(value) => candidates.push(Candidate {
                 available_from: syntax_range(&value.syntax).end,
@@ -1104,6 +1170,7 @@ impl Collector<'_> {
                     ..CompletionItem::default()
                 },
                 symbol: None,
+                pipe_parameter: None,
             }),
             TypeParameterPattern::Product(value) => {
                 for element in &value.elements {
@@ -1232,6 +1299,13 @@ impl Collector<'_> {
             },
             symbol: match definition {
                 DefinitionId::Symbol(symbol) => Some(symbol),
+                _ => None,
+            },
+            pipe_parameter: match definition {
+                DefinitionId::Symbol(symbol) => self
+                    .typed
+                    .pipe_receiver_parameter_of_symbol(symbol)
+                    .cloned(),
                 _ => None,
             },
         })
@@ -2397,5 +2471,48 @@ mod tests {
         assert!(!literal.contains(&"cmp".to_owned()), "{literal:?}");
         let body = labels(source.len() - 1);
         assert!(body.contains(&"unwrap".to_owned()), "{body:?}");
+    }
+    #[test]
+    fn pipe_completion_offers_compatible_local_functions() {
+        let source = concat!(
+            "type Animal = wrap I32\n",
+            "companion Animal { pub def legs: Animal -> I32 = animal => 4 }\n",
+            "def double = value: I32 => value * 2\n",
+            "def shout = value: String => value\n",
+            "def exercise = (legs: Animal -> I32) => {\n",
+            "    let triple = (value: I32) => value * 3\n",
+            "    let count = 2\n",
+            "    count\n",
+            "}\n",
+        );
+        let path = std::env::temp_dir().join("staple-pipe-locals.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let typed = TypeChecker::new()
+            .check(NameResolver::new().resolve_program(program).unwrap())
+            .unwrap();
+        let module = parse(source).unwrap();
+        let index = index(&module, &typed);
+        let receiver_end = source.rfind("count").unwrap() + "count".len();
+        let items = index.method_items(receiver_end);
+        for label in ["double", "triple"] {
+            assert!(
+                items.iter().any(|item| {
+                    item.label == label && item.kind == Some(CompletionItemKind::FUNCTION)
+                }),
+                "missing {label} in {items:?}"
+            );
+        }
+        assert!(!items.iter().any(|item| item.label == "shout"), "{items:?}");
+        assert!(!items.iter().any(|item| item.label == "legs"), "{items:?}");
+        let named = index.named_method_items("count", receiver_end);
+        assert!(named.iter().any(|item| item.label == "triple"), "{named:?}");
     }
 }

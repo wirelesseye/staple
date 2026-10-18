@@ -484,6 +484,7 @@ pub struct ResolvedModule {
     trait_references: HashMap<SyntaxId, TraitId>,
     associated_type_references: HashMap<SyntaxId, (TraitId, usize)>,
     trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
+    pipe_local_references: HashMap<SyntaxId, SymbolId>,
     trait_implementations: Vec<ResolvedTraitImplementation>,
     standard_traits: HashMap<String, TraitId>,
     checked_initialization_symbols: HashSet<SymbolId>,
@@ -965,6 +966,11 @@ impl ResolvedModule {
         self.trait_references.get(&syntax).copied()
     }
 
+    /// The lexically visible value a bare `|> name` stage may also select.
+    pub fn pipe_local_for_expression(&self, syntax: SyntaxId) -> Option<SymbolId> {
+        self.pipe_local_references.get(&syntax).copied()
+    }
+
     pub fn trait_methods_for_expression(&self, syntax: SyntaxId) -> &[TraitMethodId] {
         self.trait_method_references
             .get(&syntax)
@@ -1327,6 +1333,7 @@ pub struct NameResolver {
     trait_references: HashMap<SyntaxId, TraitId>,
     associated_type_references: HashMap<SyntaxId, (TraitId, usize)>,
     trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
+    pipe_local_references: HashMap<SyntaxId, SymbolId>,
     trait_implementations: Vec<ResolvedTraitImplementation>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
     mutable_symbols: HashSet<SymbolId>,
@@ -1735,6 +1742,7 @@ impl NameResolver {
             trait_references: self.trait_references,
             associated_type_references: self.associated_type_references,
             trait_method_references: self.trait_method_references,
+            pipe_local_references: self.pipe_local_references,
             trait_implementations: self.trait_implementations,
             standard_traits,
             checked_initialization_symbols: HashSet::new(),
@@ -5349,6 +5357,20 @@ impl NameResolver {
             }
             Expression::Access(access) => {
                 if let Accessor::Method(name) = &access.accessor {
+                    if let Some(symbol) = access
+                        .syntax
+                        .definition_module()
+                        .and_then(|module| {
+                            self.definition_context_values
+                                .get(module)
+                                .and_then(|values| values.get(name))
+                                .copied()
+                        })
+                        .or_else(|| self.lookup(name))
+                    {
+                        self.pipe_local_references.insert(access.syntax.id, symbol);
+                        self.record_capture(symbol);
+                    }
                     self.trait_method_references.insert(
                         access.syntax.id,
                         self.visible_trait_methods

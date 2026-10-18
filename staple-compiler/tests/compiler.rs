@@ -6588,6 +6588,74 @@ fn type_checks_method_call_syntax_for_juxtaposed_companion_methods() {
 }
 
 #[test]
+fn pipes_into_local_functions_parameters_and_closures() {
+    let module = type_check(concat!(
+        "def double = value: I32 => value * 2\n",
+        "def add: (I32; I32) -> I32 = (left; right) => left + right\n",
+        "let triple = value: I32 => value * 3\n",
+        "let offset = 10\n",
+        "let doubled: I32 = 21 |> double\n",
+        "let added: I32 = 1 |> add 2\n",
+        "let chained: I32 = 3 |> double |> add 1 |> triple\n",
+        "def apply_twice = (f: I32 -> I32; value: I32) => value |> f |> f\n",
+        "def shifted = () => {\n",
+        "    let shift = value: I32 => value + offset\n",
+        "    let later = () => 1 |> shift\n",
+        "    later ()\n",
+        "}\n",
+        "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = <T, effect E> callback => callback ()\n",
+        "def thunked = () => {\n",
+        "    let shift = value: I32 => value + offset\n",
+        "    evaluate (1 |> shift)\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("pipes into local functions should lower as ordinary calls");
+}
+
+#[test]
+fn rejects_pipe_stages_matching_a_local_and_a_companion_or_trait() {
+    let messages = type_check_errors(
+        concat!(
+            "type Animal = wrap I32\n",
+            "companion Animal { pub def legs: Animal -> I32 = animal => 4 }\n",
+            "trait Named T { name: T -> String }\n",
+            "impl Named I32 { name = value => \"trait\" }\n",
+            "def companion_clash = (legs: Animal -> I32) => Animal 1 |> legs\n",
+            "def trait_clash = (name: I32 -> String) => 1 |> name\n",
+        ),
+        "a local and a companion or trait stage of the same name are ambiguous",
+    );
+    for expected in [
+        "ambiguous pipe stage `legs`: both the local `legs` and the companion function `Animal.legs`",
+        "ambiguous pipe stage `name`: both the local `name` and the trait method `Named.name`",
+    ] {
+        assert!(
+            messages.iter().any(|message| message.contains(expected)),
+            "missing `{expected}` in {messages:?}"
+        );
+    }
+}
+
+#[test]
+fn qualified_or_incompatible_locals_leave_pipe_stages_unambiguous() {
+    type_check(concat!(
+        "type Animal = wrap I32\n",
+        "companion Animal { pub def legs: Animal -> I32 = animal => 4 }\n",
+        "trait Named T { name: T -> String }\n",
+        "impl Named I32 { name = value => \"trait\" }\n",
+        "def qualified = (legs: Animal -> I32) => Animal 1 |> Animal.legs\n",
+        "def direct = (legs: Animal -> I32) => legs (Animal 1)\n",
+        "def qualified_trait = (name: I32 -> String) => 1 |> Named.name\n",
+        "def not_callable = (legs: I32) => Animal 1 |> legs\n",
+        "def incompatible = (legs: String -> I32) => Animal 1 |> legs\n",
+        "def trait_wins = (name: String -> String) => 1 |> name\n",
+    ));
+}
+
+#[test]
 fn rejects_incomplete_method_call_on_a_juxtaposed_companion_method() {
     TypeChecker::new()
         .check(resolve(concat!(
@@ -13031,7 +13099,7 @@ fn slotted_product_template_spreads_and_markers_normalize_after_substitution() {
         "type Inputs = alias (I32; I32)\n",
         "def sum: Expand Inputs I32 = (a; b) => a + b\n",
         "let result: I32 = sum 1 2\n",
-        "def push: (mut List I32; move I32) -> () = (mut list; move value) => list |> push value\n",
+        "def push: (mut List I32; move I32) -> () = (mut list; move value) => list |> List.push value\n",
         "let mut list: List I32 = List.new ()\n",
         "push list 1\n",
     ));
@@ -13280,7 +13348,7 @@ fn from_types_are_not_subtypes_and_do_not_share_traits_or_members() {
     for expected in [
         "trait bound is not satisfied for",
         "is not a subtype of",
-        "no compatible accessible companion or visible trait method",
+        "no compatible local function, accessible companion, or visible trait method",
     ] {
         assert!(
             messages.iter().any(|message| message.contains(expected)),
@@ -14801,7 +14869,7 @@ fn pipe_stages_reject_ambiguous_incomplete_and_non_method_calls() {
             "qualified pipe stage",
         ),
         (
-            "def identity: I32 -> I32 = value => value\nlet result = 1 |> identity\n",
+            "def identity: String -> String = value => value\nlet result = 1 |> undefined\n",
             "no compatible",
         ),
         (
