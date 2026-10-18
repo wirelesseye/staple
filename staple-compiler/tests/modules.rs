@@ -2225,7 +2225,7 @@ fn preserves_macro_overload_sets_through_imports_and_reexports() {
         "helpers.sta",
         concat!(
             "pub macro reveal = value: Expr => parse_quote { $value }\n",
-            "pub macro reveal = (value: Expr; _: Ident \"with\"; replacement: Expr) => parse_quote { $replacement }\n",
+            "pub macro reveal = (value: Expr; _: Ident \"then\"; replacement: Expr) => parse_quote { $replacement }\n",
         ),
     );
     fixture.write("bridge.sta", "pub use helpers.reveal\n");
@@ -2236,9 +2236,9 @@ fn preserves_macro_overload_sets_through_imports_and_reexports() {
             "use helpers.reveal as renamed\n",
             "use bridge.(reveal)\n",
             "let namespace_short: I32 = helpers.reveal 1\n",
-            "let namespace_long: I32 = helpers.reveal 1 with 2\n",
-            "let renamed_long: I32 = renamed 1 with 3\n",
-            "let reexported_long: I32 = reveal 1 with 4\n",
+            "let namespace_long: I32 = helpers.reveal 1 then 2\n",
+            "let renamed_long: I32 = renamed 1 then 3\n",
+            "let reexported_long: I32 = reveal 1 then 4\n",
         ),
     );
 

@@ -2635,8 +2635,6 @@ impl Grammar {
         let start = self.position;
         let mut ty = self.parse_type_postfix()?;
         while self.starts_type_atom()
-            && !(self.has_newline_before_next_token()
-                && (self.peek_text("resource") || self.peek_text("with")))
             && !(self.newline_terminates_type
                 && self.has_newline_before_next_token()
                 && (self.any_newline_terminates_type
@@ -3499,12 +3497,12 @@ impl Grammar {
         if let Some(path) = self.quote_expression_start() {
             return self.parse_quote_expression(path).map(Expression::Quote);
         }
-        if self.peek_text("resource") && self.is_resource_expression_start() {
+        if self.at(TokenKind::Resource) && self.is_resource_expression_start() {
             return self
                 .parse_resource_expression()
                 .map(|value| Expression::Resource(Box::new(value)));
         }
-        if self.peek_text("with") && self.is_with_resource_expression_start() {
+        if self.at(TokenKind::With) && self.is_with_resource_expression_start() {
             return self
                 .parse_with_resource_expression()
                 .map(|value| Expression::With(Box::new(value)));
@@ -3883,10 +3881,7 @@ impl Grammar {
 
     fn parse_resource_expression(&mut self) -> Result<ResourceExpression, ParseError> {
         let start = self.position;
-        let keyword = self.expect(TokenKind::Identifier, "expected `resource`")?;
-        if keyword.text != "resource" {
-            return Err(self.error("expected `resource`"));
-        }
+        self.expect(TokenKind::Resource, "expected `resource`")?;
         let resource = self.parse_type_union()?;
         Ok(ResourceExpression {
             syntax: self.syntax(start),
@@ -3907,10 +3902,7 @@ impl Grammar {
 
     fn parse_with_resource_expression(&mut self) -> Result<WithResourceExpression, ParseError> {
         let start = self.position;
-        let keyword = self.expect(TokenKind::Identifier, "expected `with`")?;
-        if keyword.text != "with" {
-            return Err(self.error("expected `with`"));
-        }
+        self.expect(TokenKind::With, "expected `with`")?;
         let mutable = self.eat(TokenKind::Mut);
         let resource = self.parse_type_union()?;
         self.expect(TokenKind::Equals, "expected `=` after resource type")?;
@@ -4090,6 +4082,8 @@ impl Grammar {
                     | TokenKind::Match
                     | TokenKind::Loop
                     | TokenKind::Pub
+                    | TokenKind::Resource
+                    | TokenKind::With
                     | TokenKind::Identifier
                     | TokenKind::Underscore
                     | TokenKind::Dollar

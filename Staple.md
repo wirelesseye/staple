@@ -2089,6 +2089,8 @@ type Logger = wrap (
 )
 ```
 
+`resource` and `with` are reserved keywords and cannot be used as identifiers.
+
 Transparent aliases use the identity of their underlying nominal type. A
 structural type, ordinary opaque type, or unspecialized generic type is not
 eligible. The compiler-represented opaque `std.io.IO` and

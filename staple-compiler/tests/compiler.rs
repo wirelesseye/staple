@@ -8306,12 +8306,12 @@ fn provides_integer_range_iterator_implementations() {
 fn macro_overloads_choose_longest_then_most_specific() {
     let module = type_check(concat!(
         "macro select = value: Expr => parse_quote { 10 }\n",
-        "macro select = (value: Expr; _: Ident \"with\"; replacement: Expr) => parse_quote { $replacement }\n",
+        "macro select = (value: Expr; _: Ident \"then\"; replacement: Expr) => parse_quote { $replacement }\n",
         "macro classify = value: SyntaxNode => parse_quote { 1 }\n",
         "macro classify = value: Expr => parse_quote { 2 }\n",
         "macro classify = value: Ident String => parse_quote { 3 }\n",
         "macro classify = _: Ident \"else\" => parse_quote { 4 }\n",
-        "let longest: I32 = select 0 with 20\n",
+        "let longest: I32 = select 0 then 20\n",
         "let specific: I32 = classify else\n",
     ));
     let context = Context::create();
@@ -11270,7 +11270,7 @@ fn lowers_custom_drop_and_gc_finalizer_glue() {
     let module = type_check(concat!(
         "type Resource = wrap I32\n",
         "impl Drop Resource { cleanup = Resource value => () }\n",
-        "def release = () => { let resource = Resource 7; drop resource }\n",
+        "def release = () => { let handle = Resource 7; drop handle }\n",
         "def managed = () => Ref (Resource 9)\n",
     ));
     let context = Context::create();
@@ -11429,8 +11429,8 @@ fn lowers_path_sensitive_drop_flags() {
     let module = type_check(concat!(
         "type Resource = wrap I32\n",
         "impl Drop Resource { cleanup = Resource value => () }\n",
-        "def conditional = (flag: Bool, move resource: Resource) => match flag {\n",
-        "  True() => { drop resource; () },\n",
+        "def conditional = (flag: Bool, move handle: Resource) => match flag {\n",
+        "  True() => { drop handle; () },\n",
         "  False() => (),\n",
         "}\n",
     ));
@@ -12107,8 +12107,8 @@ fn standard_library_conversion_blankets_consume_non_copy_values() {
         "type Resource = wrap I32\n",
         "impl Drop Resource { cleanup = Resource value => () }\n",
         "def convert_resource: () -> Ok Resource | Never = () => {\n",
-        "    let resource: Resource = Convert.convert (Resource 41)\n",
-        "    TryConvert.try_convert resource\n",
+        "    let handle: Resource = Convert.convert (Resource 41)\n",
+        "    TryConvert.try_convert handle\n",
         "}\n",
         "def identity: <T> move T -> T = <T> move value => Convert.convert value\n",
         "def attempt: <T> move T -> Ok T | Never = <T> move value => TryConvert.try_convert value\n",
@@ -12183,7 +12183,7 @@ fn a_non_copy_type_can_implement_clone_manually() {
         "type Resource = wrap I32\n",
         "impl Drop Resource { cleanup = Resource value => () }\n",
         "impl Clone Resource { clone = Resource value => Resource value }\n",
-        "def duplicate: Resource -> Resource = resource => Clone.clone resource\n",
+        "def duplicate: Resource -> Resource = handle => Clone.clone handle\n",
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)

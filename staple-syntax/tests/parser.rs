@@ -3702,7 +3702,7 @@ fn formats_slotted_products_and_call_spreads_idempotently() {
 fn parses_function_value_effect_lower_bounds() {
     let source = concat!(
         "def empty = () =>{} ()\n",
-        "def resource = () =>{IO, mut Clock, state.read} { () }\n",
+        "def resourceful = () =>{IO, mut Clock, state.read} { () }\n",
         "def nested = () =>{IO} () =>{state.write} ()\n",
         "def generic: <effect E> (() ->{E} ()) ->{E} () = callback =>{E} callback ()\n",
         "def spaced = () => { () }\n",
@@ -3866,4 +3866,14 @@ fn companion_members_wrapped_in_modifiers_keep_companion_context() {
     };
     assert!(binding.companion_target.is_some());
     assert!(binding.companion_generics.is_some());
+}
+
+#[test]
+fn reserves_resource_and_with_as_keywords() {
+    assert!(parse("let resource = 1\n").is_err());
+    assert!(parse("let with = 1\n").is_err());
+    assert!(parse("def f = (with: I32) => with\n").is_err());
+    let source = "def read: () ->{Clock} Clock = () => resource Clock\n";
+    let module = parse(source).expect("a type annotation stops before a resource expression");
+    assert_eq!(module.syntax.text(), source);
 }

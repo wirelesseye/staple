@@ -673,6 +673,8 @@ fn is_keyword(value: &str) -> bool {
             | "alias"
             | "opaque"
             | "where"
+            | "resource"
+            | "with"
     )
 }
 

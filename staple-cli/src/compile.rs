@@ -3845,8 +3845,8 @@ mod tests {
             concat!(
                 "extern \"c\" { exit: I32 -> () }\n",
                 "type Resource = wrap I32\n",
-                "def release = () => { let mut resource = Resource 1; resource = Resource 2 }\n",
-                "def abandon = () => { let mut resource = Resource 4; let update = () => { resource = Resource 5 }; update () }\n",
+                "def release = () => { let mut handle = Resource 1; handle = Resource 2 }\n",
+                "def abandon = () => { let mut handle = Resource 4; let update = () => { handle = Resource 5 }; update () }\n",
                 "def churn: I32 -> () = n => match n == 0 { True() => (), False() => { Ref n; churn (n - 1) } }\n",
                 "def update_data = mut data: I32 => { data = 42 }\n",
                 "def make_counter = () => {\n",

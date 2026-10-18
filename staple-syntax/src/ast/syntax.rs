@@ -49,6 +49,8 @@ pub enum TokenKind {
     Impl,
     Match,
     Where,
+    Resource,
+    With,
     Underscore,
     Identifier,
     String,
