@@ -13913,7 +13913,10 @@ fn classify_expression(module: &TypedModule, expression: &Expression) -> Express
         Expression::RepeatedProduct(_) => Ordinary(Family::RepeatedProduct),
         Expression::Access(_) => Ordinary(Family::Access),
         Expression::Index(_) => Ordinary(Family::Index),
-        Expression::Unary(_) | Expression::Binary(_) | Expression::Try(_) => Rejected,
+        Expression::Unary(_)
+        | Expression::Binary(_)
+        | Expression::Try(_)
+        | Expression::Conversion(_) => Rejected,
         Expression::Logical(_) => Ordinary(Family::Logical),
         Expression::SyntaxArgument(_)
         | Expression::VisibilityArgument(_)
@@ -14100,6 +14103,7 @@ fn expression_variant_name(expression: &Expression) -> &'static str {
         Expression::Index(_) => "Index",
         Expression::Unary(_) => "Unary",
         Expression::Try(_) => "Try",
+        Expression::Conversion(_) => "Conversion",
         Expression::Binary(_) => "Binary",
         Expression::Logical(_) => "Logical",
         Expression::SyntaxArgument(_) => "SyntaxArgument",
@@ -14124,6 +14128,7 @@ fn reject_compile_time_expression(expression: &Expression) -> Result<(), Diagnos
             unary.operator.text()
         ),
         Expression::Try(_) => "unresolved `?` expression reached lowering".to_owned(),
+        Expression::Conversion(_) => "unresolved `as` expression reached lowering".to_owned(),
         Expression::Binary(binary) => format!(
             "unresolved `{}` operator expression reached lowering",
             binary.operator.text()
@@ -15372,6 +15377,7 @@ impl<'a> SourceCoverage<'a> {
             | Expression::Float(_) => {}
             Expression::Unary(_)
             | Expression::Try(_)
+            | Expression::Conversion(_)
             | Expression::Binary(_)
             | Expression::SyntaxArgument(_)
             | Expression::VisibilityArgument(_)
@@ -19386,6 +19392,9 @@ mod tests {
             Expression::Try(try_) => {
                 collect_call_routes(program, module, owner, &try_.operand, routes);
             }
+            Expression::Conversion(conversion) => {
+                collect_call_routes(program, module, owner, &conversion.value, routes);
+            }
             Expression::Binary(binary) => {
                 collect_call_routes(program, module, owner, &binary.left, routes);
                 collect_call_routes(program, module, owner, &binary.right, routes);
@@ -20503,6 +20512,7 @@ mod tests {
             }
             Expression::Unary(unary) => collect_calls(&unary.operand, visit),
             Expression::Try(try_) => collect_calls(&try_.operand, visit),
+            Expression::Conversion(conversion) => collect_calls(&conversion.value, visit),
             Expression::Binary(binary) => {
                 collect_calls(&binary.left, visit);
                 collect_calls(&binary.right, visit);

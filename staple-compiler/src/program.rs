@@ -2588,6 +2588,9 @@ fn find_block_submodules_in_expression(expression: &Expression, out: &mut Vec<Su
         Expression::Try(try_) => {
             find_block_submodules_in_expression(&try_.operand, out);
         }
+        Expression::Conversion(conversion) => {
+            find_block_submodules_in_expression(&conversion.value, out);
+        }
         Expression::Logical(logical) => {
             find_block_submodules_in_expression(&logical.left, out);
             find_block_submodules_in_expression(&logical.right, out);
@@ -2758,6 +2761,9 @@ fn find_block_use_declarations_in_expression(
         }
         Expression::Try(try_) => {
             find_block_use_declarations_in_expression(&try_.operand, out);
+        }
+        Expression::Conversion(conversion) => {
+            find_block_use_declarations_in_expression(&conversion.value, out);
         }
         Expression::Logical(logical) => {
             find_block_use_declarations_in_expression(&logical.left, out);

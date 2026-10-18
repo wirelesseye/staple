@@ -304,6 +304,9 @@ fn scan_expression(
         Expression::Try(try_) => {
             scan_expression(module, &try_.operand, info, diagnostics);
         }
+        Expression::Conversion(conversion) => {
+            scan_expression(module, &conversion.value, info, diagnostics);
+        }
         Expression::Binary(binary) => {
             scan_expression(module, &binary.left, info, diagnostics);
             scan_expression(module, &binary.right, info, diagnostics);
@@ -442,6 +445,9 @@ fn collect_expression<'a>(
         }
         Expression::Try(try_) => {
             collect_expression(&try_.operand, out);
+        }
+        Expression::Conversion(conversion) => {
+            collect_expression(&conversion.value, out);
         }
         Expression::Binary(binary) => {
             collect_expression(&binary.left, out);

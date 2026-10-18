@@ -1746,7 +1746,7 @@ fn parses_product_parameter_and_expression_body() {
 }
 
 #[test]
-fn conversion_syntax_desugars_to_an_ascribed_convert_call() {
+fn conversion_syntax_parses_to_a_conversion_expression() {
     for (source, target) in [
         ("value as I64", "I64"),
         ("value as Slice U8", "Slice U8"),
@@ -1757,36 +1757,14 @@ fn conversion_syntax_desugars_to_an_ascribed_convert_call() {
         ("value as _", "_"),
     ] {
         let module = parse(source).expect("conversion should parse");
-        let Item::Expression(Expression::TypeAscription(ascription)) = &module.items[0] else {
-            panic!("expected an ascribed conversion for {source}");
+        let Item::Expression(Expression::Conversion(conversion)) = &module.items[0] else {
+            panic!("expected a conversion for {source}");
         };
-        assert_eq!(ascription.syntax.text(), source);
-        assert_eq!(ascription.ty.syntax().text().trim(), target);
-        let Expression::Call(call) = ascription.value.as_ref() else {
-            panic!("expected conversion call");
-        };
-        let Expression::Access(access) = call.callee.as_ref() else {
-            panic!("expected trait method access");
-        };
-        let Expression::Name(name) = access.value.as_ref() else {
-            panic!("expected trait name");
-        };
-        assert_eq!(name.name, "Convert");
-        assert_eq!(access.accessor, Accessor::Name("convert".to_owned()));
-        assert_eq!(name.syntax.text(), "Convert");
-        assert_eq!(access.syntax.text(), "Convert.convert");
-        assert!(matches!(call.argument.as_ref(), Expression::Name(name) if name.name == "value"));
-        let ids = [
-            ascription.syntax.id,
-            call.syntax.id,
-            access.syntax.id,
-            name.syntax.id,
-        ];
-        assert_eq!(
-            ids.into_iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len(),
-            4
+        assert_eq!(conversion.syntax.text(), source);
+        assert_eq!(conversion.operator_syntax.text().trim(), "as");
+        assert_eq!(conversion.ty.syntax().text().trim(), target);
+        assert!(
+            matches!(conversion.value.as_ref(), Expression::Name(name) if name.name == "value")
         );
     }
 }
@@ -1806,21 +1784,15 @@ fn conversions_bind_between_prefix_operators_and_arithmetic_and_chain_left() {
         panic!("expected product")
     };
     assert_eq!(product.operator, BinaryOperator::Multiply);
-    let Expression::TypeAscription(outer) = product.left.as_ref() else {
+    let Expression::Conversion(outer) = product.left.as_ref() else {
         panic!("expected outer conversion")
     };
     assert_eq!(outer.ty.syntax().text().trim(), "F64");
-    let Expression::Call(outer_call) = outer.value.as_ref() else {
-        panic!("expected outer call")
-    };
-    let Expression::TypeAscription(inner) = outer_call.argument.as_ref() else {
+    let Expression::Conversion(inner) = outer.value.as_ref() else {
         panic!("expected inner conversion")
     };
     assert_eq!(inner.ty.syntax().text().trim(), "I64");
-    let Expression::Call(inner_call) = inner.value.as_ref() else {
-        panic!("expected inner call")
-    };
-    assert!(matches!(inner_call.argument.as_ref(), Expression::Unary(_)));
+    assert!(matches!(inner.value.as_ref(), Expression::Unary(_)));
 }
 
 #[test]

@@ -1278,6 +1278,10 @@ pub struct NameResolver {
     prelude_macros: HashMap<String, Vec<MacroId>>,
     prelude_traits: HashMap<String, TraitId>,
     prelude_namespaces: HashMap<String, ModuleId>,
+    /// The standard `Index` and `MutateIndex` traits, kept apart from
+    /// `prelude_traits` so a local item that shadows one of those names does
+    /// not change how the index sugar's methods are recognized.
+    standard_index_traits: Vec<TraitId>,
     symbols: HashMap<SyntaxId, SymbolId>,
     namespace_references: HashMap<SyntaxId, ModuleId>,
     function_expressions: HashMap<SyntaxId, FunctionId>,
@@ -1368,7 +1372,8 @@ pub struct NameResolver {
     multiple_modules: bool,
     standard_library_core: Option<ModuleId>,
     standard_library_ops: Option<ModuleId>,
-    standard_library_try: Option<ModuleId>,
+    /// The standard modules whose traits desugared operator syntax names.
+    standard_library_operator_modules: Vec<ModuleId>,
     standard_library_prelude: Option<ModuleId>,
     standard_library_syntax: Option<ModuleId>,
     standard_library_cinterop: Option<ModuleId>,
@@ -1414,9 +1419,17 @@ impl NameResolver {
             ops: find_module("std.ops"),
             try_: find_module("std.try"),
             result: find_module("std.result"),
+            cmp: find_module("std.cmp"),
+            convert: find_module("std.convert"),
+            range: find_module("std.range"),
+            boolean: find_module("std.boolean"),
         };
         self.standard_library_ops = ops_module.ops;
-        self.standard_library_try = ops_module.try_;
+        self.standard_library_operator_modules =
+            [ops_module.ops, ops_module.try_, ops_module.cmp, ops_module.convert]
+                .into_iter()
+                .flatten()
+                .collect();
         crate::macro_expand::desugar_program(&mut program, &mut next_syntax_id, ops_module);
         crate::macro_expand::desugar_macro_analysis(
             &mut macro_analysis,
@@ -1529,6 +1542,15 @@ impl NameResolver {
             self.install_prelude(&program, source_module.id);
             self.install_imports(&program, source_module.id);
             self.install_local_traits(source_module.id);
+            // Taken before a companion inherits its parent's namespaces: those
+            // include the parent's imports and implicit namespaces, which a
+            // companion sees but which do not shadow its implicit items.
+            let own_namespaces = self
+                .namespaces
+                .iter()
+                .flat_map(HashMap::keys)
+                .cloned()
+                .collect::<HashSet<_>>();
             if source_module.companion
                 && let Some(parent) = source_module.parent
             {
@@ -1546,6 +1568,7 @@ impl NameResolver {
                 self.namespaces.push(namespaces);
             }
             self.predeclare_items(&source_module.syntax.items);
+            self.shadow_prelude(own_namespaces);
             self.record_visible_module_definitions(source_module.id);
             for item in &source_module.syntax.items {
                 self.resolve_item(item);
@@ -3024,6 +3047,7 @@ impl NameResolver {
         self.definition_context_namespaces = (0..program.modules().len())
             .map(|_| HashMap::new())
             .collect();
+        let mut explicit_names = vec![HashSet::<String>::new(); program.modules().len()];
         // Unlike an ordinary inline module, a companion is an extension of
         // its declaring module's type namespace. Its body therefore sees the
         // parent's declarations without spelling `use super.*`.
@@ -3065,30 +3089,6 @@ impl NameResolver {
                 self.definition_context_namespaces[module.id.0] = namespaces;
             }
         }
-        if let Some(core) = program.standard_library_core() {
-            for module in program.modules() {
-                if module.id != core {
-                    self.definition_context_values[module.id.0]
-                        .extend(self.interfaces[core.0].values.clone());
-                    self.definition_context_types[module.id.0]
-                        .extend(self.interfaces[core.0].types.clone());
-                    self.definition_context_namespaces[module.id.0]
-                        .extend(self.interfaces[core.0].namespaces.clone());
-                }
-            }
-        }
-        if let Some(prelude) = program.standard_library_prelude() {
-            for module in program.modules() {
-                if module.id != prelude && program.module_uses_prelude(module.id) {
-                    self.definition_context_values[module.id.0]
-                        .extend(self.interfaces[prelude.0].values.clone());
-                    self.definition_context_types[module.id.0]
-                        .extend(self.interfaces[prelude.0].types.clone());
-                    self.definition_context_namespaces[module.id.0]
-                        .extend(self.interfaces[prelude.0].namespaces.clone());
-                }
-            }
-        }
         for module in program.modules() {
             for item in &module.syntax.items {
                 let Item::UseDeclaration(use_) = item else {
@@ -3098,9 +3098,12 @@ impl NameResolver {
                     continue;
                 };
                 let interface = self.visible_interface(module.id, imported, use_.visibility);
+                let explicit = &mut explicit_names[module.id.0];
                 match self.use_kind(use_) {
                     UseKind::Dotted => {}
                     UseKind::Glob => {
+                        explicit.extend(interface.traits.keys().cloned());
+                        explicit.extend(interface.macros.keys().cloned());
                         self.definition_context_values[module.id.0]
                             .extend(interface.values.clone());
                         self.definition_context_types[module.id.0].extend(interface.types.clone());
@@ -3110,6 +3113,7 @@ impl NameResolver {
                     UseKind::Selected(names) => {
                         for import in names {
                             let alias = import.alias().to_owned();
+                            explicit.insert(alias.clone());
                             if let Some(symbol) = interface.values.get(&import.name) {
                                 self.definition_context_values[module.id.0]
                                     .insert(alias.clone(), *symbol);
@@ -3125,6 +3129,7 @@ impl NameResolver {
                         }
                     }
                     UseKind::Renamed { item, alias } => {
+                        explicit.insert(alias.clone());
                         if let Some(symbol) = interface.values.get(&item) {
                             self.definition_context_values[module.id.0]
                                 .insert(alias.clone(), *symbol);
@@ -3142,6 +3147,53 @@ impl NameResolver {
                             self.definition_context_namespaces[module.id.0]
                                 .insert(name.clone(), imported);
                         }
+                    }
+                }
+            }
+        }
+        // Core and prelude items come last and only fill names the module
+        // neither defines nor imports explicitly, in any namespace, matching
+        // how the module's own body resolves them.
+        let mut implicit = Vec::new();
+        if let Some(core) = program.standard_library_core() {
+            implicit.push((core, false));
+        }
+        if let Some(prelude) = program.standard_library_prelude() {
+            implicit.push((prelude, true));
+        }
+        for module in program.modules() {
+            let id = module.id.0;
+            let mut bound = std::mem::take(&mut explicit_names[id]);
+            bound.extend(self.definition_context_values[id].keys().cloned());
+            bound.extend(self.definition_context_types[id].keys().cloned());
+            bound.extend(self.definition_context_namespaces[id].keys().cloned());
+            bound.extend(self.declared_traits[id].keys().cloned());
+            bound.extend(self.declared_macros[id].keys().cloned());
+            if module.companion
+                && let Some(parent) = module.parent
+            {
+                bound.extend(self.declared_traits[parent.0].keys().cloned());
+                bound.extend(self.declared_macros[parent.0].keys().cloned());
+            }
+            for &(source, needs_prelude) in &implicit {
+                if module.id == source || (needs_prelude && !program.module_uses_prelude(module.id))
+                {
+                    continue;
+                }
+                let interface = &self.interfaces[source.0];
+                for (name, symbol) in &interface.values {
+                    if !bound.contains(name) {
+                        self.definition_context_values[id].insert(name.clone(), *symbol);
+                    }
+                }
+                for (name, ty) in &interface.types {
+                    if !bound.contains(name) {
+                        self.definition_context_types[id].insert(name.clone(), *ty);
+                    }
+                }
+                for (name, namespace) in &interface.namespaces {
+                    if !bound.contains(name) {
+                        self.definition_context_namespaces[id].insert(name.clone(), *namespace);
                     }
                 }
             }
@@ -3582,12 +3634,51 @@ impl NameResolver {
             self.prelude_namespaces
                 .extend(self.interfaces[prelude.0].namespaces.clone());
         }
+        self.standard_index_traits = ["Index", "MutateIndex"]
+            .iter()
+            .filter_map(|name| self.prelude_traits.get(*name).copied())
+            .collect();
+    }
+
+    /// Drops every implicitly imported (core and prelude) item whose name the
+    /// module defines itself or imports explicitly, in any namespace. A local
+    /// `type List` therefore hides the prelude's `List` type, constructor, and
+    /// companion namespace together, rather than only the item of the same
+    /// kind. Runs once the module's own items and imports are installed, and
+    /// only then makes the surviving prelude traits' methods visible.
+    fn shadow_prelude(&mut self, namespaces: HashSet<String>) {
+        let module = self.current_module.0;
+        let mut bound = namespaces;
+        bound.extend(
+            self.scopes
+                .iter()
+                .flat_map(HashMap::keys)
+                .chain(self.declared_types[module].keys())
+            .chain(self.imported_types.iter().flat_map(HashMap::keys))
+            .chain(self.declared_traits[module].keys())
+            .chain(self.imported_traits.iter().flat_map(HashMap::keys))
+            .chain(self.declared_macros[module].keys())
+            .chain(self.imported_macros.iter().flat_map(HashMap::keys))
+                .cloned(),
+        );
+        self.prelude_values.retain(|name, _| !bound.contains(name));
+        self.prelude_types.retain(|name, _| !bound.contains(name));
+        self.prelude_macros.retain(|name, _| !bound.contains(name));
+        self.prelude_traits.retain(|name, _| !bound.contains(name));
+        self.prelude_namespaces
+            .retain(|name, _| !bound.contains(name));
         for trait_id in self.prelude_traits.values().copied().collect::<Vec<_>>() {
             self.add_visible_trait_methods(trait_id);
         }
     }
 
     fn install_selected(&mut self, interface: &Interface, item: &str, local: &str, span: Span) {
+        // Report a clash with this module's own definition once, and install
+        // no part of the import, so the local item keeps its name intact.
+        if self.defined_locally(local) {
+            self.duplicate_import(local, span);
+            return;
+        }
         let mut found = false;
         if let Some(symbol) = interface.values.get(item).copied() {
             found = true;
@@ -3726,10 +3817,24 @@ impl NameResolver {
     }
 
     fn duplicate_import(&mut self, name: &str, span: Span) {
-        self.diagnostics.push(Diagnostic::new(
-            span,
-            format!("duplicate import of `{name}`"),
-        ));
+        let message = if self.defined_locally(name) {
+            format!("import of `{name}` conflicts with a definition of the same name in this module")
+        } else {
+            format!("duplicate import of `{name}`")
+        };
+        self.diagnostics.push(Diagnostic::new(span, message));
+    }
+
+    /// Whether an import being installed at module level clashes with an
+    /// item the current module itself defines. Block-level imports may still
+    /// shadow module-level values.
+    fn defined_locally(&self, name: &str) -> bool {
+        let module = self.current_module.0;
+        self.scopes.len() == 1
+            && (self.module_values[module].contains_key(name)
+                || self.declared_types[module].contains_key(name)
+                || self.declared_traits[module].contains_key(name)
+                || self.declared_macros[module].contains_key(name))
     }
 
     fn predeclare_items(&mut self, items: &[Item]) {
@@ -4752,6 +4857,7 @@ impl NameResolver {
             Expression::Binary(_) => unreachable!("binary expression was not desugared"),
             Expression::Unary(_) => unreachable!("unary expression was not desugared"),
             Expression::Try(_) => unreachable!("try expression was not desugared"),
+            Expression::Conversion(_) => unreachable!("conversion expression was not desugared"),
         }
     }
 
@@ -5374,9 +5480,7 @@ impl NameResolver {
                             self.trait_method_traits
                                 .get(method)
                                 .is_some_and(|trait_id| {
-                                    ["Index", "MutateIndex"].iter().any(|name| {
-                                        self.prelude_traits.get(*name) == Some(trait_id)
-                                    })
+                                    self.standard_index_traits.contains(trait_id)
                                 })
                         }) =>
                 {
@@ -5445,6 +5549,7 @@ impl NameResolver {
             Expression::Binary(_) => unreachable!("binary expression was not desugared"),
             Expression::Unary(_) => unreachable!("unary expression was not desugared"),
             Expression::Try(_) => unreachable!("try expression was not desugared"),
+            Expression::Conversion(_) => unreachable!("conversion expression was not desugared"),
         }
     }
 
@@ -5729,9 +5834,9 @@ impl NameResolver {
         match expression {
             Expression::Name(name)
                 if name.syntax.definition_module().is_some()
-                    && [self.standard_library_ops, self.standard_library_try]
-                        .into_iter()
-                        .flatten()
+                    && self
+                        .standard_library_operator_modules
+                        .iter()
                         .any(|module| name.syntax.definition_module() == Some(module.0)) =>
             {
                 self.interfaces[name.syntax.definition_module().unwrap()]
@@ -7257,6 +7362,7 @@ impl<'a> InitializationAnalyzer<'a> {
             Expression::Binary(_) => unreachable!("binary expression was not desugared"),
             Expression::Unary(_) => unreachable!("unary expression was not desugared"),
             Expression::Try(_) => unreachable!("try expression was not desugared"),
+            Expression::Conversion(_) => unreachable!("conversion expression was not desugared"),
         }
     }
 
@@ -7467,6 +7573,7 @@ fn find_block_type_declarations_in_expression<'a>(
         Expression::Binary(_) => unreachable!("binary expression was not desugared"),
         Expression::Unary(_) => unreachable!("unary expression was not desugared"),
         Expression::Try(_) => unreachable!("try expression was not desugared"),
+        Expression::Conversion(_) => unreachable!("conversion expression was not desugared"),
     }
 }
 
