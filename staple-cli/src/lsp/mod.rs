@@ -2565,10 +2565,10 @@ mod tests {
         let head = concat!(
             "let value = 1\n",
             "def f = (value: Result I32 String) => I32 :: {\n",
-            "    let local: Option I32 = Some 1\n",
+            "    let local: List I32 = List.new ()\n",
         );
         let tail = "    0\n}\n";
-        for (receiver, expected) in [("value", "unwrap"), ("local", "Some")] {
+        for (receiver, expected) in [("value", "unwrap"), ("local", "push")] {
             let (connection, _client) = Connection::memory();
             let mut server = Server {
                 connection,

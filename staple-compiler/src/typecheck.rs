@@ -17541,7 +17541,7 @@ pub(crate) enum FromCoercion {
 }
 
 /// A sum type, seen through at most one implicitly introduced (`from`)
-/// wrapper, such as the standard library's `Bool` and `Option T`.
+/// wrapper, such as the standard library's `Bool`.
 pub(crate) fn sum_through_implicit_wrapper(value_type: &CheckedType) -> Option<&CheckedSumType> {
     match implicit_wrapper_representation(value_type).unwrap_or(value_type) {
         CheckedType::Sum(sum) => Some(sum),

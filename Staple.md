@@ -3045,8 +3045,8 @@ any value.
 
 A nominal pattern selects one sum alternative and may recursively destructure
 its representation with binding, product, nominal, and wildcard patterns.
-Patterns also see through one [`from`](#from) layer, so a `Bool` or
-`Option T` subject is matched by its variants directly. A
+Patterns also see through one [`from`](#from) layer, so a `Bool` subject is
+matched by its variants directly. A
 bare singleton name selects its unique alternative, including the
 standard-library boolean values:
 
@@ -3762,8 +3762,18 @@ import can shadow a prelude name. Integer literals use an expected integer type
 when one is available and otherwise default to `I32`. Mixed-type arithmetic is
 not implicit.
 
-`Option T` is declared in `std.option` as a `typegroup` of `None` and
-`Some T`; `std.core` re-exports it with both variants.
+`Option T` is declared in `std.option` as the sum `None | Some T`, where
+`None` is a singleton type and `Some T` is a `from` type; `std.core` re-exports
+all three. Because `Some` is a [`from`](#from) type, a value converts implicitly
+wherever an `Option` is expected:
+
+```staple
+def head = (values: List I32) => Option I32 :: List.get values 0
+let port: Option I32 = 8080   // implicitly `Some 8080`
+```
+
+As with `Ok`, an exact alternative wins over the `from` conversion, so a bare
+`None` selects the `None` alternative rather than `Some None`.
 
 `Never` is the uninhabited bottom type. No expression can normally produce a
 `Never` value, and `Never` is a subtype of every value type, so a divergent
