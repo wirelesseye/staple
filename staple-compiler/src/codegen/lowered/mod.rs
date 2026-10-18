@@ -3035,7 +3035,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if environment.returned {
                     return Ok(());
                 }
-                if binding.propagating || binding.asserting {
+                if binding.propagating {
                     let value = value_as_basic(value).ok_or_else(|| {
                         Diagnostic::new(
                             item.origin.span.clone(),
@@ -4896,19 +4896,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_conditional_branch(success, success_block, failure_block)
             .map_err(compiler_diagnostic)?;
         self.backend.builder.position_at_end(failure_block);
-        if let Some(message) = &binding.panic_message {
-            self.backend.build_panic(message, &span)?;
-            self.backend.builder.position_at_end(success_block);
-            return self.bind_propagated_success(
-                owner,
-                binding,
-                sum_value,
-                source_sum,
-                propagation.success_index,
-                &span,
-                environment,
-            );
-        }
         let failure_value = if propagation.source == propagation.result {
             sum_value.as_any_value_enum()
         } else if let Some(index) = binding.propagation_residual {

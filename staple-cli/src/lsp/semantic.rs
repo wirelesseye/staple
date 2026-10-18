@@ -837,6 +837,9 @@ impl<'a> Classifier<'a> {
             Expression::Unary(value) => {
                 self.expression(&value.operand, resolved);
             }
+            Expression::Try(value) => {
+                self.expression(&value.operand, resolved);
+            }
             Expression::Binary(value) => {
                 self.expression(&value.left, resolved);
                 self.expression(&value.right, resolved);

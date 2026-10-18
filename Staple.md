@@ -1291,6 +1291,7 @@ these imports:
 
 | Operator(s) | Precedence | Associativity | Desugars to |
 |---|---|---|---|
+| `?` (postfix) | 9 | — | `match (Try.branch operand) { Ok output => output, residual => return residual }` |
 | `-`, `!` (prefix) | 8 | — | `Neg.negate`, `Not.not` |
 | `as` | 7.5 | left | `Type :: Convert.convert expression` |
 | `*`, `/` | 7 | left | `Multiply.multiply`, `Divide.divide` |
@@ -1301,7 +1302,9 @@ these imports:
 | `\|\|` | 1 | left | not a call; see below |
 | `\|>` | 0 | left | receiver-first companion/trait call |
 
-Function application and access bind tighter than every operator above.
+Function application and access bind tighter than every operator above, and
+postfix `?` (see [Propagating with `?`](#propagating-with-)) ends the call or pipeline stage
+on its left.
 Chaining two non-associative operators at the same precedence (for example
 `1 == 2 == 3`) is a parse error; parenthesize to disambiguate. The standard
 integer implementations of `Add`, `Subtract`, `Multiply`, `Divide`, `Eq`, and
@@ -4390,12 +4393,12 @@ match status {
 ```
 
 The explicit nominal form `Ready()` remains available, including in
-destructuring, propagating, and panicking bindings.
+destructuring and propagating bindings.
 
 The same form can select a singleton alternative in a propagating binding:
 
 ```staple
-let? Ready() = operation()
+let ?Ready() = operation()
 ```
 
 The standard-library `Bool` type is defined entirely in these terms, using
@@ -4646,7 +4649,7 @@ so `match flag { True => ..., False => ... }` works on a `Bool`. Within a sum,
 a pattern that selects no alternative directly matches inside the unique
 `from` alternative whose representation it selects from, so `True` matches the
 `Bool` alternative of `Bool | I32`. Typed patterns, destructuring bindings,
-and propagating bindings (`let? Some(value) = option`) see through the same
+and propagating bindings (`let ?Some(value) = option`) see through the same
 way. Exhaustiveness is checked against the representation, and the
 representation must be visible where the pattern is written.
 
@@ -4756,13 +4759,15 @@ match a single alternative or `Never`.
 
 #### Propagating bindings
 
-`let?` followed by a nominal destructuring pattern selects its success
-alternative and returns every other alternative from the enclosing function:
+`let ?` followed by a nominal destructuring pattern selects its success
+alternative and returns every other alternative from the enclosing function. The
+`?` is written attached to the pattern, `let ?Ok(file) = ...`; the formatter
+normalizes `let? Ok(file)` and `let ? Ok(file)` to that spelling.
 
 ```staple
 def load = (path: String) => {
-    let? Ok(file) = read_file(path)
-    let? Ok(tree) = parse_tree_from_file(file)
+    let ?Ok(file) = read_file(path)
+    let ?Ok(tree) = parse_tree_from_file(file)
     Ok(tree)
 }
 ```
@@ -4780,26 +4785,6 @@ reachable explicit returns, and every propagated alternative. The example
 therefore infers `Ok Tree | IOError | ParseError`. With an explicit binding
 annotation or type-ascription constraint on the body, every normal and propagated
 result must be contained in that type.
-
-#### Asserting bindings
-
-`let!` takes the same patterns and right-hand sides as `let?`, but a mismatch
-terminates the program instead of returning:
-
-```staple
-let! Ready() = operation()
-```
-
-On the selected tag, the payload is destructured and execution continues. Any
-other tag writes a message to standard error naming the pattern and the source
-location of the binding, then exits with status 1:
-
-```text
-panic: `let!` pattern `Ready()` did not match at main.sta:3:1
-```
-
-Unlike `let?`, a panicking binding adds nothing to the enclosing function's
-result type and is also allowed at module level.
 
 Sum types use Staple's internal tagged inline representation and may not appear
 anywhere inside an `extern` binding type.
@@ -4871,7 +4856,8 @@ pub trait Try T {
 ```
 
 `branch` returns the success as `Ok` and the failure as its residual, so its
-result is a `Result Output Residual` that `match` and `let?` take apart. The
+result is a `Result Output Residual` that `match`, `let ?` and the postfix
+[`?` operator](#propagating-with-) take apart. The
 default `unwrap` and `expect` return the success value and otherwise
 [panic](#track_caller-and-location) at their caller, `expect` with the given message:
 
@@ -4886,6 +4872,48 @@ every sum with exactly one `Ok` alternative: `Ok I32` (`E = Never`),
 `Ok I32 | String`, and `Ok I32 | String | Bool` (`E = String | Bool`) all
 implement `Try`. A sum with two `Ok` alternatives does not, because its
 success type would be ambiguous.
+
+#### Propagating with `?`
+
+A postfix `?` unwraps a `Try` value in place. `operand ?` is shorthand for
+
+```staple
+match (Try.branch operand) {
+    Ok output => output,
+    residual => return residual,
+}
+```
+
+so a success evaluates to its `Output` and a failure returns its `Residual`
+from the enclosing function or lambda. `Try` and `Ok` always mean the standard
+library's, whatever the module imports or declares:
+
+```staple
+def load = (path: String) => {
+    let file = read_file path ?
+    let tree = parse_tree_from_file file ?
+    Ok(tree)
+}
+```
+
+Because `Result T E` is the sum `Ok T | E` and `Option T` is `None | Some T`, a
+residual is returned unchanged and widens into the function's result type like
+a [`let ?` propagation](#propagating-bindings) does. With no declared result,
+the compiler joins the trailing value with every residual; `load` above infers
+`Ok Tree | IOError | ParseError`. `Option` and `Result` can share a function,
+which then returns `Ok T | None | E`. With a declared result, every residual
+must be contained in it. A `Try` type whose `Residual` is `Never`, such as
+`Ok I32`, adds nothing. `?` is only allowed inside a function and is not
+available during compile-time macro evaluation.
+
+`?` ends the application on its left: `f a b ?` is `(f a b) ?`, and so is a
+`|>` pipeline so far, so `x |> parse ? |> check ?` is `((x |> parse) ? |> check) ?`.
+It binds tighter than every prefix and binary operator, and `await`'s operand
+is the call it prefixes, so `await fetch url ?` is `(await (fetch url)) ?`.
+Accesses may follow (`load path ?.port`) and `?` can repeat, but a juxtaposed
+argument cannot: `f x ? y` is a parse error. Parenthesize instead, as in
+`f (x ?) y` or `(f x ?) y`. By convention a space separates `?` from its
+operand, as in `f arg ?`, so that it does not read as applying to `arg`.
 
 ## Foreign declarations
 

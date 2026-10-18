@@ -8013,48 +8013,44 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(compiler_diagnostic)?;
         let state = environment.snapshot();
         self.backend.builder.position_at_end(failure);
-        if let Some(message) = &binding.panic_message {
-            self.backend.build_panic(message, span)?;
+        if propagation.source == propagation.result {
+            self.backend.copy_dynamic_value(
+                environment.result_descriptor,
+                value,
+                environment.result,
+            )?;
         } else {
-            if propagation.source == propagation.result {
-                self.backend.copy_dynamic_value(
-                    environment.result_descriptor,
-                    value,
+            let (source, source_type) = if let Some(index) = binding.propagation_residual {
+                (
+                    self.dynamic_sum_payload(source_descriptor, value, sum.alternatives.len())?,
+                    &sum.alternatives[index],
+                )
+            } else {
+                (value, &propagation.source)
+            };
+            if let Some(plan) = &binding.propagation_plan {
+                self.coerce_dynamic_value(
+                    source,
+                    source_type,
+                    &propagation.result,
+                    plan,
                     environment.result,
+                    environment,
+                    span,
                 )?;
             } else {
-                let (source, source_type) = if let Some(index) = binding.propagation_residual {
-                    (
-                        self.dynamic_sum_payload(source_descriptor, value, sum.alternatives.len())?,
-                        &sum.alternatives[index],
-                    )
-                } else {
-                    (value, &propagation.source)
-                };
-                if let Some(plan) = &binding.propagation_plan {
-                    self.coerce_dynamic_value(
-                        source,
-                        source_type,
-                        &propagation.result,
-                        plan,
-                        environment.result,
-                        environment,
-                        span,
-                    )?;
-                } else {
-                    self.backend.copy_dynamic_value(
-                        environment.result_descriptor,
-                        source,
-                        environment.result,
-                    )?;
-                }
+                self.backend.copy_dynamic_value(
+                    environment.result_descriptor,
+                    source,
+                    environment.result,
+                )?;
             }
-            self.drop_dynamic_bindings(environment, 0)?;
-            self.backend
-                .builder
-                .build_return(None)
-                .map_err(compiler_diagnostic)?;
         }
+        self.drop_dynamic_bindings(environment, 0)?;
+        self.backend
+            .builder
+            .build_return(None)
+            .map_err(compiler_diagnostic)?;
         environment.restore(&state);
         self.backend.builder.position_at_end(success);
         let payload = self.dynamic_sum_payload(source_descriptor, value, sum.alternatives.len())?;
@@ -8281,7 +8277,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map_or(&expression.value_type, |coercion| &coercion.target);
                     let descriptor =
                         self.dynamic_descriptor(value_type, environment, &item.origin.span)?;
-                    if binding.propagating || binding.asserting {
+                    if binding.propagating {
                         self.emit_dynamic_propagating_binding(
                             owner,
                             binding,

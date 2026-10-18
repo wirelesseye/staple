@@ -241,6 +241,14 @@ impl<'a> Formatter<'a> {
                 self.pending_newlines = 0;
             }
             self.track_continuation(index);
+            // A `?` after `let`, `where` or `,` marks the following pattern or
+            // bound; anywhere else it is the postfix operator.
+            let prefix_question = token.kind == TokenKind::Operator
+                && token.text == "?"
+                && matches!(
+                    self.previous,
+                    Some(TokenKind::Let | TokenKind::Where | TokenKind::Comma)
+                );
             match token.kind {
                 TokenKind::Whitespace => {
                     if self.pending_newlines == 0 {
@@ -376,6 +384,13 @@ impl<'a> Formatter<'a> {
                     self.space();
                     self.generic_depth -= 1;
                 }
+                TokenKind::Operator if prefix_question => {
+                    // `let ?Pattern` and `where ?Sized T`: attached to what follows.
+                    self.flush_pending(false);
+                    self.space();
+                    self.text("?");
+                    self.generic_open = true;
+                }
                 TokenKind::Caret
                 | TokenKind::Operator
                 | TokenKind::As
@@ -399,7 +414,7 @@ impl<'a> Formatter<'a> {
                 }
             }
             if !token.kind.is_trivia() {
-                if token.text != "<" {
+                if token.text != "<" && !prefix_question {
                     self.generic_open = false;
                 }
                 self.previous = Some(token.kind);

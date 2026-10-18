@@ -1450,10 +1450,13 @@ impl Grammar {
             self.position = checkpoint;
             return self.parse_binding(visibility, start).map(Item::Binding);
         }
+        if self.at(TokenKind::Bang) {
+            return Err(self.error(
+                "`let!` was removed; use `match`, or `Try.unwrap`/`Try.expect`",
+            ));
+        }
         let refutable_kind = if self.eat_operator("?") {
             Some(PatternBindingKind::Propagating)
-        } else if self.eat(TokenKind::Bang) {
-            Some(PatternBindingKind::Asserting)
         } else {
             None
         };
@@ -1478,7 +1481,7 @@ impl Grammar {
             }));
         }
         if refutable_kind.is_some() {
-            return Err(self.error("`let?` and `let!` require a destructuring pattern"));
+            return Err(self.error("`let ?` requires a destructuring pattern"));
         }
         self.position = checkpoint;
         self.parse_binding(visibility, start).map(Item::Binding)
@@ -3008,7 +3011,7 @@ impl Grammar {
                 return Err(self.error("expected a method stage on the same statement after `|>`"));
             }
             let stage_start = self.position;
-            let stage = self.parse_call_expression()?;
+            let stage = self.parse_call_without_try()?;
             if matches!(
                 self.peek(),
                 Some(TokenKind::Plus | TokenKind::Minus | TokenKind::Star | TokenKind::Slash)
@@ -3023,6 +3026,7 @@ impl Grammar {
                 );
             }
             receiver = self.apply_pipe_stage(receiver, stage, start, stage_start)?;
+            receiver = self.parse_try_suffixes(receiver, start)?;
         }
         Ok(receiver)
     }
@@ -3399,9 +3403,44 @@ impl Grammar {
     /// Parses juxtaposition-based function calls.
     fn parse_call_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
+        let expression = self.parse_call_without_try()?;
+        self.parse_try_suffixes(expression, start)
+    }
+
+    /// Applies any postfix `?` operators to the call, `await`, or `|>` stage
+    /// that ends at the cursor. `?` ends the application on its left, so a
+    /// juxtaposed argument cannot follow it without parentheses; an access
+    /// chain (`f x ?.field`) can.
+    fn parse_try_suffixes(
+        &mut self,
+        mut expression: Expression,
+        start: usize,
+    ) -> Result<Expression, ParseError> {
+        while !(self.newline_terminates_expression && self.has_newline_before_next_token())
+            && self.at_operator("?")
+        {
+            let operator_start = self.position;
+            self.eat_operator("?");
+            let operator_syntax = self.syntax(operator_start);
+            expression = Expression::Try(TryExpression {
+                syntax: self.syntax(start),
+                operator_syntax,
+                operand: Box::new(expression),
+            });
+            expression = self.parse_access_suffixes(expression, start)?;
+            if self.starts_atom() {
+                return Err(self.error("`?` ends a call; parenthesize it to apply the result"));
+            }
+        }
+        Ok(expression)
+    }
+
+    /// Parses an `await` or juxtaposition call without a trailing `?`.
+    fn parse_call_without_try(&mut self) -> Result<Expression, ParseError> {
+        let start = self.position;
         if self.peek_text("await") && self.is_await_operand_start() {
             self.bump_token();
-            let operand = self.parse_call_expression()?;
+            let operand = self.parse_call_without_try()?;
             return Ok(Expression::Await(AwaitExpression {
                 syntax: self.syntax(start),
                 operand: Box::new(operand),
@@ -3503,7 +3542,17 @@ impl Grammar {
     /// Parses chained named or positional product access.
     fn parse_access_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
-        let mut expression = self.parse_atom()?;
+        let expression = self.parse_atom()?;
+        self.parse_access_suffixes(expression, start)
+    }
+
+    /// Parses the `.name`, `.0`, `.*`, `.<T>` and `[index]` suffixes that
+    /// follow `expression`, which began at token `start`.
+    fn parse_access_suffixes(
+        &mut self,
+        mut expression: Expression,
+        start: usize,
+    ) -> Result<Expression, ParseError> {
         loop {
             if self.eat(TokenKind::Dot) {
                 if self.eat_operator("<") {

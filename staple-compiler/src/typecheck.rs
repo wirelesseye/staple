@@ -6374,6 +6374,7 @@ impl TypeChecker {
             | Expression::Float(_) => CheckedEffectSet::default(),
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
+            Expression::Try(_) => unreachable!("try expression reached type checking"),
             Expression::Name(name) => {
                 let state_cell = self.state_cell_symbol(module, name.syntax.id);
                 if let Some(symbol) = state_cell {
@@ -7261,6 +7262,7 @@ impl TypeChecker {
             | Expression::Float(_) => false,
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
+            Expression::Try(_) => unreachable!("try expression reached type checking"),
         };
         // Retained schemes are source templates even when this occurrence
         // has already been instantiated at an ordinary function type.
@@ -7693,6 +7695,7 @@ impl TypeChecker {
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
+            Expression::Try(_) => unreachable!("try expression reached type checking"),
         }
     }
 
@@ -8382,7 +8385,6 @@ impl TypeChecker {
         binding: &staple_syntax::PatternBinding,
         value_type: &CheckedType,
     ) {
-        let asserts = binding.kind == PatternBindingKind::Asserting;
         let mut root = &binding.pattern;
         while let Pattern::At(at) = root {
             self.pattern_types.insert(at.syntax.id, value_type.clone());
@@ -8431,10 +8433,7 @@ impl TypeChecker {
             if *value_type != CheckedType::Error {
                 self.diagnostics.push(Diagnostic::new(
                     binding.value.syntax().span.clone(),
-                    format!(
-                        "a `{}` binding requires a sum value, found `{value_type}`",
-                        if asserts { "let!" } else { "let?" }
-                    ),
+                    format!("a `let ?` binding requires a sum value, found `{value_type}`"),
                 ));
             }
             return;
@@ -8459,19 +8458,6 @@ impl TypeChecker {
             return;
         };
         self.bind_pattern_types(module, &pattern.argument, representation);
-        if asserts {
-            // A mismatch panics instead of returning, so nothing joins the
-            // function result and the failure value is never built.
-            self.propagations.insert(
-                binding.syntax.id,
-                CheckedPropagation {
-                    source: value_type.clone(),
-                    success_index: *success_index,
-                    result: value_type.clone(),
-                },
-            );
-            return;
-        }
         let contributions = self
             .return_contributions
             .last_mut()
@@ -9301,6 +9287,7 @@ impl TypeChecker {
         let natural_type = match expression {
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
+            Expression::Try(_) => unreachable!("try expression reached type checking"),
             Expression::Function(function) => {
                 let Some(function_id) = module.function_for(function.syntax.id) else {
                     return CheckedType::Error;
@@ -19876,6 +19863,7 @@ fn expression_reads_reactive(
         | Expression::Float(_) => false,
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
         Expression::Unary(_) => unreachable!("unary expression reached type checking"),
+        Expression::Try(_) => unreachable!("try expression reached type checking"),
     }
 }
 
@@ -19953,6 +19941,7 @@ fn collect_value_bindings(module: &ResolvedModule) -> Vec<Binding> {
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
+            Expression::Try(_) => unreachable!("try expression reached type checking"),
         }
     }
     fn item_value_bindings(item: &Item, bindings: &mut Vec<Binding>) {
@@ -20122,6 +20111,7 @@ fn expression_mentions_symbols(
         | Expression::Float(_) => false,
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
         Expression::Unary(_) => unreachable!("unary expression reached type checking"),
+        Expression::Try(_) => unreachable!("try expression reached type checking"),
     }
 }
 
@@ -20198,6 +20188,7 @@ fn expression_contains_assignment(expression: &Expression) -> bool {
         | Expression::Float(_) => false,
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
         Expression::Unary(_) => unreachable!("unary expression reached type checking"),
+        Expression::Try(_) => unreachable!("try expression reached type checking"),
     }
 }
 
@@ -20402,6 +20393,7 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
+            Expression::Try(_) => unreachable!("try expression reached type checking"),
         }
     }
 
