@@ -1,5 +1,7 @@
 use crate::ast::*;
 use crate::lexer::lex;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::Arc;
 
 fn has_unescaped_dollar(content: &str) -> bool {
@@ -84,6 +86,20 @@ fn matching_template_brace(content: &str, opening: usize) -> Option<usize> {
 pub fn parse(source: &str) -> Result<Module, ParseError> {
     let tokens = Arc::from(lex(source));
     Grammar::new(tokens, Arc::from(source), 0, None).parse_source_file()
+}
+
+/// Parses `source` and returns the indices, within `lex(source)`, of the
+/// tokens that begin newline-separated statements and members, in order.
+pub(crate) fn statement_starts(source: &str) -> Result<Vec<usize>, ParseError> {
+    let tokens = Arc::from(lex(source));
+    let mut grammar = Grammar::new(tokens, Arc::from(source), 0, None);
+    let module = grammar.parse_module_items();
+    grammar.check_tab_indentation()?;
+    module?;
+    let mut starts = grammar.statement_starts.take();
+    starts.sort_unstable();
+    starts.dedup();
+    Ok(starts)
 }
 
 /// Parses a complete Staple source file, assigning `SyntaxId`s from
@@ -232,8 +248,9 @@ fn parse_fragment<T>(
         .map(|token| token.text.as_str())
         .collect::<String>();
     let mut tokens = syntax.tokens().to_vec();
+    let mut first = syntax.token_range().start;
     if grouped {
-        let first = tokens
+        let opening = tokens
             .iter()
             .position(|token| !token.kind.is_trivia())
             .filter(|index| tokens[*index].kind == TokenKind::LParen)
@@ -243,7 +260,8 @@ fn parse_fragment<T>(
             .rposition(|token| !token.kind.is_trivia())
             .filter(|index| tokens[*index].kind == TokenKind::RParen)
             .ok_or_else(|| fragment_error(syntax, "expected grouped syntax argument"))?;
-        tokens = tokens[first + 1..last].to_vec();
+        tokens = tokens[opening + 1..last].to_vec();
+        first += opening + 1;
     }
     let source_name = match &syntax.span {
         Span::User { source, .. } => source.clone(),
@@ -255,7 +273,10 @@ fn parse_fragment<T>(
         *next_syntax_id,
         source_name,
     );
-    let value = parse(&mut grammar)?;
+    grammar.first_line_column = column_within(all_tokens, first).0;
+    let value = parse(&mut grammar);
+    grammar.check_tab_indentation()?;
+    let value = value?;
     if grammar.peek().is_some() {
         return Err(grammar.error("expected one complete syntax argument"));
     }
@@ -299,6 +320,18 @@ struct Grammar {
     newline_terminates_expression: bool,
     newline_terminates_type: bool,
     any_newline_terminates_type: bool,
+    /// First token of the innermost newline-separated statement or member. A
+    /// line indented past its column continues that statement.
+    statement_anchor: Option<usize>,
+    /// Column of this grammar's first token within its source line, for
+    /// fragments that begin partway through a line.
+    first_line_column: usize,
+    /// The first line-start token whose column was compared while its line,
+    /// or its statement's line, was indented with a tab.
+    tab_indentation: Cell<Option<usize>>,
+    /// Every token that began a newline-separated statement or member, shared
+    /// with speculative clones so cloning stays cheap.
+    statement_starts: Rc<RefCell<Vec<usize>>>,
     conversion_target: bool,
     brace_terminates_expression: bool,
     macro_punctuation_arguments: bool,
@@ -329,6 +362,10 @@ impl Grammar {
             newline_terminates_expression: false,
             newline_terminates_type: false,
             any_newline_terminates_type: false,
+            statement_anchor: None,
+            first_line_column: 0,
+            tab_indentation: Cell::new(None),
+            statement_starts: Rc::default(),
             conversion_target: false,
             brace_terminates_expression: false,
             macro_punctuation_arguments: false,
@@ -339,6 +376,12 @@ impl Grammar {
 
     /// Parses all top-level items and returns the completed module.
     fn parse_source_file(mut self) -> Result<Module, ParseError> {
+        let module = self.parse_module_items();
+        self.check_tab_indentation()?;
+        module
+    }
+
+    fn parse_module_items(&mut self) -> Result<Module, ParseError> {
         let start = self.position;
         let (declaration_syntax, docs, visibility, modifiers) =
             self.parse_current_module_declaration()?;
@@ -433,6 +476,13 @@ impl Grammar {
 
     /// Parses one top-level item.
     fn parse_item(&mut self) -> Result<Item, ParseError> {
+        let previous_anchor = self.anchor_statement(self.position);
+        let item = self.parse_anchored_item();
+        self.statement_anchor = previous_anchor;
+        item
+    }
+
+    fn parse_anchored_item(&mut self) -> Result<Item, ParseError> {
         let previous = self.newline_terminates_expression;
         self.newline_terminates_expression = true;
         let item_start = self.position;
@@ -965,11 +1015,13 @@ impl Grammar {
         let mut associated_types = Vec::new();
         self.expect(TokenKind::LBrace, "expected `{` before trait members")?;
         let mut members = Vec::new();
+        let previous_anchor = self.statement_anchor;
         while !self.at(TokenKind::RBrace) {
             if self.peek().is_none() {
                 return Err(self.error("unterminated trait declaration"));
             }
             let member_start = self.position;
+            self.anchor_statement(member_start);
             let (docs, track_caller) = self.parse_member_modifiers(member_start, MemberKind::Trait)?;
             if self.at(TokenKind::Type) {
                 if track_caller {
@@ -1035,6 +1087,7 @@ impl Grammar {
             });
             self.eat(TokenKind::Semicolon);
         }
+        self.statement_anchor = previous_anchor;
         self.expect(TokenKind::RBrace, "expected `}` after trait members")?;
         Ok(TraitDeclaration {
             syntax: self.syntax(start),
@@ -1164,11 +1217,13 @@ impl Grammar {
         )?;
         let mut members = Vec::new();
         let mut associated_types = Vec::new();
+        let previous_anchor = self.statement_anchor;
         while !self.at(TokenKind::RBrace) {
             if self.peek().is_none() {
                 return Err(self.error("unterminated trait implementation"));
             }
             let member_start = self.position;
+            self.anchor_statement(member_start);
             let (docs, _) = self.parse_member_modifiers(member_start, MemberKind::Implementation)?;
             if self.at(TokenKind::Type) {
                 self.bump_token();
@@ -1208,6 +1263,7 @@ impl Grammar {
             });
             self.eat(TokenKind::Semicolon);
         }
+        self.statement_anchor = previous_anchor;
         self.expect(
             TokenKind::RBrace,
             "expected `}` after implementation members",
@@ -1227,6 +1283,13 @@ impl Grammar {
 
     /// Parses one of the item forms supported in a block expression.
     fn parse_block_item(&mut self) -> Result<Item, ParseError> {
+        let previous_anchor = self.anchor_statement(self.position);
+        let item = self.parse_anchored_block_item();
+        self.statement_anchor = previous_anchor;
+        item
+    }
+
+    fn parse_anchored_block_item(&mut self) -> Result<Item, ParseError> {
         let item_start = self.position;
         let docs = self.leading_doc_comments(item_start);
         if !docs.is_empty() {
@@ -1515,11 +1578,13 @@ impl Grammar {
             .text;
         self.expect(TokenKind::LBrace, "expected `{` after extern ABI")?;
         let mut bindings = Vec::new();
+        let previous_anchor = self.statement_anchor;
         while !self.at(TokenKind::RBrace) {
             if self.peek().is_none() {
                 return Err(self.error("unterminated extern block"));
             }
             let binding_start = self.position;
+            self.anchor_statement(binding_start);
             let docs = self.parse_member_docs(binding_start)?;
             let binding_visibility = if self.eat(TokenKind::Pub) {
                 self.parse_visibility_after_pub()?.0
@@ -1549,6 +1614,7 @@ impl Grammar {
             });
             self.eat(TokenKind::Semicolon);
         }
+        self.statement_anchor = previous_anchor;
         self.expect(TokenKind::RBrace, "expected `}`")?;
         Ok(ExternBlock {
             syntax: self.syntax(start),
@@ -4307,10 +4373,81 @@ impl Grammar {
     }
 
     /// Returns whether skipped trivia before the next token contains a newline.
+    /// Whether a line break separates the cursor from the next token. A line
+    /// indented past the start of the current statement continues it, so
+    /// its break does not count.
     fn has_newline_before_next_token(&self) -> bool {
-        self.tokens[self.position..self.next_non_trivia(self.position)]
+        let next = self.next_non_trivia(self.position);
+        self.tokens[self.position..next]
             .iter()
             .any(|token| token.kind == TokenKind::Newline)
+            && !self.continues_statement(next)
+    }
+
+    /// Whether the token at `index`, the first on its line, is indented past
+    /// the first token of the current statement.
+    fn continues_statement(&self, index: usize) -> bool {
+        let Some(anchor) = self.statement_anchor else {
+            return false;
+        };
+        if index >= self.tokens.len() {
+            return false;
+        }
+        if self.tab_indentation.get().is_none()
+            && (self.line_indented_with_tab(index) || self.line_indented_with_tab(anchor))
+        {
+            self.tab_indentation.set(Some(index));
+        }
+        self.column_of(index) > self.column_of(anchor)
+    }
+
+    /// Makes the statement starting at `start` the one later lines continue,
+    /// returning the previous anchor.
+    fn anchor_statement(&mut self, start: usize) -> Option<usize> {
+        let anchor = self.next_non_trivia(start);
+        if anchor < self.tokens.len() {
+            self.statement_starts.borrow_mut().push(anchor);
+        }
+        std::mem::replace(
+            &mut self.statement_anchor,
+            (anchor < self.tokens.len()).then_some(anchor),
+        )
+    }
+
+    fn column_of(&self, index: usize) -> usize {
+        match column_within(&self.tokens, index) {
+            (column, true) => column,
+            (column, false) => column + self.first_line_column,
+        }
+    }
+
+    fn line_indented_with_tab(&self, index: usize) -> bool {
+        let line_start = match self.tokens[..index]
+            .iter()
+            .rposition(|token| token.kind == TokenKind::Newline)
+        {
+            Some(newline) => newline + 1,
+            None if self.first_line_column == 0 => 0,
+            None => return false,
+        };
+        self.tokens[line_start..index]
+            .iter()
+            .take_while(|token| token.kind == TokenKind::Whitespace)
+            .any(|token| token.text.contains('\t'))
+    }
+
+    /// Rejects tab indentation on a line whose column decided whether a line
+    /// break continued a statement; tab width would change its meaning.
+    fn check_tab_indentation(&self) -> Result<(), ParseError> {
+        let Some(index) = self.tab_indentation.get() else {
+            return Ok(());
+        };
+        let offset = self.tokens[index].span.start;
+        Err(ParseError {
+            offset,
+            location: self.location(offset),
+            message: "tabs cannot indent a line whose indentation decides whether it continues a statement; indent with spaces".to_owned(),
+        })
     }
 
     fn has_trivia_before_next_token(&self) -> bool {
@@ -4493,6 +4630,22 @@ fn span_from_token_origins(tokens: &[SyntaxToken]) -> Option<Span> {
             Some(origin @ Span::User { .. }) => Some(origin.clone()),
             _ => None,
         })
+}
+
+/// Counts the characters between the start of `index`'s line and that token.
+/// The flag is false when the line starts before `tokens` does.
+pub(crate) fn column_within(tokens: &[SyntaxToken], index: usize) -> (usize, bool) {
+    let mut column = 0;
+    for token in tokens[..index].iter().rev() {
+        if token.kind == TokenKind::Newline {
+            return (column, true);
+        }
+        if let Some(newline) = token.text.rfind(['\n', '\r']) {
+            return (column + token.text[newline + 1..].chars().count(), true);
+        }
+        column += token.text.chars().count();
+    }
+    (column, false)
 }
 
 fn line_starts(source: &str) -> Vec<usize> {

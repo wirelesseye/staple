@@ -462,7 +462,7 @@ fn panic_reports_the_location_of_its_call() {
         concat!(
             "use std.io.println\n",
             "println \"before\"\n",
-            "  panic \"stop\"\n",
+            "{ panic \"stop\" }\n",
         ),
         false,
     );

@@ -7914,6 +7914,29 @@ fn top_level_macro_sequence_may_be_the_final_parameter() {
 }
 
 #[test]
+fn top_level_macro_sequence_continues_onto_indented_lines() {
+    let module = type_check(concat!(
+        "macro tail = (_: Ident \"marker\"; name: Ident String; values: Sequence (Ident String)) => match values {\n",
+        "    Sequence () => quote { let $name: I32 = 0 },\n",
+        "    Sequence (first: Ident String, rest: Sequence Ident String) => match rest {\n",
+        "        Sequence () => quote { let $name: I32 = 1 },\n",
+        "        _ => quote { let $name: Bool = True },\n",
+        "    },\n",
+        "}\n",
+        "tail marker wrapped alpha\n",
+        "    beta\n",
+        "    gamma\n",
+        "tail marker single alpha\n",
+        "let wrapped_is_many: Bool = wrapped\n",
+        "let single_is_one: I32 = single\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("an indented line should extend a trailing top-level sequence");
+}
+
+#[test]
 fn longer_complete_overload_still_beats_a_trailing_sequence_overload() {
     let module = type_check(concat!(
         "macro pick = (value: Ident String; _: Sequence (Ident String)) => quote { let $value: I32 = 0 }\n",

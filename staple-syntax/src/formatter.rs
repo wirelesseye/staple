@@ -5,6 +5,7 @@
 //! observe their punctuation, so this module changes trivia but never invents
 //! or removes non-trivia tokens.
 
+use crate::parser::{column_within, statement_starts};
 use crate::{ParseError, SyntaxToken, TokenKind, lex, parse};
 
 const WIDTH: usize = 100;
@@ -13,21 +14,175 @@ const INDENT: &str = "    ";
 /// Parses and formats one complete Staple source file.
 pub fn format_source(source: &str) -> Result<String, ParseError> {
     parse(source)?;
+    let starts = statement_starts(source)?;
     let tokens = lex(source);
-    let output = format_token_stream(&tokens);
-    // This is intentionally a runtime invariant: a formatter must never emit
-    // source the parser itself rejects.
+    let output = format_with_statement_starts(&tokens, &starts);
+    // These are intentionally runtime invariants: a formatter must never emit
+    // source the parser itself rejects, nor move a statement boundary.
     parse(&output)?;
+    let output_starts = statement_starts(&output)?;
+    let output_tokens = lex(&output);
+    let texts = |tokens: &[SyntaxToken], starts: &[usize]| {
+        starts
+            .iter()
+            .map(|index| (non_trivia_ordinal(tokens, *index), tokens[*index].text.clone()))
+            .collect::<Vec<_>>()
+    };
+    if texts(&tokens, &starts) != texts(&output_tokens, &output_starts) {
+        return Err(ParseError {
+            offset: 0,
+            location: crate::SourceLocation { line: 1, column: 1 },
+            message: "formatting would change where statements begin".to_owned(),
+        });
+    }
     Ok(output)
+}
+
+fn non_trivia_ordinal(tokens: &[SyntaxToken], index: usize) -> usize {
+    tokens[..index]
+        .iter()
+        .filter(|token| !token.kind.is_trivia())
+        .count()
 }
 
 /// Formats an already-tokenized source fragment without requiring it to be a
 /// complete, independently parseable module. Macro expansion uses this for
 /// reconstructed output which may retain documented splice placeholders.
 pub fn format_token_stream(tokens: &[SyntaxToken]) -> String {
-    let mut formatter = Formatter::new(tokens);
+    let source = tokens
+        .iter()
+        .map(|token| token.text.as_str())
+        .collect::<String>();
+    // Prefer the parser's statements; guess only for streams that do not parse.
+    let starts = statement_starts(&source)
+        .ok()
+        .filter(|_| {
+            let relexed = lex(&source);
+            relexed.len() == tokens.len()
+                && relexed
+                    .iter()
+                    .zip(tokens)
+                    .all(|(relexed, token)| relexed.kind == token.kind)
+        })
+        .unwrap_or_else(|| guess_statement_starts(tokens));
+    format_with_statement_starts(tokens, &starts)
+}
+
+fn format_with_statement_starts(tokens: &[SyntaxToken], starts: &[usize]) -> String {
+    let mut formatter = Formatter::new(tokens, starts);
     formatter.format();
     formatter.finish()
+}
+
+/// How each token relates to the newline-separated statements around it.
+struct Layout {
+    /// The token begins a statement or member.
+    starts: Vec<bool>,
+    /// The token begins a line indented past its statement's first token,
+    /// so the line continues that statement.
+    continuations: Vec<bool>,
+    /// The token is the first non-trivia token on its line.
+    line_starts: Vec<bool>,
+}
+
+impl Layout {
+    fn new(tokens: &[SyntaxToken], statement_starts: &[usize]) -> Self {
+        let mut starts = vec![false; tokens.len()];
+        for index in statement_starts {
+            if let Some(start) = starts.get_mut(*index) {
+                *start = true;
+            }
+        }
+        let mut continuations = vec![false; tokens.len()];
+        let mut line_starts = vec![false; tokens.len()];
+        // Each bracket level remembers the statement its lines are measured
+        // against, and whether that statement belongs to this level.
+        let mut levels = vec![(None::<usize>, true)];
+        let mut at_line_start = true;
+        for (index, token) in tokens.iter().enumerate() {
+            if token.kind == TokenKind::Newline {
+                at_line_start = true;
+                continue;
+            }
+            if token.kind.is_trivia() {
+                continue;
+            }
+            line_starts[index] = at_line_start;
+            let level = levels.last_mut().expect("root level");
+            if starts[index] {
+                *level = (Some(index), true);
+            } else if at_line_start && let (Some(anchor), true) = *level {
+                continuations[index] =
+                    column_within(tokens, index).0 > column_within(tokens, anchor).0;
+            }
+            at_line_start = false;
+            match token.kind {
+                TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => {
+                    let anchor = levels.last().expect("root level").0;
+                    levels.push((anchor, false));
+                }
+                TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket if levels.len() > 1 => {
+                    levels.pop();
+                }
+                _ => {}
+            }
+        }
+        Self {
+            starts,
+            continuations,
+            line_starts,
+        }
+    }
+
+    /// Whether a line break before `index` must survive formatting: it
+    /// separates statements or begins a continuation line.
+    fn needs_break(&self, index: usize, first_in_group: bool) -> bool {
+        self.line_starts[index]
+            && (self.continuations[index] || (self.starts[index] && !first_in_group))
+    }
+}
+
+/// Approximates the parser's statement starts for token streams that may not
+/// parse: the first token of the stream, of each brace group and after each
+/// `;`, and each line start not indented past the current statement.
+fn guess_statement_starts(tokens: &[SyntaxToken]) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut levels = vec![None::<usize>];
+    let mut expect_start = true;
+    let mut at_line_start = true;
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind == TokenKind::Newline {
+            at_line_start = true;
+            continue;
+        }
+        if token.kind.is_trivia() {
+            continue;
+        }
+        let level = levels.last_mut().expect("root level");
+        let dedented = at_line_start
+            && level.is_some_and(|anchor| {
+                column_within(tokens, index).0 <= column_within(tokens, anchor).0
+            });
+        if expect_start || dedented {
+            *level = Some(index);
+            starts.push(index);
+        }
+        expect_start = false;
+        at_line_start = false;
+        match token.kind {
+            TokenKind::LBrace => {
+                levels.push(None);
+                expect_start = true;
+            }
+            TokenKind::LParen | TokenKind::LBracket => levels.push(None),
+            TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket if levels.len() > 1 => {
+                levels.pop();
+            }
+            TokenKind::Semicolon => expect_start = true,
+            _ => {}
+        }
+    }
+    starts
 }
 
 #[derive(Clone, Copy)]
@@ -38,7 +193,11 @@ struct Group {
 
 struct Formatter<'a> {
     tokens: &'a [SyntaxToken],
+    layout: Layout,
     groups: Vec<Option<Group>>,
+    /// Per open bracket level, whether its current statement has continued
+    /// onto an indented line; each such level adds one indent.
+    continuing: Vec<bool>,
     output: String,
     line: String,
     indent: usize,
@@ -51,10 +210,13 @@ struct Formatter<'a> {
 }
 
 impl<'a> Formatter<'a> {
-    fn new(tokens: &'a [SyntaxToken]) -> Self {
+    fn new(tokens: &'a [SyntaxToken], statement_starts: &[usize]) -> Self {
+        let layout = Layout::new(tokens, statement_starts);
         Self {
             tokens,
-            groups: groups(tokens),
+            groups: groups(tokens, &layout),
+            layout,
+            continuing: vec![false],
             output: String::new(),
             line: String::new(),
             indent: 0,
@@ -78,6 +240,7 @@ impl<'a> Formatter<'a> {
             {
                 self.pending_newlines = 0;
             }
+            self.track_continuation(index);
             match token.kind {
                 TokenKind::Whitespace => {
                     if self.pending_newlines == 0 {
@@ -112,12 +275,18 @@ impl<'a> Formatter<'a> {
                             TokenKind::Arrow | TokenKind::FatArrow
                         )
                         && self.tokens[index - 1].span.end == token.span.start;
-                    if arrow_effect_set {
+                    // `Name{E}` supplies an effect parameter only while the
+                    // brace touches the name, so that adjacency is kept.
+                    let effect_parameter = token.kind == TokenKind::LBrace
+                        && index > 0
+                        && self.tokens[index - 1].kind == TokenKind::Identifier;
+                    if arrow_effect_set || effect_parameter {
                         self.trim_line();
                     } else if self.separated || needs_space(self.previous, token.kind) {
                         self.space();
                     }
                     self.text(&token.text);
+                    self.continuing.push(false);
                     let multiline = self.groups[index].is_some_and(|group| group.multiline);
                     if multiline {
                         self.indent += 1;
@@ -125,6 +294,9 @@ impl<'a> Formatter<'a> {
                     }
                 }
                 TokenKind::RBrace | TokenKind::RParen | TokenKind::RBracket => {
+                    if self.continuing.len() > 1 {
+                        self.continuing.pop();
+                    }
                     let opening = matching_open(self.tokens, index);
                     let multiline = opening
                         .and_then(|opening| self.groups[opening])
@@ -236,6 +408,33 @@ impl<'a> Formatter<'a> {
         }
     }
 
+    /// Updates whether the current statement has continued onto an indented
+    /// line. A comment takes the state of the token it precedes, so a comment
+    /// above a new statement is not indented as a continuation.
+    fn track_continuation(&mut self, index: usize) {
+        let token = self.tokens[index].kind;
+        let subject = if !token.is_trivia() {
+            index
+        } else if matches!(token, TokenKind::LineComment | TokenKind::BlockComment) {
+            match self.tokens[index..]
+                .iter()
+                .position(|token| !token.kind.is_trivia())
+            {
+                Some(offset) => index + offset,
+                None => return,
+            }
+        } else {
+            return;
+        };
+        let continuing = self.continuing.last_mut().expect("root level");
+        if self.layout.starts[subject] {
+            *continuing = false;
+        }
+        if self.layout.continuations[subject] {
+            *continuing = true;
+        }
+    }
+
     fn block_comment(&mut self, text: &str) {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         for (index, part) in normalized.split('\n').enumerate() {
@@ -264,7 +463,9 @@ impl<'a> Formatter<'a> {
 
     fn text(&mut self, text: &str) {
         if self.at_line_start {
-            self.line.push_str(&INDENT.repeat(self.indent));
+            let continuing = self.continuing.iter().filter(|level| **level).count();
+            self.line
+                .push_str(&INDENT.repeat(self.indent + continuing));
             self.at_line_start = false;
         }
         self.line.push_str(text);
@@ -308,7 +509,7 @@ impl<'a> Formatter<'a> {
     }
 }
 
-fn groups(tokens: &[SyntaxToken]) -> Vec<Option<Group>> {
+fn groups(tokens: &[SyntaxToken], layout: &Layout) -> Vec<Option<Group>> {
     let mut result = vec![None; tokens.len()];
     let mut stack = Vec::<usize>::new();
     for (index, token) in tokens.iter().enumerate() {
@@ -321,6 +522,7 @@ fn groups(tokens: &[SyntaxToken]) -> Vec<Option<Group>> {
                     .any(|token| token.kind == TokenKind::LineComment);
                 let top_level_separator = tokens[open].kind == TokenKind::LBrace
                     && has_top_level_separator(tokens, open + 1, index);
+                let statement_break = has_statement_break(tokens, layout, open + 1, index);
                 let width = tokens[open..=index]
                     .iter()
                     .filter(|token| !token.kind.is_trivia())
@@ -328,7 +530,10 @@ fn groups(tokens: &[SyntaxToken]) -> Vec<Option<Group>> {
                     .sum::<usize>();
                 result[open] = Some(Group {
                     close: index,
-                    multiline: line_comment || top_level_separator || width > WIDTH,
+                    multiline: line_comment
+                        || top_level_separator
+                        || statement_break
+                        || width > WIDTH,
                 });
             }
             _ => {}
@@ -348,6 +553,31 @@ fn has_top_level_separator(tokens: &[SyntaxToken], start: usize, end: usize) -> 
             TokenKind::Semicolon if depth == 0 => return true,
             _ => {}
         }
+    }
+    false
+}
+
+/// Whether a line break directly inside `start..end` separates statements or
+/// begins a continuation line, so the group cannot be joined onto one line.
+fn has_statement_break(tokens: &[SyntaxToken], layout: &Layout, start: usize, end: usize) -> bool {
+    let mut depth = 0usize;
+    let mut first_start = true;
+    for index in start..end {
+        let direct = depth == 0;
+        match tokens[index].kind {
+            TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => depth += 1,
+            TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {
+                depth = depth.saturating_sub(1)
+            }
+            _ => {}
+        }
+        if !direct {
+            continue;
+        }
+        if layout.needs_break(index, first_start) {
+            return true;
+        }
+        first_start &= !layout.starts[index];
     }
     false
 }
@@ -488,9 +718,55 @@ mod tests {
     #[test]
     fn canonicalizes_indentation_and_compacts_groups_that_fit() {
         let formatted =
-            format_source("let value = {\n\t       (\n        1,\n        2,\n    )\n}\n").unwrap();
+            format_source("let value = {\n        (\n        1,\n        2,\n    )\n}\n").unwrap();
         assert_eq!(formatted, "let value = {(1, 2,)}\n");
         assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
+    fn indents_continuation_lines_and_keeps_statement_lines() {
+        let source = concat!(
+            "def f = () => { let a = 1\n",
+            "                a }\n",
+            "let total = 1\n",
+            "  + 2\n",
+            "      + 3\n",
+            "// leads the next statement\n",
+            "let call = f a\n",
+            "  b {\n",
+            "x\n",
+            "      y\n",
+            "}\n",
+        );
+        let formatted = format_source(source).unwrap();
+        assert_eq!(
+            formatted,
+            concat!(
+                "def f = () => {\n",
+                "    let a = 1\n",
+                "    a\n",
+                "}\n",
+                "let total = 1\n",
+                "    + 2\n",
+                "    + 3\n",
+                "// leads the next statement\n",
+                "let call = f a\n",
+                "    b {\n",
+                "        x\n",
+                "            y\n",
+                "    }\n",
+            )
+        );
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
+    fn token_stream_formatting_guesses_continuations() {
+        let source = "let total = $value\n  + 2\nlet next = 3\n";
+        assert_eq!(
+            format_token_stream(&lex(source)),
+            "let total = $value\n    + 2\nlet next = 3\n"
+        );
     }
 
     #[test]

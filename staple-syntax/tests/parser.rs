@@ -3877,3 +3877,81 @@ fn reserves_resource_and_with_as_keywords() {
     let module = parse(source).expect("a type annotation stops before a resource expression");
     assert_eq!(module.syntax.text(), source);
 }
+
+#[test]
+fn indented_lines_continue_the_current_statement() {
+    let source = concat!(
+        "let total = 1\n",
+        "    + 2\n",
+        "    + 3\n",
+        "let call = f a\n",
+        "    b\n",
+        "let piped = value\n",
+        "    |> show\n",
+        "let block = {\n",
+        "    1\n",
+        "}\n",
+        "    + 2\n",
+        "def body = () => {\n",
+        "    let a = g\n",
+        "        x\n",
+        "    a\n",
+        "}\n",
+        "def same_line = () => { let a = 1\n",
+        "                        a }\n",
+        "trait Show T {\n",
+        "    show: T\n",
+        "        -> String\n",
+        "    debug: T -> String\n",
+        "}\n",
+        "let separate = f\n",
+        "b\n",
+    );
+    let module = parse(source).expect("indented continuations should parse");
+    assert_eq!(module.syntax.text(), source);
+    assert_eq!(module.items.len(), 9);
+    let value = |index: usize| {
+        let Item::Binding(binding) = &module.items[index] else {
+            panic!("expected binding {index}")
+        };
+        binding.value.as_ref().expect("binding value")
+    };
+    let Expression::Binary(total) = value(0) else {
+        panic!("expected a binary continuation")
+    };
+    assert!(matches!(total.left.as_ref(), Expression::Binary(_)));
+    let Expression::Call(call) = value(1) else {
+        panic!("expected a call continuation")
+    };
+    assert!(matches!(call.callee.as_ref(), Expression::Call(_)));
+    assert!(!matches!(value(2), Expression::Name(_)));
+    let Expression::Binary(block) = value(3) else {
+        panic!("a continuation after a block returns to the outer statement")
+    };
+    assert!(matches!(block.left.as_ref(), Expression::Block(_)));
+    for index in [4, 5] {
+        let Expression::Function(function) = value(index) else {
+            panic!("expected function {index}")
+        };
+        let Expression::Block(body) = function.body.as_ref() else {
+            panic!("expected block body {index}")
+        };
+        assert_eq!(body.items.len(), 2, "block statements stay separate in {index}");
+    }
+    let Item::TraitDeclaration(show) = &module.items[6] else {
+        panic!("expected trait")
+    };
+    assert_eq!(show.members.len(), 2);
+    assert!(matches!(value(7), Expression::Name(_)));
+    assert!(matches!(&module.items[8], Item::Expression(Expression::Name(_))));
+}
+
+#[test]
+fn rejects_tab_indentation_where_it_decides_continuation() {
+    let error = parse("let total = 1\n\t+ 2\n").expect_err("a tab-indented continuation");
+    assert!(error.message.contains("tabs"), "{}", error.message);
+    assert_eq!(error.location.line, 2);
+    let error = parse("def f = () => {\n\tlet a = g\n\ta\n}\n").expect_err("tab-indented statements");
+    assert!(error.message.contains("tabs"), "{}", error.message);
+    assert!(parse("let a = \"\tquoted\"\n\n").is_ok());
+}

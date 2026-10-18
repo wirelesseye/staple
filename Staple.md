@@ -646,6 +646,30 @@ a source file does not change its text. Newlines also separate adjacent
 statements where they would otherwise form a single expression. A semicolon may
 be written after any item as an explicit separator, including after the last item in a sequence.
 
+A line indented further than the first token of the current statement
+continues that statement instead of ending it. The statement is the innermost
+item, block item, trait or implementation member, or extern binding:
+
+```staple
+let total = first
+    + second
+    + third
+tail marker name alpha
+    beta
+```
+
+Every continuation line is compared with the statement's first token, so
+consecutive continuation lines may share one indentation. A line at or left of
+that column ends the statement as before, and a block's statements are each
+measured from their own first token. The same rule applies wherever a newline
+would otherwise end an expression, type, pattern argument, pipe stage, or
+macro argument run, so a trailing top-level `Sequence` macro parameter also
+captures arguments on indented continuation lines. Indentation is measured in
+characters; a tab in the indentation of a line whose column decides whether it
+continues a statement, or of that statement's own line, is rejected, so indent
+with spaces. The formatter indents continuation lines one level deeper than
+their statement.
+
 Line comments begin with `//` and continue to the end of the line. Block
 comments are delimited by `/*` and `*/`, may span multiple lines, and nest, so
 every `/*` inside a block comment must be balanced by a matching `*/`.
