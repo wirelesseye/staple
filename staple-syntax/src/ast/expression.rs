@@ -19,6 +19,7 @@ pub enum Expression {
     Index(IndexExpression),
     Unary(UnaryExpression),
     Try(TryExpression),
+    Conversion(Box<ConversionExpression>),
     Binary(BinaryExpression),
     Logical(LogicalExpression),
     SyntaxArgument(SyntaxArgumentExpression),
@@ -53,6 +54,7 @@ impl Expression {
             Self::Index(expression) => &expression.syntax,
             Self::Unary(expression) => &expression.syntax,
             Self::Try(expression) => &expression.syntax,
+            Self::Conversion(expression) => &expression.syntax,
             Self::Binary(expression) => &expression.syntax,
             Self::Logical(expression) => &expression.syntax,
             Self::SyntaxArgument(expression) => &expression.syntax,
@@ -282,6 +284,16 @@ pub struct TryExpression {
     pub syntax: Syntax,
     pub operator_syntax: Syntax,
     pub operand: Box<Expression>,
+}
+
+/// A `value as Type` conversion. It is rewritten to
+/// `Convert.convert.<_, Type> value` before name resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversionExpression {
+    pub syntax: Syntax,
+    pub operator_syntax: Syntax,
+    pub value: Box<Expression>,
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

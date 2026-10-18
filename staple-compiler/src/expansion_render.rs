@@ -491,6 +491,11 @@ fn render_expr(program: &Program, expression: &Expression) -> String {
             render_expr(program, &unary.operand),
         ),
         Expression::Try(try_) => format!("{} ?", render_expr(program, &try_.operand)),
+        Expression::Conversion(conversion) => format!(
+            "{} as {}",
+            render_expr(program, &conversion.value),
+            conversion.ty
+        ),
         Expression::Binary(binary) => format!(
             "{} {} {}",
             render_expr(program, &binary.left),
@@ -762,6 +767,7 @@ fn expr_has_generated(expression: &Expression) -> bool {
         }
         Expression::Unary(unary) => expr_has_generated(&unary.operand),
         Expression::Try(try_) => expr_has_generated(&try_.operand),
+        Expression::Conversion(conversion) => expr_has_generated(&conversion.value),
         Expression::Logical(logical) => {
             expr_has_generated(&logical.left) || expr_has_generated(&logical.right)
         }

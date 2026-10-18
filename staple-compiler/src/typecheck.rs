@@ -6375,6 +6375,7 @@ impl TypeChecker {
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
             Expression::Try(_) => unreachable!("try expression reached type checking"),
+            Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
             Expression::Name(name) => {
                 let state_cell = self.state_cell_symbol(module, name.syntax.id);
                 if let Some(symbol) = state_cell {
@@ -7263,6 +7264,7 @@ impl TypeChecker {
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
             Expression::Try(_) => unreachable!("try expression reached type checking"),
+            Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
         };
         // Retained schemes are source templates even when this occurrence
         // has already been instantiated at an ordinary function type.
@@ -7696,6 +7698,7 @@ impl TypeChecker {
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
             Expression::Try(_) => unreachable!("try expression reached type checking"),
+            Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
         }
     }
 
@@ -9288,6 +9291,7 @@ impl TypeChecker {
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
             Expression::Try(_) => unreachable!("try expression reached type checking"),
+            Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
             Expression::Function(function) => {
                 let Some(function_id) = module.function_for(function.syntax.id) else {
                     return CheckedType::Error;
@@ -14532,11 +14536,71 @@ impl TypeChecker {
             return CheckedType::Error;
         }
         let mut substitutions = HashMap::new();
+        let mut arguments = Vec::new();
+        let mut partial = Vec::new();
         for (parameter, argument) in parameters.iter().zip(&application.arguments) {
             let actual = self.resolve_source_type(module, argument);
             if actual == CheckedType::Inferred {
                 continue;
             }
+            if contains_inferred_type(&actual) {
+                partial.push((parameter, argument, actual));
+            } else {
+                arguments.push((parameter, argument, actual));
+            }
+        }
+        // An argument with nested `_` holes (`RawPtr _`) is completed from
+        // the expected type, as an ascription's holes are. One the context
+        // cannot complete is left to ordinary inference.
+        if !partial.is_empty() {
+            for (parameter, _, actual) in &arguments {
+                infer_type_parameters_mode(true, parameter, actual, &mut substitutions);
+            }
+            // A callee's expected result is the caller's context; its
+            // expected parameter may still be an uninstantiated argument type,
+            // so it only fills what the result leaves open.
+            let template = substitute_type(raw.clone(), &substitutions);
+            let mut provisional = substitutions.clone();
+            if let Some(expected) = expected {
+                if let (CheckedType::Function(template), CheckedType::Function(expected)) =
+                    (&template, expected)
+                {
+                    infer_type_parameters_for_expected(
+                        &template.result,
+                        &expected.result,
+                        &mut provisional,
+                    );
+                }
+                let mut whole = provisional.clone();
+                infer_type_parameters_for_expected(&template, expected, &mut whole);
+                for (id, ty) in whole {
+                    provisional.entry(id).or_insert(ty);
+                }
+            }
+            substitutions.clear();
+            for (parameter, argument, actual) in partial {
+                let candidate = substitute_type(parameter.clone(), &provisional);
+                if contains_type_parameter(&candidate) {
+                    continue;
+                }
+                match merge_types(actual.clone(), candidate.clone()) {
+                    Some(merged) if !contains_inferred_type(&merged) => {
+                        arguments.push((parameter, argument, merged));
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.diagnostics.push(Diagnostic::new(
+                            argument.syntax().span.clone(),
+                            format!(
+                                "compile-time argument `{actual}` conflicts with the expected `{candidate}`"
+                            ),
+                        ));
+                        return CheckedType::Error;
+                    }
+                }
+            }
+        }
+        for (parameter, argument, actual) in arguments {
             if !infer_type_parameters_mode(true, parameter, &actual, &mut substitutions) {
                 self.diagnostics.push(Diagnostic::new(
                     argument.syntax().span.clone(),
@@ -19864,6 +19928,7 @@ fn expression_reads_reactive(
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
         Expression::Unary(_) => unreachable!("unary expression reached type checking"),
         Expression::Try(_) => unreachable!("try expression reached type checking"),
+        Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
     }
 }
 
@@ -19942,6 +20007,7 @@ fn collect_value_bindings(module: &ResolvedModule) -> Vec<Binding> {
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
             Expression::Try(_) => unreachable!("try expression reached type checking"),
+            Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
         }
     }
     fn item_value_bindings(item: &Item, bindings: &mut Vec<Binding>) {
@@ -20112,6 +20178,7 @@ fn expression_mentions_symbols(
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
         Expression::Unary(_) => unreachable!("unary expression reached type checking"),
         Expression::Try(_) => unreachable!("try expression reached type checking"),
+        Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
     }
 }
 
@@ -20189,6 +20256,7 @@ fn expression_contains_assignment(expression: &Expression) -> bool {
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
         Expression::Unary(_) => unreachable!("unary expression reached type checking"),
         Expression::Try(_) => unreachable!("try expression reached type checking"),
+        Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
     }
 }
 
@@ -20394,6 +20462,7 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
             Expression::Try(_) => unreachable!("try expression reached type checking"),
+            Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
         }
     }
 

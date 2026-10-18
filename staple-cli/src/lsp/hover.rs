@@ -378,6 +378,9 @@ impl Collector<'_> {
             Expression::Try(unary) => {
                 self.collect_expression_declarations(&unary.operand);
             }
+            Expression::Conversion(conversion) => {
+                self.collect_expression_declarations(&conversion.value);
+            }
             Expression::Binary(binary) => {
                 self.collect_expression_declarations(&binary.left);
                 self.collect_expression_declarations(&binary.right);
@@ -1660,6 +1663,10 @@ impl Collector<'_> {
             }
             Expression::Try(unary) => {
                 self.expression(&unary.operand);
+            }
+            Expression::Conversion(conversion) => {
+                self.expression(&conversion.value);
+                self.ty(&conversion.ty);
             }
             Expression::Binary(binary) => {
                 self.expression(&binary.left);

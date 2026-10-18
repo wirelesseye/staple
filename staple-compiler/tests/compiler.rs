@@ -12105,6 +12105,108 @@ fn as_syntax_requires_an_infallible_conversion() {
 }
 
 #[test]
+fn local_items_shadow_implicitly_imported_items_of_every_kind() {
+    // The local type hides the prelude's `List` companion namespace too.
+    let diagnostics = TypeChecker::new()
+        .check(resolve("type List\nList.new ()\n"))
+        .expect_err_diagnostics("a local `List` has no companion `new`");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("no element named `new`")),
+        "{diagnostics:?}"
+    );
+    // A local value hides the prelude's type of the same name.
+    let diagnostics = resolve_result("def List = 3\nlet values: List I32 = List.new ()\n")
+        .expect_err_diagnostics("a local `List` value hides the prelude `List` type");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "unknown type `List`"),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn explicitly_imported_items_shadow_implicitly_imported_items() {
+    let diagnostics = resolve_result("use std.option.Option as List\nlet values = List.new ()\n")
+        .expect_err_diagnostics("an explicitly imported `List` hides the prelude `List`");
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.message.contains("duplicate")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn desugared_syntax_ignores_local_items_named_after_standard_items() {
+    type_check(concat!(
+        "use std.result.Ok as Success\n",
+        "type Convert\n",
+        "type Try\n",
+        "type Ok\n",
+        "type Eq\n",
+        "type PartialOrd\n",
+        "type Bool\n",
+        "type Add\n",
+        "def range = 1\n",
+        "def range_inclusive = 2\n",
+        "def parse = (x: I32) => Result I32 String :: if (x > 0) { Success x } else { \"negative\" }\n",
+        "def twice = (x: I32) => Result I32 String :: {\n",
+        "    let y = parse x ?\n",
+        "    parse (y + y)\n",
+        "}\n",
+        "let narrow = (I32 :: 42)\n",
+        "let wide: I64 = narrow as I64\n",
+        "let compared = (narrow == 42) && (narrow < 50) || (narrow != 3)\n",
+        "let exclusive = 1 .. 3\n",
+        "let inclusive = 1 ..= 3\n",
+    ));
+}
+
+#[test]
+fn nested_holes_in_explicit_type_arguments_infer_from_the_expected_type() {
+    type_check(concat!(
+        "use std.ptr.(RawPtr)\n",
+        "def identity = <T> move value: T => value\n",
+        "let value: Option I32 = identity.<Option _> (Some 1)\n",
+        "let pointer: RawPtr I32 = (USize :: 4096) as RawPtr _\n",
+        "let pair: (I32, String) = (I32 :: 1, \"pair\") as (I32, _)\n",
+    ));
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "use std.ptr.(RawPtr)\nlet wide: I64 = (USize :: 4096) as RawPtr _\n",
+        ))
+        .expect_err_diagnostics("a partial argument must agree with the expected type");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.message
+            == "compile-time argument `RawPtr _` conflicts with the expected `I64`"),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn imports_that_clash_with_local_definitions_name_the_conflict() {
+    for source in [
+        "use std.list.List\ntype List\n",
+        "type List\nuse std.list.List\n",
+        "use std.list.List\ndef List = 1\n",
+        "use std.list.List\ntype List = wrap I32\n",
+    ] {
+        let diagnostics = resolve_result(source).expect_err_diagnostics("the import must clash");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message.as_str())
+                .collect::<Vec<_>>(),
+            ["import of `List` conflicts with a definition of the same name in this module"],
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn as_syntax_consumes_move_only_sources() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(

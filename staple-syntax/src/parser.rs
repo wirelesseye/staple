@@ -3240,7 +3240,7 @@ impl Grammar {
     }
 
     /// Parses left-associative `value as Type` between prefix operators and
-    /// multiplication, desugaring it to `Type :: Convert.convert value`.
+    /// multiplication.
     fn parse_conversion_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let mut expression = self.parse_unary_expression()?;
@@ -3252,14 +3252,7 @@ impl Grammar {
             if !self.eat(TokenKind::As) {
                 break;
             }
-            // Give synthesized references their own IDs and token text while
-            // anchoring diagnostics at the source `as` keyword.
-            let mut name_syntax = self.syntax(operator_start);
-            name_syntax.tokens = Arc::from(lex("Convert"));
-            name_syntax.token_range = 0..name_syntax.tokens.len();
-            let mut access_syntax = self.syntax(operator_start);
-            access_syntax.tokens = Arc::from(lex("Convert.convert"));
-            access_syntax.token_range = 0..access_syntax.tokens.len();
+            let operator_syntax = self.syntax(operator_start);
 
             let newline_terminates_type = self.newline_terminates_type;
             let any_newline_terminates_type = self.any_newline_terminates_type;
@@ -3272,23 +3265,10 @@ impl Grammar {
             self.any_newline_terminates_type = any_newline_terminates_type;
             self.conversion_target = conversion_target;
             let ty = ty?;
-            let callee = Expression::Access(AccessExpression {
-                syntax: access_syntax,
-                value: Box::new(Expression::Name(NameExpression {
-                    syntax: name_syntax,
-                    name: "Convert".to_owned(),
-                })),
-                accessor: Accessor::Name("convert".to_owned()),
-            });
-            let value = Expression::Call(CallExpression {
-                spread: false,
+            expression = Expression::Conversion(Box::new(ConversionExpression {
                 syntax: self.syntax(start),
-                callee: Box::new(callee),
-                argument: Box::new(expression),
-            });
-            expression = Expression::TypeAscription(Box::new(TypeAscriptionExpression {
-                syntax: self.syntax(start),
-                value: Box::new(value),
+                operator_syntax,
+                value: Box::new(expression),
                 ty,
             }));
         }

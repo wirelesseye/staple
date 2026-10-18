@@ -745,6 +745,13 @@ Core names remain available. `use std.prelude.*` explicitly restores the
 prelude regardless of either opt-out. A module-level opt-out does not propagate
 to inline child modules.
 
+Implicitly imported core and prelude items yield to the module's own items and
+explicit imports. A module that defines or explicitly imports a name, in any
+namespace, hides every implicit item of that name: after a local `type List`,
+`List` no longer refers to the prelude's `List` type, constructor, or companion
+namespace, so `List.new ()` is an error. An explicit import that names the same
+item as a definition in the same module is an error.
+
 Packages conditionally include items with the compiler-provided
 `@feature` modifier declared by `std.core`:
 
@@ -1263,13 +1270,15 @@ no user-definable operator or infix-function syntax. Each operator desugars
 directly to a call against a standard library trait. The traits in
 `std.ops` (`Add`, `Subtract`, `Multiply`, `Divide`, `Neg`, and `Not`)
 and their methods require explicit imports; operator syntax works without
-these imports:
+these imports. Every name an operator desugars to resolves at its
+standard-library definition, so local items or imports named `Convert`, `Eq`,
+`Try`, `Ok`, `range`, and so on never change what an operator means:
 
 | Operator(s) | Precedence | Associativity | Desugars to |
 |---|---|---|---|
 | `?` (postfix) | 9 | — | `match (Try.branch operand) { Ok output => output, residual => return residual }` |
 | `-`, `!` (prefix) | 8 | — | `Neg.negate`, `Not.not` |
-| `as` | 7.5 | left | `Type :: Convert.convert expression` |
+| `as` | 7.5 | left | `Convert.convert.<_, Type> expression` |
 | `*`, `/` | 7 | left | `Multiply.multiply`, `Divide.divide` |
 | `+`, `-` | 6 | left | `Add.add`, `Subtract.subtract` |
 | `==`, `!=`, `<`, `<=`, `>`, `>=` | 4 | none | `Eq.eq`/`Eq.ne`, `PartialOrd.lt`/`le`/`gt`/`ge` |
@@ -1970,8 +1979,10 @@ let int_identity: I32 -> I32 = identity
 ```
 
 Type arguments can also be supplied explicitly with `.<…>`, which binds like
-member access, before function application. `_` leaves one to inference.
-Without a value argument, the result is the instantiated function:
+member access, before function application. `_` leaves one to inference; a
+`_` nested inside an argument (`RawPtr _`) is completed from the expected type,
+as in an ascription. Without a value argument, the result is the instantiated
+function:
 
 ```staple
 let list = List.new.<I32> ()
@@ -4292,7 +4303,7 @@ let same = writable == (pointer as RawMutPtr I32)
 ```
 
 
-`expression as Type` is syntactic sugar for `Type :: Convert.convert expression`.
+`expression as Type` is syntactic sugar for `Convert.convert.<_, Type> expression`.
 It uses `Convert`, so it requires an infallible conversion implementation.
 It binds tighter than arithmetic and comparisons, but looser than prefix
 operators, function application, and access. Chained conversions associate

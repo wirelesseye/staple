@@ -840,6 +840,10 @@ impl<'a> Classifier<'a> {
             Expression::Try(value) => {
                 self.expression(&value.operand, resolved);
             }
+            Expression::Conversion(value) => {
+                self.expression(&value.value, resolved);
+                self.ty(&value.ty, resolved);
+            }
             Expression::Binary(value) => {
                 self.expression(&value.left, resolved);
                 self.expression(&value.right, resolved);
