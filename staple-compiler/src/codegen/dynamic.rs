@@ -151,6 +151,9 @@ impl<'program, 'context> Backend<'program, 'context> {
     /// at runtime, so reserve padding and align the resulting byte address.
     /// The active builder must still be in the entry block: layout loads must
     /// dominate the allocation, and loops must never repeat stack allocation.
+    /// The value starts zeroed: field stores never write product padding, and
+    /// whole-value copies would otherwise carry stale stack bytes (including
+    /// old pointers the conservative collector would retain) into the result.
     pub(crate) fn allocate_dynamic_value(
         &self,
         descriptor: PointerValue<'context>,
@@ -198,13 +201,23 @@ impl<'program, 'context> Backend<'program, 'context> {
             .builder
             .build_int_mul(units, layout.align, "dynamic.aligned.address")
             .map_err(compiler_diagnostic)?;
-        self.builder
+        let value = self
+            .builder
             .build_int_to_ptr(
                 aligned,
                 self.context.ptr_type(AddressSpace::default()),
                 "dynamic.value",
             )
-            .map_err(compiler_diagnostic)
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_memset(
+                value,
+                1,
+                self.context.i8_type().const_zero(),
+                layout.store_size,
+            )
+            .map_err(compiler_diagnostic)?;
+        Ok(value)
     }
 
     pub(crate) fn dynamic_byte_offset(
