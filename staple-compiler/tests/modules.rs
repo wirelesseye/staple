@@ -1,3 +1,8 @@
+// Test binaries compile the standard library many times over; mimalloc keeps
+// the compiler's small allocations from dominating the suite.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

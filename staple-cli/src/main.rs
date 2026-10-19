@@ -8,6 +8,11 @@ mod fmt;
 mod lsp;
 mod package;
 
+// The compiler allocates and frees many small type and syntax nodes; mimalloc
+// handles that pattern far faster than the system allocator (notably glibc's).
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// The result of a single `staple` invocation, shared by every subcommand.
 #[derive(Debug)]
 pub enum Outcome {

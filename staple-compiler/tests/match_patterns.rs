@@ -2,6 +2,11 @@
 //! typed wildcards select one alternative, and a match that binds nothing
 //! non-`Copy` borrows a named subject instead of consuming it.
 
+// Test binaries compile the standard library many times over; mimalloc keeps
+// the compiler's small allocations from dominating the suite.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use inkwell::context::Context;
 use staple_compiler::{
     CodeGenerator, LoweredModule, Lowerer, NameResolver, ProgramLoader, TypeChecker,

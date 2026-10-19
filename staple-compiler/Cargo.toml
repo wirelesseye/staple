@@ -7,3 +7,6 @@ edition = "2024"
 staple-project = { path = "../staple-project" }
 staple-syntax = { path = "../staple-syntax" }
 inkwell = { version = "0.10.0", features = ["llvm21-1"] }
+
+[dev-dependencies]
+mimalloc = { version = "0.1", default-features = false }

@@ -2,6 +2,11 @@
 //! root package are emitted as independent objects that must link into the
 //! same executable the single-module build produces.
 
+// Test binaries compile the standard library many times over; mimalloc keeps
+// the compiler's small allocations from dominating the suite.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use inkwell::{context::Context, memory_buffer::MemoryBuffer, module::Linkage, values::BasicValue};
 use staple_compiler::{
     CodeGenerator, EmissionUnit, LoweredModule, Lowerer, NameResolver, ProgramLoader, TypeChecker,

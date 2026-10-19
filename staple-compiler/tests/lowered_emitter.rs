@@ -1,3 +1,8 @@
+// Test binaries compile the standard library many times over; mimalloc keeps
+// the compiler's small allocations from dominating the suite.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::path::Path;
 
 use inkwell::context::Context;

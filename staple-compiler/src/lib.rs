@@ -26,6 +26,10 @@ mod resolve;
 mod specialization;
 mod typecheck;
 
+#[cfg(test)]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub use codegen::*;
 pub use expansion_render::render_expanded_module;
 pub use lower::*;
