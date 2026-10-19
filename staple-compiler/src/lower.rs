@@ -25091,8 +25091,12 @@ mod tests {
                         (&mut value as *mut u32).cast(),
                     );
                 }
+                // Only `size` bytes of the `T` field are value; the rest of the
+                // word is product padding, which the closure copies out from
+                // uninitialized stack storage.
+                let value_bytes = u32::MAX >> (32 - 8 * size);
                 assert_eq!(
-                    result,
+                    [result[0], result[1] & value_bytes],
                     [42 + if shared_cell { invocation as u32 } else { 0 }, value]
                 );
             }
