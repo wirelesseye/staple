@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::lexer::lex;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 fn has_unescaped_dollar(content: &str) -> bool {
     let mut escaped = false;
@@ -243,10 +243,7 @@ fn parse_fragment<T>(
     parse: impl FnOnce(&mut Grammar) -> Result<T, ParseError>,
 ) -> Result<T, ParseError> {
     let all_tokens = &syntax.tokens;
-    let source = all_tokens
-        .iter()
-        .map(|token| token.text.as_str())
-        .collect::<String>();
+    let (source, line_starts) = fragment_source(all_tokens);
     let mut tokens = syntax.tokens().to_vec();
     let mut first = syntax.token_range().start;
     if grouped {
@@ -267,9 +264,10 @@ fn parse_fragment<T>(
         Span::User { source, .. } => source.clone(),
         Span::Compiler => None,
     };
-    let mut grammar = Grammar::new(
+    let mut grammar = Grammar::with_line_starts(
         Arc::from(tokens),
-        Arc::from(source),
+        source,
+        line_starts,
         *next_syntax_id,
         source_name,
     );
@@ -282,6 +280,49 @@ fn parse_fragment<T>(
     }
     *next_syntax_id = grammar.next_syntax_id;
     Ok(value)
+}
+
+/// Fragment parses that recently ran over one backing token stream, with the
+/// source text and line table reconstructed from it.
+type FragmentSources = Vec<(Weak<[SyntaxToken]>, Arc<str>, Arc<[usize]>)>;
+
+thread_local! {
+    static FRAGMENT_SOURCES: RefCell<FragmentSources> = const { RefCell::new(Vec::new()) };
+}
+
+/// Streams whose reconstructed source stays cached per thread. Macro
+/// expansion re-parses many fragments of the same few files in turn.
+const FRAGMENT_SOURCE_CACHE: usize = 16;
+
+/// Returns the source text and line table of a fragment's whole backing token
+/// stream. Token spans index into that text, so every fragment parse needs it,
+/// but rebuilding it scans the entire file; macro argument matching parses
+/// thousands of fragments of the same file, so the result is cached.
+fn fragment_source(tokens: &Arc<[SyntaxToken]>) -> (Arc<str>, Arc<[usize]>) {
+    let stream = Arc::downgrade(tokens);
+    FRAGMENT_SOURCES.with_borrow_mut(|cache| {
+        if let Some(index) = cache
+            .iter()
+            .position(|(cached, ..)| Weak::ptr_eq(cached, &stream))
+        {
+            let entry = cache.remove(index);
+            let found = (Arc::clone(&entry.1), Arc::clone(&entry.2));
+            cache.push(entry);
+            return found;
+        }
+        let source = tokens
+            .iter()
+            .map(|token| token.text.as_str())
+            .collect::<String>();
+        let line_table = Arc::from(line_starts(&source));
+        let source = Arc::from(source);
+        cache.retain(|(stream, ..)| stream.strong_count() > 0);
+        if cache.len() >= FRAGMENT_SOURCE_CACHE {
+            cache.remove(0);
+        }
+        cache.push((stream, Arc::clone(&source), Arc::clone(&line_table)));
+        (source, line_table)
+    })
 }
 
 fn fragment_error(syntax: &Syntax, message: &'static str) -> ParseError {
@@ -315,7 +356,7 @@ struct Grammar {
     position: usize,
     source: Arc<str>,
     source_len: usize,
-    line_starts: Vec<usize>,
+    line_starts: Arc<[usize]>,
     next_syntax_id: usize,
     newline_terminates_expression: bool,
     newline_terminates_type: bool,
@@ -350,7 +391,19 @@ impl Grammar {
         next_syntax_id: usize,
         source_name: Option<Arc<str>>,
     ) -> Self {
-        let line_starts = line_starts(&source);
+        let line_starts = Arc::from(line_starts(&source));
+        Self::with_line_starts(tokens, source, line_starts, next_syntax_id, source_name)
+    }
+
+    /// Creates a grammar cursor over `tokens` reusing an already computed line
+    /// table for `source`, so re-parsing part of a large source stays cheap.
+    fn with_line_starts(
+        tokens: Arc<[SyntaxToken]>,
+        source: Arc<str>,
+        line_starts: Arc<[usize]>,
+        next_syntax_id: usize,
+        source_name: Option<Arc<str>>,
+    ) -> Self {
         let source_len = source.len();
         Self {
             tokens,
@@ -3775,9 +3828,10 @@ impl Grammar {
             token.span.start += offset;
             token.span.end += offset;
         }
-        let mut grammar = Grammar::new(
+        let mut grammar = Grammar::with_line_starts(
             Arc::from(tokens),
             Arc::clone(&self.source),
+            Arc::clone(&self.line_starts),
             self.next_syntax_id,
             self.source_name.clone(),
         );

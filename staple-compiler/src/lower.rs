@@ -3195,6 +3195,9 @@ pub(crate) struct LoweredProgram {
     traits: Catalog<TraitId, LoweredTraitMetadata, LoweredTraitId>,
     trait_methods: Catalog<TraitMethodId, LoweredTraitMethodMetadata, LoweredTraitMethodId>,
     trait_implementations: Arena<LoweredTraitImplementationMetadata, LoweredTraitImplementationId>,
+    /// Transient lowering state: `trait_implementations` in the checker's
+    /// shape, built once for trait selection instead of on every query.
+    trait_selection_catalog: std::sync::OnceLock<instance_resolution::TraitSelectionCatalog>,
     calls: Arena<LoweredCall, LoweredCallId>,
     callable_values: Arena<LoweredCallableValue, LoweredCallableValueId>,
     /// The deduplicated source positions of `@track_caller` references.

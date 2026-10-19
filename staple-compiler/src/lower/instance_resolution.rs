@@ -8,6 +8,7 @@
 
 use super::internal_invariant;
 use std::cell::{Cell, RefCell};
+use std::sync::Arc;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use staple_syntax::Diagnostic;
@@ -1017,8 +1018,8 @@ fn contains_placeholder(value_type: &CheckedType) -> bool {
 /// consults `TypedModule`, LLVM state, or a runtime implementation search.
 struct TraitSelectionContext<'a> {
     program: &'a LoweredProgram,
-    implementations: Vec<CheckedTraitImplementation>,
-    implementation_ids: Vec<LoweredTraitImplementationId>,
+    implementations: Arc<[CheckedTraitImplementation]>,
+    implementation_ids: Arc<[LoweredTraitImplementationId]>,
     /// Substituted declared prerequisites in scope for this request.
     bounds: Vec<CheckedTraitBound>,
     visited: RefCell<Vec<(TraitId, Vec<CheckedType>)>>,
@@ -1030,8 +1031,16 @@ struct TraitSelectionContext<'a> {
     runtime: BTreeSet<TypeParameterId>,
 }
 
-impl<'a> TraitSelectionContext<'a> {
-    fn new(program: &'a LoweredProgram, bounds: Vec<CheckedTraitBound>) -> Self {
+/// The owned trait-implementation catalog in the checker's
+/// `CheckedTraitImplementation` shape, with each entry's lowered ID.
+#[derive(Debug, Clone)]
+pub(crate) struct TraitSelectionCatalog {
+    implementations: Arc<[CheckedTraitImplementation]>,
+    implementation_ids: Arc<[LoweredTraitImplementationId]>,
+}
+
+impl TraitSelectionCatalog {
+    fn build(program: &LoweredProgram) -> Self {
         let mut implementations = Vec::new();
         let mut implementation_ids = Vec::new();
         for (id, metadata) in program.trait_implementations.iter() {
@@ -1046,6 +1055,34 @@ impl<'a> TraitSelectionContext<'a> {
             });
             implementation_ids.push(id);
         }
+        TraitSelectionCatalog {
+            implementations: implementations.into(),
+            implementation_ids: implementation_ids.into(),
+        }
+    }
+
+    /// The catalog for `program`, converted once and then shared: selection
+    /// runs for every owned binding, and copying every implementation's types
+    /// per query dominated lowering. The catalog is complete before selection
+    /// starts; a later addition falls back to a fresh conversion.
+    fn of(program: &LoweredProgram) -> Self {
+        let cached = program
+            .trait_selection_catalog
+            .get_or_init(|| Self::build(program));
+        if cached.implementations.len() == program.trait_implementations.len() {
+            cached.clone()
+        } else {
+            Self::build(program)
+        }
+    }
+}
+
+impl<'a> TraitSelectionContext<'a> {
+    fn new(program: &'a LoweredProgram, bounds: Vec<CheckedTraitBound>) -> Self {
+        let TraitSelectionCatalog {
+            implementations,
+            implementation_ids,
+        } = TraitSelectionCatalog::of(program);
         TraitSelectionContext {
             program,
             implementations,
@@ -1391,7 +1428,7 @@ impl<'a> TraitSelectionContext<'a> {
                 })
             })
             .collect::<Vec<_>>();
-        for implementation in &self.implementations {
+        for implementation in self.implementations.iter() {
             if implementation.trait_id != trait_id
                 || implementation.arguments.len() != arguments.len()
             {
@@ -5197,10 +5234,12 @@ mod tests {
         // completion; the checker's coherence rules prevent this in a real
         // program, so the defensive ambiguity path is exercised directly.
         conflicting.arguments = vec![CheckedType::I32, CheckedType::I32, nominal(5, "Other")];
-        context.implementations.push(conflicting);
-        context
-            .implementation_ids
-            .push(LoweredTraitImplementationId::for_test(0));
+        let mut implementations = context.implementations.to_vec();
+        implementations.push(conflicting);
+        context.implementations = implementations.into();
+        let mut implementation_ids = context.implementation_ids.to_vec();
+        implementation_ids.push(LoweredTraitImplementationId::for_test(0));
+        context.implementation_ids = implementation_ids.into();
         let error = context
             .select_method(
                 convert,
