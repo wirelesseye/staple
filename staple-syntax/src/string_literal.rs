@@ -49,3 +49,9 @@ mod tests {
         assert!(decode("\"$5\"").is_err());
     }
 }
+
+/// Decodes the literal text between a string template's interpolations, as
+/// recorded in `StringTemplatePart::Literal`.
+pub fn decode_template_text(raw: &str) -> Result<String, String> {
+    decode(&format!("\"{raw}\""))
+}

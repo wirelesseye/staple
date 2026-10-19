@@ -487,6 +487,8 @@ pub struct StringTemplateExpression {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StringTemplatePart {
+    /// Literal text between interpolations, as written (escapes undecoded);
+    /// decode it with [`crate::string_literal::decode_template_text`].
     Literal(String),
     Interpolation(StringInterpolation),
 }

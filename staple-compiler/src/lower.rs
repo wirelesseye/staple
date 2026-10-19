@@ -6732,8 +6732,10 @@ impl LoweredProgram {
         let mut parts = Vec::with_capacity(template.parts.len());
         for part in &template.parts {
             match part {
-                staple_syntax::StringTemplatePart::Literal(literal) => {
-                    parts.push(LoweredStringTemplatePart::Literal(literal.clone()));
+                staple_syntax::StringTemplatePart::Literal(raw) => {
+                    let literal = staple_syntax::string_literal::decode_template_text(raw)
+                        .expect("the parser validates template literal escapes");
+                    parts.push(LoweredStringTemplatePart::Literal(literal));
                 }
                 staple_syntax::StringTemplatePart::Interpolation(interpolation) => {
                     let expression =
