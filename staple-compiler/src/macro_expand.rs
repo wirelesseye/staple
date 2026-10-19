@@ -9590,8 +9590,8 @@ pub(crate) fn function_value_signature(expression: &Expression) -> Option<Type> 
     Some(Type::Function(staple_syntax::FunctionType {
         syntax: function.syntax.clone(),
         parameter: Box::new(function.pattern.ty()),
-        mutations: Vec::new(),
-        moves: Vec::new(),
+        mutable_marker: None,
+        moved_marker: None,
         effects: function
             .effect_lower_bound
             .clone()
@@ -13503,8 +13503,11 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
             for resource in &mut function.effects.resources {
                 freshen_type(expander, &mut resource.value_type, module, mark);
             }
-            for mutation in &mut function.mutations {
-                expander.freshen_syntax(&mut mutation.syntax, module, mark);
+            for marker in [&mut function.mutable_marker, &mut function.moved_marker]
+                .into_iter()
+                .flatten()
+            {
+                expander.freshen_syntax(marker, module, mark);
             }
             freshen_type(expander, &mut function.result, module, mark);
         }

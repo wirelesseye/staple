@@ -92,8 +92,8 @@ impl fmt::Display for Type {
             Self::Function(function) => {
                 let parameter = format_mutable_parameter(
                     &function.parameter,
-                    &function.mutations,
-                    &function.moves,
+                    &function.mutations(),
+                    &function.moves(),
                 );
                 if function.effects.is_empty() {
                     write!(formatter, "{parameter} -> {}", function.result)
@@ -327,9 +327,11 @@ pub struct TypeElement {
     pub ty: Type,
     pub default: Option<Box<super::Expression>>,
     pub spread: bool,
-    /// Temporary parser marker, normalized into the enclosing function type.
+    /// Whether this element of a function parameter is marked `mut`; see
+    /// [`FunctionType::mutations`].
     pub mutable: bool,
-    /// Temporary parser marker, normalized into the enclosing function type.
+    /// Whether this element of a function parameter is marked `move`; see
+    /// [`FunctionType::moves`].
     pub moved: bool,
 }
 
@@ -349,10 +351,56 @@ pub struct ArrayType {
 pub struct FunctionType {
     pub syntax: Syntax,
     pub parameter: Box<Type>,
-    pub mutations: Vec<MutationTarget>,
-    pub moves: Vec<MutationTarget>,
+    /// The `mut` keyword marking the whole parameter, when written. Marks on
+    /// individual product elements stay on those elements.
+    pub mutable_marker: Option<Syntax>,
+    /// The `move` keyword marking the whole parameter, when written.
+    pub moved_marker: Option<Syntax>,
     pub effects: EffectSet,
     pub result: Box<Type>,
+}
+
+impl FunctionType {
+    /// The parameter positions marked `mut`: the whole parameter, or each
+    /// marked element of a product parameter.
+    pub fn mutations(&self) -> Vec<MutationTarget> {
+        marked_targets(self.mutable_marker.as_ref(), &self.parameter, |element| {
+            element.mutable
+        })
+    }
+
+    /// The parameter positions marked `move`, like [`Self::mutations`].
+    pub fn moves(&self) -> Vec<MutationTarget> {
+        marked_targets(self.moved_marker.as_ref(), &self.parameter, |element| {
+            element.moved
+        })
+    }
+}
+
+fn marked_targets(
+    whole: Option<&Syntax>,
+    parameter: &Type,
+    marked: impl Fn(&TypeElement) -> bool,
+) -> Vec<MutationTarget> {
+    if let Some(syntax) = whole {
+        return vec![MutationTarget {
+            syntax: syntax.clone(),
+            target: MutationTargetKind::Whole,
+        }];
+    }
+    let Type::Product(product) = parameter else {
+        return Vec::new();
+    };
+    product
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, element)| marked(element))
+        .map(|(index, element)| MutationTarget {
+            syntax: element.syntax.clone(),
+            target: MutationTargetKind::Element(index),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

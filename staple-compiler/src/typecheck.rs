@@ -15790,8 +15790,8 @@ impl TypeChecker {
             }
             Type::Function(function) => {
                 let mut parameter_source = function.parameter.as_ref().clone();
-                let source_mutations = function.mutations.clone();
-                let source_moves = function.moves.clone();
+                let source_mutations = function.mutations();
+                let source_moves = function.moves();
                 if let Type::Product(product) = &mut parameter_source {
                     let singleton = !product.variadic && product.elements.len() == 1;
                     for slot in &mut product.elements {

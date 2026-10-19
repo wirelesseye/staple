@@ -27,8 +27,8 @@ fn push_template_literal(
     if raw.is_empty() {
         return Ok(());
     }
-    let literal = format!("\"{raw}\"");
-    let decoded = crate::string_literal::decode(&literal).map_err(|message| ParseError {
+    // Decoding only validates the escapes; the part keeps its raw text.
+    crate::string_literal::decode_template_text(raw).map_err(|message| ParseError {
         offset: syntax.span.to_range().start,
         location: match &syntax.span {
             Span::User {
@@ -39,7 +39,7 @@ fn push_template_literal(
         },
         message,
     })?;
-    parts.push(StringTemplatePart::Literal(decoded));
+    parts.push(StringTemplatePart::Literal(raw.to_owned()));
     Ok(())
 }
 
@@ -2538,20 +2538,24 @@ impl Grammar {
     }
 
     fn parse_non_juxtaposed_function_type(&mut self, start: usize) -> Result<Type, ParseError> {
-        let whole_mutable = self.eat(TokenKind::Mut);
-        let whole_moved = if whole_mutable {
+        let marker_start = self.position;
+        let mutable_marker = self.eat(TokenKind::Mut).then(|| self.syntax(marker_start));
+        let moved_marker = if mutable_marker.is_some() {
             if self.eat(TokenKind::Move) {
                 return Err(self.error("a parameter type cannot be marked both `mut` and `move`"));
             }
-            false
+            None
         } else if self.eat(TokenKind::Move) {
+            let marker = self.syntax(marker_start);
             if self.eat(TokenKind::Mut) {
                 return Err(self.error("a parameter type cannot be marked both `mut` and `move`"));
             }
-            true
+            Some(marker)
         } else {
-            false
+            None
         };
+        let whole_mutable = mutable_marker.is_some();
+        let whole_moved = moved_marker.is_some();
         let mut parameter = self.parse_type_union()?;
         if self.at(TokenKind::Star) && !self.conversion_target {
             return Err(self.error("juxtaposed parameters are now written `(A; B) -> R`"));
@@ -2561,28 +2565,17 @@ impl Grammar {
         }
         if self.at(TokenKind::Arrow) {
             let arrow = self.bump_token().expect("peeked arrow");
-            let mutations = if whole_mutable {
-                if contains_mutable_type_element(&parameter) {
-                    return Err(self.error("a whole mutable parameter cannot also mark individual product elements `mut`"));
-                }
-                vec![MutationTarget {
-                    syntax: self.syntax(start),
-                    target: MutationTargetKind::Whole,
-                }]
-            } else {
-                self.extract_parameter_mutations(&mut parameter)?
-            };
-            let moves = if whole_moved {
-                if contains_move_type_element(&parameter) {
-                    return Err(self.error("a whole move parameter cannot also mark individual product elements `move`"));
-                }
-                vec![MutationTarget {
-                    syntax: self.syntax(start),
-                    target: MutationTargetKind::Whole,
-                }]
-            } else {
-                self.extract_parameter_moves(&mut parameter)?
-            };
+            if whole_mutable && contains_mutable_type_element(&parameter) {
+                return Err(self.error(
+                    "a whole mutable parameter cannot also mark individual product elements `mut`",
+                ));
+            }
+            if whole_moved && contains_move_type_element(&parameter) {
+                return Err(self.error(
+                    "a whole move parameter cannot also mark individual product elements `move`",
+                ));
+            }
+            self.check_parameter_type_markers(&parameter)?;
             let resources = if self.at(TokenKind::LBrace) {
                 if self.tokens[self.next_non_trivia(self.position)].span.start != arrow.span.end {
                     return Err(
@@ -2597,8 +2590,8 @@ impl Grammar {
             Ok(Type::Function(FunctionType {
                 syntax: self.syntax(start),
                 parameter: Box::new(parameter),
-                mutations,
-                moves,
+                mutable_marker,
+                moved_marker,
                 effects: resources,
                 result: Box::new(result),
             }))
@@ -2668,46 +2661,17 @@ impl Grammar {
         })
     }
 
-    fn extract_parameter_mutations(
-        &mut self,
-        parameter: &mut Type,
-    ) -> Result<Vec<MutationTarget>, ParseError> {
+    /// Rejects `mut`/`move` nested below the direct elements of a function's
+    /// product parameter type.
+    fn check_parameter_type_markers(&self, parameter: &Type) -> Result<(), ParseError> {
         let Type::Product(product) = parameter else {
-            return Ok(Vec::new());
+            return Ok(());
         };
-        let mut mutations = Vec::new();
-        for (index, element) in product.elements.iter_mut().enumerate() {
-            if element.mutable {
-                element.mutable = false;
-                mutations.push(MutationTarget {
-                    syntax: element.syntax.clone(),
-                    target: MutationTargetKind::Element(index),
-                });
-            }
+        for element in &product.elements {
             if contains_mutable_type_element(&element.ty) {
                 return Err(self.error(
                     "`mut` is only allowed on a direct element of a function parameter type",
                 ));
-            }
-        }
-        Ok(mutations)
-    }
-
-    fn extract_parameter_moves(
-        &mut self,
-        parameter: &mut Type,
-    ) -> Result<Vec<MutationTarget>, ParseError> {
-        let Type::Product(product) = parameter else {
-            return Ok(Vec::new());
-        };
-        let mut moves = Vec::new();
-        for (index, element) in product.elements.iter_mut().enumerate() {
-            if element.moved {
-                element.moved = false;
-                moves.push(MutationTarget {
-                    syntax: element.syntax.clone(),
-                    target: MutationTargetKind::Element(index),
-                });
             }
             if contains_move_type_element(&element.ty) {
                 return Err(self.error(
@@ -2715,7 +2679,7 @@ impl Grammar {
                 ));
             }
         }
-        Ok(moves)
+        Ok(())
     }
 
     /// Parses an unordered structural sum, tighter than a function arrow.
@@ -4552,9 +4516,16 @@ fn contains_mutable_type_element(ty: &Type) -> bool {
             .iter()
             .any(|element| element.mutable || contains_mutable_type_element(&element.ty)),
         Type::Sum(sum) => sum.alternatives.iter().any(contains_mutable_type_element),
+        // A function type's own parameter marks are legitimate; only look
+        // below them.
         Type::Function(function) => {
-            contains_mutable_type_element(&function.parameter)
-                || contains_mutable_type_element(&function.result)
+            let parameter = match function.parameter.as_ref() {
+                Type::Product(product) => {
+                    product.elements.iter().any(|element| contains_mutable_type_element(&element.ty))
+                }
+                parameter => contains_mutable_type_element(parameter),
+            };
+            parameter || contains_mutable_type_element(&function.result)
         }
         Type::Application(application) => {
             contains_mutable_type_element(&application.callee)
@@ -4581,9 +4552,16 @@ fn contains_move_type_element(ty: &Type) -> bool {
             .iter()
             .any(|element| element.moved || contains_move_type_element(&element.ty)),
         Type::Sum(sum) => sum.alternatives.iter().any(contains_move_type_element),
+        // A function type's own parameter marks are legitimate; only look
+        // below them.
         Type::Function(function) => {
-            contains_move_type_element(&function.parameter)
-                || contains_move_type_element(&function.result)
+            let parameter = match function.parameter.as_ref() {
+                Type::Product(product) => {
+                    product.elements.iter().any(|element| contains_move_type_element(&element.ty))
+                }
+                parameter => contains_move_type_element(parameter),
+            };
+            parameter || contains_move_type_element(&function.result)
         }
         Type::Application(application) => {
             contains_move_type_element(&application.callee)

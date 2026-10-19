@@ -27,7 +27,12 @@ fn parses_string_templates_and_preserves_source() {
         StringTemplatePart::Interpolation(value)
             if value.format == StringInterpolationFormat::Debug
     ));
-    assert!(matches!(&template.parts[6], StringTemplatePart::Literal(value) if value == "; $5; "));
+    // Literal parts keep their escapes as written.
+    assert!(matches!(&template.parts[6], StringTemplatePart::Literal(value) if value == "; \\$5; "));
+    assert_eq!(
+        staple_syntax::string_literal::decode_template_text("; \\$5; ").unwrap(),
+        "; $5; "
+    );
     assert!(matches!(
         &template.parts[7],
         StringTemplatePart::Interpolation(value)
@@ -222,11 +227,11 @@ fn parses_fully_qualified_quote_expressions_losslessly() {
 fn parses_mutable_parameter_types_losslessly() {
     use staple_syntax::{MutationTarget, MutationTargetKind};
 
-    fn mutations(annotation: &Option<Type>) -> &[MutationTarget] {
+    fn mutations(annotation: &Option<Type>) -> Vec<MutationTarget> {
         let Some(Type::Function(function)) = annotation else {
             panic!("expected function annotation");
         };
-        &function.mutations
+        function.mutations()
     }
 
     let source = concat!(
@@ -243,7 +248,7 @@ fn parses_mutable_parameter_types_losslessly() {
         panic!("expected binding");
     };
     assert!(matches!(
-        mutations(&f1.annotation),
+        mutations(&f1.annotation).as_slice(),
         [MutationTarget {
             target: MutationTargetKind::Whole,
             ..
@@ -254,7 +259,7 @@ fn parses_mutable_parameter_types_losslessly() {
         panic!("expected binding");
     };
     assert!(matches!(
-        mutations(&f2.annotation),
+        mutations(&f2.annotation).as_slice(),
         [MutationTarget {
             target: MutationTargetKind::Element(0),
             ..
@@ -265,7 +270,7 @@ fn parses_mutable_parameter_types_losslessly() {
         panic!("expected binding");
     };
     assert!(matches!(
-        mutations(&f3.annotation),
+        mutations(&f3.annotation).as_slice(),
         [MutationTarget {
             target: MutationTargetKind::Element(0),
             ..
@@ -278,7 +283,7 @@ fn parses_mutable_parameter_types_losslessly() {
     let Some(Type::Function(function)) = &f4.annotation else {
         panic!("expected function annotation");
     };
-    assert_eq!(function.mutations.len(), 1);
+    assert_eq!(function.mutations().len(), 1);
     assert_eq!(function.effects.resources.len(), 1);
     assert!(function.effects.resources[0].mutable);
 
@@ -305,9 +310,9 @@ fn parses_marked_function_types_inside_parentheses() {
             panic!("expected a function type, got {ty:?}");
         };
         let targets = if moved {
-            &function.moves
+            &function.moves()
         } else {
-            &function.mutations
+            &function.mutations()
         };
         assert!(matches!(
             targets.as_slice(),
@@ -342,7 +347,7 @@ fn parses_marked_function_types_inside_parentheses() {
     let Some(Type::Function(run)) = &run.annotation else {
         panic!("expected function annotation");
     };
-    assert!(run.mutations.is_empty());
+    assert!(run.mutations().is_empty());
     let Type::Product(slots) = run.parameter.as_ref() else {
         panic!("expected slotted parameter");
     };
@@ -356,7 +361,7 @@ fn parses_marked_function_types_inside_parentheses() {
     let Some(Type::Function(call)) = &call.annotation else {
         panic!("expected function annotation");
     };
-    assert!(call.mutations.is_empty());
+    assert!(call.mutations().is_empty());
     whole_marked_function(&call.parameter, false);
 
     let Item::Binding(consume) = &module.items[3] else {
@@ -365,9 +370,9 @@ fn parses_marked_function_types_inside_parentheses() {
     let Some(Type::Function(consume)) = &consume.annotation else {
         panic!("expected function annotation");
     };
-    assert!(consume.moves.is_empty());
+    assert!(consume.moves().is_empty());
     assert!(matches!(
-        consume.mutations.as_slice(),
+        consume.mutations().as_slice(),
         [target] if matches!(target.target, MutationTargetKind::Element(1))
     ));
     let Type::Product(elements) = consume.parameter.as_ref() else {
@@ -385,7 +390,7 @@ fn parses_marked_function_types_inside_parentheses() {
         panic!("expected function body");
     };
     assert!(matches!(
-        twice.mutations.as_slice(),
+        twice.mutations().as_slice(),
         [target] if matches!(target.target, MutationTargetKind::Element(1))
     ));
     let Type::Product(slots) = twice.parameter.as_ref() else {
@@ -3579,8 +3584,8 @@ fn parses_slotted_function_patterns_and_slot_markers() {
     let Some(Type::Function(ty)) = &binding.annotation else {
         panic!("expected function type")
     };
-    assert_eq!(ty.mutations.len(), 1);
-    assert_eq!(ty.moves.len(), 1);
+    assert_eq!(ty.mutations().len(), 1);
+    assert_eq!(ty.moves().len(), 1);
     let Some(Expression::Function(f)) = &binding.value else {
         panic!("expected function")
     };
