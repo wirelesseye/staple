@@ -3701,6 +3701,32 @@ fn enforces_implicit_sized_and_supports_question_sized_parameters() {
 }
 
 #[test]
+fn rejects_question_sized_clauses_naming_unknown_or_repeated_parameters() {
+    for (source, message) in [
+        (
+            "type Bad T where ?Sized U = alias T\n",
+            "`?Sized` must name an already introduced compile-time parameter; `U` was not found",
+        ),
+        (
+            "type Bad T where ?Sized T, ?Sized T = alias T\n",
+            "duplicate `?Sized` clause for compile-time parameter `T`",
+        ),
+        (
+            "def bad: <T where ?Sized U> Ref T -> Ref T = <T> value => value\n",
+            "`U` was not found",
+        ),
+    ] {
+        let diagnostics = resolve_result(source).expect_err(source);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(message)),
+            "{source}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
 fn allows_local_trait_implementations_for_products() {
     let source = concat!(
         "trait ProductDefault T { product_default: () -> T }\n",

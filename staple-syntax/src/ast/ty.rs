@@ -275,8 +275,6 @@ pub struct EffectParameterBinding {
 pub struct TypeParameterBinding {
     pub syntax: Syntax,
     pub name: String,
-    /// Whether this parameter has the language's implicit `Sized` bound.
-    pub sized: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -516,6 +514,14 @@ pub struct SubtypeBound {
     pub supertype: Type,
 }
 
+/// A `?Sized T` clause, relaxing the implicit `Sized` bound on the
+/// compile-time parameter `T` of the same header. Name resolution applies it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SizedRelaxation {
+    pub syntax: Syntax,
+    pub parameter: NamedType,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefaultTypeBound {
     pub syntax: Syntax,
@@ -530,6 +536,7 @@ pub struct GenericParameters {
     pub parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub sized_relaxations: Vec<SizedRelaxation>,
 }
 
 /// A generic function type, `<T where …> body`.
@@ -567,12 +574,9 @@ impl fmt::Display for GenericParameters {
                 .join(", ")
         )?;
         let mut constraints = self
-            .parameters
+            .sized_relaxations
             .iter()
-            .filter_map(|p| match p {
-                TypeParameterPattern::Binding(p) if !p.sized => Some(format!("?Sized {}", p.name)),
-                _ => None,
-            })
+            .map(|relaxation| format!("?Sized {}", relaxation.parameter.name))
             .collect::<Vec<_>>();
         constraints.extend(self.trait_bounds.iter().map(|b| {
             let name = Type::Named(b.trait_name.clone()).to_string();

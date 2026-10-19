@@ -851,15 +851,18 @@ fn parses_trait_associated_types_losslessly() {
     };
     assert_eq!(iterator.associated_types.len(), 1);
     assert_eq!(iterator.associated_types[0].name, "Item");
-    assert_eq!(iterator.type_parameters.len(), 2);
+    // Associated types stay members; desugaring adds their hidden parameters.
+    assert_eq!(iterator.type_parameters.len(), 1);
+    assert_eq!(iterator.explicit_type_parameters().len(), 1);
     assert_eq!(iterator.members.len(), 1);
 
     let Item::TraitDeclaration(add) = &root.items[1] else {
         panic!("expected Add trait");
     };
     assert_eq!(add.associated_types[0].name, "Output");
-    assert_eq!(add.type_parameters.len(), 3);
-    assert_eq!(add.prerequisites.len(), 1);
+    assert_eq!(add.type_parameters.len(), 2);
+    assert!(add.prerequisites.is_empty());
+    assert_eq!(add.associated_types[0].trait_bounds.len(), 1);
 
     let Item::TraitImplementation(implementation) = &root.items[2] else {
         panic!("expected Iterator implementation");
@@ -2457,33 +2460,42 @@ fn parses_sized_relaxations_losslessly() {
     let root = parse(source).expect("`?Sized` clauses should parse");
     assert_eq!(root.text(), source);
 
+    // `?Sized` clauses are recorded as written; name resolution applies them.
     let Item::TypeDeclaration(reference) = &root.items[0] else {
         panic!("expected type declaration");
     };
     assert!(matches!(
-        reference.type_parameters.as_slice(),
-        [staple_syntax::TypeParameterPattern::Binding(binding)] if !binding.sized
+        reference.sized_relaxations.as_slice(),
+        [relaxation] if relaxation.parameter.name == "T"
     ));
 
     let Item::Binding(preserve) = unmodified_item(&root.items[1]) else {
         panic!("expected generic binding");
     };
+    let Some(Expression::Function(function)) = &preserve.value else {
+        panic!("expected function value");
+    };
+    let Some(Type::Forall(annotation)) = &preserve.annotation else {
+        panic!("expected generic annotation");
+    };
+    assert!(function.generics.is_none());
     assert!(matches!(
-        preserve.all_type_parameters().as_slice(),
-        [staple_syntax::TypeParameterPattern::Binding(binding)] if !binding.sized
+        annotation.generics.sized_relaxations.as_slice(),
+        [relaxation] if relaxation.parameter.name == "T"
     ));
 
     let Item::Binding(ordinary) = unmodified_item(&root.items[2]) else {
         panic!("expected generic binding");
     };
-    assert!(matches!(
-        ordinary.all_type_parameters().as_slice(),
-        [staple_syntax::TypeParameterPattern::Binding(binding)] if binding.sized
-    ));
+    let Some(Type::Forall(annotation)) = &ordinary.annotation else {
+        panic!("expected generic annotation");
+    };
+    assert!(annotation.generics.sized_relaxations.is_empty());
 
     assert!(parse("type Bad T where ?Other T = alias T\n").is_err());
-    assert!(parse("type Bad T where ?Sized U = alias T\n").is_err());
-    assert!(parse("type Bad T where ?Sized T, ?Sized T = alias T\n").is_err());
+    // Whether the clause names a parameter of this header is checked during
+    // name resolution, not parsing.
+    assert!(parse("type Bad T where ?Sized U = alias T\n").is_ok());
 }
 
 #[test]
@@ -3151,18 +3163,17 @@ fn generic_extern_bindings_and_companions_round_trip() {
     let Item::ExternBlock(members) = &companion.module.items[0] else {
         panic!("extern members")
     };
-    assert_eq!(members.bindings[0].all_type_parameters().len(), 1);
-    assert_eq!(members.bindings[1].all_type_parameters().len(), 2);
-    assert_eq!(members.bindings[0].all_trait_bounds().len(), 1);
-    assert_ne!(
-        members.bindings[0].all_trait_bounds()[0].syntax.id,
-        members.bindings[1].all_trait_bounds()[0].syntax.id
-    );
+    // The companion header stays on the companion; loading gives each member
+    // its own copy.
+    assert_eq!(companion.type_parameters.len(), 1);
+    assert_eq!(companion.trait_bounds.len(), 1);
+    assert_eq!(members.bindings[0].all_type_parameters().len(), 0);
+    assert_eq!(members.bindings[1].all_type_parameters().len(), 1);
     assert!(
         members
             .bindings
             .iter()
-            .all(|binding| binding.companion_target.is_some())
+            .all(|binding| binding.companion_target.is_none())
     );
     let formatted = staple_syntax::format_source(source).expect("format generic externs");
     assert_eq!(staple_syntax::format_source(&formatted).unwrap(), formatted);
@@ -3246,8 +3257,12 @@ fn forall_annotations_own_parameters_and_constraints() {
     };
     assert_eq!(ty.generics.parameters.len(), 2);
     assert!(
-        matches!(&ty.generics.parameters[0], staple_syntax::TypeParameterPattern::Binding(p) if !p.sized)
+        matches!(&ty.generics.parameters[0], staple_syntax::TypeParameterPattern::Binding(p) if p.name == "T")
     );
+    assert!(matches!(
+        ty.generics.sized_relaxations.as_slice(),
+        [relaxation] if relaxation.parameter.name == "T"
+    ));
     assert!(
         matches!(&ty.generics.parameters[1], staple_syntax::TypeParameterPattern::Effect(p) if p.name == "E")
     );
@@ -3275,42 +3290,28 @@ fn forall_annotations_own_parameters_and_constraints() {
 }
 
 #[test]
-fn companion_generics_are_separate_and_fresh_for_each_member() {
+fn companion_headers_stay_on_the_companion() {
     let source = "companion<T where Clone T> Box T { def first: <U> (Box T, U) -> T = x => x; def second: Box T -> T = x => x }\n";
     let module = parse(source).unwrap();
     let Item::Submodule(companion) = &module.items[0] else {
         panic!("companion")
     };
+    assert_eq!(companion.type_parameters[0].names(), ["T"]);
+    assert_eq!(companion.trait_bounds.len(), 1);
+    assert_eq!(
+        companion.generics_syntax.as_ref().unwrap().text().trim(),
+        "<T where Clone T>"
+    );
+    assert_eq!(companion.companion_target.as_ref().unwrap().to_string(), "Box T");
     let Item::Binding(first) = &companion.module.items[0] else {
         panic!("first")
     };
     let Item::Binding(second) = &companion.module.items[1] else {
         panic!("second")
     };
-    let header = first.companion_generics.as_ref().unwrap();
-    assert_eq!(header.parameters[0].names(), ["T"]);
     assert_eq!(first.generics().unwrap().parameters[0].names(), ["U"]);
     assert!(second.generics().is_none());
-    assert_eq!(
-        first
-            .all_type_parameters()
-            .iter()
-            .flat_map(|p| p.names())
-            .collect::<Vec<_>>(),
-        ["T", "U"]
-    );
-    assert_ne!(
-        header.parameters[0].syntax().id,
-        second.companion_generics.as_ref().unwrap().parameters[0]
-            .syntax()
-            .id
-    );
-    assert_ne!(
-        header.trait_bounds[0].syntax.id,
-        second.companion_generics.as_ref().unwrap().trait_bounds[0]
-            .syntax
-            .id
-    );
+    assert!(first.companion_generics.is_none() && second.companion_generics.is_none());
 }
 
 #[test]
@@ -3943,8 +3944,8 @@ fn companion_members_wrapped_in_modifiers_keep_companion_context() {
     let Item::Binding(binding) = modified.item.as_ref() else {
         panic!("expected a binding")
     };
-    assert!(binding.companion_target.is_some());
-    assert!(binding.companion_generics.is_some());
+    assert!(binding.companion_target.is_none());
+    assert!(binding.companion_generics.is_none());
 }
 
 #[test]

@@ -227,7 +227,7 @@ fn render_type_declaration(declaration: &staple_syntax::TypeDeclaration) -> Stri
         }
     }
     let constraints = render_constraints(
-        &declaration.type_parameters,
+        &declaration.sized_relaxations,
         &declaration.trait_bounds,
         &declaration.subtype_bounds,
     );
@@ -283,18 +283,13 @@ fn render_type_parameter(parameter: &staple_syntax::TypeParameterPattern) -> Str
 }
 
 fn render_constraints(
-    parameters: &[staple_syntax::TypeParameterPattern],
+    relaxations: &[staple_syntax::SizedRelaxation],
     traits: &[staple_syntax::TraitBound],
     subtypes: &[staple_syntax::SubtypeBound],
 ) -> String {
-    let mut entries = parameters
+    let mut entries = relaxations
         .iter()
-        .filter_map(|parameter| match parameter {
-            staple_syntax::TypeParameterPattern::Binding(binding) if !binding.sized => {
-                Some(format!("?Sized {}", binding.name))
-            }
-            _ => None,
-        })
+        .map(|relaxation| format!("?Sized {}", relaxation.parameter.name))
         .collect::<Vec<_>>();
     entries.extend(traits.iter().map(|bound| {
         let name = match &bound.trait_name.namespace {

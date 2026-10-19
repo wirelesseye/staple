@@ -153,11 +153,15 @@ pub struct Program {
     child_modules: HashMap<SyntaxId, ModuleId>,
     children: Vec<HashMap<String, ModuleId>>,
     initialization_order: Vec<ModuleId>,
+    /// The next syntax identity no loaded node uses.
+    next_syntax_id: usize,
 }
 
 impl Program {
     pub(crate) fn single(module: Module) -> Self {
         let visibility = module.visibility;
+        // A module's own node is the last one its parse numbers.
+        let next_syntax_id = module.syntax.id.0 + 1;
         let mut program = Self {
             entry: ModuleId(0),
             executable_entry: Some(ModuleId(0)),
@@ -197,6 +201,7 @@ impl Program {
             child_modules: HashMap::new(),
             children: vec![HashMap::new()],
             initialization_order: vec![ModuleId(0)],
+            next_syntax_id,
         };
         program.collect_single_submodules(ModuleId(0));
         program.resolve_single_inline_imports();
@@ -222,6 +227,7 @@ impl Program {
             })
             .collect::<Vec<_>>();
         for mut declaration in declarations {
+            attach_companion_generics(&mut declaration, &mut self.next_syntax_id);
             let alias =
                 canonicalize_companion(&self.modules[parent.0].syntax.items, &mut declaration);
             if declaration.companion
@@ -370,7 +376,8 @@ impl Program {
     }
 
     /// Registers inline modules introduced after parsing, such as macro output.
-    pub(crate) fn rebuild_generated_inline_modules(&mut self) {
+    /// `next_syntax_id` continues the identities macro expansion allocated.
+    pub(crate) fn rebuild_generated_inline_modules(&mut self, next_syntax_id: &mut usize) {
         let mut parent = 0;
         while parent < self.modules.len() {
             let mut declarations = self.modules[parent]
@@ -398,6 +405,7 @@ impl Program {
             // module needs to be rescanned so nested inline items land too.
             let mut rescan_from: Option<usize> = None;
             for (mut declaration, top_level) in declarations {
+                attach_companion_generics(&mut declaration, next_syntax_id);
                 let alias = if top_level {
                     canonicalize_companion(&self.modules[parent].syntax.items, &mut declaration)
                 } else {
@@ -487,6 +495,11 @@ impl Program {
 
     pub fn entry(&self) -> ModuleId {
         self.entry
+    }
+
+    /// The next syntax identity no loaded node uses.
+    pub(crate) fn next_syntax_id(&self) -> usize {
+        self.next_syntax_id
     }
 
     pub fn executable_entry(&self) -> Option<ModuleId> {
@@ -1361,8 +1374,9 @@ impl ProgramLoader {
         &mut self,
         parent: ModuleId,
         path: PathBuf,
-        declaration: Submodule,
+        mut declaration: Submodule,
     ) -> Result<(), LoadDiagnostic> {
+        attach_companion_generics(&mut declaration, &mut self.next_syntax_id);
         if let Some(existing) = self.children[parent.0].get(&declaration.name).copied() {
             if !self.modules[existing.0].companion {
                 return Err(load_diagnostic_at(
@@ -1653,6 +1667,7 @@ impl ProgramLoader {
             })
             .collect::<Vec<_>>();
         for mut declaration in declarations {
+            attach_companion_generics(&mut declaration, &mut self.next_syntax_id);
             let alias =
                 canonicalize_companion(&self.modules[parent.0].syntax.items, &mut declaration);
             if declaration.companion
@@ -2233,6 +2248,7 @@ impl ProgramLoader {
             child_modules: self.child_modules,
             children: self.children,
             initialization_order,
+            next_syntax_id: self.next_syntax_id,
         }
     }
 }
@@ -3054,6 +3070,64 @@ fn group_initialization_order(
 mod tests {
     use super::*;
 
+    fn companion_members(source: &str) -> Vec<staple_syntax::Binding> {
+        let program = Program::single(staple_syntax::parse(source).unwrap());
+        let companion = program
+            .modules()
+            .iter()
+            .find(|module| module.companion)
+            .expect("companion module");
+        let mut items = companion.syntax.items.clone();
+        items
+            .iter_mut()
+            .flat_map(companion_member_bindings)
+            .map(|binding| binding.clone())
+            .collect()
+    }
+
+    #[test]
+    fn companion_members_get_separate_fresh_copies_of_the_header() {
+        let members = companion_members(
+            "companion<T where Clone T> Box T { def first: <U> (Box T, U) -> T = x => x; def second: Box T -> T = x => x }\n",
+        );
+        let [first, second] = members.as_slice() else {
+            panic!("two members")
+        };
+        let header = first.companion_generics.as_ref().unwrap();
+        assert_eq!(header.parameters[0].names(), ["T"]);
+        assert_eq!(
+            first
+                .all_type_parameters()
+                .iter()
+                .flat_map(|p| p.names())
+                .collect::<Vec<_>>(),
+            ["T", "U"]
+        );
+        let other = second.companion_generics.as_ref().unwrap();
+        assert_ne!(header.parameters[0].syntax().id, other.parameters[0].syntax().id);
+        assert_ne!(header.trait_bounds[0].syntax.id, other.trait_bounds[0].syntax.id);
+        assert_ne!(
+            first.companion_target.as_ref().unwrap().syntax().id,
+            second.companion_target.as_ref().unwrap().syntax().id
+        );
+    }
+
+    #[test]
+    fn companion_members_inside_modifiers_and_extern_blocks_get_the_header() {
+        let members = companion_members(concat!(
+            "companion<T> Box T {\n",
+            "    /// Documented.\n",
+            "    @track_caller\n",
+            "    pub def first = (b: Box T) => b\n",
+            "    pub extern \"staple-intrinsic\" { second: Box T -> T; third: <U> (Box T, U) -> T }\n",
+            "}\n",
+        ));
+        assert_eq!(members.len(), 3);
+        assert!(members.iter().all(|binding| binding.companion_target.is_some()
+            && binding.companion_generics.is_some()));
+        assert_eq!(members[2].all_type_parameters().len(), 2);
+    }
+
     #[test]
     fn source_at_reports_a_structured_missing_import() {
         let entry = std::env::temp_dir().join("staple-loader-structured-test.sta");
@@ -3238,4 +3312,177 @@ fn companion_alias_target(items: &[Item], name: &str) -> Option<String> {
         current = declaration(head(current.underlying()?)?)?;
     }
     (current.name != name).then(|| current.name.clone())
+}
+
+/// Gives each member binding of a `companion` block its own copy of the
+/// block's compile-time parameters and target. Blocks for the same type merge
+/// into one module, so this must run per block, before merging. Each copy gets
+/// fresh syntax identities: resolution caches a parameter's identity per
+/// syntax node, so members sharing one copy would overwrite each other's.
+fn attach_companion_generics(declaration: &mut Submodule, next_syntax_id: &mut usize) {
+    if !declaration.companion {
+        return;
+    }
+    let Some(target) = declaration.companion_target.clone() else {
+        return;
+    };
+    let generics = staple_syntax::GenericParameters {
+        syntax: declaration
+            .generics_syntax
+            .clone()
+            .unwrap_or_else(Syntax::compiler),
+        parameters: declaration.type_parameters.clone(),
+        trait_bounds: declaration.trait_bounds.clone(),
+        subtype_bounds: declaration.subtype_bounds.clone(),
+        sized_relaxations: declaration.sized_relaxations.clone(),
+    };
+    for item in &mut declaration.module.items {
+        for binding in companion_member_bindings(item) {
+            if binding.companion_target.is_some() {
+                continue;
+            }
+            let mut member_generics = generics.clone();
+            refresh_generics_ids(&mut member_generics, next_syntax_id);
+            let mut member_target = target.clone();
+            refresh_type_ids(&mut member_target, next_syntax_id);
+            binding.companion_generics = Some(member_generics);
+            binding.companion_target = Some(member_target);
+        }
+    }
+}
+
+/// The bindings declared by a companion member, looking through modifiers
+/// (`///` docs, `@modifier`) and visibility splices that wrap it.
+fn companion_member_bindings(item: &mut Item) -> Vec<&mut staple_syntax::Binding> {
+    match item {
+        Item::Binding(binding) => vec![binding],
+        Item::ExternBlock(block) => block.bindings.iter_mut().collect(),
+        Item::Modified(modified) => companion_member_bindings(&mut modified.item),
+        Item::VisibilitySplice(splice) => companion_member_bindings(&mut splice.item),
+        _ => Vec::new(),
+    }
+}
+
+fn refresh_syntax_id(syntax: &mut Syntax, next_syntax_id: &mut usize) {
+    syntax.id = SyntaxId(*next_syntax_id);
+    *next_syntax_id += 1;
+}
+
+fn refresh_generics_ids(
+    generics: &mut staple_syntax::GenericParameters,
+    next_syntax_id: &mut usize,
+) {
+    refresh_syntax_id(&mut generics.syntax, next_syntax_id);
+    for parameter in &mut generics.parameters {
+        refresh_type_parameter_ids(parameter, next_syntax_id);
+    }
+    for bound in &mut generics.trait_bounds {
+        refresh_syntax_id(&mut bound.syntax, next_syntax_id);
+        refresh_syntax_id(&mut bound.trait_name.syntax, next_syntax_id);
+        for argument in &mut bound.arguments {
+            refresh_type_ids(argument, next_syntax_id);
+        }
+    }
+    for bound in &mut generics.subtype_bounds {
+        refresh_syntax_id(&mut bound.syntax, next_syntax_id);
+        refresh_syntax_id(&mut bound.parameter.syntax, next_syntax_id);
+        refresh_type_ids(&mut bound.supertype, next_syntax_id);
+    }
+    for relaxation in &mut generics.sized_relaxations {
+        refresh_syntax_id(&mut relaxation.syntax, next_syntax_id);
+        refresh_syntax_id(&mut relaxation.parameter.syntax, next_syntax_id);
+    }
+}
+
+fn refresh_type_parameter_ids(
+    parameter: &mut staple_syntax::TypeParameterPattern,
+    next_syntax_id: &mut usize,
+) {
+    match parameter {
+        staple_syntax::TypeParameterPattern::Binding(binding) => {
+            refresh_syntax_id(&mut binding.syntax, next_syntax_id)
+        }
+        staple_syntax::TypeParameterPattern::Effect(binding) => {
+            refresh_syntax_id(&mut binding.syntax, next_syntax_id)
+        }
+        staple_syntax::TypeParameterPattern::Product(product) => {
+            refresh_syntax_id(&mut product.syntax, next_syntax_id);
+            for element in &mut product.elements {
+                refresh_type_parameter_ids(element, next_syntax_id);
+            }
+        }
+        staple_syntax::TypeParameterPattern::Splice(splice) => {
+            refresh_syntax_id(&mut splice.syntax, next_syntax_id)
+        }
+    }
+}
+
+fn refresh_effect_ids(effects: &mut staple_syntax::EffectSet, next_syntax_id: &mut usize) {
+    refresh_syntax_id(&mut effects.syntax, next_syntax_id);
+    if let Some(variable) = &mut effects.variable {
+        refresh_syntax_id(&mut variable.syntax, next_syntax_id);
+    }
+    for resource in &mut effects.resources {
+        refresh_syntax_id(&mut resource.syntax, next_syntax_id);
+        refresh_type_ids(&mut resource.value_type, next_syntax_id);
+    }
+}
+
+/// Refreshes every syntax identity in a type. Default values of product
+/// elements are expressions and keep their identities; companion headers do
+/// not contain them in practice.
+fn refresh_type_ids(ty: &mut staple_syntax::Type, next_syntax_id: &mut usize) {
+    use staple_syntax::Type;
+    match ty {
+        Type::Inferred(ty) => refresh_syntax_id(&mut ty.syntax, next_syntax_id),
+        Type::NumberLiteral(ty) => refresh_syntax_id(&mut ty.syntax, next_syntax_id),
+        Type::StringLiteral(ty) => refresh_syntax_id(&mut ty.syntax, next_syntax_id),
+        Type::Named(ty) => refresh_syntax_id(&mut ty.syntax, next_syntax_id),
+        Type::Splice(ty) => refresh_syntax_id(&mut ty.syntax, next_syntax_id),
+        Type::Product(product) => {
+            refresh_syntax_id(&mut product.syntax, next_syntax_id);
+            for element in &mut product.elements {
+                refresh_syntax_id(&mut element.syntax, next_syntax_id);
+                refresh_type_ids(&mut element.ty, next_syntax_id);
+            }
+        }
+        Type::Sum(sum) => {
+            refresh_syntax_id(&mut sum.syntax, next_syntax_id);
+            for alternative in &mut sum.alternatives {
+                refresh_type_ids(alternative, next_syntax_id);
+            }
+        }
+        Type::Function(function) => {
+            refresh_syntax_id(&mut function.syntax, next_syntax_id);
+            refresh_type_ids(&mut function.parameter, next_syntax_id);
+            for marker in [&mut function.mutable_marker, &mut function.moved_marker]
+                .into_iter()
+                .flatten()
+            {
+                refresh_syntax_id(marker, next_syntax_id);
+            }
+            refresh_effect_ids(&mut function.effects, next_syntax_id);
+            refresh_type_ids(&mut function.result, next_syntax_id);
+        }
+        Type::Forall(forall) => {
+            refresh_syntax_id(&mut forall.syntax, next_syntax_id);
+            refresh_generics_ids(&mut forall.generics, next_syntax_id);
+            refresh_type_ids(&mut forall.body, next_syntax_id);
+        }
+        Type::Application(application) => {
+            refresh_syntax_id(&mut application.syntax, next_syntax_id);
+            refresh_type_ids(&mut application.callee, next_syntax_id);
+            refresh_type_ids(&mut application.argument, next_syntax_id);
+        }
+        Type::EffectApplication(application) => {
+            refresh_syntax_id(&mut application.syntax, next_syntax_id);
+            refresh_type_ids(&mut application.callee, next_syntax_id);
+            refresh_effect_ids(&mut application.effects, next_syntax_id);
+        }
+        Type::Array(array) => {
+            refresh_syntax_id(&mut array.syntax, next_syntax_id);
+            refresh_type_ids(&mut array.element, next_syntax_id);
+            refresh_type_ids(&mut array.count, next_syntax_id);
+        }
+    }
 }

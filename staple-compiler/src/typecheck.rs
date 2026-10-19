@@ -4840,13 +4840,16 @@ impl TypeChecker {
                 }),
                 ..CheckedEffectSet::default()
             }),
-            TypeParameterPattern::Binding(binding) => CheckedType::Parameter {
-                id: module
+            TypeParameterPattern::Binding(binding) => {
+                let id = module
                     .type_parameter_for(binding.syntax.id)
-                    .expect("resolved compile-time parameter"),
-                name: binding.name.clone(),
-                sized: binding.sized,
-            },
+                    .expect("resolved compile-time parameter");
+                CheckedType::Parameter {
+                    id,
+                    name: binding.name.clone(),
+                    sized: module.type_parameter_is_sized(id),
+                }
+            }
             TypeParameterPattern::Product(product) if product.elements.len() == 1 => {
                 self.checked_type_parameter_pattern(module, &product.elements[0])
             }
@@ -16686,7 +16689,10 @@ impl TypeChecker {
                 let Some(id) = module.type_parameter_for(binding.syntax.id) else {
                     return false;
                 };
-                if binding.sized && !argument.is_sized() && *argument != CheckedType::Error {
+                if module.type_parameter_is_sized(id)
+                    && !argument.is_sized()
+                    && *argument != CheckedType::Error
+                {
                     self.diagnostics.push(Diagnostic::new(
                         binding.syntax.span.clone(),
                         format!(

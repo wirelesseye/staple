@@ -2714,7 +2714,11 @@ impl NameResolver {
         if matches!(builtin, BuiltinType::Ref | BuiltinType::Unique)
             && !matches!(
                 declaration.type_parameters.as_slice(),
-                [TypeParameterPattern::Binding(binding)] if !binding.sized
+                [TypeParameterPattern::Binding(binding)]
+                    if declaration
+                        .sized_relaxations
+                        .iter()
+                        .any(|relaxation| relaxation.parameter.name == binding.name)
             )
         {
             self.diagnostics.push(Diagnostic::new(
@@ -2840,6 +2844,10 @@ impl NameResolver {
                         for pattern in &declaration.type_parameters {
                             self.allocate_type_parameter_pattern(pattern, &mut parameters);
                         }
+                        self.apply_sized_relaxations(
+                            &declaration.type_parameters,
+                            &declaration.sized_relaxations,
+                        );
                         let mut methods = Vec::new();
                         for member in &declaration.members {
                             let method = TraitMethodId(self.next_trait_method_id);
@@ -3979,6 +3987,7 @@ impl NameResolver {
         for parameter in &declaration.type_parameters {
             self.declare_type_parameter_pattern(parameter);
         }
+        self.apply_sized_relaxations(&declaration.type_parameters, &declaration.sized_relaxations);
         for bound in &declaration.trait_bounds {
             if let Some(trait_id) = self.resolve_trait_name(&bound.trait_name) {
                 self.trait_references.insert(bound.syntax.id, trait_id);
@@ -4141,6 +4150,10 @@ impl NameResolver {
                         for parameter in &ty.generics.parameters {
                             self.declare_type_parameter_pattern(parameter);
                         }
+                        self.apply_sized_relaxations(
+                            &ty.generics.parameters,
+                            &ty.generics.sized_relaxations,
+                        );
                         parameters.extend(ty.generics.parameters.clone());
                         for bound in &ty.generics.trait_bounds {
                             if let Some(id) = self.resolve_trait_name(&bound.trait_name) {
@@ -4222,6 +4235,10 @@ impl NameResolver {
                     self.declare_type_parameter_pattern(parameter);
                     self.collect_declared_type_parameter_pattern(parameter, &mut parameters);
                 }
+                self.apply_sized_relaxations(
+                    &implementation.type_parameters,
+                    &implementation.sized_relaxations,
+                );
                 let trait_id = self.resolve_trait_name(&implementation.trait_name);
                 for argument in &implementation.arguments {
                     self.resolve_type(argument);
@@ -4536,6 +4553,7 @@ impl NameResolver {
         for parameter in &declaration.type_parameters {
             self.declare_type_parameter_pattern(parameter);
         }
+        self.apply_sized_relaxations(&declaration.type_parameters, &declaration.sized_relaxations);
         if let Some(annotation) = &declaration.annotation {
             self.resolve_type_lenient(annotation);
         }
@@ -4996,6 +5014,47 @@ impl NameResolver {
         }
     }
 
+    /// Applies a header's `?Sized` clauses to the parameters it declares.
+    fn apply_sized_relaxations(
+        &mut self,
+        parameters: &[TypeParameterPattern],
+        relaxations: &[staple_syntax::SizedRelaxation],
+    ) {
+        fn find<'a>(
+            parameters: &'a [TypeParameterPattern],
+            name: &str,
+        ) -> Option<&'a staple_syntax::TypeParameterBinding> {
+            parameters.iter().find_map(|parameter| match parameter {
+                TypeParameterPattern::Binding(binding) if binding.name == name => Some(binding),
+                TypeParameterPattern::Product(product) => find(&product.elements, name),
+                _ => None,
+            })
+        }
+        let mut relaxed = HashSet::new();
+        for relaxation in relaxations {
+            let name = &relaxation.parameter.name;
+            let Some(binding) = find(parameters, name) else {
+                self.diagnostics.push(Diagnostic::new(
+                    relaxation.syntax.span.clone(),
+                    format!(
+                        "`?Sized` must name an already introduced compile-time parameter; `{name}` was not found"
+                    ),
+                ));
+                continue;
+            };
+            if !relaxed.insert(name.as_str()) {
+                self.diagnostics.push(Diagnostic::new(
+                    relaxation.syntax.span.clone(),
+                    format!("duplicate `?Sized` clause for compile-time parameter `{name}`"),
+                ));
+                continue;
+            }
+            if let Some(id) = self.type_parameters.get(&binding.syntax.id) {
+                self.type_parameter_sized.insert(*id, false);
+            }
+        }
+    }
+
     fn declare_type_parameter_pattern(&mut self, pattern: &TypeParameterPattern) {
         match pattern {
             TypeParameterPattern::Binding(binding) => {
@@ -5012,7 +5071,7 @@ impl NameResolver {
                     ));
                 }
                 self.type_parameters.insert(binding.syntax.id, id);
-                self.type_parameter_sized.insert(id, binding.sized);
+                self.type_parameter_sized.insert(id, true);
                 self.type_parameter_declarations
                     .insert(id, binding.syntax.id);
                 self.type_parameter_modules.insert(id, self.current_module);
@@ -5058,7 +5117,7 @@ impl NameResolver {
                 let id = TypeParameterId(self.next_type_parameter_id);
                 self.next_type_parameter_id += 1;
                 self.type_parameters.insert(binding.syntax.id, id);
-                self.type_parameter_sized.insert(id, binding.sized);
+                self.type_parameter_sized.insert(id, true);
                 self.type_parameter_declarations
                     .insert(id, binding.syntax.id);
                 self.type_parameter_modules.insert(id, self.current_module);
@@ -5620,6 +5679,7 @@ impl NameResolver {
         for parameter in &generics.parameters {
             self.declare_type_parameter_pattern(parameter);
         }
+        self.apply_sized_relaxations(&generics.parameters, &generics.sized_relaxations);
         for bound in &generics.trait_bounds {
             if let Some(id) = self.resolve_trait_name(&bound.trait_name) {
                 self.trait_references.insert(bound.syntax.id, id);

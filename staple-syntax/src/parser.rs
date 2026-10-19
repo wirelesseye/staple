@@ -82,6 +82,26 @@ fn matching_template_brace(content: &str, opening: usize) -> Option<usize> {
     None
 }
 
+/// The constraints of one `where` clause, in source order per kind.
+#[derive(Default)]
+struct WhereClause {
+    trait_bounds: Vec<TraitBound>,
+    subtype_bounds: Vec<SubtypeBound>,
+    sized_relaxations: Vec<SizedRelaxation>,
+}
+
+impl WhereClause {
+    fn into_generics(self, syntax: Syntax, parameters: Vec<TypeParameterPattern>) -> GenericParameters {
+        GenericParameters {
+            syntax,
+            parameters,
+            trait_bounds: self.trait_bounds,
+            subtype_bounds: self.subtype_bounds,
+            sized_relaxations: self.sized_relaxations,
+        }
+    }
+}
+
 /// Parses a complete Staple source file into a lossless syntax tree.
 pub fn parse(source: &str) -> Result<Module, ParseError> {
     let tokens = Arc::from(lex(source));
@@ -854,9 +874,11 @@ impl Grammar {
             name,
             module,
             companion: false,
+            generics_syntax: None,
             type_parameters: Vec::new(),
             trait_bounds: Vec::new(),
             subtype_bounds: Vec::new(),
+            sized_relaxations: Vec::new(),
             companion_target: None,
         })
     }
@@ -864,7 +886,15 @@ impl Grammar {
     fn parse_companion(&mut self, start: usize) -> Result<Submodule, ParseError> {
         self.expect(TokenKind::Companion, "expected `companion`")?;
         let generics_start = self.position;
-        let (type_parameters, trait_bounds, subtype_bounds) = self.parse_bracketed_generics()?;
+        let (
+            type_parameters,
+            WhereClause {
+                trait_bounds,
+                subtype_bounds,
+                sized_relaxations,
+            },
+        ) = self.parse_bracketed_generics()?;
+        let generics_syntax = self.annotation_syntax(generics_start, 1);
         self.reject_effect_parameters(&type_parameters, "companion declarations")?;
         let target = self.parse_type()?;
         let name = companion_target_name(&target)
@@ -886,35 +916,6 @@ impl Grammar {
         if self.peek().is_none() {
             return Err(self.error("expected `}` after companion items"));
         }
-        for item in &mut items {
-            for binding in companion_member_bindings(item) {
-                // Re-parse the companion's own `<...>` clause fresh for each
-                // member, rather than `.clone()`ing the one parsed above. A
-                // plain clone would give every member's spliced parameters
-                // and bounds the same `SyntaxId`s as each other (and as the
-                // companion's own copy) — later resolver passes that cache
-                // a `SyntaxId`'s resolved `TypeParameterId` (e.g. which type
-                // parameter a `where`-clause argument refers to) would then
-                // have each member overwrite that shared cache entry, so
-                // only the last-processed member's bounds resolve to the
-                // right parameter. Re-parsing gives each member independent,
-                // genuinely fresh `SyntaxId`s for the identical token range.
-                let resume = self.position;
-                self.position = generics_start;
-                let (member_type_parameters, member_trait_bounds, member_subtype_bounds) =
-                    self.parse_bracketed_generics()?;
-                let member_generics_syntax = self.annotation_syntax(generics_start, 1);
-                binding.companion_target = Some(self.parse_type()?);
-                self.position = resume;
-
-                binding.companion_generics = Some(crate::GenericParameters {
-                    syntax: member_generics_syntax,
-                    parameters: member_type_parameters,
-                    trait_bounds: member_trait_bounds,
-                    subtype_bounds: member_subtype_bounds,
-                });
-            }
-        }
         let module = Module {
             syntax: self.syntax(module_start),
             declaration_syntax,
@@ -931,9 +932,11 @@ impl Grammar {
             name,
             module,
             companion: true,
+            generics_syntax: Some(generics_syntax),
             type_parameters,
             trait_bounds,
             subtype_bounds,
+            sized_relaxations,
             companion_target: Some(target),
         })
     }
@@ -951,14 +954,16 @@ impl Grammar {
         let mut type_parameters = Vec::new();
         let mut trait_bounds = Vec::new();
         let mut subtype_bounds = Vec::new();
+        let mut sized_relaxations = Vec::new();
         let annotation = if self.eat(TokenKind::Colon) {
             let previous = self.newline_terminates_type;
             self.newline_terminates_type = true;
-            let (parameters, bounds, subtypes) = self.parse_bracketed_generics()?;
+            let (parameters, clause) = self.parse_bracketed_generics()?;
             self.reject_effect_parameters(&parameters, "macro declarations")?;
             type_parameters = parameters;
-            trait_bounds = bounds;
-            subtype_bounds = subtypes;
+            trait_bounds = clause.trait_bounds;
+            subtype_bounds = clause.subtype_bounds;
+            sized_relaxations = clause.sized_relaxations;
             let annotation = self.parse_type();
             self.newline_terminates_type = previous;
             Some(annotation?)
@@ -979,6 +984,7 @@ impl Grammar {
             type_parameters,
             trait_bounds,
             subtype_bounds,
+            sized_relaxations,
             annotation,
             value,
         })
@@ -1048,12 +1054,15 @@ impl Grammar {
         let name = self
             .expect(TokenKind::Identifier, "expected trait name")?
             .text;
-        let (mut type_parameters, default_bounds) = self.parse_juxtaposed_type_parameters()?;
+        let (type_parameters, default_bounds) = self.parse_juxtaposed_type_parameters()?;
         if type_parameters.is_empty() {
             return Err(self.error("expected at least one trait type parameter"));
         }
-        let (mut prerequisites, mut subtype_bounds) =
-            self.parse_where_clause(&mut type_parameters)?;
+        let WhereClause {
+            trait_bounds: prerequisites,
+            subtype_bounds,
+            sized_relaxations,
+        } = self.parse_where_clause()?;
         let mut associated_types = Vec::new();
         self.expect(TokenKind::LBrace, "expected `{` before trait members")?;
         let mut members = Vec::new();
@@ -1073,34 +1082,35 @@ impl Grammar {
                 let associated_name = self
                     .expect(TokenKind::Identifier, "expected associated type name")?
                     .text;
-                // An associated type is a hidden trailing trait parameter
-                // determined by the explicit parameters; its `where` bounds
-                // become trait prerequisites.
-                let mut hidden = vec![TypeParameterPattern::Binding(TypeParameterBinding {
-                    syntax: self.syntax(member_start),
-                    name: associated_name.clone(),
-                    sized: true,
-                })];
                 let previous = self.newline_terminates_type;
                 let previous_any = self.any_newline_terminates_type;
                 self.newline_terminates_type = true;
                 self.any_newline_terminates_type = true;
-                let clause = self.parse_where_clause(&mut hidden);
+                let clause = self.parse_where_clause();
                 self.newline_terminates_type = previous;
                 self.any_newline_terminates_type = previous_any;
-                let (bounds, subtypes) = clause?;
-                prerequisites.extend(bounds);
-                subtype_bounds.extend(subtypes);
-                let syntax = self.syntax(member_start);
-                let TypeParameterPattern::Binding(binding) = &mut hidden[0] else {
-                    unreachable!("hidden associated type parameter is a binding")
-                };
-                binding.syntax = syntax.clone();
-                type_parameters.push(hidden.remove(0));
+                let clause = clause?;
+                if let Some(relaxation) = clause
+                    .sized_relaxations
+                    .iter()
+                    .find(|relaxation| relaxation.parameter.name != associated_name)
+                {
+                    let offset = relaxation.syntax.span.to_range().start;
+                    return Err(ParseError {
+                        offset,
+                        location: self.location(offset),
+                        message: format!(
+                            "`?Sized` in an associated type's `where` clause must name `{associated_name}`"
+                        ),
+                    });
+                }
                 associated_types.push(AssociatedTypeDeclaration {
-                    syntax,
+                    syntax: self.syntax(member_start),
                     docs,
                     name: associated_name,
+                    trait_bounds: clause.trait_bounds,
+                    subtype_bounds: clause.subtype_bounds,
+                    sized_relaxations: clause.sized_relaxations,
                 });
                 self.eat(TokenKind::Semicolon);
                 continue;
@@ -1140,6 +1150,7 @@ impl Grammar {
             associated_types,
             prerequisites,
             subtype_bounds,
+            sized_relaxations,
             default_bounds,
             members,
         })
@@ -1148,17 +1159,11 @@ impl Grammar {
     /// Parses the unified `where` clause shared by every generic-parameter
     /// header: trait bounds, subtype bounds, `?Sized` relaxations, and
     /// all as one flat comma-separated list in any order. Returns empty lists when no
-    /// `where` keyword is present. `parameters` is mutated in place for
-    /// `?Sized` relaxations, which flip `sized` on an already-introduced
-    /// parameter rather than producing a bound of their own.
-    fn parse_where_clause(
-        &mut self,
-        parameters: &mut [TypeParameterPattern],
-    ) -> Result<(Vec<TraitBound>, Vec<SubtypeBound>), ParseError> {
-        let mut trait_bounds = Vec::new();
-        let mut subtype_bounds = Vec::new();
+    /// `where` keyword is present.
+    fn parse_where_clause(&mut self) -> Result<WhereClause, ParseError> {
+        let mut clause = WhereClause::default();
         if !self.eat(TokenKind::Where) {
-            return Ok((trait_bounds, subtype_bounds));
+            return Ok(clause);
         }
         loop {
             let start = self.position;
@@ -1169,23 +1174,22 @@ impl Grammar {
                 if bound != "Sized" {
                     return Err(self.error("only the implicit `Sized` bound may be relaxed"));
                 }
+                let name_start = self.position;
                 let name = self
                     .expect(
                         TokenKind::Identifier,
                         "expected compile-time parameter after `?Sized`",
                     )?
                     .text;
-                let Some(parameter) = find_type_parameter_binding_mut(parameters, &name) else {
-                    return Err(self.error(format!(
-                        "`?Sized` must name an already introduced compile-time parameter; `{name}` was not found"
-                    )));
-                };
-                if !parameter.sized {
-                    return Err(self.error(format!(
-                        "duplicate `?Sized` clause for compile-time parameter `{name}`"
-                    )));
-                }
-                parameter.sized = false;
+                let syntax = self.syntax(start);
+                clause.sized_relaxations.push(SizedRelaxation {
+                    syntax,
+                    parameter: NamedType {
+                        syntax: self.syntax(name_start),
+                        namespace: None,
+                        name,
+                    },
+                });
             } else {
                 let first = self
                     .expect(TokenKind::Identifier, "expected constraint")?
@@ -1194,7 +1198,7 @@ impl Grammar {
                     self.eat_operator("<:");
                     let supertype = self.parse_type_union()?;
                     let syntax = self.syntax(start);
-                    subtype_bounds.push(SubtypeBound {
+                    clause.subtype_bounds.push(SubtypeBound {
                         syntax: syntax.clone(),
                         parameter: NamedType {
                             syntax,
@@ -1211,7 +1215,7 @@ impl Grammar {
                     }
                     let arguments = split_trait_arguments(self.parse_type_union()?);
                     let syntax = self.syntax(start);
-                    trait_bounds.push(TraitBound {
+                    clause.trait_bounds.push(TraitBound {
                         syntax: syntax.clone(),
                         trait_name: NamedType {
                             syntax,
@@ -1226,7 +1230,7 @@ impl Grammar {
                 break;
             }
         }
-        Ok((trait_bounds, subtype_bounds))
+        Ok(clause)
     }
 
     fn parse_trait_implementation(
@@ -1234,7 +1238,14 @@ impl Grammar {
         start: usize,
     ) -> Result<TraitImplementation, ParseError> {
         self.expect(TokenKind::Impl, "expected `impl`")?;
-        let (type_parameters, trait_bounds, subtype_bounds) = self.parse_bracketed_generics()?;
+        let (
+            type_parameters,
+            WhereClause {
+                trait_bounds,
+                subtype_bounds,
+                sized_relaxations,
+            },
+        ) = self.parse_bracketed_generics()?;
         let negative = self.eat(TokenKind::Bang);
         // Negative implementations have no methods and can quantify the effect
         // row of affine opaque types such as Coroutine{E} T.
@@ -1315,6 +1326,7 @@ impl Grammar {
             type_parameters,
             trait_bounds,
             subtype_bounds,
+            sized_relaxations,
             negative,
             trait_name,
             arguments,
@@ -1707,7 +1719,11 @@ impl Grammar {
         if self.at(TokenKind::LBrace) {
             return Err(self.error("effect parameter must appear immediately after the type name"));
         }
-        let (trait_bounds, subtype_bounds) = self.parse_where_clause(&mut type_parameters)?;
+        let WhereClause {
+            trait_bounds,
+            subtype_bounds,
+            sized_relaxations,
+        } = self.parse_where_clause()?;
         let has_body = self.eat(TokenKind::Equals);
         if !has_body && !type_parameters.is_empty() {
             return Err(self.error("singleton types cannot have compile-time parameters"));
@@ -1729,6 +1745,7 @@ impl Grammar {
             type_parameters,
             trait_bounds,
             subtype_bounds,
+            sized_relaxations,
             default_bounds,
         })
     }
@@ -1918,16 +1935,9 @@ impl Grammar {
     /// the comma separator. Returns empty lists when no `<` is present.
     fn parse_bracketed_generics(
         &mut self,
-    ) -> Result<
-        (
-            Vec<TypeParameterPattern>,
-            Vec<TraitBound>,
-            Vec<SubtypeBound>,
-        ),
-        ParseError,
-    > {
+    ) -> Result<(Vec<TypeParameterPattern>, WhereClause), ParseError> {
         if !self.eat_operator("<") {
-            return Ok((Vec::new(), Vec::new(), Vec::new()));
+            return Ok((Vec::new(), WhereClause::default()));
         }
         let mut parameters = Vec::new();
         loop {
@@ -1944,11 +1954,11 @@ impl Grammar {
                 break;
             }
         }
-        let (trait_bounds, subtype_bounds) = self.parse_where_clause(&mut parameters)?;
+        let clause = self.parse_where_clause()?;
         if !self.eat_operator(">") {
             return Err(self.error("expected `>` to close generic parameter list"));
         }
-        Ok((parameters, trait_bounds, subtype_bounds))
+        Ok((parameters, clause))
     }
 
     fn reject_effect_parameters(
@@ -2018,7 +2028,6 @@ impl Grammar {
             let pattern = TypeParameterPattern::Binding(TypeParameterBinding {
                 syntax: syntax.clone(),
                 name: name.clone(),
-                sized: true,
             });
             let default_bound = DefaultTypeBound {
                 syntax: syntax.clone(),
@@ -2090,7 +2099,6 @@ impl Grammar {
         Ok(TypeParameterPattern::Binding(TypeParameterBinding {
             syntax: self.syntax(start),
             name,
-            sized: true,
         }))
     }
 
@@ -2142,13 +2150,8 @@ impl Grammar {
     fn parse_function_expression(&mut self) -> Result<FunctionExpression, ParseError> {
         let start = self.position;
         let generics = if self.at_operator("<") {
-            let (parameters, trait_bounds, subtype_bounds) = self.parse_bracketed_generics()?;
-            Some(crate::GenericParameters {
-                syntax: self.annotation_syntax(start, 1),
-                parameters,
-                trait_bounds,
-                subtype_bounds,
-            })
+            let (parameters, clause) = self.parse_bracketed_generics()?;
+            Some(clause.into_generics(self.annotation_syntax(start, 1), parameters))
         } else {
             None
         };
@@ -2519,13 +2522,8 @@ impl Grammar {
             if self.conversion_target {
                 return Err(self.error("generic function types are not allowed in `as` targets"));
             }
-            let (parameters, trait_bounds, subtype_bounds) = self.parse_bracketed_generics()?;
-            let generics = crate::GenericParameters {
-                syntax: self.annotation_syntax(start, 1),
-                parameters,
-                trait_bounds,
-                subtype_bounds,
-            };
+            let (parameters, clause) = self.parse_bracketed_generics()?;
+            let generics = clause.into_generics(self.annotation_syntax(start, 1), parameters);
             let body = self.parse_non_juxtaposed_function_type(self.position)?;
             Ok(Type::Forall(crate::ForallType {
                 syntax: self.annotation_syntax(start, 2),
@@ -2556,7 +2554,7 @@ impl Grammar {
         };
         let whole_mutable = mutable_marker.is_some();
         let whole_moved = moved_marker.is_some();
-        let mut parameter = self.parse_type_union()?;
+        let parameter = self.parse_type_union()?;
         if self.at(TokenKind::Star) && !self.conversion_target {
             return Err(self.error("juxtaposed parameters are now written `(A; B) -> R`"));
         }
@@ -4633,28 +4631,6 @@ fn line_starts(source: &str) -> Vec<usize> {
     starts
 }
 
-fn find_type_parameter_binding_mut<'a>(
-    parameters: &'a mut [TypeParameterPattern],
-    name: &str,
-) -> Option<&'a mut TypeParameterBinding> {
-    for parameter in parameters {
-        match parameter {
-            TypeParameterPattern::Binding(binding) if binding.name == name => {
-                return Some(binding);
-            }
-            TypeParameterPattern::Product(product) => {
-                if let Some(binding) = find_type_parameter_binding_mut(&mut product.elements, name)
-                {
-                    return Some(binding);
-                }
-            }
-            TypeParameterPattern::Binding(_) => {}
-            TypeParameterPattern::Effect(_) => {}
-            TypeParameterPattern::Splice(_) => {}
-        }
-    }
-    None
-}
 
 /// Splits the outer application spine of a trait use into its compile-time
 /// arguments. Parenthesized types remain product nodes, so they continue to
@@ -4682,17 +4658,6 @@ fn attach_parsed_docs(item: &mut Item, docs: Vec<String>) -> bool {
     true
 }
 
-/// The bindings declared by a companion member, looking through modifiers
-/// (`///` docs, `@modifier`) and visibility splices that wrap it.
-fn companion_member_bindings(item: &mut Item) -> Vec<&mut Binding> {
-    match item {
-        Item::Binding(binding) => vec![binding],
-        Item::ExternBlock(block) => block.bindings.iter_mut().collect(),
-        Item::Modified(modified) => companion_member_bindings(&mut modified.item),
-        Item::VisibilitySplice(splice) => companion_member_bindings(&mut splice.item),
-        _ => Vec::new(),
-    }
-}
 
 fn companion_target_name(ty: &Type) -> Option<String> {
     match ty {

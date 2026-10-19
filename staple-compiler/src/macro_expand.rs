@@ -1090,6 +1090,21 @@ fn desugar_item(item: &mut Item, next_syntax_id: &mut usize, ops_module: StdModu
             }
         }
         Item::TraitDeclaration(declaration) => {
+            // Each associated type is a hidden trailing trait parameter
+            // determined by the explicit parameters; its `where` constraints
+            // become the trait's. The hidden parameter shares the associated
+            // type's syntax (see `TraitDeclaration::explicit_type_parameters`).
+            for associated in &mut declaration.associated_types {
+                declaration.type_parameters.push(staple_syntax::TypeParameterPattern::Binding(
+                    staple_syntax::TypeParameterBinding {
+                        syntax: associated.syntax.clone(),
+                        name: associated.name.clone(),
+                    },
+                ));
+                declaration.prerequisites.append(&mut associated.trait_bounds);
+                declaration.subtype_bounds.append(&mut associated.subtype_bounds);
+                declaration.sized_relaxations.append(&mut associated.sized_relaxations);
+            }
             for member in &mut declaration.members {
                 if let Some(default) = &mut member.default {
                     desugar_expression(default, next_syntax_id, ops_module);
@@ -1370,9 +1385,11 @@ pub(crate) fn expand_program(
                 name: String::new(),
                 module: source_module.syntax.clone(),
                 companion: false,
+                generics_syntax: None,
                 type_parameters: Vec::new(),
                 trait_bounds: Vec::new(),
                 subtype_bounds: Vec::new(),
+                sized_relaxations: Vec::new(),
                 companion_target: None,
             };
             let modified = staple_syntax::ModifiedItem {
@@ -1436,7 +1453,7 @@ pub(crate) fn expand_program(
         }
         source_module.syntax.items = items;
     }
-    program.rebuild_generated_inline_modules();
+    program.rebuild_generated_inline_modules(&mut expander.next_syntax_id);
     program.reattach_expanded_inline_modules();
     for source_module in program.modules() {
         for item in &source_module.syntax.items {
@@ -1572,10 +1589,10 @@ impl MacroExpander {
         let mut next_syntax_id = program
             .modules()
             .iter()
-            .map(|module| module.syntax.syntax.id.0)
+            .map(|module| module.syntax.syntax.id.0 + 1)
+            .chain([program.next_syntax_id()])
             .max()
-            .unwrap_or(0)
-            + 1;
+            .unwrap_or(0);
         for source_module in program.modules() {
             for item in &source_module.syntax.items {
                 match item {
@@ -12557,6 +12574,14 @@ fn substitute_item(
             for bound in &mut declaration.default_bounds {
                 substitute_default_bound(bound, environment, diagnostics)?;
             }
+            for associated in &mut declaration.associated_types {
+                for bound in &mut associated.trait_bounds {
+                    substitute_trait_bound(bound, environment, diagnostics)?;
+                }
+                for bound in &mut associated.subtype_bounds {
+                    substitute_subtype_bound(bound, environment, diagnostics)?;
+                }
+            }
             for member in &mut declaration.members {
                 substitute_type(&mut member.annotation, environment, diagnostics)?;
                 if let Some(default) = &mut member.default {
@@ -12631,6 +12656,13 @@ fn substitute_item(
                 environment,
                 diagnostics,
             )?;
+            substitute_type_parameter_list(&mut submodule.type_parameters, environment, diagnostics)?;
+            for bound in &mut submodule.trait_bounds {
+                substitute_trait_bound(bound, environment, diagnostics)?;
+            }
+            for bound in &mut submodule.subtype_bounds {
+                substitute_subtype_bound(bound, environment, diagnostics)?;
+            }
             if let Some(target) = &mut submodule.companion_target {
                 substitute_type(target, environment, diagnostics)?;
             }
@@ -12769,7 +12801,6 @@ fn substitute_type_parameter_list(
                 staple_syntax::TypeParameterBinding {
                     syntax: identifier.syntax,
                     name: identifier.name,
-                    sized: true,
                 },
             ));
         }
@@ -13196,6 +13227,18 @@ fn freshen_block_item(expander: &mut MacroExpander, item: &mut Item, module: Mod
         Item::Submodule(submodule) => {
             expander.freshen_syntax(&mut submodule.syntax, module, mark);
             expander.freshen_syntax(&mut submodule.module.syntax, module, mark);
+            if let Some(syntax) = &mut submodule.generics_syntax {
+                expander.freshen_syntax(syntax, module, mark);
+            }
+            for parameter in &mut submodule.type_parameters {
+                freshen_type_parameter(expander, parameter, module, mark);
+            }
+            for bound in &mut submodule.trait_bounds {
+                freshen_trait_bound(expander, bound, module, mark);
+            }
+            for bound in &mut submodule.subtype_bounds {
+                freshen_subtype_bound(expander, bound, module, mark);
+            }
             if let Some(target) = &mut submodule.companion_target {
                 freshen_type(expander, target, module, mark);
             }
@@ -13396,6 +13439,12 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
             }
             for associated in &mut declaration.associated_types {
                 expander.freshen_syntax(&mut associated.syntax, module, mark);
+                for bound in &mut associated.trait_bounds {
+                    freshen_trait_bound(expander, bound, module, mark);
+                }
+                for bound in &mut associated.subtype_bounds {
+                    freshen_subtype_bound(expander, bound, module, mark);
+                }
             }
             for prerequisite in &mut declaration.prerequisites {
                 freshen_trait_bound(expander, prerequisite, module, mark);

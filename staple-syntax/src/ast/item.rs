@@ -1,4 +1,5 @@
 use super::{
+    SizedRelaxation,
     DefaultTypeBound, Expression, NamedType, SubtypeBound, Syntax, TraitBound, Type,
     TypeParameterPattern,
 };
@@ -151,9 +152,12 @@ pub struct Submodule {
     /// True for a type-keyed `companion` namespace rather than an ordinary
     /// inline `mod` declaration.
     pub companion: bool,
+    /// A companion's `<...>` clause, including when it is empty.
+    pub generics_syntax: Option<Syntax>,
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub sized_relaxations: Vec<SizedRelaxation>,
     pub companion_target: Option<Type>,
 }
 
@@ -315,6 +319,7 @@ pub struct TypeDeclaration {
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub sized_relaxations: Vec<SizedRelaxation>,
     pub default_bounds: Vec<DefaultTypeBound>,
 }
 
@@ -371,6 +376,7 @@ pub struct MacroDeclaration {
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub sized_relaxations: Vec<SizedRelaxation>,
     pub annotation: Option<Type>,
     pub value: Option<Expression>,
 }
@@ -381,25 +387,33 @@ pub struct TraitDeclaration {
     pub docs: Vec<String>,
     pub visibility: Visibility,
     pub name: String,
-    /// Explicit parameters followed by one hidden trailing parameter per
-    /// associated type, in declaration order.
+    /// The parameters written in the trait header. Desugaring appends one
+    /// hidden trailing parameter per associated type, in declaration order.
     pub type_parameters: Vec<TypeParameterPattern>,
     pub associated_types: Vec<AssociatedTypeDeclaration>,
     pub prerequisites: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub sized_relaxations: Vec<SizedRelaxation>,
     pub default_bounds: Vec<DefaultTypeBound>,
     pub members: Vec<TraitMember>,
 }
 
 impl TraitDeclaration {
-    /// The parameters written in the trait header, without the hidden
-    /// parameters that represent associated types.
+    /// The parameters written in the trait header, without any hidden
+    /// parameters desugaring appended for associated types. A hidden
+    /// parameter shares its associated type's syntax.
     pub fn explicit_type_parameters(&self) -> &[TypeParameterPattern] {
-        let count = self
+        let hidden = self
             .type_parameters
-            .len()
-            .saturating_sub(self.associated_types.len());
-        &self.type_parameters[..count]
+            .iter()
+            .rev()
+            .zip(self.associated_types.iter().rev())
+            .take_while(|(parameter, associated)| {
+                matches!(parameter, TypeParameterPattern::Binding(binding)
+                    if binding.syntax.id == associated.syntax.id)
+            })
+            .count();
+        &self.type_parameters[..self.type_parameters.len() - hidden]
     }
 }
 
@@ -408,6 +422,12 @@ pub struct AssociatedTypeDeclaration {
     pub syntax: Syntax,
     pub docs: Vec<String>,
     pub name: String,
+    /// The associated type's own `where` clause. Desugaring appends the
+    /// associated type to the trait's parameters as a hidden trailing
+    /// parameter and moves these constraints onto the trait.
+    pub trait_bounds: Vec<TraitBound>,
+    pub subtype_bounds: Vec<SubtypeBound>,
+    pub sized_relaxations: Vec<SizedRelaxation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,6 +456,7 @@ pub struct TraitImplementation {
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub sized_relaxations: Vec<SizedRelaxation>,
     /// Whether this is a negative implementation (`impl !Trait T {}`),
     /// declaring that `T` explicitly does not implement `Trait`.
     pub negative: bool,
