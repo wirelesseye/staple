@@ -18,6 +18,12 @@ workspace:
 cargo build            # produces target/debug/staple
 ```
 
+Building needs LLVM 21, found through `llvm-config` on the `PATH` or
+`LLVM_SYS_211_PREFIX`. On Linux, prefer a distribution package such as
+`llvm-21-dev` from apt.llvm.org over the official release tarball: the
+tarball's static libraries are ThinLTO bitcode, so every link re-runs code
+generation for all of LLVM and each test binary takes minutes to link.
+
 The compiler crate documentation describes phase responsibilities and the
 validated lowering boundary. Open it with `cargo doc -p staple-compiler --open`.
 
