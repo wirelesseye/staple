@@ -1343,19 +1343,21 @@ fn parses_typed_macro_parameters_and_literal_identifiers() {
     let Item::MacroDeclaration(declaration) = &root.items[0] else {
         panic!("expected macro declaration");
     };
-    let Some(Expression::Function(first)) = &declaration.value else {
-        panic!("expected first parameter");
+    // The value is recorded as written: one function over a slotted product,
+    // not a curried chain.
+    let Some(Expression::Function(function)) = &declaration.value else {
+        panic!("expected a function value");
     };
-    let Expression::Function(second) = first.body.as_ref() else {
-        panic!("expected second parameter");
+    let Pattern::Product(parameters) = &function.pattern else {
+        panic!("expected slotted parameters");
     };
-    let Expression::Function(keyword) = second.body.as_ref() else {
-        panic!("expected identifier parameter");
-    };
+    assert!(parameters.slotted);
+    assert_eq!(parameters.elements.len(), 4);
     assert!(matches!(
-        keyword.pattern,
+        parameters.elements[2],
         Pattern::Wildcard(ref pattern) if !matches!(pattern.ty, Type::Inferred(_))
     ));
+    assert!(matches!(function.body.as_ref(), Expression::Quote(_)));
 }
 
 #[test]
@@ -1521,9 +1523,7 @@ fn parses_metadata_aware_macro_calls_losslessly() {
     let Some(Expression::Function(function)) = &declaration.value else {
         panic!("expected macro body");
     };
-    let Expression::Function(function) = function.body.as_ref() else {
-        panic!("expected second macro parameter");
-    };
+    assert!(matches!(&function.pattern, Pattern::Product(p) if p.slotted && p.elements.len() == 2));
     let Expression::Quote(quote) = function.body.as_ref() else {
         panic!("expected item quotation");
     };
@@ -3591,7 +3591,7 @@ fn parses_slotted_function_patterns_and_slot_markers() {
     let Some(Expression::Function(f)) = &binding.value else {
         panic!("expected function")
     };
-    assert!(matches!(f.pattern, Pattern::Binding(_)));
+    assert!(matches!(&f.pattern, Pattern::Product(p) if p.slotted && p.elements.len() == 1));
     assert!(parse("let p: (mut I32; I32) = p\n").is_err());
     assert!(parse("let p: (I32; ...) = p\n").is_err());
     assert!(parse("def f: mut (I32; I32) -> I32 = (x; y) => x\n").is_err());

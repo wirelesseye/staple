@@ -358,15 +358,22 @@ fn render_pattern(pattern: &Pattern) -> String {
             } else {
                 ""
             };
+            // A single slot keeps its `;` so it does not reparse as grouping.
+            let trailing = if product.slotted && product.elements.len() == 1 {
+                ";"
+            } else {
+                ""
+            };
             format!(
-                "{}({})",
+                "{}({}{})",
                 prefix,
                 product
                     .elements
                     .iter()
                     .map(render_pattern)
                     .collect::<Vec<_>>()
-                    .join(if product.slotted { "; " } else { ", " })
+                    .join(if product.slotted { "; " } else { ", " }),
+                trailing
             )
         }
         Pattern::Nominal(nominal) => {
@@ -797,7 +804,7 @@ mod slotted_pattern_tests {
             ("def f = (a; b) => a\n", "(a; b)"),
             ("def f = (a, b) => a\n", "(a, b)"),
             ("def f = (a; b, c) => a\n", "(a; (b, c))"),
-            ("def f = (a;) => a\n", "a"),
+            ("def f = (a;) => a\n", "(a;)"),
         ] {
             let module = staple_syntax::parse(source).expect("function parses");
             let Item::Binding(binding) = &module.items[0] else {

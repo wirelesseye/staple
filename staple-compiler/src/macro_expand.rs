@@ -1185,6 +1185,16 @@ fn desugar_expression(
             *expression = lower_pipe_expression(pipe, next_syntax_id);
         }
         Expression::Function(function) => {
+            // A single-slot parameter `(a;) => body` takes the same argument
+            // as `a => body`.
+            if let Pattern::Product(product) = &mut function.pattern
+                && product.slotted
+                && product.elements.len() == 1
+                && !product.mutable
+                && !product.moved
+            {
+                function.pattern = product.elements.remove(0);
+            }
             desugar_expression(&mut function.body, next_syntax_id, ops_module)
         }
         Expression::TypeApplication(application) => {
@@ -1559,10 +1569,18 @@ impl MacroExpander {
             })
             .map(|module| module.id);
 
+        let mut next_syntax_id = program
+            .modules()
+            .iter()
+            .map(|module| module.syntax.syntax.id.0)
+            .max()
+            .unwrap_or(0)
+            + 1;
         for source_module in program.modules() {
             for item in &source_module.syntax.items {
                 match item {
                     Item::MacroDeclaration(declaration) => {
+                        let declaration = &with_curried_macro_value(declaration, &mut next_syntax_id);
                         let key = MacroKey {
                             module: source_module.id,
                             name: declaration.name.clone(),
@@ -2186,13 +2204,6 @@ impl MacroExpander {
             }
         }
 
-        let next_syntax_id = program
-            .modules()
-            .iter()
-            .map(|module| module.syntax.syntax.id.0)
-            .max()
-            .unwrap_or(0)
-            + 1;
         Self {
             definitions,
             scopes,
@@ -7953,6 +7964,44 @@ fn macro_same_package(program: &Program, left: ModuleId, right: ModuleId) -> boo
         .package_of(left)
         .zip(program.package_of(right))
         .is_some_and(|(left, right)| left == right)
+}
+
+/// A copy of `declaration` whose value is curried into the nested
+/// single-parameter functions expansion consumes: the source value
+/// `(a; b) => body` becomes `a => b => body`. Inner layers get fresh syntax
+/// identities.
+fn with_curried_macro_value(
+    declaration: &staple_syntax::MacroDeclaration,
+    next_syntax_id: &mut usize,
+) -> staple_syntax::MacroDeclaration {
+    let mut declaration = declaration.clone();
+    let Some(Expression::Function(function)) = &mut declaration.value else {
+        return declaration;
+    };
+    let Pattern::Product(product) = &mut function.pattern else {
+        return declaration;
+    };
+    if !product.slotted || product.elements.is_empty() {
+        return declaration;
+    }
+    let mut parameters = std::mem::take(&mut product.elements);
+    let first = parameters.remove(0);
+    let mut body = std::mem::replace(
+        &mut function.body,
+        Box::new(Expression::Product(staple_syntax::ProductExpression::empty())),
+    );
+    for pattern in parameters.into_iter().rev() {
+        body = Box::new(Expression::Function(Box::new(staple_syntax::FunctionExpression {
+            syntax: freshened_syntax(&function.syntax, next_syntax_id),
+            generics: None,
+            pattern,
+            effect_lower_bound: None,
+            body,
+        })));
+    }
+    function.pattern = first;
+    function.body = body;
+    declaration
 }
 
 fn expression_arity(expression: &Expression) -> usize {

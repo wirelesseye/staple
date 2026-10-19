@@ -984,30 +984,23 @@ impl Grammar {
         })
     }
 
-    /// Parses a macro declaration's value: a juxtaposed parameter list whose
-    /// slots are separated by `;`, a single `=>`, and then the macro body
+    /// Parses a macro declaration's value: a parameter list whose slots are
+    /// separated by `;`, a single `=>`, and then the macro body
     /// (`quote`/`parse_quote`, a `match`, a block, or a bare syntax
     /// expression). Multiple parameters are written `(a; b) => body`, not as a
-    /// curried `a => b => body` chain — the value is desugared here into the
-    /// nested single-parameter `Function` chain that the rest of the compiler
-    /// consumes, so a body that itself parses as a bare function is rejected as
-    /// the old curried spelling.
+    /// curried `a => b => body` chain, so a body that itself parses as a bare
+    /// function is rejected as the old curried spelling.
     fn parse_macro_value(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let pattern = self.parse_top_level_parameter_pattern()?;
-        let patterns = if matches!(&pattern, Pattern::Product(product) if product.slotted) {
-            let Pattern::Product(product) = pattern else {
-                unreachable!()
-            };
-            product.elements
-        } else {
-            vec![pattern]
+        let patterns = match &pattern {
+            Pattern::Product(product) if product.slotted => product.elements.iter().collect(),
+            pattern => vec![pattern],
         };
-        let parameter_starts = vec![start; patterns.len()];
         if self.at(TokenKind::Star) {
             return Err(self.error("juxtaposed parameters are now written `(a; b) => body`"));
         }
-        for pattern in &patterns {
+        for pattern in patterns {
             if parameter_has_nested_mutable(pattern) {
                 return Err(self.error(
                     "`mut` is only allowed on a whole parameter binding or a direct element of a \
@@ -1037,17 +1030,13 @@ impl Grammar {
                     .to_owned(),
             });
         }
-        let mut expression = body;
-        for (start, pattern) in parameter_starts.into_iter().zip(patterns).rev() {
-            expression = Expression::Function(Box::new(FunctionExpression {
-                syntax: self.syntax(start),
-                generics: None,
-                pattern,
-                effect_lower_bound: None,
-                body: Box::new(expression),
-            }));
-        }
-        Ok(expression)
+        Ok(Expression::Function(Box::new(FunctionExpression {
+            syntax: self.syntax(start),
+            generics: None,
+            pattern,
+            effect_lower_bound: None,
+            body: Box::new(body),
+        })))
     }
 
     fn parse_trait_declaration(
@@ -2163,14 +2152,7 @@ impl Grammar {
         } else {
             None
         };
-        let mut pattern = self.parse_top_level_parameter_pattern()?;
-        if matches!(&pattern, Pattern::Product(p) if p.slotted)
-            && let Pattern::Product(p) = &mut pattern
-        {
-            if p.elements.len() == 1 && !p.mutable && !p.moved {
-                pattern = p.elements.remove(0);
-            }
-        }
+        let pattern = self.parse_top_level_parameter_pattern()?;
         if self.at(TokenKind::Star) {
             return Err(self.error("juxtaposed parameters are now written `(a; b) => body`"));
         }
