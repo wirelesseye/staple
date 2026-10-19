@@ -420,6 +420,8 @@ impl TraitDeclaration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssociatedTypeDeclaration {
     pub syntax: Syntax,
+    /// See [`TraitMember::modifiers`].
+    pub modifiers: Vec<ModifierInvocation>,
     pub docs: Vec<String>,
     pub name: String,
     /// The associated type's own `where` clause. Desugaring appends the
@@ -433,6 +435,8 @@ pub struct AssociatedTypeDeclaration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssociatedTypeBinding {
     pub syntax: Syntax,
+    /// See [`TraitMember::modifiers`].
+    pub modifiers: Vec<ModifierInvocation>,
     pub docs: Vec<String>,
     pub name: String,
     pub value: Type,
@@ -441,6 +445,9 @@ pub struct AssociatedTypeBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraitMember {
     pub syntax: Syntax,
+    /// The `@modifier` invocations written on the member. Macro expansion
+    /// interprets them, adding `@doc` text to `docs` and setting `track_caller`.
+    pub modifiers: Vec<ModifierInvocation>,
     pub docs: Vec<String>,
     pub name: String,
     pub annotation: Type,
@@ -469,6 +476,8 @@ pub struct TraitImplementation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImplementationMember {
     pub syntax: Syntax,
+    /// See [`TraitMember::modifiers`].
+    pub modifiers: Vec<ModifierInvocation>,
     pub docs: Vec<String>,
     pub name: String,
     pub value: Expression,
@@ -488,6 +497,10 @@ pub enum BindingKind {
 pub struct Binding {
     pub syntax: Syntax,
     pub docs: Vec<String>,
+    /// The `@modifier` invocations written on an `extern` block member (see
+    /// [`TraitMember::modifiers`]); other bindings carry theirs in an
+    /// enclosing `ModifiedItem`.
+    pub member_modifiers: Vec<ModifierInvocation>,
     pub visibility: Visibility,
     pub kind: BindingKind,
     pub mutable: bool,

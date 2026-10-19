@@ -3889,15 +3889,18 @@ fn parenthesized_nominal_patterns_take_type_annotations() {
         };
         function.pattern.clone()
     };
+    // The parentheses stay in the tree, carrying the annotation; desugaring
+    // moves it onto the nominal pattern.
     let Pattern::Product(product) = function(0) else {
         panic!("slotted product")
     };
-    let Pattern::Nominal(first) = &product.elements[0] else {
-        panic!("annotated nominal slot: {:?}", product.elements[0])
+    let Pattern::Product(first) = &product.elements[0] else {
+        panic!("annotated parenthesized slot: {:?}", product.elements[0])
     };
     assert_eq!(first.annotation.as_ref().unwrap().to_string(), "Box I32");
-    let Pattern::Nominal(moved) = function(1) else {
-        panic!("annotated nominal parameter")
+    assert!(matches!(first.elements.as_slice(), [Pattern::Nominal(nominal)] if nominal.annotation.is_none()));
+    let Pattern::Product(moved) = function(1) else {
+        panic!("annotated parenthesized parameter")
     };
     assert!(moved.moved);
     assert_eq!(moved.annotation.as_ref().unwrap().to_string(), "Box String");
@@ -3946,6 +3949,52 @@ fn companion_members_wrapped_in_modifiers_keep_companion_context() {
     };
     assert!(binding.companion_target.is_none());
     assert!(binding.companion_generics.is_none());
+}
+
+#[test]
+fn marks_parser_supplied_nodes_as_implied() {
+    let module = parse("def f = (x, _, y: I32) => x\nlet ns.Unit = value\n").unwrap();
+    let Item::Binding(binding) = &module.items[0] else {
+        panic!("binding")
+    };
+    let Some(Expression::Function(function)) = &binding.value else {
+        panic!("function")
+    };
+    let Pattern::Product(parameters) = &function.pattern else {
+        panic!("product")
+    };
+    let [Pattern::Binding(x), Pattern::Wildcard(wildcard), Pattern::Binding(y)] =
+        parameters.elements.as_slice()
+    else {
+        panic!("parameters")
+    };
+    assert!(matches!(&x.ty, Type::Inferred(ty) if ty.syntax.implied));
+    assert!(matches!(&wildcard.ty, Type::Inferred(ty) if ty.syntax.implied));
+    assert!(!y.ty.syntax().implied);
+    assert!(!parameters.syntax.implied);
+
+    let explicit = parse("def g = (x: _) => x\n").unwrap();
+    let Item::Binding(binding) = &explicit.items[0] else {
+        panic!("binding")
+    };
+    let Some(Expression::Function(function)) = &binding.value else {
+        panic!("function")
+    };
+    let Pattern::Product(parameters) = &function.pattern else {
+        panic!("product")
+    };
+    let [Pattern::Binding(x)] = parameters.elements.as_slice() else {
+        panic!("parameter")
+    };
+    assert!(matches!(&x.ty, Type::Inferred(ty) if !ty.syntax.implied));
+
+    let Item::PatternBinding(binding) = &module.items[1] else {
+        panic!("pattern binding")
+    };
+    let Pattern::Nominal(unit) = &binding.pattern else {
+        panic!("nominal")
+    };
+    assert!(matches!(unit.argument.as_ref(), Pattern::Product(argument) if argument.syntax.implied));
 }
 
 #[test]

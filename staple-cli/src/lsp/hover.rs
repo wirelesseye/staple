@@ -1736,6 +1736,9 @@ impl Collector<'_> {
                 for element in &product.elements {
                     self.pattern(element);
                 }
+                if let Some(annotation) = &product.annotation {
+                    self.ty(annotation);
+                }
             }
             Pattern::Nominal(nominal) => {
                 if let Some(id) = self.typed.resolved().type_for_pattern(nominal.syntax.id)

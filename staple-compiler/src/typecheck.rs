@@ -15633,6 +15633,7 @@ impl TypeChecker {
                 elements: Vec::new(),
                 mutable: false,
                 moved: false,
+                annotation: None,
             }),
             effect_lower_bound: None,
             result_annotation: None,

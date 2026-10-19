@@ -3727,6 +3727,53 @@ fn rejects_question_sized_clauses_naming_unknown_or_repeated_parameters() {
 }
 
 #[test]
+fn member_modifiers_document_and_track_trait_members() {
+    let module = resolve(concat!(
+        "trait Describe T {\n",
+        "    /// First line.\n",
+        "    @doc(\"Second line.\")\n",
+        "    @track_caller\n",
+        "    describe: T -> I32\n",
+        "}\n",
+    ));
+    let describe = module
+        .traits()
+        .values()
+        .find(|resolved| resolved.declaration.name == "Describe")
+        .expect("trait");
+    let member = &describe.declaration.members[0];
+    assert_eq!(member.docs, [" First line.", "Second line."]);
+    assert!(member.track_caller);
+
+    for (source, message) in [
+        (
+            "trait Bad T {\n    @track_caller\n    type Out\n    f: T -> T\n}\n",
+            "`@track_caller` may only modify a trait member function",
+        ),
+        (
+            "trait Bad T {\n    @track_caller(1)\n    f: T -> T\n}\n",
+            "`@track_caller` takes no argument",
+        ),
+        (
+            "trait Bad T {\n    @inline\n    f: T -> T\n}\n",
+            "only `@doc` and `@track_caller` may modify a trait member",
+        ),
+        (
+            "extern \"staple-intrinsic\" {\n    @track_caller\n    f: I32 -> I32\n}\n",
+            "only `@doc` may modify a declaration member",
+        ),
+    ] {
+        let diagnostics = resolve_result(source).expect_err(source);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(message)),
+            "{source}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
 fn allows_local_trait_implementations_for_products() {
     let source = concat!(
         "trait ProductDefault T { product_default: () -> T }\n",

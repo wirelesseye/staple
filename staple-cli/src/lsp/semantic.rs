@@ -1059,6 +1059,9 @@ impl<'a> Classifier<'a> {
                 for element in &value.elements {
                     self.pattern(element, kind, resolved);
                 }
+                if let Some(annotation) = &value.annotation {
+                    self.ty(annotation, resolved);
+                }
             }
             Pattern::Nominal(value) => {
                 self.mark_first(&value.syntax, &value.name, TYPE, 0, 1);

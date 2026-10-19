@@ -1017,6 +1017,9 @@ impl Collector<'_> {
                 for element in &value.elements {
                     self.pattern(element);
                 }
+                if let Some(annotation) = &value.annotation {
+                    self.ty(annotation);
+                }
             }
             Pattern::Nominal(value) => {
                 self.add_resolved(&value.syntax, &value.name, false);

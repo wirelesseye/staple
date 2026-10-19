@@ -1,3 +1,34 @@
+//! Parsing Staple source into a lossless syntax tree.
+//!
+//! The tree records the source exactly as written. Every node stands for a
+//! construct that appears in the source and holds what was written for it, so
+//! tooling and later passes can recover the original program from the tree
+//! alone. To keep it that way, the parser must not:
+//!
+//! - rewrite one construct into another: `a |> f x` stays a pipe, a macro
+//!   value `(a; b) => body` stays one function, and `(a;) => body` keeps its
+//!   slot;
+//! - invent nodes or names, or copy a node to another place (a companion's
+//!   `<...>` header stays on the companion, not on each member);
+//! - move information off the node it was written on (an annotation, a
+//!   `mut`/`move` mark, or an associated type's `where` clause stays put);
+//! - decode or interpret what it reads, such as string escapes or the meaning
+//!   of modifiers like `@doc` and `@track_caller`;
+//! - look up names, for example to apply `?Sized` to a parameter.
+//!
+//! Rejecting malformed input is fine, as long as rejecting is all a check does.
+//! Two cases are recorded in a fixed form instead: a node the grammar requires
+//! for omitted syntax (the inferred type of an unannotated binding, the empty
+//! argument of a qualified nominal pattern) is marked [`Syntax::implied`], and
+//! `///` comments are kept as text in `docs`, or as doc-comment
+//! `ModifierInvocation`s when written among `@modifier`s.
+//!
+//! Rewriting into simpler forms happens after parsing: the compiler's desugar
+//! pass before name resolution (operators, `?`, `as`, pipes, single-slot
+//! parameters, associated types, pattern annotations), macro expansion (macro
+//! values, member modifiers), name resolution (`?Sized`), and program loading
+//! (companion headers).
+
 use crate::ast::*;
 use crate::lexer::lex;
 use std::cell::{Cell, RefCell};
@@ -102,7 +133,8 @@ impl WhereClause {
     }
 }
 
-/// Parses a complete Staple source file into a lossless syntax tree.
+/// Parses a complete Staple source file into a lossless syntax tree; see the
+/// module documentation.
 pub fn parse(source: &str) -> Result<Module, ParseError> {
     let tokens = Arc::from(lex(source));
     Grammar::new(tokens, Arc::from(source), 0, None).parse_source_file()
@@ -360,14 +392,6 @@ fn fragment_error(syntax: &Syntax, message: &'static str) -> ParseError {
         location,
         message: message.to_owned(),
     }
-}
-
-/// Which declaration a member belongs to, for the modifiers it accepts.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MemberKind {
-    Trait,
-    Implementation,
-    Other,
 }
 
 #[derive(Clone)]
@@ -779,59 +803,18 @@ impl Grammar {
         })
     }
 
-    fn parse_member_docs(&mut self, start: usize) -> Result<Vec<String>, ParseError> {
-        self.parse_member_modifiers(start, MemberKind::Other)
-            .map(|(docs, _)| docs)
-    }
-
-    /// Parses a declaration member's documentation comments and modifiers.
-    /// Trait members also accept `@track_caller`, which the second result
-    /// reports; implementation members inherit it from the trait member.
+    /// Parses a declaration member's leading `///` comments and its
+    /// `@modifier` invocations, which follow them.
     fn parse_member_modifiers(
         &mut self,
         start: usize,
-        kind: MemberKind,
-    ) -> Result<(Vec<String>, bool), ParseError> {
-        let mut docs = self.leading_doc_comments(start);
-        let mut track_caller = false;
+    ) -> Result<(Vec<String>, Vec<ModifierInvocation>), ParseError> {
+        let docs = self.leading_doc_comments(start);
+        let mut modifiers = Vec::new();
         while self.at(TokenKind::At) {
-            let modifier = self.parse_modifier_invocation()?;
-            if modifier.namespace.is_none() && modifier.name == "track_caller" {
-                match kind {
-                    MemberKind::Trait if modifier.argument.is_none() => {
-                        track_caller = true;
-                        continue;
-                    }
-                    MemberKind::Trait => {
-                        return Err(self.error("`@track_caller` takes no argument"));
-                    }
-                    MemberKind::Implementation => {
-                        return Err(self.error(
-                            "`@track_caller` belongs on the trait member; implementation members inherit it",
-                        ));
-                    }
-                    MemberKind::Other => {}
-                }
-            }
-            if modifier.namespace.is_some() || modifier.name != "doc" {
-                return Err(self.error(match kind {
-                    MemberKind::Trait => {
-                        "only `@doc` and `@track_caller` may modify a trait member"
-                    }
-                    _ => "only `@doc` may modify a declaration member",
-                }));
-            }
-            let Some(argument) = modifier.argument else {
-                return Err(self.error("`@doc` requires a parenthesized string literal"));
-            };
-            let Some(Expression::String(literal)) = argument.expression else {
-                return Err(self.error("`@doc` requires a string literal argument"));
-            };
-            let doc = crate::string_literal::decode(&literal.literal)
-                .map_err(|message| self.error(message))?;
-            docs.push(doc);
+            modifiers.push(self.parse_modifier_invocation()?);
         }
-        Ok((docs, track_caller))
+        Ok((docs, modifiers))
     }
 
     fn parse_submodule(
@@ -1073,11 +1056,8 @@ impl Grammar {
             }
             let member_start = self.position;
             self.anchor_statement(member_start);
-            let (docs, track_caller) = self.parse_member_modifiers(member_start, MemberKind::Trait)?;
+            let (docs, modifiers) = self.parse_member_modifiers(member_start)?;
             if self.at(TokenKind::Type) {
-                if track_caller {
-                    return Err(self.error("`@track_caller` may only modify a trait member function"));
-                }
                 self.bump_token();
                 let associated_name = self
                     .expect(TokenKind::Identifier, "expected associated type name")?
@@ -1106,6 +1086,7 @@ impl Grammar {
                 }
                 associated_types.push(AssociatedTypeDeclaration {
                     syntax: self.syntax(member_start),
+                    modifiers,
                     docs,
                     name: associated_name,
                     trait_bounds: clause.trait_bounds,
@@ -1131,11 +1112,12 @@ impl Grammar {
             };
             members.push(TraitMember {
                 syntax: self.syntax(member_start),
+                modifiers,
                 docs,
                 name: member_name,
                 annotation,
                 default,
-                track_caller,
+                track_caller: false,
             });
             self.eat(TokenKind::Semicolon);
         }
@@ -1277,7 +1259,7 @@ impl Grammar {
             }
             let member_start = self.position;
             self.anchor_statement(member_start);
-            let (docs, _) = self.parse_member_modifiers(member_start, MemberKind::Implementation)?;
+            let (docs, modifiers) = self.parse_member_modifiers(member_start)?;
             if self.at(TokenKind::Type) {
                 self.bump_token();
                 let associated_name = self
@@ -1293,6 +1275,7 @@ impl Grammar {
                 self.any_newline_terminates_type = previous_any;
                 associated_types.push(AssociatedTypeBinding {
                     syntax: self.syntax(member_start),
+                    modifiers,
                     docs,
                     name: associated_name,
                     value: value?,
@@ -1310,6 +1293,7 @@ impl Grammar {
             let value = self.parse_expression()?;
             members.push(ImplementationMember {
                 syntax: self.syntax(member_start),
+                modifiers,
                 docs,
                 name,
                 value,
@@ -1642,7 +1626,7 @@ impl Grammar {
             }
             let binding_start = self.position;
             self.anchor_statement(binding_start);
-            let docs = self.parse_member_docs(binding_start)?;
+            let (docs, member_modifiers) = self.parse_member_modifiers(binding_start)?;
             let binding_visibility = if self.eat(TokenKind::Pub) {
                 self.parse_visibility_after_pub()?.0
             } else {
@@ -1658,6 +1642,7 @@ impl Grammar {
             bindings.push(Binding {
                 syntax: self.syntax(binding_start),
                 docs,
+                member_modifiers,
                 visibility: binding_visibility,
                 kind: BindingKind::Extern,
                 mutable: false,
@@ -1914,6 +1899,7 @@ impl Grammar {
         Ok(Binding {
             syntax: self.syntax(start),
             docs: Vec::new(),
+            member_modifiers: Vec::new(),
             visibility,
             kind,
             mutable,
@@ -2265,7 +2251,7 @@ impl Grammar {
                 self.parse_type()?
             } else {
                 Type::Inferred(InferredType {
-                    syntax: self.syntax(start),
+                    syntax: self.syntax(start).implied(),
                 })
             };
             Pattern::Wildcard(WildcardPattern {
@@ -2308,6 +2294,7 @@ impl Grammar {
                 elements,
                 mutable: false,
                 moved: false,
+                annotation: None,
             })
         }
     }
@@ -2407,13 +2394,15 @@ impl Grammar {
                 return Err(self.error("`mut` can only modify a binding pattern"));
             }
             self.bump_token();
-            let ty = self.parse_type()?;
-            let Some(Pattern::Nominal(mut nominal)) = elements.pop() else {
-                unreachable!("checked nominal pattern")
-            };
-            nominal.moved |= moved;
-            nominal.annotation = Some(ty);
-            return Ok(Pattern::Nominal(nominal));
+            let annotation = Some(self.parse_type()?);
+            return Ok(Pattern::Product(ProductPattern {
+                slotted,
+                syntax: self.syntax(start),
+                elements,
+                mutable,
+                moved,
+                annotation,
+            }));
         }
         if slotted && (mutable || moved) {
             return Err(self.error("mark individual slots of a slotted parameter"));
@@ -2434,6 +2423,7 @@ impl Grammar {
             elements,
             mutable,
             moved,
+            annotation: None,
         }))
     }
 
@@ -2470,10 +2460,11 @@ impl Grammar {
         if namespace.is_some() && !adjacent_argument {
             let argument = Box::new(Pattern::Product(ProductPattern {
                 slotted: false,
-                syntax: self.syntax(start),
+                syntax: self.syntax(start).implied(),
                 elements: Vec::new(),
                 mutable: false,
                 moved: false,
+                annotation: None,
             }));
             return Ok(Pattern::Nominal(NominalPattern {
                 syntax: self.syntax(start),
@@ -2502,7 +2493,7 @@ impl Grammar {
             self.parse_type()?
         } else {
             Type::Inferred(InferredType {
-                syntax: self.syntax(start),
+                syntax: self.syntax(start).implied(),
             })
         };
         Ok(Pattern::Binding(BindingPattern {
@@ -4446,6 +4437,7 @@ impl Grammar {
         });
         Syntax {
             pipe_stage: false,
+            implied: false,
             id,
             span,
             tokens: Arc::clone(&self.tokens),

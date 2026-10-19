@@ -622,6 +622,15 @@ fn span_contains(outer: &Span, inner: &Span) -> bool {
     }
 }
 
+/// Which kind of declaration member a modifier is written on.
+#[derive(Clone, Copy)]
+enum MemberKind {
+    TraitFunction,
+    TraitType,
+    Implementation,
+    Other,
+}
+
 pub(crate) struct MacroAnalysis {
     pub definitions: HashMap<SyntaxId, ResolvedMacro>,
     pub invocations: HashMap<SyntaxId, ResolvedMacro>,
@@ -1029,6 +1038,35 @@ fn lower_pipe_expression(
     result
 }
 
+/// Moves the annotation of a parenthesized nominal pattern, `(Box value): T`,
+/// onto the nominal pattern it annotates.
+fn desugar_pattern(pattern: &mut Pattern) {
+    match pattern {
+        Pattern::Product(product) if product.annotation.is_some() => {
+            let moved = product.moved;
+            let annotation = product.annotation.take();
+            let Some(Pattern::Nominal(mut nominal)) = product.elements.pop() else {
+                unreachable!("the parser only annotates a single nominal pattern")
+            };
+            nominal.moved |= moved;
+            nominal.annotation = annotation;
+            *pattern = Pattern::Nominal(nominal);
+            desugar_pattern(pattern);
+        }
+        Pattern::Product(product) => {
+            for element in &mut product.elements {
+                desugar_pattern(element);
+            }
+        }
+        Pattern::Nominal(nominal) => desugar_pattern(&mut nominal.argument),
+        Pattern::At(at) => desugar_pattern(&mut at.pattern),
+        Pattern::Binding(_)
+        | Pattern::Wildcard(_)
+        | Pattern::StringLiteral(_)
+        | Pattern::Splice(_) => {}
+    }
+}
+
 pub(crate) fn desugar_program(
     program: &mut Program,
     next_syntax_id: &mut usize,
@@ -1127,6 +1165,7 @@ fn desugar_item(item: &mut Item, next_syntax_id: &mut usize, ops_module: StdModu
             }
         }
         Item::PatternBinding(binding) => {
+            desugar_pattern(&mut binding.pattern);
             desugar_expression(&mut binding.value, next_syntax_id, ops_module)
         }
         Item::Assignment(assignment) => {
@@ -1200,6 +1239,7 @@ fn desugar_expression(
             *expression = lower_pipe_expression(pipe, next_syntax_id);
         }
         Expression::Function(function) => {
+            desugar_pattern(&mut function.pattern);
             // A single-slot parameter `(a;) => body` takes the same argument
             // as `a => body`.
             if let Pattern::Product(product) = &mut function.pattern
@@ -1221,6 +1261,7 @@ fn desugar_expression(
         Expression::Match(match_) => {
             desugar_expression(&mut match_.subject, next_syntax_id, ops_module);
             for arm in &mut match_.arms {
+                desugar_pattern(&mut arm.pattern);
                 desugar_expression(&mut arm.body, next_syntax_id, ops_module);
             }
         }
@@ -3606,15 +3647,48 @@ impl MacroExpander {
             | Item::Continue(_)
             | Item::Expression(_)) => self.expand_block_item_contents(module, item, depth),
             Item::TraitImplementation(implementation) => {
+                for associated in &mut implementation.associated_types {
+                    self.apply_member_modifiers(
+                        &mut associated.modifiers,
+                        &mut associated.docs,
+                        MemberKind::Implementation,
+                    );
+                }
                 for member in &mut implementation.members {
+                    self.apply_member_modifiers(
+                        &mut member.modifiers,
+                        &mut member.docs,
+                        MemberKind::Implementation,
+                    );
                     member.value = self.expand_expression(module, member.value.clone(), depth);
                 }
             }
             Item::TraitDeclaration(declaration) => {
+                for associated in &mut declaration.associated_types {
+                    self.apply_member_modifiers(
+                        &mut associated.modifiers,
+                        &mut associated.docs,
+                        MemberKind::TraitType,
+                    );
+                }
                 for member in &mut declaration.members {
+                    member.track_caller |= self.apply_member_modifiers(
+                        &mut member.modifiers,
+                        &mut member.docs,
+                        MemberKind::TraitFunction,
+                    );
                     if let Some(default) = member.default.take() {
                         member.default = Some(self.expand_expression(module, default, depth));
                     }
+                }
+            }
+            Item::ExternBlock(block) => {
+                for binding in &mut block.bindings {
+                    self.apply_member_modifiers(
+                        &mut binding.member_modifiers,
+                        &mut binding.docs,
+                        MemberKind::Other,
+                    );
                 }
             }
             Item::Submodule(submodule) if submodule.syntax.definition_module().is_some() => {
@@ -3628,9 +3702,75 @@ impl MacroExpander {
             | Item::RepeatedItemSplice(_)
             | Item::Submodule(_)
             | Item::UseDeclaration(_)
-            | Item::ExternBlock(_)
             | Item::TypeDeclaration(_) => {}
         }
+    }
+
+    /// Interprets the `@doc` and `@track_caller` modifiers written on a trait,
+    /// implementation, or `extern` member: `@doc` text joins the member's
+    /// `///` documentation, and the result reports `@track_caller`. The
+    /// modifiers are consumed, so reapplying is a no-op.
+    fn apply_member_modifiers(
+        &mut self,
+        modifiers: &mut Vec<staple_syntax::ModifierInvocation>,
+        docs: &mut Vec<String>,
+        kind: MemberKind,
+    ) -> bool {
+        let mut track_caller = false;
+        for modifier in std::mem::take(modifiers) {
+            let span = modifier.syntax.span.clone();
+            if modifier.namespace.is_none() && modifier.name == "track_caller" {
+                let message = match kind {
+                    MemberKind::TraitFunction if modifier.argument.is_none() => {
+                        track_caller = true;
+                        continue;
+                    }
+                    MemberKind::TraitFunction => Some("`@track_caller` takes no argument"),
+                    MemberKind::TraitType => {
+                        Some("`@track_caller` may only modify a trait member function")
+                    }
+                    MemberKind::Implementation => Some(
+                        "`@track_caller` belongs on the trait member; implementation members inherit it",
+                    ),
+                    MemberKind::Other => None,
+                };
+                if let Some(message) = message {
+                    self.diagnostics.push(Diagnostic::new(span, message));
+                    continue;
+                }
+            }
+            if modifier.namespace.is_some() || modifier.name != "doc" {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    match kind {
+                        MemberKind::TraitFunction | MemberKind::TraitType => {
+                            "only `@doc` and `@track_caller` may modify a trait member"
+                        }
+                        _ => "only `@doc` may modify a declaration member",
+                    },
+                ));
+                continue;
+            }
+            let Some(argument) = modifier.argument else {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    "`@doc` requires a parenthesized string literal",
+                ));
+                continue;
+            };
+            let Some(Expression::String(literal)) = argument.expression else {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    "`@doc` requires a string literal argument",
+                ));
+                continue;
+            };
+            match staple_syntax::string_literal::decode(&literal.literal) {
+                Ok(doc) => docs.push(doc),
+                Err(message) => self.diagnostics.push(Diagnostic::new(span, message)),
+            }
+        }
+        track_caller
     }
 
     fn expand_macro_call_metadata_invocation(
@@ -12486,6 +12626,9 @@ fn substitute_pattern(
             for element in &mut product.elements {
                 substitute_pattern(element, environment, diagnostics)?;
             }
+            if let Some(annotation) = &mut product.annotation {
+                substitute_type(annotation, environment, diagnostics)?;
+            }
         }
         Pattern::Nominal(nominal) => {
             if let Some(annotation) = &mut nominal.annotation {
@@ -13184,6 +13327,9 @@ fn freshen_pattern(
             expander.freshen_syntax(&mut product.syntax, module, mark);
             for element in &mut product.elements {
                 freshen_pattern(expander, element, module, mark);
+            }
+            if let Some(annotation) = &mut product.annotation {
+                freshen_type(expander, annotation, module, mark);
             }
         }
         Pattern::Nominal(nominal) => {

@@ -39,6 +39,9 @@ impl Pattern {
                 syntax: pattern.syntax.clone(),
                 literal: pattern.literal.clone(),
             }),
+            Self::Product(pattern) if pattern.annotation.is_some() => {
+                pattern.annotation.clone().expect("checked annotation")
+            }
             Self::Product(pattern) => {
                 let elements = pattern.elements.iter().map(Self::type_element).collect();
                 Type::Product(ProductType {
@@ -126,6 +129,9 @@ pub struct ProductPattern {
     /// parameter position; mutually exclusive with per-element markers.
     pub mutable: bool,
     pub moved: bool,
+    /// The annotation of a parenthesized nominal pattern, as in
+    /// `(Box value): Box I32`. Desugaring moves it onto the nominal pattern.
+    pub annotation: Option<Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

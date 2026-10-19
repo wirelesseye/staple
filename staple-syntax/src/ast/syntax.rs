@@ -145,6 +145,10 @@ pub struct Syntax {
     /// Marks the callable head of a desugared pipe stage. Desugaring sets this
     /// when it rewrites a `PipeExpression`; the parser never does.
     pub pipe_stage: bool,
+    /// Marks a node the parser supplies for something the source leaves
+    /// unwritten, such as the inferred type of an unannotated binding. Its
+    /// span is where the omitted syntax would be.
+    pub implied: bool,
     pub id: SyntaxId,
     pub span: Span,
     pub tokens: Arc<[SyntaxToken]>,
@@ -219,9 +223,16 @@ impl Syntax {
         syntax
     }
 
+    /// This syntax, marked as [`Self::implied`].
+    pub fn implied(mut self) -> Self {
+        self.implied = true;
+        self
+    }
+
     pub fn compiler() -> Self {
         Self {
             pipe_stage: false,
+            implied: false,
             id: SyntaxId::COMPILER,
             span: Span::Compiler,
             tokens: Arc::from([]),
@@ -235,6 +246,7 @@ impl Syntax {
     pub fn synthetic(id: SyntaxId, span: Span) -> Self {
         Self {
             pipe_stage: false,
+            implied: false,
             id,
             span,
             tokens: Arc::from([]),

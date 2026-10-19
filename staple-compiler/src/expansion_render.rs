@@ -369,7 +369,11 @@ fn render_pattern(pattern: &Pattern) -> String {
                     .collect::<Vec<_>>()
                     .join(if product.slotted { "; " } else { ", " }),
                 trailing
-            )
+            ) + &product
+                .annotation
+                .as_ref()
+                .map(|annotation| format!(": {annotation}"))
+                .unwrap_or_default()
         }
         Pattern::Nominal(nominal) => {
             let pattern = format!(
