@@ -3611,6 +3611,15 @@ impl TypeChecker {
     }
 
     fn collect_trait_implementations(&mut self, module: &ResolvedModule) {
+        // Canonical header of each collected implementation, index-aligned with
+        // `self.trait_implementations`. Every new header is compared against all
+        // earlier ones, so canonicalizing them once keeps collection linear in
+        // canonicalizations rather than quadratic.
+        let mut canonical_headers = self
+            .trait_implementations
+            .iter()
+            .map(|existing| canonicalize_impl_header(&existing.parameters, &existing.arguments))
+            .collect::<Vec<_>>();
         for implementation in module.trait_implementations() {
             let span = implementation
                 .arguments
@@ -3759,11 +3768,15 @@ impl TypeChecker {
                 continue;
             }
             let canonical_arguments = canonicalize_impl_header(&declared_parameters, &arguments);
-            if self.trait_implementations.iter().any(|existing| {
-                existing.trait_id == implementation.trait_id
-                    && canonicalize_impl_header(&existing.parameters, &existing.arguments)
-                        == canonical_arguments
-            }) {
+            if self
+                .trait_implementations
+                .iter()
+                .zip(&canonical_headers)
+                .any(|(existing, existing_canonical)| {
+                    existing.trait_id == implementation.trait_id
+                        && *existing_canonical == canonical_arguments
+                })
+            {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     "duplicate trait implementation for these arguments",
@@ -3802,25 +3815,27 @@ impl TypeChecker {
                 .unwrap_or_default();
             let parameters = &self.trait_parameter_arguments[&implementation.trait_id];
             let new_values = trait_parameter_values(parameters, &canonical_arguments);
-            let conflict = self.trait_implementations.iter().any(|existing| {
-                if existing.trait_id != implementation.trait_id {
-                    return false;
-                }
-                let existing_canonical =
-                    canonicalize_impl_header(&existing.parameters, &existing.arguments);
-                let existing_values = trait_parameter_values(parameters, &existing_canonical);
-                dependencies.iter().any(|dependency| {
-                    dependency.determinants.iter().all(|determinant| {
-                        optional_types_equivalent(
-                            new_values.get(determinant),
-                            existing_values.get(determinant),
+            let conflict = self
+                .trait_implementations
+                .iter()
+                .zip(&canonical_headers)
+                .any(|(existing, existing_canonical)| {
+                    if existing.trait_id != implementation.trait_id {
+                        return false;
+                    }
+                    let existing_values = trait_parameter_values(parameters, existing_canonical);
+                    dependencies.iter().any(|dependency| {
+                        dependency.determinants.iter().all(|determinant| {
+                            optional_types_equivalent(
+                                new_values.get(determinant),
+                                existing_values.get(determinant),
+                            )
+                        }) && !optional_types_equivalent(
+                            new_values.get(&dependency.dependent),
+                            existing_values.get(&dependency.dependent),
                         )
-                    }) && !optional_types_equivalent(
-                        new_values.get(&dependency.dependent),
-                        existing_values.get(&dependency.dependent),
-                    )
-                })
-            });
+                    })
+                });
             if conflict {
                 self.diagnostics.push(Diagnostic::new(
                     span.clone(),
@@ -3884,6 +3899,7 @@ impl TypeChecker {
                     }
                 }
             }
+            canonical_headers.push(canonical_arguments);
             self.trait_implementations.push(CheckedTraitImplementation {
                 span,
                 trait_id: implementation.trait_id,
