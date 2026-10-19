@@ -21,6 +21,7 @@ pub enum Expression {
     Try(TryExpression),
     Conversion(Box<ConversionExpression>),
     Binary(BinaryExpression),
+    Pipe(PipeExpression),
     Logical(LogicalExpression),
     SyntaxArgument(SyntaxArgumentExpression),
     VisibilityArgument(VisibilitySyntax),
@@ -56,6 +57,7 @@ impl Expression {
             Self::Try(expression) => &expression.syntax,
             Self::Conversion(expression) => &expression.syntax,
             Self::Binary(expression) => &expression.syntax,
+            Self::Pipe(expression) => &expression.syntax,
             Self::Logical(expression) => &expression.syntax,
             Self::SyntaxArgument(expression) => &expression.syntax,
             Self::VisibilityArgument(expression) => &expression.syntax,
@@ -214,6 +216,16 @@ impl ProductExpression {
             elements: vec![],
         }
     }
+
+    /// Whether this is a grouping `(value)`: one unnamed, unspread,
+    /// undesignated element in an unslotted product.
+    pub fn is_grouping(&self) -> bool {
+        !self.slotted
+            && self.elements.len() == 1
+            && self.elements[0].name.is_none()
+            && !self.elements[0].spread
+            && !self.elements[0].designated
+    }
 }
 
 /// An array literal `(value ^ count)` that repeats `value` `count` times.
@@ -318,6 +330,61 @@ impl UnaryOperator {
             Self::Negate => ("Neg", "negate"),
             Self::Not => ("Not", "not"),
         }
+    }
+}
+
+/// A source-level `receiver |> stage` pipe, recorded as written: `stage` is
+/// the parsed method call (`method 1`, `Trait.method x`, `method.<T>`, or a
+/// parenthesized call). Desugaring rewrites it before name resolution into
+/// nested calls of the stage's method on the receiver, marking the method
+/// head `Syntax::pipe_stage`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeExpression {
+    pub syntax: Syntax,
+    pub operator_syntax: Syntax,
+    pub receiver: Box<Expression>,
+    pub stage: Box<Expression>,
+}
+
+impl PipeExpression {
+    /// The stage's call arguments, in source order, looking through grouping
+    /// parentheses. The stage's method head is not an argument: it names a
+    /// method of the receiver's type, not a value in scope.
+    pub fn stage_arguments(&self) -> Vec<&Expression> {
+        fn collect<'a>(expression: &'a Expression, arguments: &mut Vec<&'a Expression>) {
+            match expression {
+                Expression::Product(product) if product.is_grouping() => {
+                    collect(&product.elements[0].value, arguments)
+                }
+                Expression::Call(call) => {
+                    collect(&call.callee, arguments);
+                    arguments.push(&call.argument);
+                }
+                _ => {}
+            }
+        }
+        let mut arguments = Vec::new();
+        collect(&self.stage, &mut arguments);
+        arguments
+    }
+
+    /// Mutable form of [`Self::stage_arguments`].
+    pub fn stage_arguments_mut(&mut self) -> Vec<&mut Expression> {
+        fn collect<'a>(expression: &'a mut Expression, arguments: &mut Vec<&'a mut Expression>) {
+            match expression {
+                Expression::Product(product) if product.is_grouping() => {
+                    collect(&mut product.elements[0].value, arguments)
+                }
+                Expression::Call(call) => {
+                    collect(&mut call.callee, arguments);
+                    arguments.push(&mut call.argument);
+                }
+                _ => {}
+            }
+        }
+        let mut arguments = Vec::new();
+        collect(&mut self.stage, &mut arguments);
+        arguments
     }
 }
 

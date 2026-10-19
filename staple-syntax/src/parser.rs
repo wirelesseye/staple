@@ -3052,18 +3052,23 @@ impl Grammar {
         (">", BinaryOperator::Greater),
     ];
 
-    /// Parses `||` (precedence 1, left-associative) as surface syntax.
-    /// Pipes group complete calls and feed each stage's receiver into slot one.
+    /// Parses `|>` (precedence 1, left-associative). Each stage is one
+    /// complete method call.
     fn parse_pipe_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let mut receiver = self.parse_or_expression()?;
-        while !(self.newline_terminates_expression && self.has_newline_before_next_token())
-            && self.eat_operator("|>")
-        {
+        loop {
+            if self.newline_terminates_expression && self.has_newline_before_next_token() {
+                break;
+            }
+            let operator_start = self.position;
+            if !self.eat_operator("|>") {
+                break;
+            }
+            let operator_syntax = self.syntax(operator_start);
             if self.newline_terminates_expression && self.has_newline_before_next_token() {
                 return Err(self.error("expected a method stage on the same statement after `|>`"));
             }
-            let stage_start = self.position;
             let stage = self.parse_call_without_try()?;
             if matches!(
                 self.peek(),
@@ -3078,101 +3083,18 @@ impl Grammar {
                     self.error("pipe stage arguments containing operators must be parenthesized")
                 );
             }
-            receiver = self.apply_pipe_stage(receiver, stage, start, stage_start)?;
+            if !is_pipe_method_stage(&stage) {
+                return Err(self.error("expected a companion or trait method stage after `|>`"));
+            }
+            receiver = Expression::Pipe(PipeExpression {
+                syntax: self.syntax(start),
+                operator_syntax,
+                receiver: Box::new(receiver),
+                stage: Box::new(stage),
+            });
             receiver = self.parse_try_suffixes(receiver, start)?;
         }
         Ok(receiver)
-    }
-
-    fn apply_pipe_stage(
-        &mut self,
-        receiver: Expression,
-        stage: Expression,
-        start: usize,
-        stage_start: usize,
-    ) -> Result<Expression, ParseError> {
-        fn ungroup(expression: Expression) -> Expression {
-            match expression {
-                Expression::Product(mut product)
-                    if product.elements.len() == 1
-                        && product.elements[0].name.is_none()
-                        && !product.elements[0].spread
-                        && !product.elements[0].designated =>
-                {
-                    ungroup(product.elements.remove(0).value)
-                }
-                expression => expression,
-            }
-        }
-        fn split(stage: Expression, arguments: &mut Vec<(Expression, bool)>) -> Expression {
-            match ungroup(stage) {
-                Expression::Call(call) => {
-                    let head = split(*call.callee, arguments);
-                    arguments.push((*call.argument, call.spread));
-                    head
-                }
-                head => head,
-            }
-        }
-        fn select(head: Expression, empty: Expression) -> Option<Expression> {
-            match head {
-                Expression::Name(name) => {
-                    let mut syntax = name.syntax;
-                    syntax.pipe_stage = true;
-                    Some(Expression::Access(AccessExpression {
-                        syntax,
-                        value: Box::new(empty),
-                        accessor: Accessor::Method(name.name),
-                    }))
-                }
-                Expression::Access(mut access) if matches!(access.accessor, Accessor::Name(_)) => {
-                    access.syntax.pipe_stage = true;
-                    Some(Expression::Access(access))
-                }
-                Expression::TypeApplication(mut application) => {
-                    application.value = Box::new(select(*application.value, empty)?);
-                    application.syntax.pipe_stage = true;
-                    Some(Expression::TypeApplication(application))
-                }
-                _ => None,
-            }
-        }
-        let mut arguments = Vec::new();
-        let head = split(stage, &mut arguments);
-        // The selector carries no receiver copy: the receiver occurs only in
-        // the first call argument, keeping syntax identities and evaluation unique.
-        let empty = Expression::Product(ProductExpression {
-            slotted: false,
-            syntax: Syntax::synthetic(self.syntax(stage_start).id, head.syntax().span.clone()),
-            elements: Vec::new(),
-        });
-        let head = select(head, empty)
-            .ok_or_else(|| self.error("expected a companion or trait method stage after `|>`"))?;
-        let stage_end = self.position;
-        self.position = head.syntax().token_range.end;
-        let receiver_call_syntax = self.syntax(start);
-        self.position = stage_end;
-        let mut result = Expression::Call(CallExpression {
-            spread: false,
-            syntax: receiver_call_syntax,
-            callee: Box::new(head),
-            argument: Box::new(receiver),
-        });
-        for (argument, spread) in arguments {
-            self.position = argument.syntax().token_range.end;
-            let syntax = self.syntax(start);
-            self.position = stage_end;
-            result = Expression::Call(CallExpression {
-                spread,
-                syntax,
-                callee: Box::new(result),
-                argument: Box::new(argument),
-            });
-        }
-        if let Expression::Call(call) = &mut result {
-            call.syntax = self.syntax(start);
-        }
-        Ok(result)
     }
 
     fn parse_or_expression(&mut self) -> Result<Expression, ParseError> {
@@ -4887,6 +4809,31 @@ fn parameter_has_nested_move(pattern: &Pattern) -> bool {
 /// signals the removed curried `a => b => body` spelling rather than the
 /// juxtaposed `(a; b) => body` form. Looks through a type ascription so the
 /// diagnostic still fires on `a => b => T :: body`.
+/// Whether a parsed `|>` stage is a method call: after looking through
+/// grouping parentheses and the call's arguments, its head is a method name,
+/// a qualified `Namespace.method`, or either with explicit `.<T>` arguments.
+/// This only validates; the stage itself stays exactly as written.
+fn is_pipe_method_stage(stage: &Expression) -> bool {
+    fn head(expression: &Expression) -> &Expression {
+        match expression {
+            Expression::Product(product) if product.is_grouping() => {
+                head(&product.elements[0].value)
+            }
+            Expression::Call(call) => head(&call.callee),
+            expression => expression,
+        }
+    }
+    fn is_method(expression: &Expression) -> bool {
+        match expression {
+            Expression::Name(_) => true,
+            Expression::Access(access) => matches!(access.accessor, Accessor::Name(_)),
+            Expression::TypeApplication(application) => is_method(&application.value),
+            _ => false,
+        }
+    }
+    is_method(head(stage))
+}
+
 fn macro_body_is_bare_function(expression: &Expression) -> bool {
     match expression {
         Expression::Function(_) => true,

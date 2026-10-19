@@ -942,6 +942,93 @@ fn lower_conversion_expression(
     })
 }
 
+/// Rewrites `receiver |> stage` into nested calls of the stage's method with
+/// the receiver as the first argument: `value |> method a b` becomes
+/// `((().method value) a) b`, whose method head carries `Syntax::pipe_stage` so
+/// checking selects a companion or trait method for the receiver's type. The
+/// selector's empty value carries no receiver copy, so the receiver occurs
+/// once and keeps its syntax identity and single evaluation.
+fn lower_pipe_expression(
+    pipe: staple_syntax::PipeExpression,
+    next_syntax_id: &mut usize,
+) -> Expression {
+    fn ungroup(expression: Expression) -> Expression {
+        match expression {
+            Expression::Product(mut product) if product.is_grouping() => {
+                ungroup(product.elements.remove(0).value)
+            }
+            expression => expression,
+        }
+    }
+    fn split(stage: Expression, arguments: &mut Vec<(Expression, bool)>) -> Expression {
+        match ungroup(stage) {
+            Expression::Call(call) => {
+                let head = split(*call.callee, arguments);
+                arguments.push((*call.argument, call.spread));
+                head
+            }
+            head => head,
+        }
+    }
+    fn select(head: Expression, empty: Expression) -> Expression {
+        match head {
+            Expression::Name(name) => {
+                let mut syntax = name.syntax;
+                syntax.pipe_stage = true;
+                Expression::Access(staple_syntax::AccessExpression {
+                    syntax,
+                    value: Box::new(empty),
+                    accessor: Accessor::Method(name.name),
+                })
+            }
+            Expression::Access(mut access) => {
+                access.syntax.pipe_stage = true;
+                Expression::Access(access)
+            }
+            Expression::TypeApplication(mut application) => {
+                application.value = Box::new(select(*application.value, empty));
+                application.syntax.pipe_stage = true;
+                Expression::TypeApplication(application)
+            }
+            // The parser only accepts method stages.
+            head => head,
+        }
+    }
+    let staple_syntax::PipeExpression {
+        syntax,
+        receiver,
+        stage,
+        ..
+    } = pipe;
+    let mut arguments = Vec::new();
+    let head = split(*stage, &mut arguments);
+    let empty = Expression::Product(staple_syntax::ProductExpression {
+        slotted: false,
+        syntax: Syntax::synthetic(SyntaxId(*next_syntax_id), head.syntax().span.clone()),
+        elements: Vec::new(),
+    });
+    *next_syntax_id += 1;
+    let head = select(head, empty);
+    let mut result = Expression::Call(staple_syntax::CallExpression {
+        spread: false,
+        syntax: freshened_syntax(&syntax, next_syntax_id).ending_at(head.syntax()),
+        callee: Box::new(head),
+        argument: receiver,
+    });
+    for (argument, spread) in arguments {
+        result = Expression::Call(staple_syntax::CallExpression {
+            spread,
+            syntax: freshened_syntax(&syntax, next_syntax_id).ending_at(argument.syntax()),
+            callee: Box::new(result),
+            argument: Box::new(argument),
+        });
+    }
+    if let Expression::Call(call) = &mut result {
+        call.syntax = syntax;
+    }
+    result
+}
+
 pub(crate) fn desugar_program(
     program: &mut Program,
     next_syntax_id: &mut usize,
@@ -1082,6 +1169,20 @@ fn desugar_expression(
             };
             desugar_expression(&mut unary.operand, next_syntax_id, ops_module);
             *expression = lower_unary_expression(unary, next_syntax_id, ops_module);
+        }
+        Expression::Pipe(_) => {
+            let Expression::Pipe(mut pipe) = std::mem::replace(
+                expression,
+                Expression::Name(staple_syntax::NameExpression {
+                    syntax: Syntax::compiler(),
+                    name: String::new(),
+                }),
+            ) else {
+                unreachable!()
+            };
+            desugar_expression(&mut pipe.receiver, next_syntax_id, ops_module);
+            desugar_expression(&mut pipe.stage, next_syntax_id, ops_module);
+            *expression = lower_pipe_expression(pipe, next_syntax_id);
         }
         Expression::Function(function) => {
             desugar_expression(&mut function.body, next_syntax_id, ops_module)
@@ -2621,6 +2722,13 @@ impl MacroExpander {
                 ));
                 CompileType::Error
             }
+            Expression::Pipe(value) => {
+                self.diagnostics.push(Diagnostic::new(
+                    value.syntax.span.clone(),
+                    "`|>` is not available during compile-time macro evaluation",
+                ));
+                CompileType::Error
+            }
             Expression::CString(_) => CompileType::Named("CString".to_owned()),
         };
         if let Some(expected) = expected
@@ -3010,6 +3118,12 @@ impl MacroExpander {
             Expression::Binary(value) => {
                 self.check_quoted_expression(module, &value.left, environment);
                 self.check_quoted_expression(module, &value.right, environment);
+            }
+            Expression::Pipe(value) => {
+                self.check_quoted_expression(module, &value.receiver, environment);
+                for argument in value.stage_arguments() {
+                    self.check_quoted_expression(module, argument, environment);
+                }
             }
             Expression::Logical(value) => {
                 self.check_quoted_expression(module, &value.left, environment);
@@ -4807,6 +4921,20 @@ impl MacroExpander {
                 binary.right = Box::new(self.expand_expression(module, *binary.right, depth));
                 Expression::Binary(binary)
             }
+            Expression::Pipe(mut pipe) => {
+                pipe.receiver = Box::new(self.expand_expression(module, *pipe.receiver, depth));
+                // Only the stage's arguments are expressions in scope; its head
+                // names a method and is never a macro invocation.
+                for argument in pipe.stage_arguments_mut() {
+                    let expanded = self.expand_expression(
+                        module,
+                        std::mem::replace(argument, Expression::Product(staple_syntax::ProductExpression::empty())),
+                        depth,
+                    );
+                    *argument = expanded;
+                }
+                Expression::Pipe(pipe)
+            }
             Expression::Logical(mut logical) => {
                 logical.left = Box::new(self.expand_expression(module, *logical.left, depth));
                 logical.right = Box::new(self.expand_expression(module, *logical.right, depth));
@@ -6021,6 +6149,13 @@ impl MacroExpander {
                 self.diagnostics.push(Diagnostic::new(
                     conversion.syntax.span.clone(),
                     "`as` is not available during compile-time macro evaluation",
+                ));
+                None
+            }
+            Expression::Pipe(pipe) => {
+                self.diagnostics.push(Diagnostic::new(
+                    pipe.syntax.span.clone(),
+                    "`|>` is not available during compile-time macro evaluation",
                 ));
                 None
             }
@@ -7708,6 +7843,11 @@ impl MacroExpander {
                 self.freshen_syntax(&mut binary.operator_syntax, module, mark);
                 self.freshen_expression(&mut binary.left, module, mark);
                 self.freshen_expression(&mut binary.right, module, mark);
+            }
+            Expression::Pipe(pipe) => {
+                self.freshen_syntax(&mut pipe.operator_syntax, module, mark);
+                self.freshen_expression(&mut pipe.receiver, module, mark);
+                self.freshen_expression(&mut pipe.stage, module, mark);
             }
             Expression::Logical(logical) => {
                 self.freshen_expression(&mut logical.left, module, mark);
@@ -10792,6 +10932,8 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         Expression::Binary(binary) => {
             obviously_not_syntax(&binary.left, 0) || obviously_not_syntax(&binary.right, 0)
         }
+        // Desugars to a method call, which may produce syntax.
+        Expression::Pipe(_) => false,
         Expression::Unary(unary) => obviously_not_syntax(&unary.operand, 0),
         Expression::Try(try_) => obviously_not_syntax(&try_.operand, 0),
         // Desugars to a `Convert.convert` call, which may produce syntax.
@@ -11734,6 +11876,10 @@ fn substitute_splices(
         Expression::Binary(binary) => {
             *binary.left = substitute_splices(&binary.left, environment, diagnostics)?;
             *binary.right = substitute_splices(&binary.right, environment, diagnostics)?;
+        }
+        Expression::Pipe(pipe) => {
+            *pipe.receiver = substitute_splices(&pipe.receiver, environment, diagnostics)?;
+            *pipe.stage = substitute_splices(&pipe.stage, environment, diagnostics)?;
         }
         Expression::Logical(logical) => {
             *logical.left = substitute_splices(&logical.left, environment, diagnostics)?;
@@ -12815,6 +12961,12 @@ fn alpha_rename_expression(
             alpha_rename_expression(&mut binary.left, mark, scopes);
             alpha_rename_expression(&mut binary.right, mark, scopes);
         }
+        Expression::Pipe(pipe) => {
+            alpha_rename_expression(&mut pipe.receiver, mark, scopes);
+            for argument in pipe.stage_arguments_mut() {
+                alpha_rename_expression(argument, mark, scopes);
+            }
+        }
         Expression::Logical(logical) => {
             alpha_rename_expression(&mut logical.left, mark, scopes);
             alpha_rename_expression(&mut logical.right, mark, scopes);
@@ -12909,6 +13061,7 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::Index(value) => &mut value.syntax,
         Expression::Unary(value) => &mut value.syntax,
         Expression::Binary(value) => &mut value.syntax,
+        Expression::Pipe(value) => &mut value.syntax,
         Expression::Logical(value) => &mut value.syntax,
         Expression::SyntaxArgument(value) => &mut value.syntax,
         Expression::VisibilityArgument(value) => &mut value.syntax,

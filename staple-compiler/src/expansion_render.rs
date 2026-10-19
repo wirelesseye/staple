@@ -502,6 +502,11 @@ fn render_expr(program: &Program, expression: &Expression) -> String {
             binary.operator.text(),
             render_expr(program, &binary.right),
         ),
+        Expression::Pipe(pipe) => format!(
+            "({}) |> {}",
+            render_expr(program, &pipe.receiver),
+            render_expr(program, &pipe.stage),
+        ),
         Expression::Access(access) => {
             if let Accessor::Method(name) = &access.accessor {
                 return name.clone();
@@ -764,6 +769,9 @@ fn expr_has_generated(expression: &Expression) -> bool {
         }
         Expression::Binary(binary) => {
             expr_has_generated(&binary.left) || expr_has_generated(&binary.right)
+        }
+        Expression::Pipe(pipe) => {
+            expr_has_generated(&pipe.receiver) || expr_has_generated(&pipe.stage)
         }
         Expression::Unary(unary) => expr_has_generated(&unary.operand),
         Expression::Try(try_) => expr_has_generated(&try_.operand),

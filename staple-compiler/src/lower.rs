@@ -13918,6 +13918,7 @@ fn classify_expression(module: &TypedModule, expression: &Expression) -> Express
         Expression::Index(_) => Ordinary(Family::Index),
         Expression::Unary(_)
         | Expression::Binary(_)
+        | Expression::Pipe(_)
         | Expression::Try(_)
         | Expression::Conversion(_) => Rejected,
         Expression::Logical(_) => Ordinary(Family::Logical),
@@ -14108,6 +14109,7 @@ fn expression_variant_name(expression: &Expression) -> &'static str {
         Expression::Try(_) => "Try",
         Expression::Conversion(_) => "Conversion",
         Expression::Binary(_) => "Binary",
+        Expression::Pipe(_) => "Pipe",
         Expression::Logical(_) => "Logical",
         Expression::SyntaxArgument(_) => "SyntaxArgument",
         Expression::VisibilityArgument(_) => "VisibilityArgument",
@@ -14136,6 +14138,7 @@ fn reject_compile_time_expression(expression: &Expression) -> Result<(), Diagnos
             "unresolved `{}` operator expression reached lowering",
             binary.operator.text()
         ),
+        Expression::Pipe(_) => "unresolved `|>` expression reached lowering".to_owned(),
         Expression::Quote(quote) => {
             format!(
                 "unexpanded `{}` expression reached lowering",
@@ -15382,6 +15385,7 @@ impl<'a> SourceCoverage<'a> {
             | Expression::Try(_)
             | Expression::Conversion(_)
             | Expression::Binary(_)
+            | Expression::Pipe(_)
             | Expression::SyntaxArgument(_)
             | Expression::VisibilityArgument(_)
             | Expression::Quote(_)
@@ -19402,6 +19406,10 @@ mod tests {
                 collect_call_routes(program, module, owner, &binary.left, routes);
                 collect_call_routes(program, module, owner, &binary.right, routes);
             }
+            Expression::Pipe(binary) => {
+                collect_call_routes(program, module, owner, &binary.receiver, routes);
+                collect_call_routes(program, module, owner, &binary.stage, routes);
+            }
             Expression::Logical(logical) => {
                 collect_call_routes(program, module, owner, &logical.left, routes);
                 collect_call_routes(program, module, owner, &logical.right, routes);
@@ -20519,6 +20527,10 @@ mod tests {
             Expression::Binary(binary) => {
                 collect_calls(&binary.left, visit);
                 collect_calls(&binary.right, visit);
+            }
+            Expression::Pipe(binary) => {
+                collect_calls(&binary.receiver, visit);
+                collect_calls(&binary.stage, visit);
             }
             Expression::Logical(logical) => {
                 collect_calls(&logical.left, visit);

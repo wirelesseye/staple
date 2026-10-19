@@ -848,6 +848,10 @@ impl<'a> Classifier<'a> {
                 self.expression(&value.left, resolved);
                 self.expression(&value.right, resolved);
             }
+            Expression::Pipe(value) => {
+                self.expression(&value.receiver, resolved);
+                self.expression(&value.stage, resolved);
+            }
             Expression::Logical(value) => {
                 self.expression(&value.left, resolved);
                 self.expression(&value.right, resolved);

@@ -996,6 +996,10 @@ impl Collector<'_> {
                 self.expression(&value.left, module_index);
                 self.expression(&value.right, module_index);
             }
+            Expression::Pipe(value) => {
+                self.expression(&value.receiver, module_index);
+                self.expression(&value.stage, module_index);
+            }
             Expression::Logical(value) => {
                 self.expression(&value.left, module_index);
                 self.expression(&value.right, module_index);

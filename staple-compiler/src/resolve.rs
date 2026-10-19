@@ -4863,6 +4863,7 @@ impl NameResolver {
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression was not desugared"),
+            Expression::Pipe(_) => unreachable!("pipe expression was not desugared"),
             Expression::Unary(_) => unreachable!("unary expression was not desugared"),
             Expression::Try(_) => unreachable!("try expression was not desugared"),
             Expression::Conversion(_) => unreachable!("conversion expression was not desugared"),
@@ -5569,6 +5570,7 @@ impl NameResolver {
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression was not desugared"),
+            Expression::Pipe(_) => unreachable!("pipe expression was not desugared"),
             Expression::Unary(_) => unreachable!("unary expression was not desugared"),
             Expression::Try(_) => unreachable!("try expression was not desugared"),
             Expression::Conversion(_) => unreachable!("conversion expression was not desugared"),
@@ -7382,6 +7384,7 @@ impl<'a> InitializationAnalyzer<'a> {
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression was not desugared"),
+            Expression::Pipe(_) => unreachable!("pipe expression was not desugared"),
             Expression::Unary(_) => unreachable!("unary expression was not desugared"),
             Expression::Try(_) => unreachable!("try expression was not desugared"),
             Expression::Conversion(_) => unreachable!("conversion expression was not desugared"),
@@ -7593,6 +7596,7 @@ fn find_block_type_declarations_in_expression<'a>(
         | Expression::Integer(_)
         | Expression::Float(_) => {}
         Expression::Binary(_) => unreachable!("binary expression was not desugared"),
+        Expression::Pipe(_) => unreachable!("pipe expression was not desugared"),
         Expression::Unary(_) => unreachable!("unary expression was not desugared"),
         Expression::Try(_) => unreachable!("try expression was not desugared"),
         Expression::Conversion(_) => unreachable!("conversion expression was not desugared"),

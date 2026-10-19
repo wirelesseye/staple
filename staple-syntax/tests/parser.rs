@@ -497,16 +497,12 @@ fn parses_nominal_representation_access_losslessly() {
         panic!("expected first representation projection");
     };
     assert_eq!(inner.accessor, Accessor::Representation);
-    let Item::Expression(Expression::Call(call)) = unmodified_item(&root.items[3]) else {
-        panic!("expected a companion call after representation access");
+    let Item::Expression(Expression::Pipe(pipe)) = unmodified_item(&root.items[3]) else {
+        panic!("expected a pipe after representation access");
     };
-    assert!(matches!(
-        call.callee.as_ref(),
-        Expression::Access(method)
-            if method.accessor == Accessor::Method("length".into())
-                && matches!(call.argument.as_ref(), Expression::Access(representation)
-                    if representation.accessor == Accessor::Representation)
-    ));
+    assert!(matches!(pipe.stage.as_ref(), Expression::Name(name) if name.name == "length"));
+    assert!(matches!(pipe.receiver.as_ref(), Expression::Access(representation)
+        if representation.accessor == Accessor::Representation));
     assert!(parse("user.+\n").is_err());
 }
 
@@ -1674,16 +1670,14 @@ fn parses_pipe_method_calls_below_application_precedence() {
     let source = "animal |> move_to (1.0, 1.0)\n";
     let root = parse(source).expect("companion method call should parse");
     assert_eq!(root.text(), source);
-    let Item::Expression(Expression::Call(call)) = &root.items[0] else {
-        panic!("expected explicit argument call");
+    let Item::Expression(Expression::Pipe(pipe)) = &root.items[0] else {
+        panic!("expected a pipe");
     };
-    let Expression::Call(method) = call.callee.as_ref() else {
-        panic!("expected receiver application");
+    let Expression::Call(stage) = pipe.stage.as_ref() else {
+        panic!("expected the stage to be the call as written");
     };
-    assert!(matches!(
-        method.callee.as_ref(),
-        Expression::Access(access) if access.accessor == Accessor::Method("move_to".into())
-    ));
+    assert!(matches!(stage.callee.as_ref(), Expression::Name(name) if name.name == "move_to"));
+    assert!(matches!(stage.argument.as_ref(), Expression::Product(_)));
     assert!(parse("animal^ 1\n").is_err());
 }
 
@@ -3422,6 +3416,10 @@ fn pipe_stages_group_calls_and_bind_below_binary_operators() {
                 unique_ids(&call.argument, ids);
             }
             Expression::Access(access) => unique_ids(&access.value, ids),
+            Expression::Pipe(pipe) => {
+                unique_ids(&pipe.receiver, ids);
+                unique_ids(&pipe.stage, ids);
+            }
             Expression::Product(product) => {
                 for element in &product.elements {
                     unique_ids(&element.value, ids);
@@ -3434,22 +3432,23 @@ fn pipe_stages_group_calls_and_bind_below_binary_operators() {
         panic!()
     };
     unique_ids(expression, &mut std::collections::HashSet::new());
-    let Item::Expression(Expression::Call(second_arg)) = &module.items[0] else {
+    // Pipes are recorded as written: the outer stage's receiver is the inner
+    // pipe, and each stage is the method call exactly as it appears.
+    let Expression::Pipe(second) = expression else {
+        panic!("expected a pipe, got {expression:?}")
+    };
+    assert_eq!(second.operator_syntax.text().trim(), "|>");
+    assert_eq!(second.stage.syntax().text().trim(), "method_b 2");
+    let Expression::Call(second_stage) = second.stage.as_ref() else {
         panic!()
     };
-    let Expression::Call(second) = second_arg.callee.as_ref() else {
+    assert!(matches!(second_stage.callee.as_ref(), Expression::Name(name) if name.name == "method_b"));
+    let Expression::Pipe(first) = second.receiver.as_ref() else {
         panic!()
     };
-    assert!(
-        matches!(second.callee.as_ref(), Expression::Access(access) if access.accessor == Accessor::Method("method_b".into()))
-    );
-    let Expression::Call(first_arg) = second.argument.as_ref() else {
-        panic!()
-    };
-    let Expression::Call(first) = first_arg.callee.as_ref() else {
-        panic!()
-    };
-    assert!(matches!(first.argument.as_ref(), Expression::Name(name) if name.name == "value"));
+    assert!(matches!(first.receiver.as_ref(), Expression::Name(name) if name.name == "value"));
+    assert_eq!(first.stage.syntax().text().trim(), "method_a 1");
+    assert_eq!(first.stage_arguments().len(), 1);
     for source in [
         "a + b |> method\n",
         "a || b |> method\n",
@@ -3617,14 +3616,13 @@ fn parses_atomic_call_spreads_and_preserves_them_in_pipelines() {
         panic!("expected first call")
     };
     assert!(!first.spread);
-    let Item::Expression(Expression::Call(last)) = &module.items[1] else {
-        panic!("expected pipeline call")
+    let Item::Expression(Expression::Pipe(pipe)) = &module.items[1] else {
+        panic!("expected pipeline")
     };
-    assert!(last.spread);
-    let Expression::Call(receiver) = last.callee.as_ref() else {
-        panic!("expected receiver call")
+    let Expression::Call(stage) = pipe.stage.as_ref() else {
+        panic!("expected stage call")
     };
-    assert!(!receiver.spread);
+    assert!(stage.spread);
     let module = parse("f ...g x\n").unwrap();
     let Item::Expression(Expression::Call(last)) = &module.items[0] else {
         panic!("expected call")

@@ -6388,6 +6388,7 @@ impl TypeChecker {
             | Expression::Integer(_)
             | Expression::Float(_) => CheckedEffectSet::default(),
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+            Expression::Pipe(_) => unreachable!("pipe expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
             Expression::Try(_) => unreachable!("try expression reached type checking"),
             Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
@@ -7277,6 +7278,7 @@ impl TypeChecker {
             | Expression::Integer(_)
             | Expression::Float(_) => false,
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+            Expression::Pipe(_) => unreachable!("pipe expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
             Expression::Try(_) => unreachable!("try expression reached type checking"),
             Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
@@ -7711,6 +7713,7 @@ impl TypeChecker {
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+            Expression::Pipe(_) => unreachable!("pipe expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
             Expression::Try(_) => unreachable!("try expression reached type checking"),
             Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
@@ -9304,6 +9307,7 @@ impl TypeChecker {
         }
         let natural_type = match expression {
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+            Expression::Pipe(_) => unreachable!("pipe expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
             Expression::Try(_) => unreachable!("try expression reached type checking"),
             Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
@@ -20037,6 +20041,7 @@ fn expression_reads_reactive(
         | Expression::Integer(_)
         | Expression::Float(_) => false,
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+        Expression::Pipe(_) => unreachable!("pipe expression reached type checking"),
         Expression::Unary(_) => unreachable!("unary expression reached type checking"),
         Expression::Try(_) => unreachable!("try expression reached type checking"),
         Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
@@ -20116,6 +20121,7 @@ fn collect_value_bindings(module: &ResolvedModule) -> Vec<Binding> {
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+            Expression::Pipe(_) => unreachable!("pipe expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
             Expression::Try(_) => unreachable!("try expression reached type checking"),
             Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
@@ -20287,6 +20293,7 @@ fn expression_mentions_symbols(
         | Expression::Integer(_)
         | Expression::Float(_) => false,
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+        Expression::Pipe(_) => unreachable!("pipe expression reached type checking"),
         Expression::Unary(_) => unreachable!("unary expression reached type checking"),
         Expression::Try(_) => unreachable!("try expression reached type checking"),
         Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
@@ -20365,6 +20372,7 @@ fn expression_contains_assignment(expression: &Expression) -> bool {
         | Expression::Integer(_)
         | Expression::Float(_) => false,
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+        Expression::Pipe(_) => unreachable!("pipe expression reached type checking"),
         Expression::Unary(_) => unreachable!("unary expression reached type checking"),
         Expression::Try(_) => unreachable!("try expression reached type checking"),
         Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),
@@ -20574,6 +20582,7 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+            Expression::Pipe(_) => unreachable!("pipe expression reached type checking"),
             Expression::Unary(_) => unreachable!("unary expression reached type checking"),
             Expression::Try(_) => unreachable!("try expression reached type checking"),
             Expression::Conversion(_) => unreachable!("conversion expression reached type checking"),

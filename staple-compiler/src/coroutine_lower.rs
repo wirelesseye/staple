@@ -311,6 +311,10 @@ fn scan_expression(
             scan_expression(module, &binary.left, info, diagnostics);
             scan_expression(module, &binary.right, info, diagnostics);
         }
+        Expression::Pipe(binary) => {
+            scan_expression(module, &binary.receiver, info, diagnostics);
+            scan_expression(module, &binary.stage, info, diagnostics);
+        }
         Expression::Logical(logical) => {
             scan_expression(module, &logical.left, info, diagnostics);
             scan_expression(module, &logical.right, info, diagnostics);
@@ -452,6 +456,10 @@ fn collect_expression<'a>(
         Expression::Binary(binary) => {
             collect_expression(&binary.left, out);
             collect_expression(&binary.right, out);
+        }
+        Expression::Pipe(binary) => {
+            collect_expression(&binary.receiver, out);
+            collect_expression(&binary.stage, out);
         }
         Expression::Logical(logical) => {
             collect_expression(&logical.left, out);

@@ -142,7 +142,8 @@ impl SyntaxToken {
 /// The exact source covered by an AST node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Syntax {
-    /// Marks the callable head of a desugared pipe stage.
+    /// Marks the callable head of a desugared pipe stage. Desugaring sets this
+    /// when it rewrites a `PipeExpression`; the parser never does.
     pub pipe_stage: bool,
     pub id: SyntaxId,
     pub span: Span,
@@ -191,6 +192,31 @@ impl Syntax {
     /// so their [`Self::token_range`]s can be compared.
     pub fn shares_token_stream(&self, other: &Syntax) -> bool {
         Arc::ptr_eq(&self.tokens, &other.tokens)
+    }
+
+    /// A copy of `self` that ends where `end` ends, for nodes a later pass
+    /// builds over a run of existing source (for example the partial
+    /// applications of a desugared pipe stage). The extent only changes when
+    /// both nodes come from the same parse.
+    pub fn ending_at(&self, end: &Syntax) -> Syntax {
+        let mut syntax = self.clone();
+        if self.shares_token_stream(end) && end.token_range.end >= syntax.token_range.start {
+            syntax.token_range.end = end.token_range.end;
+        }
+        if let (
+            Span::User { source, range, .. },
+            Span::User {
+                source: end_source,
+                range: end_range,
+                ..
+            },
+        ) = (&mut syntax.span, &end.span)
+            && source == end_source
+            && end_range.end >= range.start
+        {
+            range.end = end_range.end;
+        }
+        syntax
     }
 
     pub fn compiler() -> Self {

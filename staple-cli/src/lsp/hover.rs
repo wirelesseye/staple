@@ -385,6 +385,10 @@ impl Collector<'_> {
                 self.collect_expression_declarations(&binary.left);
                 self.collect_expression_declarations(&binary.right);
             }
+            Expression::Pipe(binary) => {
+                self.collect_expression_declarations(&binary.receiver);
+                self.collect_expression_declarations(&binary.stage);
+            }
             Expression::Logical(logical) => {
                 self.collect_expression_declarations(&logical.left);
                 self.collect_expression_declarations(&logical.right);
@@ -1671,6 +1675,10 @@ impl Collector<'_> {
             Expression::Binary(binary) => {
                 self.expression(&binary.left);
                 self.expression(&binary.right);
+            }
+            Expression::Pipe(binary) => {
+                self.expression(&binary.receiver);
+                self.expression(&binary.stage);
             }
             Expression::Logical(logical) => {
                 self.expression(&logical.left);
