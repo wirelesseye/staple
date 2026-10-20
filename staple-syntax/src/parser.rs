@@ -294,6 +294,19 @@ fn parse_fragment<T>(
     next_syntax_id: &mut usize,
     parse: impl FnOnce(&mut Grammar) -> Result<T, ParseError>,
 ) -> Result<T, ParseError> {
+    parse_fragment_with(syntax, grouped, next_syntax_id, true, parse).map(|(value, _)| value)
+}
+
+/// Parses `syntax` with `parse`, returning the value and how many of the
+/// fragment's tokens it consumed. With `complete`, the value must also consume
+/// everything but trivia; without it, whatever follows is left unread.
+fn parse_fragment_with<T>(
+    syntax: &Syntax,
+    grouped: bool,
+    next_syntax_id: &mut usize,
+    complete: bool,
+    parse: impl FnOnce(&mut Grammar) -> Result<T, ParseError>,
+) -> Result<(T, usize), ParseError> {
     let all_tokens = &syntax.tokens;
     let (source, line_starts) = fragment_source(all_tokens);
     let mut tokens = syntax.tokens().to_vec();
@@ -327,11 +340,76 @@ fn parse_fragment<T>(
     let value = parse(&mut grammar);
     grammar.check_tab_indentation()?;
     let value = value?;
-    if grammar.peek().is_some() {
+    if complete && grammar.peek().is_some() {
         return Err(grammar.error("expected one complete syntax argument"));
     }
     *next_syntax_id = grammar.next_syntax_id;
-    Ok(value)
+    Ok((value, grammar.position))
+}
+
+/// Reads one expression from the front of `syntax` and reports how many of its
+/// tokens it used, leaving whatever follows unread. Unlike
+/// [`parse_expression_fragment`], the value need not be the whole fragment; it
+/// is the longest expression the grammar accepts from the first token.
+pub fn parse_expression_prefix(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<(Expression, usize), ParseError> {
+    parse_fragment_with(syntax, false, next_syntax_id, false, |grammar| {
+        grammar.parse_expression()
+    })
+}
+
+/// Reads one type from the front of `syntax`; see [`parse_expression_prefix`].
+pub fn parse_type_prefix(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<(Type, usize), ParseError> {
+    parse_fragment_with(syntax, false, next_syntax_id, false, |grammar| {
+        grammar.parse_type()
+    })
+}
+
+/// Reads one pattern from the front of `syntax`; see [`parse_expression_prefix`].
+pub fn parse_pattern_prefix(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<(Pattern, usize), ParseError> {
+    parse_fragment_with(syntax, false, next_syntax_id, false, |grammar| {
+        grammar.parse_pattern()
+    })
+}
+
+/// Reads one item from the front of `syntax`; see [`parse_expression_prefix`].
+pub fn parse_item_prefix(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<(Item, usize), ParseError> {
+    parse_fragment_with(syntax, false, next_syntax_id, false, |grammar| {
+        grammar.parse_item()
+    })
+}
+
+/// Reads one modifier invocation from the front of `syntax`; see
+/// [`parse_expression_prefix`].
+pub fn parse_modifier_prefix(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<(ModifierInvocation, usize), ParseError> {
+    parse_fragment_with(syntax, false, next_syntax_id, false, |grammar| {
+        grammar.parse_modifier_invocation()
+    })
+}
+
+/// Reads one type declaration body from the front of `syntax`; see
+/// [`parse_expression_prefix`].
+pub fn parse_type_body_prefix(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<(TypeBody, usize), ParseError> {
+    parse_fragment_with(syntax, false, next_syntax_id, false, |grammar| {
+        grammar.parse_type_body()
+    })
 }
 
 /// Fragment parses that recently ran over one backing token stream, with the

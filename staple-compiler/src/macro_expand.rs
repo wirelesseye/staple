@@ -5,8 +5,11 @@ use std::{
     sync::Arc,
 };
 
+mod parse;
+
 use crate::program::source_location_at;
 use crate::{ModuleId, Program, ResolvedMacro};
+use parse::{ParseImpl, ParseTarget, SyntaxIntrinsic, TypeEnv};
 use staple_syntax::{
     Accessor, BinaryOperator, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
     LogicalOperator, MacroDeclaration, ModifierArgument, ModifierInvocation, Pattern,
@@ -150,6 +153,9 @@ pub(crate) enum MetaType {
     Optional(Box<MetaType>),
     Sequence(Box<MetaType>),
     Delimited(DelimiterKind, DelimitedMetaContents),
+    /// A user type, or a standard syntax constructor such as `Separated`, as a
+    /// `Parse` target. Macro signatures never produce it.
+    Nominal(String, Vec<MetaType>),
 }
 
 /// The statically-known portion of a value evaluated while expanding macros.
@@ -172,6 +178,13 @@ enum CompileType {
     Meta(MetaType),
     Product(Vec<CompileType>),
     Function(Box<CompileType>, Box<CompileType>),
+    /// `Result T E`, whose success is `Ok T` and whose failure is an `E`.
+    Result(Box<CompileType>, Box<CompileType>),
+    /// A `ParseStream`.
+    Stream,
+    /// An applied, sum, or array type kept as written, so a `Parse` target can
+    /// be recovered from it.
+    Written(Box<Type>),
 }
 
 #[derive(Clone)]
@@ -462,8 +475,19 @@ enum Value {
         function: staple_syntax::FunctionExpression,
         environment: Environment,
         quote_result: Option<MetaType>,
+        /// The `Parse` implementation parameters in scope where the function
+        /// was written, so closures and default members keep their bindings.
+        type_env: TypeEnv,
     },
     Helper(ModuleId, Binding),
+    /// A compiler-implemented `std.syntax` function.
+    Intrinsic(SyntaxIntrinsic),
+    /// A copyable cursor over a syntax fragment: the stream's tokens and the
+    /// index, within them, of the first unread one.
+    Stream {
+        syntax: Syntax,
+        cursor: usize,
+    },
     Product(Vec<(Option<String>, Value)>, bool),
     Integer(i128),
     Float(f64),
@@ -636,6 +660,9 @@ pub(crate) struct MacroAnalysis {
     pub invocations: HashMap<SyntaxId, ResolvedMacro>,
     pub helpers: Vec<(ModuleId, Binding)>,
     pub binding_types: HashMap<SyntaxId, String>,
+    /// Functions that exist only during macro expansion (the `std.syntax`
+    /// intrinsics), so importing one is not an error.
+    pub compile_time_items: HashSet<(ModuleId, String)>,
     /// Macro-generated references mapped to the span of the outermost macro
     /// invocation that produced them.
     pub caller_location_spans: HashMap<SyntaxId, Span>,
@@ -1469,8 +1496,21 @@ pub(crate) fn expand_program(
         items.retain(|item| {
             !matches!(item,
                 Item::Binding(binding) if binding_is_compile_time_helper(binding)
-            )
+            ) && !expander.is_compile_time_parse_item(module, item)
         });
+        if Some(module) == expander.syntax_module {
+            // The default `parse_all` calls intrinsics that no longer exist
+            // after expansion, so the trait keeps only its signatures.
+            for item in &mut items {
+                if let Item::TraitDeclaration(declaration) = item
+                    && declaration.name == "Parse"
+                {
+                    for member in &mut declaration.members {
+                        member.default = None;
+                    }
+                }
+            }
+        }
         let declared = items
             .iter()
             .filter_map(|item| match item {
@@ -1578,6 +1618,29 @@ struct MacroExpander {
     checked_compile_helpers: HashSet<SyntaxId>,
     checking_compile_helpers: HashSet<SyntaxId>,
     compile_binding_types: HashMap<SyntaxId, String>,
+    /// The `std.syntax` module, which defines `Parse` and its intrinsics.
+    syntax_module: Option<ModuleId>,
+    /// Every implementation of `Parse`, standard and user-written.
+    parse_impls: Vec<ParseImpl>,
+    /// The default body of `Parse.parse_all`, with the module it was written in.
+    parse_all_default: Option<(ModuleId, Expression)>,
+    /// What the type parameters of the `Parse` implementation being evaluated
+    /// stand for.
+    type_env: TypeEnv,
+    /// The value a `?` or `return` is leaving the innermost compile-time
+    /// function with. Evaluation unwinds as a failure until the function call
+    /// that owns it takes the value.
+    pending_return: Option<Value>,
+    /// The caller's storage for the next call's `mut` argument, so the callee
+    /// updates it in place.
+    argument_place: Option<EnvironmentBinding>,
+    /// The `Parse` target of each `Parse.parse`/`Parse.parse_all` call, as the
+    /// static check inferred it from the call's context.
+    parse_targets: HashMap<SyntaxId, ParseTarget>,
+    /// While statically checking a `Parse` implementation, its type
+    /// parameters and the ones bounded by `Parse`.
+    static_parameters: HashSet<String>,
+    static_parse_bounds: HashSet<String>,
 }
 
 fn provisional_use_kind(program: &Program, declaration: &UseDeclaration) -> UseKind {
@@ -1780,6 +1843,53 @@ impl MacroExpander {
                             .entry(declaration.name.clone())
                             .or_default()
                             .push(key);
+                    }
+                    // `Parse` and the `std.syntax` intrinsics are scope entries
+                    // so they import, re-export, and rename like helpers do.
+                    Item::TraitDeclaration(declaration)
+                        if Some(source_module.id) == syntax && declaration.name == "Parse" =>
+                    {
+                        scopes[source_module.id.0].helpers.insert(
+                            declaration.name.clone(),
+                            HelperDefinition {
+                                module: source_module.id,
+                                binding: Binding {
+                                    syntax: declaration.syntax.clone(),
+                                    docs: Vec::new(),
+                                    member_modifiers: Vec::new(),
+                                    visibility: declaration.visibility,
+                                    kind: BindingKind::Extern,
+                                    mutable: false,
+                                    signal: false,
+                                    name: declaration.name.clone(),
+                                    annotation: None,
+                                    companion_target: None,
+                                    companion_generics: None,
+                                    track_caller: false,
+                                    value: None,
+                                },
+                            },
+                        );
+                    }
+                    Item::ExternBlock(block)
+                        if Some(source_module.id) == syntax
+                            && block.abi == "\"staple-intrinsic\"" =>
+                    {
+                        for binding in &block.bindings {
+                            if SyntaxIntrinsic::from_name(&binding.name).is_some() {
+                                let mut binding = binding.clone();
+                                if block.visibility == Visibility::Public {
+                                    binding.visibility = Visibility::Public;
+                                }
+                                scopes[source_module.id.0].helpers.insert(
+                                    binding.name.clone(),
+                                    HelperDefinition {
+                                        module: source_module.id,
+                                        binding,
+                                    },
+                                );
+                            }
+                        }
                     }
                     Item::Binding(binding) => {
                         if binding.value.is_some() {
@@ -2262,7 +2372,7 @@ impl MacroExpander {
             }
         }
 
-        Self {
+        let mut expander = Self {
             definitions,
             scopes,
             imported_modules: program.imported_modules().clone(),
@@ -2331,7 +2441,21 @@ impl MacroExpander {
             root_invocation_span: None,
             caller_location_spans: HashMap::new(),
             source_files: source_files(program),
-        }
+            syntax_module: syntax,
+            parse_impls: Vec::new(),
+            parse_all_default: None,
+            type_env: TypeEnv::default(),
+            pending_return: None,
+            argument_place: None,
+            parse_targets: HashMap::new(),
+            static_parameters: HashSet::new(),
+            static_parse_bounds: HashSet::new(),
+        };
+        let (impls, default, diagnostics) = parse::collect_parse_impls(program, &expander);
+        expander.parse_impls = impls;
+        expander.parse_all_default = default;
+        expander.diagnostics.extend(diagnostics);
+        expander
     }
 
     fn analysis(&self) -> MacroAnalysis {
@@ -2350,6 +2474,17 @@ impl MacroExpander {
                 .map(|helper| (helper.module, helper.binding.clone()))
                 .collect(),
             binding_types: self.compile_binding_types.clone(),
+            compile_time_items: self
+                .syntax_module
+                .map(|module| {
+                    self.scopes[module.0]
+                        .helpers
+                        .values()
+                        .filter(|helper| self.helper_intrinsic(helper).is_some())
+                        .map(|helper| (module, helper.binding.name.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
             caller_location_spans: self.caller_location_spans.clone(),
             next_syntax_id: self.next_syntax_id,
         }
@@ -2433,6 +2568,7 @@ impl MacroExpander {
         for helper in helpers {
             self.check_compile_helper(&helper);
         }
+        self.check_parse_impls();
     }
 
     fn check_compile_helper(&mut self, helper: &HelperDefinition) {
@@ -2496,8 +2632,14 @@ impl MacroExpander {
                 self.check_compile_expression(module, &value.value, environment, Some(&annotation))
             }
             Expression::Match(value) => {
-                let subject =
+                let mut subject =
                     self.check_compile_expression(module, &value.subject, environment, None);
+                // A parenthesized `Result` subject is the `Result` itself.
+                if let CompileType::Product(elements) = &subject
+                    && let [CompileType::Result(..)] = elements.as_slice()
+                {
+                    subject = elements[0].clone();
+                }
                 let mut previous_patterns = Vec::new();
                 let mut result = CompileType::Never;
                 for arm in &value.arms {
@@ -2514,7 +2656,9 @@ impl MacroExpander {
                         self.check_compile_expression(module, &arm.body, &mut nested, expected);
                     result = join_compile_types(result, arm_type);
                 }
-                if !compile_patterns_are_exhaustive(&subject, &previous_patterns) {
+                if !matches!(subject, CompileType::Unknown | CompileType::Error)
+                    && !compile_patterns_are_exhaustive(&subject, &previous_patterns)
+                {
                     self.diagnostics.push(Diagnostic::new(
                         value.syntax.span.clone(),
                         "non-exhaustive match",
@@ -2778,11 +2922,12 @@ impl MacroExpander {
                 CompileType::Error
             }
             Expression::Try(value) => {
-                self.diagnostics.push(Diagnostic::new(
-                    value.syntax.span.clone(),
-                    "`?` is not available during compile-time macro evaluation",
-                ));
-                CompileType::Error
+                // `Ok x` is `x`; any other outcome leaves the function.
+                match self.check_compile_expression(module, &value.operand, environment, None) {
+                    CompileType::Result(ok, _) => *ok,
+                    CompileType::Error => CompileType::Error,
+                    _ => CompileType::Unknown,
+                }
             }
             Expression::Conversion(value) => {
                 self.diagnostics.push(Diagnostic::new(
@@ -2897,6 +3042,23 @@ impl MacroExpander {
         environment: &mut CompileEnvironment,
         expected: Option<&CompileType>,
     ) -> CompileType {
+        if let Expression::Call(call) = expression {
+            if let Some((member, type_arguments)) =
+                self.parse_member_head(module, &call.callee, |name| environment.contains_key(name))
+            {
+                return self.check_parse_call(
+                    module,
+                    call,
+                    member,
+                    type_arguments,
+                    environment,
+                    expected,
+                );
+            }
+            if let Expression::TypeApplication(application) = call.callee.as_ref() {
+                return self.check_type_applied_call(module, call, application, environment);
+            }
+        }
         let (head, arguments) = flatten_call(expression);
         if let Some(keys) = self.resolve_macro(module, head) {
             // Match overloads the same way real call sites and compile-time
@@ -2923,6 +3085,16 @@ impl MacroExpander {
             // expression value here, the same coercion `parse_quote` performs:
             // adopt the expected quotable meta type when one is supplied.
             let result = selected.definition.result.clone();
+            // A control-flow macro such as `if` or `when` is evaluated in
+            // place, so a `Result` context says nothing about its syntax type.
+            if matches!(expected, Some(CompileType::Result(..)))
+                && matches!(
+                    result,
+                    MetaType::Syntax | MetaType::SyntaxNode | MetaType::Expr
+                )
+            {
+                return CompileType::Unknown;
+            }
             if matches!(result, MetaType::Syntax | MetaType::SyntaxNode) {
                 match expected {
                     Some(CompileType::Meta(meta)) if quote_result_type(meta) => {
@@ -2945,6 +3117,11 @@ impl MacroExpander {
         }
 
         let mut callee = self.check_compile_expression(module, head, environment, None);
+        if let Some(first) = arguments.first()
+            && self.head_takes_mut(module, head, environment)
+        {
+            self.require_mutable_argument(first, environment);
+        }
         for argument in arguments {
             let CompileType::Function(parameter, result) = callee else {
                 if callee != CompileType::Error && callee != CompileType::Unknown {
@@ -3646,6 +3823,10 @@ impl MacroExpander {
             | Item::Break(_)
             | Item::Continue(_)
             | Item::Expression(_)) => self.expand_block_item_contents(module, item, depth),
+            // `Parse` implementations are compile-time code, like macro bodies:
+            // they run in the interpreter and are dropped after expansion.
+            Item::TraitImplementation(implementation)
+                if self.names_parse_trait(module, &implementation.trait_name) => {}
             Item::TraitImplementation(implementation) => {
                 for associated in &mut implementation.associated_types {
                     self.apply_member_modifiers(
@@ -5702,6 +5883,7 @@ impl MacroExpander {
                     MetaType::SlottedProduct(_)
                     | MetaType::Product(_)
                     | MetaType::Optional(_)
+                    | MetaType::Nominal(_, _)
                     | MetaType::Sequence(_) => {
                         format!("`{}` syntax", format_meta_type(expected))
                     }
@@ -5766,6 +5948,7 @@ impl MacroExpander {
                 function: function.as_ref().clone(),
                 environment: environment.clone(),
                 quote_result: self.quote_context.clone(),
+                type_env: self.type_env.clone(),
             }),
             Expression::TypeApplication(_) => None,
             Expression::TypeAscription(ascription) => {
@@ -5824,6 +6007,9 @@ impl MacroExpander {
                 let mut cursor = module;
                 loop {
                     if let Some(helper) = self.scopes[cursor.0].helpers.get(&name.name).cloned() {
+                        if let Some(intrinsic) = self.helper_intrinsic(&helper) {
+                            return Some(Value::Intrinsic(intrinsic));
+                        }
                         if matches!(helper.binding.value, Some(Expression::Function(_))) {
                             return Some(Value::Helper(helper.module, helper.binding));
                         }
@@ -5985,6 +6171,16 @@ impl MacroExpander {
                 {
                     return result;
                 }
+                if let Some((member, type_arguments)) =
+                    self.parse_member_head(module, &call.callee, |name| {
+                        environment.contains_key(name)
+                    })
+                {
+                    return self.eval_parse_call(module, call, member, type_arguments, environment);
+                }
+                if let Expression::TypeApplication(application) = call.callee.as_ref() {
+                    return self.eval_type_applied_call(module, call, application, environment);
+                }
                 if let Some(keys) = self.resolve_macro(module, head) {
                     let selected = self.select_macro(
                         &keys,
@@ -6093,9 +6289,10 @@ impl MacroExpander {
                         )
                     {
                         let expanded = expanded.clone();
-                        let evaluated = self.eval_expression(module, &expanded, environment);
+                        // The expansion is done; a branch may use the same
+                        // macro again.
                         self.expansion_stack.pop();
-                        return evaluated;
+                        return self.eval_expression(module, &expanded, environment);
                     }
                     let result = result.map(Value::Syntax);
                     self.expansion_stack.pop();
@@ -6104,7 +6301,16 @@ impl MacroExpander {
                 if let Expression::Name(name) = call.callee.as_ref()
                     && name.name.chars().next().is_some_and(char::is_uppercase)
                 {
-                    let argument = self.eval_expression(module, &call.argument, environment)?;
+                    let mut argument = self.eval_expression(module, &call.argument, environment)?;
+                    if name.name == "Ok"
+                        && matches!(call.argument.as_ref(), Expression::Product(product)
+                            if product.elements.len() == 1
+                                && product.elements[0].name.is_none()
+                                && !product.elements[0].spread)
+                    {
+                        // `Ok (x)` wraps `x`, not a one-element product.
+                        argument = ungroup_value(argument);
+                    }
                     if matches!(
                         name.name.as_str(),
                         "Ident"
@@ -6129,7 +6335,10 @@ impl MacroExpander {
                     return Some(Value::Nominal(name.name.clone(), Box::new(argument)));
                 }
                 let callee = self.eval_expression(module, &call.callee, environment)?;
-                let argument = self.eval_expression(module, &call.argument, environment)?;
+                let wants_place = callee_takes_mut(&callee);
+                let (argument, place) =
+                    self.eval_call_argument(module, &call.argument, environment, wants_place)?;
+                self.argument_place = place;
                 self.apply_value(callee, argument, call.syntax.span.clone())
             }
             Expression::Access(access) => {
@@ -6140,6 +6349,9 @@ impl MacroExpander {
                     && let Some(helper) = self.scopes[target.0].helpers.get(&item).cloned()
                     && helper.binding.visibility == Visibility::Public
                 {
+                    if let Some(intrinsic) = self.helper_intrinsic(&helper) {
+                        return Some(Value::Intrinsic(intrinsic));
+                    }
                     return Some(Value::Helper(helper.module, helper.binding));
                 }
                 let mut value = self.eval_expression(module, &access.value, environment)?;
@@ -6245,12 +6457,16 @@ impl MacroExpander {
             }
             Expression::Match(match_) => {
                 let subject = self.eval_expression(module, &match_.subject, environment)?;
-                for arm in &match_.arms {
-                    let mut bindings = Environment::new();
-                    if match_pattern(&arm.pattern, &subject, &mut bindings) {
-                        let mut arm_environment = environment.clone();
-                        arm_environment.extend(bindings);
-                        return self.eval_expression(module, &arm.body, &mut arm_environment);
+                // A parenthesized subject also matches as its single element.
+                let ungrouped = ungroup_value(subject.clone());
+                for candidate in [&ungrouped, &subject] {
+                    for arm in &match_.arms {
+                        let mut bindings = Environment::new();
+                        if match_pattern(&arm.pattern, candidate, &mut bindings) {
+                            let mut arm_environment = environment.clone();
+                            arm_environment.extend(bindings);
+                            return self.eval_expression(module, &arm.body, &mut arm_environment);
+                        }
                     }
                 }
                 self.diagnostics.push(Diagnostic::new(
@@ -6307,11 +6523,15 @@ impl MacroExpander {
                 None
             }
             Expression::Try(try_) => {
-                self.diagnostics.push(Diagnostic::new(
-                    try_.syntax.span.clone(),
-                    "`?` is not available during compile-time macro evaluation",
-                ));
-                None
+                // `Ok x` is `x`; anything else leaves the innermost
+                // compile-time function with that value.
+                match self.eval_expression(module, &try_.operand, environment)? {
+                    Value::Nominal(name, payload) if name == "Ok" => Some(*payload),
+                    residual => {
+                        self.pending_return = Some(residual);
+                        None
+                    }
+                }
             }
             Expression::Conversion(conversion) => {
                 self.diagnostics.push(Diagnostic::new(
@@ -6367,6 +6587,10 @@ impl MacroExpander {
                         Item::PatternBinding(binding) => {
                             let value = self.eval_expression(module, &binding.value, &mut local)?;
                             if !match_pattern(&binding.pattern, &value, &mut local) {
+                                self.diagnostics.push(Diagnostic::new(
+                                    binding.pattern.syntax().span.clone(),
+                                    "this compile-time value does not match the pattern",
+                                ));
                                 return None;
                             }
                         }
@@ -6401,7 +6625,11 @@ impl MacroExpander {
                             result = self.eval_expression(module, value, &mut local)?
                         }
                         Item::Return(return_) => {
-                            return self.eval_expression(module, &return_.value, &mut local);
+                            // `return` leaves the whole function, not just
+                            // this block.
+                            let value = self.eval_expression(module, &return_.value, &mut local)?;
+                            self.pending_return = Some(value);
+                            return None;
                         }
                         Item::Break(break_) => {
                             self.diagnostics.push(Diagnostic::new(
@@ -7035,7 +7263,10 @@ impl MacroExpander {
         self.helper_eval_depth += 1;
         let result = self.eval_expression(module, value, &mut Environment::new());
         self.helper_eval_depth -= 1;
-        result
+        match result {
+            None => self.pending_return.take(),
+            result => result,
+        }
     }
 
     /// Applies a compile-time callable to an argument, bounded by
@@ -7053,6 +7284,7 @@ impl MacroExpander {
                 span,
                 "compile-time evaluation recursed too deeply; check for a self-referential binding",
             ));
+            self.argument_place = None;
             return None;
         }
         self.helper_eval_depth += 1;
@@ -7062,12 +7294,14 @@ impl MacroExpander {
     }
 
     fn apply_value_inner(&mut self, callee: Value, argument: Value, span: Span) -> Option<Value> {
+        let place = self.argument_place.take();
         match callee {
             Value::Function {
                 module,
                 function,
                 mut environment,
                 quote_result,
+                type_env,
             } => {
                 if !bind_pattern(&function.pattern, argument, &mut environment) {
                     self.diagnostics.push(Diagnostic::new(
@@ -7076,13 +7310,28 @@ impl MacroExpander {
                     ));
                     return None;
                 }
+                // A `mut` parameter is the caller's own storage, not a copy.
+                if let Some(place) = place
+                    && let Some(name) = mutable_parameter_name(&function.pattern)
+                {
+                    environment.insert(name.to_owned(), place);
+                }
                 let previous_context = match quote_result {
                     Some(expected) => self.quote_context.replace(expected),
                     None => self.quote_context.take(),
                 };
+                let previous_env = std::mem::replace(&mut self.type_env, type_env);
                 let result = self.eval_expression(module, &function.body, &mut environment);
+                self.type_env = previous_env;
                 self.quote_context = previous_context;
-                result
+                // A `?` or `return` leaves this function with its value.
+                match result {
+                    None => self.pending_return.take(),
+                    result => result,
+                }
+            }
+            Value::Intrinsic(intrinsic) => {
+                self.apply_intrinsic(intrinsic, None, argument, place, span)
             }
             Value::Helper(module, binding) => {
                 if Some(module) == self.standard_library_process && binding.name == "panic" {
@@ -7115,6 +7364,7 @@ impl MacroExpander {
                 // through `apply_value_inner` directly so `helper_eval_depth`
                 // (and the resulting recursion-depth budget) tracks actual
                 // call nesting rather than this implementation detail.
+                self.argument_place = place;
                 self.apply_value_inner(function?, argument, span)
             }
             _ => {
@@ -7272,7 +7522,10 @@ impl MacroExpander {
             }
             other => {
                 let description = match other {
-                    Value::Function { .. } | Value::Helper(..) => "a function value",
+                    Value::Function { .. } | Value::Helper(..) | Value::Intrinsic(_) => {
+                        "a function value"
+                    }
+                    Value::Stream { .. } => "a parse stream",
                     Value::Syntax(_) => "a syntax value",
                     Value::Sequence(_) => "a sequence value",
                     Value::Separated { .. } => "a separated sequence value",
@@ -8475,6 +8728,7 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
         | MetaType::TypeBody
         | MetaType::UnstructuredItem
         | MetaType::SlottedProduct(_)
+        | MetaType::Nominal(_, _)
         | MetaType::Optional(_)
         | MetaType::Sequence(_) => false,
         MetaType::Comma => matches_single_token(argument.syntax(), staple_syntax::TokenKind::Comma),
@@ -9028,6 +9282,7 @@ fn match_syntax_fragment(
         MetaType::SlottedProduct(_)
         | MetaType::Product(_)
         | MetaType::Optional(_)
+        | MetaType::Nominal(_, _)
         | MetaType::Sequence(_) => unreachable!(),
         MetaType::TypeBody => unreachable!("type bodies are matched before expression parsing"),
         MetaType::MacroCallMetadata => unreachable!(),
@@ -9537,6 +9792,7 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::SlottedProduct(_)
             | MetaType::Product(_)
             | MetaType::Optional(_)
+            | MetaType::Nominal(_, _)
             | MetaType::Sequence(_) => format_meta_type(parameter),
             MetaType::Delimited(_, _) => format_meta_type(parameter),
         })
@@ -9633,6 +9889,16 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
         MetaType::Product(elements) => format_meta_elements(elements, ", "),
         MetaType::Optional(element) => format!("Optional {}", format_meta_type(element)),
         MetaType::Sequence(element) => format!("Sequence {}", format_meta_type(element)),
+        MetaType::Nominal(name, arguments) => {
+            arguments.iter().fold(name.clone(), |text, argument| {
+                let argument = format_meta_type(argument);
+                if argument.contains(' ') && !argument.starts_with('(') {
+                    format!("{text} ({argument})")
+                } else {
+                    format!("{text} {argument}")
+                }
+            })
+        }
         MetaType::Delimited(kind, contents) => {
             let name = match kind {
                 DelimiterKind::Parenthesized => "Parenthesized",
@@ -9679,6 +9945,7 @@ fn compile_type(ty: &Type) -> CompileType {
             | "USize" => CompileType::Integer,
             "Float" | "F32" | "F64" => CompileType::Float,
             "Bool" => CompileType::Bool,
+            "ParseStream" => CompileType::Stream,
             name => CompileType::Named(name.to_owned()),
         },
         Type::NumberLiteral(_) => CompileType::Integer,
@@ -9696,8 +9963,24 @@ fn compile_type(ty: &Type) -> CompileType {
             Box::new(compile_type(&function.parameter)),
             Box::new(compile_type(&function.result)),
         ),
-        Type::Sum(_) | Type::Application(_) | Type::EffectApplication(_) | Type::Array(_) => {
-            CompileType::Named(ty.to_string())
+        Type::Application(application) => {
+            // `Result T E` is `Ok T | E`, whose two sides are tracked apart.
+            if let Type::Application(inner) = application.callee.as_ref()
+                && let Type::Named(head) = inner.callee.as_ref()
+                && head.namespace.is_none()
+                && head.name == "Result"
+            {
+                return CompileType::Result(
+                    Box::new(compile_type(unwrap_singleton_product(&inner.argument))),
+                    Box::new(compile_type(unwrap_singleton_product(
+                        &application.argument,
+                    ))),
+                );
+            }
+            CompileType::Written(Box::new(ty.clone()))
+        }
+        Type::Sum(_) | Type::EffectApplication(_) | Type::Array(_) => {
+            CompileType::Written(Box::new(ty.clone()))
         }
     }
 }
@@ -9826,6 +10109,13 @@ fn compile_constructor_type(name: &str, argument: CompileType) -> CompileType {
             _ => CompileType::Meta(MetaType::Sequence(Box::new(MetaType::SyntaxNode))),
         },
         "Some" | "None" => CompileType::Named("Optional".to_owned()),
+        "Ok" => CompileType::Result(
+            Box::new(match argument {
+                CompileType::Product(mut elements) if elements.len() == 1 => elements.remove(0),
+                other => other,
+            }),
+            Box::new(CompileType::Unknown),
+        ),
         "True" | "False" => CompileType::Bool,
         _ => CompileType::Named(name.to_owned()),
     }
@@ -9867,6 +10157,9 @@ fn inferred_compile_quote_type(quote: &staple_syntax::QuoteExpression) -> Compil
 }
 
 fn compile_types_compatible(actual: &CompileType, expected: &CompileType) -> bool {
+    if let (CompileType::Result(ao, ae), CompileType::Result(eo, ee)) = (actual, expected) {
+        return compile_types_compatible(ao, eo) && compile_types_compatible(ae, ee);
+    }
     if matches!(
         actual,
         CompileType::Error | CompileType::Unknown | CompileType::Never
@@ -9908,6 +10201,9 @@ fn compile_types_compatible(actual: &CompileType, expected: &CompileType) -> boo
             compile_types_compatible(ap, ep) && compile_types_compatible(ar, er)
         }
         (CompileType::Named(actual), CompileType::Named(expected)) => actual == expected,
+        (CompileType::Result(ao, ae), CompileType::Result(eo, ee)) => {
+            compile_types_compatible(ao, eo) && compile_types_compatible(ae, ee)
+        }
         _ => actual == expected,
     }
 }
@@ -9951,6 +10247,9 @@ fn compile_type_contains_unknown(ty: &CompileType) -> bool {
         CompileType::Function(parameter, result) => {
             compile_type_contains_unknown(parameter) || compile_type_contains_unknown(result)
         }
+        CompileType::Result(ok, err) => {
+            compile_type_contains_unknown(ok) || compile_type_contains_unknown(err)
+        }
         _ => false,
     }
 }
@@ -9983,6 +10282,19 @@ fn format_compile_type(ty: &CompileType) -> String {
         CompileType::Bool => "Bool".to_owned(),
         CompileType::Named(name) => name.clone(),
         CompileType::Meta(meta) => format_meta_type(meta),
+        CompileType::Stream => "ParseStream".to_owned(),
+        CompileType::Written(ty) => ty.to_string(),
+        CompileType::Result(ok, err) => {
+            let argument = |ty: &CompileType| {
+                let text = format_compile_type(ty);
+                if text.contains(' ') && !text.starts_with('(') {
+                    format!("({text})")
+                } else {
+                    text
+                }
+            };
+            format!("Result {} {}", argument(ok), argument(err))
+        }
         CompileType::Product(elements) => format!(
             "({})",
             elements
@@ -10044,6 +10356,13 @@ fn compile_product_fields(ty: &CompileType, length: usize) -> Vec<CompileType> {
 
 fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<CompileType> {
     match (ty, name) {
+        (CompileType::Result(ok, _), "Ok") => Some(ok.as_ref().clone()),
+        (CompileType::Result(_, error), "ParseError") if matches!(error.as_ref(), CompileType::Named(name) if name == "ParseError") => {
+            Some(CompileType::Product(vec![CompileType::String]))
+        }
+        (CompileType::Named(named), "ParseError") if named == "ParseError" => {
+            Some(CompileType::Product(vec![CompileType::String]))
+        }
         (CompileType::Meta(MetaType::Optional(element)), "Some") => {
             Some(CompileType::Meta(element.as_ref().clone()))
         }
@@ -10192,6 +10511,18 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
         }
         CompileType::Named(name) if name == "Optional" => {
             ["None", "Some"].iter().all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name)))
+        }
+        CompileType::Result(_, error) => {
+            let has = |name: &str| {
+                patterns
+                    .iter()
+                    .any(|pattern| compile_pattern_constructor_name(pattern) == Some(name))
+            };
+            has("Ok")
+                && match error.as_ref() {
+                    CompileType::Named(name) => has(name),
+                    _ => patterns.len() >= 2,
+                }
         }
         CompileType::Meta(MetaType::Visibility) => ["Private", "Package", "Public"]
             .iter()
@@ -10898,6 +11229,7 @@ fn type_contains_syntax(ty: &Type) -> bool {
                 | "ModifiedItem"
                 | "Visibility"
                 | "MacroCallMetadata"
+                | "ParseStream"
                 | "Private"
                 | "Package"
                 | "Public"
@@ -11311,6 +11643,36 @@ fn is_plain_identifier(name: &staple_syntax::NameExpression) -> bool {
     }
     matches!(tokens.next(), Some(token) if token.kind == staple_syntax::TokenKind::Identifier)
         && tokens.next().is_none()
+}
+
+/// A parenthesized single element stands for the element itself.
+fn ungroup_value(value: Value) -> Value {
+    match value {
+        Value::Product(mut fields, _) if fields.len() == 1 && fields[0].0.is_none() => {
+            fields.remove(0).1
+        }
+        other => other,
+    }
+}
+
+/// Whether applying `callee` updates its argument in place.
+fn callee_takes_mut(callee: &Value) -> bool {
+    match callee {
+        Value::Function { function, .. } => mutable_parameter_name(&function.pattern).is_some(),
+        Value::Helper(_, binding) => matches!(&binding.value,
+            Some(Expression::Function(function)) if mutable_parameter_name(&function.pattern).is_some()),
+        Value::Intrinsic(intrinsic) => intrinsic.takes_mut(),
+        _ => false,
+    }
+}
+
+/// The name a function's `mut` parameter binds, when its pattern is one.
+fn mutable_parameter_name(pattern: &Pattern) -> Option<&str> {
+    match pattern {
+        Pattern::Binding(binding) if binding.mutable => Some(&binding.name),
+        Pattern::At(at) if at.binding.mutable => Some(&at.binding.name),
+        _ => None,
+    }
 }
 
 fn bool_value(value: bool) -> Value {

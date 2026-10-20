@@ -17040,3 +17040,653 @@ fn span_position_agrees_with_source_location_macros() {
     assert_eq!(position.file, "<stdin>.sta");
     assert_eq!(position.line, 2);
 }
+
+/// The program's source after macro expansion, whitespace removed.
+fn expanded_compact(source: &str) -> String {
+    let resolved = resolve(source);
+    staple_compiler::render_expanded_module(resolved.program())
+        .unwrap()
+        .split_whitespace()
+        .collect()
+}
+
+const PARSE_IMPORTS: &str = "use std.syntax.(Syntax, Expr, Type, Pattern, Item, SyntaxNode, Comma, Equals, Ident, Sequence, Separated, Optional, Parenthesized, Bracketed, Braced, Parse, ParseError, ParseStream, stream, is_empty, remaining, error_at, quote, parse_quote)\n";
+
+#[test]
+fn parse_reads_streaming_leaves_in_order() {
+    let source = format!(
+        "{PARSE_IMPORTS}{}",
+        concat!(
+            "macro leaves = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    let mut input = stream contents\n",
+            "    let Ok first = Parse.parse.<Expr> input\n",
+            "    let Ok comma = Parse.parse.<Comma> input\n",
+            "    let Ok last = Parse.parse.<Ident String> input\n",
+            "    if (is_empty input) { parse_quote { ($first, $last) } } else { panic \"stream should be empty\" }\n",
+            "}\n",
+            "let a = 1\n",
+            "let b = 2\n",
+            "let c = 10\n",
+            "let result: (I32, I32) = leaves { a + b, c }\n",
+        )
+    );
+    let compact = expanded_compact(&source);
+    assert!(compact.contains("(a+b,c)"), "{compact}");
+    type_check(&source);
+}
+
+#[test]
+fn parse_all_dispatches_from_context_and_from_a_type_argument() {
+    let source = format!(
+        "{PARSE_IMPORTS}{}",
+        concat!(
+            "macro contextual = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    let parsed: Result Expr ParseError = Parse.parse_all contents\n",
+            "    match parsed {\n",
+            "        Ok value => parse_quote { ($value, 1) },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "macro explicit = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    match (Parse.parse_all.<Parenthesized (Separated (Ident String) Comma)> contents) {\n",
+            "        Ok Parenthesized (Separated (_, elements, _)) => parse_quote { 7 },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "let one: (I32, I32) = contextual { 1 + 2 }\n",
+            "let two: I32 = explicit { (alpha, beta, gamma) }\n",
+        )
+    );
+    let compact = expanded_compact(&source);
+    assert!(compact.contains("(1+2,1)"), "{compact}");
+    type_check(&source);
+}
+
+#[test]
+fn parse_all_rejects_leftover_syntax_with_a_position() {
+    let source = format!(
+        "{PARSE_IMPORTS}{}",
+        concat!(
+            "macro single = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    match (Parse.parse_all.<Ident String> contents) {\n",
+            "        Ok _ => parse_quote { 1 },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "let value: I32 = single { alpha , beta }\n",
+        )
+    );
+    let diagnostics = resolve_result(&source).expect_err_diagnostics("leftover syntax");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .starts_with("macro `single` panicked: unexpected syntax at line")),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn parse_reads_slotted_and_comma_products() {
+    let source = format!(
+        "{PARSE_IMPORTS}{}",
+        concat!(
+            "macro binding = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    match (Parse.parse_all.<(Ident \"set\"; Ident String; Equals; Expr)> contents) {\n",
+            "        Ok (_, name, _, value) => parse_quote { ($name, $value) },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "macro pair = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    match (Parse.parse_all.<(Expr, Expr)> contents) {\n",
+            "        Ok (left, right) => parse_quote { ($right, $left) },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "macro nothing = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    match (Parse.parse_all.<()> contents) {\n",
+            "        Ok _ => parse_quote { 0 },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "let x = 5\n",
+            "let a = 1\n",
+            "let b = 2\n",
+            "let bound: (I32, I32) = binding { set x = 1 + 2 }\n",
+            "let none: I32 = nothing {  }\n",
+            "let plain: (I32, I32) = pair { a, b }\n",
+            "let trailing: (I32, I32) = pair { a, b, }\n",
+        )
+    );
+    let compact = expanded_compact(&source);
+    assert!(compact.contains("(x,1+2)"), "{compact}");
+    assert!(compact.contains("letplain:(I32,I32)=(b,a)"), "{compact}");
+    assert!(compact.contains("lettrailing:(I32,I32)=(b,a)"), "{compact}");
+    type_check(&source);
+}
+
+#[test]
+fn comma_products_reject_adjacent_elements_and_doubled_trailing_commas() {
+    for (body, expected) in [
+        ("a b", "expected Comma"),
+        ("a, b,,", "unexpected syntax"),
+        ("a", "expected Ident String"),
+    ] {
+        let source = format!(
+            "{PARSE_IMPORTS}{}",
+            format!(
+                concat!(
+                    "macro pair = body: Braced Syntax => {{\n",
+                    "    let Braced (contents) = body\n",
+                    "    match (Parse.parse_all.<(Ident String, Ident String)> contents) {{\n",
+                    "        Ok _ => parse_quote {{ 0 }},\n",
+                    "        ParseError (message) => panic message,\n",
+                    "    }}\n",
+                    "}}\n",
+                    "let value: I32 = pair {{ {} }}\n",
+                ),
+                body
+            )
+        );
+        let diagnostics = resolve_result(&source).expect_err_diagnostics(body);
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .starts_with(&format!("macro `pair` panicked: {expected}"))),
+            "{body}: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
+fn parse_reads_sequences_options_and_separated_bodies() {
+    let source = format!(
+        "{PARSE_IMPORTS}{}",
+        concat!(
+            "macro atoms = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    match (Parse.parse_all.<Sequence SyntaxNode> contents) {\n",
+            "        Ok Sequence (first, rest) => parse_quote { ($first, 1) },\n",
+            "        Ok Sequence () => parse_quote { (0, 0) },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "macro maybe = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    match (Parse.parse_all.<(Optional Type; Equals; Expr)> contents) {\n",
+            "        Ok (Some _, _, value) => parse_quote { ($value, 1) },\n",
+            "        Ok (None, _, value) => parse_quote { ($value, 0) },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "macro fields = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    match (Parse.parse_all.<Braced (Separated (Ident String; Equals; Expr) Comma)> contents) {\n",
+            "        Ok Braced (Separated (_, Sequence (first, rest), _)) => {\n",
+            "            let (_, _, value) = first\n",
+            "            parse_quote { ($value, 2) }\n",
+            "        },\n",
+            "        Ok _ => parse_quote { (0, 0) },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "let a = 3\n",
+            "let first: (I32, I32) = atoms { a (b c) d }\n",
+            "let empty: (I32, I32) = atoms { }\n",
+            "let value = 4\n",
+            "let typed: (I32, I32) = maybe { = value }\n",
+            "let annotated: (I32, I32) = maybe { I32 = value }\n",
+            "let field: (I32, I32) = fields { { x = a, y = 2, } }\n",
+        )
+    );
+    let compact = expanded_compact(&source);
+    assert!(compact.contains("letfirst:(I32,I32)=(a,1)"), "{compact}");
+    assert!(compact.contains("letempty:(I32,I32)=(0,0)"), "{compact}");
+    assert!(compact.contains("lettyped:(I32,I32)=(value,0)"), "{compact}");
+    assert!(compact.contains("letannotated:(I32,I32)=(value,1)"), "{compact}");
+    assert!(compact.contains("letfield:(I32,I32)=(a,2)"), "{compact}");
+    type_check(&source);
+}
+
+#[test]
+fn parse_forks_backtrack_and_commit() {
+    let source = format!(
+        "{PARSE_IMPORTS}{}",
+        concat!(
+            "macro forks = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    let mut input = stream contents\n",
+            "    let mut fork = input\n",
+            "    let Ok _ = Parse.parse.<Expr> fork\n",
+            "    let unmoved = if (is_empty input) { parse_quote { 0 } } else { parse_quote { 1 } }\n",
+            "    let moved = if (is_empty fork) { parse_quote { 1 } } else { parse_quote { 0 } }\n",
+            "    input = fork\n",
+            "    let committed = if (is_empty input) { parse_quote { 1 } } else { parse_quote { 0 } }\n",
+            "    parse_quote { ($unmoved, $moved, $committed) }\n",
+            "}\n",
+            "let flags: (I32, I32, I32) = forks { value }\n",
+        )
+    );
+    let compact = expanded_compact(&source);
+    assert!(compact.contains("letflags:(I32,I32,I32)=(1,1,1)"), "{compact}");
+    type_check(&source);
+}
+
+#[test]
+fn a_failed_optional_leaves_the_stream_unmoved() {
+    let source = format!(
+        "{PARSE_IMPORTS}{}",
+        concat!(
+            "macro unmoved = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    let mut input = stream contents\n",
+            "    let Ok skipped = Parse.parse.<Optional Type> input\n",
+            "    let Ok equals = Parse.parse.<Equals> input\n",
+            "    let Ok value = Parse.parse.<Expr> input\n",
+            "    parse_quote { ($value, 1) }\n",
+            "}\n",
+            "let value = 9\n",
+            "let result: (I32, I32) = unmoved { = value }\n",
+        )
+    );
+    let compact = expanded_compact(&source);
+    assert!(compact.contains("letresult:(I32,I32)=(value,1)"), "{compact}");
+    type_check(&source);
+}
+
+#[test]
+fn mut_parameters_of_compile_time_helpers_update_the_callers_stream() {
+    let source = format!(
+        "{PARSE_IMPORTS}{}",
+        concat!(
+            "def skip_one = mut input: ParseStream => () :: {\n",
+            "    let Ok _ = Parse.parse.<Ident String> input\n",
+            "}\n",
+            "macro second = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    let mut input = stream contents\n",
+            "    skip_one input\n",
+            "    let Ok name = Parse.parse.<Ident String> input\n",
+            "    parse_quote { ($name, 2) }\n",
+            "}\n",
+            "let beta = 1\n",
+            "let result: (I32, I32) = second { alpha beta }\n",
+        )
+    );
+    let compact = expanded_compact(&source);
+    assert!(compact.contains("letresult:(I32,I32)=(beta,2)"), "{compact}");
+    type_check(&source);
+}
+
+#[test]
+fn passing_an_immutable_binding_to_a_mut_parameter_is_rejected() {
+    let source = format!(
+        "{PARSE_IMPORTS}{}",
+        concat!(
+            "def skip_one = mut input: ParseStream => () :: {\n",
+            "    let Ok _ = Parse.parse.<Ident String> input\n",
+            "}\n",
+            "macro second = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    let input = stream contents\n",
+            "    skip_one input\n",
+            "    let Ok name = Parse.parse.<Ident String> input\n",
+            "    parse_quote { ($name, 2) }\n",
+            "}\n",
+        )
+    );
+    let diagnostics = resolve_result(&source).expect_err_diagnostics("immutable mut argument");
+    let count = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.message == "cannot write through `input`; its binding is not declared `mut`"
+        })
+        .count();
+    assert_eq!(count, 2, "{diagnostics:#?}");
+}
+
+#[test]
+fn question_mark_and_return_leave_the_innermost_compile_time_function() {
+    let source = format!(
+        "{PARSE_IMPORTS}{}",
+        concat!(
+            "def name_or_fail = mut input: ParseStream => Result (Ident String) ParseError :: {\n",
+            "    let seen = {\n",
+            "        let ident = Parse.parse.<Ident String> input?\n",
+            "        ident\n",
+            "    }\n",
+            "    Ok seen\n",
+            "}\n",
+            "def early = value: Expr => Expr :: {\n",
+            "    let ignored = { return value }\n",
+            "    parse_quote { 0 }\n",
+            "}\n",
+            "macro succeeds = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    let mut input = stream contents\n",
+            "    match (name_or_fail input) {\n",
+            "        Ok name => parse_quote { ($name, 1) },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "macro fails = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    let mut input = stream contents\n",
+            "    match (name_or_fail input) {\n",
+            "        Ok name => parse_quote { ($name, 1) },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "macro returns = value: Expr => early value\n",
+            "let alpha = 1\n",
+            "let good: (I32, I32) = succeeds { alpha }\n",
+            "let early_value: I32 = returns alpha\n",
+            "let bad: (I32, I32) = fails { 1 + 2 }\n",
+        )
+    );
+    let diagnostics = resolve_result(&source).expect_err_diagnostics("failed ? exits early");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .starts_with("macro `fails` panicked: expected Ident String")),
+        "{diagnostics:#?}"
+    );
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+}
+
+const KEY_VALUE_PARSE: &str = concat!(
+    "pub type KeyValue = pub wrap (key: Ident String, value: Expr)\n",
+    "impl Parse KeyValue {\n",
+    "    parse = mut input => {\n",
+    "        let key = Parse.parse.<Ident String> input?\n",
+    "        let equals = Parse.parse.<Equals> input?\n",
+    "        let value = Parse.parse.<Expr> input?\n",
+    "        Ok (KeyValue (key: key, value: value))\n",
+    "    }\n",
+    "}\n",
+);
+
+#[test]
+fn user_impls_parse_custom_nodes_in_macros_and_helpers() {
+    let source = format!(
+        "{PARSE_IMPORTS}{KEY_VALUE_PARSE}{}",
+        concat!(
+            "pub type Pair T = pub wrap (first: T, second: T)\n",
+            "impl <T where Parse T> Parse (Pair T) {\n",
+            "    parse = mut input => {\n",
+            "        let first = Parse.parse.<T> input?\n",
+            "        let comma = Parse.parse.<Comma> input?\n",
+            "        let second = Parse.parse.<T> input?\n",
+            "        Ok (Pair (first: first, second: second))\n",
+            "    }\n",
+            "}\n",
+            "def entry = body: Syntax => Result KeyValue ParseError :: Parse.parse_all body\n",
+            "macro field = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    match (entry contents) {\n",
+            "        Ok KeyValue (key, value) => parse_quote { ($key, $value) },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "macro pair_of = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    match (Parse.parse_all.<Pair KeyValue> contents) {\n",
+            "        Ok Pair (left, right) => {\n",
+            "            let KeyValue (_, first) = left\n",
+            "            let KeyValue (_, second) = right\n",
+            "            parse_quote { ($first, $second) }\n",
+            "        },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "macro broken = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    match (entry contents) {\n",
+            "        Ok _ => parse_quote { 0 },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "let key = 1\n",
+            "let a = 2\n",
+            "let b = 3\n",
+            "let single: (I32, I32) = field { key = a + 1 }\n",
+            "let both: (I32, I32) = pair_of { x = a, y = b }\n",
+        )
+    );
+    let compact = expanded_compact(&source);
+    assert!(compact.contains("letsingle:(I32,I32)=(key,a+1)"), "{compact}");
+    assert!(compact.contains("letboth:(I32,I32)=(a,b)"), "{compact}");
+    // The implementations and their intrinsics exist only while expanding.
+    assert!(!compact.contains("implParse"), "{compact}");
+    let module = type_check(&source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("programs with `Parse` implementations should compile");
+
+    let broken = format!("{source}let bad: I32 = broken {{ key a }}\n");
+    let diagnostics = resolve_result(&broken).expect_err_diagnostics("a failing user parse");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .starts_with("macro `broken` panicked: expected Equals at line")),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn parse_diagnostics_name_the_missing_context_target_and_implementation() {
+    let cases: [(&str, &str, &str); 4] = [
+        (
+            "    let parsed = Parse.parse_all contents\n    parse_quote { 0 }\n",
+            "",
+            "`Parse.parse` requires a contextual `Result T ParseError` type or an explicit type argument",
+        ),
+        (
+            "    let parsed: Result Unknown ParseError = Parse.parse_all contents\n    parse_quote { 0 }\n",
+            "",
+            "`Unknown` does not implement `Parse`",
+        ),
+        (
+            "    match (Parse.parse_all.<Expr> contents) {\n        Ok value => parse_quote { 0 },\n    }\n",
+            "",
+            "non-exhaustive match",
+        ),
+        (
+            "    match (Parse.parse_all.<Expr> contents) {\n        Ok value => parse_quote { 0 },\n        ParseError (message) => panic message,\n    }\n",
+            "impl Parse I32 { parse = mut input => Ok 1 }\n",
+            "cannot implement an external trait for external types; the trait or at least one top-level nominal implementation argument must be defined in the current package",
+        ),
+    ];
+    for (body, extra, expected) in cases {
+        let source = format!(
+            "{PARSE_IMPORTS}{extra}macro m = body: Braced Syntax => {{\n    let Braced (contents) = body\n{body}}}\n"
+        );
+        let diagnostics = resolve_result(&source).expect_err_diagnostics(expected);
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic.message.contains(expected)),
+            "{expected}: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
+fn ambiguous_user_parse_impls_are_reported_at_the_use() {
+    let source = format!(
+        "{PARSE_IMPORTS}{KEY_VALUE_PARSE}{}{}",
+        "impl Parse KeyValue { parse = mut input => Ok (KeyValue (key: Ident \"x\", value: Expr \"y\")) }\n",
+        concat!(
+            "macro m = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    match (Parse.parse_all.<KeyValue> contents) {\n",
+            "        Ok _ => parse_quote { 0 },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+        )
+    );
+    let diagnostics = resolve_result(&source).expect_err_diagnostics("ambiguous impls");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.message.contains(
+            "`KeyValue` has ambiguous `Parse` implementations: `impl Parse KeyValue` and `impl Parse KeyValue`"
+        )),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn parsed_caller_identifiers_keep_their_hygiene() {
+    let source = format!(
+        "{PARSE_IMPORTS}{}",
+        concat!(
+            "macro shadow = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    match (Parse.parse_all.<Ident String> contents) {\n",
+            "        Ok name => parse_quote { { let a = 100\n a; $name } },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "let a = \"caller\"\n",
+            "let result: String = shadow { a }\n",
+        )
+    );
+    type_check(&source);
+}
+
+#[test]
+fn parse_names_resolve_through_namespaces_globs_and_renames() {
+    let namespaced = concat!(
+        "use std.syntax\n",
+        "use std.syntax.(Braced, Syntax, Ident, ParseError, parse_quote)\n",
+        "macro m = body: Braced Syntax => {\n",
+        "    let Braced (contents) = body\n",
+        "    let mut input = syntax.stream contents\n",
+        "    match (syntax.Parse.parse.<Ident String> input) {\n",
+        "        Ok name => parse_quote { ($name, 1) },\n",
+        "        ParseError (message) => panic message,\n",
+        "    }\n",
+        "}\n",
+        "let alpha = 1\n",
+        "let result: (I32, I32) = m { alpha }\n",
+    );
+    assert!(expanded_compact(namespaced).contains("letresult:(I32,I32)=(alpha,1)"));
+    let renamed = concat!(
+        "use std.syntax.*\n",
+        "use std.syntax.(stream as open_stream, Parse as Reader)\n",
+        "macro m = body: Braced Syntax => {\n",
+        "    let Braced (contents) = body\n",
+        "    let mut input = open_stream contents\n",
+        "    match (Reader.parse.<Ident String> input) {\n",
+        "        Ok name => parse_quote { ($name, 1) },\n",
+        "        ParseError (message) => panic message,\n",
+        "    }\n",
+        "}\n",
+        "macro bare = body: Braced Syntax => {\n",
+        "    let Braced (contents) = body\n",
+        "    match (parse_all.<Ident String> contents) {\n",
+        "        Ok name => parse_quote { ($name, 2) },\n",
+        "        ParseError (message) => panic message,\n",
+        "    }\n",
+        "}\n",
+        "let alpha = 1\n",
+        "let first: (I32, I32) = m { alpha }\n",
+        "let second: (I32, I32) = bare { alpha }\n",
+    );
+    let compact = expanded_compact(renamed);
+    assert!(compact.contains("letfirst:(I32,I32)=(alpha,1)"), "{compact}");
+    assert!(compact.contains("letsecond:(I32,I32)=(alpha,2)"), "{compact}");
+}
+
+#[test]
+fn if_and_when_work_in_parse_members() {
+    let source = format!(
+        "{PARSE_IMPORTS}{}",
+        concat!(
+            "pub type Tagged = pub wrap (name: Ident String, extra: Optional (Ident String))\n",
+            "impl Parse Tagged {\n",
+            "    parse = mut input => {\n",
+            "        let name = Parse.parse.<Ident String> input?\n",
+            "        when {\n",
+            "            (is_empty input) => Ok (Tagged (name: name, extra: None)),\n",
+            "            else => match (Parse.parse.<Comma> input) {\n",
+            "                Ok comma => match (Parse.parse.<Ident String> input) {\n",
+            "                    Ok extra => Ok (Tagged (name: name, extra: Some extra)),\n",
+            "                    failure => failure,\n",
+            "                },\n",
+            "                failure => failure,\n",
+            "            },\n",
+            "        }\n",
+            "    }\n",
+            "    parse_all = syntax => {\n",
+            "        let mut input = stream syntax\n",
+            "        let value = Parse.parse.<Tagged> input?\n",
+            "        if (is_empty input) { Ok value } else { error_at (input; \"trailing syntax\") }\n",
+            "    }\n",
+            "}\n",
+            "macro tagged = body: Braced Syntax => {\n",
+            "    let Braced (contents) = body\n",
+            "    match (Parse.parse_all.<Tagged> contents) {\n",
+            "        Ok Tagged (name, extra) => match extra {\n",
+            "            None => parse_quote { ($name, 1) },\n",
+            "            Some other => parse_quote { ($other, 2) },\n",
+            "        },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "let alpha = 1\n",
+            "let beta = 2\n",
+            "let one: (I32, I32) = tagged { alpha }\n",
+            "let two: (I32, I32) = tagged { alpha, beta }\n",
+        )
+    );
+    let compact = expanded_compact(&source);
+    assert!(compact.contains("letone:(I32,I32)=(alpha,1)"), "{compact}");
+    assert!(compact.contains("lettwo:(I32,I32)=(beta,2)"), "{compact}");
+    type_check(&source);
+}
+
+#[test]
+fn the_macros_example_with_parse_type_checks() {
+    type_check(include_str!("../examples/macros.sta"));
+}
+
+#[test]
+fn parse_impl_members_are_checked_against_the_trait() {
+    let unbounded = format!(
+        "{PARSE_IMPORTS}{}",
+        concat!(
+            "pub type Wrapper T = pub wrap T\n",
+            "impl <T> Parse (Wrapper T) {\n",
+            "    parse = mut input => {\n",
+            "        let inner = Parse.parse.<T> input?\n",
+            "        Ok (Wrapper inner)\n",
+            "    }\n",
+            "}\n",
+        )
+    );
+    let diagnostics = resolve_result(&unbounded).expect_err_diagnostics("a missing bound");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.message
+            == "`T` does not implement `Parse`; add a `Parse T` bound"),
+        "{diagnostics:#?}"
+    );
+    let immutable = format!(
+        "{PARSE_IMPORTS}{}",
+        concat!(
+            "pub type Marker = pub wrap ()\n",
+            "impl Parse Marker { parse = input => Ok (Marker ()) }\n",
+        )
+    );
+    let diagnostics = resolve_result(&immutable).expect_err_diagnostics("a copied stream");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.message
+            == "a `Parse.parse` implementation must declare its parameter `mut`"),
+        "{diagnostics:#?}"
+    );
+}

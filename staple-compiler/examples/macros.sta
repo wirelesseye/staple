@@ -16,6 +16,9 @@ use std.syntax.(
     Sequence,
     Separated,
     Comma,
+    Equals,
+    Parse,
+    ParseError,
     Parenthesized,
     Bracketed,
     Braced,
@@ -172,3 +175,29 @@ match total == 377 {
 }
 
 identity println "excess arguments follow the expansion"
+
+// Parse reads structure out of an opaque Syntax value. A user type implements
+// it with an ordinary compile-time function over a mutable ParseStream; the
+// implementation recurses through Parse.parse, and `?` leaves the function
+// with the ParseError when a step fails. The implementation only exists while
+// macros expand.
+pub type Setting = pub wrap (name: Ident String, value: Expr)
+
+impl Parse Setting {
+    parse = mut input => {
+        let name = Parse.parse.<Ident String> input?
+        let equals = Parse.parse.<Equals> input?
+        let value = Parse.parse.<Expr> input?
+        Ok (Setting (name: name, value: value))
+    }
+}
+
+macro setting_value: Braced Syntax -> Expr = body => {
+    let Braced (contents) = body
+    match (Parse.parse_all.<Setting> contents) {
+        Ok Setting (_, value) => parse_quote { $value },
+        ParseError (message) => panic message,
+    }
+}
+
+let timeout: I32 = setting_value { timeout = 30 }

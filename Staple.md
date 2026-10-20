@@ -284,6 +284,132 @@ source is reparsed for that placement. `$name` splices a captured value while
 preserving its hygiene. `$items...` splices a `Sequence Item` in an item-list
 position.
 
+##### Parsing syntax with `Parse`
+
+A macro or compile-time helper that holds an opaque `Syntax` value, such as the
+contents of a captured `Braced Syntax`, can parse structure out of it with the
+streaming `Parse` trait in `std.syntax`:
+
+```staple
+pub type ParseError = pub wrap (message: String)
+pub type ParseStream = opaque
+
+pub extern "staple-intrinsic" {
+    stream: Syntax -> ParseStream          // starts at the beginning
+    is_empty: ParseStream -> Bool          // only trivia remains
+    remaining: ParseStream -> Syntax       // the unconsumed rest, losslessly
+    error_at: (ParseStream; String) -> ParseError
+}
+
+pub trait Parse T {
+    parse: mut ParseStream -> Result T ParseError
+    parse_all: Syntax -> Result T ParseError = ... // rejects leftover syntax
+}
+```
+
+A `ParseStream` is a cursor over a syntax fragment and a copyable value, so
+copying one forks it: `let mut fork = input` is a backtracking point and
+`input = fork` commits it. `Parse.parse` reads one `T` from the front of the
+stream and advances the stream in place; on failure it returns a `ParseError`
+whose message names the stream's position and leaves the caller's stream where
+it was. `Parse.parse_all` parses all of a `Syntax` as one `T` and reports
+`unexpected syntax` for anything left over. The target is the expected type of
+the call, as with `parse_quote`, or an explicit type argument:
+
+```staple
+macro fields = body: Braced Syntax => {
+    let Braced (contents) = body
+    let parsed: Result (Separated (Ident String; Equals; Expr) Comma) ParseError =
+        Parse.parse_all contents
+    match parsed {
+        Ok fields => ...,
+        ParseError (message) => panic message,
+    }
+}
+
+let mut input = stream contents
+let name = Parse.parse.<Ident String> input?
+let comma = Parse.parse.<Comma> input?
+```
+
+A call with neither a contextual `Result T ParseError` type nor a type argument
+is rejected, as is a type with no `Parse` implementation. `Parse.parse`,
+`syntax.Parse.parse`, and (when `Parse` is imported) a bare `parse` all name the
+same member, and the intrinsics import like any other `std.syntax` item.
+
+`Parse` is greedy and only backtracks through explicit forks, which is
+different from how macro parameters match. A macro parameter shaped
+`(Expr; Expr)` matches `a b` as one atom each, but `Parse.parse.<(Expr; Expr)>`
+on `a b` fails, because the first `Expr` reads the whole call `a b`. Use
+`SyntaxNode`, which reads one shortest structural atom (a balanced group counts
+as one), or delimiters to get atom semantics. Likewise, `Optional Type` reads a
+`Type` whenever one starts there, and `I32 value` is one applied type. Products
+parse their *bare* contents: `(A; B)` reads `A` then `B`, juxtaposed, and
+`(A, B)` reads `A`, a comma, then `B` with one optional trailing comma;
+`Parenthesized (A, B)` is the delimited form that requires the parentheses.
+
+The built-in nodes implement `Parse` with ordinary `impl` items in
+`std/syntax.sta`:
+
+- `Expr`, `CallExpr`, `StringExpr`, `UnstructuredExpr`, `Type`, `Pattern`,
+  `BindingPattern`, `NominalPattern`, `Item`, `ModifiedItem`,
+  `TypeDeclarationItem`, `UnstructuredItem`, `Modifier`, and `TypeBody` read the
+  longest node the grammar accepts from the cursor and stop where it stops: `Expr`
+  reads `a + b` from `a + b, c`.
+- `Ident S` (a spelling or `String`), `Comma`, `Equals`, and `FatArrow` read one
+  token. `Visibility` reads `pub` or `pub(package)`, and yields `Private` without
+  consuming anything when neither is written. `SyntaxNode` reads one atom.
+- `Syntax` takes everything that is left, `()` takes nothing, and
+  `Optional T` yields `None` without consuming anything when `T` does not parse.
+- `Parenthesized C`, `Bracketed C`, and `Braced C` parse their contents as `C` and
+  require them to be used up. The result keeps the group's original syntax.
+- Products `(A; B)` and `(A, B)`, `Sequence T` (until the stream ends or `T`
+  stops parsing), and `Separated T Comma` (an optional trailing comma).
+
+A program adds its own implementations. They are ordinary Staple code that runs
+at compile time, may be generic, and recurse through `Parse.parse`:
+
+```staple
+pub type KeyValue = pub wrap (key: Ident String, value: Expr)
+
+impl Parse KeyValue {
+    parse = mut input => {
+        let key = Parse.parse.<Ident String> input?
+        let equals = Parse.parse.<Equals> input?
+        let value = Parse.parse.<Expr> input?
+        Ok (KeyValue (key: key, value: value))
+    }
+}
+
+impl<T where Parse T> Parse (Pair T) {
+    parse = mut input => {
+        let first = Parse.parse.<T> input?
+        let comma = Parse.parse.<Comma> input?
+        Ok (Pair (first: first, second: Parse.parse.<T> input?))
+    }
+}
+```
+
+`parse` must declare its parameter `mut`; `parse_all` may be replaced the same
+way. A type parameter used as a target needs a `Parse` bound. The compiler
+never type-checks these implementations as runtime code: they are checked
+as compile-time code and dropped after macro expansion, together with the
+intrinsics they call. Because of that, the orphan rule is applied by the macro
+expander: outside the standard library, the implemented type must be a nominal
+type declared in the implementing package. User `Parse` types are not macro
+parameter types, and macro argument matching is unchanged; the trait is used by
+explicit calls only.
+
+Compile-time `mut` parameters are passed by address. A call such as
+`skip_one input` hands the callee the caller's own `mut` binding, so the callee's
+assignments are visible after the call, while passing an immutable binding to a
+`mut` parameter is rejected like it is at run time. In compile-time code, a
+postfix `?` on a `Result` yields the `Ok` payload, and any other value leaves
+the innermost compile-time function with that value; `return` likewise leaves
+the whole function rather than just its block. Compile-time recursion, including
+the recursion of `Sequence` and `Separated`, shares the evaluation depth limit
+described above.
+
 Identifiers and calls may also be inspected, constructed, and changed as
 compile-time values:
 
@@ -520,7 +646,7 @@ evaluation steps. Syntax
 values are compile-time-only. This release supports `parse_quote`-driven
 contextual expression, type, pattern, item, and item-sequence quotation;
 `quote`'s opaque fragments; structured identifier and call expressions;
-scalar splices; and repeated item splices.
+scalar splices; repeated item splices; and streaming `Parse` of syntax.
 It also supports opaque item input through modifier macros and atomic visibility
 syntax. General repeated expression, type, and pattern splices,
 function-style item input, item inspection, and structured access to other

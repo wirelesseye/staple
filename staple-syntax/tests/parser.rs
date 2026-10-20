@@ -1,7 +1,8 @@
 use staple_syntax::{
     Accessor, BinaryOperator, BindingKind, Expression, Item, Pattern, StringInterpolationFormat,
     StringTemplatePart, TokenKind, Type, TypeBodyKind, TypeDeclarationKind, UseKind, Visibility,
-    VisibilityKind, parse,
+    VisibilityKind, parse, parse_expression_prefix, parse_item_prefix, parse_modifier_prefix,
+    parse_pattern_prefix, parse_type_body_prefix, parse_type_prefix,
 };
 
 #[test]
@@ -4094,4 +4095,83 @@ fn an_indented_postfix_question_continues_the_statement() {
     };
     assert!(matches!(binding.value, Some(Expression::Try(_))));
     assert!(parse("let value = lookup key\n?\n").is_err());
+}
+
+/// The tokens between the delimiters of the initializer in `let x = <open>...<close>`,
+/// as the fragment a prefix parse starts from.
+fn delimited_fragment(source: &str, skip: usize) -> staple_syntax::Syntax {
+    let module = parse(source).expect("source should parse");
+    let Item::Binding(binding) = &module.items[0] else {
+        panic!("expected a binding");
+    };
+    let mut syntax = binding.value.as_ref().expect("a value").syntax().clone();
+    let tokens = syntax.tokens();
+    let open = tokens
+        .iter()
+        .position(|token| !token.kind.is_trivia())
+        .expect("an opening delimiter");
+    let close = tokens
+        .iter()
+        .rposition(|token| !token.kind.is_trivia())
+        .expect("a closing delimiter");
+    let start = syntax.token_range.start;
+    syntax.token_range = start + open + 1 + skip..start + close;
+    syntax
+}
+
+/// The rendered source covered by the first `consumed` tokens of `syntax`.
+fn consumed_text(syntax: &staple_syntax::Syntax, consumed: usize) -> String {
+    syntax.tokens()[..consumed]
+        .iter()
+        .map(|token| token.text.as_str())
+        .collect()
+}
+
+#[test]
+fn prefix_parses_stop_where_the_grammar_stops() {
+    let mut ids = 1_000_000;
+
+    let syntax = delimited_fragment("let x = (a + b, c)\n", 0);
+    let (expression, consumed) = parse_expression_prefix(&syntax, &mut ids).unwrap();
+    assert!(matches!(expression, Expression::Binary(_)));
+    assert_eq!(consumed_text(&syntax, consumed), "a + b");
+
+    // A closing delimiter ends the prefix just as a comma does.
+    let syntax = delimited_fragment("let x = {f (a) b}\n", 0);
+    let (_, consumed) = parse_expression_prefix(&syntax, &mut ids).unwrap();
+    assert_eq!(consumed_text(&syntax, consumed), "f (a) b");
+
+    let syntax = delimited_fragment("let x = (I32, Bool)\n", 0);
+    let (ty, consumed) = parse_type_prefix(&syntax, &mut ids).unwrap();
+    assert!(matches!(ty, Type::Named(_)));
+    assert_eq!(consumed_text(&syntax, consumed), "I32");
+
+    let syntax = delimited_fragment("let x = (Some value, other)\n", 0);
+    let (pattern, consumed) = parse_pattern_prefix(&syntax, &mut ids).unwrap();
+    assert!(matches!(pattern, Pattern::Nominal(_)));
+    assert_eq!(consumed_text(&syntax, consumed), "Some value");
+
+    let syntax = delimited_fragment("let x = {let first = 1\n    let second = 2\n}\n", 0);
+    let (item, consumed) = parse_item_prefix(&syntax, &mut ids).unwrap();
+    assert!(matches!(item, Item::Binding(_)));
+    assert_eq!(consumed_text(&syntax, consumed).trim_end(), "let first = 1");
+
+    let syntax = delimited_fragment("let x = {@doc(\"one\")\n    let y = 1\n}\n", 0);
+    let (modifier, consumed) = parse_modifier_prefix(&syntax, &mut ids).unwrap();
+    assert_eq!(modifier.name, "doc");
+    assert_eq!(consumed_text(&syntax, consumed), "@doc(\"one\")");
+
+    let syntax = delimited_fragment("let x = (wrap I32, rest)\n", 0);
+    let (body, consumed) = parse_type_body_prefix(&syntax, &mut ids).unwrap();
+    assert_eq!(body.kind, TypeBodyKind::Wrapper);
+    assert_eq!(consumed_text(&syntax, consumed), "wrap I32");
+}
+
+#[test]
+fn prefix_parses_reject_input_that_does_not_start_the_construct() {
+    let mut ids = 1_000_000;
+    let syntax = delimited_fragment("let x = (b, a)\n", 1);
+    assert!(parse_expression_prefix(&syntax, &mut ids).is_err());
+    let syntax = delimited_fragment("let x = ()\n", 0);
+    assert!(parse_expression_prefix(&syntax, &mut ids).is_err());
 }

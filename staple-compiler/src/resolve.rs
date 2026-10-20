@@ -1383,6 +1383,9 @@ pub struct NameResolver {
     standard_library_operator_modules: Vec<ModuleId>,
     standard_library_prelude: Option<ModuleId>,
     standard_library_syntax: Option<ModuleId>,
+    /// Imports of these names are accepted without binding anything: they
+    /// exist only while macros expand.
+    compile_time_items: HashSet<(ModuleId, String)>,
     standard_library_cinterop: Option<ModuleId>,
     standard_library_io: Option<ModuleId>,
 }
@@ -1415,6 +1418,7 @@ impl NameResolver {
     ) -> Result<ResolvedModule, Vec<Diagnostic>> {
         let (mut program, mut macro_analysis) = crate::macro_expand::expand_program(program)?;
         let mut next_syntax_id = macro_analysis.next_syntax_id;
+        self.compile_time_items = std::mem::take(&mut macro_analysis.compile_time_items);
         let find_module = |dotted: &str| {
             program
                 .modules()
@@ -3464,6 +3468,12 @@ impl NameResolver {
             }
             UseKind::Selected(names) => {
                 for import in names {
+                    if self
+                        .compile_time_items
+                        .contains(&(imported, import.name.clone()))
+                    {
+                        continue;
+                    }
                     let alias = import.alias().to_owned();
                     self.record_import_definitions(
                         declaration.syntax.id,
@@ -3496,6 +3506,9 @@ impl NameResolver {
                 }
             }
             UseKind::Renamed { item, alias } => {
+                if self.compile_time_items.contains(&(imported, item.clone())) {
+                    return;
+                }
                 self.record_import_definitions(declaration.syntax.id, &item, &alias, &interface);
                 self.install_selected(&interface, &item, &alias, declaration.syntax.span.clone());
             }
@@ -4602,12 +4615,6 @@ impl NameResolver {
                 self.push_type_parameter_scope();
                 if let Some(generics) = &value.generics {
                     self.resolve_value_generics(generics, false);
-                }
-                if pattern_contains_mutable_marker(&value.pattern) {
-                    self.diagnostics.push(Diagnostic::new(
-                        value.pattern.syntax().span.clone(),
-                        "parameter `mut` effects are only supported by runtime functions",
-                    ));
                 }
                 self.resolve_pattern_types_lenient(&value.pattern);
                 if let Some(effects) = &value.effect_lower_bound {
@@ -6597,16 +6604,6 @@ fn mutable_pattern_symbols(resolver: &NameResolver, pattern: &Pattern) -> Vec<Sy
     }
     collect(resolver, pattern, &mut symbols);
     symbols
-}
-
-fn pattern_contains_mutable_marker(pattern: &Pattern) -> bool {
-    match pattern {
-        Pattern::Binding(binding) => binding.mutable,
-        Pattern::At(at) => at.binding.mutable || pattern_contains_mutable_marker(&at.pattern),
-        Pattern::Product(product) => product.elements.iter().any(pattern_contains_mutable_marker),
-        Pattern::Nominal(nominal) => pattern_contains_mutable_marker(&nominal.argument),
-        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

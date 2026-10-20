@@ -1,6 +1,6 @@
 pub mod
 
-
+use package.result.(Result, Ok)
 
 /// Compiler-owned, compile-time-only syntax values. Identifiers and calls expose
 /// their data in the first structured-syntax slice; remaining expressions round-trip
@@ -167,3 +167,215 @@ pub macro quote: Braced Syntax -> Syntax
 /// macro identity: Expr -> Expr = value: Expr => parse_quote { $value }
 /// ```
 pub macro parse_quote: Braced Syntax -> Syntax
+
+/// A compile-time parse failure.
+pub type ParseError = pub wrap (message: String)
+/// A cursor over a syntax fragment. Copying a stream forks it: `let mut fork =
+/// input` is a backtracking point and `input = fork` commits it.
+@sized_opaque
+pub type ParseStream = opaque
+
+pub extern "staple-intrinsic" {
+    /// Starts a stream at the beginning of `syntax`.
+    stream: Syntax -> ParseStream
+    /// `True` when only trivia remains.
+    is_empty: ParseStream -> Bool
+    /// The unconsumed rest of the stream, losslessly.
+    remaining: ParseStream -> Syntax
+    /// A `ParseError` whose message names the stream's current position.
+    error_at: (ParseStream; String) -> ParseError
+}
+
+/// Syntax that can be parsed from the front of a `ParseStream` at compile time.
+///
+/// `parse` reads one `T` and advances the stream in place; it fails without
+/// consuming anything the caller keeps unless the caller commits a fork.
+pub trait Parse T {
+    parse: mut ParseStream -> Result T ParseError
+    /// Parses all of `syntax` as one `T`, rejecting leftover syntax.
+    parse_all: Syntax -> Result T ParseError = syntax => {
+        let mut input = stream syntax
+        let value = Parse.parse.<T> input?
+        if (is_empty input) { Ok value } else { error_at (input; "unexpected syntax") }
+    }
+}
+
+// Compiler building blocks for the implementations below. Like those
+// implementations, they exist only while macros expand.
+extern "staple-intrinsic" {
+    __parse_primitive: <T> mut ParseStream -> Result T ParseError
+    __parenthesized_group: mut ParseStream -> Result (Syntax; ParseStream) ParseError
+    __bracketed_group: mut ParseStream -> Result (Syntax; ParseStream) ParseError
+    __braced_group: mut ParseStream -> Result (Syntax; ParseStream) ParseError
+    __parenthesized: <C> (Syntax; C) -> Parenthesized C
+    __bracketed: <C> (Syntax; C) -> Bracketed C
+    __braced: <C> (Syntax; C) -> Braced C
+    __take_rest: mut ParseStream -> Syntax
+    __offset: ParseStream -> USize
+}
+
+// Leaf syntax nodes: each consumes the longest node the grammar accepts from
+// the cursor and stops where the grammar stops.
+impl Parse Expr { parse = mut input => __parse_primitive.<Expr> input }
+impl Parse CallExpr { parse = mut input => __parse_primitive.<CallExpr> input }
+impl Parse StringExpr { parse = mut input => __parse_primitive.<StringExpr> input }
+impl Parse UnstructuredExpr { parse = mut input => __parse_primitive.<UnstructuredExpr> input }
+impl Parse Type { parse = mut input => __parse_primitive.<Type> input }
+impl Parse Pattern { parse = mut input => __parse_primitive.<Pattern> input }
+impl Parse BindingPattern { parse = mut input => __parse_primitive.<BindingPattern> input }
+impl Parse NominalPattern { parse = mut input => __parse_primitive.<NominalPattern> input }
+impl Parse Item { parse = mut input => __parse_primitive.<Item> input }
+impl Parse ModifiedItem { parse = mut input => __parse_primitive.<ModifiedItem> input }
+impl Parse TypeDeclarationItem { parse = mut input => __parse_primitive.<TypeDeclarationItem> input }
+impl Parse UnstructuredItem { parse = mut input => __parse_primitive.<UnstructuredItem> input }
+impl Parse Modifier { parse = mut input => __parse_primitive.<Modifier> input }
+impl Parse TypeBody { parse = mut input => __parse_primitive.<TypeBody> input }
+// One token, checked against the spelling the type names.
+impl<S where S <: String> Parse (Ident S) { parse = mut input => __parse_primitive.<Ident S> input }
+impl Parse Comma { parse = mut input => __parse_primitive.<Comma> input }
+impl Parse Equals { parse = mut input => __parse_primitive.<Equals> input }
+impl Parse FatArrow { parse = mut input => __parse_primitive.<FatArrow> input }
+// `pub` or `pub(package)`; with neither present, nothing is consumed and the
+// result is `Private`.
+impl Parse Visibility { parse = mut input => __parse_primitive.<Visibility> input }
+// Exactly one shortest structural atom; a balanced group counts as one atom.
+impl Parse SyntaxNode { parse = mut input => __parse_primitive.<SyntaxNode> input }
+
+// Everything that is left.
+impl Parse Syntax { parse = mut input => Ok (__take_rest input) }
+// Nothing at all.
+impl Parse () { parse = mut input => Ok () }
+
+// `None` and no consumption when `T` does not parse here.
+impl<T where Parse T> Parse (Optional T) {
+    parse = mut input => {
+        let mut fork = input
+        match (Parse.parse.<T> fork) {
+            Ok value => {
+                input = fork
+                Ok (Some value)
+            },
+            ParseError _ => Ok None,
+        }
+    }
+}
+
+// Delimited groups parse their contents on an inner stream that must be
+// consumed completely. The result keeps the group's original syntax.
+impl<C where Parse C> Parse (Parenthesized C) {
+    parse = mut input => {
+        let (source, inner) = __parenthesized_group input?
+        let mut contents = inner
+        let value = Parse.parse.<C> contents?
+        if (is_empty contents) {
+            Ok (__parenthesized.<C> (source; value))
+        } else {
+            error_at (contents; "unexpected syntax")
+        }
+    }
+}
+impl<C where Parse C> Parse (Bracketed C) {
+    parse = mut input => {
+        let (source, inner) = __bracketed_group input?
+        let mut contents = inner
+        let value = Parse.parse.<C> contents?
+        if (is_empty contents) {
+            Ok (__bracketed.<C> (source; value))
+        } else {
+            error_at (contents; "unexpected syntax")
+        }
+    }
+}
+impl<C where Parse C> Parse (Braced C) {
+    parse = mut input => {
+        let (source, inner) = __braced_group input?
+        let mut contents = inner
+        let value = Parse.parse.<C> contents?
+        if (is_empty contents) {
+            Ok (__braced.<C> (source; value))
+        } else {
+            error_at (contents; "unexpected syntax")
+        }
+    }
+}
+
+// Slotted products parse bare, juxtaposed contents one element at a time.
+impl<H, T where Parse H, Parse T> Parse (H; ...T) {
+    parse = mut input => {
+        let head = Parse.parse.<H> input?
+        // The tail is spread where it is read: binding a one-element product
+        // would unwrap it.
+        Ok (head; ...Parse.parse.<T> input?)
+    }
+}
+
+// Comma products parse bare contents separated by commas, with one optional
+// trailing comma.
+impl<H, T where Parse H, Parse T> Parse (H, ...T) {
+    parse = mut input => {
+        let head = Parse.parse.<H> input?
+        if (is_empty input) {
+            Ok (head, ...Parse.parse.<T> input?)
+        } else {
+            let _ = Parse.parse.<Comma> input?
+            Ok (head, ...Parse.parse.<T> input?)
+        }
+    }
+}
+
+// Elements until the stream ends or `T` stops parsing.
+impl<T where Parse T> Parse (Sequence T) {
+    parse = mut input => {
+        if (is_empty input) {
+            Ok (Sequence ())
+        } else {
+            let mut fork = input
+            let start = __offset fork
+            match (Parse.parse.<T> fork) {
+                Ok first => if (__offset fork == start) {
+                    Ok (Sequence ())
+                } else {
+                    input = fork
+                    let rest = Parse.parse.<Sequence T> input?
+                    Ok (Sequence (first: first, rest: rest))
+                },
+                ParseError _ => Ok (Sequence ()),
+            }
+        }
+    }
+}
+
+// Comma-separated elements with an optional trailing comma.
+impl<T where Parse T> Parse (Separated T Comma) {
+    parse = mut input => {
+        if (is_empty input) {
+            Ok (Separated (separator: Comma, elements: Sequence (), trailing: False))
+        } else {
+            let first = Parse.parse.<T> input?
+            if (is_empty input) {
+                Ok (Separated (
+                    separator: Comma,
+                    elements: Sequence (first: first, rest: Sequence ()),
+                    trailing: False,
+                ))
+            } else {
+                let comma = Parse.parse.<Comma> input?
+                if (is_empty input) {
+                    Ok (Separated (
+                        separator: comma,
+                        elements: Sequence (first: first, rest: Sequence ()),
+                        trailing: True,
+                    ))
+                } else {
+                    let Separated (separator, elements, trailing) =
+                        Parse.parse.<Separated T Comma> input?
+                    Ok (Separated (
+                        separator: separator,
+                        elements: Sequence (first: first, rest: elements),
+                        trailing: trailing,
+                    ))
+                }
+            }
+        }
+    }
+}
