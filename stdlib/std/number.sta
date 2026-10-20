@@ -11,6 +11,9 @@ use package.string.String
 use package.fmt.(Display, Debug, Formatter)
 
 pub use package.number.types.*
+use package.convert.(ConversionError, Convert, TryConvert)
+use package.result.(Ok)
+use package.string.(ToString)
 
 extern "staple-intrinsic" {
     __i8_to_string: I8 -> String

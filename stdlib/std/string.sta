@@ -2,6 +2,8 @@ pub mod
 
 use package.ops.(Add)
 use package.cmp.(Eq)
+use package.convert.(ConversionError, TryConvert)
+use package.result.(Ok, Result)
 
 /// The bytes are not valid UTF-8.
 pub type InvalidUtf8
@@ -65,6 +67,9 @@ impl IntoIterator StringBytes {
 }
 
 companion String {
+    use package.list.List
+    use package.result.(Ok, Result)
+
     /// Copies the UTF-8 bytes of a string into a new list.
     pub def to_bytes = value: String => List U8 :: string_to_bytes value
 

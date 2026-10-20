@@ -1,6 +1,7 @@
 pub mod
 
 use package.result.(Result, Ok)
+use package.string.(String)
 
 /// Compiler-owned, compile-time-only syntax values. Identifiers and calls expose
 /// their data in the first structured-syntax slice; remaining expressions round-trip

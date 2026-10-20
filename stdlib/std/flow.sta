@@ -4,6 +4,7 @@ use package.boolean.(True, False)
 use package.iterator.(IntoIterator, Iterator)
 use package.iterator.IterStep.(Done, Yield)
 use package.syntax.*
+use package.process.(panic)
 
 def when_clauses = clauses: Sequence (Expr; FatArrow; Expr) => Expr :: match clauses {
     Sequence () => parse_quote { () },

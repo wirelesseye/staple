@@ -1,4 +1,5 @@
 package "std" {
     kind "library"
     root "std"
+    prelude #false
 }

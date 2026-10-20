@@ -1,5 +1,8 @@
 pub mod
 
+use package.typegroup.(typegroup)
+use package.result.(Ok, Result)
+
 /// Converts a value into another type without failure.
 pub trait Convert From To {
     /// Consumes the source value and returns the converted value.

@@ -1446,6 +1446,9 @@ pub struct NameResolver {
     module_values: Vec<HashMap<String, SymbolId>>,
     definition_context_values: Vec<HashMap<String, SymbolId>>,
     definition_context_types: Vec<HashMap<String, TypeId>>,
+    /// The traits each module's own body sees, for resolving a trait name
+    /// that macro-generated syntax carries from its defining module.
+    definition_context_traits: Vec<HashMap<String, TraitId>>,
     definition_context_namespaces: Vec<HashMap<String, ModuleId>>,
     binding_companion_targets: HashMap<SyntaxId, Type>,
     /// The representation product of the `wrap`/`from` declaration being
@@ -1707,6 +1710,10 @@ impl NameResolver {
                     .last_mut()
                     .expect("resolver type scope")
                     .extend(self.declared_types[parent.0].clone());
+                self.imported_traits
+                    .last_mut()
+                    .expect("resolver trait scope")
+                    .extend(self.declared_traits[parent.0].clone());
                 let own_namespaces = self.namespaces.pop().expect("resolver namespace scope");
                 let mut namespaces = self.definition_context_namespaces[parent.0].clone();
                 namespaces.extend(own_namespaces);
@@ -3225,6 +3232,7 @@ impl NameResolver {
     fn build_definition_context_values(&mut self, program: &Program) {
         self.definition_context_values = self.module_values.clone();
         self.definition_context_types = self.declared_types.clone();
+        self.definition_context_traits = self.declared_traits.clone();
         self.definition_context_namespaces = (0..program.modules().len())
             .map(|_| HashMap::new())
             .collect();
@@ -3240,6 +3248,8 @@ impl NameResolver {
                     .extend(self.module_values[parent.0].clone());
                 self.definition_context_types[module.id.0]
                     .extend(self.declared_types[parent.0].clone());
+                self.definition_context_traits[module.id.0]
+                    .extend(self.declared_traits[parent.0].clone());
             }
         }
         for module in program.modules() {
@@ -3288,6 +3298,8 @@ impl NameResolver {
                         self.definition_context_values[module.id.0]
                             .extend(interface.values.clone());
                         self.definition_context_types[module.id.0].extend(interface.types.clone());
+                        self.definition_context_traits[module.id.0]
+                            .extend(interface.traits.clone());
                         self.definition_context_namespaces[module.id.0]
                             .extend(interface.namespaces.clone());
                     }
@@ -3303,6 +3315,10 @@ impl NameResolver {
                                 self.definition_context_types[module.id.0]
                                     .insert(alias.clone(), *ty);
                             }
+                            if let Some(id) = interface.traits.get(&import.name) {
+                                self.definition_context_traits[module.id.0]
+                                    .insert(alias.clone(), *id);
+                            }
                             if let Some(namespace) = interface.namespaces.get(&import.name) {
                                 self.definition_context_namespaces[module.id.0]
                                     .insert(alias, *namespace);
@@ -3317,6 +3333,9 @@ impl NameResolver {
                         }
                         if let Some(ty) = interface.types.get(&item) {
                             self.definition_context_types[module.id.0].insert(alias.clone(), *ty);
+                        }
+                        if let Some(id) = interface.traits.get(&item) {
+                            self.definition_context_traits[module.id.0].insert(alias.clone(), *id);
                         }
                         if let Some(namespace) = interface.namespaces.get(&item) {
                             self.definition_context_namespaces[module.id.0]
@@ -3375,6 +3394,11 @@ impl NameResolver {
                 for (name, namespace) in &interface.namespaces {
                     if !bound.contains(name) {
                         self.definition_context_namespaces[id].insert(name.clone(), *namespace);
+                    }
+                }
+                for (name, trait_id) in &interface.traits {
+                    if !bound.contains(name) {
+                        self.definition_context_traits[id].insert(name.clone(), *trait_id);
                     }
                 }
             }
@@ -6033,16 +6057,7 @@ impl NameResolver {
                 .lookup_namespace(module)
                 .and_then(|module| self.qualified_interface(module).traits.get(trait_name))
                 .copied(),
-            None => self.declared_traits[self.current_module.0]
-                .get(namespace)
-                .copied()
-                .or_else(|| {
-                    self.imported_traits
-                        .iter()
-                        .rev()
-                        .find_map(|frame| frame.get(namespace).copied())
-                })
-                .or_else(|| self.prelude_traits.get(namespace).copied()),
+            None => self.lookup_trait(namespace, None),
         }?;
         let index = self
             .traits
@@ -6054,6 +6069,22 @@ impl NameResolver {
         Some((trait_id, index))
     }
 
+    /// Resolves an unqualified trait name. Syntax a macro generated carries
+    /// its defining module, and resolves in what that module's body sees, so
+    /// a public macro can name a trait its own module imports.
+    fn lookup_trait(&self, name: &str, definition_module: Option<usize>) -> Option<TraitId> {
+        definition_module
+            .and_then(|module| self.definition_context_traits.get(module)?.get(name).copied())
+            .or_else(|| self.declared_traits[self.current_module.0].get(name).copied())
+            .or_else(|| {
+                self.imported_traits
+                    .iter()
+                    .rev()
+                    .find_map(|frame| frame.get(name).copied())
+            })
+            .or_else(|| self.prelude_traits.get(name).copied())
+    }
+
     fn resolve_trait_name(&mut self, name: &staple_syntax::NamedType) -> Option<TraitId> {
         let resolved = if let Some(namespace) = &name.namespace {
             self.lookup_namespace(namespace)
@@ -6061,16 +6092,7 @@ impl NameResolver {
                 .and_then(|module| self.qualified_interface(*module).traits.get(&name.name))
                 .copied()
         } else {
-            self.declared_traits[self.current_module.0]
-                .get(&name.name)
-                .copied()
-                .or_else(|| {
-                    self.imported_traits
-                        .iter()
-                        .rev()
-                        .find_map(|frame| frame.get(&name.name).copied())
-                })
-                .or_else(|| self.prelude_traits.get(&name.name).copied())
+            self.lookup_trait(&name.name, name.syntax.definition_module())
         };
         if let Some(id) = resolved {
             self.trait_references.insert(name.syntax.id, id);
@@ -6096,16 +6118,7 @@ impl NameResolver {
                     .get(&name.name)
                     .copied()
             }
-            Expression::Name(name) => self.declared_traits[self.current_module.0]
-                .get(&name.name)
-                .copied()
-                .or_else(|| {
-                    self.imported_traits
-                        .iter()
-                        .rev()
-                        .find_map(|frame| frame.get(&name.name).copied())
-                })
-                .or_else(|| self.prelude_traits.get(&name.name).copied()),
+            Expression::Name(name) => self.lookup_trait(&name.name, name.syntax.definition_module()),
             Expression::Access(access) => {
                 let (namespace, name, _, _) = qualified_access_path(access)?;
                 self.lookup_namespace(&namespace)

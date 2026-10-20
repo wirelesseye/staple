@@ -1474,20 +1474,27 @@ impl ProgramLoader {
             staple_project::PackageId(index)
         } else {
             let std_id = staple_project::PackageId(graph.packages.len());
+            let manifest = package_root
+                .parent()
+                .unwrap_or(&package_root)
+                .join("staple.kdl");
+            // The stdlib's manifest decides its prelude, exactly as when the
+            // stdlib is built as the root package, so both builds compile
+            // its modules the same way and share one cached object.
+            let prelude = staple_project::load_package_graph(&manifest)
+                .map(|graph| graph.root_package().prelude)
+                .unwrap_or(true);
             graph.packages.push(staple_project::Package {
                 name: "std".to_owned(),
                 kind: staple_project::PackageKind::Library,
-                manifest: package_root
-                    .parent()
-                    .unwrap_or(&package_root)
-                    .join("staple.kdl"),
+                manifest,
                 directory: package_root.clone(),
                 root: package_root.join("root.sta"),
                 entry: None,
                 dependencies: Vec::new(),
                 features: HashMap::new(),
                 default_features: Vec::new(),
-                prelude: true,
+                prelude,
             });
             std_id
         };

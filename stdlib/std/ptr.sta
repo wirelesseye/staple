@@ -1,6 +1,7 @@
 pub mod
 
 use package.cmp.(Eq)
+use package.convert.(Convert)
 
 /// A non-owning, low-level pointer that permits reads of a `Pointee`.
 /// Copying or converting the pointer does not validate its address, alignment,
@@ -149,6 +150,8 @@ impl Eq RawOpaqueMutPtr {
 }
 
 companion<T where ?Sized T> RawPtr T {
+    use package.convert.Convert
+
     /// Returns a new pointer offset by a signed number of bytes.
     /// Does not validate the resulting address, alignment, or allocation lifetime.
     /// Does not dereference the pointer or transfer ownership.
@@ -164,6 +167,8 @@ companion<T where Copy T> RawPtr T {
 }
 
 companion<T where ?Sized T> RawMutPtr T {
+    use package.convert.Convert
+
     /// Returns a pointer offset by a signed number of bytes, without validation.
     pub def offset = (pointer: RawMutPtr T; bytes: ISize) =>
         RawMutPtr T :: __mut_pointer_offset (pointer, bytes)
@@ -180,6 +185,8 @@ companion<T where Copy T> RawMutPtr T {
 }
 
 companion RawOpaquePtr {
+    use package.convert.Convert
+
     /// Returns a new pointer offset by a signed number of bytes.
     /// Does not validate the resulting address, alignment, or allocation lifetime.
     /// Does not dereference the pointer or transfer ownership.
@@ -190,6 +197,8 @@ companion RawOpaquePtr {
 }
 
 companion RawOpaqueMutPtr {
+    use package.convert.Convert
+
     /// Returns a pointer offset by a signed number of bytes, without validation.
     pub def offset = (pointer: RawOpaqueMutPtr; bytes: ISize) =>
         RawOpaqueMutPtr :: __mut_opaque_offset (pointer, bytes)

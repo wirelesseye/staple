@@ -3,6 +3,9 @@ pub mod
 use package.ops.(Not)
 use package.cmp.(Eq)
 use package.default.Default
+use package.typegroup.(typegroup)
+use package.convert.(Convert)
+use package.string.(String, ToString)
 
 /// The input is not a supported boolean representation.
 pub type InvalidBool

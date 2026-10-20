@@ -871,9 +871,10 @@ needed, and a manifest may not bind `std` itself. Paths beginning with `std`
 therefore resolve from the standard-library source root through the same
 dependency-alias machinery as any local dependency. `std.core` is the small,
 always-imported language interface: booleans, numbers, indexing protocols,
-references, reactive primitives, ranges, and compiler modifiers. The separate
+references, reactive primitives, ranges, flow macros (`if`, `when`, `while`,
+`for`, and the rest of `std.flow`), and compiler modifiers. The separate
 `std.prelude` interface is imported by default and provides strings, lists,
-iteration, formatting traits, defaults, results, and flow macros. Lower-level
+iteration, formatting traits, defaults, and results. Lower-level
 modules such as `std.buffer`, `std.shared_buffer`, `std.io`, `std.syntax`, and
 `std.cinterop` require explicit imports.
 
@@ -885,6 +886,8 @@ it only serves the `staple` that built it. `--no-incremental` or
 `STAPLE_INCREMENTAL=0` compiles one whole-program module instead.
 
 A package disables its implicit prelude with `prelude #false` in `staple.kdl`.
+The standard library does so itself: its modules see only `std.core` and
+import everything else explicitly.
 A file module may opt out independently:
 
 ```staple
@@ -3421,7 +3424,7 @@ not supported. Values owned by an iteration are dropped before a break,
 continue, or implicit next iteration; a value moved out by `break` becomes the
 loop result and is preserved.
 
-The prelude supplies a `while` form implemented in `std.flow` using
+`std.core` supplies a `while` form implemented in `std.flow` using
 `loop`, `break`, and a boolean match:
 
 ```staple

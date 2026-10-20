@@ -1,5 +1,7 @@
 pub mod
 
+use package.typegroup.(typegroup)
+
 /// The result of comparing two ordered values.
 ///
 /// The variants are not re-exported, so refer to them as `Ordering.Less`,

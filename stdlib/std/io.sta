@@ -3,6 +3,9 @@ pub mod
 
 use package.cinterop.*
 use package.ptr.*
+use package.process.(panic)
+use package.result.(Ok)
+use package.string.(String)
 
 /// The capability required for standard output operations.
 @sized_opaque

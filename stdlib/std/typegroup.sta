@@ -1,6 +1,7 @@
 pub mod
 
 use package.syntax.*
+use package.process.(panic)
 
 def typegroup_apply_modifiers = (
     modifiers: Sequence Modifier,

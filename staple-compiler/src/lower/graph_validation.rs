@@ -838,9 +838,17 @@ pub(crate) mod tests {
         let id = program
             .instances
             .iter()
-            .find(|(_, instance)| instance.body.is_some())
+            // The substitution goes on a call, so take the first body that
+            // has one. Which instance comes first depends on the standard
+            // library, so do not assume it is the program's own.
+            .find(|(_, instance)| {
+                instance
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| body.calls.iter().next().is_some())
+            })
             .map(|(id, _)| id)
-            .expect("an instance body");
+            .expect("an instance body with a call");
         let body = program
             .instances
             .get_mut(id)
@@ -850,7 +858,7 @@ pub(crate) mod tests {
             .calls
             .iter()
             .next()
-            .expect("the identity body calls its boxed value");
+            .expect("the body has a call");
         body.calls
             .get_mut(call_id)
             .expect("call")

@@ -1,5 +1,9 @@
 pub mod
 
+use package.convert.(TryConvert)
+use package.result.(Ok, Result)
+use package.string.(String)
+
 /// A C string cannot contain an embedded NUL byte.
 pub type InteriorNul
 
@@ -31,6 +35,10 @@ extern "staple-intrinsic" {
 }
 
 companion CString {
+    use package.string.(InvalidUtf8, String)
+    use package.result.Result
+    use package.convert.TryConvert
+
     /// Validates UTF-8 and copies the bytes into a String.
     /// Consumes and frees the C string on both success and failure.
     pub def to_string = move value: CString =>

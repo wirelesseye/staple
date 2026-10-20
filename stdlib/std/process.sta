@@ -3,6 +3,8 @@ pub mod
 use package.io.printf
 use package.cinterop.(c_string, CString, InteriorNul)
 use package.source.(Location, track_caller)
+use package.result.(Ok)
+use package.string.(String)
 
 // Nested so the raw C `exit` symbol (extern bindings are always named
 // exactly after their C symbol) doesn't collide with the `exit` wrapper

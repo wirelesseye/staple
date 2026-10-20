@@ -17327,6 +17327,31 @@ fn track_caller_location_api_resolves_and_type_checks() {
 }
 
 #[test]
+fn macro_quotes_resolve_traits_their_defining_module_imports() {
+    // `for` expands to `IntoIterator.into_iterator` and `Iterator.next`,
+    // which `std.flow` imports. Without the prelude the expanding module
+    // names neither trait, so they must resolve where `for` is defined.
+    type_check(concat!(
+        "@no_prelude\npub mod\n",
+        "let mut total: I32 = 0\n",
+        "for item in (0 .. 3) { total = total + item }\n",
+    ));
+}
+
+#[test]
+fn companions_see_traits_their_parent_module_declares() {
+    type_check(concat!(
+        "trait Show T { show: T -> I32 }\n",
+        "impl Show I32 { show = value => value }\n",
+        "type Box = wrap I32\n",
+        "companion Box {\n",
+        "    pub def via_trait = <T where Show T> value: T => I32 :: Show.show value\n",
+        "}\n",
+        "let shown = Box.via_trait 3\n",
+    ));
+}
+
+#[test]
 fn track_caller_flags_only_the_outer_stage() {
     let resolved = resolve(concat!(
         "use std.source.(track_caller)\n@track_caller\n",

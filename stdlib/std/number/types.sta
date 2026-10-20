@@ -47,6 +47,7 @@ pub type F64 = opaque
 
 companion F32 {
     use package.source.(track_caller)
+    use package.process.(panic)
 
     extern "staple-intrinsic" {
         __f32_from_bits: U32 -> F32
@@ -188,6 +189,7 @@ companion F32 {
 
 companion F64 {
     use package.source.(track_caller)
+    use package.process.(panic)
 
     extern "staple-intrinsic" {
         __f64_from_bits: U64 -> F64

@@ -4,6 +4,7 @@ use package.list.List
 use package.string.(String, ToString)
 use package.flow.for
 use package.syntax.*
+use package.process.(panic)
 
 /// A growable UTF-8 output buffer used by formatting traits.
 pub type Formatter = wrap List U8
@@ -144,6 +145,8 @@ def formatter_finish = move formatter: Formatter => String :: {
 def formatter_new = () => Formatter :: Formatter (List.with_capacity 16)
 
 companion Formatter {
+    use package.string.String
+
     /// Creates an empty formatter.
     pub def new = () => Formatter :: formatter_new ()
 
