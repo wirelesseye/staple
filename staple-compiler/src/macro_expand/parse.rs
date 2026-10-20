@@ -141,7 +141,7 @@ pub(super) fn header_pattern(ty: &Type, parameters: &HashSet<String>) -> Option<
             }
             let element = |ty: &Type| header_pattern(unwrap_singleton_product(ty), parameters);
             match (name.name.as_str(), arguments.as_slice()) {
-                ("Optional", [element_type]) => {
+                ("Option", [element_type]) => {
                     Some(HeaderPattern::Optional(Box::new(element(element_type)?)))
                 }
                 ("Sequence", [element_type]) => {

@@ -118,7 +118,6 @@ fn with_syntax_imports(source: &str) -> String {
         ("Ident", source.contains("Ident")),
         ("CallExpr", source.contains("CallExpr")),
         ("Sequence", source.contains("Sequence")),
-        ("Optional", source.contains("Optional")),
         ("Separated", source.contains("Separated")),
         ("Comma", source.contains("Comma")),
         ("Equals", source.contains("Equals")),
@@ -7049,8 +7048,8 @@ fn rejects_empty_typegroups_and_top_level_optional_macro_parameters() {
             "macro `typegroup` panicked: empty typegroup is unsupported",
         ),
         (
-            "macro invalid: Optional Type -> Expr = value => parse_quote { 0 }\ninvalid I32\n",
-            "`Optional` and slotted product syntax shapes may only appear inside delimited contents",
+            "macro invalid: Option Type -> Expr = value => parse_quote { 0 }\ninvalid I32\n",
+            "`Option` and slotted product syntax shapes may only appear inside delimited contents",
         ),
     ] {
         let program = ProgramLoader::new()
@@ -12667,11 +12666,11 @@ fn statically_checks_macro_match_coverage_before_expansion() {
 #[test]
 fn infers_nested_compile_time_match_bindings() {
     type_check(concat!(
-        "use std.syntax.(Sequence, Modifier, Ident, Optional, Type, Item)\n",
+        "use std.syntax.(Sequence, Modifier, Ident, Type, Item)\n",
         "def accept_modifiers: Sequence Modifier -> () = _ => ()\n",
         "def accept_ident: Ident String -> () = _ => ()\n",
         "def accept_type: Type -> () = _ => ()\n",
-        "def infer: Sequence (Sequence Modifier, Ident String, Optional Type) -> Sequence Item = entries => match entries {\n",
+        "def infer: Sequence (Sequence Modifier, Ident String, Option Type) -> Sequence Item = entries => match entries {\n",
         "  Sequence () => Sequence (),\n",
         "  Sequence (first, rest) => match first {\n",
         "    (modifiers, variant, None) => {\n",
@@ -12686,14 +12685,49 @@ fn infers_nested_compile_time_match_bindings() {
 }
 
 #[test]
+fn option_marks_a_def_compile_time_only_when_it_holds_syntax() {
+    // `Option` is the ordinary `std.option` type, so mentioning it does not
+    // make a `def` a compile-time helper; `Option Expr` still does, through
+    // `Expr`.
+    let module = type_check(concat!(
+        "use std.syntax.(Expr, parse_quote)\n",
+        "def or_zero: Option I32 -> I32 = value => match value {\n",
+        "  Some number => number,\n",
+        "  None => 0,\n",
+        "}\n",
+        "def or_default: Option Expr -> Expr = value => match value {\n",
+        "  Some expression => expression,\n",
+        "  None => parse_quote { 0 },\n",
+        "}\n",
+        "macro pick: Expr -> Expr = value => or_default (Some value)\n",
+        "let picked: I32 = pick (or_zero (Some 7))\n",
+    ));
+    let names = module
+        .resolved()
+        .syntax()
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Binding(binding) => Some(binding.name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"or_zero"), "runtime `def` was dropped: {names:?}");
+    assert!(
+        !names.contains(&"or_default"),
+        "compile-time helper survived expansion: {names:?}"
+    );
+}
+
+#[test]
 fn checks_inferred_and_explicit_compile_time_match_binding_types() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
             concat!(
-                "use std.syntax.(Sequence, Modifier, Ident, Optional, Type, Item)\n",
+                "use std.syntax.(Sequence, Modifier, Ident, Type, Item)\n",
                 "def accept_ident: Ident String -> () = _ => ()\n",
-                "def invalid: Sequence (Sequence Modifier, Ident String, Optional Type) -> Sequence Item = entries => match entries {\n",
+                "def invalid: Sequence (Sequence Modifier, Ident String, Option Type) -> Sequence Item = entries => match entries {\n",
                 "  Sequence () => Sequence (),\n",
                 "  Sequence (first, _) => match first {\n",
                 "    (modifiers, _, None) => { accept_ident modifiers; Sequence () },\n",
@@ -12705,8 +12739,8 @@ fn checks_inferred_and_explicit_compile_time_match_binding_types() {
         ),
         (
             concat!(
-                "use std.syntax.(Sequence, Modifier, Ident, Optional, Type, Item)\n",
-                "def invalid: Sequence (Sequence Modifier, Ident String, Optional Type) -> Sequence Item = entries => match entries {\n",
+                "use std.syntax.(Sequence, Modifier, Ident, Type, Item)\n",
+                "def invalid: Sequence (Sequence Modifier, Ident String, Option Type) -> Sequence Item = entries => match entries {\n",
                 "  Sequence () => Sequence (),\n",
                 "  Sequence (first, _) => match first {\n",
                 "    (modifiers: Ident String, _, None) => Sequence (),\n",
@@ -17050,7 +17084,7 @@ fn expanded_compact(source: &str) -> String {
         .collect()
 }
 
-const PARSE_IMPORTS: &str = "use std.syntax.(Syntax, Expr, Type, Pattern, Item, SyntaxNode, Comma, Equals, Ident, Sequence, Separated, Optional, Parenthesized, Bracketed, Braced, Parse, ParseError, ParseStream, stream, is_empty, remaining, error_at, quote, parse_quote)\n";
+const PARSE_IMPORTS: &str = "use std.syntax.(Syntax, Expr, Type, Pattern, Item, SyntaxNode, Comma, Equals, Ident, Sequence, Separated, Parenthesized, Bracketed, Braced, Parse, ParseError, ParseStream, stream, is_empty, remaining, error_at, quote, parse_quote)\n";
 
 #[test]
 fn parse_reads_streaming_leaves_in_order() {
@@ -17219,7 +17253,7 @@ fn parse_reads_sequences_options_and_separated_bodies() {
             "}\n",
             "macro maybe = body: Braced Syntax => {\n",
             "    let Braced (contents) = body\n",
-            "    match (Parse.parse_all.<(Optional Type; Equals; Expr)> contents) {\n",
+            "    match (Parse.parse_all.<(Option Type; Equals; Expr)> contents) {\n",
             "        Ok (Some _, _, value) => parse_quote { ($value, 1) },\n",
             "        Ok (None, _, value) => parse_quote { ($value, 0) },\n",
             "        ParseError (message) => panic message,\n",
@@ -17286,7 +17320,7 @@ fn a_failed_optional_leaves_the_stream_unmoved() {
             "macro unmoved = body: Braced Syntax => {\n",
             "    let Braced (contents) = body\n",
             "    let mut input = stream contents\n",
-            "    let Ok skipped = Parse.parse.<Optional Type> input\n",
+            "    let Ok skipped = Parse.parse.<Option Type> input\n",
             "    let Ok equals = Parse.parse.<Equals> input\n",
             "    let Ok value = Parse.parse.<Expr> input\n",
             "    parse_quote { ($value, 1) }\n",
@@ -17608,7 +17642,7 @@ fn if_and_when_work_in_parse_members() {
     let source = format!(
         "{PARSE_IMPORTS}{}",
         concat!(
-            "pub type Tagged = pub wrap (name: Ident String, extra: Optional (Ident String))\n",
+            "pub type Tagged = pub wrap (name: Ident String, extra: Option (Ident String))\n",
             "impl Parse Tagged {\n",
             "    parse = mut input => {\n",
             "        let name = Parse.parse.<Ident String> input?\n",

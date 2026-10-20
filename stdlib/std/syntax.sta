@@ -22,9 +22,6 @@ pub type StringExpr = pub wrap String
 pub type Sequence Element = pub wrap
     () |
     (first: Element, rest: Sequence Element)
-/// An optional syntax value.
-@recursive_constructor
-pub type Optional Element = pub wrap None | Some Element
 /// A separated syntax sequence with its separator and trailing state.
 @recursive_constructor
 pub type Separated Element Separator = pub wrap (
@@ -91,7 +88,7 @@ pub type TypeDeclarationItem = pub wrap (
     name_spelling: String,
     declared_type: Type,
     type_parameters: Sequence (Ident String),
-    underlying: Optional Type,
+    underlying: Option Type,
 )
 /// An `alias` type declaration body.
 @recursive_constructor
@@ -247,7 +244,7 @@ impl Parse Syntax { parse = mut input => Ok (__take_rest input) }
 impl Parse () { parse = mut input => Ok () }
 
 // `None` and no consumption when `T` does not parse here.
-impl<T where Parse T> Parse (Optional T) {
+impl<T where Parse T> Parse (Option T) {
     parse = mut input => {
         let mut fork = input
         match (Parse.parse.<T> fork) {

@@ -192,9 +192,10 @@ values use `Separated (separator: Comma, elements: (...), trailing: True)` or
 the corresponding `False` value.
 Like `Sequence`, `Separated` is valid only as the complete contents of a
 delimiter. Its `elements` field is a `Sequence`. A separated element may be a
-slotted product shape. `Optional T` is available only inside such slotted
-products and captures `None` or `Some value`, so
-`Braced (Separated (Ident String; Optional Type) Comma)` accepts both
+slotted product shape. `Option T` (the ordinary `std.option` type) is
+available as a macro parameter shape only inside such slotted products and
+captures `None` or `Some value`, so
+`Braced (Separated (Ident String; Option Type) Comma)` accepts both
 `Literal String` and `Wildcard` entries.
 
 `Type` and `Pattern` parameters accept opaque type and pattern syntax. One
@@ -342,7 +343,7 @@ different from how macro parameters match. A macro parameter shaped
 `(Expr; Expr)` matches `a b` as one atom each, but `Parse.parse.<(Expr; Expr)>`
 on `a b` fails, because the first `Expr` reads the whole call `a b`. Use
 `SyntaxNode`, which reads one shortest structural atom (a balanced group counts
-as one), or delimiters to get atom semantics. Likewise, `Optional Type` reads a
+as one), or delimiters to get atom semantics. Likewise, `Option Type` reads a
 `Type` whenever one starts there, and `I32 value` is one applied type. Products
 parse their *bare* contents: `(A; B)` reads `A` then `B`, juxtaposed, and
 `(A, B)` reads `A`, a comma, then `B` with one optional trailing comma;
@@ -360,7 +361,7 @@ The built-in nodes implement `Parse` with ordinary `impl` items in
   token. `Visibility` reads `pub` or `pub(package)`, and yields `Private` without
   consuming anything when neither is written. `SyntaxNode` reads one atom.
 - `Syntax` takes everything that is left, `()` takes nothing, and
-  `Optional T` yields `None` without consuming anything when `T` does not parse.
+  `Option T` yields `None` without consuming anything when `T` does not parse.
 - `Parenthesized C`, `Bracketed C`, and `Braced C` parse their contents as `C` and
   require them to be used up. The result keeps the group's original syntax.
 - Products `(A; B)` and `(A, B)`, `Sequence T` (until the stream ends or `T`
