@@ -1,4 +1,5 @@
 use std.io.println
+use std.cmp.(Eq, Ord)
 trait Visit T { visit: <A> (T, move A) -> A }
 impl Visit I32 { visit = <A> (_, move value) => value }
 def relay = <T, A where Visit T> (item: T, move value: A) => A :: Visit.visit (item, value)

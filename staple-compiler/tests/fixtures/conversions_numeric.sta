@@ -1,3 +1,5 @@
+use std.cmp.Eq
+
 def expect_bool: (Ok Bool | InvalidBool, Bool) -> () = (result, expected) => match result {
     Ok value => if (value == expected) { () } else { panic "wrong boolean" },
     InvalidBool => panic "valid boolean rejected",

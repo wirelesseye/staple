@@ -1,5 +1,6 @@
 pub mod
 
+use package.cmp.(Eq)
 
 /// A non-owning, low-level pointer that permits reads of a `Pointee`.
 /// Copying or converting the pointer does not validate its address, alignment,

@@ -1,6 +1,7 @@
 pub mod
 
 use package.buffer.Buffer
+use package.cmp.(Eq)
 
 
 use package.index.(Index, MutateIndex)

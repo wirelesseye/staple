@@ -1379,6 +1379,7 @@ pub struct NameResolver {
     multiple_modules: bool,
     standard_library_core: Option<ModuleId>,
     standard_library_ops: Option<ModuleId>,
+    standard_library_cmp: Option<ModuleId>,
     /// The standard modules whose traits desugared operator syntax names.
     standard_library_operator_modules: Vec<ModuleId>,
     standard_library_prelude: Option<ModuleId>,
@@ -1477,6 +1478,7 @@ impl NameResolver {
             boolean: find_module("std.boolean"),
         };
         self.standard_library_ops = ops_module.ops;
+        self.standard_library_cmp = ops_module.cmp;
         self.standard_library_operator_modules =
             [ops_module.ops, ops_module.try_, ops_module.cmp, ops_module.convert]
                 .into_iter()
@@ -1666,6 +1668,9 @@ impl NameResolver {
             .unwrap_or_default();
         if let Some(ops) = self.standard_library_ops {
             standard_traits.extend(self.interfaces[ops.0].traits.clone());
+        }
+        if let Some(cmp) = self.standard_library_cmp {
+            standard_traits.extend(self.interfaces[cmp.0].traits.clone());
         }
         if let Some(prelude) = self.standard_library_prelude {
             standard_traits.extend(self.interfaces[prelude.0].traits.clone());

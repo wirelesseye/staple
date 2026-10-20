@@ -1,5 +1,6 @@
 use std.io.(IO, println)
 use std.fmt.Display
+use std.cmp.(Eq, Ord)
 trait Visit T { visit: <A> (T, move A) -> A }
 impl Visit I32 { visit = <A> (_, move value) => value }
 type Box T = wrap T

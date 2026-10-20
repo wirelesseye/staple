@@ -1,6 +1,7 @@
 pub mod
 
 use package.ops.(Add)
+use package.cmp.(Eq)
 
 /// The bytes are not valid UTF-8.
 pub type InvalidUtf8

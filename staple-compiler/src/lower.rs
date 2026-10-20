@@ -15913,6 +15913,7 @@ mod tests {
     #[test]
     fn structural_product_equality_short_circuits_and_negates_at_runtime() {
         let module = checked_program(concat!(
+            "use std.cmp.Eq\n",
             "type Guard = wrap USize\n",
             "impl Eq Guard { eq = (Guard left; Guard right) => (1, 2)[left] == (1, 2)[right] }\n",
             "def run: () -> I32 = () => {\n",
@@ -25774,6 +25775,7 @@ mod tests {
     fn static_dictionaries_close_emit_and_run_default_slots_with_associated_prerequisites() {
         use artifact_closure::{ClosureRequest, ProductionHooks};
         let module = checked_program(concat!(
+            "use std.cmp.Eq\n",
             "trait TestDictionary T where Eq T {\n",
             "  type Item where Eq Item\n",
             "  evaluate: (T, Item) -> I32\n",

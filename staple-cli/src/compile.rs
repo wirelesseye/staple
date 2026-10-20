@@ -4893,6 +4893,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
+                "use std.cmp.(PartialOrd, Ord, Ordering)\n",
                 "extern \"c\" { exit: I32 -> () }\n",
                 "def score_bool: Bool -> I32 = value => match value { True() => 1, False() => 0, }\n",
                 "let nan = 0.0 / 0.0\n",

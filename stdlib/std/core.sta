@@ -4,7 +4,6 @@ pub use package.annotation.*
 pub use package.boolean.*
 pub use package.copy.*
 pub use package.drop.*
-pub use package.cmp.*
 pub use package.index.*
 pub use package.number.*
 pub use package.option.*

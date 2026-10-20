@@ -3657,6 +3657,7 @@ fn iterates_slices_through_the_standard_library_implementations() {
 fn compares_slices_and_strings_through_the_standard_library_eq_implementations() {
     let module = type_check(concat!(
         "use std.shared_buffer.SharedBuffer\n",
+        "use std.cmp.Eq\n",
         "let first: (I32 ^ 3) = (1, 2, 3)\n",
         "let same: (I32 ^ 3) = (1, 2, 3)\n",
         "let different: (I32 ^ 3) = (1, 2, 4)\n",
@@ -4960,6 +4961,29 @@ fn arithmetic_operators_work_without_trait_imports() {
 }
 
 #[test]
+fn comparison_operators_work_without_trait_imports() {
+    let module = type_check(concat!(
+        "let equal = 1 == 1\n",
+        "let not_equal = 1 != 2\n",
+        "let less = 1 < 2\n",
+        "let less_equal = 1 <= 2\n",
+        "let greater = 2 > 1\n",
+        "let greater_equal = 2 >= 1\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("comparison without trait imports should compile");
+
+    for predicate in ["icmp eq", "icmp ne", "icmp slt", "icmp sgt"] {
+        assert!(
+            llvm.contains(predicate),
+            "missing `{predicate}` in LLVM without a `std.cmp` import"
+        );
+    }
+}
+
+#[test]
 fn bitwise_traits_lower_to_intrinsics_for_every_integer_type() {
     let types = [
         "I8", "I16", "I32", "I64", "U8", "U16", "U32", "U64", "ISize", "USize",
@@ -5029,6 +5053,7 @@ fn bitwise_traits_reject_unsupported_types() {
 #[test]
 fn compares_all_standard_library_integer_types() {
     let module = type_check(concat!(
+        "use std.cmp.(Eq, PartialOrd)\n",
         "let equal: Bool = 1 == 1\n",
         "let not_equal: Bool = 1 != 2\n",
         "let less: Bool = 1 < 2\n",
@@ -5065,6 +5090,7 @@ fn compares_all_standard_library_integer_types() {
 #[test]
 fn supports_contextual_float_literals_arithmetic_and_partial_ordering() {
     let module = type_check(concat!(
+        "use std.cmp.(PartialOrd, Ord, Ordering)\n",
         "extern \"c\" { scale_float: F64 -> F64 }\n",
         "def single = () => F32 :: { let a: F32 = 1.5; let b: F32 = .5; (a + b) * b - a / b; }\n",
         "def double = () => F64 :: { let a: F64 = 1e3; let b: F64 = 2.; (a + b) / b; }\n",
@@ -5137,16 +5163,16 @@ fn rejects_invalid_float_contexts_and_float_ord() {
     );
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("def compare: <T where Copy T, Ord T> T -> T -> Ordering = <T where Copy T, Ord T> left => right => Ord.cmp (left; right)\nlet invalid = compare 1.0 2.0\n"))
+        .check(resolve("use std.cmp.(Ord, Ordering)\ndef compare: <T where Copy T, Ord T> T -> T -> Ordering = <T where Copy T, Ord T> left => right => Ord.cmp (left; right)\nlet invalid = compare 1.0 2.0\n"))
         .expect_err_diagnostics("floats should not implement Ord");
     assert!(!diagnostics.is_empty());
 }
 
 #[test]
-fn requires_only_the_core_ordering_methods() {
+fn requires_only_the_ordering_methods() {
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "type Text = wrap String\nimpl PartialOrd Text {}\n",
+            "use std.cmp.PartialOrd\ntype Text = wrap String\nimpl PartialOrd Text {}\n",
         ))
         .expect_err_diagnostics("partial_cmp is required");
     assert!(
@@ -5156,7 +5182,9 @@ fn requires_only_the_core_ordering_methods() {
     );
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("type Text = wrap String\nimpl Ord Text {}\n"))
+        .check(resolve(
+            "use std.cmp.Ord\ntype Text = wrap String\nimpl Ord Text {}\n",
+        ))
         .expect_err_diagnostics("cmp is required");
     assert!(
         diagnostics
@@ -5166,9 +5194,11 @@ fn requires_only_the_core_ordering_methods() {
 }
 
 #[test]
-fn requires_only_the_core_equality_method() {
+fn requires_only_the_equality_method() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("type Text = wrap String\nimpl Eq Text {}\n"))
+        .check(resolve(
+            "use std.cmp.Eq\ntype Text = wrap String\nimpl Eq Text {}\n",
+        ))
         .expect_err_diagnostics("eq is required");
     assert!(
         diagnostics
@@ -5177,6 +5207,7 @@ fn requires_only_the_core_equality_method() {
     );
 
     let module = type_check(concat!(
+        "use std.cmp.Eq\n",
         "type Point = wrap (x: I32, y: I32)\n",
         "impl Eq Point { eq = (left; right) => left.x == right.x && left.y == right.y }\n",
         "let a: Point = Point (x: 1, y: 2)\n",
@@ -9449,6 +9480,7 @@ fn type_checks_and_lowers_managed_refs() {
 fn compares_refs_through_the_standard_library_eq_implementation() {
     let source = concat!(
         "use std.buffer.Buffer\n",
+        "use std.cmp.Eq\n",
         "def refs_equal: <T where Eq T> (Ref T, Ref T) -> Bool = <T where Eq T> (left, right) => left == right\n",
         "let a: Ref I32 = Ref 1\n",
         "let b: Ref I32 = Ref 1\n",
@@ -10163,6 +10195,7 @@ fn uses_generic_default_trait_members_and_concrete_overrides() {
 #[test]
 fn default_trait_members_use_prerequisites_multiple_arguments_and_macros() {
     let module = type_check(concat!(
+        "use std.cmp.Eq\n",
         "trait Same T where Copy T, Eq T { same: (T, T) -> Bool = (left, right) => Eq.eq (left; right) }\n",
         "trait Select Value { select: (Bool, move Value, move Value) -> Value = (condition, move left, move right) => when { condition => left, else => right } }\n",
         "trait First (Left, Right) { first: (move Left, Right) -> Left = (move left, right) => left }\n",
@@ -10467,6 +10500,7 @@ fn prerequisite_copy_bounds_are_visible_to_ownership_checking() {
 #[test]
 fn substitutes_product_parameters_into_multiple_prerequisites() {
     type_check(concat!(
+        "use std.cmp.Eq\n",
         "trait BothEqual (Left, Right) where Eq Left, Eq Right { equal: (Left, Left, Right, Right) -> (Bool, Bool) }\n",
         "impl BothEqual (I32, I32) { equal = (left_a, left_b, right_a, right_b) => (Eq.eq (left_a; left_b), Eq.eq (right_a; right_b)) }\n",
         "def compare_both: <Left, Right where Copy Left, Copy Right, BothEqual (Left, Right)> (Left, Left, Right, Right) -> (Bool, Bool) = <Left, Right where Copy Left, Copy Right, BothEqual (Left, Right)> (left_a, left_b, right_a, right_b) => (Eq.eq (left_a; left_b), Eq.eq (right_a; right_b))\n",
@@ -14021,6 +14055,7 @@ fn generic_intrinsic_trait_bounds_are_checked_at_calls() {
     let path = root.join("stdlib/std/reactive.sta");
     let source = std::fs::read_to_string(&path)
         .unwrap()
+        .replace("pub mod\n", "pub mod\n\nuse std.cmp.Eq\n")
         .replace("snapshot: <T>", "snapshot: <T where Eq T>")
         + "\nlet _ = snapshot (() => ())\n";
     let program = ProgramLoader::new()
@@ -14169,6 +14204,7 @@ fn call_site_type_arguments_enforce_trait_bounds() {
 #[test]
 fn call_site_type_arguments_work_in_generic_bodies_and_macro_quotes() {
     let module = type_check(concat!(
+        "use std.cmp.Eq\n",
         "def identity: <T> move T -> T = <T> move x => x\n",
         "def relay: <T> move T -> T = <T> move x => identity.<T> x\n",
         "let value = relay.<I32> 4\n",
@@ -14391,6 +14427,7 @@ fn checked_schemes_preserve_invalid_generic_body_diagnostics() {
 #[test]
 fn checked_schemes_preserve_trait_argument_inference_from_expected_types() {
     type_check(concat!(
+        "use std.cmp.Eq\n",
         "let equals: (I32; I32) -> Bool = Eq.eq.<_>\n",
         "let same: Bool = equals 1 1\n",
     ));
@@ -15789,6 +15826,7 @@ fn product_display_requires_element_traits_and_rejects_overrides() {
 #[test]
 fn structural_product_equality_supports_plain_slotted_and_generic_values() {
     let module = type_check(concat!(
+        "use std.cmp.Eq\n",
         "def compare: <T where Eq T> (T; T) -> Bool = <T where Eq T> (left; right) => left == right\n",
         "def compare_slots: <T where Eq T> ((T; T); (T; T)) -> Bool = <T where Eq T> (left; right) => left == right\n",
         "let plain: (I32, I32) = (1, 2)\n",
@@ -17122,7 +17160,7 @@ fn track_caller_rejects_unsupported_placements() {
             "`@track_caller` may only modify a `def` whose value is a function",
         ),
         (
-            "use std.source.(track_caller)\n@track_caller\nimpl Eq I32 { eq = (a; b) => True }\n",
+            "use std.source.(track_caller)\nuse std.cmp.Eq\n@track_caller\nimpl Eq I32 { eq = (a; b) => True }\n",
             "`@track_caller` may only modify a `def` whose value is a function",
         ),
         (

@@ -1,6 +1,7 @@
 pub mod
 
 use package.ops.(Not)
+use package.cmp.(Eq)
 use package.default.Default
 
 /// The input is not a supported boolean representation.

@@ -870,7 +870,7 @@ package implicitly depends on under the alias `std`; no `dependencies` entry is
 needed, and a manifest may not bind `std` itself. Paths beginning with `std`
 therefore resolve from the standard-library source root through the same
 dependency-alias machinery as any local dependency. `std.core` is the small,
-always-imported language interface: booleans, numbers, comparison and indexing protocols,
+always-imported language interface: booleans, numbers, indexing protocols,
 references, reactive primitives, ranges, and compiler modifiers. The separate
 `std.prelude` interface is imported by default and provides strings, lists,
 iteration, formatting traits, defaults, results, and flow macros. Lower-level
@@ -1440,8 +1440,9 @@ environment, including private helpers used by generated syntax.
 Operators are fixed grammar with fixed precedence and associativity; there is
 no user-definable operator or infix-function syntax. Each operator desugars
 directly to a call against a standard library trait. The traits in
-`std.ops` (`Add`, `Subtract`, `Multiply`, `Divide`, `Neg`, and `Not`)
-and their methods require explicit imports; operator syntax works without
+`std.ops` (`Add`, `Subtract`, `Multiply`, `Divide`, `Neg`, and `Not`) and
+`std.cmp` (`Eq`, `PartialOrd`, and `Ord`) and their methods require explicit
+imports; operator syntax works without
 these imports. Every name an operator desugars to resolves at its
 standard-library definition, so local items or imports named `Convert`, `Eq`,
 `Try`, `Ok`, `range`, and so on never change what an operator means:
@@ -3994,9 +3995,11 @@ Ordering
 Option T
 ```
 
-The numeric types, `Never`, `Bool`, `String`, arithmetic and ordering traits,
-`ToString`, and their functions from `std.core` are imported implicitly into
-every source module. These are
+The numeric types, `Never`, `Bool`, `String`, `ToString`, and their functions
+from `std.core` are imported implicitly into every source module. The comparison
+traits `Eq`, `PartialOrd`, and `Ord` and the `Ordering` result live in
+`std.cmp` and require explicit imports, although comparison operator syntax
+works without those imports. These are
 ordinary type names rather than keywords, so a local declaration or explicit
 import can shadow a prelude name. Integer literals use an expected integer type
 when one is available and otherwise default to `I32`. Mixed-type arithmetic is

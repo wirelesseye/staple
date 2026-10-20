@@ -1,6 +1,7 @@
 pub mod
 
 use package.ops.*
+use package.cmp.*
 
 use package.convert.checked_conversion
 
