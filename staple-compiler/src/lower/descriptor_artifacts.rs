@@ -523,7 +523,7 @@ pub(super) fn scan_instance(
             });
         }
     }
-    // Implicit thunk arguments use the same descriptor-bound closure entry
+    // Block arguments use the same descriptor-bound closure entry
     // and capture finalizer as written lambdas.
     for (site, target) in &body.bindings {
         let super::LoweredBindingSite::CallArgumentThunk { call, argument } = site else {

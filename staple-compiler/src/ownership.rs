@@ -107,7 +107,7 @@ impl<'a> OwnershipChecker<'a> {
         for function in module.functions() {
             checker.check_function(function);
         }
-        for function in module.implicit_thunks() {
+        for function in module.synthesized_thunks() {
             checker.check_function(function);
         }
 
@@ -188,7 +188,7 @@ impl<'a> OwnershipChecker<'a> {
             .collect();
 
         let drop_method = self.module.is_drop_method(function.id);
-        // A coroutine body's implicit thunk owns its captures (moved in when
+        // A coroutine body's synthesized thunk owns its captures (moved in when
         // the coroutine was constructed), so they are consumable inside it.
         let owns_captures = self
             .coroutine_body_thunks
@@ -332,8 +332,8 @@ impl<'a> OwnershipChecker<'a> {
             Expression::Coro(value) => {
                 // Constructing a coroutine moves its owned, non-`Copy`
                 // captures and rejects captured borrowed views. The body is
-                // ownership-checked separately as its own implicit thunk.
-                if let Some(thunk) = self.module.implicit_thunk_for(value.body.syntax.id) {
+                // ownership-checked separately as its own synthesized thunk.
+                if let Some(thunk) = self.module.synthesized_thunk_for(value.body.syntax.id) {
                     for capture in thunk.captures.clone() {
                         if self.borrowed_closures.contains_key(&capture) {
                             self.diagnostics.push(Diagnostic::new(
@@ -418,7 +418,7 @@ impl<'a> OwnershipChecker<'a> {
                         for (index, argument) in plan.arguments.iter().enumerate() {
                             let count = plan.spreads.get(&index).copied().unwrap_or(1);
                             if let Some(thunk) =
-                                self.module.implicit_thunk_for(argument.syntax().id)
+                                self.module.synthesized_thunk_for(argument.syntax().id)
                             {
                                 for capture in &thunk.captures {
                                     if !self.module.has_mutable_storage(*capture) {
@@ -487,7 +487,7 @@ impl<'a> OwnershipChecker<'a> {
                         .module
                         .type_of_expression(value.argument.syntax().id)
                         .is_some_and(|ty| matches!(ty, crate::CheckedType::CString));
-                if let Some(thunk) = self.module.implicit_thunk_for(value.argument.syntax().id) {
+                if let Some(thunk) = self.module.synthesized_thunk_for(value.argument.syntax().id) {
                     for capture in &thunk.captures {
                         if !self.module.has_mutable_storage(*capture) {
                             self.use_symbol(*capture, value.argument.syntax(), true);

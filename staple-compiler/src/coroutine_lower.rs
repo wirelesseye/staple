@@ -20,7 +20,7 @@ use crate::{CheckedEffectSet, CheckedType, IntrinsicFunction, SymbolId, TypedMod
 
 #[derive(Debug, Clone)]
 pub(crate) struct CoroutinePlan {
-    /// The `coro` body block's syntax id — the key the implicit thunk and this
+    /// The `coro` body block's syntax id — the key the synthesized thunk and this
     /// plan share.
     pub body_syntax: SyntaxId,
     /// The value the coroutine yields (`T` in `Coroutine{E} T`).

@@ -6264,7 +6264,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<BasicMetadataValueEnum<'context>> {
         let Some(expression) = expression else {
-            // An implicit thunk argument builds the thunk's closure over the
+            // a block argument builds the thunk's closure over the
             // current environment.
             let value =
                 self.build_thunk_closure(owner, call_id, record_index, environment, span)?;
@@ -6339,7 +6339,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.pass_computed_argument(record, record_index, value, by_value_route, cleanups)
     }
 
-    /// One implicit thunk argument's closure: the thunk instance's function
+    /// One block argument's closure: the thunk instance's function
     /// paired with a fresh capture environment built from the current scope.
     fn build_thunk_closure(
         &mut self,
@@ -6359,12 +6359,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 },
             )
             .ok_or_else(|| {
-                Diagnostic::new(span.clone(), "implicit thunk argument has no binding")
+                Diagnostic::new(span.clone(), "block argument has no binding")
             })?;
         let LoweredBoundTarget::Instance(instance) = binding else {
             return Err(Diagnostic::new(
                 span.clone(),
-                "implicit thunk argument is not bound to an instance",
+                "block argument is not bound to an instance",
             ));
         };
         let instance = *instance;

@@ -735,7 +735,7 @@ from `Location.caller`.
 
 A `@track_caller` function passes the location through a call to another
 `@track_caller` function only from its own body: such a call reports the same
-caller, so wrappers stay transparent. Closures, implicit thunks, and `coro`
+caller, so wrappers stay transparent. Closures, block arguments, and `coro`
 bodies inside the function are separate functions and report their own sites,
 and `Location.caller ()` inside them reports that site; the compiler-reserved
 `__caller_*` intrinsics are rejected there. A value reference (`let g = f`)
@@ -2348,8 +2348,8 @@ let signal count = 0
 count = count + 1
 ```
 
-`reaction` accepts a zero-argument callback (and therefore benefits from
-call-site implicit thunking). Its initial run and every rerun are scheduled on
+`reaction` accepts a zero-argument callback, usually written as a
+[block argument](#block-arguments). Its initial run and every rerun are scheduled on
 the reactive executor. Outside a batch, the executor drains synchronously to
 quiescence before ordinary execution continues, so a reaction still runs
 immediately when created and has completed before a signal assignment returns.
@@ -2425,24 +2425,60 @@ batches share the outer batch. A reaction created inside a batch also defers
 its initial run; if its owning `Reactive` scope exits first, the queued run is
 discarded safely.
 
-### Call-site implicit thunking
+### Block arguments
 
-At a function call, an expression of type `T` may be supplied to a parameter
-of type `() -> T`. The compiler treats that argument as `() => expression`, so
-the expression is evaluated only when the callback is invoked:
+A block written directly as a call argument, for a parameter of type
+`() -> T`, is a **block argument**: the compiler treats `{ … }` as
+`() => { … }`, so the block runs only when the callback is invoked, as many
+times as it is invoked. Its value must have type `T`:
+
+```staple
+def twice = <effect E> (f: () ->{E} ()) => {
+    f ()
+    f ()
+}
+
+twice {
+    println "hello"
+}
+twice (println "hello") // error: expected `() -> ()`, found `()`
+```
+
+Only a bare block is adapted; it may also be a direct element of a product
+argument, as in `add_later (40, { 2 })`, or fill a slot, as in
+`direct 2 { 3 }`. Any other argument is passed as written, so the braces show
+at the call site which code is deferred. A block argument always becomes the
+callback, even when the block's value is itself a compatible function. To
+compute a function eagerly with a block, wrap it in grouping parentheses:
+
+```staple
+twice ({ make_callback () }) // evaluates the block once and passes its value
+```
+
+Block arguments are restricted to call arguments; they are not a general
+coercion, so `let callback: () -> I32 = { 42 }` remains invalid. A pipe
+receiver is evaluated before the call, so `{ … } |> f` passes the block's
+value rather than a block argument. A spread operand is never a block
+argument either.
+
+A block argument is the body of its callback. It captures values and infers
+the effects of its body exactly like an explicit anonymous function, which
+lets effect-polymorphic higher-order functions preserve deferred resource and
+state effects. `return` inside it returns from the callback, not from the
+enclosing function, and `?` likewise propagates to the callback's result.
+This differs from the blocks of `with`, `loop`, and macros such as `if`,
+which are part of the enclosing function. `break` and `continue` cannot
+leave a block argument, though a loop written entirely inside it may use
+them:
 
 ```staple
 def evaluate = callback: (() -> I32) => I32 :: callback ()
 
-let answer = evaluate { expensive_computation () }
+let answer = evaluate {
+    if cached { return cached_value }
+    expensive_computation ()
+}
 ```
-
-This adaptation is restricted to call arguments. It is not a general coercion,
-so `let callback: () -> I32 = 42` remains invalid. A directly compatible
-function value always wins over implicit thunking. The generated callback
-captures values and infers the effects of its body exactly like an explicit
-anonymous function; this allows effect-polymorphic higher-order functions to
-preserve deferred resource and state effects.
 
 The empty set may be written explicitly as `->{}`. Reordering or repeating
 entries does not change a function type or the canonical hidden-parameter
@@ -3167,8 +3203,8 @@ from its arguments.
 `...expr` spreads a fixed plain or slotted product into consecutive slots.
 It binds to one atomic argument, so use `f ...(g x)` to spread a call result.
 A spread cannot overrun the remaining slots, and its shape must be known
-when checked. `...=` is not allowed at call sites. Implicit thunking applies
-to individual arguments, never to spread operands.
+when checked. `...=` is not allowed at call sites. A block argument fills
+one slot and is never a spread operand.
 
 ```staple
 let p = (1; 2)

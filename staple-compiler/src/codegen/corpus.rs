@@ -1980,7 +1980,7 @@ debug_pair 5
     ),
     expect_stdout(
         must_run(inline(
-            "dynamic_implicit_thunks",
+            "dynamic_synthesized_thunks",
             concat!(
                 "use std.io.println\n",
                 "def evaluate: <T where Copy T> (() -> T) -> T = <T where Copy T> callback => callback ()\n",
@@ -2862,7 +2862,7 @@ let value = at (Ref (1, 2), (USize :: 5))
         ),
         "hello\nhello\ngo\nhello\nhello\nL\nL\ngo\nL\nL\n",
     )),
-    // A parenthesized argument implicitly thunked for an effect-generic callee.
+    // A block argument passed to an effect-generic callee.
     must_run(expect_stdout(
         inline(
             "effect_generic_thunk_argument",
@@ -2870,14 +2870,14 @@ let value = at (Ref (1, 2), (USize :: 5))
                 "use std.io.(IO, println)\n",
                 "def sum_twice: <effect F> (() ->{F} I32) ->{F} I32 = <effect F> f => f () + f ()\n",
                 "def five: () ->{IO} I32 = () => { println \"five\"; 5 }\n",
-                "def outer: (() ->{IO} I32) ->{IO} I32 = g => sum_twice (g ())\n",
+                "def outer: (() ->{IO} I32) ->{IO} I32 = g => sum_twice { g () }\n",
                 "println \"${outer five}\"\n",
             ),
             "emission",
         ),
         "five\nfive\n10\n",
     )),
-    // Closures and implicit thunks whose rows name a run-time effect variable
+    // Closures and synthesized thunks whose rows name a run-time effect variable
     // capture values; their environments follow the dynamic layout.
     must_run(expect_stdout(
         inline(
@@ -2893,7 +2893,7 @@ let value = at (Ref (1, 2), (USize :: 5))
                 "    h ()\n",
                 "}\n",
                 "def make: <effect E> (() ->{E} ()) -> (() ->{E} ()) = <effect E> g => () => { g (); g () }\n",
-                "def thunked: <effect E> (() ->{E} I32) ->{E} I32 = <effect E> g => sum_twice (g ())\n",
+                "def thunked: <effect E> (() ->{E} I32) ->{E} I32 = <effect E> g => sum_twice { g () }\n",
                 "\n",
                 "def hello: () ->{IO} () = () => println \"hello\"\n",
                 "def five: () ->{IO} I32 = () => { println \"five\"; 5 }\n",

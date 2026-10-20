@@ -183,7 +183,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// One reactive callback's closure value: an explicit callable occurrence
-    /// is evaluated; an implicit thunk builds its fresh capture environment
+    /// is evaluated; a synthesized thunk builds its fresh capture environment
     /// and installs the recorded environment finalizer.
     fn reactive_callback_value(
         &mut self,

@@ -1648,7 +1648,7 @@ pub struct TypedModule {
     symbol_companion_types: HashMap<SymbolId, TypeId>,
     function_result_companion_types: HashMap<FunctionId, TypeId>,
     function_symbols: HashMap<SymbolId, FunctionId>,
-    implicit_thunks: HashMap<SyntaxId, ResolvedFunction>,
+    synthesized_thunks: HashMap<SyntaxId, ResolvedFunction>,
     implicit_function_parents: HashMap<FunctionId, Option<FunctionId>>,
     derived_symbols: HashSet<SymbolId>,
     derived_evaluators: HashMap<SymbolId, SyntaxId>,
@@ -1695,12 +1695,12 @@ impl TypedModule {
         self.resolved.functions()
     }
 
-    pub(crate) fn implicit_thunks(&self) -> impl Iterator<Item = &ResolvedFunction> {
-        self.implicit_thunks.values()
+    pub(crate) fn synthesized_thunks(&self) -> impl Iterator<Item = &ResolvedFunction> {
+        self.synthesized_thunks.values()
     }
 
-    pub(crate) fn implicit_thunks_in_id_order(&self) -> Vec<&ResolvedFunction> {
-        let mut thunks = self.implicit_thunks.values().collect::<Vec<_>>();
+    pub(crate) fn synthesized_thunks_in_id_order(&self) -> Vec<&ResolvedFunction> {
+        let mut thunks = self.synthesized_thunks.values().collect::<Vec<_>>();
         thunks.sort_by_key(|function| function.id.0);
         thunks
     }
@@ -1709,7 +1709,7 @@ impl TypedModule {
         let mut evaluators = self
             .derived_evaluators
             .iter()
-            .filter_map(|(symbol, syntax)| Some((*symbol, self.implicit_thunks.get(syntax)?.id)))
+            .filter_map(|(symbol, syntax)| Some((*symbol, self.synthesized_thunks.get(syntax)?.id)))
             .collect::<Vec<_>>();
         evaluators.sort_by_key(|(symbol, _)| symbol.0);
         evaluators
@@ -1775,8 +1775,8 @@ impl TypedModule {
         }
     }
 
-    pub(crate) fn implicit_thunk_for(&self, syntax: SyntaxId) -> Option<&ResolvedFunction> {
-        self.implicit_thunks.get(&syntax)
+    pub(crate) fn synthesized_thunk_for(&self, syntax: SyntaxId) -> Option<&ResolvedFunction> {
+        self.synthesized_thunks.get(&syntax)
     }
 
     pub fn is_derived_symbol(&self, symbol: SymbolId) -> bool {
@@ -1786,7 +1786,7 @@ impl TypedModule {
     pub(crate) fn derived_evaluator(&self, symbol: SymbolId) -> Option<&ResolvedFunction> {
         self.derived_evaluators
             .get(&symbol)
-            .and_then(|syntax| self.implicit_thunks.get(syntax))
+            .and_then(|syntax| self.synthesized_thunks.get(syntax))
     }
 
     pub(crate) fn function_by_id(&self, id: FunctionId) -> Option<&ResolvedFunction> {
@@ -1795,7 +1795,7 @@ impl TypedModule {
             .iter()
             .find(|function| function.id == id)
             .or_else(|| {
-                self.implicit_thunks
+                self.synthesized_thunks
                     .values()
                     .find(|function| function.id == id)
             })
@@ -2905,7 +2905,7 @@ pub struct TypeChecker {
     /// Parameter symbols explicitly marked `move`: they own their value
     /// (may move/drop it) rather than implicitly borrowing it.
     move_parameter_symbols: HashSet<SymbolId>,
-    implicit_thunks: HashMap<SyntaxId, ResolvedFunction>,
+    synthesized_thunks: HashMap<SyntaxId, ResolvedFunction>,
     implicit_function_parents: HashMap<FunctionId, Option<FunctionId>>,
     /// `coro` body thunks checked against an expected `Coroutine{E} T`: the
     /// expected row is their declared effect set, an upper bound on the body,
@@ -2914,7 +2914,15 @@ pub struct TypeChecker {
     derived_symbols: HashSet<SymbolId>,
     derived_evaluators: HashMap<SymbolId, SyntaxId>,
     next_implicit_function: usize,
-    implicit_thunk_context: bool,
+    /// Set by a call for its argument: the next checked expression is in
+    /// block-argument position, so a bare block there becomes a thunk.
+    /// Checking any expression consumes it; only the direct elements of a
+    /// non-grouping product argument inherit it.
+    block_argument_context: bool,
+    /// Whether we are checking a block argument's body. Its loop contexts
+    /// start empty, so a `break` or `continue` outside a loop nested in the
+    /// block has no target.
+    inside_block_argument: bool,
 }
 
 impl TypeChecker {
@@ -3214,7 +3222,7 @@ impl TypeChecker {
             symbol_companion_types: self.symbol_companion_types,
             function_result_companion_types: self.function_result_companion_types,
             function_symbols: self.function_symbols,
-            implicit_thunks: self.implicit_thunks,
+            synthesized_thunks: self.synthesized_thunks,
             implicit_function_parents: self.implicit_function_parents,
             derived_symbols: self.derived_symbols,
             derived_evaluators: self.derived_evaluators,
@@ -5987,6 +5995,110 @@ impl TypeChecker {
         ))
     }
 
+    /// Checks a function body in its own return context. `return` and `?`
+    /// inside it contribute to `declared_result` (joined from the
+    /// contributions when it is `Inferred`), never to an enclosing function.
+    fn check_returning_body(
+        &mut self,
+        module: &ResolvedModule,
+        body: &Expression,
+        declared_result: CheckedType,
+    ) -> CheckedType {
+        let outer_did_return = self.did_return;
+        let outer_return_reachable = self.return_reachable;
+        self.did_return = false;
+        self.return_reachable = true;
+        self.return_contexts.push(declared_result.clone());
+        self.return_contributions.push(Vec::new());
+        self.pending_propagations.push(Vec::new());
+        let body_expected = (declared_result != CheckedType::Inferred).then_some(&declared_result);
+        let body_type = self.check_expression_expected(module, body, body_expected);
+        let returned = self.did_return;
+        self.return_contexts.pop().expect("function return context");
+        let mut contributions = self
+            .return_contributions
+            .pop()
+            .expect("function return contributions");
+        if !returned {
+            contributions.push(ReturnContribution {
+                syntax: Some(body.syntax().id),
+                span: body.syntax().span.clone(),
+                value_type: body_type,
+            });
+        }
+        let result_type = if declared_result == CheckedType::Inferred {
+            self.join_return_contributions(&contributions, body.syntax().span.clone())
+        } else {
+            declared_result
+        };
+        for contribution in contributions {
+            if let Some(syntax) = contribution.syntax {
+                self.coerce_expression_type(
+                    syntax,
+                    contribution.value_type,
+                    &result_type,
+                    contribution.span,
+                );
+            } else if !can_coerce_type(&contribution.value_type, &result_type) {
+                self.diagnostics.push(Diagnostic::new(
+                    contribution.span,
+                    format!(
+                        "propagated variant `{}` is not contained in function result `{result_type}`",
+                        contribution.value_type
+                    ),
+                ));
+            }
+        }
+        let pending = self
+            .pending_propagations
+            .pop()
+            .expect("function propagations");
+        for (syntax, source, success_index, _) in pending {
+            self.propagations.insert(
+                syntax,
+                CheckedPropagation {
+                    source,
+                    success_index,
+                    result: result_type.clone(),
+                },
+            );
+        }
+        self.did_return = outer_did_return;
+        self.return_reachable = outer_return_reachable;
+        result_type
+    }
+
+    /// Checks a block argument and synthesizes its thunk.
+    fn check_block_argument(
+        &mut self,
+        module: &ResolvedModule,
+        block: &Expression,
+        declared_result: CheckedType,
+    ) -> CheckedType {
+        let result = self.check_block_argument_body(module, block, declared_result);
+        self.make_synthesized_thunk(module, block, result)
+    }
+
+    /// Checks a block argument's body as the body of its thunk and returns
+    /// the thunk's result type: `return` and `?` leave the thunk, the block
+    /// is a suspension boundary, and `break`/`continue` cannot reach a loop
+    /// outside it.
+    fn check_block_argument_body(
+        &mut self,
+        module: &ResolvedModule,
+        block: &Expression,
+        declared_result: CheckedType,
+    ) -> CheckedType {
+        let outer_suspension = std::mem::replace(&mut self.suspension_allowed, false);
+        let outer_loops = std::mem::take(&mut self.loop_contexts);
+        let outer_inside = std::mem::replace(&mut self.inside_block_argument, true);
+        let result = self.check_returning_body(module, block, declared_result);
+        self.inside_block_argument = outer_inside;
+        self.loop_contexts = outer_loops;
+        self.suspension_allowed = outer_suspension;
+        result
+    }
+
     fn ensure_function_checked(&mut self, module: &ResolvedModule, function_id: FunctionId) {
         if self.checking_functions.contains(&function_id)
             && let Some(f) = module.functions().iter().find(|f| f.id == function_id)
@@ -6044,72 +6156,12 @@ impl TypeChecker {
         self.active_generic_parameters.push(rigid);
 
         self.bind_pattern_types(module, &function.pattern, &function_type.parameter);
-        let outer_did_return = self.did_return;
-        let outer_return_reachable = self.return_reachable;
-        self.did_return = false;
-        self.return_reachable = true;
-        self.return_contexts.push((*function_type.result).clone());
-        self.return_contributions.push(Vec::new());
-        self.pending_propagations.push(Vec::new());
-        let body_expected = (!matches!(*function_type.result, CheckedType::Inferred))
-            .then_some(function_type.result.as_ref());
         // An ordinary nested function does not inherit `await` permission from
         // an enclosing `coro` body.
         let outer_suspension = std::mem::replace(&mut self.suspension_allowed, false);
-        let body_type = self.check_expression_expected(module, &function.body, body_expected);
+        let result_type =
+            self.check_returning_body(module, &function.body, (*function_type.result).clone());
         self.suspension_allowed = outer_suspension;
-        let returned = self.did_return;
-        let declared_result = self.return_contexts.pop().expect("function return context");
-        let mut contributions = self
-            .return_contributions
-            .pop()
-            .expect("function return contributions");
-        if !returned {
-            contributions.push(ReturnContribution {
-                syntax: Some(function.body.syntax().id),
-                span: function.body.syntax().span.clone(),
-                value_type: body_type,
-            });
-        }
-        let result_type = if declared_result == CheckedType::Inferred {
-            self.join_return_contributions(&contributions, function.body.syntax().span.clone())
-        } else {
-            declared_result
-        };
-        for contribution in contributions {
-            if let Some(syntax) = contribution.syntax {
-                self.coerce_expression_type(
-                    syntax,
-                    contribution.value_type,
-                    &result_type,
-                    contribution.span,
-                );
-            } else if !can_coerce_type(&contribution.value_type, &result_type) {
-                self.diagnostics.push(Diagnostic::new(
-                    contribution.span,
-                    format!(
-                        "propagated variant `{}` is not contained in function result `{result_type}`",
-                        contribution.value_type
-                    ),
-                ));
-            }
-        }
-        let pending = self
-            .pending_propagations
-            .pop()
-            .expect("function propagations");
-        for (syntax, source, success_index, _) in pending {
-            self.propagations.insert(
-                syntax,
-                CheckedPropagation {
-                    source,
-                    success_index,
-                    result: result_type.clone(),
-                },
-            );
-        }
-        self.did_return = outer_did_return;
-        self.return_reachable = outer_return_reachable;
         // A value-only generic scheme is instantiated at its uses, so its known
         // effects, and the resources of the named functions it calls, must be
         // complete before the first one. Captured-state effects of other
@@ -6236,7 +6288,7 @@ impl TypeChecker {
             }
             // Constructing a coroutine is pure: its body's effects are
             // deferred and recorded on the `Coroutine{E}` type, inferred via
-            // the body's own implicit thunk.
+            // the body's own synthesized thunk.
             Expression::Coro(_) => CheckedEffectSet::default(),
             // Awaiting runs the coroutine as a child continuation, so its
             // deferred row is folded into the current body's effects.
@@ -6316,7 +6368,7 @@ impl TypeChecker {
                             .map(|default| default.function.result.as_ref())
                     {
                         let argument_effects = if self
-                            .implicit_thunks
+                            .synthesized_thunks
                             .contains_key(&value.argument.syntax().id)
                         {
                             CheckedEffectSet::default()
@@ -6359,7 +6411,7 @@ impl TypeChecker {
                     }
                 };
                 let argument_effects = if self
-                    .implicit_thunks
+                    .synthesized_thunks
                     .contains_key(&value.argument.syntax().id)
                 {
                     CheckedEffectSet::default()
@@ -6390,7 +6442,7 @@ impl TypeChecker {
                     let mut substitutions = HashMap::new();
                     if function_type.effects.variable.is_some() {
                         let argument_type = self
-                            .implicit_thunks
+                            .synthesized_thunks
                             .get(&value.argument.syntax().id)
                             .and_then(|thunk| self.function_types.get(&thunk.id).cloned())
                             .map(CheckedType::Function)
@@ -6507,7 +6559,7 @@ impl TypeChecker {
                 .iter()
                 .find(|function| function.id == function_id)
                 .or_else(|| {
-                    self.implicit_thunks
+                    self.synthesized_thunks
                         .values()
                         .find(|function| function.id == function_id)
                 })
@@ -6615,7 +6667,7 @@ impl TypeChecker {
         result: CheckedType,
     ) {
         let syntax = expression.syntax().id;
-        self.make_implicit_thunk(module, expression, result);
+        self.make_synthesized_thunk(module, expression, result);
         self.derived_evaluators.insert(symbol, syntax);
     }
 
@@ -6634,7 +6686,7 @@ impl TypeChecker {
                 CheckedEffectSet::default(),
                 |effects, (index, element)| {
                     let item = if self
-                        .implicit_thunks
+                        .synthesized_thunks
                         .contains_key(&element.value.syntax().id)
                     {
                         CheckedEffectSet::default()
@@ -6764,13 +6816,13 @@ impl TypeChecker {
             )
             .collect::<HashMap<_, _>>();
 
-        let effect_function_count = module.functions().len() + self.implicit_thunks.len();
+        let effect_function_count = module.functions().len() + self.synthesized_thunks.len();
         for _ in 0..=effect_function_count {
             let mut updates = Vec::new();
             let functions = module
                 .functions()
                 .iter()
-                .chain(self.implicit_thunks.values())
+                .chain(self.synthesized_thunks.values())
                 .cloned()
                 .collect::<Vec<_>>();
             for function in &functions {
@@ -6833,7 +6885,7 @@ impl TypeChecker {
             let functions = module
                 .functions()
                 .iter()
-                .chain(self.implicit_thunks.values())
+                .chain(self.synthesized_thunks.values())
                 .cloned()
                 .collect::<Vec<_>>();
             for function in &functions {
@@ -6855,7 +6907,7 @@ impl TypeChecker {
         let functions = module
             .functions()
             .iter()
-            .chain(self.implicit_thunks.values())
+            .chain(self.synthesized_thunks.values())
             .cloned()
             .collect::<Vec<_>>();
         for function in &functions {
@@ -7300,7 +7352,7 @@ impl TypeChecker {
             Expression::Call(value) => {
                 let mut changed = self.refresh_expression_function_types(module, &value.callee)
                     | self.refresh_expression_function_types(module, &value.argument);
-                changed |= self.refresh_implicit_thunk_call(module, value);
+                changed |= self.refresh_block_argument_call(module, value);
                 changed |= self.refresh_effect_generic_call(module, value);
                 changed
             }
@@ -7375,7 +7427,7 @@ impl TypeChecker {
         call: &staple_syntax::CallExpression,
     ) -> bool {
         if self
-            .implicit_thunks
+            .synthesized_thunks
             .contains_key(&call.argument.syntax().id)
         {
             return false;
@@ -7495,12 +7547,12 @@ impl TypeChecker {
         }
     }
 
-    fn refresh_implicit_thunk_call(
+    fn refresh_block_argument_call(
         &mut self,
         module: &ResolvedModule,
         call: &staple_syntax::CallExpression,
     ) -> bool {
-        let Some(thunk) = self.implicit_thunks.get(&call.argument.syntax().id) else {
+        let Some(thunk) = self.synthesized_thunks.get(&call.argument.syntax().id) else {
             return false;
         };
         let Some(actual) = self.function_types.get(&thunk.id).cloned() else {
@@ -7570,7 +7622,7 @@ impl TypeChecker {
             // `<effect E>`) never settles through the fixpoint above — its
             // `function_types` entry stays the generic, uninstantiated
             // template forever. Backfilling from it here would overwrite the
-            // per-call-site instantiation that `refresh_implicit_thunk_call`
+            // per-call-site instantiation that `refresh_block_argument_call`
             // already resolved for this reference with that unresolved `E`.
             && resources.variable.is_none()
             && let Some(CheckedType::Function(function)) =
@@ -7589,7 +7641,7 @@ impl TypeChecker {
         match expression {
             // A nested function literal's own syntax nodes are recorded
             // separately, on its own pass over `module.functions()`. A `coro`
-            // body is recorded on its own implicit-thunk pass for the same
+            // body is recorded on its own synthesized-thunk pass for the same
             // reason: its effects are deferred, not the enclosing function's.
             Expression::Function(_) | Expression::Coro(_) | Expression::Resource(_) => {}
             Expression::Await(value) => self.record_expression_effects(
@@ -8234,6 +8286,22 @@ impl TypeChecker {
                 }
                 CheckedType::empty_product()
             }
+            Item::Break(item) if self.loop_contexts.is_empty() && self.inside_block_argument => {
+                self.diagnostics.push(Diagnostic::new(
+                    item.syntax.span.clone(),
+                    "`break` cannot leave a block argument",
+                ));
+                CheckedType::empty_product()
+            }
+            Item::Continue(item)
+                if self.loop_contexts.is_empty() && self.inside_block_argument =>
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    item.syntax.span.clone(),
+                    "`continue` cannot leave a block argument",
+                ));
+                CheckedType::empty_product()
+            }
             Item::Break(item) => {
                 let expected = self
                     .loop_contexts
@@ -8723,6 +8791,7 @@ impl TypeChecker {
         module: &ResolvedModule,
         product: &ProductExpression,
         expected: Option<&CheckedType>,
+        block_argument: bool,
     ) -> CheckedType {
         let expected_product = match expected {
             Some(CheckedType::Product(expected_product))
@@ -8799,6 +8868,7 @@ impl TypeChecker {
                     .find(|field| field.name.as_deref() == Some(name.as_str()))
                     .map(|field| &field.value_type)
             });
+            self.block_argument_context = block_argument;
             let value_type =
                 self.check_expression_expected(module, &element.value, expected_field_type);
             if self.did_return {
@@ -8875,6 +8945,7 @@ impl TypeChecker {
         module: &ResolvedModule,
         product: &ProductExpression,
         expected: Option<&CheckedType>,
+        block_argument: bool,
     ) -> CheckedType {
         if product.elements.iter().any(|element| element.named_spread) {
             self.diagnostics.push(Diagnostic::new(
@@ -8912,6 +8983,7 @@ impl TypeChecker {
                 let expected_field = destination
                     .and_then(|index| expected_product.elements.get(index))
                     .map(|field| &field.value_type);
+                self.block_argument_context = block_argument;
                 let value_type =
                     self.check_expression_expected(module, &element.value, expected_field);
                 let Some(destination) = destination else {
@@ -8941,6 +9013,7 @@ impl TypeChecker {
             let value_type = if element.spread {
                 self.check_expression(module, &element.value)
             } else {
+                self.block_argument_context = block_argument;
                 self.check_expression_expected(
                     module,
                     &element.value,
@@ -9225,6 +9298,22 @@ impl TypeChecker {
         expression: &Expression,
         expected: Option<&CheckedType>,
     ) -> CheckedType {
+        // Block-argument position applies to this expression only; its
+        // subexpressions start outside it unless they are re-marked.
+        let block_argument = std::mem::replace(&mut self.block_argument_context, false);
+        let result =
+            self.check_expression_in_position(module, expression, expected, block_argument);
+        self.block_argument_context = false;
+        result
+    }
+
+    fn check_expression_in_position(
+        &mut self,
+        module: &ResolvedModule,
+        expression: &Expression,
+        expected: Option<&CheckedType>,
+        block_argument: bool,
+    ) -> CheckedType {
         // The call chain's root callee, or the expression itself.
         let mut referenced = expression;
         if let Expression::Call(call) = expression {
@@ -9279,37 +9368,39 @@ impl TypeChecker {
         // annotation resolves to), so treat it exactly like "no expected type" rather
         // than letting it take the `Some(_)` branch of expected-type-driven logic below.
         let expected = expected.filter(|expected| **expected != CheckedType::Inferred);
-        if self.implicit_thunk_context
+        if block_argument
             && let Some(CheckedType::Function(callback)) = expected
             && is_empty_product_type(&callback.parameter)
         {
-            self.implicit_thunk_context = false;
-            // A thunk-ified callback argument (a `reaction`/`batch` body, and
-            // the like) is its own suspension boundary: it does not inherit an
-            // enclosing `coro` body's `await` permission.
-            let outer_suspension = std::mem::replace(&mut self.suspension_allowed, false);
+            // A bare block always becomes the callback, even when its value
+            // would itself be a compatible function; `({ … })` passes that
+            // value eagerly instead.
+            if let Expression::Block(_) = expression {
+                return self.check_block_argument(
+                    module,
+                    expression,
+                    erase_type_parameters(&callback.result),
+                );
+            }
+            // Anything else is passed as written. A value that would only fit
+            // as the callback's result gets a hint to brace it.
             let direct = self.check_expression(module, expression);
-            self.suspension_allowed = outer_suspension;
-            let mut matched = callback.clone();
-            if let CheckedType::Function(direct_function) = &direct
-                && matched.effects.variable.is_some()
-                && direct_function.effects.variable.is_some()
-                && matched.effects.variable != direct_function.effects.variable
+            if direct != CheckedType::Error
+                && !matches!(direct, CheckedType::Function(_))
+                && merge_types(direct.clone(), CheckedType::Function(callback.clone())).is_none()
+                && (can_coerce_type(&direct, &callback.result)
+                    || infer_type_parameters(&callback.result, &direct, &mut HashMap::new()))
             {
-                matched.effects = direct_function.effects.clone();
+                self.diagnostics.push(Diagnostic::new(
+                    expression.syntax().span.clone(),
+                    format!(
+                        "expected `{}`, found `{direct}`; wrap the argument in braces `{{ … }}` to pass it as a block argument",
+                        CheckedType::Function(callback.clone())
+                    ),
+                ));
+                return CheckedType::Error;
             }
-            if merge_types(direct.clone(), CheckedType::Function(matched)).is_some() {
-                self.implicit_thunk_context = true;
-                return direct;
-            }
-            let result_expected = erase_type_parameters(&callback.result);
-            let result = if result_expected == CheckedType::Inferred {
-                direct
-            } else {
-                self.check_expression_expected(module, expression, Some(&result_expected))
-            };
-            self.implicit_thunk_context = true;
-            return self.make_implicit_thunk(module, expression, result);
+            return direct;
         }
         // A product written for a `from` type is built against its product
         // representation, so field labels, designators, and field defaults
@@ -9320,6 +9411,7 @@ impl TypeChecker {
                 implicit_wrapper_representation(expected_type)
         {
             let representation = representation.clone();
+            self.block_argument_context = block_argument;
             let actual = self.check_expression_expected(module, expression, Some(&representation));
             if actual == CheckedType::Error || self.did_return {
                 return actual;
@@ -9507,12 +9599,12 @@ impl TypeChecker {
             Expression::Product(product)
                 if product.elements.iter().any(|element| element.designated) =>
             {
-                self.check_designated_product(module, product, expected)
+                self.check_designated_product(module, product, expected, block_argument)
             }
             Expression::Product(product)
                 if product.elements.iter().any(|element| element.named_spread) =>
             {
-                self.check_named_spread_product(module, product, expected)
+                self.check_named_spread_product(module, product, expected, block_argument)
             }
             // A plain one-element product `(e)` or `(name: e)` is `e`. Against
             // an expected multi-element product it initializes that product's
@@ -9537,6 +9629,7 @@ impl TypeChecker {
                             .all(|field| field.default.is_some()),
                     } =>
             {
+                self.block_argument_context = block_argument && !product.is_grouping();
                 self.check_expression_expected(module, &element.value, expected)
             }
             Expression::Product(product) => {
@@ -9603,6 +9696,7 @@ impl TypeChecker {
                         continue;
                     }
                     let index = elements.len();
+                    self.block_argument_context = block_argument && !product.is_grouping();
                     let value_type = self.check_expression_expected(
                         module,
                         &element.value,
@@ -10053,14 +10147,14 @@ impl TypeChecker {
                             } else {
                                 None
                             };
-                            let previous_thunk_context = self.implicit_thunk_context;
-                            self.implicit_thunk_context = !source.spread;
+                            let previous_thunk_context = self.block_argument_context;
+                            self.block_argument_context = !source.spread;
                             let mut actual = self.check_expression_expected(
                                 module,
                                 &source.argument,
                                 slot_expected.as_ref(),
                             );
-                            self.implicit_thunk_context = previous_thunk_context;
+                            self.block_argument_context = previous_thunk_context;
                             if source.spread {
                                 let operand = match &actual {
                                     CheckedType::Product(operand)
@@ -10131,13 +10225,13 @@ impl TypeChecker {
                                                 })
                                                 .collect(),
                                         });
-                                    self.implicit_thunk_context = false;
+                                    self.block_argument_context = false;
                                     actual = self.check_expression_expected(
                                         module,
                                         &source.argument,
                                         Some(&expected_operand),
                                     );
-                                    self.implicit_thunk_context = previous_thunk_context;
+                                    self.block_argument_context = previous_thunk_context;
                                 }
                                 let CheckedType::Product(operand) = actual else {
                                     return CheckedType::Error;
@@ -10382,10 +10476,11 @@ impl TypeChecker {
                     let trait_methods = trait_methods.as_slice();
                     if !trait_methods.is_empty() {
                         if matches!(call.argument.as_ref(), Expression::Block(_)) {
-                            let previous = self.implicit_thunk_context;
-                            self.implicit_thunk_context = true;
-                            let block_result = self.check_expression(module, &call.argument);
-                            self.implicit_thunk_context = previous;
+                            let block_result = self.check_block_argument_body(
+                                module,
+                                &call.argument,
+                                CheckedType::Inferred,
+                            );
                             let mut transformed = Vec::new();
                             for method in trait_methods {
                                 let Some(CheckedType::Function(root)) =
@@ -10436,8 +10531,11 @@ impl TypeChecker {
                                 }
                             }
                             if !transformed.is_empty() {
-                                let thunk_type =
-                                    self.make_implicit_thunk(module, &call.argument, block_result);
+                                let thunk_type = self.make_synthesized_thunk(
+                                    module,
+                                    &call.argument,
+                                    block_result,
+                                );
                                 let selected_type = self.resolve_trait_method_use(
                                     module,
                                     call.callee.syntax().id,
@@ -10625,6 +10723,11 @@ impl TypeChecker {
                             Expression::Product(product) => self
                                 .check_trait_call_product_argument(module, trait_methods, product)
                                 .unwrap_or_else(|| self.check_expression(module, &call.argument)),
+                            Expression::Block(_) => self.check_block_argument_body(
+                                module,
+                                &call.argument,
+                                CheckedType::Inferred,
+                            ),
                             _ => self.check_expression(module, &call.argument),
                         };
                         if self.did_return {
@@ -10673,7 +10776,7 @@ impl TypeChecker {
                                 }
                             }
                             if !transformed.is_empty() {
-                                let thunk_type = self.make_implicit_thunk(
+                                let thunk_type = self.make_synthesized_thunk(
                                     module,
                                     &call.argument,
                                     argument_type.clone(),
@@ -10756,19 +10859,9 @@ impl TypeChecker {
                                 );
                             }
                         }
-                        let has_direct_shape = trait_methods.iter().any(|method| {
-                            let Some(CheckedType::Function(function)) =
-                                self.trait_method_types.get(method)
-                            else {
-                                return false;
-                            };
-                            infer_type_parameters(
-                                &function.parameter,
-                                &argument_type,
-                                &mut HashMap::new(),
-                            )
-                        });
-                        if !has_direct_shape {
+                        // A bare block becomes the callback whenever a candidate takes
+                        // one, even if another candidate would take its value.
+                        if matches!(call.argument.as_ref(), Expression::Block(_)) {
                             let has_thunk_shape = trait_methods.iter().any(|method| {
                                 let Some(CheckedType::Function(function)) =
                                     self.trait_method_types.get(method)
@@ -10787,7 +10880,7 @@ impl TypeChecker {
                                     )
                             });
                             if has_thunk_shape {
-                                argument_type = self.make_implicit_thunk(
+                                argument_type = self.make_synthesized_thunk(
                                     module,
                                     &call.argument,
                                     argument_type.clone(),
@@ -11051,16 +11144,30 @@ impl TypeChecker {
                                 CheckedType::Error
                             }
                         }
+                    } else if argument_expected.is_none()
+                        && matches!(call.argument.as_ref(), Expression::Block(_))
+                        && matches!(&raw_callee_type, CheckedType::Function(function)
+                            if function.default.is_some() && default_chain_takes_callback(function))
+                    {
+                        // A defaulted callee picks the parameter a block fills
+                        // only after seeing its result, so check the block as a
+                        // thunk body now; the default-skipping path below
+                        // adapts it.
+                        self.check_block_argument_body(
+                            module,
+                            &call.argument,
+                            CheckedType::Inferred,
+                        )
                     } else {
-                        let previous = self.implicit_thunk_context;
-                        self.implicit_thunk_context = !call.spread;
+                        let previous = self.block_argument_context;
+                        self.block_argument_context = !call.spread;
                         let diagnostics_before = self.diagnostics.len();
                         let value = self.check_expression_expected(
                             module,
                             &call.argument,
                             argument_expected,
                         );
-                        self.implicit_thunk_context = previous;
+                        self.block_argument_context = previous;
                         // When the first slot rejects the argument, probe the
                         // whole parameter in an isolated checker. Probing only on
                         // this error path keeps successful calls from cloning the
@@ -11253,14 +11360,14 @@ impl TypeChecker {
                                     })
                                     .collect(),
                             });
-                            let previous_thunk_context = self.implicit_thunk_context;
-                            self.implicit_thunk_context = false;
+                            let previous_thunk_context = self.block_argument_context;
+                            self.block_argument_context = false;
                             let checked = self.check_expression_expected(
                                 module,
                                 &call.argument,
                                 Some(&expected_operand),
                             );
-                            self.implicit_thunk_context = previous_thunk_context;
+                            self.block_argument_context = previous_thunk_context;
                             checked
                         } else {
                             argument_type
@@ -11292,9 +11399,16 @@ impl TypeChecker {
                                     ))
                         };
                         let selected = 0;
-                        let should_thunk = !call.spread && callback_compatible(first);
+                        // A block the slot's expected type already thunked is
+                        // not wrapped again.
+                        let should_thunk = !call.spread
+                            && matches!(call.argument.as_ref(), Expression::Block(_))
+                            && !self
+                                .synthesized_thunks
+                                .contains_key(&call.argument.syntax().id)
+                            && callback_compatible(first);
                         let argument_type = if should_thunk {
-                            self.make_implicit_thunk(module, &call.argument, argument_type)
+                            self.make_synthesized_thunk(module, &call.argument, argument_type)
                         } else {
                             argument_type
                         };
@@ -11539,16 +11653,11 @@ impl TypeChecker {
                             }
                         }
                         while skipped.is_empty() {
-                            if can_coerce_type(&argument_type, &candidate.parameter)
-                                || infer_type_parameters(
-                                    &candidate.parameter,
-                                    &argument_type,
-                                    &mut HashMap::new(),
-                                )
-                            {
-                                break;
-                            }
-                            if let CheckedType::Function(callback) = candidate.parameter.as_ref()
+                            // A bare block becomes the callback before its value
+                            // is considered; nothing else is ever thunked.
+                            if matches!(call.argument.as_ref(), Expression::Block(_))
+                                && let CheckedType::Function(callback) =
+                                    candidate.parameter.as_ref()
                                 && is_empty_product_type(&callback.parameter)
                                 && (can_coerce_type(&argument_type, &callback.result)
                                     || infer_type_parameters(
@@ -11558,6 +11667,15 @@ impl TypeChecker {
                                     ))
                             {
                                 thunk = true;
+                                break;
+                            }
+                            if can_coerce_type(&argument_type, &candidate.parameter)
+                                || infer_type_parameters(
+                                    &candidate.parameter,
+                                    &argument_type,
+                                    &mut HashMap::new(),
+                                )
+                            {
                                 break;
                             }
                             let Some(default) = candidate.default.clone() else {
@@ -11576,7 +11694,7 @@ impl TypeChecker {
                         }
                         if !skipped.is_empty() {
                             let argument_type = if thunk {
-                                self.make_implicit_thunk(module, &call.argument, argument_type)
+                                self.make_synthesized_thunk(module, &call.argument, argument_type)
                             } else {
                                 argument_type
                             };
@@ -11692,16 +11810,16 @@ impl TypeChecker {
                         // The synthesized callee is not an argument position, so
                         // it must not be thunk-ified: a nullary call's expected
                         // callee has an empty-product parameter, which the
-                        // implicit-thunk rule below would otherwise mistake for
+                        // block-argument rule below would otherwise mistake for
                         // a `() -> T` callback.
-                        let previous_thunk_context = self.implicit_thunk_context;
-                        self.implicit_thunk_context = false;
+                        let previous_thunk_context = self.block_argument_context;
+                        self.block_argument_context = false;
                         raw_callee_type = self.check_expression_expected(
                             module,
                             &call.callee,
                             Some(&expected_callee),
                         );
-                        self.implicit_thunk_context = previous_thunk_context;
+                        self.block_argument_context = previous_thunk_context;
                     }
                     let callee_type = self.instantiate_function_use(
                         self.function_use_type(module, &call.callee, raw_callee_type.clone()),
@@ -12484,7 +12602,7 @@ impl TypeChecker {
         // Lower the body to an implicit nullary thunk so its deferred effect
         // row is inferred and converges separately from the enclosing
         // function; the row rides on the coroutine type, not the caller.
-        let mut deferred = match self.make_implicit_thunk(module, &body, body_result.clone()) {
+        let mut deferred = match self.make_synthesized_thunk(module, &body, body_result.clone()) {
             CheckedType::Function(function) => function.effects,
             _ => CheckedEffectSet::default(),
         };
@@ -12500,7 +12618,7 @@ impl TypeChecker {
             && declared.variable.is_none()
             && deferred.is_subset_of(declared)
             && let Some(thunk) = self
-                .implicit_thunks
+                .synthesized_thunks
                 .get(&body.syntax().id)
                 .map(|thunk| thunk.id)
         {
@@ -15659,7 +15777,7 @@ impl TypeChecker {
         self.coerce_expression_type(expression.syntax().id, actual, expected, span);
     }
 
-    fn make_implicit_thunk(
+    fn make_synthesized_thunk(
         &mut self,
         module: &ResolvedModule,
         expression: &Expression,
@@ -15669,11 +15787,11 @@ impl TypeChecker {
         self.next_implicit_function += 1;
         self.implicit_function_parents
             .insert(id, module.expression_function_owner(expression.syntax().id));
-        let captures = implicit_thunk_captures(module, expression);
+        let captures = synthesized_thunk_captures(module, expression);
         let function = ResolvedFunction {
             generics: None,
             id,
-            name: format!("__staple_implicit_thunk_{}", id.0),
+            name: format!("__staple_thunk_{}", id.0),
             binding_syntax: None,
             pattern: Pattern::Product(staple_syntax::ProductPattern {
                 slotted: false,
@@ -15694,7 +15812,7 @@ impl TypeChecker {
             track_caller: false,
             body: expression.clone(),
         };
-        self.implicit_thunks
+        self.synthesized_thunks
             .insert(expression.syntax().id, function);
 
         let previous_function = self.current_effect_function.replace(Some(id));
@@ -16888,7 +17006,7 @@ impl TypeChecker {
                 if let Some(default) = element.default.as_deref()
                     && self.checked_product_defaults.insert(default.syntax().id)
                 {
-                    if !implicit_thunk_captures(module, default).is_empty() {
+                    if !synthesized_thunk_captures(module, default).is_empty() {
                         self.diagnostics.push(Diagnostic::new(
                             default.syntax().span.clone(),
                             "a product field default cannot capture a local runtime value",
@@ -18348,7 +18466,7 @@ fn erase_type_parameters(value_type: &CheckedType) -> CheckedType {
 /// argument; enclosing (rigid) parameters inside function types are kept.
 /// The expectation for a call's argument. A parameter that is itself a function
 /// type keeps its parameters: a function-valued argument then decides between
-/// the callback and the implicit-thunk reading against the declared type.
+/// the callback and the block-argument reading against the declared type.
 fn erase_call_parameter(
     value_type: &CheckedType,
     solvable: &HashSet<TypeParameterId>,
@@ -20434,7 +20552,7 @@ fn expression_contains_assignment(expression: &Expression) -> bool {
     }
 }
 
-fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> Vec<SymbolId> {
+fn synthesized_thunk_captures(module: &ResolvedModule, expression: &Expression) -> Vec<SymbolId> {
     fn declare_pattern(
         module: &ResolvedModule,
         pattern: &Pattern,
@@ -20667,6 +20785,25 @@ fn peel_access_wrappers(value_type: &CheckedType) -> (CheckedType, Vec<CheckedTy
         }
     }
     (accessible, dereference)
+}
+
+/// Whether a curried function with defaults takes a nullary callback at its
+/// own parameter or at one reached by skipping defaults.
+fn default_chain_takes_callback(function: &CheckedFunctionType) -> bool {
+    let mut candidate = function;
+    loop {
+        if matches!(candidate.parameter.as_ref(), CheckedType::Function(callback)
+            if is_empty_product_type(&callback.parameter))
+        {
+            return true;
+        }
+        let (Some(_), CheckedType::Function(next)) =
+            (&candidate.default, candidate.result.as_ref())
+        else {
+            return false;
+        };
+        candidate = next;
+    }
 }
 
 fn is_empty_product_type(value_type: &CheckedType) -> bool {

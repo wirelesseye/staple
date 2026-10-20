@@ -205,19 +205,19 @@ fn function_definition<'a>(llvm: &'a str, name: &str) -> &'a str {
 }
 
 #[test]
-fn implicitly_thunks_call_arguments_and_preserves_callback_effects() {
+fn block_arguments_lower_as_callbacks_and_preserve_callback_effects() {
     let module = type_check(concat!(
         "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = <T, effect E> callback => callback ()\n",
         "let mut count = 0\n",
         "let first = evaluate { count = count + 1; count }\n",
-        "let second = evaluate count\n",
+        "let second = evaluate { count }\n",
     ));
 
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_root(&lower(&module))
-        .expect("implicit thunks should lower as ordinary callbacks");
-    assert!(llvm.contains("implicit_thunk"));
+        .expect("block arguments should lower as ordinary callbacks");
+    assert!(llvm.contains("__staple_thunk_"));
 }
 
 /// A generic `def` whose type parameter never appears in its signature has no
@@ -277,7 +277,7 @@ fn signals_and_scoped_reactions_type_check_and_lower() {
 }
 
 #[test]
-fn reactive_batches_type_check_and_lower_through_implicit_thunking() {
+fn reactive_batches_type_check_and_lower_through_block_arguments() {
     let module = type_check(concat!(
         "let signal count = 0\n",
         "batch { count = 1; count = 2; () }\n",
@@ -289,7 +289,7 @@ fn reactive_batches_type_check_and_lower_through_implicit_thunking() {
         .expect("reactive batches should lower");
     assert!(llvm.contains("__staple_batch_begin"));
     assert!(llvm.contains("__staple_batch_end"));
-    assert!(llvm.contains("implicit_thunk"));
+    assert!(llvm.contains("__staple_thunk_"));
     assert!(llvm.contains("__staple_executor_checkpoint"));
 }
 
@@ -367,24 +367,24 @@ fn derived_initializers_reject_independent_state_and_writes() {
 }
 
 #[test]
-fn implicitly_thunks_fixed_product_argument_positions() {
+fn block_arguments_fill_fixed_product_argument_positions() {
     let module = type_check(concat!(
         "def add_later: (I32, () -> I32) -> I32 = (left, right) => left + right ()\n",
-        "let implicit = add_later (40, 2)\n",
+        "let block = add_later (40, { 2 })\n",
         "let direct = add_later (40, () => 2)\n",
     ));
 
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_root(&lower(&module))
-        .expect("fixed product slots should lower implicit thunks independently");
+        .expect("fixed product slots should lower block arguments independently");
 }
 
 #[test]
-fn implicit_thunking_is_not_a_general_value_coercion() {
+fn block_arguments_are_not_a_general_value_coercion() {
     let diagnostics = TypeChecker::new()
         .check(resolve("let callback: () -> I32 = 42\n"))
-        .expect_err_diagnostics("non-call contexts must not implicitly thunk values");
+        .expect_err_diagnostics("non-call contexts must not thunk values");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -393,35 +393,188 @@ fn implicit_thunking_is_not_a_general_value_coercion() {
 }
 
 #[test]
-fn direct_trait_method_matches_beat_implicit_thunking() {
+fn trait_dispatch_selects_by_whether_the_argument_is_a_block() {
     let module = type_check(concat!(
         "trait Direct T { choose: T -> I32 }\n",
         "trait Lazy T { choose: (() -> T) -> I32 }\n",
         "impl Direct I32 { choose = value => value }\n",
-        "impl Lazy I32 { choose = callback => callback () }\n",
-        "let answer = choose 42\n",
+        "impl Lazy I32 { choose = callback => callback () + 1 }\n",
+        "let direct = choose 42\n",
+        "let lazy = choose { 42 }\n",
     ));
-    let answer = module.syntax().items.last().expect("answer binding");
-    let Item::Binding(answer) = answer else {
-        panic!("expected answer binding");
-    };
-    assert_eq!(
-        module.type_of_expression(answer.value.as_ref().unwrap().syntax().id),
-        Some(&CheckedType::I32),
-    );
+    for item in &module.syntax().items {
+        let Item::Binding(binding) = item else {
+            continue;
+        };
+        assert_eq!(
+            module.type_of_expression(binding.value.as_ref().unwrap().syntax().id),
+            Some(&CheckedType::I32),
+        );
+    }
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("both trait candidates should lower");
 }
 
 #[test]
-fn trait_methods_fall_back_to_implicit_thunking() {
+fn trait_methods_take_block_arguments_but_not_bare_values() {
     let module = type_check(concat!(
         "trait Lazy T { force: (() -> T) -> T }\n",
         "impl Lazy I32 { force = callback => callback () }\n",
-        "let answer = force 42\n",
+        "let answer = force { 42 }\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_root(&lower(&module))
-        .expect("trait dispatch should use thunking when no direct match exists");
+        .expect("trait dispatch should accept a block argument");
+
+    TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Lazy T { force: (() -> T) -> T }\n",
+            "impl Lazy I32 { force = callback => callback () }\n",
+            "let answer = force 42\n",
+        )))
+        .expect_err_diagnostics("a bare value is not a block argument");
+}
+
+fn rejected_messages(source: &str) -> Vec<String> {
+    TypeChecker::new()
+        .check(resolve(source))
+        .expect_err_diagnostics("the program should be rejected")
+        .into_iter()
+        .map(|diagnostic| diagnostic.message)
+        .collect()
+}
+
+#[test]
+fn unbraced_values_are_not_block_arguments() {
+    for source in [
+        concat!(
+            "def twice: (() -> ()) -> () = f => { f (); f () }\n",
+            "def noop: () -> () = () => ()\n",
+            "twice (noop ())\n",
+        ),
+        concat!(
+            "def evaluate: (() -> I32) -> I32 = f => f ()\n",
+            "let answer = evaluate 42\n",
+        ),
+    ] {
+        let messages = rejected_messages(source);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("wrap the argument in braces")),
+            "{messages:?}"
+        );
+    }
+}
+
+#[test]
+fn block_arguments_always_thunk_and_grouping_opts_out() {
+    // The block's value is a compatible function, but the braces still make
+    // the block itself the callback, whose result must then be `()`.
+    rejected_messages(concat!(
+        "def twice: (() -> ()) -> () = f => { f (); f () }\n",
+        "def make: () -> (() -> ()) = () => () => ()\n",
+        "twice { make () }\n",
+    ));
+    // Grouping parentheses evaluate the block eagerly and pass its value.
+    let module = type_check(concat!(
+        "def twice: (() -> ()) -> () = f => { f (); f () }\n",
+        "def make: () -> (() -> ()) = () => () => ()\n",
+        "twice ({ make () })\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("an eagerly computed callback should lower");
+    rejected_messages(concat!(
+        "def evaluate: (() -> I32) -> I32 = f => f ()\n",
+        "let answer = evaluate ({ 2 })\n",
+    ));
+}
+
+#[test]
+fn only_the_argument_itself_is_in_block_argument_position() {
+    // The `match` fills the callback slot, so its block arms are ordinary
+    // blocks rather than callbacks.
+    rejected_messages(concat!(
+        "def add_later: (I32, () -> I32) -> I32 = (left, right) => left + right ()\n",
+        "let flag = True\n",
+        "let answer = add_later (40, match flag { True() => { 1 }, False() => { 2 } })\n",
+    ));
+}
+
+#[test]
+fn block_arguments_fill_slots_but_not_pipe_receivers() {
+    let module = type_check(concat!(
+        "def direct: (I64; () -> I64) -> I64 = (value; callback) => value + callback ()\n",
+        "let slotted: I64 = direct 2 { 3 }\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("slot block arguments should lower");
+
+    // A pipe receiver is evaluated before the call, so it is never deferred.
+    rejected_messages(concat!(
+        "def force: (() -> I64) -> I64 = callback => callback ()\n",
+        "let piped: I64 = { 3 } |> force\n",
+    ));
+}
+
+#[test]
+fn return_inside_a_block_argument_returns_from_the_callback() {
+    let module = type_check(concat!(
+        "def evaluate: (() -> I32) -> I32 = f => f ()\n",
+        "def pick: Bool -> I32 = flag => {\n",
+        "    let value = evaluate { if flag { return 1 }; 2 }\n",
+        "    value + 10\n",
+        "}\n",
+        "let early = pick True\n",
+        "let late = pick False\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("returns inside block arguments should lower");
+
+    // The `return` is checked against the callback's `I32`, not the
+    // enclosing function's `String`.
+    let messages = rejected_messages(concat!(
+        "def evaluate: (() -> I32) -> I32 = f => f ()\n",
+        "def pick: Bool -> String = flag => {\n",
+        "    evaluate { if flag { return \"early\" }; 2 }\n",
+        "    \"late\"\n",
+        "}\n",
+    ));
+    assert!(
+        messages.iter().any(|message| message.contains("I32")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn break_and_continue_cannot_leave_a_block_argument() {
+    for item in ["break", "continue"] {
+        let messages = rejected_messages(&format!(
+            "def run: (() -> ()) -> () = f => f ()\n\
+             def spin: () -> () = () => {{\n\
+                 loop {{ run {{ {item} }}; break }}\n\
+             }}\n"
+        ));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains(&format!("`{item}` cannot leave a block argument"))),
+            "{messages:?}"
+        );
+    }
+    type_check(concat!(
+        "def run: (() -> ()) -> () = f => f ()\n",
+        "run { loop { break } }\n",
+    ));
 }
 
 #[test]
@@ -6683,7 +6836,7 @@ fn pipes_into_local_functions_parameters_and_closures() {
         "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = <T, effect E> callback => callback ()\n",
         "def thunked = () => {\n",
         "    let shift = value: I32 => value + offset\n",
-        "    evaluate (1 |> shift)\n",
+        "    evaluate { 1 |> shift }\n",
         "}\n",
     ));
     let context = Context::create();
@@ -15438,7 +15591,7 @@ fn slotted_trait_calls_contextualize_each_ordinary_slot() {
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_root(&lower(&module))
-        .expect("trait slots apply literal context and implicit thunking independently");
+        .expect("trait slots apply literal context and block arguments independently");
 }
 
 #[test]

@@ -335,7 +335,7 @@ impl<'a> InitializerBinder<'a> {
         else {
             self.report(
                 origin,
-                format!("implicit thunk {} has no lowered template", function.0),
+                format!("synthesized thunk {} has no lowered template", function.0),
             );
             return;
         };
