@@ -34,12 +34,12 @@ struct Document {
     semantic_tokens: Vec<SemanticToken>,
     hover_entries: Vec<HoverEntry>,
     definition_entries: Vec<DefinitionEntry>,
-    last_successful: Option<SuccessfulAnalysis>,
+    last_analysis: Option<Analysis>,
     last_resolved: Option<ResolvedDefinitions>,
 }
 
 #[derive(Clone)]
-struct SuccessfulAnalysis {
+struct Analysis {
     source: String,
     completion_index: CompletionIndex,
     semantic_entries: Vec<SemanticEntry>,
@@ -288,13 +288,13 @@ impl Server {
                     {
                         return Some(Vec::new());
                     }
-                    let successful = document.last_successful.as_ref()?;
+                    let previous = document.last_analysis.as_ref()?;
                     let previous_offset =
-                        TextChange::between(&successful.source, &document.text).old_offset(offset);
+                        TextChange::between(&previous.source, &document.text).old_offset(offset);
                     let completion_receiver = completion_receiver(&document.text, offset).map(
                         |(receiver, qualified, name)| {
                             (
-                                TextChange::between(&successful.source, &document.text)
+                                TextChange::between(&previous.source, &document.text)
                                     .old_offset(receiver),
                                 qualified,
                                 name,
@@ -303,9 +303,9 @@ impl Server {
                     );
                     Some(match completion_receiver {
                         Some((receiver, true, name)) => {
-                            let indexed = successful.completion_index.qualifier_items(receiver);
+                            let indexed = previous.completion_index.qualifier_items(receiver);
                             if indexed.is_empty() {
-                                successful
+                                previous
                                     .completion_index
                                     .named_qualifier_items(name, previous_offset)
                             } else {
@@ -313,16 +313,16 @@ impl Server {
                             }
                         }
                         Some((receiver, false, name)) => {
-                            let indexed = successful.completion_index.method_items(receiver);
+                            let indexed = previous.completion_index.method_items(receiver);
                             if indexed.is_empty() {
-                                successful
+                                previous
                                     .completion_index
                                     .named_method_items(name, previous_offset)
                             } else {
                                 indexed
                             }
                         }
-                        None => successful.completion_index.items(previous_offset),
+                        None => previous.completion_index.items(previous_offset),
                     })
                 })
                 .unwrap_or_else(crate::lsp::completion::keywords);
@@ -539,7 +539,7 @@ impl Server {
                         semantic_tokens: Vec::new(),
                         hover_entries: Vec::new(),
                         definition_entries: Vec::new(),
-                        last_successful: None,
+                        last_analysis: None,
                         last_resolved: None,
                     },
                 );
@@ -611,9 +611,13 @@ impl Server {
         // id the program assigned this module, so hover/definition/semantic
         // walks over the surface tree query the resolver with matching ids.
         let mut rebased_module: Option<staple_syntax::Module> = None;
-        let mut analysis_succeeded = false;
+        // Resolution and checking recover from errors, so a module with
+        // errors is still analyzed; only the first failing phase's
+        // diagnostics are published, since later ones mostly follow from it.
+        let mut analyzed = false;
+        let mut analysis_has_errors = false;
         if let Some(module) = &parsed {
-            let mut loader = ProgramLoader::new();
+            let mut loader = ProgramLoader::new().recovering_imports();
             if let Some(stdlib) = &self.stdlib {
                 loader = loader.with_standard_library_root(stdlib);
             }
@@ -629,27 +633,20 @@ impl Server {
                 false => loader.load_source_at(&path, &text),
             };
             match loaded {
-                Err(error) => {
-                    let diagnostic_uri = error
-                        .source
-                        .as_deref()
-                        .and_then(path_to_uri)
-                        .unwrap_or_else(|| uri.clone());
-                    let diagnostic_text = source_for(&diagnostic_uri, uri, &text);
-                    grouped
-                        .entry(diagnostic_uri)
-                        .or_default()
-                        .push(lsp_diagnostic(
-                            &diagnostic_text,
-                            error.range.unwrap_or(0..0),
-                            error.message,
-                        ));
-                }
-                Ok(program) => match NameResolver::new().resolve_program(program) {
-                    Err(diagnostics) => {
-                        add_compiler_diagnostics(&mut grouped, diagnostics, uri, &text)
+                Err(error) => add_load_diagnostic(&mut grouped, error, uri, &text),
+                Ok(program) => {
+                    let import_errors = program.import_errors().to_vec();
+                    let loading_failed = !import_errors.is_empty();
+                    for error in import_errors {
+                        add_load_diagnostic(&mut grouped, error, uri, &text);
                     }
-                    Ok(resolved) => {
+                    let (resolved, diagnostics) =
+                        NameResolver::new().resolve_program_recovering(program);
+                    let resolution_failed = loading_failed || !diagnostics.is_empty();
+                    if !loading_failed {
+                        add_compiler_diagnostics(&mut grouped, diagnostics, uri, &text);
+                    }
+                    if let Some(resolved) = resolved {
                         definition_path = normalized_source_path(&path);
                         rebased_module =
                             rebased_surface(&resolved, &definition_path, module, &text);
@@ -661,29 +658,28 @@ impl Server {
                             None,
                         ));
                         resolved_for_tokens = Some(resolved.clone());
-                        match TypeChecker::new().check(resolved) {
-                            Ok(typed) => {
-                                let surface = rebased_module.as_ref().unwrap_or(module);
-                                definition_entries = Some(definition::entries_at_path(
-                                    &definition_path,
-                                    surface,
-                                    typed.resolved(),
-                                    Some(&typed),
-                                ));
-                                hover_entries =
-                                    hover::entries_at_path(&definition_path, surface, &typed);
-                                let completion_index =
-                                    crate::lsp::completion::index(surface, &typed);
-                                typed_for_tokens = Some(typed);
-                                document_completion = Some(completion_index);
-                                analysis_succeeded = true;
-                            }
-                            Err(diagnostics) => {
-                                add_compiler_diagnostics(&mut grouped, diagnostics, uri, &text)
-                            }
+                        let (typed, diagnostics) = TypeChecker::new().check_recovering(resolved);
+                        analysis_has_errors = resolution_failed || !diagnostics.is_empty();
+                        if !resolution_failed {
+                            add_compiler_diagnostics(&mut grouped, diagnostics, uri, &text);
+                        }
+                        if let Some(typed) = typed {
+                            let surface = rebased_module.as_ref().unwrap_or(module);
+                            definition_entries = Some(definition::entries_at_path(
+                                &definition_path,
+                                surface,
+                                typed.resolved(),
+                                Some(&typed),
+                            ));
+                            hover_entries =
+                                hover::entries_at_path(&definition_path, surface, &typed);
+                            let completion_index = crate::lsp::completion::index(surface, &typed);
+                            typed_for_tokens = Some(typed);
+                            document_completion = Some(completion_index);
+                            analyzed = true;
                         }
                     }
-                },
+                }
             }
         } else if let Err(error) = staple_syntax::parse(&text) {
             grouped.entry(uri.clone()).or_default().push(lsp_diagnostic(
@@ -713,20 +709,23 @@ impl Server {
         } else {
             document.definition_entries.clear();
         }
-        if analysis_succeeded {
+        if analyzed {
+            if analysis_has_errors && let Some(previous) = &document.last_analysis {
+                hover_entries = merge_hover_entries(&text, hover_entries, previous);
+            }
             document.semantic_tokens = semantic::encode(&text, &current_semantic);
             document.hover_entries = hover_entries.clone();
-            document.last_successful = Some(SuccessfulAnalysis {
+            document.last_analysis = Some(Analysis {
                 source: text.clone(),
                 completion_index: document_completion
-                    .expect("successful analysis builds completion data"),
+                    .expect("type-checked analysis builds completion data"),
                 semantic_entries: current_semantic,
                 hover_entries,
             });
-        } else if let Some(successful) = &document.last_successful {
-            let merged_semantic = merge_semantic_entries(&text, current_semantic, successful);
+        } else if let Some(previous) = &document.last_analysis {
+            let merged_semantic = merge_semantic_entries(&text, current_semantic, previous);
             document.semantic_tokens = semantic::encode(&text, &merged_semantic);
-            document.hover_entries = remap_hover_entries(&text, successful);
+            document.hover_entries = remap_hover_entries(&text, previous);
         } else {
             document.semantic_tokens = semantic::encode(&text, &current_semantic);
             document.hover_entries.clear();
@@ -774,21 +773,21 @@ impl Server {
 fn merge_semantic_entries(
     source: &str,
     current: Vec<SemanticEntry>,
-    successful: &SuccessfulAnalysis,
+    previous: &Analysis,
 ) -> Vec<SemanticEntry> {
-    let change = TextChange::between(&successful.source, source);
+    let change = TextChange::between(&previous.source, source);
     let mut merged = current
         .into_iter()
         .map(|entry| ((entry.start, entry.end), entry))
         .collect::<HashMap<_, _>>();
-    for entry in &successful.semantic_entries {
+    for entry in &previous.semantic_entries {
         if entry.token_type > semantic::PROPERTY {
             continue;
         }
         let Some((start, end)) = change.remap(entry.start, entry.end) else {
             continue;
         };
-        if successful.source.get(entry.start..entry.end) != source.get(start..end) {
+        if previous.source.get(entry.start..entry.end) != source.get(start..end) {
             continue;
         }
         merged.insert(
@@ -837,15 +836,40 @@ fn render_hover_markdown(entries: &[&HoverEntry]) -> String {
         .join("\n\n---\n\n")
 }
 
-fn remap_hover_entries(source: &str, successful: &SuccessfulAnalysis) -> Vec<HoverEntry> {
-    let change = TextChange::between(&successful.source, source);
-    successful
+/// Replaces the hover entries a module with errors could only type as
+/// `<error>` with the previous analysis's entries for the same unchanged text.
+fn merge_hover_entries(
+    source: &str,
+    current: Vec<HoverEntry>,
+    previous: &Analysis,
+) -> Vec<HoverEntry> {
+    let remapped = remap_hover_entries(source, previous);
+    let mut merged = current
+        .into_iter()
+        .filter(|entry| {
+            !entry.signature.contains("<error>")
+                || !remapped
+                    .iter()
+                    .any(|previous| previous.range == entry.range)
+        })
+        .collect::<Vec<_>>();
+    for entry in remapped {
+        if !merged.iter().any(|current| current.range == entry.range) {
+            merged.push(entry);
+        }
+    }
+    merged
+}
+
+fn remap_hover_entries(source: &str, previous: &Analysis) -> Vec<HoverEntry> {
+    let change = TextChange::between(&previous.source, source);
+    previous
         .hover_entries
         .iter()
         .filter_map(|entry| {
             let (start, end) = change.remap(entry.range.start, entry.range.end)?;
             let range = start..end;
-            (successful.source.get(entry.range.clone())? == source.get(range.clone())?).then(|| {
+            (previous.source.get(entry.range.clone())? == source.get(range.clone())?).then(|| {
                 HoverEntry {
                     range,
                     signature: entry.signature.clone(),
@@ -894,8 +918,8 @@ fn remap_definition_entries(source: &str, resolved: &ResolvedDefinitions) -> Vec
 
 /// "Import `name` from `module`" quick fixes for the unknown-name diagnostics
 /// the client passed in `params.context`. Candidate modules come from the last
-/// successful analysis's cross-module index, so this needs one prior clean
-/// compile of the file's package.
+/// analysis's cross-module index, so this needs one prior analysis of the
+/// file's package to have got as far as type checking.
 fn import_code_actions(
     uri: &Uri,
     document: &Document,
@@ -906,7 +930,7 @@ fn import_code_actions(
     {
         return Vec::new();
     }
-    let Some(successful) = document.last_successful.as_ref() else {
+    let Some(previous) = document.last_analysis.as_ref() else {
         return Vec::new();
     };
 
@@ -919,7 +943,7 @@ fn import_code_actions(
         let Some(name) = diagnostic.message.split('`').nth(1) else {
             continue;
         };
-        let modules = successful.completion_index.modules_exporting(name);
+        let modules = previous.completion_index.modules_exporting(name);
         let preferred = modules.len() == 1;
         for module_path in modules {
             let title = format!("Import `{name}` from `{module_path}`");
@@ -1060,6 +1084,25 @@ impl TextChange {
             None
         }
     }
+}
+
+fn add_load_diagnostic(
+    grouped: &mut HashMap<Uri, Vec<lsp_types::Diagnostic>>,
+    error: staple_compiler::LoadDiagnostic,
+    entry_uri: &Uri,
+    entry_text: &str,
+) {
+    let uri = error
+        .source
+        .as_deref()
+        .and_then(path_to_uri)
+        .unwrap_or_else(|| entry_uri.clone());
+    let source = source_for(&uri, entry_uri, entry_text);
+    grouped.entry(uri).or_default().push(lsp_diagnostic(
+        &source,
+        error.range.unwrap_or(0..0),
+        error.message,
+    ));
 }
 
 fn add_compiler_diagnostics(
@@ -1389,7 +1432,7 @@ mod tests {
         let new = "def good = () => 1\nbroken ???\ngood\n";
         let declaration = old.find("good").unwrap();
         let reference = old.rfind("good").unwrap();
-        let successful = SuccessfulAnalysis {
+        let previous = Analysis {
             source: old.to_owned(),
             completion_index: CompletionIndex::default(),
             semantic_entries: vec![
@@ -1415,7 +1458,7 @@ mod tests {
             }],
         };
 
-        let semantics = merge_semantic_entries(new, Vec::new(), &successful);
+        let semantics = merge_semantic_entries(new, Vec::new(), &previous);
         assert_eq!(semantics.len(), 2);
         assert!(
             semantics
@@ -1428,11 +1471,11 @@ mod tests {
                 .all(|entry| &new[entry.start..entry.end] == "good")
         );
 
-        let hover = remap_hover_entries(new, &successful);
+        let hover = remap_hover_entries(new, &previous);
         assert_eq!(hover.len(), 1);
         assert_eq!(&new[hover[0].range.clone()], "good");
         assert_eq!(hover[0].signature, "def good: () -> I32");
-        assert_eq!(hover[0].module, successful.hover_entries[0].module);
+        assert_eq!(hover[0].module, previous.hover_entries[0].module);
     }
 
     #[test]
@@ -1683,7 +1726,7 @@ mod tests {
         );
 
         let semantics = &document
-            .last_successful
+            .last_analysis
             .as_ref()
             .expect("analysis succeeded")
             .semantic_entries;
@@ -1846,6 +1889,87 @@ mod tests {
             Some("helpers"),
             "without a manifest the module is named by its module-root-relative path"
         );
+    }
+
+    #[test]
+    fn analyzes_a_module_with_errors() {
+        let root = std::env::temp_dir().join(format!("staple-lsp-errors-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("main.sta");
+        std::fs::write(&path, "").unwrap();
+        let path = std::fs::canonicalize(path).unwrap();
+        let uri = path_to_uri(&path).unwrap();
+        let header = "def double = (x: I32) => x * 2\n";
+        for (error, expected) in [
+            ("let other = missing\n", "unknown"),
+            ("let text: String = double 21\n", "String"),
+            ("use nowhere.thing\n", "could not resolve module"),
+        ] {
+            let source = format!("{header}{error}double 4\n");
+            let (connection, client) = Connection::memory();
+            let mut server = Server {
+                connection,
+                documents: HashMap::from([(
+                    uri.clone(),
+                    Document {
+                        text: source.clone(),
+                        version: 1,
+                        ..Document::default()
+                    },
+                )]),
+                published_by_root: HashMap::new(),
+                stdlib: Some(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .parent()
+                        .unwrap()
+                        .join("stdlib"),
+                ),
+            };
+            server.analyze(&uri).unwrap();
+
+            let Message::Notification(notification) = client.receiver.try_recv().unwrap() else {
+                panic!("expected diagnostics")
+            };
+            let published: PublishDiagnosticsParams =
+                serde_json::from_value(notification.params).unwrap();
+            assert_eq!(published.diagnostics.len(), 1, "{:?}", published.diagnostics);
+            assert!(
+                published.diagnostics[0].message.contains(expected),
+                "{:?}",
+                published.diagnostics
+            );
+
+            let document = &server.documents[&uri];
+            let reference = source.rfind("double").unwrap();
+            let hover = document
+                .hover_entries
+                .iter()
+                .find(|entry| entry.range.start == reference)
+                .unwrap_or_else(|| panic!("no hover for `double`: {:?}", document.hover_entries));
+            assert!(hover.signature.contains("I32"), "{}", hover.signature);
+            let definition = document
+                .definition_entries
+                .iter()
+                .find(|entry| entry.range.start == reference)
+                .expect("definition entry for `double`");
+            assert_eq!(
+                &source[definition.targets[0].selection_range.clone()],
+                "double"
+            );
+            let analysis = document.last_analysis.as_ref().expect("analysis");
+            assert!(analysis.semantic_entries.iter().any(|entry| {
+                entry.start == reference && entry.token_type == semantic::FUNCTION
+            }));
+            assert!(
+                analysis
+                    .completion_index
+                    .items(source.len())
+                    .iter()
+                    .any(|item| item.label == "double")
+            );
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -2292,7 +2416,7 @@ mod tests {
 
         // A clean analysis first, so the cross-module index is available.
         server.analyze(&uri).unwrap();
-        assert!(server.documents[&uri].last_successful.is_some());
+        assert!(server.documents[&uri].last_analysis.is_some());
 
         // Now introduce a reference to an item that lives in a sibling module.
         let broken = "pub mod\n\ndef main = () => greet ()\n";
@@ -2406,7 +2530,7 @@ mod tests {
         };
 
         server.analyze(&uri).unwrap();
-        assert!(server.documents[&uri].last_successful.is_some());
+        assert!(server.documents[&uri].last_analysis.is_some());
 
         let broken = "\n\nprintln \"Hello, world!\"\n";
         server.documents.get_mut(&uri).unwrap().text = broken.to_owned();
@@ -2515,7 +2639,7 @@ mod tests {
             ),
         };
         server.analyze(&uri).unwrap();
-        assert!(server.documents[&uri].last_successful.is_some());
+        assert!(server.documents[&uri].last_analysis.is_some());
         for (id, suffix, trigger, expect_method) in [
             (1, " |>", true, true),
             (2, " |> la", false, true),
@@ -2589,23 +2713,23 @@ mod tests {
                 ),
             };
             server.analyze(&uri).unwrap();
-            assert!(server.documents[&uri].last_successful.is_some());
+            assert!(server.documents[&uri].last_analysis.is_some());
             let typed = format!("{head}    {receiver} |>\n{tail}");
             server.documents.get_mut(&uri).unwrap().text = typed.clone();
             server.analyze(&uri).unwrap();
             let document = &server.documents[&uri];
-            let successful = document.last_successful.as_ref().unwrap();
+            let previous = document.last_analysis.as_ref().unwrap();
             let offset = typed.find("|>").unwrap() + 2;
-            let change = TextChange::between(&successful.source, &document.text);
+            let change = TextChange::between(&previous.source, &document.text);
             let (receiver_end, _, name) = completion_receiver(&document.text, offset).unwrap();
             assert!(
-                successful
+                previous
                     .completion_index
                     .method_items(change.old_offset(receiver_end))
                     .is_empty(),
                 "the receiver is new text",
             );
-            let labels = successful
+            let labels = previous
                 .completion_index
                 .named_method_items(name, change.old_offset(offset))
                 .into_iter()

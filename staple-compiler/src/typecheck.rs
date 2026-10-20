@@ -2930,15 +2930,52 @@ impl TypeChecker {
     /// harnesses use for spawned test threads even though a typical `main`
     /// thread does not.
     pub fn check(self, module: ResolvedModule) -> Result<TypedModule, Vec<Diagnostic>> {
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(move || self.check_inner(module))
-            .expect("type-checking thread should spawn")
-            .join()
+        self.check_on_thread(module, false)
             .expect("type-checking should not panic")
+            .map(|(typed, _)| typed)
     }
 
-    fn check_inner(mut self, module: ResolvedModule) -> Result<TypedModule, Vec<Diagnostic>> {
+    /// Type-checks past errors, for tooling that wants types for code that
+    /// does not compile. The diagnostics are the ones [`Self::check`]
+    /// reports. A module with type errors skips ownership checking and
+    /// coroutine planning, so its ownership facts and coroutine plans are
+    /// empty. Returns no module if recovery fails, in which case the
+    /// diagnostics come from a fail-fast check.
+    pub fn check_recovering(
+        self,
+        module: ResolvedModule,
+    ) -> (Option<TypedModule>, Vec<Diagnostic>) {
+        let (checker, fallback) = (self.clone(), module.clone());
+        let checked = self
+            .check_on_thread(module, true)
+            .or_else(|_| checker.check_on_thread(fallback, false));
+        match checked {
+            Ok(Ok((typed, diagnostics))) => (Some(typed), diagnostics),
+            Ok(Err(diagnostics)) => (None, diagnostics),
+            Err(_) => (None, Vec::new()),
+        }
+    }
+
+    fn check_on_thread(
+        self,
+        module: ResolvedModule,
+        recovering: bool,
+    ) -> std::thread::Result<Result<(TypedModule, Vec<Diagnostic>), Vec<Diagnostic>>> {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || self.check_inner(module, recovering))
+            .expect("type-checking thread should spawn")
+            .join()
+    }
+
+    /// Checks `module`, returning the typed module with the diagnostics of
+    /// the first phase that reported any. Without `recovering`, that phase's
+    /// diagnostics are returned as `Err` instead.
+    fn check_inner(
+        mut self,
+        module: ResolvedModule,
+        recovering: bool,
+    ) -> Result<(TypedModule, Vec<Diagnostic>), Vec<Diagnostic>> {
         self.next_implicit_function = module.functions().len();
         self.io_type = module
             .type_declarations()
@@ -3105,15 +3142,15 @@ impl TypeChecker {
         self.collect_type_representations(&module);
         #[cfg(debug_assertions)]
         self.validate_scheme_storage();
-        if !self.diagnostics.is_empty() {
-            // A type is resolved once per use, so errors on a shared declaration
-            // can repeat verbatim.
-            let mut unique: Vec<Diagnostic> = Vec::with_capacity(self.diagnostics.len());
-            for diagnostic in self.diagnostics {
-                if !unique.contains(&diagnostic) {
-                    unique.push(diagnostic);
-                }
+        // A type is resolved once per use, so errors on a shared declaration
+        // can repeat verbatim.
+        let mut unique: Vec<Diagnostic> = Vec::with_capacity(self.diagnostics.len());
+        for diagnostic in std::mem::take(&mut self.diagnostics) {
+            if !unique.contains(&diagnostic) {
+                unique.push(diagnostic);
             }
+        }
+        if !recovering && !unique.is_empty() {
             return Err(unique);
         }
 
@@ -3183,17 +3220,26 @@ impl TypeChecker {
             derived_evaluators: self.derived_evaluators,
             coroutine_plans: HashMap::new(),
         };
-        let (ownership, ownership_diagnostics) = crate::ownership::OwnershipChecker::check(&typed);
-        if !ownership_diagnostics.is_empty() {
-            return Err(ownership_diagnostics);
+        if !unique.is_empty() {
+            return Ok((typed, unique));
         }
+        let (ownership, ownership_diagnostics) = crate::ownership::OwnershipChecker::check(&typed);
         let mut typed = TypedModule { ownership, ..typed };
+        if !ownership_diagnostics.is_empty() {
+            return match recovering {
+                true => Ok((typed, ownership_diagnostics)),
+                false => Err(ownership_diagnostics),
+            };
+        }
         let (plans, plan_diagnostics) = crate::coroutine_lower::plan(&typed);
         if !plan_diagnostics.is_empty() {
-            return Err(plan_diagnostics);
+            return match recovering {
+                true => Ok((typed, plan_diagnostics)),
+                false => Err(plan_diagnostics),
+            };
         }
         typed.coroutine_plans = plans;
-        Ok(typed)
+        Ok((typed, Vec::new()))
     }
 
     fn collect_type_declarations(&mut self, module: &ResolvedModule) {
@@ -8173,15 +8219,17 @@ impl TypeChecker {
                     .filter(|value_type| **value_type != CheckedType::Inferred);
                 let value_type =
                     self.check_expression_expected(module, &item.value, concrete_expected);
-                if !self.did_return && self.return_reachable {
-                    self.return_contributions
-                        .last_mut()
-                        .expect("return contribution inside function")
-                        .push(ReturnContribution {
-                            syntax: Some(item.value.syntax().id),
-                            span: item.value.syntax().span.clone(),
-                            value_type,
-                        });
+                // Name resolution rejects a `return` outside a function, but
+                // a recovering check still visits it.
+                if !self.did_return
+                    && self.return_reachable
+                    && let Some(contributions) = self.return_contributions.last_mut()
+                {
+                    contributions.push(ReturnContribution {
+                        syntax: Some(item.value.syntax().id),
+                        span: item.value.syntax().span.clone(),
+                        value_type,
+                    });
                     self.did_return = true;
                 }
                 CheckedType::empty_product()

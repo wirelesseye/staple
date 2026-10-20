@@ -155,9 +155,16 @@ pub struct Program {
     initialization_order: Vec<ModuleId>,
     /// The next syntax identity no loaded node uses.
     next_syntax_id: usize,
+    /// Imports a recovering loader could not resolve and left unbound.
+    import_errors: Vec<LoadDiagnostic>,
 }
 
 impl Program {
+    /// Imports a [`ProgramLoader::recovering_imports`] loader left unbound.
+    pub fn import_errors(&self) -> &[LoadDiagnostic] {
+        &self.import_errors
+    }
+
     pub(crate) fn single(module: Module) -> Self {
         let visibility = module.visibility;
         // A module's own node is the last one its parse numbers.
@@ -202,6 +209,7 @@ impl Program {
             children: vec![HashMap::new()],
             initialization_order: vec![ModuleId(0)],
             next_syntax_id,
+            import_errors: Vec::new(),
         };
         program.collect_single_submodules(ModuleId(0));
         program.resolve_single_inline_imports();
@@ -930,6 +938,8 @@ pub struct ProgramLoader {
     standard_library_syntax: Option<ModuleId>,
     standard_library_cinterop: Option<ModuleId>,
     standard_library_io: Option<ModuleId>,
+    /// Collects unresolvable imports instead of failing on the first one.
+    import_errors: Option<Vec<LoadDiagnostic>>,
 }
 
 impl ProgramLoader {
@@ -939,6 +949,14 @@ impl ProgramLoader {
 
     pub fn with_standard_library_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.standard_library_root = Some(root.into());
+        self
+    }
+
+    /// Loads past imports that do not resolve, leaving them unbound, for
+    /// tooling that analyzes code being edited. The loaded program lists them
+    /// in [`Program::import_errors`].
+    pub fn recovering_imports(mut self) -> Self {
+        self.import_errors = Some(Vec::new());
         self
     }
 
@@ -1772,10 +1790,12 @@ impl ProgramLoader {
                     }
                 }
                 Err(_) if self.can_defer_inline_import(module, &declaration) => {}
-                Err(error) => return Err(error),
+                Err(error) => self.import_error(error)?,
             }
         }
-        self.load_root_qualified_references(module, &root)?;
+        if let Err(error) = self.load_root_qualified_references(module, &root) {
+            self.import_error(error)?;
+        }
         let children = self.children[module.0]
             .values()
             .copied()
@@ -1784,6 +1804,17 @@ impl ProgramLoader {
             self.load_imports(child, &root)?;
         }
         Ok(())
+    }
+
+    /// Records an unresolvable import when recovering, or fails with it.
+    fn import_error(&mut self, error: LoadDiagnostic) -> Result<(), LoadDiagnostic> {
+        match &mut self.import_errors {
+            Some(errors) => {
+                errors.push(error);
+                Ok(())
+            }
+            None => Err(error),
+        }
     }
 
     fn resolve_dotted_import(
@@ -2249,6 +2280,7 @@ impl ProgramLoader {
             children: self.children,
             initialization_order,
             next_syntax_id: self.next_syntax_id,
+            import_errors: self.import_errors.unwrap_or_default(),
         }
     }
 }

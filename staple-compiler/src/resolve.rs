@@ -1404,19 +1404,60 @@ impl NameResolver {
     /// included), and some callers (notably test harnesses) run on threads
     /// with a smaller default stack than a typical `main` thread provides.
     pub fn resolve_program(self, program: Program) -> Result<ResolvedModule, Vec<Diagnostic>> {
-        std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
-            .spawn(move || self.resolve_program_inner(program))
-            .expect("name resolution thread should spawn")
-            .join()
+        self.resolve_on_thread(program, false)
             .expect("name resolution should not panic")
+            .map(|(resolved, _)| resolved)
     }
 
+    /// Resolves `program` past its errors, for tooling that wants semantic
+    /// facts about code that does not compile. The diagnostics are the ones
+    /// [`Self::resolve_program`] reports; errors that only follow from them
+    /// are not repeated. Returns no module if recovery fails, in which case
+    /// the diagnostics come from a fail-fast resolution.
+    pub fn resolve_program_recovering(
+        self,
+        program: Program,
+    ) -> (Option<ResolvedModule>, Vec<Diagnostic>) {
+        let fallback = program.clone();
+        let resolved = self
+            .resolve_on_thread(program, true)
+            .or_else(|_| Self::new().resolve_on_thread(fallback, false));
+        match resolved {
+            Ok(Ok((resolved, diagnostics))) => (Some(resolved), diagnostics),
+            Ok(Err(diagnostics)) => (None, diagnostics),
+            Err(_) => (None, Vec::new()),
+        }
+    }
+
+    fn resolve_on_thread(
+        self,
+        program: Program,
+        recovering: bool,
+    ) -> std::thread::Result<Result<(ResolvedModule, Vec<Diagnostic>), Vec<Diagnostic>>> {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || self.resolve_program_inner(program, recovering))
+            .expect("name resolution thread should spawn")
+            .join()
+    }
+
+    /// Resolves `program`, returning the module with the diagnostics of the
+    /// first phase that reported any. Without `recovering`, that phase's
+    /// diagnostics are returned as `Err` instead.
     fn resolve_program_inner(
         mut self,
         program: Program,
-    ) -> Result<ResolvedModule, Vec<Diagnostic>> {
-        let (mut program, mut macro_analysis) = crate::macro_expand::expand_program(program)?;
+        recovering: bool,
+    ) -> Result<(ResolvedModule, Vec<Diagnostic>), Vec<Diagnostic>> {
+        let (mut program, mut macro_analysis, expansion_diagnostics) =
+            crate::macro_expand::expand_program_recovering(program, recovering)?;
+        let mut reported = None;
+        if !expansion_diagnostics.is_empty() {
+            if !recovering {
+                return Err(expansion_diagnostics);
+            }
+            reported = Some(expansion_diagnostics);
+        }
         let mut next_syntax_id = macro_analysis.next_syntax_id;
         self.compile_time_items = std::mem::take(&mut macro_analysis.compile_time_items);
         let find_module = |dotted: &str| {
@@ -1602,7 +1643,10 @@ impl NameResolver {
         self.validate_alias_companions(&program);
 
         if !self.diagnostics.is_empty() {
-            return Err(self.diagnostics);
+            if !recovering {
+                return Err(self.diagnostics);
+            }
+            reported.get_or_insert(std::mem::take(&mut self.diagnostics));
         }
         self.functions.sort_by_key(|function| function.id.0);
         let external_symbols = program
@@ -1771,11 +1815,14 @@ impl NameResolver {
         };
         let analysis = InitializationAnalyzer::new(&resolved).analyze();
         if !analysis.diagnostics.is_empty() {
-            return Err(analysis.diagnostics);
+            if !recovering {
+                return Err(analysis.diagnostics);
+            }
+            reported.get_or_insert(analysis.diagnostics);
         }
         resolved.checked_initialization_symbols = analysis.checked_symbols;
         resolved.checked_initialization_reads = analysis.checked_reads;
-        Ok(resolved)
+        Ok((resolved, reported.unwrap_or_default()))
     }
 
     /// Rejects a reference to a `std.source` caller intrinsic outside the body

@@ -1417,8 +1417,23 @@ pub fn expand_macros(program: Program) -> Result<Program, Vec<Diagnostic>> {
 }
 
 pub(crate) fn expand_program(
-    mut program: Program,
+    program: Program,
 ) -> Result<(Program, MacroAnalysis), Vec<Diagnostic>> {
+    let (program, analysis, diagnostics) = expand_program_recovering(program, false)?;
+    if diagnostics.is_empty() {
+        Ok((program, analysis))
+    } else {
+        Err(diagnostics)
+    }
+}
+
+/// Expands `program` and returns it alongside every expansion diagnostic.
+/// With `recovering`, invalid macro definitions do not stop expansion, so the
+/// result always carries a program; otherwise they fail fast with `Err`.
+pub(crate) fn expand_program_recovering(
+    mut program: Program,
+    recovering: bool,
+) -> Result<(Program, MacroAnalysis, Vec<Diagnostic>), Vec<Diagnostic>> {
     let mut expander = MacroExpander::new(&program);
     expander.validate_definitions();
     expander.validate_compile_time_code();
@@ -1435,7 +1450,7 @@ pub(crate) fn expand_program(
             }
         }
     }
-    if !expander.diagnostics.is_empty() {
+    if !recovering && !expander.diagnostics.is_empty() {
         return Err(expander.diagnostics);
     }
 
@@ -1548,11 +1563,8 @@ pub(crate) fn expand_program(
             }
         }
     }
-    if expander.diagnostics.is_empty() {
-        Ok((program, expander.analysis()))
-    } else {
-        Err(expander.diagnostics)
-    }
+    let analysis = expander.analysis();
+    Ok((program, analysis, expander.diagnostics))
 }
 
 struct MacroExpander {
