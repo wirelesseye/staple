@@ -9559,8 +9559,28 @@ impl TypeChecker {
                 let Some(function_id) = module.function_for(function.syntax.id) else {
                     return CheckedType::Error;
                 };
+                // A result parameter from the callee's scheme is not rigid
+                // inside this lambda: the lambda's body determines it, and the
+                // enclosing call unifies it from the checked function type.
+                // Keeping it as the body expectation would make the body's
+                // own trait calls try to solve a foreign parameter.
+                let merge_expected = match expected {
+                    Some(CheckedType::Function(expected_function))
+                        if type_parameter_ids(&expected_function.result).iter().any(|id| {
+                            !self
+                                .active_generic_parameters
+                                .iter()
+                                .any(|parameters| parameters.contains(id))
+                        }) =>
+                    {
+                        let mut relaxed = expected_function.clone();
+                        relaxed.result = Box::new(CheckedType::Inferred);
+                        Some(CheckedType::Function(relaxed))
+                    }
+                    expected => expected.cloned(),
+                };
                 if !self.checked_functions.contains(&function_id)
-                    && let Some(CheckedType::Function(expected)) = expected
+                    && let Some(CheckedType::Function(expected)) = &merge_expected
                     && let Some(current) = self.function_types.get(&function_id).cloned()
                     && let Some(CheckedType::Function(merged)) = merge_types(
                         CheckedType::Function(current),
@@ -11544,24 +11564,6 @@ impl TypeChecker {
                                 &mut substitutions,
                             );
                         }
-                        let CheckedType::Function(instantiated_function) = substitute_type(
-                            CheckedType::Function(function.clone()),
-                            &substitutions,
-                        ) else {
-                            unreachable!()
-                        };
-                        let CheckedType::Product(product) =
-                            instantiated_function.parameter.as_ref()
-                        else {
-                            unreachable!()
-                        };
-                        let product = product.clone();
-                        let CheckedType::Function(instantiated_original) =
-                            substitute_type(CheckedType::Function(original), &substitutions)
-                        else {
-                            unreachable!()
-                        };
-                        let original = instantiated_original;
                         let mut root_callee = call.callee.as_ref();
                         for _ in 1..consumed_calls {
                             let Expression::Call(previous) = root_callee else {
@@ -11569,10 +11571,6 @@ impl TypeChecker {
                             };
                             root_callee = previous.callee.as_ref();
                         }
-                        // Slot filling instantiates the full function without
-                        // passing through instantiate_function_use. Check the
-                        // root scheme against that full type, including bounds
-                        // inferred by a later slot of a partial application.
                         let root_symbol =
                             module.symbol_for(root_callee.syntax().id).or_else(|| {
                                 let function = self.function_origin(module, root_callee)?;
@@ -11599,13 +11597,48 @@ impl TypeChecker {
                                     _ => None,
                                 }
                             });
-                        if let Some(scheme) = root_scheme {
+                        // Slot filling instantiates the full function without
+                        // passing through instantiate_function_use. Resolve the
+                        // projections its bounds determine before later slots
+                        // are checked against the residual parameter type.
+                        let normalize = |checker: &Self, value_type: CheckedType| {
+                            match &root_scheme {
+                                Some(scheme) => checker.normalize_instantiated_projections(
+                                    &scheme.trait_bounds,
+                                    &scheme.body,
+                                    value_type,
+                                ),
+                                None => value_type,
+                            }
+                        };
+                        let CheckedType::Function(instantiated_function) = normalize(
+                            self,
+                            substitute_type(CheckedType::Function(function.clone()), &substitutions),
+                        ) else {
+                            unreachable!()
+                        };
+                        let CheckedType::Product(product) =
+                            instantiated_function.parameter.as_ref()
+                        else {
+                            unreachable!()
+                        };
+                        let product = product.clone();
+                        let CheckedType::Function(instantiated_original) = normalize(
+                            self,
+                            substitute_type(CheckedType::Function(original), &substitutions),
+                        ) else {
+                            unreachable!()
+                        };
+                        let original = instantiated_original;
+                        // Check the root scheme against the full type, including
+                        // bounds inferred by a later slot of a partial application.
+                        if let Some(scheme) = &root_scheme {
                             self.expression_schemes
                                 .entry(root_callee.syntax().id)
                                 .or_insert_with(|| scheme.clone());
                             self.check_instantiated_bounds(
-                                scheme.trait_bounds,
-                                scheme.subtype_bounds,
+                                scheme.trait_bounds.clone(),
+                                scheme.subtype_bounds.clone(),
                                 &scheme.body,
                                 &CheckedType::Function(original.clone()),
                                 root_callee.syntax().span.clone(),
@@ -15242,7 +15275,36 @@ impl TypeChecker {
             return instantiated;
         }
         let mut substitutions = HashMap::new();
-        if !infer_type_parameters(template, &instantiated, &mut substitutions) {
+        let mut inferred =
+            infer_type_parameters(template, &instantiated, &mut substitutions);
+        if !inferred
+            && let (CheckedType::Function(template), CheckedType::Function(instantiated)) =
+                (template, &instantiated)
+        {
+            // A partially applied function has fewer parameter slots than the
+            // scheme template, but its result still determines the parameters
+            // the projections need. Try each half on its own before giving up.
+            let mut from_result = HashMap::new();
+            if infer_type_parameters(
+                template.result.as_ref(),
+                instantiated.result.as_ref(),
+                &mut from_result,
+            ) {
+                substitutions = from_result;
+                inferred = true;
+            } else {
+                let mut from_parameter = HashMap::new();
+                if infer_type_parameters(
+                    template.parameter.as_ref(),
+                    instantiated.parameter.as_ref(),
+                    &mut from_parameter,
+                ) {
+                    substitutions = from_parameter;
+                    inferred = true;
+                }
+            }
+        }
+        if !inferred {
             return instantiated;
         }
         let mut projections = HashMap::new();
@@ -15669,6 +15731,13 @@ impl TypeChecker {
         receiver_type: CheckedType,
         expected: Option<&CheckedType>,
     ) -> CheckedType {
+        let scheme = match &raw_type {
+            CheckedType::Forall(scheme) => Some(scheme.as_ref().clone()),
+            _ => match self.symbol_types.get(&symbol) {
+                Some(CheckedType::Forall(scheme)) => Some(scheme.as_ref().clone()),
+                _ => None,
+            },
+        };
         let raw_type = raw_type.scheme_body().clone();
         let CheckedType::Function(function) = raw_type.clone() else {
             return CheckedType::Error;
@@ -15698,9 +15767,17 @@ impl TypeChecker {
         if let Some(expected) = expected {
             infer_type_parameters_for_expected(&function.result, expected, &mut substitutions);
         }
-        let CheckedType::Function(instantiated_function) =
-            substitute_type(CheckedType::Function(function.clone()), &substitutions)
-        else {
+        let instantiated =
+            substitute_type(CheckedType::Function(function.clone()), &substitutions);
+        let instantiated = match &scheme {
+            Some(scheme) => self.normalize_instantiated_projections(
+                &scheme.trait_bounds,
+                &scheme.body,
+                instantiated,
+            ),
+            None => instantiated,
+        };
+        let CheckedType::Function(instantiated_function) = instantiated else {
             unreachable!()
         };
         let CheckedType::Product(instantiated_product) = instantiated_function.parameter.as_ref()

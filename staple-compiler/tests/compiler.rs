@@ -10343,6 +10343,39 @@ fn rejects_invalid_associated_type_uses_and_conflicting_impls() {
 }
 
 #[test]
+fn infers_unannotated_lambdas_against_normalized_iterator_projections() {
+    // Regression test: a juxtaposed pipe stage fills the iterator slot first,
+    // but the unannotated lambda in the next slot used to be checked against
+    // the still-projected `Iterator.Item Iter` instead of the solved element
+    // type, so its body could not resolve the operator's trait arguments.
+    let module = type_check(concat!(
+        "use std.iterator.(IntoIterator, Iterator, IterStep)\n",
+        "type Map S Out = wrap (iter: S, step: move S -> IterStep (S, Out))\n",
+        "impl<S, Out> Iterator (Map S Out) {\n",
+        "  type Item = Out\n",
+        "  next = move Map (iter, step) => match step iter {\n",
+        "    IterStep.Done rest => IterStep.Done (Map.<S, Out> (iter: rest, step: step)),\n",
+        "    IterStep.Yield (item, rest) => IterStep.Yield (item, Map.<S, Out> (iter: rest, step: step)),\n",
+        "  }\n",
+        "}\n",
+        "impl<S, Out> IntoIterator (Map S Out) {\n",
+        "  type Iter = Map S Out\n",
+        "  into_iterator = move iterator => iterator\n",
+        "}\n",
+        "def map = <Iter, B where Iterator Iter>\n",
+        "  (move iter: Iter; f: move Iterator.Item Iter -> B) => Map Iter B :: {\n",
+        "  let step = move it: Iter => IterStep (Iter, B) :: match Iterator.next it {\n",
+        "    IterStep.Done rest => IterStep.Done rest,\n",
+        "    IterStep.Yield (item, rest) => IterStep.Yield (f item, rest),\n",
+        "  }\n",
+        "  Map.<Iter, B> (iter: iter, step: step)\n",
+        "}\n",
+        "let doubled: Map (Range I32) I32 = (0 .. 3) |> map (x => x * 2)\n",
+    ));
+    lower(&module);
+}
+
+#[test]
 fn resolves_associated_type_projections() {
     let module = type_check(concat!(
         "trait Container T { type Element; first: T -> Element }\n",
