@@ -1555,7 +1555,7 @@ fn parses_metadata_aware_macro_calls_losslessly() {
 
 #[test]
 fn parses_modifier_sequences_in_structural_macro_products() {
-    let source = "macro collect = body: Braced (Separated (Sequence Modifier, Ident String, Optional Type) Comma) => quote {}\n";
+    let source = "macro collect = body: Braced (Separated (Sequence Modifier, Ident String, Option Type) Comma) => quote {}\n";
     let root = parse(source).expect("modifier-prefixed structural products should parse");
     assert_eq!(root.text(), source);
 }

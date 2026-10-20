@@ -1888,7 +1888,6 @@ impl NameResolver {
             "CallExpr",
             "StringExpr",
             "Sequence",
-            "Optional",
             "Separated",
             "Comma",
             "Parenthesized",
@@ -6835,7 +6834,7 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         "Bracketed" => Some("<Contents> Contents -> Bracketed Contents"),
         "Braced" => Some("<Contents> Contents -> Braced Contents"),
         "TypeDeclarationItem" => Some(
-            "(kind: TypeDeclarationKind, name: Ident String, name_spelling: String, declared_type: Type, type_parameters: Sequence (Ident String), underlying: Optional Type) -> TypeDeclarationItem",
+            "(kind: TypeDeclarationKind, name: Ident String, name_spelling: String, declared_type: Type, type_parameters: Sequence (Ident String), underlying: Option Type) -> TypeDeclarationItem",
         ),
         "AliasBody" => Some("Type -> AliasBody Type"),
         "WrapperBody" => Some("(Visibility, Type) -> WrapperBody (Visibility, Type)"),

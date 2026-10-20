@@ -2680,6 +2680,14 @@ impl MacroExpander {
                 }
                 result
             }
+            // `(value)` is `value`, as it is at run time.
+            Expression::Product(product)
+                if product.elements.len() == 1
+                    && product.elements[0].name.is_none()
+                    && !product.elements[0].spread =>
+            {
+                self.check_compile_expression(module, &product.elements[0].value, environment, None)
+            }
             Expression::Product(product) => CompileType::Product(
                 product
                     .elements
@@ -3519,14 +3527,14 @@ impl MacroExpander {
             }) {
                 self.diagnostics.push(Diagnostic::new(
                     definition.declaration.syntax.span.clone(),
-                    "`Optional` and slotted product syntax shapes may only appear inside delimited contents",
+                    "`Option` and slotted product syntax shapes may only appear inside delimited contents",
                 ));
             }
             validate_top_level_sequence(definition, &mut self.diagnostics);
             if definition.parameters.iter().any(invalid_raw_syntax_shape) {
                 self.diagnostics.push(Diagnostic::new(
                     definition.declaration.syntax.span.clone(),
-                    "opaque `Syntax` may be a top-level argument or the entire contents of a delimiter, but cannot be partitioned by `Sequence`, `Separated`, `Optional`, or product shapes",
+                    "opaque `Syntax` may be a top-level argument or the entire contents of a delimiter, but cannot be partitioned by `Sequence`, `Separated`, `Option`, or product shapes",
                 ));
             }
             if let (Some(annotation), Some(body)) = (
@@ -8472,7 +8480,7 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
             if let Some(element) = sequence_meta_type(ty) {
                 return Some(MetaType::Sequence(Box::new(element)));
             }
-            if let Some(element) = applied_meta_type(application, "Optional") {
+            if let Some(element) = applied_meta_type(application, "Option") {
                 return Some(MetaType::Optional(Box::new(element)));
             }
             if let Some(element) = applied_meta_type(application, "Sequence") {
@@ -9887,7 +9895,7 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
         MetaType::FatArrow => "FatArrow".to_owned(),
         MetaType::SlottedProduct(elements) => format_meta_elements(elements, "; "),
         MetaType::Product(elements) => format_meta_elements(elements, ", "),
-        MetaType::Optional(element) => format!("Optional {}", format_meta_type(element)),
+        MetaType::Optional(element) => format!("Option {}", format_meta_type(element)),
         MetaType::Sequence(element) => format!("Sequence {}", format_meta_type(element)),
         MetaType::Nominal(name, arguments) => {
             arguments.iter().fold(name.clone(), |text, argument| {
@@ -10108,7 +10116,11 @@ fn compile_constructor_type(name: &str, argument: CompileType) -> CompileType {
             }
             _ => CompileType::Meta(MetaType::Sequence(Box::new(MetaType::SyntaxNode))),
         },
-        "Some" | "None" => CompileType::Named("Optional".to_owned()),
+        "Some" => match compile_type_as_meta(&argument) {
+            Some(meta) => CompileType::Meta(MetaType::Optional(Box::new(meta))),
+            None => CompileType::Named("Option".to_owned()),
+        },
+        "None" => CompileType::Named("Option".to_owned()),
         "Ok" => CompileType::Result(
             Box::new(match argument {
                 CompileType::Product(mut elements) if elements.len() == 1 => elements.remove(0),
@@ -10189,6 +10201,15 @@ fn compile_types_compatible(actual: &CompileType, expected: &CompileType) -> boo
                     ))
                 || (*expected == MetaType::Pattern
                     && matches!(actual, MetaType::BindingPattern | MetaType::NominalPattern))
+                || matches!((actual, expected), (MetaType::Optional(actual), MetaType::Optional(expected))
+                if compile_types_compatible(
+                    &CompileType::Meta(actual.as_ref().clone()),
+                    &CompileType::Meta(expected.as_ref().clone()),
+                ))
+        }
+        // `None`, or a `Some` whose payload is not syntax, is still an `Option`.
+        (CompileType::Named(actual), CompileType::Meta(MetaType::Optional(_))) => {
+            actual == "Option"
         }
         (CompileType::Product(actual), CompileType::Product(expected)) => {
             actual.len() == expected.len()
@@ -10201,9 +10222,6 @@ fn compile_types_compatible(actual: &CompileType, expected: &CompileType) -> boo
             compile_types_compatible(ap, ep) && compile_types_compatible(ar, er)
         }
         (CompileType::Named(actual), CompileType::Named(expected)) => actual == expected,
-        (CompileType::Result(ao, ae), CompileType::Result(eo, ee)) => {
-            compile_types_compatible(ao, eo) && compile_types_compatible(ae, ee)
-        }
         _ => actual == expected,
     }
 }
@@ -10509,7 +10527,7 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
         CompileType::Meta(MetaType::Optional(_)) => {
             ["None", "Some"].iter().all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name)))
         }
-        CompileType::Named(name) if name == "Optional" => {
+        CompileType::Named(name) if name == "Option" => {
             ["None", "Some"].iter().all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name)))
         }
         CompileType::Result(_, error) => {
@@ -11213,7 +11231,6 @@ fn type_contains_syntax(ty: &Type) -> bool {
                 | "Ident"
                 | "CallExpr"
                 | "Sequence"
-                | "Optional"
                 | "Separated"
                 | "Comma"
                 | "Equals"
