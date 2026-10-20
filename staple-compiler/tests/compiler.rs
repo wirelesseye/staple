@@ -10429,6 +10429,20 @@ fn resolves_iterator_projections_named_only_in_a_function_body() {
 }
 
 #[test]
+fn infers_generic_wrapper_constructor_with_a_function_field() {
+    // Regression test: the callee type lookup unwrapped the constructor's
+    // `Forall` scheme to its body before collecting the parameters a call may
+    // infer, so a function-typed field kept `S` generic and rejected the
+    // concrete argument.
+    let module = type_check(concat!(
+        "type W S = wrap (state: S, step: S -> S)\n",
+        "def inc: I32 -> I32 = x => x + 1\n",
+        "let w: W I32 = W (state: 5, step: inc)\n",
+    ));
+    lower(&module);
+}
+
+#[test]
 fn resolves_associated_type_projections() {
     let module = type_check(concat!(
         "trait Container T { type Element; first: T -> Element }\n",

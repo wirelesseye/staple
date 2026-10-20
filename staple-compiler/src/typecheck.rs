@@ -11202,7 +11202,11 @@ impl TypeChecker {
                             CheckedType::Function(_) => match call.callee.as_ref() {
                                 Expression::Name(name) => module
                                     .symbol_for(name.syntax.id)
-                                    .and_then(|symbol| self.symbol_value_type(symbol))
+                                    // Keep the `Forall` wrapper: `symbol_value_type`
+                                    // unwraps constructor schemes to their body,
+                                    // which hides the parameters this call still
+                                    // has to infer from its argument.
+                                    .and_then(|symbol| self.symbol_types.get(&symbol))
                                     .and_then(|value_type| match value_type {
                                         CheckedType::Forall(scheme) => {
                                             Some(scheme.type_parameter_ids().into_iter().collect())
