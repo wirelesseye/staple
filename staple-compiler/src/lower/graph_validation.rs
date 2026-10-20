@@ -1584,7 +1584,7 @@ pub(crate) mod tests {
             match kind {
                 LoweredInstanceDependencyKind::DerivedEvaluator => evaluator_bound = true,
                 LoweredInstanceDependencyKind::ReactiveCallback
-                | LoweredInstanceDependencyKind::ImplicitThunkArgument => callback_bound = true,
+                | LoweredInstanceDependencyKind::BlockArgument => callback_bound = true,
                 _ => {}
             }
         }

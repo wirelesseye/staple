@@ -141,7 +141,7 @@ pub(crate) enum ArtifactUseSite {
     /// The instantiation adapter a polymorphic value's use-site coercion
     /// builds its closure from.
     InstantiationAdapter(ExpressionId),
-    /// Descriptor-bound entry for an implicit thunk argument.
+    /// Descriptor-bound entry for a block argument.
     DescriptorBoundThunk {
         call: LoweredCallId,
         argument: usize,
@@ -166,7 +166,7 @@ pub(crate) enum ArtifactUseSite {
     /// An indexed (`MutateIndex`) assignment's materialized base temporary,
     /// dropped after the call.
     MutateIndexTemporary(ItemId),
-    /// An implicit thunk argument's closure environment finalizer. Emission
+    /// a block argument's closure environment finalizer. Emission
     /// builds the thunk's closure over the current scope when it evaluates the
     /// argument, and installs the finalizer under the same gate as a fresh
     /// callable value.

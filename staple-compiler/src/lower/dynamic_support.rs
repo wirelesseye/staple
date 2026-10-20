@@ -1303,7 +1303,7 @@ mod tests {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let program = codegen_corpus()
             .iter()
-            .find(|program| program.name == "dynamic_implicit_thunks")
+            .find(|program| program.name == "dynamic_synthesized_thunks")
             .unwrap();
         let CorpusSource::Inline(source) = program.source else {
             panic!("thunk regression is inline");

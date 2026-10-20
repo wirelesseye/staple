@@ -1225,7 +1225,7 @@ impl<'a> LoweredWalker<'a> {
         Ok(())
     }
 
-    /// Requests the closure-environment finalizer of one implicit thunk
+    /// Requests the closure-environment finalizer of one synthesized thunk
     /// argument. Emission builds the thunk's closure over the current scope
     /// when the argument evaluates and installs the finalizer under the same
     /// gate as a fresh callable value: a non-empty environment with some
@@ -1260,7 +1260,7 @@ impl<'a> LoweredWalker<'a> {
                 else {
                     return Err(vec![Diagnostic::new(
                         origin.span.clone(),
-                        "implicit thunk argument has no lowered template".to_string(),
+                        "block argument has no lowered template".to_string(),
                     )]);
                 };
                 let request = InstanceResolutionRequest {

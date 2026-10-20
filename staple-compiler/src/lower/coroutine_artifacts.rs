@@ -212,12 +212,12 @@ pub(super) fn expand_coroutine_codes(
 /// The concrete type of one frame-binding symbol.
 ///
 /// `coroutine_lower` collects frame bindings through call arguments, so a
-/// binding inside an implicit-thunk argument (a reaction, batch, or `until`
+/// binding inside an block argument (a reaction, batch, or `until`
 /// block, a derived initializer, or a block argument) is a frame binding too:
 /// the emitter lays out a frame cell for it and conditionally drops that
 /// never-initialized cell on the cancel unwind. The symbol is bound in the
 /// nested thunk's own instance, not in the coroutine body, so the search
-/// descends through the bound implicit-thunk instances, the same nesting
+/// descends through the bound block-argument thunk instances, the same nesting
 /// `coroutine_lower` recurses through, and stops at nested coroutine bodies.
 fn frame_binding_type(
     program: &LoweredProgram,
@@ -244,7 +244,7 @@ fn frame_binding_type(
                 .functions
                 .get(record.template)
                 .is_some_and(|function| {
-                    function.class.implicit_thunk && !function.class.coroutine_body
+                    function.class.synthesized_thunk && !function.class.coroutine_body
                 });
             if !nested_thunk {
                 continue;

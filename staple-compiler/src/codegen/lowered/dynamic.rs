@@ -1385,7 +1385,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         ) else {
             return Err(Diagnostic::new(
                 span.clone(),
-                "missing implicit thunk instance",
+                "missing synthesized thunk instance",
             ));
         };
         let instance = *instance;
@@ -1394,7 +1394,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .instance(instance)
             .and_then(|record| record.body.as_ref())
             .cloned()
-            .ok_or_else(|| Diagnostic::new(span.clone(), "missing implicit thunk body"))?;
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing synthesized thunk body"))?;
         let runtime = self
             .view
             .instance_runtime_order(instance)
@@ -1491,7 +1491,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .collect(),
                 ..Default::default()
             };
-            // An implicit thunk inherits its enclosing function's declared
+            // A synthesized thunk inherits its enclosing function's declared
             // bounds, so its dictionaries are that environment's prefix.
             let stored = self
                 .view

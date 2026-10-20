@@ -82,7 +82,7 @@ pub(crate) enum LoweredBindingSite {
     Call(LoweredCallId),
     /// A first-class callable value's target or closure construction.
     CallableValue(LoweredCallableValueId),
-    /// An implicit thunk adapted into one call argument.
+    /// A synthesized thunk adapted into one call argument.
     CallArgumentThunk {
         call: LoweredCallId,
         argument: usize,
@@ -2421,7 +2421,7 @@ impl<'a> BodyCloner<'a> {
                     },
                     argument.thunk,
                     &original.origin,
-                    LoweredInstanceDependencyKind::ImplicitThunkArgument,
+                    LoweredInstanceDependencyKind::BlockArgument,
                 );
             }
         }
@@ -3018,7 +3018,7 @@ impl<'a> BodyCloner<'a> {
         else {
             self.diagnostics.push(Diagnostic::new(
                 origin.span.clone(),
-                format!("implicit thunk {} has no lowered template", function.0),
+                format!("synthesized thunk {} has no lowered template", function.0),
             ));
             return;
         };
@@ -5764,7 +5764,7 @@ impl<'a> BodyValidator<'a> {
     ) -> Vec<LoweredInstanceDependencyKind> {
         match site {
             LoweredBindingSite::CallArgumentThunk { .. } => {
-                vec![LoweredInstanceDependencyKind::ImplicitThunkArgument]
+                vec![LoweredInstanceDependencyKind::BlockArgument]
             }
             LoweredBindingSite::Index(_)
             | LoweredBindingSite::Interpolation { .. }

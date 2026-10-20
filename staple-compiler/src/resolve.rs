@@ -5411,7 +5411,7 @@ impl NameResolver {
                 // A coroutine body is a suspension-permitting scope that does
                 // not inherit the enclosing loop. It is not a function
                 // boundary for name resolution: outer locals it mentions are
-                // captured, exactly as for the implicit thunk it lowers to.
+                // captured, exactly as for the synthesized thunk it lowers to.
                 //
                 // `resolve_block` is called directly rather than through
                 // `resolve_expression`, so record the body block's module here

@@ -1401,7 +1401,7 @@ pub(crate) struct LoweredCallArgument {
     /// The argument occurrence, absent when the argument is an implicit
     /// thunk whose body is owned by the thunk function.
     pub expression: Option<ExpressionId>,
-    /// The implicit thunk closure this argument adapts to, when present.
+    /// The synthesized thunk closure this argument adapts to, when present.
     pub thunk: Option<FunctionId>,
     /// The final ABI slot, absent when the argument is materialized.
     pub slot: Option<usize>,
@@ -1676,12 +1676,12 @@ pub(crate) struct LoweredWith {
     pub scope_exit: LoweredScopeExit,
 }
 
-/// One reactive callback: an implicit thunk or an explicit callable occurrence
+/// One reactive callback: a synthesized thunk or an explicit callable occurrence
 /// with its checked function type, captures, and resource requirements.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredReactiveCallback {
     pub origin: Origin,
-    /// The implicit thunk that owns a block callback.
+    /// The synthesized thunk that owns a block callback.
     pub thunk: Option<FunctionId>,
     /// The callable occurrence for an explicit callback.
     pub callable: Option<ExpressionId>,
@@ -1756,7 +1756,7 @@ pub(crate) struct LoweredCoroutinePlan {
     pub body_syntax: SyntaxId,
     /// The lowered coroutine body block, linked once its thunk body lowers.
     pub body: Option<BlockId>,
-    /// The implicit thunk that owns the body.
+    /// The synthesized thunk that owns the body.
     pub thunk: FunctionId,
     /// Ordered captures copied from the thunk catalog.
     pub captures: Vec<LoweredCapture>,
@@ -2877,7 +2877,7 @@ pub(crate) struct LoweredCapture {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct LoweredFunctionClass {
     pub declared: bool,
-    pub implicit_thunk: bool,
+    pub synthesized_thunk: bool,
     pub derived_evaluator: bool,
     pub coroutine_body: bool,
     pub resource_helper: bool,
@@ -3627,7 +3627,7 @@ impl LoweredProgram {
         for function in module
             .functions()
             .iter()
-            .chain(module.implicit_thunks_in_id_order())
+            .chain(module.synthesized_thunks_in_id_order())
         {
             captured.extend(function.captures.iter().copied());
             referenced.extend(pattern_symbols(resolved, &function.pattern));
@@ -3756,7 +3756,7 @@ impl LoweredProgram {
         self.symbols.insert("symbol", symbol, origin, value).err()
     }
 
-    /// Inserts declared functions in resolver order, then implicit thunks in
+    /// Inserts declared functions in resolver order, then synthesized thunks in
     /// stable semantic-ID order.
     /// Populates the function catalog in two passes so forward and recursive
     /// references resolve: every function's metadata is inserted first, then
@@ -3772,22 +3772,22 @@ impl LoweredProgram {
         for function in module.functions() {
             pending.push((function, false));
         }
-        for function in module.implicit_thunks_in_id_order() {
+        for function in module.synthesized_thunks_in_id_order() {
             pending.push((function, true));
         }
-        for (function, implicit_thunk) in &pending {
+        for (function, synthesized_thunk) in &pending {
             self.snapshot_function_metadata(
                 module,
                 function,
-                *implicit_thunk,
+                *synthesized_thunk,
                 &derived_evaluators,
                 &mut diagnostics,
             );
         }
         // Plans exist before any body lowers: a `coro` creation site and every
         // `await` inside the body must find its plan while lowering.
-        for (function, implicit_thunk) in &pending {
-            if *implicit_thunk {
+        for (function, synthesized_thunk) in &pending {
+            if *synthesized_thunk {
                 self.snapshot_coroutine_plan(module, function, &mut diagnostics);
             }
         }
@@ -3814,7 +3814,7 @@ impl LoweredProgram {
 
     /// Copies the checker's coroutine plan for one coroutine body thunk into an
     /// owned lowered record keyed by its body syntax. The plan links the
-    /// owning implicit thunk, ordered captures, checked result and deferred
+    /// owning synthesized thunk, ordered captures, checked result and deferred
     /// effects, resume count, frame bindings, awaited result types, and
     /// wait/`until` cancellation classifications; its body block links after
     /// the thunk body lowers and await sites append as they lower.
@@ -3879,7 +3879,7 @@ impl LoweredProgram {
         &mut self,
         module: &TypedModule,
         function: &ResolvedFunction,
-        implicit_thunk: bool,
+        synthesized_thunk: bool,
         derived_evaluators: &HashSet<FunctionId>,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
@@ -3913,14 +3913,15 @@ impl LoweredProgram {
             .binding_syntax
             .and_then(|syntax| resolved.symbol_for(syntax));
         let derived_evaluator = derived_evaluators.contains(&function.id);
-        let coroutine_body = implicit_thunk && module.coroutine_plan(body_syntax.id).is_some();
+        let coroutine_body = synthesized_thunk && module.coroutine_plan(body_syntax.id).is_some();
         let effectful = !signature.effects.resources.is_empty()
             || signature.effects.state.is_some()
             || signature.effects.variable.is_some();
-        let resource_helper = implicit_thunk && !derived_evaluator && !coroutine_body && effectful;
+        let resource_helper =
+            synthesized_thunk && !derived_evaluator && !coroutine_body && effectful;
         let class = LoweredFunctionClass {
-            declared: !implicit_thunk,
-            implicit_thunk,
+            declared: !synthesized_thunk,
+            synthesized_thunk,
             derived_evaluator,
             coroutine_body,
             resource_helper,
@@ -4862,7 +4863,7 @@ impl LoweredProgram {
             .unwrap_or_default()
     }
 
-    /// Builds the callback record for a reactive intrinsic: the implicit thunk
+    /// Builds the callback record for a reactive intrinsic: the synthesized thunk
     /// that owns a block callback or the explicit callable occurrence, its
     /// checked function type, ordered captures, and ordered hidden resource
     /// requirements.
@@ -4875,7 +4876,7 @@ impl LoweredProgram {
         let argument = &call.argument;
         let span = argument.syntax().span.clone();
         let thunk = module
-            .implicit_thunk_for(argument.syntax().id)
+            .synthesized_thunk_for(argument.syntax().id)
             .map(|f| f.id);
         let (callable, function_type) = match thunk {
             Some(thunk) => {
@@ -5327,7 +5328,7 @@ impl LoweredProgram {
     }
 
     /// Lowers a function template's parameter pattern. Compiler-synthesized
-    /// implicit-thunk parameters carry no source pattern type, so their
+    /// synthesized-thunk parameters carry no source pattern type, so their
     /// checked signature parameter and body origin stand in.
     fn lower_function_pattern(
         &mut self,
@@ -8341,7 +8342,7 @@ impl LoweredProgram {
                     (
                         placement
                             .expression
-                            .expect("spread operands never use implicit thunking"),
+                            .expect("spread operands are never block arguments"),
                         placement.place,
                     )
                 } else {
@@ -8658,7 +8659,7 @@ impl LoweredProgram {
     }
 
     /// Lowers arguments for a call with no indirect slots: every argument
-    /// passes by value, with implicit thunks recorded explicitly.
+    /// passes by value, with synthesized thunks recorded explicitly.
     fn lower_value_call_arguments(
         &mut self,
         module: &TypedModule,
@@ -8976,7 +8977,7 @@ impl LoweredProgram {
         Ok(())
     }
 
-    /// Lowers one argument element: an implicit thunk keeps its function and
+    /// Lowers one argument element: a synthesized thunk keeps its function and
     /// no occurrence; anything else lowers to an expression and an optional
     /// source place.
     fn lower_argument_value(
@@ -8986,7 +8987,7 @@ impl LoweredProgram {
         context: ExpressionContext,
         expression: &Expression,
     ) -> Result<CallArgumentPlacement, Diagnostic> {
-        if let Some(thunk) = module.implicit_thunk_for(expression.syntax().id) {
+        if let Some(thunk) = module.synthesized_thunk_for(expression.syntax().id) {
             return Ok(CallArgumentPlacement {
                 expression: None,
                 thunk: Some(thunk.id),
@@ -9250,7 +9251,7 @@ impl LoweredProgram {
             if callback.thunk.is_some() == callback.callable.is_some() {
                 diagnostics.push(Diagnostic::new(
                     callback.origin.span.clone(),
-                    "reactive callback must be exactly one of an implicit thunk or a callable occurrence",
+                    "reactive callback must be exactly one of a synthesized thunk or a callable occurrence",
                 ));
             }
             if let Some(thunk) = callback.thunk {
@@ -13678,7 +13679,7 @@ pub(crate) fn internal_invariant(span: Span, invariant: &str) -> Diagnostic {
 }
 
 /// Decides which arguments of one call are temporaries the caller drops after
-/// the call. An argument with no source place that is not an implicit thunk is
+/// the call. An argument with no source place that is not a synthesized thunk is
 /// owned by the call site. When its parameter is mutated, or borrowed (neither
 /// `move` nor `mut`), the callee does not take ownership, so the caller drops
 /// it once the call returns. A `move` parameter takes ownership instead.
@@ -14734,7 +14735,7 @@ struct CallArgumentPlacement {
     place: Option<PlaceId>,
 }
 
-/// The ordered step that evaluates one call argument. An implicit thunk has
+/// The ordered step that evaluates one call argument. A synthesized thunk has
 /// no argument occurrence; its closure construction is recorded on the
 /// argument itself.
 fn call_argument_step(
@@ -14981,7 +14982,7 @@ fn runtime_item(item: &Item) -> bool {
 /// The lowering completeness traversal. It mirrors the lowering walk over the
 /// checked program and diagnoses any runtime source function, item, expression,
 /// pattern, or assignment place without a lowered counterpart, plus any lowered
-/// node invented without a source. Implicit thunks are owned by their function
+/// node invented without a source. Synthesized thunks are owned by their function
 /// template, so their callback bodies are covered through the function catalog.
 struct SourceCoverage<'a> {
     program: &'a LoweredProgram,
@@ -15025,7 +15026,7 @@ impl<'a> SourceCoverage<'a> {
         ));
     }
 
-    /// Every declared function and implicit thunk has exactly one lowered
+    /// Every declared function and synthesized thunk has exactly one lowered
     /// template whose body syntax matches, and every lowered template has a
     /// checked source function.
     fn check_functions(&mut self) {
@@ -15034,7 +15035,7 @@ impl<'a> SourceCoverage<'a> {
             .module
             .functions()
             .iter()
-            .chain(self.module.implicit_thunks())
+            .chain(self.module.synthesized_thunks())
         {
             sources.insert(function.id);
             let owner = ExpressionOwner::Function(function.id);
@@ -15189,7 +15190,7 @@ impl<'a> SourceCoverage<'a> {
     fn visit_pattern(&mut self, pattern: &Pattern) {
         let syntax = pattern.syntax();
         if self.module.type_of_pattern(syntax.id).is_none() {
-            // Compiler-synthesized implicit-thunk parameters lower from the
+            // Compiler-synthesized synthesized-thunk parameters lower from the
             // checked signature instead of checked pattern metadata.
             return;
         }
@@ -15277,18 +15278,18 @@ impl<'a> SourceCoverage<'a> {
     }
 
     /// Every runtime expression occurrence has a lowered node under the same
-    /// owner with a `Primary` context. Implicit thunks are function templates,
+    /// owner with a `Primary` context. Synthesized thunks are function templates,
     /// so their bodies are owned by the function catalog instead.
     fn visit_expression(&mut self, owner: ExpressionOwner, expression: &Expression) {
         let syntax = expression.syntax();
-        if let Some(thunk) = self.module.implicit_thunk_for(syntax.id)
+        if let Some(thunk) = self.module.synthesized_thunk_for(syntax.id)
             && owner != ExpressionOwner::Function(thunk.id)
         {
             if self.program.functions.get(thunk.id).is_none() {
                 self.diagnostics.push(Diagnostic::new(
                     syntax.span.clone(),
                     format!(
-                        "runtime implicit thunk (function id {}) has no lowered template",
+                        "runtime synthesized thunk (function id {}) has no lowered template",
                         thunk.id.0
                     ),
                 ));
@@ -15404,7 +15405,7 @@ impl<'a> SourceCoverage<'a> {
         if let Expression::Product(product) = argument
             && self
                 .module
-                .implicit_thunk_for(argument.syntax().id)
+                .synthesized_thunk_for(argument.syntax().id)
                 .is_none()
         {
             // A plain one-element product is its element, matching
@@ -15827,7 +15828,7 @@ fn validate_checked_module(module: &TypedModule) -> Vec<Diagnostic> {
     module
         .functions()
         .iter()
-        .chain(module.implicit_thunks())
+        .chain(module.synthesized_thunks())
         .filter(|function| module.type_of_function(function.id).is_none())
         .map(|function| {
             Diagnostic::new(
@@ -16349,7 +16350,7 @@ mod tests {
         assert!(method_ids.windows(2).all(|ids| ids[0] < ids[1]));
 
         let thunk_ids = module
-            .implicit_thunks_in_id_order()
+            .synthesized_thunks_in_id_order()
             .into_iter()
             .map(|function| function.id.0)
             .collect::<Vec<_>>();
@@ -16704,7 +16705,7 @@ mod tests {
     }
 
     #[test]
-    fn function_catalog_lists_declared_functions_before_implicit_thunks() {
+    fn function_catalog_lists_declared_functions_before_synthesized_thunks() {
         let module = checked_program(concat!(
             "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = <T, effect E> callback => callback ()\n",
             "let mut count = 0\n",
@@ -16720,7 +16721,7 @@ mod tests {
             .map(|function| function.id)
             .chain(
                 module
-                    .implicit_thunks_in_id_order()
+                    .synthesized_thunks_in_id_order()
                     .into_iter()
                     .map(|function| function.id),
             )
@@ -16754,7 +16755,7 @@ mod tests {
                 .functions
                 .iter()
                 .skip(declared)
-                .all(|(_, _, function)| function.class.implicit_thunk)
+                .all(|(_, _, function)| function.class.synthesized_thunk)
         );
     }
 
@@ -16811,11 +16812,11 @@ mod tests {
                 .module_for_syntax(source.body.syntax().id)
                 .expect("owning module")
         );
-        assert!(lowered.class.declared && !lowered.class.implicit_thunk);
+        assert!(lowered.class.declared && !lowered.class.synthesized_thunk);
     }
 
     #[test]
-    fn implicit_thunk_captures_match_transition_ownership_facts() {
+    fn synthesized_thunk_captures_match_transition_ownership_facts() {
         let module = checked_program(concat!(
             "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = <T, effect E> callback => callback ()\n",
             "def run: () ->{state} I32 = () => {\n",
@@ -16827,15 +16828,15 @@ mod tests {
         assert!(program.snapshot(&module).is_empty());
 
         let thunk = module
-            .implicit_thunks_in_id_order()
+            .synthesized_thunks_in_id_order()
             .into_iter()
             .next()
             .expect("a callback thunk");
         let lowered = program
             .functions
             .get(thunk.id)
-            .expect("lowered implicit thunk");
-        assert!(lowered.class.implicit_thunk && !lowered.class.declared);
+            .expect("lowered synthesized thunk");
+        assert!(lowered.class.synthesized_thunk && !lowered.class.declared);
         assert!(lowered.binding_symbol.is_none());
         assert_eq!(lowered.captures.len(), thunk.captures.len());
         for (capture, symbol) in lowered.captures.iter().zip(&thunk.captures) {
@@ -16912,7 +16913,7 @@ mod tests {
             .get(evaluator.id)
             .expect("lowered derived evaluator");
         assert!(lowered.class.derived_evaluator);
-        assert!(lowered.class.implicit_thunk);
+        assert!(lowered.class.synthesized_thunk);
         assert!(!lowered.class.coroutine_body);
         assert_eq!(
             lowered
@@ -16931,7 +16932,7 @@ mod tests {
         let diagnostics = program.snapshot(&module);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         let body = module
-            .implicit_thunks_in_id_order()
+            .synthesized_thunks_in_id_order()
             .into_iter()
             .find(|function| module.coroutine_plan(function.body.syntax().id).is_some())
             .expect("coroutine body thunk");
@@ -16940,7 +16941,7 @@ mod tests {
             .get(body.id)
             .expect("lowered coroutine body");
         assert!(lowered.class.coroutine_body);
-        assert!(lowered.class.implicit_thunk);
+        assert!(lowered.class.synthesized_thunk);
         assert!(!lowered.class.derived_evaluator);
         assert_eq!(lowered.body_syntax, body.body.syntax().id);
     }
@@ -16957,17 +16958,17 @@ mod tests {
         let mut program = LoweredProgram::default();
         assert!(program.snapshot(&module).is_empty());
         let callback = module
-            .implicit_thunks_in_id_order()
+            .synthesized_thunks_in_id_order()
             .into_iter()
             .find(|thunk| {
                 let class = program.functions.get(thunk.id).expect("thunk").class;
                 !class.derived_evaluator && !class.coroutine_body
             })
-            .expect("the reaction callback should be an implicit thunk");
+            .expect("the reaction callback should be a synthesized thunk");
         let lowered = program
             .functions
             .get(callback.id)
-            .expect("lowered implicit thunk");
+            .expect("lowered synthesized thunk");
         assert!(lowered.class.resource_helper);
         assert!(lowered.signature.effects.state.is_some());
 
@@ -16978,14 +16979,14 @@ mod tests {
         let mut program = LoweredProgram::default();
         assert!(program.snapshot(&module).is_empty());
         let pure = module
-            .implicit_thunks_in_id_order()
+            .synthesized_thunks_in_id_order()
             .into_iter()
             .next()
-            .expect("the callback should be an implicit thunk");
+            .expect("the callback should be a synthesized thunk");
         let lowered = program
             .functions
             .get(pure.id)
-            .expect("lowered implicit thunk");
+            .expect("lowered synthesized thunk");
         assert!(!lowered.class.resource_helper);
         assert!(lowered.signature.effects == CheckedEffectSet::default());
     }
@@ -17174,7 +17175,7 @@ mod tests {
         let (_function, borrowed) = module
             .functions()
             .iter()
-            .chain(module.implicit_thunks_in_id_order())
+            .chain(module.synthesized_thunks_in_id_order())
             .flat_map(|function| {
                 function
                     .captures
@@ -17864,18 +17865,18 @@ mod tests {
     }
 
     #[test]
-    fn implicit_thunks_inherit_declared_dictionary_bounds() {
+    fn block_arguments_inherit_declared_dictionary_bounds() {
         let module = checked_program(concat!(
             "def evaluate: (() -> String) -> String = callback => callback ()\n",
-            "def describe: <T where Display T> T -> String = <T where Display T> value => evaluate \"text\"\n",
+            "def describe: <T where Display T> T -> String = <T where Display T> value => evaluate { \"text\" }\n",
         ));
         let mut program = LoweredProgram::default();
         assert!(program.snapshot(&module).is_empty());
         let thunk = module
-            .implicit_thunks_in_id_order()
+            .synthesized_thunks_in_id_order()
             .into_iter()
             .next()
-            .expect("implicit callback");
+            .expect("block argument callback");
         let lowered = program.functions.get(thunk.id).unwrap();
         assert_eq!(lowered.declared_bounds.len(), 1);
         assert_eq!(
@@ -18492,13 +18493,13 @@ mod tests {
             }
         }
 
-        // Reactive callbacks link the checker's implicit thunks and captures.
+        // Reactive callbacks link the checker's synthesized thunks and captures.
         for (_, callback) in first.reactive_callbacks.iter() {
             let Some(thunk) = callback.thunk else {
                 continue;
             };
             let checked = module
-                .implicit_thunk_for(callback.origin.syntax)
+                .synthesized_thunk_for(callback.origin.syntax)
                 .expect("checked callback thunk");
             assert_eq!(thunk, checked.id);
             assert_eq!(
@@ -18562,7 +18563,7 @@ mod tests {
             assert_eq!(plan.wait_await_states, checked.wait_await_states);
             assert_eq!(plan.until_await_states, checked.until_await_states);
             let thunk = module
-                .implicit_thunk_for(plan.body_syntax)
+                .synthesized_thunk_for(plan.body_syntax)
                 .expect("checked body thunk");
             assert_eq!(plan.thunk, thunk.id);
             assert_eq!(
@@ -19295,7 +19296,7 @@ mod tests {
         assert!(program.validate().is_empty());
 
         let mut routes = Vec::new();
-        for function in module.functions().iter().chain(module.implicit_thunks()) {
+        for function in module.functions().iter().chain(module.synthesized_thunks()) {
             collect_call_routes(
                 &program,
                 &module,
@@ -22804,7 +22805,7 @@ mod tests {
 
     /// The lowering completeness gate: every runtime construct of a fixture
     /// that exercises every expression family, resources, reactive operations,
-    /// implicit thunks, captures, and coroutines has exactly one lowered
+    /// synthesized thunks, captures, and coroutines has exactly one lowered
     /// counterpart, and no lowered node lacks a source.
     #[test]
     fn source_constructs_have_exactly_one_lowered_counterpart() {
@@ -22834,14 +22835,14 @@ mod tests {
         let coverage = program.validate_source_coverage(&module);
         assert!(coverage.is_empty(), "{coverage:?}");
 
-        // Every checked function and implicit thunk is cataloged exactly once.
+        // Every checked function and synthesized thunk is cataloged exactly once.
         assert_eq!(
             program.functions.iter().count(),
-            module.functions().len() + module.implicit_thunks().count()
+            module.functions().len() + module.synthesized_thunks().count()
         );
         assert!(
-            module.implicit_thunks().count() > 0,
-            "the fixture should exercise implicit thunks"
+            module.synthesized_thunks().count() > 0,
+            "the fixture should exercise synthesized thunks"
         );
         assert!(
             program
@@ -23043,13 +23044,13 @@ mod tests {
     }
 
     #[test]
-    fn source_coverage_walks_implicit_thunk_body_children() {
+    fn source_coverage_walks_synthesized_thunk_body_children() {
         let module = checked_program(complete_coverage_source());
         let mut program = LoweredProgram::default();
         assert!(program.snapshot(&module).is_empty());
         assert!(program.validate_source_coverage(&module).is_empty());
         let key = module
-            .implicit_thunks()
+            .synthesized_thunks()
             .find_map(|thunk| {
                 let Expression::Block(block) = &thunk.body else {
                     return None;
@@ -23066,14 +23067,14 @@ mod tests {
                     program.expression_lookup.contains_key(&key).then_some(key)
                 })
             })
-            .expect("an implicit thunk with a lowered body child");
+            .expect("a synthesized thunk with a lowered body child");
         program.expression_lookup.remove(&key);
         assert!(
             program
                 .validate_source_coverage(&module)
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("has no lowered counterpart")),
-            "a missing expression inside an implicit thunk must diagnose"
+            "a missing expression inside a synthesized thunk must diagnose"
         );
     }
 

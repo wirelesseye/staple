@@ -151,8 +151,8 @@ pub(crate) enum LoweredInstanceDependencyKind {
     FormattingWrite,
     /// A function-valued name, selector, or closure construction.
     CallableValue,
-    /// An implicit thunk adapted into a call argument.
-    ImplicitThunkArgument,
+    /// A synthesized thunk adapted into a call argument.
+    BlockArgument,
     /// The method function selected by a trait-dependent site.
     TraitMethod,
     /// A derived binding's evaluator thunk.
@@ -176,7 +176,7 @@ impl LoweredInstanceDependencyKind {
             LoweredInstanceDependencyKind::FormattingFinish => "formatting-finish",
             LoweredInstanceDependencyKind::FormattingWrite => "formatting-write",
             LoweredInstanceDependencyKind::CallableValue => "callable-value",
-            LoweredInstanceDependencyKind::ImplicitThunkArgument => "implicit-thunk-argument",
+            LoweredInstanceDependencyKind::BlockArgument => "block-argument",
             LoweredInstanceDependencyKind::TraitMethod => "trait-method",
             LoweredInstanceDependencyKind::DerivedEvaluator => "derived-evaluator",
             LoweredInstanceDependencyKind::ReactiveCallback => "reactive-callback",
@@ -837,7 +837,7 @@ impl<'a> WorklistBuilder<'a> {
     }
 
     /// Root order continues with the same concrete templates the current
-    /// backend emits eagerly: signature-free templates and implicit thunks
+    /// backend emits eagerly: signature-free templates and synthesized thunks
     /// with no declared parameter. Coroutine body thunks stay demand-driven,
     /// and unused generic templates are never seeded. Returns the roots this
     /// call newly interned, so a resumed traversal can visit exactly the
@@ -1588,7 +1588,7 @@ impl<'a> WorklistBuilder<'a> {
                 None,
                 nested_target(enclosing),
                 owner,
-                LoweredInstanceDependencyKind::ImplicitThunkArgument,
+                LoweredInstanceDependencyKind::BlockArgument,
                 false,
                 false,
             );
@@ -3042,7 +3042,7 @@ mod tests {
         let expected = module
             .functions()
             .iter()
-            .chain(module.implicit_thunks())
+            .chain(module.synthesized_thunks())
             .filter(|function| {
                 !contains_type_parameter(&CheckedType::Function(
                     module
@@ -3697,7 +3697,7 @@ mod tests {
                     instance.request,
                     LoweredInstanceRequest::Initializer {
                         kind: LoweredInstanceDependencyKind::ReactiveCallback
-                            | LoweredInstanceDependencyKind::ImplicitThunkArgument,
+                            | LoweredInstanceDependencyKind::BlockArgument,
                         ..
                     }
                 )
