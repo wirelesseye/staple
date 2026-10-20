@@ -3085,7 +3085,13 @@ impl Grammar {
             let stage = self.parse_call_without_try()?;
             if matches!(
                 self.peek(),
-                Some(TokenKind::Plus | TokenKind::Minus | TokenKind::Star | TokenKind::Slash)
+                Some(
+                    TokenKind::Plus
+                        | TokenKind::Minus
+                        | TokenKind::Star
+                        | TokenKind::Slash
+                        | TokenKind::Percent
+                )
             ) || [
                 "as", "==", "!=", "<", "<=", ">", ">=", "..", "..=", "&&", "||",
             ]
@@ -3259,7 +3265,7 @@ impl Grammar {
         Ok(expression)
     }
 
-    /// Parses `*`/`/` (precedence 7, left-associative).
+    /// Parses `*`/`/`/`%` (precedence 7, left-associative).
     fn parse_multiplicative_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let mut expression = self.parse_conversion_expression()?;
@@ -3272,6 +3278,8 @@ impl Grammar {
                 Some(BinaryOperator::Multiply)
             } else if self.eat(TokenKind::Slash) {
                 Some(BinaryOperator::Divide)
+            } else if self.eat(TokenKind::Percent) {
+                Some(BinaryOperator::Remainder)
             } else {
                 None
             };

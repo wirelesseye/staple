@@ -4422,6 +4422,28 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     values[1].into_float_value(),
                 )?
                 .as_basic_value_enum(),
+            crate::IntrinsicFunction::FloatUnary { float, operation } => self
+                .backend
+                .build_float_unary(float, operation, values[0].into_float_value())?
+                .as_basic_value_enum(),
+            crate::IntrinsicFunction::FloatTernary { float, operation } => self
+                .backend
+                .build_float_ternary(
+                    float,
+                    operation,
+                    values[0].into_float_value(),
+                    values[1].into_float_value(),
+                    values[2].into_float_value(),
+                )?
+                .as_basic_value_enum(),
+            crate::IntrinsicFunction::FloatToBits { float } => self
+                .backend
+                .build_float_to_bits(float, values[0].into_float_value())?
+                .as_basic_value_enum(),
+            crate::IntrinsicFunction::FloatFromBits { float } => self
+                .backend
+                .build_float_from_bits(float, values[0].into_int_value())?
+                .as_basic_value_enum(),
             crate::IntrinsicFunction::FloatCompare { float, operation } => {
                 let condition = self.backend.build_float_compare(
                     float,

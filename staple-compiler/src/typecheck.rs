@@ -71,6 +71,34 @@ fn checked_type_id(ty: &CheckedType) -> Option<TypeId> {
     }
 }
 
+/// The compiler-provided type a checked scalar corresponds to, if any. This
+/// lets a pipe stage find a companion on a builtin numeric type the same way
+/// it finds one on a user-declared type.
+fn checked_builtin_type(ty: &CheckedType) -> Option<BuiltinType> {
+    Some(match ty {
+        CheckedType::I8 => BuiltinType::Integer(IntegerType::I8),
+        CheckedType::I16 => BuiltinType::Integer(IntegerType::I16),
+        CheckedType::I32 => BuiltinType::Integer(IntegerType::I32),
+        CheckedType::I64 => BuiltinType::Integer(IntegerType::I64),
+        CheckedType::U8 => BuiltinType::Integer(IntegerType::U8),
+        CheckedType::U16 => BuiltinType::Integer(IntegerType::U16),
+        CheckedType::U32 => BuiltinType::Integer(IntegerType::U32),
+        CheckedType::U64 => BuiltinType::Integer(IntegerType::U64),
+        CheckedType::ISize => BuiltinType::Integer(IntegerType::ISize),
+        CheckedType::USize => BuiltinType::Integer(IntegerType::USize),
+        CheckedType::F32 => BuiltinType::Float(FloatType::F32),
+        CheckedType::F64 => BuiltinType::Float(FloatType::F64),
+        CheckedType::String => BuiltinType::String,
+        CheckedType::CChar => BuiltinType::CChar,
+        CheckedType::CString => BuiltinType::CString,
+        _ => return None,
+    })
+}
+
+fn checked_builtin_type_id(module: &ResolvedModule, ty: &CheckedType) -> Option<TypeId> {
+    module.type_for_builtin(checked_builtin_type(ty)?)
+}
+
 #[derive(Debug, Clone)]
 pub struct CheckedTraitBound {
     pub trait_id: TraitId,
@@ -5121,6 +5149,62 @@ impl TypeChecker {
                         mutations: Vec::new(),
                         moves: Vec::new(),                        effects: CheckedEffectSet::default(),
                         result: Box::new(float),
+                    })
+                }
+                crate::IntrinsicFunction::FloatUnary { float, .. } => {
+                    let float = CheckedType::float(*float);
+                    CheckedType::Function(CheckedFunctionType {
+                        default: None,
+                        parameter: Box::new(float.clone()),
+                        mutations: Vec::new(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
+                        result: Box::new(float),
+                    })
+                }
+                crate::IntrinsicFunction::FloatTernary { float, .. } => {
+                    let float = CheckedType::float(*float);
+                    CheckedType::Function(CheckedFunctionType {
+                        default: None,
+                        parameter: Box::new(CheckedType::Product(CheckedProductType {
+                            slotted: false,
+                            spreads: Vec::new(),
+                            elements: [float.clone(), float.clone(), float.clone()]
+                                .into_iter()
+                                .map(|value_type| CheckedTypeElement {
+                                    name: None,
+                                    value_type,
+                                    default: None,
+                                })
+                                .collect(),
+                            variadic: false,
+                        })),
+                        mutations: Vec::new(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
+                        result: Box::new(float),
+                    })
+                }
+                crate::IntrinsicFunction::FloatToBits { float } => {
+                    let integer = CheckedType::integer(float_bits_integer(*float));
+                    CheckedType::Function(CheckedFunctionType {
+                        default: None,
+                        parameter: Box::new(CheckedType::float(*float)),
+                        mutations: Vec::new(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
+                        result: Box::new(integer),
+                    })
+                }
+                crate::IntrinsicFunction::FloatFromBits { float } => {
+                    let integer = CheckedType::integer(float_bits_integer(*float));
+                    CheckedType::Function(CheckedFunctionType {
+                        default: None,
+                        parameter: Box::new(integer),
+                        mutations: Vec::new(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
+                        result: Box::new(CheckedType::float(*float)),
                     })
                 }
                 crate::IntrinsicFunction::FloatCompare { float, .. } => {
@@ -10380,7 +10464,8 @@ impl TypeChecker {
                     } else {
                         let receiver_id = self
                             .companion_type_for_expression(module, &call.argument)
-                            .or_else(|| checked_type_id(&receiver_type));
+                            .or_else(|| checked_type_id(&receiver_type))
+                            .or_else(|| checked_builtin_type_id(module, &receiver_type));
                         let Some(receiver_id) = receiver_id else {
                             self.diagnostics.push(Diagnostic::new(
                                 selector.syntax.span.clone(),
@@ -15366,6 +15451,7 @@ impl TypeChecker {
             if let Some(ty) = self
                 .companion_type_for_expression(module, receiver)
                 .or_else(|| checked_type_id(&receiver_type))
+                .or_else(|| checked_builtin_type_id(module, &receiver_type))
             {
                 companion_type = Some(ty);
                 companion =
@@ -21518,6 +21604,14 @@ pub(crate) fn is_default_type(
                 && types_equivalent(&bound.arguments[0], value_type)
         }),
         _ => false,
+    }
+}
+
+/// The unsigned integer type whose bit pattern represents `float`.
+pub(crate) fn float_bits_integer(float: FloatType) -> IntegerType {
+    match float {
+        FloatType::F32 => IntegerType::U32,
+        FloatType::F64 => IntegerType::U64,
     }
 }
 

@@ -4,6 +4,7 @@ use package.ops.*
 use package.cmp.*
 
 use package.convert.checked_conversion
+use package.process.(panic)
 
 use package.default.Default
 use package.string.String
@@ -28,42 +29,52 @@ extern "staple-intrinsic" {
     __i8_subtract: (I8, I8) -> I8
     __i8_multiply: (I8, I8) -> I8
     __i8_divide: (I8, I8) -> I8
+    __i8_remainder: (I8, I8) -> I8
     __i16_add: (I16, I16) -> I16
     __i16_subtract: (I16, I16) -> I16
     __i16_multiply: (I16, I16) -> I16
     __i16_divide: (I16, I16) -> I16
+    __i16_remainder: (I16, I16) -> I16
     __i32_add: (I32, I32) -> I32
     __i32_subtract: (I32, I32) -> I32
     __i32_multiply: (I32, I32) -> I32
     __i32_divide: (I32, I32) -> I32
+    __i32_remainder: (I32, I32) -> I32
     __i64_add: (I64, I64) -> I64
     __i64_subtract: (I64, I64) -> I64
     __i64_multiply: (I64, I64) -> I64
     __i64_divide: (I64, I64) -> I64
+    __i64_remainder: (I64, I64) -> I64
     __u8_add: (U8, U8) -> U8
     __u8_subtract: (U8, U8) -> U8
     __u8_multiply: (U8, U8) -> U8
     __u8_divide: (U8, U8) -> U8
+    __u8_remainder: (U8, U8) -> U8
     __u16_add: (U16, U16) -> U16
     __u16_subtract: (U16, U16) -> U16
     __u16_multiply: (U16, U16) -> U16
     __u16_divide: (U16, U16) -> U16
+    __u16_remainder: (U16, U16) -> U16
     __u32_add: (U32, U32) -> U32
     __u32_subtract: (U32, U32) -> U32
     __u32_multiply: (U32, U32) -> U32
     __u32_divide: (U32, U32) -> U32
+    __u32_remainder: (U32, U32) -> U32
     __u64_add: (U64, U64) -> U64
     __u64_subtract: (U64, U64) -> U64
     __u64_multiply: (U64, U64) -> U64
     __u64_divide: (U64, U64) -> U64
+    __u64_remainder: (U64, U64) -> U64
     __isize_add: (ISize, ISize) -> ISize
     __isize_subtract: (ISize, ISize) -> ISize
     __isize_multiply: (ISize, ISize) -> ISize
     __isize_divide: (ISize, ISize) -> ISize
+    __isize_remainder: (ISize, ISize) -> ISize
     __usize_add: (USize, USize) -> USize
     __usize_subtract: (USize, USize) -> USize
     __usize_multiply: (USize, USize) -> USize
     __usize_divide: (USize, USize) -> USize
+    __usize_remainder: (USize, USize) -> USize
     __i8_equal: (I8, I8) -> Bool
     __i8_not_equal: (I8, I8) -> Bool
     __i8_lt: (I8, I8) -> Bool
@@ -108,6 +119,7 @@ extern "staple-intrinsic" {
     __f32_subtract: (F32, F32) -> F32
     __f32_multiply: (F32, F32) -> F32
     __f32_divide: (F32, F32) -> F32
+    __f32_remainder: (F32, F32) -> F32
     __f32_equal: (F32, F32) -> Bool
     __f32_not_equal: (F32, F32) -> Bool
     __f32_lt: (F32, F32) -> Bool
@@ -116,6 +128,7 @@ extern "staple-intrinsic" {
     __f64_subtract: (F64, F64) -> F64
     __f64_multiply: (F64, F64) -> F64
     __f64_divide: (F64, F64) -> F64
+    __f64_remainder: (F64, F64) -> F64
     __f64_equal: (F64, F64) -> Bool
     __f64_not_equal: (F64, F64) -> Bool
     __f64_lt: (F64, F64) -> Bool
@@ -221,7 +234,23 @@ impl Multiply I8 {
 }
 
 impl Divide I8 {
-    divide = (left; right) => __i8_divide (left, right)
+    divide = (left; right) => when {
+        right == 0 => panic "division by zero",
+        // Only `MIN / -1` overflows (`right + 1 == 0` tests for `-1`): `MIN`
+        // is the one negative value whose negation is still negative.
+        right + 1 == 0 && left < 0 && 0 - left < 0 => panic "integer division overflow",
+        else => __i8_divide (left, right),
+    }
+}
+
+impl Remainder I8 {
+    remainder = (left; right) => when {
+        right == 0 => panic "remainder by zero",
+        // Every remainder by `-1` (`right + 1 == 0`) is zero, and `MIN % -1`
+        // would overflow.
+        right + 1 == 0 => 0,
+        else => __i8_remainder (left, right),
+    }
 }
 
 impl Add I16 {
@@ -237,7 +266,23 @@ impl Multiply I16 {
 }
 
 impl Divide I16 {
-    divide = (left; right) => __i16_divide (left, right)
+    divide = (left; right) => when {
+        right == 0 => panic "division by zero",
+        // Only `MIN / -1` overflows (`right + 1 == 0` tests for `-1`): `MIN`
+        // is the one negative value whose negation is still negative.
+        right + 1 == 0 && left < 0 && 0 - left < 0 => panic "integer division overflow",
+        else => __i16_divide (left, right),
+    }
+}
+
+impl Remainder I16 {
+    remainder = (left; right) => when {
+        right == 0 => panic "remainder by zero",
+        // Every remainder by `-1` (`right + 1 == 0`) is zero, and `MIN % -1`
+        // would overflow.
+        right + 1 == 0 => 0,
+        else => __i16_remainder (left, right),
+    }
 }
 
 impl Add I32 {
@@ -253,7 +298,23 @@ impl Multiply I32 {
 }
 
 impl Divide I32 {
-    divide = (left; right) => __i32_divide (left, right)
+    divide = (left; right) => when {
+        right == 0 => panic "division by zero",
+        // Only `MIN / -1` overflows (`right + 1 == 0` tests for `-1`): `MIN`
+        // is the one negative value whose negation is still negative.
+        right + 1 == 0 && left < 0 && 0 - left < 0 => panic "integer division overflow",
+        else => __i32_divide (left, right),
+    }
+}
+
+impl Remainder I32 {
+    remainder = (left; right) => when {
+        right == 0 => panic "remainder by zero",
+        // Every remainder by `-1` (`right + 1 == 0`) is zero, and `MIN % -1`
+        // would overflow.
+        right + 1 == 0 => 0,
+        else => __i32_remainder (left, right),
+    }
 }
 
 impl Add I64 {
@@ -269,7 +330,23 @@ impl Multiply I64 {
 }
 
 impl Divide I64 {
-    divide = (left; right) => __i64_divide (left, right)
+    divide = (left; right) => when {
+        right == 0 => panic "division by zero",
+        // Only `MIN / -1` overflows (`right + 1 == 0` tests for `-1`): `MIN`
+        // is the one negative value whose negation is still negative.
+        right + 1 == 0 && left < 0 && 0 - left < 0 => panic "integer division overflow",
+        else => __i64_divide (left, right),
+    }
+}
+
+impl Remainder I64 {
+    remainder = (left; right) => when {
+        right == 0 => panic "remainder by zero",
+        // Every remainder by `-1` (`right + 1 == 0`) is zero, and `MIN % -1`
+        // would overflow.
+        right + 1 == 0 => 0,
+        else => __i64_remainder (left, right),
+    }
 }
 
 impl Add U8 {
@@ -285,7 +362,19 @@ impl Multiply U8 {
 }
 
 impl Divide U8 {
-    divide = (left; right) => __u8_divide (left, right)
+    divide = (left; right) => if (right == 0) {
+        panic "division by zero"
+    } else {
+        __u8_divide (left, right)
+    }
+}
+
+impl Remainder U8 {
+    remainder = (left; right) => if (right == 0) {
+        panic "remainder by zero"
+    } else {
+        __u8_remainder (left, right)
+    }
 }
 
 impl Add U16 {
@@ -301,7 +390,19 @@ impl Multiply U16 {
 }
 
 impl Divide U16 {
-    divide = (left; right) => __u16_divide (left, right)
+    divide = (left; right) => if (right == 0) {
+        panic "division by zero"
+    } else {
+        __u16_divide (left, right)
+    }
+}
+
+impl Remainder U16 {
+    remainder = (left; right) => if (right == 0) {
+        panic "remainder by zero"
+    } else {
+        __u16_remainder (left, right)
+    }
 }
 
 impl Add U32 {
@@ -317,7 +418,19 @@ impl Multiply U32 {
 }
 
 impl Divide U32 {
-    divide = (left; right) => __u32_divide (left, right)
+    divide = (left; right) => if (right == 0) {
+        panic "division by zero"
+    } else {
+        __u32_divide (left, right)
+    }
+}
+
+impl Remainder U32 {
+    remainder = (left; right) => if (right == 0) {
+        panic "remainder by zero"
+    } else {
+        __u32_remainder (left, right)
+    }
 }
 
 impl Add U64 {
@@ -333,7 +446,19 @@ impl Multiply U64 {
 }
 
 impl Divide U64 {
-    divide = (left; right) => __u64_divide (left, right)
+    divide = (left; right) => if (right == 0) {
+        panic "division by zero"
+    } else {
+        __u64_divide (left, right)
+    }
+}
+
+impl Remainder U64 {
+    remainder = (left; right) => if (right == 0) {
+        panic "remainder by zero"
+    } else {
+        __u64_remainder (left, right)
+    }
 }
 
 impl Add ISize {
@@ -349,7 +474,23 @@ impl Multiply ISize {
 }
 
 impl Divide ISize {
-    divide = (left; right) => __isize_divide (left, right)
+    divide = (left; right) => when {
+        right == 0 => panic "division by zero",
+        // Only `MIN / -1` overflows (`right + 1 == 0` tests for `-1`): `MIN`
+        // is the one negative value whose negation is still negative.
+        right + 1 == 0 && left < 0 && 0 - left < 0 => panic "integer division overflow",
+        else => __isize_divide (left, right),
+    }
+}
+
+impl Remainder ISize {
+    remainder = (left; right) => when {
+        right == 0 => panic "remainder by zero",
+        // Every remainder by `-1` (`right + 1 == 0`) is zero, and `MIN % -1`
+        // would overflow.
+        right + 1 == 0 => 0,
+        else => __isize_remainder (left, right),
+    }
 }
 
 impl Add USize {
@@ -365,7 +506,19 @@ impl Multiply USize {
 }
 
 impl Divide USize {
-    divide = (left; right) => __usize_divide (left, right)
+    divide = (left; right) => if (right == 0) {
+        panic "division by zero"
+    } else {
+        __usize_divide (left, right)
+    }
+}
+
+impl Remainder USize {
+    remainder = (left; right) => if (right == 0) {
+        panic "remainder by zero"
+    } else {
+        __usize_remainder (left, right)
+    }
 }
 
 // Bitwise operations. Like arithmetic, they are homogeneous: the shift amount
@@ -658,6 +811,10 @@ impl Divide F32 {
     divide = (left; right) => __f32_divide (left, right)
 }
 
+impl Remainder F32 {
+    remainder = (left; right) => __f32_remainder (left, right)
+}
+
 impl Eq F32 {
     eq = (left; right) => __f32_equal (left, right)
     ne = (left; right) => __f32_not_equal (left, right)
@@ -686,6 +843,10 @@ impl Multiply F64 {
 
 impl Divide F64 {
     divide = (left; right) => __f64_divide (left, right)
+}
+
+impl Remainder F64 {
+    remainder = (left; right) => __f64_remainder (left, right)
 }
 
 impl Eq F64 {

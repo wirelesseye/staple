@@ -8,7 +8,7 @@ use std::{
 mod parse;
 
 use crate::program::source_location_at;
-use crate::{ModuleId, Program, ResolvedMacro};
+use crate::{FloatType, ModuleId, Program, ResolvedMacro};
 use parse::{ParseImpl, ParseTarget, SyntaxIntrinsic, TypeEnv};
 use staple_syntax::{
     Accessor, BinaryOperator, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
@@ -490,7 +490,10 @@ enum Value {
     },
     Product(Vec<(Option<String>, Value)>, bool),
     Integer(i128),
-    Float(f64),
+    /// A float and the float type it is known to have. `None` is an
+    /// unannotated literal, or arithmetic over only those, whose type the
+    /// checker infers from context later.
+    Float(f64, Option<FloatType>),
     String(String),
     Nominal(String, Box<Value>),
     Sequence(Vec<Value>),
@@ -765,6 +768,7 @@ fn lower_binary_expression(
         BinaryOperator::Subtract => ("Subtract", "subtract"),
         BinaryOperator::Multiply => ("Multiply", "multiply"),
         BinaryOperator::Divide => ("Divide", "divide"),
+        BinaryOperator::Remainder => ("Remainder", "remainder"),
         BinaryOperator::Equal => ("Eq", "eq"),
         BinaryOperator::NotEqual => ("Eq", "ne"),
         BinaryOperator::Less => ("PartialOrd", "lt"),
@@ -1632,6 +1636,10 @@ struct MacroExpander {
     compile_binding_types: HashMap<SyntaxId, String>,
     /// The `std.syntax` module, which defines `Parse` and its intrinsics.
     syntax_module: Option<ModuleId>,
+    /// The `companion F32` and `companion F64` modules. Their tier-1 float
+    /// intrinsics are evaluated at compile time, and a reified non-finite
+    /// float constant is rebuilt as a call to their `from_bits` intrinsic.
+    float_companion_modules: [Option<ModuleId>; 2],
     /// Every implementation of `Parse`, standard and user-written.
     parse_impls: Vec<ParseImpl>,
     /// The default body of `Parse.parse_all`, with the module it was written in.
@@ -1691,6 +1699,15 @@ impl MacroExpander {
         });
         let prelude = program.standard_library_prelude();
         let syntax = program.standard_library_syntax();
+        let number_types = program
+            .modules()
+            .iter()
+            .find(|module| module.path.ends_with(std::path::Path::new("std/number/types.sta")))
+            .map(|module| module.id);
+        let float_companion_modules = [
+            number_types.and_then(|module| program.child_named(module, "F32")),
+            number_types.and_then(|module| program.child_named(module, "F64")),
+        ];
         let cinterop = program.standard_library_cinterop();
         let standard_library_process = program
             .modules()
@@ -1884,11 +1901,19 @@ impl MacroExpander {
                         );
                     }
                     Item::ExternBlock(block)
-                        if Some(source_module.id) == syntax
-                            && block.abi == "\"staple-intrinsic\"" =>
+                        if block.abi == "\"staple-intrinsic\""
+                            && (Some(source_module.id) == syntax
+                                || float_companion_modules
+                                    .iter()
+                                    .any(|module| *module == Some(source_module.id))) =>
                     {
                         for binding in &block.bindings {
-                            if SyntaxIntrinsic::from_name(&binding.name).is_some() {
+                            let intrinsic = if Some(source_module.id) == syntax {
+                                SyntaxIntrinsic::from_name(&binding.name)
+                            } else {
+                                SyntaxIntrinsic::from_float_name(&binding.name)
+                            };
+                            if intrinsic.is_some() {
                                 let mut binding = binding.clone();
                                 if block.visibility == Visibility::Public {
                                     binding.visibility = Visibility::Public;
@@ -2454,6 +2479,7 @@ impl MacroExpander {
             caller_location_spans: HashMap::new(),
             source_files: source_files(program),
             syntax_module: syntax,
+            float_companion_modules,
             parse_impls: Vec::new(),
             parse_all_default: None,
             type_env: TypeEnv::default(),
@@ -2792,7 +2818,8 @@ impl MacroExpander {
                     BinaryOperator::Add
                     | BinaryOperator::Subtract
                     | BinaryOperator::Multiply
-                    | BinaryOperator::Divide => {
+                    | BinaryOperator::Divide
+                    | BinaryOperator::Remainder => {
                         self.require_compile_type(
                             &right,
                             &left,
@@ -4873,9 +4900,15 @@ impl MacroExpander {
                     && let Some(value) = &binding.value
                 {
                     let span = value.syntax().span.clone();
+                    let annotation = binding.annotation_body();
+                    let float = annotation
+                        .and_then(|annotation| self.named_float_type(module, annotation));
                     let folded = self
                         .eval_expression(module, value, &mut Environment::new())
-                        .and_then(|result| self.value_to_expression(result, span));
+                        .and_then(|result| self.assign_float_type(result, float, span.clone()))
+                        .and_then(|result| {
+                            self.value_to_expression(result, span, module, annotation)
+                        });
                     if let Some(folded) = folded {
                         binding.value = Some(folded);
                     }
@@ -5993,7 +6026,9 @@ impl MacroExpander {
                         &expected,
                     );
                 }
-                self.eval_expression(module, &ascription.value, environment)
+                let value = self.eval_expression(module, &ascription.value, environment)?;
+                let float = self.named_float_type(module, &ascription.ty);
+                self.assign_float_type(value, float, ascription.syntax.span.clone())
             }
             Expression::Binary(binary) => self.eval_binary_expression(module, binary, environment),
             Expression::Unary(unary) => self.eval_unary_expression(module, unary, environment),
@@ -6027,18 +6062,7 @@ impl MacroExpander {
                 let mut cursor = module;
                 loop {
                     if let Some(helper) = self.scopes[cursor.0].helpers.get(&name.name).cloned() {
-                        if let Some(intrinsic) = self.helper_intrinsic(&helper) {
-                            return Some(Value::Intrinsic(intrinsic));
-                        }
-                        if matches!(helper.binding.value, Some(Expression::Function(_))) {
-                            return Some(Value::Helper(helper.module, helper.binding));
-                        }
-                        let value = helper.binding.value?;
-                        return self.eval_helper_value(
-                            helper.module,
-                            &value,
-                            name.syntax.span.clone(),
-                        );
+                        return self.eval_helper_binding(helper, name.syntax.span.clone());
                     }
                     if !self.companion_modules[cursor.0] {
                         break;
@@ -6084,7 +6108,15 @@ impl MacroExpander {
             Expression::Integer(integer) => {
                 integer.literal.parse::<i128>().ok().map(Value::Integer)
             }
-            Expression::Float(float) => float.literal.parse::<f64>().ok().map(Value::Float),
+            Expression::Float(float) => float
+                .literal
+                .parse::<f64>()
+                .ok()
+                // A float *literal* must still be finite; only computed
+                // values may reify as NaN or infinity. Leaving a non-finite
+                // literal unfolded lets the checker's literal rule report it.
+                .filter(|value| value.is_finite())
+                .map(|value| Value::Float(value, None)),
             Expression::SyntaxArgument(argument) => {
                 self.diagnostics.push(Diagnostic::new(
                     argument.syntax.span.clone(),
@@ -6369,10 +6401,10 @@ impl MacroExpander {
                     && let Some(helper) = self.scopes[target.0].helpers.get(&item).cloned()
                     && helper.binding.visibility == Visibility::Public
                 {
-                    if let Some(intrinsic) = self.helper_intrinsic(&helper) {
-                        return Some(Value::Intrinsic(intrinsic));
-                    }
-                    return Some(Value::Helper(helper.module, helper.binding));
+                    // `F64.Pi` or `Real.floor` (with `F64 as Real`) reaches a
+                    // companion's members through the namespace its type
+                    // name maps to, like any other qualified helper.
+                    return self.eval_helper_binding(helper, access.syntax.span.clone());
                 }
                 let mut value = self.eval_expression(module, &access.value, environment)?;
                 if let Value::Syntax(SyntaxValue::Call(call)) = value {
@@ -7289,6 +7321,131 @@ impl MacroExpander {
         }
     }
 
+    /// Evaluates a named helper: an intrinsic or a function stays a callable
+    /// value, and any other binding is evaluated from its initializer. A
+    /// binding annotated with a float type gives its value that type, so
+    /// `F32.Pi` is an `F32` wherever it is read.
+    fn eval_helper_binding(&mut self, helper: HelperDefinition, span: Span) -> Option<Value> {
+        if let Some(intrinsic) = self.helper_intrinsic(&helper) {
+            return Some(Value::Intrinsic(intrinsic));
+        }
+        if matches!(helper.binding.value, Some(Expression::Function(_))) {
+            return Some(Value::Helper(helper.module, helper.binding));
+        }
+        let float = helper
+            .binding
+            .annotation_body()
+            .and_then(|annotation| self.named_float_type(helper.module, annotation));
+        let value = helper.binding.value?;
+        let value = self.eval_helper_value(helper.module, &value, span.clone())?;
+        self.assign_float_type(value, float, span)
+    }
+
+    /// The `companion F32`/`companion F64` module of `float`.
+    fn float_companion(&self, float: FloatType) -> Option<ModuleId> {
+        match float {
+            FloatType::F32 => self.float_companion_modules[0],
+            FloatType::F64 => self.float_companion_modules[1],
+        }
+    }
+
+    /// The float type a type expression names in `module`. A type name maps
+    /// to its companion's namespace, so this recognizes `F64` and an import
+    /// of it under another name, and not an unrelated type called `F64`.
+    fn named_float_type(&self, module: ModuleId, ty: &Type) -> Option<FloatType> {
+        let Type::Named(named) = ty else {
+            return None;
+        };
+        if named.namespace.is_some() {
+            return None;
+        }
+        let mut cursor = module;
+        loop {
+            if let Some(target) = self.scopes[cursor.0].namespaces.get(&named.name) {
+                return FloatType::ALL
+                    .into_iter()
+                    .find(|float| self.float_companion(*float) == Some(*target));
+            }
+            if !self.companion_modules[cursor.0] {
+                return None;
+            }
+            cursor = self.parent_modules[cursor.0]?;
+        }
+    }
+
+    /// Gives an untyped float the float type its context expects, rounding it
+    /// to that precision. A float already known to have a different type is
+    /// a type error: the folded constant replaces its initializer, so the
+    /// checker would never see the mismatch.
+    fn assign_float_type(
+        &mut self,
+        value: Value,
+        float: Option<FloatType>,
+        span: Span,
+    ) -> Option<Value> {
+        match (value, float) {
+            (Value::Float(value, None), Some(float)) => {
+                Some(Value::Float(parse::round_float(float, value), Some(float)))
+            }
+            (Value::Float(_, Some(actual)), Some(float)) if actual != float => {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!("expected `{}`, found `{}`", float.name(), actual.name()),
+                ));
+                None
+            }
+            (value, _) => Some(value),
+        }
+    }
+
+    /// Folds an arithmetic or comparison operator over two floats. An untyped
+    /// operand takes the other operand's type, and the arithmetic happens at
+    /// that type's precision, as it would at run time.
+    fn fold_float_operator(
+        &mut self,
+        operator: &str,
+        (left, left_type): (f64, Option<FloatType>),
+        (right, right_type): (f64, Option<FloatType>),
+        span: Span,
+    ) -> Option<Value> {
+        use crate::FloatBinaryOperation as Operation;
+        let float = match (left_type, right_type) {
+            (Some(left), Some(right)) if left != right => {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!(
+                        "operator `{operator}` cannot combine `{}` and `{}`",
+                        left.name(),
+                        right.name()
+                    ),
+                ));
+                return None;
+            }
+            (left, right) => left.or(right),
+        };
+        let precision = float.unwrap_or(FloatType::F64);
+        let left = parse::round_float(precision, left);
+        let right = parse::round_float(precision, right);
+        let operation = match operator {
+            "+" => Operation::Add,
+            "-" => Operation::Subtract,
+            "*" => Operation::Multiply,
+            "/" => Operation::Divide,
+            "%" => Operation::Remainder,
+            "==" => return Some(bool_value(left == right)),
+            "!=" => return Some(bool_value(left != right)),
+            "<" => return Some(bool_value(left < right)),
+            "<=" => return Some(bool_value(left <= right)),
+            ">" => return Some(bool_value(left > right)),
+            ">=" => return Some(bool_value(left >= right)),
+            _ => unreachable!("not a builtin operator: {operator}"),
+        };
+        Some(Value::Float(
+            parse::apply_float_binary(precision, operation, left, right),
+            float,
+        ))
+    }
+
     /// Applies a compile-time callable to an argument, bounded by
     /// `helper_eval_depth` so unbounded compile-time recursion (a
     /// self-referential `def`/`const`, or one whose base case can never be
@@ -7318,11 +7475,59 @@ impl MacroExpander {
         match callee {
             Value::Function {
                 module,
-                function,
+                mut function,
                 mut environment,
                 quote_result,
                 type_env,
             } => {
+                // A slotted function is curried by juxtaposed calls: after
+                // `F64.min a`, the remaining `b` is still awaited. A spread
+                // filling every slot at once is bound as one product.
+                let whole_product = matches!(
+                    (&argument, &function.pattern),
+                    (Value::Product(fields, true), Pattern::Product(product))
+                        if product.slotted && product.elements.len() == fields.len()
+                );
+                if !whole_product
+                    && let Pattern::Product(product) = &mut function.pattern
+                    && product.slotted
+                    && product.elements.len() > 1
+                {
+                    let mut elements = std::mem::take(&mut product.elements);
+                    let first = elements.remove(0);
+                    let rest = if elements.len() == 1 {
+                        elements.remove(0)
+                    } else {
+                        Pattern::Product(staple_syntax::ProductPattern {
+                            slotted: true,
+                            syntax: product.syntax.clone(),
+                            elements,
+                            mutable: false,
+                            moved: false,
+                            annotation: None,
+                        })
+                    };
+                    if !bind_pattern(&first, argument, &mut environment) {
+                        self.diagnostics.push(Diagnostic::new(
+                            span,
+                            "compile-time function argument does not match its parameter",
+                        ));
+                        return None;
+                    }
+                    return Some(Value::Function {
+                        module,
+                        function: staple_syntax::FunctionExpression {
+                            syntax: function.syntax,
+                            generics: None,
+                            pattern: rest,
+                            effect_lower_bound: None,
+                            body: function.body,
+                        },
+                        environment,
+                        quote_result,
+                        type_env,
+                    });
+                }
                 if !bind_pattern(&function.pattern, argument, &mut environment) {
                     self.diagnostics.push(Diagnostic::new(
                         span,
@@ -7421,8 +7626,8 @@ impl MacroExpander {
             (staple_syntax::UnaryOperator::Negate, Value::Integer(value)) => {
                 Some(Value::Integer(value.wrapping_neg()))
             }
-            (staple_syntax::UnaryOperator::Negate, Value::Float(value)) => {
-                Some(Value::Float(-value))
+            (staple_syntax::UnaryOperator::Negate, Value::Float(value, float)) => {
+                Some(Value::Float(-value, *float))
             }
             (staple_syntax::UnaryOperator::Not, Value::Nominal(name, _))
                 if name == "True" || name == "False" =>
@@ -7445,10 +7650,22 @@ impl MacroExpander {
     /// Converts a compile-time `Value` produced by folding a `const`
     /// initializer back into a literal `Expression` the rest of the
     /// pipeline (resolve, typecheck, codegen) can treat like any other
-    /// literal-valued binding. Only integers, finite floats, strings, and
-    /// (possibly nested) products of those can be represented this way;
-    /// anything else is reported as a diagnostic.
-    fn value_to_expression(&mut self, value: Value, span: Span) -> Option<Expression> {
+    /// literal-valued binding. Integers, floats, strings, and (possibly
+    /// nested) products of those can be represented this way. `expected` is
+    /// the binding's annotation, read in `module`, which lets an untyped
+    /// float, including one inside a product, take the float type it names.
+    fn value_to_expression(
+        &mut self,
+        value: Value,
+        span: Span,
+        module: ModuleId,
+        expected: Option<&Type>,
+    ) -> Option<Expression> {
+        let float_hint = expected.and_then(|expected| self.named_float_type(module, expected));
+        let value = match value {
+            Value::Float(float, None) if float_hint.is_some() => Value::Float(float, float_hint),
+            value => value,
+        };
         match value {
             Value::Integer(integer) if integer >= 0 => {
                 Some(Expression::Integer(staple_syntax::IntegerExpression {
@@ -7475,41 +7692,66 @@ impl MacroExpander {
                     right: Box::new(magnitude),
                 }))
             }
-            Value::Float(float) if float.is_finite() && float >= 0.0 => {
-                Some(Expression::Float(staple_syntax::FloatExpression {
-                    syntax: Syntax::synthetic(self.fresh_id(), span),
-                    literal: format!("{float:?}"),
-                }))
+            // A literal takes its type from context, so it spells an untyped
+            // float, or a typed one where the binding expects that type. A
+            // reified literal may carry a leading `-`: source literals cannot,
+            // but this is compiler-built syntax that later phases only parse.
+            Value::Float(float, float_type)
+                if float.is_finite() && (float_type.is_none() || float_type == float_hint) =>
+            {
+                Some(self.float_literal(float, span))
             }
-            // Mirrors the `Value::Integer` case above: float literals can
-            // never carry a leading `-` either, so a negative compile-time
-            // result uses the same subtraction operator syntax.
-            Value::Float(float) if float.is_finite() => {
-                let zero = Expression::Float(staple_syntax::FloatExpression {
-                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                    literal: "0.0".to_string(),
-                });
-                let magnitude = Expression::Float(staple_syntax::FloatExpression {
-                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                    literal: format!("{:?}", float.abs()),
-                });
+            // An untyped NaN or infinity came from literal arithmetic, and
+            // reifies as that arithmetic so its type is still inferred.
+            Value::Float(float, None) => {
+                let numerator = if float.is_nan() {
+                    0.0
+                } else {
+                    float.signum()
+                };
+                let numerator = self.float_literal(numerator, span.clone());
+                let zero = self.float_literal(0.0, span.clone());
                 Some(Expression::Binary(staple_syntax::BinaryExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                     operator_syntax: Syntax::synthetic(self.fresh_id(), span),
-                    operator: BinaryOperator::Subtract,
-                    left: Box::new(zero),
-                    right: Box::new(magnitude),
+                    operator: BinaryOperator::Divide,
+                    left: Box::new(numerator),
+                    right: Box::new(zero),
                 }))
             }
-            Value::Float(float) => {
-                self.diagnostics.push(Diagnostic::new(
-                    span,
-                    format!(
-                        "compile-time float result `{float}` is not finite; \
-                         `const` initializers must fold to a finite value"
-                    ),
-                ));
-                None
+            // Any other typed float, including a non-finite one, reifies as
+            // its exact bit pattern through its type's `from_bits`, which
+            // fixes the type and keeps NaN payload bits.
+            Value::Float(float, Some(float_type)) => {
+                let Some(companion) = self.float_companion(float_type) else {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "a typed compile-time float requires the standard library's float companions",
+                    ));
+                    return None;
+                };
+                let bits = match float_type {
+                    FloatType::F32 => u64::from((float as f32).to_bits()),
+                    FloatType::F64 => float.to_bits(),
+                };
+                let callee = Expression::Name(staple_syntax::NameExpression {
+                    syntax: {
+                        let mut syntax = Syntax::synthetic(self.fresh_id(), span.clone());
+                        syntax.definition_module = Some(companion.0);
+                        syntax
+                    },
+                    name: format!("__{}_from_bits", float_type.intrinsic_name()),
+                });
+                let argument = Expression::Integer(staple_syntax::IntegerExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                    literal: bits.to_string(),
+                });
+                Some(Expression::Call(staple_syntax::CallExpression {
+                    spread: false,
+                    syntax: Syntax::synthetic(self.fresh_id(), span),
+                    callee: Box::new(callee),
+                    argument: Box::new(argument),
+                }))
             }
             // `Value::String`'s payload is already the raw, quoted source
             // literal (see `Expression::String`'s handling in
@@ -7521,14 +7763,28 @@ impl MacroExpander {
                 literal: string,
             })),
             Value::Product(fields, slotted) => {
+                let element_types: Vec<Option<&Type>> = match expected {
+                    Some(Type::Product(product))
+                        if !product.variadic && product.elements.len() == fields.len() =>
+                    {
+                        product.elements.iter().map(|element| Some(&element.ty)).collect()
+                    }
+                    _ => vec![None; fields.len()],
+                };
                 let elements = fields
                     .into_iter()
-                    .map(|(name, value)| {
+                    .zip(element_types)
+                    .map(|((name, value), expected)| {
                         Some(staple_syntax::ProductElement {
                             syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                             name,
                             designated: false,
-                            value: self.value_to_expression(value, span.clone())?,
+                            value: self.value_to_expression(
+                                value,
+                                span.clone(),
+                                module,
+                                expected,
+                            )?,
                             spread: false,
                             named_spread: false,
                         })
@@ -7551,7 +7807,7 @@ impl MacroExpander {
                     Value::Separated { .. } => "a separated sequence value",
                     Value::Nominal(..) => "a nominal value",
                     Value::Integer(_)
-                    | Value::Float(_)
+                    | Value::Float(..)
                     | Value::String(_)
                     | Value::Product(_, _) => {
                         unreachable!()
@@ -7567,6 +7823,13 @@ impl MacroExpander {
                 None
             }
         }
+    }
+
+    fn float_literal(&mut self, float: f64, span: Span) -> Expression {
+        Expression::Float(staple_syntax::FloatExpression {
+            syntax: Syntax::synthetic(self.fresh_id(), span),
+            literal: format!("{float:?}"),
+        })
     }
 
     /// Folds a lowered builtin arithmetic/comparison operator call (e.g.
@@ -7586,11 +7849,12 @@ impl MacroExpander {
         arguments: &[&Expression],
         environment: &mut Environment,
     ) -> Option<Option<Value>> {
-        const BUILTIN_OPERATOR_METHODS: [(&str, &str, &str); 10] = [
+        const BUILTIN_OPERATOR_METHODS: [(&str, &str, &str); 11] = [
             ("Add", "add", "+"),
             ("Subtract", "subtract", "-"),
             ("Multiply", "multiply", "*"),
             ("Divide", "divide", "/"),
+            ("Remainder", "remainder", "%"),
             ("Eq", "eq", "=="),
             ("Eq", "ne", "!="),
             ("PartialOrd", "lt", "<"),
@@ -7651,6 +7915,9 @@ impl MacroExpander {
             (Value::Integer(left), Value::Integer(right), "/") if *right != 0 => {
                 Some(Value::Integer(left.wrapping_div(*right)))
             }
+            (Value::Integer(left), Value::Integer(right), "%") if *right != 0 => {
+                Some(Value::Integer(left.wrapping_rem(*right)))
+            }
             (Value::Integer(left), Value::Integer(right), "==") => Some(bool_value(left == right)),
             (Value::Integer(left), Value::Integer(right), "!=") => Some(bool_value(left != right)),
             (Value::Integer(left), Value::Integer(right), "<") => Some(bool_value(left < right)),
@@ -7659,16 +7926,13 @@ impl MacroExpander {
             (Value::Integer(left), Value::Integer(right), ">=") => Some(bool_value(left >= right)),
             (Value::String(left), Value::String(right), "==") => Some(bool_value(left == right)),
             (Value::String(left), Value::String(right), "!=") => Some(bool_value(left != right)),
-            (Value::Float(left), Value::Float(right), "+") => Some(Value::Float(left + right)),
-            (Value::Float(left), Value::Float(right), "-") => Some(Value::Float(left - right)),
-            (Value::Float(left), Value::Float(right), "*") => Some(Value::Float(left * right)),
-            (Value::Float(left), Value::Float(right), "/") => Some(Value::Float(left / right)),
-            (Value::Float(left), Value::Float(right), "==") => Some(bool_value(left == right)),
-            (Value::Float(left), Value::Float(right), "!=") => Some(bool_value(left != right)),
-            (Value::Float(left), Value::Float(right), "<") => Some(bool_value(left < right)),
-            (Value::Float(left), Value::Float(right), "<=") => Some(bool_value(left <= right)),
-            (Value::Float(left), Value::Float(right), ">") => Some(bool_value(left > right)),
-            (Value::Float(left), Value::Float(right), ">=") => Some(bool_value(left >= right)),
+            (Value::Float(left, left_type), Value::Float(right, right_type), _) => self
+                .fold_float_operator(
+                    operator,
+                    (*left, *left_type),
+                    (*right, *right_type),
+                    access.syntax.span.clone(),
+                ),
             _ => {
                 self.diagnostics.push(Diagnostic::new(
                     access.syntax.span.clone(),

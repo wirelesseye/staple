@@ -312,6 +312,7 @@ fn single_character_kind(character: char) -> TokenKind {
         '+' => TokenKind::Plus,
         '-' => TokenKind::Minus,
         '/' => TokenKind::Slash,
+        '%' => TokenKind::Percent,
         '$' => TokenKind::Dollar,
         '@' => TokenKind::At,
         '!' => TokenKind::Bang,

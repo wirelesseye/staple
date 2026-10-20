@@ -234,6 +234,73 @@ pub enum IntegerBinaryOperation {
     Subtract,
     Multiply,
     Divide,
+    Remainder,
+}
+
+/// Floating-point arithmetic. Kept separate from [`IntegerBinaryOperation`]
+/// because floats add operations (`min`, `max`, `copysign`) that integers do
+/// not share, and because an integer `%` and a float `%` lower differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FloatBinaryOperation {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder,
+    Min,
+    Max,
+    CopySign,
+}
+
+/// A one-operand floating-point operation backed by an LLVM intrinsic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FloatUnaryOperation {
+    Floor,
+    Ceil,
+    Trunc,
+    Round,
+    RoundEven,
+    Abs,
+    Sqrt,
+}
+
+/// A three-operand floating-point operation backed by an LLVM intrinsic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FloatTernaryOperation {
+    MulAdd,
+}
+
+/// The intrinsics a float type's companion declares, keyed by the suffix of
+/// their `__f32_`/`__f64_` name. Both name resolution and compile-time
+/// evaluation read this one table.
+pub(crate) fn float_companion_intrinsics(
+    float: FloatType,
+) -> [(&'static str, IntrinsicFunction); 13] {
+    use FloatBinaryOperation as Binary;
+    use FloatUnaryOperation as Unary;
+    let unary = |operation| IntrinsicFunction::FloatUnary { float, operation };
+    let binary = |operation| IntrinsicFunction::FloatBinary { float, operation };
+    [
+        ("floor", unary(Unary::Floor)),
+        ("ceil", unary(Unary::Ceil)),
+        ("trunc", unary(Unary::Trunc)),
+        ("round", unary(Unary::Round)),
+        ("round_even", unary(Unary::RoundEven)),
+        ("abs", unary(Unary::Abs)),
+        ("sqrt", unary(Unary::Sqrt)),
+        ("min", binary(Binary::Min)),
+        ("max", binary(Binary::Max)),
+        ("copysign", binary(Binary::CopySign)),
+        (
+            "mul_add",
+            IntrinsicFunction::FloatTernary {
+                float,
+                operation: FloatTernaryOperation::MulAdd,
+            },
+        ),
+        ("to_bits", IntrinsicFunction::FloatToBits { float }),
+        ("from_bits", IntrinsicFunction::FloatFromBits { float }),
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -328,7 +395,23 @@ pub enum IntrinsicFunction {
     },
     FloatBinary {
         float: FloatType,
-        operation: IntegerBinaryOperation,
+        operation: FloatBinaryOperation,
+    },
+    FloatUnary {
+        float: FloatType,
+        operation: FloatUnaryOperation,
+    },
+    FloatTernary {
+        float: FloatType,
+        operation: FloatTernaryOperation,
+    },
+    /// `F32`/`F64` to their unsigned bit pattern (`U32`/`U64`).
+    FloatToBits {
+        float: FloatType,
+    },
+    /// The unsigned bit pattern (`U32`/`U64`) to `F32`/`F64`.
+    FloatFromBits {
+        float: FloatType,
     },
     FloatCompare {
         float: FloatType,
@@ -466,6 +549,8 @@ pub struct ResolvedModule {
     type_names: HashMap<TypeId, String>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
     builtin_types: HashMap<TypeId, BuiltinType>,
+    /// The inverse of `builtin_types`, for finding a builtin type's companion.
+    builtin_type_ids: HashMap<BuiltinType, TypeId>,
     recursive_constructions: HashMap<TypeId, RecursiveConstruction>,
     intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
     external_symbols: HashSet<SymbolId>,
@@ -899,6 +984,12 @@ impl ResolvedModule {
 
     pub fn builtin_type(&self, id: TypeId) -> Option<BuiltinType> {
         self.builtin_types.get(&id).copied()
+    }
+
+    /// The declaration of a compiler-provided type, when the standard library
+    /// declares it.
+    pub fn type_for_builtin(&self, builtin: BuiltinType) -> Option<TypeId> {
+        self.builtin_type_ids.get(&builtin).copied()
     }
 
     pub fn recursive_construction(&self, id: TypeId) -> Option<RecursiveConstruction> {
@@ -1775,6 +1866,11 @@ impl NameResolver {
             type_declarations: self.type_declarations,
             type_names: self.type_names,
             syntax_modules: self.syntax_modules,
+            builtin_type_ids: self
+                .builtin_types
+                .iter()
+                .map(|(id, builtin)| (*builtin, *id))
+                .collect(),
             builtin_types: self.builtin_types,
             recursive_constructions: self.recursive_constructions,
             intrinsic_functions: self.intrinsic_functions,
@@ -2037,6 +2133,7 @@ impl NameResolver {
                 ("subtract", IntegerBinaryOperation::Subtract),
                 ("multiply", IntegerBinaryOperation::Multiply),
                 ("divide", IntegerBinaryOperation::Divide),
+                ("remainder", IntegerBinaryOperation::Remainder),
             ] {
                 expected.push((
                     format!("__{}_{}", integer.intrinsic_name(), suffix),
@@ -2079,10 +2176,11 @@ impl NameResolver {
                 },
             ));
             for (suffix, operation) in [
-                ("add", IntegerBinaryOperation::Add),
-                ("subtract", IntegerBinaryOperation::Subtract),
-                ("multiply", IntegerBinaryOperation::Multiply),
-                ("divide", IntegerBinaryOperation::Divide),
+                ("add", FloatBinaryOperation::Add),
+                ("subtract", FloatBinaryOperation::Subtract),
+                ("multiply", FloatBinaryOperation::Multiply),
+                ("divide", FloatBinaryOperation::Divide),
+                ("remainder", FloatBinaryOperation::Remainder),
             ] {
                 expected.push((
                     format!("__{}_{}", float.intrinsic_name(), suffix),
@@ -2124,6 +2222,18 @@ impl NameResolver {
                 (module.to_owned(), None, name, intrinsic)
             })
             .collect();
+        // The float toolbox is declared in each float type's companion, which
+        // lives in `std.number.types` next to the type declarations.
+        for float in FloatType::ALL {
+            for (suffix, intrinsic) in float_companion_intrinsics(float) {
+                declarations.push((
+                    "std.number.types".to_owned(),
+                    Some(float.name()),
+                    format!("__{}_{}", float.intrinsic_name(), suffix),
+                    intrinsic,
+                ));
+            }
+        }
         for from in NumericType::ALL {
             for to in NumericType::ALL {
                 if from != to {

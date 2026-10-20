@@ -148,7 +148,8 @@ fn lexical_kind(kind: TokenKind) -> Option<u32> {
         | TokenKind::Star
         | TokenKind::Plus
         | TokenKind::Minus
-        | TokenKind::Slash => Some(OPERATOR),
+        | TokenKind::Slash
+        | TokenKind::Percent => Some(OPERATOR),
         _ => None,
     }
 }

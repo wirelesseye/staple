@@ -23,6 +23,10 @@ pub(super) enum SyntaxIntrinsic {
     Delimited(DelimiterKind),
     TakeRest,
     Offset,
+    /// A float companion intrinsic (`__f64_floor`, `__f32_from_bits`, ...),
+    /// so `const` initializers fold them with the results LLVM produces at
+    /// run time.
+    Float(crate::IntrinsicFunction),
 }
 
 impl SyntaxIntrinsic {
@@ -43,6 +47,18 @@ impl SyntaxIntrinsic {
             "__offset" => Self::Offset,
             _ => return None,
         })
+    }
+
+    /// The float intrinsic a name in a float companion declares.
+    pub(super) fn from_float_name(name: &str) -> Option<Self> {
+        let (float, suffix) = crate::FloatType::ALL.into_iter().find_map(|float| {
+            name.strip_prefix(&format!("__{}_", float.intrinsic_name()))
+                .map(|suffix| (float, suffix))
+        })?;
+        crate::float_companion_intrinsics(float)
+            .into_iter()
+            .find(|(candidate, _)| *candidate == suffix)
+            .map(|(_, intrinsic)| Self::Float(intrinsic))
     }
 
     /// Whether the intrinsic's parameter is `mut`: it advances its argument in
@@ -599,6 +615,13 @@ impl MacroExpander {
     pub(super) fn helper_intrinsic(&self, helper: &HelperDefinition) -> Option<SyntaxIntrinsic> {
         if Some(helper.module) == self.syntax_module && helper.binding.kind == BindingKind::Extern {
             SyntaxIntrinsic::from_name(&helper.binding.name)
+        } else if helper.binding.kind == BindingKind::Extern
+            && self
+                .float_companion_modules
+                .iter()
+                .any(|module| *module == Some(helper.module))
+        {
+            SyntaxIntrinsic::from_float_name(&helper.binding.name)
         } else {
             None
         }
@@ -744,6 +767,7 @@ impl MacroExpander {
                 let (_, cursor) = self.stream_argument(argument, span)?;
                 Some(Value::Integer(cursor as i128))
             }
+            SyntaxIntrinsic::Float(intrinsic) => self.eval_float_intrinsic(intrinsic, argument, span),
             SyntaxIntrinsic::ErrorAt => {
                 let Value::Product(mut elements, _) = argument else {
                     self.diagnostics.push(Diagnostic::new(
@@ -1807,5 +1831,183 @@ impl MacroExpander {
             self.static_parameters = HashSet::new();
             self.static_parse_bounds = HashSet::new();
         }
+    }
+}
+
+impl MacroExpander {
+    /// Folds a float companion intrinsic. Each operand must be a float of the
+    /// intrinsic's own type, or an untyped literal, which takes that type.
+    fn eval_float_intrinsic(
+        &mut self,
+        intrinsic: crate::IntrinsicFunction,
+        argument: Value,
+        span: Span,
+    ) -> Option<Value> {
+        use crate::{FloatType, IntrinsicFunction as Intrinsic};
+        let (float, arity) = match intrinsic {
+            Intrinsic::FloatUnary { float, .. } | Intrinsic::FloatToBits { float } => (float, 1),
+            Intrinsic::FloatBinary { float, .. } => (float, 2),
+            Intrinsic::FloatTernary { float, .. } => (float, 3),
+            Intrinsic::FloatFromBits { float } => {
+                let Value::Integer(bits) = argument else {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "float bit-cast operand must be an integer",
+                    ));
+                    return None;
+                };
+                let value = match float {
+                    FloatType::F32 => f64::from(f32::from_bits(bits as u32)),
+                    FloatType::F64 => f64::from_bits(bits as u64),
+                };
+                return Some(Value::Float(value, Some(float)));
+            }
+            _ => unreachable!("float companions declare only float intrinsics"),
+        };
+        // A multi-slot parameter receives its operands as one product.
+        let operands = match argument {
+            Value::Product(fields, _) if arity > 1 => {
+                fields.into_iter().map(|(_, value)| value).collect()
+            }
+            argument => vec![argument],
+        };
+        if operands.len() != arity {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!("float intrinsic expects {arity} operands"),
+            ));
+            return None;
+        }
+        let mut values = Vec::with_capacity(arity);
+        for operand in operands {
+            match operand {
+                Value::Float(value, None) => values.push(round_float(float, value)),
+                Value::Float(value, Some(actual)) if actual == float => values.push(value),
+                Value::Float(_, Some(actual)) => {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        format!("expected `{}`, found `{}`", float.name(), actual.name()),
+                    ));
+                    return None;
+                }
+                _ => {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "float intrinsic operands must be floats",
+                    ));
+                    return None;
+                }
+            }
+        }
+        let value = match intrinsic {
+            Intrinsic::FloatUnary { operation, .. } => {
+                apply_float_unary(float, operation, values[0])
+            }
+            Intrinsic::FloatBinary { operation, .. } => {
+                apply_float_binary(float, operation, values[0], values[1])
+            }
+            Intrinsic::FloatTernary { operation, .. } => {
+                apply_float_ternary(float, operation, values[0], values[1], values[2])
+            }
+            Intrinsic::FloatToBits { .. } => {
+                return Some(Value::Integer(match float {
+                    FloatType::F32 => i128::from((values[0] as f32).to_bits()),
+                    FloatType::F64 => i128::from(values[0].to_bits()),
+                }));
+            }
+            _ => unreachable!("handled above"),
+        };
+        Some(Value::Float(value, Some(float)))
+    }
+}
+
+/// Rounds an untyped compile-time float to `float`'s precision.
+pub(super) fn round_float(float: crate::FloatType, value: f64) -> f64 {
+    match float {
+        crate::FloatType::F32 => f64::from(value as f32),
+        crate::FloatType::F64 => value,
+    }
+}
+
+pub(super) fn apply_float_unary(
+    float: crate::FloatType,
+    operation: crate::FloatUnaryOperation,
+    value: f64,
+) -> f64 {
+    use crate::FloatUnaryOperation;
+    match float {
+        crate::FloatType::F32 => {
+            let value = value as f32;
+            (match operation {
+                FloatUnaryOperation::Floor => value.floor(),
+                FloatUnaryOperation::Ceil => value.ceil(),
+                FloatUnaryOperation::Trunc => value.trunc(),
+                FloatUnaryOperation::Round => value.round(),
+                FloatUnaryOperation::RoundEven => value.round_ties_even(),
+                FloatUnaryOperation::Abs => value.abs(),
+                FloatUnaryOperation::Sqrt => value.sqrt(),
+            }) as f64
+        }
+        crate::FloatType::F64 => match operation {
+            FloatUnaryOperation::Floor => value.floor(),
+            FloatUnaryOperation::Ceil => value.ceil(),
+            FloatUnaryOperation::Trunc => value.trunc(),
+            FloatUnaryOperation::Round => value.round(),
+            FloatUnaryOperation::RoundEven => value.round_ties_even(),
+            FloatUnaryOperation::Abs => value.abs(),
+            FloatUnaryOperation::Sqrt => value.sqrt(),
+        },
+    }
+}
+
+pub(super) fn apply_float_binary(
+    float: crate::FloatType,
+    operation: crate::FloatBinaryOperation,
+    left: f64,
+    right: f64,
+) -> f64 {
+    use crate::FloatBinaryOperation;
+    match float {
+        crate::FloatType::F32 => {
+            let left = left as f32;
+            let right = right as f32;
+            (match operation {
+                FloatBinaryOperation::Add => left + right,
+                FloatBinaryOperation::Subtract => left - right,
+                FloatBinaryOperation::Multiply => left * right,
+                FloatBinaryOperation::Divide => left / right,
+                FloatBinaryOperation::Remainder => left % right,
+                FloatBinaryOperation::Min => left.min(right),
+                FloatBinaryOperation::Max => left.max(right),
+                FloatBinaryOperation::CopySign => left.copysign(right),
+            }) as f64
+        }
+        crate::FloatType::F64 => match operation {
+            FloatBinaryOperation::Add => left + right,
+            FloatBinaryOperation::Subtract => left - right,
+            FloatBinaryOperation::Multiply => left * right,
+            FloatBinaryOperation::Divide => left / right,
+            FloatBinaryOperation::Remainder => left % right,
+            FloatBinaryOperation::Min => left.min(right),
+            FloatBinaryOperation::Max => left.max(right),
+            FloatBinaryOperation::CopySign => left.copysign(right),
+        },
+    }
+}
+
+pub(super) fn apply_float_ternary(
+    float: crate::FloatType,
+    operation: crate::FloatTernaryOperation,
+    first: f64,
+    second: f64,
+    third: f64,
+) -> f64 {
+    use crate::FloatTernaryOperation;
+    let FloatTernaryOperation::MulAdd = operation;
+    match float {
+        crate::FloatType::F32 => {
+            (first as f32).mul_add(second as f32, third as f32) as f64
+        }
+        crate::FloatType::F64 => first.mul_add(second, third),
     }
 }

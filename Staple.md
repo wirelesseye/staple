@@ -1094,6 +1094,27 @@ type declared in the same module as the alias, where `companion B` could be
 written directly. A companion for an alias of a structural type, such as a sum
 or product, is rejected, because those types cannot have companion items.
 
+The builtin numeric types have companions too, so their per-type helpers need
+no import. `F32` and `F64` provide the standard floating-point toolbox:
+
+```staple
+let cell = (x / size) |> floor        // F64.floor x
+let n = x |> round |> try_convert.<_, I64>
+let hypotenuse = (a * a + b * b) |> sqrt
+```
+
+`floor`, `ceil`, `trunc`, `round` (ties away from zero), `round_even` (ties to
+even), `fract`, `abs`, `sqrt`, `copysign`, `min`, `max`, `clamp`, and
+`mul_add` are exact and backed by LLVM intrinsics. `min` and `max` ignore a
+NaN operand; `clamp` panics at its caller when `lo > hi` or a bound is NaN. `is_nan`,
+`is_infinite`, `is_finite`, and `is_sign_negative` classify a value.
+`remainder_euclid` and `divide_euclid` provide Euclidean division over `%`.
+`to_bits`/`from_bits` expose the exact bit pattern (`F32.to_bits: F32 -> U32`,
+`F64.to_bits: F64 -> U64`), and the constants `Epsilon`, `Min`, `Max`,
+`MinPositive`, `Pi`, `E`, `NaN`, `Infinity`, and `NegInfinity` are companion
+items. Rounding returns the float type; converting to an integer is the
+separate checked conversion.
+
 Pipes associate left and bind below every binary operator. Each stage groups
 its ordinary application arguments before the next pipe:
 
@@ -1352,12 +1373,20 @@ def fibonacci = n: I32 => I32 ::
 const y = fibonacci 10
 ```
 
-An initializer must fold to an integer, a string, or a product (including a
-nested product) of those; a value that cannot be represented this way —
-a function, a resource, and so on — is a compile-time error. `const` requires
-an initializer, and, like a compile-time helper's evaluation generally, an
-initializer that recurses without bound (including through a self-referential
-`const`) is rejected rather than left to hang or exhaust memory.
+An initializer must fold to an integer, a float, a string, or a product
+(including a nested product) of those; a value that cannot be represented this
+way — a function, a resource, and so on — is a compile-time error. Floats fold
+under IEEE rules, including non-finite results: `const x: F64 = 1.0 / 0.0` is
+positive infinity and `const y: F64 = 0.0 / 0.0` is NaN. A float *literal*
+must still be finite; only computed values may be non-finite. A folded float
+keeps the float type it was computed at, so `const pi = F32.Pi` is an `F32`,
+and mixing `F32` and `F64` while folding is an error. A typed float that no
+literal can spell, such as an unannotated `F32` constant or a non-finite one,
+is represented exactly by its bit pattern, so NaN payload bits survive
+folding. `const` requires an initializer, and, like a compile-time
+helper's evaluation generally, an initializer that recurses without bound
+(including through a self-referential `const`) is rejected rather than left to
+hang or exhaust memory.
 
 Like `def`, `const` is hoisted: its name is available throughout its
 containing scope regardless of declaration order. Unlike `def`, it has no
@@ -1440,7 +1469,8 @@ environment, including private helpers used by generated syntax.
 Operators are fixed grammar with fixed precedence and associativity; there is
 no user-definable operator or infix-function syntax. Each operator desugars
 directly to a call against a standard library trait. The traits in
-`std.ops` (`Add`, `Subtract`, `Multiply`, `Divide`, `Neg`, and `Not`) and
+`std.ops` (`Add`, `Subtract`, `Multiply`, `Divide`, `Remainder`, `Neg`, and
+`Not`) and
 `std.cmp` (`Eq`, `PartialOrd`, and `Ord`) and their methods require explicit
 imports; operator syntax works without
 these imports. Every name an operator desugars to resolves at its
@@ -1452,7 +1482,7 @@ standard-library definition, so local items or imports named `Convert`, `Eq`,
 | `?` (postfix) | 9 | — | `match (Try.branch operand) { Ok output => output, residual => return residual }` |
 | `-`, `!` (prefix) | 8 | — | `Neg.negate`, `Not.not` |
 | `as` | 7.5 | left | `Convert.convert.<_, Type> expression` |
-| `*`, `/` | 7 | left | `Multiply.multiply`, `Divide.divide` |
+| `*`, `/`, `%` | 7 | left | `Multiply.multiply`, `Divide.divide`, `Remainder.remainder` |
 | `+`, `-` | 6 | left | `Add.add`, `Subtract.subtract` |
 | `==`, `!=`, `<`, `<=`, `>`, `>=` | 4 | none | `Eq.eq`/`Eq.ne`, `PartialOrd.lt`/`le`/`gt`/`ge` |
 | `..`, `..=` | 3 | none | the prelude's `range`/`range_inclusive` functions |
@@ -1465,8 +1495,14 @@ postfix `?` (see [Propagating with `?`](#propagating-with-)) ends the call or pi
 on its left.
 Chaining two non-associative operators at the same precedence (for example
 `1 == 2 == 3`) is a parse error; parenthesize to disambiguate. The standard
-integer implementations of `Add`, `Subtract`, `Multiply`, `Divide`, `Eq`, and
-`PartialOrd` are backed by private compiler intrinsics. `..`/`..=` are not
+integer implementations of `Add`, `Subtract`, `Multiply`, `Divide`,
+`Remainder`, `Eq`, and `PartialOrd` are backed by private compiler
+intrinsics. `%` is truncated remainder: its result takes the sign of the
+dividend, so `-7 % 3` is `-1` and `a == (a / b) * b + a % b` holds whenever
+both sides are defined. `Divide.divide` and `Remainder.remainder` are
+`@track_caller` members: integer division or remainder by zero, and signed
+`MIN / -1`, [panic](#track_caller-and-location) at the operator, while
+`MIN % -1` is `0`. `..`/`..=` are not
 trait-based: they call the prelude's `range`/`range_inclusive` functions
 directly, which construct `Range T`/`RangeInclusive T` values.
 

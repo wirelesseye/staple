@@ -12416,32 +12416,299 @@ fn folds_const_float_arithmetic_at_compile_time() {
     let llvm = CodeGenerator::new(&context)
         .compile_root(&lower(&module))
         .expect("float const bindings should fold and compile");
-    // `x` and `y` fold directly to literal constants. `z`'s negative
-    // result instead goes through the same zero-minus-magnitude
-    // desugaring already used for negative integer consts, so it's
-    // computed by a call at module-init time rather than appearing as a
-    // bare `double -2` literal; compiling successfully is enough to
-    // exercise that path.
+    // All three fold directly to literal constants. A negative result is a
+    // compiler-built literal even though source literals cannot carry a
+    // leading `-`.
     assert!(llvm.contains("double 4.000000e+00"));
     assert!(llvm.contains("double 2.500000e+00"));
+    assert!(llvm.contains("double -2.000000e+00"));
 }
 
 #[test]
-fn rejects_const_float_initializers_that_fold_to_non_finite_values() {
+fn folds_const_float_operations_at_compile_time() {
+    let module = type_check(concat!(
+        "const floored: F64 = F64.floor 1.9\n",
+        "const ceiled: F64 = F64.ceil 1.1\n",
+        "const truncated: F64 = F64.trunc 1.9\n",
+        "const rounded: F64 = F64.round 1.5\n",
+        "const even: F64 = F64.round_even 2.5\n",
+        "const rooted: F64 = F64.sqrt 9.0\n",
+        "const smallest: F64 = F64.min 2.0 3.0\n",
+        "const bits: U64 = F64.to_bits 1.0\n",
+        "const restored: F64 = F64.from_bits bits\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("tier-1 float operations should fold and compile");
+    let value = |name: &str| {
+        module
+            .resolved()
+            .syntax()
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Binding(binding) if binding.name == name => binding.value.clone(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("binding `{name}` should exist"))
+    };
+    let literal = |expression: &staple_syntax::Expression| match expression {
+        staple_syntax::Expression::Float(float) => float.literal.clone(),
+        other => panic!("expected a folded float literal, found {other:?}"),
+    };
+    assert_eq!(literal(&value("floored")), "1.0");
+    assert_eq!(literal(&value("rounded")), "2.0");
+    assert_eq!(literal(&value("rooted")), "3.0");
+}
+
+#[test]
+fn remainders_compile_with_integer_and_float_lowering() {
+    let module = type_check(concat!(
+        "let signed: I32 = ((I32 :: 0) - (I32 :: 7)) % (I32 :: 3)\n",
+        "let unsigned: U32 = (U32 :: 7) % (U32 :: 3)\n",
+        "let float: F64 = (F64 :: 7.5) % (F64 :: 2.0)\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&lower_whole(&module))
+        .expect("remainders should compile");
+    assert!(llvm.contains("srem"), "signed remainder uses srem:\n{llvm}");
+    assert!(
+        llvm.contains("urem"),
+        "unsigned remainder uses urem:\n{llvm}"
+    );
+    assert!(
+        llvm.contains("frem"),
+        "float remainder uses frem:\n{llvm}"
+    );
+    // The zero-divisor guard lives in the `Remainder` implementations, which
+    // panic at the caller rather than reaching the raw intrinsic.
+    assert!(
+        llvm.contains("remainder by zero"),
+        "a zero divisor panics instead of being undefined behavior:\n{llvm}"
+    );
+}
+
+#[test]
+fn folded_float_constants_keep_their_float_type() {
+    let module = type_check(concat!(
+        "const infinity = F32.Infinity\n",
+        "const pi = F32.Pi\n",
+        "const ascribed = F32 :: 1.5\n",
+        "const pair: (F32, F32) = (0.0 / 0.0, 1.0)\n",
+        "let a: F32 = infinity\n",
+        "let b: F32 = pi\n",
+        "let c: F32 = ascribed\n",
+        "let d: (F32, F32) = pair\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("F32 constants should fold as F32 and compile");
+}
+
+#[test]
+fn folded_float_constants_read_companions_through_renamed_imports() {
+    let module = type_check(concat!(
+        "use std.number.(F64 as Real)\n",
+        "const pi: Real = Real.Pi\n",
+        "const floored: Real = Real.floor 2.5\n",
+    ));
+    let value = |name: &str| {
+        module
+            .resolved()
+            .syntax()
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Binding(binding) if binding.name == name => binding.value.clone(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("binding `{name}` should exist"))
+    };
+    for (name, expected) in [("pi", "3.141592653589793"), ("floored", "2.0")] {
+        match value(name) {
+            staple_syntax::Expression::Float(float) => assert_eq!(float.literal, expected),
+            other => panic!("expected `{name}` to fold to a literal, found {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn folded_float_constants_reject_mixed_float_types() {
+    for (source, message) in [
+        ("const narrowed: F32 = F64.Pi\n", "expected `F32`, found `F64`"),
+        (
+            "const mixed = F32.Pi + F64.Pi\n",
+            "operator `+` cannot combine `F32` and `F64`",
+        ),
+    ] {
+        let diagnostics = resolve_result(source)
+            .expect_err("a mixed float constant should be rejected while folding");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(message)),
+            "expected {message:?} for {source:?}, found {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn folds_euclidean_float_remainders_inside_their_range() {
+    let module = type_check(concat!(
+        "const tiny: F64 = F64.remainder_euclid (0.0 - 1.0e-20) 1.0\n",
+        "const quotient: F64 = F64.divide_euclid (0.0 - 7.0) 2.0\n",
+        "const remainder: F64 = F64.remainder_euclid (0.0 - 7.0) 2.0\n",
+    ));
+    let value = |name: &str| {
+        module
+            .resolved()
+            .syntax()
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Binding(binding) if binding.name == name => binding.value.clone(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("binding `{name}` should exist"))
+    };
+    for (name, expected) in [("tiny", "0.0"), ("quotient", "-4.0"), ("remainder", "1.0")] {
+        match value(name) {
+            staple_syntax::Expression::Float(float) => assert_eq!(float.literal, expected),
+            other => panic!("expected `{name}` to fold to a literal, found {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn float_companions_are_reachable_from_pipe_stages_without_an_import() {
+    let module = type_check(concat!(
+        "let x = 7.5 / 2.0\n",
+        "let cell = x |> floor\n",
+        "let n = x |> round |> round_even\n",
+        "let hypotenuse = (3.0 * 3.0 + 4.0 * 4.0) |> sqrt\n",
+        "let lower = x |> min 10.0\n",
+        "let clamped = x |> clamp 0.0 10.0\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&lower_whole(&module))
+        .expect("float companion pipe stages should compile");
+    for intrinsic in [
+        "llvm.floor",
+        "llvm.round",
+        "llvm.roundeven",
+        "llvm.sqrt",
+        "llvm.minnum",
+    ] {
+        assert!(
+            llvm.contains(intrinsic),
+            "expected `{intrinsic}` in emitted IR:\n{llvm}"
+        );
+    }
+}
+
+#[test]
+fn float_companions_cover_the_tier_one_toolbox() {
+    let module = type_check(concat!(
+        "let a = 1.9 |> ceil\n",
+        "let b = 1.9 |> trunc\n",
+        "let c = -1.5 |> abs\n",
+        "let d = 2.5 |> fract\n",
+        "let e = 2.0 |> copysign (-1.0)\n",
+        "let f = 2.0 |> max 3.0\n",
+        "let g = F64.mul_add 2.0 3.0 4.0\n",
+        "let h = F64.remainder_euclid (-7.0) 3.0\n",
+        "let i = F64.divide_euclid (-7.0) 3.0\n",
+        "let j = F64.is_nan F64.NaN\n",
+        "let k = F64.is_infinite F64.Infinity\n",
+        "let l = F64.is_finite 1.0\n",
+        "let m = F64.is_sign_negative F64.NegInfinity\n",
+        "let n: U64 = F64.to_bits 1.0\n",
+        "let o: F64 = F64.from_bits n\n",
+        "let p = F64.Epsilon + F64.MinPositive + F64.Pi + F64.E\n",
+        "let q = F64.Min + F64.Max\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&lower_whole(&module))
+        .expect("the tier-one float toolbox should compile");
+    for intrinsic in [
+        "llvm.ceil",
+        "llvm.trunc",
+        "llvm.fabs",
+        "llvm.copysign",
+        "llvm.maxnum",
+        "llvm.fma",
+        "bitcast",
+    ] {
+        assert!(
+            llvm.contains(intrinsic),
+            "expected `{intrinsic}` in emitted IR:\n{llvm}"
+        );
+    }
+}
+
+#[test]
+fn folds_const_float_initializers_with_ieee_non_finite_results() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source("const x: F64 = 1.0 / 0.0\n", root)
+        .load_source(
+            concat!(
+                "const infinity: F64 = 1.0 / 0.0\n",
+                "const nan: F64 = 0.0 / 0.0\n",
+                "const negative_infinity: F64 = -1.0 / 0.0\n",
+            ),
+            root,
+        )
         .expect("source should parse");
-    let diagnostics = NameResolver::new()
+    let module = NameResolver::new()
         .resolve_program(program)
-        .expect_err_diagnostics(
-            "dividing by zero at compile time should not fold to an infinite constant",
-        );
+        .expect("non-finite computed constants should fold under IEEE rules");
+    let value = |name: &str| {
+        module
+            .syntax()
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Binding(binding) if binding.name == name => binding.value.clone(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("binding `{name}` should exist"))
+    };
+    let bits = |expression: &staple_syntax::Expression| match expression {
+        staple_syntax::Expression::Call(call) => {
+            let staple_syntax::Expression::Name(callee) = call.callee.as_ref() else {
+                panic!("expected a bit-cast call, found {call:?}");
+            };
+            assert_eq!(callee.name, "__f64_from_bits");
+            let staple_syntax::Expression::Integer(integer) = call.argument.as_ref() else {
+                panic!("expected an integer bit pattern, found {call:?}");
+            };
+            integer.literal.clone()
+        }
+        other => panic!("expected a reified non-finite float, found {other:?}"),
+    };
+    // Positive infinity, quiet NaN, and negative infinity, exactly.
+    assert_eq!(bits(&value("infinity")), "9218868437227405312");
+    assert_eq!(bits(&value("nan")), "9221120237041090560");
+    assert_eq!(bits(&value("negative_infinity")), "18442240474082181120");
+}
+
+#[test]
+fn still_rejects_float_literals_that_overflow() {
+    let resolved =
+        resolve_result("const x: F64 = 1e999\n").expect("the literal should reach the checker");
+    let diagnostics = TypeChecker::new()
+        .check(resolved)
+        .expect_err_diagnostics("an overflowing float literal is still rejected");
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("is not finite"))
+            .any(|diagnostic| diagnostic.message.contains("does not fit in `F64`"))
     );
 }
 
@@ -17081,8 +17348,9 @@ fn track_caller_flags_only_the_outer_stage() {
     assert!(resolved.is_track_caller(outer[0].id));
     assert!(!resolved.is_track_caller(tracked("plain")[0].id));
     // The curried inner stage and every other function stay untracked, apart
-    // from the standard library's `Location.caller`, `panic`, and the
-    // `Try.unwrap` and `Try.expect` defaults.
+    // from the standard library's `Location.caller`, `panic`, the
+    // `Try.unwrap` and `Try.expect` defaults, and the number module's
+    // `Divide`/`Remainder` implementations and float `clamp`.
     assert_eq!(
         resolved
             .functions()
@@ -17092,6 +17360,7 @@ fn track_caller_flags_only_the_outer_stage() {
                     && !function.name.ends_with("caller")
                     && !function.name.ends_with("panic")
                     && !function.name.contains("std.try.")
+                    && !function.name.contains("std.number.")
             })
             .count(),
         1,

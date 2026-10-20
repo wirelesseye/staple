@@ -8159,6 +8159,53 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_float_binary(float, operation, *left, *right)?;
                 Ok(value.as_any_value_enum())
             }
+            IntrinsicFunction::FloatUnary { float, operation } => {
+                let [BasicMetadataValueEnum::FloatValue(value)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "float unary intrinsic operand must be a float",
+                    ));
+                };
+                let value = self.backend.build_float_unary(float, operation, *value)?;
+                Ok(value.as_any_value_enum())
+            }
+            IntrinsicFunction::FloatTernary { float, operation } => {
+                let [
+                    BasicMetadataValueEnum::FloatValue(first),
+                    BasicMetadataValueEnum::FloatValue(second),
+                    BasicMetadataValueEnum::FloatValue(third),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "float ternary intrinsic operands must be floats",
+                    ));
+                };
+                let value =
+                    self.backend
+                        .build_float_ternary(float, operation, *first, *second, *third)?;
+                Ok(value.as_any_value_enum())
+            }
+            IntrinsicFunction::FloatToBits { float } => {
+                let [BasicMetadataValueEnum::FloatValue(value)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "float bit-cast operand must be a float",
+                    ));
+                };
+                let value = self.backend.build_float_to_bits(float, *value)?;
+                Ok(value.as_any_value_enum())
+            }
+            IntrinsicFunction::FloatFromBits { float } => {
+                let [BasicMetadataValueEnum::IntValue(value)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "float from-bits operand must be an integer",
+                    ));
+                };
+                let value = self.backend.build_float_from_bits(float, *value)?;
+                Ok(value.as_any_value_enum())
+            }
             IntrinsicFunction::FloatCompare { float, operation } => {
                 let [
                     BasicMetadataValueEnum::FloatValue(left),

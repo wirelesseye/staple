@@ -181,6 +181,10 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::IntegerBitwise { .. }
         | IntrinsicFunction::IntegerNot { .. }
         | IntrinsicFunction::FloatBinary { .. }
+        | IntrinsicFunction::FloatUnary { .. }
+        | IntrinsicFunction::FloatTernary { .. }
+        | IntrinsicFunction::FloatToBits { .. }
+        | IntrinsicFunction::FloatFromBits { .. }
         | IntrinsicFunction::FloatCompare { .. }
         | IntrinsicFunction::StringFromCString
         | IntrinsicFunction::StringToCString
@@ -529,6 +533,10 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::IntegerBitwise { .. }
             | IntrinsicFunction::IntegerNot { .. }
             | IntrinsicFunction::FloatBinary { .. }
+            | IntrinsicFunction::FloatUnary { .. }
+            | IntrinsicFunction::FloatTernary { .. }
+            | IntrinsicFunction::FloatToBits { .. }
+            | IntrinsicFunction::FloatFromBits { .. }
             | IntrinsicFunction::FloatCompare { .. }
             | IntrinsicFunction::SharedBufferLength
             | IntrinsicFunction::SharedBufferGetRef

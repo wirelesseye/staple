@@ -1907,6 +1907,7 @@ impl ProgramLoader {
                             | TokenKind::Plus
                             | TokenKind::Minus
                             | TokenKind::Slash
+                            | TokenKind::Percent
                     )
                 })
             {

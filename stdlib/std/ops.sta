@@ -20,8 +20,19 @@ pub trait Multiply T {
 
 /// Provides division.
 pub trait Divide T {
-    /// Divides the left value by the right value.
+    /// Divides the left value by the right value. Implementations that can
+    /// fail, such as integer division by zero, panic at the caller.
+    @track_caller
     divide: (T; T) -> T
+}
+
+/// Provides the remainder of division, the `%` operator.
+pub trait Remainder T {
+    /// Returns the remainder of dividing the left value by the right value.
+    /// Implementations that can fail, such as an integer remainder by zero,
+    /// panic at the caller.
+    @track_caller
+    remainder: (T; T) -> T
 }
 
 /// Provides arithmetic negation, the prefix `-` operator.

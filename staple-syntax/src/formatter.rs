@@ -397,7 +397,8 @@ impl<'a> Formatter<'a> {
                 | TokenKind::DoubleColon
                 | TokenKind::Equals
                 | TokenKind::Arrow
-                | TokenKind::FatArrow => {
+                | TokenKind::FatArrow
+                | TokenKind::Percent => {
                     self.flush_pending(false);
                     self.space();
                     self.text(&token.text);
@@ -670,6 +671,17 @@ mod tests {
     fn formats_repeated_elements() {
         let formatted = format_source("let cells:(I32^3)=(0^3)\n").unwrap();
         assert_eq!(formatted, "let cells: (I32 ^ 3) = (0 ^ 3)\n");
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
+    fn formats_the_remainder_operator() {
+        let source = "let wrapped=index%length\nlet scaled=a*b%c\n";
+        let formatted = format_source(source).expect("remainder syntax should format");
+        assert_eq!(
+            formatted,
+            "let wrapped = index % length\nlet scaled = a * b % c\n"
+        );
         assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
 

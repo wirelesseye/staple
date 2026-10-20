@@ -40,3 +40,285 @@ pub type F32 = opaque
 /// A 64-bit floating-point number.
 @sized_opaque
 pub type F64 = opaque
+
+// ---------------------------------------------------------------------------
+// F32 math
+// ---------------------------------------------------------------------------
+
+companion F32 {
+    use package.source.(track_caller)
+
+    extern "staple-intrinsic" {
+        __f32_from_bits: U32 -> F32
+        __f32_to_bits: F32 -> U32
+        __f32_floor: F32 -> F32
+        __f32_ceil: F32 -> F32
+        __f32_trunc: F32 -> F32
+        __f32_round: F32 -> F32
+        __f32_round_even: F32 -> F32
+        __f32_abs: F32 -> F32
+        __f32_sqrt: F32 -> F32
+        __f32_min: (F32, F32) -> F32
+        __f32_max: (F32, F32) -> F32
+        __f32_copysign: (F32, F32) -> F32
+        __f32_mul_add: (F32, F32, F32) -> F32
+    }
+
+    /// The difference between 1.0 and the next larger representable value.
+    pub const Epsilon: F32 = 1.19209290e-7
+    /// The smallest finite value (the most negative finite value).
+    pub const Min: F32 = from_bits 4286578687
+    /// The largest finite value.
+    pub const Max: F32 = 3.40282347e38
+    /// The smallest positive normal value.
+    pub const MinPositive: F32 = 1.17549435e-38
+    /// The ratio of a circle's circumference to its diameter.
+    pub const Pi: F32 = 3.14159265
+    /// Euler's number.
+    pub const E: F32 = 2.71828183
+    /// A quiet NaN.
+    pub const NaN: F32 = from_bits 2143289344
+    /// Positive infinity.
+    pub const Infinity: F32 = from_bits 2139095040
+    /// Negative infinity.
+    pub const NegInfinity: F32 = from_bits 4286578688
+
+    /// Reinterprets an unsigned 32-bit pattern as a float.
+    pub def from_bits = bits: U32 => F32 :: __f32_from_bits bits
+
+    /// Reinterprets a float as its unsigned 32-bit pattern.
+    pub def to_bits = value: F32 => U32 :: __f32_to_bits value
+
+    /// Returns the largest integer less than or equal to `value`.
+    pub def floor = value: F32 => F32 :: __f32_floor value
+
+    /// Returns the smallest integer greater than or equal to `value`.
+    pub def ceil = value: F32 => F32 :: __f32_ceil value
+
+    /// Returns the integer part of `value`, rounding toward zero.
+    pub def trunc = value: F32 => F32 :: __f32_trunc value
+
+    /// Rounds `value` to the nearest integer, with ties away from zero.
+    pub def round = value: F32 => F32 :: __f32_round value
+
+    /// Rounds `value` to the nearest integer, with ties to even.
+    pub def round_even = value: F32 => F32 :: __f32_round_even value
+
+    /// Returns the absolute value of `value`.
+    pub def abs = value: F32 => F32 :: __f32_abs value
+
+    /// Returns the square root of `value`; negative inputs produce NaN.
+    pub def sqrt = value: F32 => F32 :: __f32_sqrt value
+
+    /// Returns the fractional part of `value` (`value - trunc value`).
+    pub def fract = value: F32 => F32 :: value - trunc value
+
+    /// Returns `value` with the sign of `sign`.
+    pub def copysign = (value: F32; sign: F32) => F32 :: __f32_copysign (value, sign)
+
+    /// Returns the smaller value, ignoring a NaN operand.
+    pub def min = (left: F32; right: F32) => F32 :: __f32_min (left, right)
+
+    /// Returns the larger value, ignoring a NaN operand.
+    pub def max = (left: F32; right: F32) => F32 :: __f32_max (left, right)
+
+    /// Constrains `value` to the inclusive range `lo ..= hi`. Panics at the
+    /// caller when `lo > hi` or either bound is NaN.
+    @track_caller
+    pub def clamp = (value: F32; lo: F32; hi: F32) => F32 :: {
+        // A NaN bound makes `lo <= hi` false as well.
+        if (!(lo <= hi)) {
+            panic "clamp: invalid bounds"
+        }
+        if (value < lo) {
+            lo
+        } else if (value > hi) {
+            hi
+        } else {
+            value
+        }
+    }
+
+    /// Returns `value * a + b`, rounded once.
+    pub def mul_add = (value: F32; a: F32; b: F32) => F32 :: __f32_mul_add (value, a, b)
+
+    /// Returns the non-negative remainder of `left / right`.
+    pub def remainder_euclid = (left: F32; right: F32) => F32 :: {
+        let remainder = left % right
+        if (remainder >= 0.0) {
+            remainder
+        } else {
+            // A tiny negative remainder can round up to `abs right` itself,
+            // which is outside `[0, abs right)`.
+            let adjusted = remainder + abs right
+            if (adjusted == abs right) { 0.0 } else { adjusted }
+        }
+    }
+
+    /// Returns the quotient of Euclidean division of `left` by `right`: the
+    /// truncated quotient, moved one step away from zero's direction when the
+    /// truncated remainder is negative.
+    pub def divide_euclid = (left: F32; right: F32) => F32 :: {
+        let quotient = trunc (left / right)
+        if (left % right >= 0.0) {
+            quotient
+        } else if (right > 0.0) {
+            quotient - 1.0
+        } else {
+            quotient + 1.0
+        }
+    }
+
+    /// Returns whether `value` is NaN.
+    pub def is_nan = value: F32 => Bool :: value != value
+
+    /// Returns whether `value` is positive or negative infinity.
+    pub def is_infinite = value: F32 => Bool :: abs value == Infinity
+
+    /// Returns whether `value` is neither NaN nor infinite.
+    pub def is_finite = value: F32 => Bool :: abs value < Infinity
+
+    /// Returns whether `value` has its sign bit set.
+    pub def is_sign_negative = value: F32 => Bool :: to_bits value >= 2147483648
+}
+
+// ---------------------------------------------------------------------------
+// F64 math
+// ---------------------------------------------------------------------------
+
+companion F64 {
+    use package.source.(track_caller)
+
+    extern "staple-intrinsic" {
+        __f64_from_bits: U64 -> F64
+        __f64_to_bits: F64 -> U64
+        __f64_floor: F64 -> F64
+        __f64_ceil: F64 -> F64
+        __f64_trunc: F64 -> F64
+        __f64_round: F64 -> F64
+        __f64_round_even: F64 -> F64
+        __f64_abs: F64 -> F64
+        __f64_sqrt: F64 -> F64
+        __f64_min: (F64, F64) -> F64
+        __f64_max: (F64, F64) -> F64
+        __f64_copysign: (F64, F64) -> F64
+        __f64_mul_add: (F64, F64, F64) -> F64
+    }
+
+    /// The difference between 1.0 and the next larger representable value.
+    pub const Epsilon: F64 = 2.220446049250313e-16
+    /// The smallest finite value (the most negative finite value).
+    pub const Min: F64 = from_bits 18442240474082181119
+    /// The largest finite value.
+    pub const Max: F64 = 1.7976931348623157e308
+    /// The smallest positive normal value.
+    pub const MinPositive: F64 = 2.2250738585072014e-308
+    /// The ratio of a circle's circumference to its diameter.
+    pub const Pi: F64 = 3.141592653589793
+    /// Euler's number.
+    pub const E: F64 = 2.718281828459045
+    /// A quiet NaN.
+    pub const NaN: F64 = from_bits 9221120237041090560
+    /// Positive infinity.
+    pub const Infinity: F64 = from_bits 9218868437227405312
+    /// Negative infinity.
+    pub const NegInfinity: F64 = from_bits 18442240474082181120
+
+    /// Reinterprets an unsigned 64-bit pattern as a float.
+    pub def from_bits = bits: U64 => F64 :: __f64_from_bits bits
+
+    /// Reinterprets a float as its unsigned 64-bit pattern.
+    pub def to_bits = value: F64 => U64 :: __f64_to_bits value
+
+    /// Returns the largest integer less than or equal to `value`.
+    pub def floor = value: F64 => F64 :: __f64_floor value
+
+    /// Returns the smallest integer greater than or equal to `value`.
+    pub def ceil = value: F64 => F64 :: __f64_ceil value
+
+    /// Returns the integer part of `value`, rounding toward zero.
+    pub def trunc = value: F64 => F64 :: __f64_trunc value
+
+    /// Rounds `value` to the nearest integer, with ties away from zero.
+    pub def round = value: F64 => F64 :: __f64_round value
+
+    /// Rounds `value` to the nearest integer, with ties to even.
+    pub def round_even = value: F64 => F64 :: __f64_round_even value
+
+    /// Returns the absolute value of `value`.
+    pub def abs = value: F64 => F64 :: __f64_abs value
+
+    /// Returns the square root of `value`; negative inputs produce NaN.
+    pub def sqrt = value: F64 => F64 :: __f64_sqrt value
+
+    /// Returns the fractional part of `value` (`value - trunc value`).
+    pub def fract = value: F64 => F64 :: value - trunc value
+
+    /// Returns `value` with the sign of `sign`.
+    pub def copysign = (value: F64; sign: F64) => F64 :: __f64_copysign (value, sign)
+
+    /// Returns the smaller value, ignoring a NaN operand.
+    pub def min = (left: F64; right: F64) => F64 :: __f64_min (left, right)
+
+    /// Returns the larger value, ignoring a NaN operand.
+    pub def max = (left: F64; right: F64) => F64 :: __f64_max (left, right)
+
+    /// Constrains `value` to the inclusive range `lo ..= hi`. Panics at the
+    /// caller when `lo > hi` or either bound is NaN.
+    @track_caller
+    pub def clamp = (value: F64; lo: F64; hi: F64) => F64 :: {
+        // A NaN bound makes `lo <= hi` false as well.
+        if (!(lo <= hi)) {
+            panic "clamp: invalid bounds"
+        }
+        if (value < lo) {
+            lo
+        } else if (value > hi) {
+            hi
+        } else {
+            value
+        }
+    }
+
+    /// Returns `value * a + b`, rounded once.
+    pub def mul_add = (value: F64; a: F64; b: F64) => F64 :: __f64_mul_add (value, a, b)
+
+    /// Returns the non-negative remainder of `left / right`.
+    pub def remainder_euclid = (left: F64; right: F64) => F64 :: {
+        let remainder = left % right
+        if (remainder >= 0.0) {
+            remainder
+        } else {
+            // A tiny negative remainder can round up to `abs right` itself,
+            // which is outside `[0, abs right)`.
+            let adjusted = remainder + abs right
+            if (adjusted == abs right) { 0.0 } else { adjusted }
+        }
+    }
+
+    /// Returns the quotient of Euclidean division of `left` by `right`: the
+    /// truncated quotient, moved one step away from zero's direction when the
+    /// truncated remainder is negative.
+    pub def divide_euclid = (left: F64; right: F64) => F64 :: {
+        let quotient = trunc (left / right)
+        if (left % right >= 0.0) {
+            quotient
+        } else if (right > 0.0) {
+            quotient - 1.0
+        } else {
+            quotient + 1.0
+        }
+    }
+
+    /// Returns whether `value` is NaN.
+    pub def is_nan = value: F64 => Bool :: value != value
+
+    /// Returns whether `value` is positive or negative infinity.
+    pub def is_infinite = value: F64 => Bool :: abs value == Infinity
+
+    /// Returns whether `value` is neither NaN nor infinite.
+    pub def is_finite = value: F64 => Bool :: abs value < Infinity
+
+    /// Returns whether `value` has its sign bit set.
+    pub def is_sign_negative = value: F64 => Bool :: to_bits value >= 9223372036854775808
+}

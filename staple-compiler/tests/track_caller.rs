@@ -632,3 +632,43 @@ fn try_unwrap_and_expect_panic_at_their_caller() {
         "panic: loading config at <stdin>.sta:2:9\n"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn integer_division_and_remainder_failures_panic_at_their_caller() {
+    for (source, expected) in [
+        (
+            "let zero: I32 = 0\nlet _ = 7 / zero\n",
+            "panic: division by zero at <stdin>.sta:2:11\n",
+        ),
+        (
+            "let zero: U8 = 0\nlet _ = 7 % zero\n",
+            "panic: remainder by zero at <stdin>.sta:2:11\n",
+        ),
+        (
+            "let minimum: I32 = 0 - 2147483647 - 1\nlet _ = minimum / (0 - 1)\n",
+            "panic: integer division overflow at <stdin>.sta:2:17\n",
+        ),
+        (
+            "let _ = F64.clamp 1.0 3.0 2.0\n",
+            "panic: clamp: invalid bounds at <stdin>.sta:1:9\n",
+        ),
+    ] {
+        let output = execute(source, false);
+        assert_eq!(output.status.code(), Some(1), "for {source:?}");
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn signed_remainder_by_minus_one_is_zero() {
+    let source = format!(
+        "{PRELUDE}{}",
+        concat!(
+            "let minimum: I32 = 0 - 2147483647 - 1\n",
+            "println \"${minimum % (0 - 1)} ${(0 - 7) % 3} ${(0 - 7) / 2}\"\n",
+        )
+    );
+    assert_eq!(run_lines(&source), ["0 -1 -3"]);
+}

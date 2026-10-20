@@ -6679,12 +6679,7 @@ impl LoweredProgram {
                 .unwrap_or(CheckedType::Never),
         };
         let true_index = match sum_through_implicit_wrapper(&bool_type) {
-            Some(sum) => sum
-                .alternatives
-                .iter()
-                .position(|alternative| {
-                    matches!(alternative, CheckedType::Wrapper { name, .. } if name == "True")
-                })
+            Some(sum) => bool_true_index(module.resolved(), sum)
                 .ok_or_else(|| {
                     Diagnostic::new(
                         logical.syntax.span.clone(),
@@ -14039,6 +14034,10 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::IntegerBitwise { .. }
         | Intrinsic::IntegerNot { .. }
         | Intrinsic::FloatBinary { .. }
+        | Intrinsic::FloatUnary { .. }
+        | Intrinsic::FloatTernary { .. }
+        | Intrinsic::FloatToBits { .. }
+        | Intrinsic::FloatFromBits { .. }
         | Intrinsic::FloatCompare { .. }
         | Intrinsic::StringFromCString
         | Intrinsic::StringToCString
@@ -15842,6 +15841,24 @@ fn validate_checked_module(module: &TypedModule) -> Vec<Diagnostic> {
         .collect()
 }
 
+
+/// The position of `Bool`'s `True` alternative in its sum. The alternative is
+/// found by its declaration: a checked wrapper's name is a display name, which
+/// is qualified (`std.boolean.Bool.True`) in a module that does not import
+/// the variants, such as `std.number`.
+fn bool_true_index(resolved: &ResolvedModule, sum: &crate::CheckedSumType) -> Option<usize> {
+    sum.alternatives.iter().position(|alternative| {
+        matches!(
+            alternative,
+            CheckedType::Wrapper { id, .. }
+                if resolved
+                    .type_declarations()
+                    .get(&id)
+                    .is_some_and(|declaration| declaration.name == "True")
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -17311,7 +17328,10 @@ mod tests {
                 .find(|info| info.id == key)
                 .expect("catalogued symbol should be declared");
             assert!(info.module_symbol || info.owner.is_some());
-            assert!(!resolved.is_const_symbol(key));
+            // A real module-level `const` is a catalogued value symbol (the
+            // standard library now declares float constants). Only a macro
+            // quote's placeholder binder must stay out of the catalog.
+            assert!(!resolved.is_const_symbol(key) || info.module_symbol);
         }
     }
 
@@ -21959,12 +21979,7 @@ mod tests {
         let Some(sum) = sum_through_implicit_wrapper(&logical.bool_type) else {
             panic!("`Bool` is a `from` type over a sum");
         };
-        let expected_true = sum
-            .alternatives
-            .iter()
-            .position(|alternative| {
-                matches!(alternative, CheckedType::Wrapper { name, .. } if name == "True")
-            })
+        let expected_true = bool_true_index(module.resolved(), sum)
             .expect("`Bool` has a `True` alternative");
         assert_eq!(logical.true_index, expected_true);
         for operand in [logical.left, logical.right] {

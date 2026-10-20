@@ -469,7 +469,7 @@ fn lexes_only_the_fixed_operator_vocabulary() {
             (TokenKind::Dot, "."),
             (TokenKind::Plus, "+"),
             (TokenKind::Plus, "+"),
-            (TokenKind::Unknown, "%"),
+            (TokenKind::Percent, "%"),
         ]
         .map(|(kind, text)| (kind, text.to_owned()))
     );

@@ -515,7 +515,12 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 
     /// The emitter's integer binary builder with its SSA names
-    /// (`{type}.add`/`.subtract`/`.multiply`/`.divide`).
+    /// (`{type}.add`/`.subtract`/`.multiply`/`.divide`/`.remainder`).
+    ///
+    /// Division and remainder are emitted unguarded. Their only callers are
+    /// the `Divide` and `Remainder` implementations in `std.number`, which
+    /// rule out a zero divisor and the overflowing `MIN / -1` and `MIN % -1`
+    /// before calling the intrinsic.
     pub(crate) fn build_integer_binary(
         &self,
         integer: crate::IntegerType,
@@ -524,30 +529,29 @@ impl<'program, 'context> Backend<'program, 'context> {
         right: inkwell::values::IntValue<'context>,
     ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
         use crate::IntegerBinaryOperation;
+        let name = match operation {
+            IntegerBinaryOperation::Add => "add",
+            IntegerBinaryOperation::Subtract => "subtract",
+            IntegerBinaryOperation::Multiply => "multiply",
+            IntegerBinaryOperation::Divide => "divide",
+            IntegerBinaryOperation::Remainder => "remainder",
+        };
+        let name = format!("{}.{}", integer.intrinsic_name(), name);
+        let signed = integer.is_signed();
         let value = match operation {
-            IntegerBinaryOperation::Add => self.builder.build_int_add(
-                left,
-                right,
-                &format!("{}.add", integer.intrinsic_name()),
-            ),
-            IntegerBinaryOperation::Subtract => self.builder.build_int_sub(
-                left,
-                right,
-                &format!("{}.subtract", integer.intrinsic_name()),
-            ),
-            IntegerBinaryOperation::Multiply => self.builder.build_int_mul(
-                left,
-                right,
-                &format!("{}.multiply", integer.intrinsic_name()),
-            ),
-            IntegerBinaryOperation::Divide if integer.is_signed() => self
-                .builder
-                .build_int_signed_div(left, right, &format!("{}.divide", integer.intrinsic_name())),
-            IntegerBinaryOperation::Divide => self.builder.build_int_unsigned_div(
-                left,
-                right,
-                &format!("{}.divide", integer.intrinsic_name()),
-            ),
+            IntegerBinaryOperation::Add => self.builder.build_int_add(left, right, &name),
+            IntegerBinaryOperation::Subtract => self.builder.build_int_sub(left, right, &name),
+            IntegerBinaryOperation::Multiply => self.builder.build_int_mul(left, right, &name),
+            IntegerBinaryOperation::Divide if signed => {
+                self.builder.build_int_signed_div(left, right, &name)
+            }
+            IntegerBinaryOperation::Divide => self.builder.build_int_unsigned_div(left, right, &name),
+            IntegerBinaryOperation::Remainder if signed => {
+                self.builder.build_int_signed_rem(left, right, &name)
+            }
+            IntegerBinaryOperation::Remainder => {
+                self.builder.build_int_unsigned_rem(left, right, &name)
+            }
         }
         .map_err(compiler_diagnostic)?;
         Ok(value)
@@ -634,32 +638,183 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 
     /// Emits floating-point arithmetic with the operation's stable SSA name.
+    /// `min`, `max` and `copysign` call the corresponding LLVM intrinsic.
     pub(crate) fn build_float_binary(
         &self,
         float: crate::FloatType,
-        operation: crate::IntegerBinaryOperation,
+        operation: crate::FloatBinaryOperation,
         left: inkwell::values::FloatValue<'context>,
         right: inkwell::values::FloatValue<'context>,
     ) -> CodeGenerationResult<inkwell::values::FloatValue<'context>> {
-        use crate::IntegerBinaryOperation;
+        use crate::FloatBinaryOperation;
         let name = format!(
             "{}.{}",
             float.intrinsic_name(),
             match operation {
-                IntegerBinaryOperation::Add => "add",
-                IntegerBinaryOperation::Subtract => "subtract",
-                IntegerBinaryOperation::Multiply => "multiply",
-                IntegerBinaryOperation::Divide => "divide",
+                FloatBinaryOperation::Add => "add",
+                FloatBinaryOperation::Subtract => "subtract",
+                FloatBinaryOperation::Multiply => "multiply",
+                FloatBinaryOperation::Divide => "divide",
+                FloatBinaryOperation::Remainder => "remainder",
+                FloatBinaryOperation::Min => "min",
+                FloatBinaryOperation::Max => "max",
+                FloatBinaryOperation::CopySign => "copysign",
             }
         );
         let value = match operation {
-            IntegerBinaryOperation::Add => self.builder.build_float_add(left, right, &name),
-            IntegerBinaryOperation::Subtract => self.builder.build_float_sub(left, right, &name),
-            IntegerBinaryOperation::Multiply => self.builder.build_float_mul(left, right, &name),
-            IntegerBinaryOperation::Divide => self.builder.build_float_div(left, right, &name),
-        }
-        .map_err(compiler_diagnostic)?;
-        Ok(value)
+            FloatBinaryOperation::Add => self
+                .builder
+                .build_float_add(left, right, &name)
+                .map_err(compiler_diagnostic),
+            FloatBinaryOperation::Subtract => self
+                .builder
+                .build_float_sub(left, right, &name)
+                .map_err(compiler_diagnostic),
+            FloatBinaryOperation::Multiply => self
+                .builder
+                .build_float_mul(left, right, &name)
+                .map_err(compiler_diagnostic),
+            FloatBinaryOperation::Divide => self
+                .builder
+                .build_float_div(left, right, &name)
+                .map_err(compiler_diagnostic),
+            FloatBinaryOperation::Remainder => self
+                .builder
+                .build_float_rem(left, right, &name)
+                .map_err(compiler_diagnostic),
+            FloatBinaryOperation::Min => self.build_float_intrinsic(
+                float,
+                "llvm.minnum",
+                &[self.compile_float_type(float).into()],
+                &[left.into(), right.into()],
+                &name,
+            ),
+            FloatBinaryOperation::Max => self.build_float_intrinsic(
+                float,
+                "llvm.maxnum",
+                &[self.compile_float_type(float).into()],
+                &[left.into(), right.into()],
+                &name,
+            ),
+            FloatBinaryOperation::CopySign => self.build_float_intrinsic(
+                float,
+                "llvm.copysign",
+                &[self.compile_float_type(float).into()],
+                &[left.into(), right.into()],
+                &name,
+            ),
+        };
+        value
+    }
+
+    /// Emits a one-operand float operation backed by an LLVM intrinsic.
+    pub(crate) fn build_float_unary(
+        &self,
+        float: crate::FloatType,
+        operation: crate::FloatUnaryOperation,
+        value: inkwell::values::FloatValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::FloatValue<'context>> {
+        use crate::FloatUnaryOperation;
+        let (suffix, intrinsic) = match operation {
+            FloatUnaryOperation::Floor => ("floor", "llvm.floor"),
+            FloatUnaryOperation::Ceil => ("ceil", "llvm.ceil"),
+            FloatUnaryOperation::Trunc => ("trunc", "llvm.trunc"),
+            FloatUnaryOperation::Round => ("round", "llvm.round"),
+            FloatUnaryOperation::RoundEven => ("round_even", "llvm.roundeven"),
+            FloatUnaryOperation::Abs => ("abs", "llvm.fabs"),
+            FloatUnaryOperation::Sqrt => ("sqrt", "llvm.sqrt"),
+        };
+        let name = format!("{}.{suffix}", float.intrinsic_name());
+        self.build_float_intrinsic(
+            float,
+            intrinsic,
+            &[self.compile_float_type(float).into()],
+            &[value.into()],
+            &name,
+        )
+    }
+
+    /// Emits a three-operand float operation backed by an LLVM intrinsic.
+    pub(crate) fn build_float_ternary(
+        &self,
+        float: crate::FloatType,
+        operation: crate::FloatTernaryOperation,
+        first: inkwell::values::FloatValue<'context>,
+        second: inkwell::values::FloatValue<'context>,
+        third: inkwell::values::FloatValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::FloatValue<'context>> {
+        use crate::FloatTernaryOperation;
+        let FloatTernaryOperation::MulAdd = operation;
+        let name = format!("{}.mul_add", float.intrinsic_name());
+        self.build_float_intrinsic(
+            float,
+            "llvm.fma",
+            &[self.compile_float_type(float).into()],
+            &[first.into(), second.into(), third.into()],
+            &name,
+        )
+    }
+
+    /// Reinterprets a float as its unsigned bit pattern.
+    pub(crate) fn build_float_to_bits(
+        &self,
+        float: crate::FloatType,
+        value: inkwell::values::FloatValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        let integer = self.compile_integer_type(crate::typecheck::float_bits_integer(float));
+        self.builder
+            .build_bit_cast(
+                value,
+                integer,
+                &format!("{}.to_bits", float.intrinsic_name()),
+            )
+            .map_err(compiler_diagnostic)
+            .map(|value| value.into_int_value())
+    }
+
+    /// Reinterprets an unsigned bit pattern as a float.
+    pub(crate) fn build_float_from_bits(
+        &self,
+        float: crate::FloatType,
+        value: inkwell::values::IntValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::FloatValue<'context>> {
+        self.builder
+            .build_bit_cast(
+                value,
+                self.compile_float_type(float),
+                &format!("{}.from_bits", float.intrinsic_name()),
+            )
+            .map_err(compiler_diagnostic)
+            .map(|value| value.into_float_value())
+    }
+
+    fn build_float_intrinsic(
+        &self,
+        float: crate::FloatType,
+        intrinsic: &str,
+        parameter_types: &[BasicTypeEnum<'context>],
+        arguments: &[inkwell::values::BasicMetadataValueEnum<'context>],
+        name: &str,
+    ) -> CodeGenerationResult<inkwell::values::FloatValue<'context>> {
+        let function = inkwell::intrinsics::Intrinsic::find(intrinsic)
+            .and_then(|intrinsic| intrinsic.get_declaration(&self.llvm_module, parameter_types))
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    Span::Compiler,
+                    format!(
+                        "LLVM does not provide the `{intrinsic}` intrinsic for {}",
+                        float.name()
+                    ),
+                )
+            })?;
+        self.builder
+            .build_call(function, arguments, name)
+            .map_err(compiler_diagnostic)
+            .map(|call| {
+                call.try_as_basic_value()
+                    .expect_basic("float intrinsics return a value")
+                    .into_float_value()
+            })
     }
 
     /// The emitter's float compare builder with its SSA name (`{type}.compare`).
