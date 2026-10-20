@@ -10376,6 +10376,25 @@ fn infers_unannotated_lambdas_against_normalized_iterator_projections() {
 }
 
 #[test]
+fn resolves_distinct_bounds_on_the_same_trait_in_one_function() {
+    // Regression test: every in-scope bound on a trait was treated as a
+    // candidate for an inferred obligation, so `Iterator L` and `Iterator R`
+    // were merged and failed instead of selecting the one matching the known
+    // receiver argument.
+    let module = type_check(concat!(
+        "use std.iterator.(Iterator, IterStep)\n",
+        "def next_both = <L, R where Iterator L, Iterator R>\n",
+        "  (move left: L; move right: R) => (Iterator.Item L, Iterator.Item R) :: {\n",
+        "  let left_step = Iterator.next left\n",
+        "  let right_step = Iterator.next right\n",
+        "  (left_step, right_step)\n",
+        "}\n",
+        "let steps = next_both (0 .. 3) (10 .. 13)\n",
+    ));
+    lower(&module);
+}
+
+#[test]
 fn resolves_associated_type_projections() {
     let module = type_check(concat!(
         "trait Container T { type Element; first: T -> Element }\n",

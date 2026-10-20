@@ -14317,6 +14317,22 @@ impl TypeChecker {
                 .iter()
                 .flatten()
                 .filter(|bound| bound.trait_id == trait_id)
+                // Every in-scope bound on the trait is a candidate, but only
+                // those whose already-known arguments match the query may
+                // contribute. Otherwise two unrelated bounds such as
+                // `Iterator L` and `Iterator R` would be merged together and
+                // fail even though one of them alone discharges the call.
+                .filter(|bound| {
+                    bound.arguments.len() == arguments.len()
+                        && bound
+                            .arguments
+                            .iter()
+                            .zip(arguments)
+                            .all(|(candidate, actual)| {
+                                contains_inferred_type(actual)
+                                    || types_equivalent(actual, candidate)
+                            })
+                })
                 .map(|bound| bound.arguments.clone());
             // A candidate impl's own header may itself contain free type
             // parameters (e.g. `impl<T where Bound T> Convert T T`), so the
