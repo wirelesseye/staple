@@ -3575,7 +3575,8 @@ with Tasks = task_scope (sched) {
   or coroutine that spawns lists `Tasks` in its effects. Normal exit closes the
   task scope. `return`, `break`, and `continue` close every task scope opened
   since their target, in reverse order, just as they dispose reactive scopes. A
-  `return` targets the function exit; `break` and `continue` target their loop.
+  `return` targets the function exit, or the end of the enclosing `coro`
+  body; `break` and `continue` target their loop.
   Closing a scope cancels its unfinished tasks (see
   [Cancellation](#cancellation)).
 - `spawn coroutine` consumes the coroutine, schedules it on the current scope's
@@ -3839,6 +3840,21 @@ Bind each `await` to a `let` and combine the results afterwards:
 let x = await a
 let y = await b
 let total = x + y
+```
+
+**Returning.** A `coro` body runs as its own function, so `return value`
+inside it finishes the coroutine with `value`, and a failing `?` finishes it
+with the residual alternative; neither leaves the function that built the
+coroutine. Its owned values and frame bindings are dropped exactly as when the
+body ends normally. `break` and `continue` cannot leave a `coro` body, though a
+loop written entirely inside it may use them:
+
+```staple
+def first_positive = n: I32 => Coroutine{} I32 :: coro {
+    if (n > 0) { return n }
+    let fallback = await (default_value ())
+    fallback
+}
 ```
 
 **Ownership.** `Coroutine`, `Task`, `Wait`, and `Resolver` values are affine.

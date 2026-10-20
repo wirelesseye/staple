@@ -28,6 +28,11 @@ pub(super) struct CoroutineContext<'context> {
     /// nested thunks. A move out of one clears its frame cell state so the
     /// completion and cancel drops skip it.
     pub frame_bindings: Vec<SymbolId>,
+    /// Where completion publishes the result and the done state.
+    pub result_slot: PointerValue<'context>,
+    pub state_slot: PointerValue<'context>,
+    /// The frame plan whose bindings completion drops.
+    pub frame_plan: CoroutineFramePlan,
 }
 
 impl<'program, 'context> LoweredEmitter<'program, 'context> {
@@ -248,6 +253,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .iter()
                 .map(|binding| binding.symbol)
                 .collect(),
+            result_slot,
+            state_slot,
+            frame_plan: frame_plan.clone(),
         });
         let state = self.backend.build_coroutine_resume_dispatch(
             resume,
@@ -299,22 +307,45 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let result = value_as_basic(result).ok_or_else(|| {
                 Diagnostic::new(span.clone(), "coroutine result is not first-class")
             })?;
-            self.drop_all_owned(&environment, span)?;
-            // A coroutine that completes normally drops its live frame
-            // bindings, in plan order, before the result is published. The
-            // recorded `unwind_drop` glue is the same type drop the cancel
-            // unwind uses; the cell state skips a moved-out or
-            // never-initialized binding, and the unwind and completion paths
-            // are mutually exclusive.
-            self.emit_frame_binding_drops(frame, layout.ty, frame_plan, span)?;
-            self.backend
-                .build_coroutine_complete(result, result_slot, state_slot, status)?;
+            self.emit_coroutine_completion(result, &environment, span)?;
         }
         self.backend.build_coroutine_cleanup(cleanup, finalizer)?;
         if let Some(previous) = previous {
             self.backend.builder.position_at_end(previous);
         }
         Ok(())
+    }
+
+    /// Finishes the coroutine whose body is being emitted with `result`, at
+    /// the end of its body or at a `return` or failed `?` inside it. A
+    /// completing coroutine drops its owned values and then its live frame
+    /// bindings, in plan order, before the result is published. The recorded
+    /// `unwind_drop` glue is the same type drop the cancel unwind uses; the
+    /// cell state skips a moved-out or never-initialized binding, and the
+    /// unwind and completion paths are mutually exclusive.
+    pub(super) fn emit_coroutine_completion(
+        &mut self,
+        result: BasicValueEnum<'context>,
+        environment: &FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let coroutine = environment
+            .coroutine
+            .as_ref()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "coroutine completion outside a body"))?;
+        self.drop_all_owned(environment, span)?;
+        self.emit_frame_binding_drops(
+            coroutine.frame,
+            coroutine.frame_type,
+            &coroutine.frame_plan,
+            span,
+        )?;
+        self.backend.build_coroutine_complete(
+            result,
+            coroutine.result_slot,
+            coroutine.state_slot,
+            coroutine.status_type,
+        )
     }
 
     /// One conditional cell drop per droppable frame binding, in plan order.

@@ -3963,6 +3963,71 @@ mod tests {
             ),
         )
         .expect("temporary block-argument source should be writable");
+        let status = compile_and_run_exit_status(&source, &output);
+        assert_eq!(status.code(), Some(0));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn return_and_propagation_inside_a_coro_body_finish_the_coroutine() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-coro-return-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-coro-return-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.coroutine.*\n",
+                "extern \"c\" { exit: I32 -> () }\n",
+                "pub type Found T = pub wrap T\n",
+                "pub type Missing = pub wrap String\n",
+                "def lookup: Bool -> Found I32 | Missing = available => match available {\n",
+                "  True => Found(42),\n",
+                "  False => Missing(\"not found\"),\n",
+                "}\n",
+                "def child: () -> Coroutine{} I32 = () => coro { 5 }\n",
+                "def pick: Bool -> Coroutine{} I32 = flag => coro {\n",
+                "  let label = \"owned\"\n",
+                "  let first = await (child ())\n",
+                "  if flag { return first }\n",
+                "  first + 100\n",
+                "}\n",
+                "def propagate: Bool -> Coroutine{} (Found I32 | Missing) = available => coro {\n",
+                "  let ?Found(value) = lookup available\n",
+                "  Found(value + value)\n",
+                "}\n",
+                "def score: Bool -> Coroutine{} I32 = available => coro {\n",
+                "  let result = await (propagate available)\n",
+                "  match result {\n",
+                "    Found value => value,\n",
+                "    Missing _ => 0,\n",
+                "  }\n",
+                "}\n",
+                "def outer: Bool -> I32 = flag => {\n",
+                "  let value = block_on (pick flag)\n",
+                "  value + 1000\n",
+                "}\n",
+                "let early = outer True - 1005\n",
+                "let late = outer False - 1105\n",
+                "let found = block_on (score True) - 84\n",
+                "let missing = block_on (score False)\n",
+                "exit (early + late + found + missing)\n",
+            ),
+        )
+        .expect("temporary coroutine source should be writable");
+        let status = compile_and_run_exit_status(&source, &output);
+        assert_eq!(status.code(), Some(0));
+    }
+
+    /// Compiles `source` to an executable at `output`, runs it, and removes
+    /// both files.
+    #[cfg(unix)]
+    fn compile_and_run_exit_status(
+        source: &std::path::Path,
+        output: &std::path::Path,
+    ) -> std::process::ExitStatus {
         let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -3973,16 +4038,16 @@ mod tests {
             "--emit".into(),
             "exe".into(),
             "-o".into(),
-            output.clone().into_os_string(),
-            source.clone().into_os_string(),
+            output.as_os_str().to_owned(),
+            source.as_os_str().to_owned(),
         ])
-        .expect("block-argument executable should compile");
-        let status = Command::new(&output)
+        .expect("test executable should compile");
+        let status = Command::new(output)
             .status()
-            .expect("block-argument executable should run");
+            .expect("test executable should run");
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(output);
-        assert_eq!(status.code(), Some(0));
+        status
     }
 
     #[test]

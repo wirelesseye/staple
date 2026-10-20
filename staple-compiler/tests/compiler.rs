@@ -578,6 +578,74 @@ fn break_and_continue_cannot_leave_a_block_argument() {
 }
 
 #[test]
+fn return_and_propagation_inside_a_coro_body_finish_the_coroutine() {
+    let module = type_check(concat!(
+        "use std.coroutine.*\n",
+        "pub type Found T = pub wrap T\n",
+        "pub type Missing = pub wrap String\n",
+        "def lookup: Bool -> Found I32 | Missing = available => match available {\n",
+        "    True => Found(42),\n",
+        "    False => Missing(\"not found\"),\n",
+        "}\n",
+        "def child: () -> Coroutine{} I32 = () => coro { 5 }\n",
+        "def pick: Bool -> Coroutine{} I32 = flag => coro {\n",
+        "    let first = await (child ())\n",
+        "    if flag { return first }\n",
+        "    first + 100\n",
+        "}\n",
+        "def propagate: Bool -> Coroutine{} (Found I32 | Missing) = available => coro {\n",
+        "    let ?Found(value) = lookup available\n",
+        "    Found(value + value)\n",
+        "}\n",
+        "let early = block_on (pick True)\n",
+        "let late = block_on (pick False)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("returns and propagation inside coro bodies should lower");
+
+    // The `return` is checked against the coroutine's `I32`, not the
+    // enclosing function's `Coroutine{} I32`.
+    let messages = rejected_messages(concat!(
+        "use std.coroutine.*\n",
+        "def pick: Bool -> Coroutine{} I32 = flag => coro {\n",
+        "    if flag { return \"early\" }\n",
+        "    2\n",
+        "}\n",
+    ));
+    assert!(
+        messages.iter().any(|message| message.contains("I32")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn break_and_continue_cannot_leave_a_coro_body() {
+    // Name resolution treats a `coro` body as a function boundary, so a loop
+    // outside it is not a target.
+    for item in ["break", "continue"] {
+        let diagnostics = resolve_result(&format!(
+            "use std.coroutine.*\n\
+             def spin: () -> () = () => {{\n\
+                 loop {{ let held = coro {{ {item} }}; break }}\n\
+             }}\n"
+        ))
+        .expect_err_diagnostics("a coro body cannot break an outer loop");
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains(&format!("`{item}` is only allowed inside a loop"))),
+            "{diagnostics:?}"
+        );
+    }
+    type_check(concat!(
+        "use std.coroutine.*\n",
+        "def looped: () -> Coroutine{} I32 = () => coro { loop { break 3 } }\n",
+    ));
+}
+
+#[test]
 fn specializes_generic_effect_parameters() {
     let module = type_check(concat!(
         "use std.io.(IO, println)\n",

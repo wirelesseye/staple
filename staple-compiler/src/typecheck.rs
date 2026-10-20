@@ -2919,10 +2919,10 @@ pub struct TypeChecker {
     /// Checking any expression consumes it; only the direct elements of a
     /// non-grouping product argument inherit it.
     block_argument_context: bool,
-    /// Whether we are checking a block argument's body. Its loop contexts
-    /// start empty, so a `break` or `continue` outside a loop nested in the
-    /// block has no target.
-    inside_block_argument: bool,
+    /// The innermost deferred body being checked ("a block argument" or
+    /// "a `coro` body"), for diagnostics. Its loop contexts start empty, so a
+    /// `break` or `continue` outside a loop nested in it has no target.
+    deferred_body_boundary: Option<&'static str>,
 }
 
 impl TypeChecker {
@@ -6080,20 +6080,33 @@ impl TypeChecker {
     }
 
     /// Checks a block argument's body as the body of its thunk and returns
-    /// the thunk's result type: `return` and `?` leave the thunk, the block
-    /// is a suspension boundary, and `break`/`continue` cannot reach a loop
-    /// outside it.
+    /// the thunk's result type. The block is a suspension boundary.
     fn check_block_argument_body(
         &mut self,
         module: &ResolvedModule,
         block: &Expression,
         declared_result: CheckedType,
     ) -> CheckedType {
-        let outer_suspension = std::mem::replace(&mut self.suspension_allowed, false);
+        self.check_deferred_body(module, block, declared_result, "a block argument", false)
+    }
+
+    /// Checks a body that runs later as its own function (a block argument's
+    /// thunk or a `coro` body) and returns its result type: `return` and `?`
+    /// leave that body, and `break`/`continue` cannot reach a loop outside
+    /// it. `suspends` says whether `await` is allowed directly inside.
+    fn check_deferred_body(
+        &mut self,
+        module: &ResolvedModule,
+        body: &Expression,
+        declared_result: CheckedType,
+        boundary: &'static str,
+        suspends: bool,
+    ) -> CheckedType {
+        let outer_suspension = std::mem::replace(&mut self.suspension_allowed, suspends);
         let outer_loops = std::mem::take(&mut self.loop_contexts);
-        let outer_inside = std::mem::replace(&mut self.inside_block_argument, true);
-        let result = self.check_returning_body(module, block, declared_result);
-        self.inside_block_argument = outer_inside;
+        let outer_boundary = self.deferred_body_boundary.replace(boundary);
+        let result = self.check_returning_body(module, body, declared_result);
+        self.deferred_body_boundary = outer_boundary;
         self.loop_contexts = outer_loops;
         self.suspension_allowed = outer_suspension;
         result
@@ -8286,19 +8299,23 @@ impl TypeChecker {
                 }
                 CheckedType::empty_product()
             }
-            Item::Break(item) if self.loop_contexts.is_empty() && self.inside_block_argument => {
+            Item::Break(item)
+                if self.loop_contexts.is_empty()
+                    && let Some(boundary) = self.deferred_body_boundary =>
+            {
                 self.diagnostics.push(Diagnostic::new(
                     item.syntax.span.clone(),
-                    "`break` cannot leave a block argument",
+                    format!("`break` cannot leave {boundary}"),
                 ));
                 CheckedType::empty_product()
             }
             Item::Continue(item)
-                if self.loop_contexts.is_empty() && self.inside_block_argument =>
+                if self.loop_contexts.is_empty()
+                    && let Some(boundary) = self.deferred_body_boundary =>
             {
                 self.diagnostics.push(Diagnostic::new(
                     item.syntax.span.clone(),
-                    "`continue` cannot leave a block argument",
+                    format!("`continue` cannot leave {boundary}"),
                 ));
                 CheckedType::empty_product()
             }
@@ -12594,11 +12611,15 @@ impl TypeChecker {
         let expected_result = expected_parts.as_ref().map(|(_, result)| result.clone());
         let body = Expression::Block(coro.body.clone());
         // The body is a suspension-permitting scope. Its `await` permission is
-        // independent of the enclosing context in both directions.
-        let previous_suspension = self.suspension_allowed;
-        self.suspension_allowed = true;
-        let body_result = self.check_expression_expected(module, &body, expected_result.as_ref());
-        self.suspension_allowed = previous_suspension;
+        // independent of the enclosing context in both directions. `return`
+        // and `?` inside it finish the coroutine.
+        let body_result = self.check_deferred_body(
+            module,
+            &body,
+            expected_result.unwrap_or(CheckedType::Inferred),
+            "a `coro` body",
+            true,
+        );
         // Lower the body to an implicit nullary thunk so its deferred effect
         // row is inferred and converges separately from the enclosing
         // function; the row rides on the coroutine type, not the caller.

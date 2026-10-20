@@ -3019,11 +3019,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 // function.
                 self.dispose_reactive_scopes(environment, 0, &item_span)?;
                 self.close_task_scopes(environment, 0)?;
-                self.drop_all_owned(environment, &item_span)?;
-                self.backend
-                    .builder
-                    .build_return(Some(&value))
-                    .map_err(compiler_diagnostic)?;
+                // Inside a `coro` body, `return` finishes the coroutine.
+                if environment.coroutine.is_some() {
+                    self.emit_coroutine_completion(value, environment, &item_span)?;
+                } else {
+                    self.drop_all_owned(environment, &item_span)?;
+                    self.backend
+                        .builder
+                        .build_return(Some(&value))
+                        .map_err(compiler_diagnostic)?;
+                }
                 environment.returned = true;
                 Ok(())
             }
@@ -4933,12 +4938,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let failure_value = value_as_basic(failure_value)
             .ok_or_else(|| Diagnostic::new(span.clone(), "propagated result is not first-class"))?;
         // The failure path drops every owned binding before returning the
-        // residual value.
-        self.drop_all_owned(environment, &span)?;
-        self.backend
-            .builder
-            .build_return(Some(&failure_value))
-            .map_err(compiler_diagnostic)?;
+        // residual value; inside a `coro` body it finishes the coroutine.
+        if environment.coroutine.is_some() {
+            self.emit_coroutine_completion(failure_value, environment, &span)?;
+        } else {
+            self.drop_all_owned(environment, &span)?;
+            self.backend
+                .builder
+                .build_return(Some(&failure_value))
+                .map_err(compiler_diagnostic)?;
+        }
         self.backend.builder.position_at_end(success_block);
         self.bind_propagated_success(
             owner,
