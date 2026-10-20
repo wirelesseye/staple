@@ -10395,6 +10395,40 @@ fn resolves_distinct_bounds_on_the_same_trait_in_one_function() {
 }
 
 #[test]
+fn resolves_iterator_projections_named_only_in_a_function_body() {
+    // Regression test: a projection first named by a local annotation was
+    // created after the function's `where` bound had already been linked, so
+    // lowering saw an unbound `Iterator.Item Iter` parameter even though the
+    // instance's iterator type was concrete.
+    let module = type_check(concat!(
+        "use std.iterator.(Iterator, IterStep)\n",
+        "type Take S Out = wrap (iter: S, left: USize, step: move S -> IterStep (S, Out))\n",
+        "impl<S, Out> Iterator (Take S Out) {\n",
+        "  type Item = Out\n",
+        "  next = move Take (iter, left, step) => if (left == 0) {\n",
+        "    IterStep.Done (Take.<S, Out> (iter: iter, left: left, step: step))\n",
+        "  } else {\n",
+        "    match step iter {\n",
+        "      IterStep.Done rest => IterStep.Done (Take.<S, Out> (iter: rest, left: left, step: step)),\n",
+        "      IterStep.Yield (item, rest) => IterStep.Yield (item, Take.<S, Out> (iter: rest, left: left - 1, step: step)),\n",
+        "    }\n",
+        "  }\n",
+        "}\n",
+        "def take = <Iter where Iterator Iter>\n",
+        "  (move iter: Iter; count: USize) => Take Iter (Iterator.Item Iter) :: {\n",
+        "  let step = move it: Iter => IterStep (Iter, Iterator.Item Iter) :: Iterator.next it\n",
+        "  Take.<Iter, Iterator.Item Iter> (iter: iter, left: count, step: step)\n",
+        "}\n",
+        "def consume = <Iter where Iterator Iter> (move it: Iter) => () :: {\n",
+        "  let taken: Take Iter (Iterator.Item Iter) = take it 3\n",
+        "  ()\n",
+        "}\n",
+        "let result = consume (0 .. 3)\n",
+    ));
+    lower(&module);
+}
+
+#[test]
 fn resolves_associated_type_projections() {
     let module = type_check(concat!(
         "trait Container T { type Element; first: T -> Element }\n",

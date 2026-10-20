@@ -3707,6 +3707,92 @@ impl LoweredProgram {
         collector.relevant
     }
 
+    /// Completes hidden associated-type parameters (`Iterator.Item Iter`) from
+    /// the instance's declared bounds once their explicit arguments are known.
+    /// The body can name such a projection in a local annotation even when the
+    /// function's own signature never mentions it, so the template needs an
+    /// entry for every projection the selected implementation determines.
+    fn add_projection_substitutions(
+        &self,
+        template: &LoweredFunction,
+        environment: &mut SubstitutionEnvironment,
+    ) {
+        let Some(scheme) = &template.scheme else {
+            return;
+        };
+        let mut bounds = scheme.trait_bounds.clone();
+        for bound in &template.declared_bounds {
+            if !bounds.contains(bound) {
+                bounds.push(bound.clone());
+            }
+        }
+        // Completion asks the implementation or structural catalogs for the
+        // associated argument. Declared bounds for the same trait are useful
+        // for evidence, but here their still-open hidden slot would compete
+        // with the concrete answer, so leave them out of this selection.
+        let context = TraitSelectionContext::new(self, Vec::new());
+        for bound in &bounds {
+            let Some(trait_metadata) = self.traits.get(bound.trait_id) else {
+                continue;
+            };
+            let explicit = trait_metadata
+                .parameters
+                .len()
+                .saturating_sub(trait_metadata.associated_types.len());
+            if !bound
+                .arguments
+                .iter()
+                .skip(explicit)
+                .any(|argument| {
+                    matches!(argument, CheckedType::Parameter { id, .. }
+                        if id.0 >= crate::typecheck::PROJECTION_PARAMETER_BASE)
+                })
+            {
+                continue;
+            }
+            let map = environment.substitution_map();
+            let mut query = bound.arguments.clone();
+            for (index, argument) in query.iter_mut().enumerate() {
+                *argument = if index < explicit {
+                    substitute_type(argument.clone(), &map)
+                } else {
+                    CheckedType::Inferred
+                };
+            }
+            if query
+                .iter()
+                .take(explicit)
+                .any(|argument| contains_inferred_type(argument))
+            {
+                continue;
+            }
+            let Some(completed) = context.resolve_obligation(bound.trait_id, &query) else {
+                continue;
+            };
+            for (index, argument) in bound.arguments.iter().enumerate().skip(explicit) {
+                let CheckedType::Parameter { id, .. } = argument else {
+                    continue;
+                };
+                if id.0 < crate::typecheck::PROJECTION_PARAMETER_BASE {
+                    continue;
+                }
+                let Some(value) = completed.get(index) else {
+                    continue;
+                };
+                if contains_type_parameter(value) || contains_inferred_type(value) {
+                    continue;
+                }
+                environment.entries.insert(
+                    *id,
+                    SubstitutionEntry {
+                        source: SubstitutionSource::Inferred,
+                        value: SubstitutionValue::Type(value.clone()),
+                    },
+                );
+            }
+        }
+    }
+
     /// Builds the resolved substitution environment for one request.
     ///
     /// The enclosing environment and the site recipe are merged first, then
@@ -3796,7 +3882,8 @@ impl LoweredProgram {
             ));
         }
         builder.add_inferred(inferred);
-        let environment = builder.resolve()?;
+        let mut environment = builder.resolve()?;
+        self.add_projection_substitutions(template, &mut environment);
         let mut concrete = environment.clone();
         let mut scope = caller.clone();
         scope.types.extend(requested_runtime);

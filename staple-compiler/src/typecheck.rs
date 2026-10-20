@@ -3110,6 +3110,7 @@ impl TypeChecker {
         for function_id in function_ids {
             self.ensure_function_checked(&module, function_id);
         }
+        self.report_unlinked_projections();
         self.infer_effects(&module);
         self.validate_inferred_scheme_contracts();
         self.validate_product_default_effects(&module);
@@ -4425,6 +4426,80 @@ impl TypeChecker {
         }
     }
 
+    /// Links a projection first named while checking a function body back into
+    /// every stored scheme or bound that already declares the trait. Bounds are
+    /// resolved before bodies, so their hidden associated-type slots are still
+    /// `Inferred` when a local annotation introduces the projection.
+    fn link_late_projection(
+        &mut self,
+        trait_id: TraitId,
+        explicit: usize,
+        associated: usize,
+        arguments: &[CheckedType],
+        id: TypeParameterId,
+        name: &str,
+    ) {
+        let known = canonical_projection_arguments(arguments);
+        let mut linked = false;
+        let mut link = |bounds: &mut Vec<CheckedTraitBound>| {
+            for bound in bounds {
+                if bound.trait_id != trait_id
+                    || bound.arguments.len() <= explicit + associated
+                    || canonical_projection_arguments(&bound.arguments[..explicit]) != known
+                {
+                    continue;
+                }
+                let slot = &mut bound.arguments[explicit + associated];
+                if *slot == CheckedType::Inferred {
+                    *slot = CheckedType::Parameter {
+                        id,
+                        name: name.to_owned(),
+                        sized: true,
+                    };
+                    linked = true;
+                }
+            }
+        };
+        for bounds in self.function_bounds.values_mut() {
+            link(bounds);
+        }
+        for bounds in self.function_declared_bounds.values_mut() {
+            link(bounds);
+        }
+        for bounds in self.active_function_bounds.iter_mut() {
+            link(bounds);
+        }
+        for (bounds, _) in self.callable_symbol_bounds.values_mut() {
+            link(bounds);
+        }
+        for scheme in self.function_schemes.values_mut() {
+            link(&mut scheme.trait_bounds);
+        }
+        for scheme in self.trait_member_schemes.values_mut() {
+            link(&mut scheme.trait_bounds);
+        }
+        for scheme in self.expression_schemes.values_mut() {
+            link(&mut scheme.trait_bounds);
+        }
+        for ty in self.symbol_types.values_mut() {
+            if let CheckedType::Forall(scheme) = ty {
+                link(&mut scheme.trait_bounds);
+            }
+        }
+        for implementation in &mut self.trait_implementations {
+            link(&mut implementation.bounds);
+        }
+        drop(link);
+        if linked
+            && let Some(projection) = self
+                .projection_parameters
+                .iter_mut()
+                .find(|projection| projection.id == id)
+        {
+            projection.linked = true;
+        }
+    }
+
     fn report_unlinked_projections(&mut self) {
         for projection in &mut self.projection_parameters {
             if !projection.linked {
@@ -4520,6 +4595,7 @@ impl TypeChecker {
                 };
             }
             let id = TypeParameterId(PROJECTION_PARAMETER_BASE + self.projection_parameters.len());
+            let projection_arguments = arguments.clone();
             self.projection_parameters.push(ProjectionParameter {
                 trait_id,
                 associated,
@@ -4529,6 +4605,14 @@ impl TypeChecker {
                 span,
                 linked: false,
             });
+            self.link_late_projection(
+                trait_id,
+                explicit,
+                associated,
+                &projection_arguments,
+                id,
+                &qualified,
+            );
             return CheckedType::Parameter {
                 id,
                 name: qualified,
