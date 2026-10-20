@@ -597,8 +597,21 @@ impl Server {
             );
         };
 
-        let parsed = staple_syntax::parse(&text).ok();
+        // A buffer that does not parse is analyzed with the regions that keep
+        // it from parsing blanked out. Blanking keeps every offset, so results
+        // for `analysis_text` apply to `text` as they are.
+        let recovered = staple_syntax::parse_recovering(&text);
+        let analysis_text = recovered.source;
+        let parse_error = recovered.error;
+        let parsed = recovered.module;
         let mut grouped: HashMap<Uri, Vec<lsp_types::Diagnostic>> = HashMap::new();
+        if let Some(error) = &parse_error {
+            grouped.entry(uri.clone()).or_default().push(lsp_diagnostic(
+                &text,
+                error.offset..error.offset,
+                error.message.clone(),
+            ));
+        }
         let mut resolved_for_tokens = None;
         let mut typed_for_tokens = None;
         let mut hover_entries = Vec::new();
@@ -615,7 +628,7 @@ impl Server {
         // errors is still analyzed; only the first failing phase's
         // diagnostics are published, since later ones mostly follow from it.
         let mut analyzed = false;
-        let mut analysis_has_errors = false;
+        let mut analysis_has_errors = parse_error.is_some();
         if let Some(module) = &parsed {
             let mut loader = ProgramLoader::new().recovering_imports();
             if let Some(stdlib) = &self.stdlib {
@@ -629,16 +642,21 @@ impl Server {
                 loader = loader.with_package_graph(config.clone());
             }
             let loaded = match use_package_graph {
-                true => loader.load_package_graph_source_at(&path, &text),
-                false => loader.load_source_at(&path, &text),
+                true => loader.load_package_graph_source_at(&path, &analysis_text),
+                false => loader.load_source_at(&path, &analysis_text),
             };
             match loaded {
-                Err(error) => add_load_diagnostic(&mut grouped, error, uri, &text),
+                Err(error) if parse_error.is_none() => {
+                    add_load_diagnostic(&mut grouped, error, uri, &text)
+                }
+                Err(_) => {}
                 Ok(program) => {
                     let import_errors = program.import_errors().to_vec();
-                    let loading_failed = !import_errors.is_empty();
-                    for error in import_errors {
-                        add_load_diagnostic(&mut grouped, error, uri, &text);
+                    let loading_failed = parse_error.is_some() || !import_errors.is_empty();
+                    if parse_error.is_none() {
+                        for error in import_errors {
+                            add_load_diagnostic(&mut grouped, error, uri, &text);
+                        }
                     }
                     let (resolved, diagnostics) =
                         NameResolver::new().resolve_program_recovering(program);
@@ -647,9 +665,10 @@ impl Server {
                         add_compiler_diagnostics(&mut grouped, diagnostics, uri, &text);
                     }
                     if let Some(resolved) = resolved {
+                        analysis_has_errors |= resolution_failed;
                         definition_path = normalized_source_path(&path);
                         rebased_module =
-                            rebased_surface(&resolved, &definition_path, module, &text);
+                            rebased_surface(&resolved, &definition_path, module, &analysis_text);
                         let surface = rebased_module.as_ref().unwrap_or(module);
                         definition_entries = Some(definition::entries_at_path(
                             &definition_path,
@@ -659,7 +678,7 @@ impl Server {
                         ));
                         resolved_for_tokens = Some(resolved.clone());
                         let (typed, diagnostics) = TypeChecker::new().check_recovering(resolved);
-                        analysis_has_errors = resolution_failed || !diagnostics.is_empty();
+                        analysis_has_errors |= !diagnostics.is_empty();
                         if !resolution_failed {
                             add_compiler_diagnostics(&mut grouped, diagnostics, uri, &text);
                         }
@@ -681,15 +700,9 @@ impl Server {
                     }
                 }
             }
-        } else if let Err(error) = staple_syntax::parse(&text) {
-            grouped.entry(uri.clone()).or_default().push(lsp_diagnostic(
-                &text,
-                error.offset..error.offset,
-                error.message,
-            ));
         }
 
-        let current_semantic = semantic::entries_at_path(
+        let mut current_semantic = semantic::entries_at_path(
             &text,
             &definition_path,
             rebased_module.as_ref().or(parsed.as_ref()),
@@ -697,7 +710,17 @@ impl Server {
             typed_for_tokens.as_ref(),
         );
         let document = self.documents.get_mut(uri).unwrap();
-        if let Some(entries) = definition_entries {
+        if let Some(mut entries) = definition_entries {
+            // Discarded regions have no entries of their own yet.
+            if parse_error.is_some()
+                && let Some(resolved) = &document.last_resolved
+            {
+                for entry in remap_definition_entries(&text, resolved) {
+                    if !entries.iter().any(|current| current.range == entry.range) {
+                        entries.push(entry);
+                    }
+                }
+            }
             document.definition_entries = entries.clone();
             document.last_resolved = Some(ResolvedDefinitions {
                 source: text.clone(),
@@ -712,6 +735,10 @@ impl Server {
         if analyzed {
             if analysis_has_errors && let Some(previous) = &document.last_analysis {
                 hover_entries = merge_hover_entries(&text, hover_entries, previous);
+                if parse_error.is_some() {
+                    current_semantic =
+                        merge_semantic_entries(&text, current_semantic, previous, false);
+                }
             }
             document.semantic_tokens = semantic::encode(&text, &current_semantic);
             document.hover_entries = hover_entries.clone();
@@ -723,7 +750,7 @@ impl Server {
                 hover_entries,
             });
         } else if let Some(previous) = &document.last_analysis {
-            let merged_semantic = merge_semantic_entries(&text, current_semantic, previous);
+            let merged_semantic = merge_semantic_entries(&text, current_semantic, previous, true);
             document.semantic_tokens = semantic::encode(&text, &merged_semantic);
             document.hover_entries = remap_hover_entries(&text, previous);
         } else {
@@ -770,12 +797,21 @@ impl Server {
     }
 }
 
+/// Adds the previous analysis's semantic entries for unchanged text to
+/// `current`. With `replace`, they take the place of current entries for the
+/// same range; otherwise they only fill text no current entry covers.
 fn merge_semantic_entries(
     source: &str,
     current: Vec<SemanticEntry>,
     previous: &Analysis,
+    replace: bool,
 ) -> Vec<SemanticEntry> {
     let change = TextChange::between(&previous.source, source);
+    let mut covered = current
+        .iter()
+        .map(|entry| entry.start..entry.end)
+        .collect::<Vec<_>>();
+    covered.sort_by_key(|range| range.start);
     let mut merged = current
         .into_iter()
         .map(|entry| ((entry.start, entry.end), entry))
@@ -790,15 +826,20 @@ fn merge_semantic_entries(
         if previous.source.get(entry.start..entry.end) != source.get(start..end) {
             continue;
         }
-        merged.insert(
-            (start, end),
-            SemanticEntry {
-                start,
-                end,
-                token_type: entry.token_type,
-                modifiers: entry.modifiers,
-            },
-        );
+        let entry = SemanticEntry {
+            start,
+            end,
+            token_type: entry.token_type,
+            modifiers: entry.modifiers,
+        };
+        if replace {
+            merged.insert((start, end), entry);
+        } else {
+            let before = covered.partition_point(|range| range.start < end);
+            if before == 0 || covered[before - 1].end <= start {
+                merged.insert((start, end), entry);
+            }
+        }
     }
     let mut entries = merged.into_values().collect::<Vec<_>>();
     entries.sort_by_key(|entry| (entry.start, entry.end));
@@ -1458,7 +1499,7 @@ mod tests {
             }],
         };
 
-        let semantics = merge_semantic_entries(new, Vec::new(), &previous);
+        let semantics = merge_semantic_entries(new, Vec::new(), &previous, true);
         assert_eq!(semantics.len(), 2);
         assert!(
             semantics
@@ -1905,6 +1946,8 @@ mod tests {
             ("let other = missing\n", "unknown"),
             ("let text: String = double 21\n", "String"),
             ("use nowhere.thing\n", "could not resolve module"),
+            ("def broken = (y: I32) => {\n    let z: = y\n    z\n}\n", "expected"),
+            ("let pair = (double 1,\n", "expected"),
         ] {
             let source = format!("{header}{error}double 4\n");
             let (connection, client) = Connection::memory();
@@ -1970,6 +2013,64 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn keeps_previous_results_for_a_region_a_syntax_error_discards() {
+        let root =
+            std::env::temp_dir().join(format!("staple-lsp-discarded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("main.sta");
+        std::fs::write(&path, "").unwrap();
+        let path = std::fs::canonicalize(path).unwrap();
+        let uri = path_to_uri(&path).unwrap();
+        let header = "def double = (x: I32) => x * 2\ndef f = () => {\n    let a = double 1\n    a\n";
+        let (connection, _client) = Connection::memory();
+        let mut server = Server {
+            connection,
+            documents: HashMap::from([(
+                uri.clone(),
+                Document {
+                    text: format!("{header}}}\n"),
+                    version: 1,
+                    ..Document::default()
+                },
+            )]),
+            published_by_root: HashMap::new(),
+            stdlib: Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            ),
+        };
+        server.analyze(&uri).unwrap();
+
+        // Without its closing brace, the whole of `f` is discarded.
+        let source = header.to_owned();
+        server.documents.get_mut(&uri).unwrap().text = source.clone();
+        server.analyze(&uri).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let document = &server.documents[&uri];
+        let reference = source.rfind("double").unwrap();
+        let hover = document
+            .hover_entries
+            .iter()
+            .find(|entry| entry.range.start == reference)
+            .unwrap_or_else(|| panic!("no hover for `double`: {:?}", document.hover_entries));
+        assert!(hover.signature.contains("I32"), "{}", hover.signature);
+        assert!(
+            document
+                .definition_entries
+                .iter()
+                .any(|entry| entry.range.start == reference)
+        );
+        let analysis = document.last_analysis.as_ref().expect("analysis");
+        assert!(analysis.semantic_entries.iter().any(|entry| {
+            entry.start == reference && entry.token_type == semantic::FUNCTION
+        }));
     }
 
     #[test]

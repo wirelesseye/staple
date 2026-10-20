@@ -4,6 +4,7 @@ mod diagnostic;
 mod formatter;
 mod lexer;
 mod parser;
+mod recovery;
 pub mod string_literal;
 
 pub use ast::*;
@@ -17,3 +18,4 @@ pub use parser::{
     parse_type_body_fragment, parse_type_body_prefix, parse_type_fragment, parse_type_prefix,
     parse_type_template_fragment, parse_with_syntax_ids,
 };
+pub use recovery::{RecoveredParse, parse_recovering};
