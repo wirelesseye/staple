@@ -3707,6 +3707,74 @@ impl LoweredProgram {
         collector.relevant
     }
 
+    /// Replaces hidden associated-type parameters (`Iterator.Item Iter`) in an
+    /// obligation by the selected implementation's answer once its explicit
+    /// arguments are concrete. A nested function's declared bounds carry the
+    /// projection its enclosing function synthesized, which neither the call's
+    /// nor the enclosing instance's substitutions spell out.
+    pub(super) fn complete_projection_arguments(
+        &self,
+        bound: CheckedTraitBound,
+    ) -> CheckedTraitBound {
+        let Some(trait_metadata) = self.traits.get(bound.trait_id) else {
+            return bound;
+        };
+        let explicit = trait_metadata
+            .parameters
+            .len()
+            .saturating_sub(trait_metadata.associated_types.len());
+        let is_projection = |argument: &CheckedType| {
+            matches!(argument, CheckedType::Parameter { id, .. }
+                if id.0 >= crate::typecheck::PROJECTION_PARAMETER_BASE)
+        };
+        if !bound.arguments.iter().skip(explicit).any(is_projection)
+            || bound
+                .arguments
+                .iter()
+                .take(explicit)
+                .any(|argument| {
+                    contains_type_parameter(argument) || contains_inferred_type(argument)
+                })
+        {
+            return bound;
+        }
+        let query = bound
+            .arguments
+            .iter()
+            .enumerate()
+            .map(|(index, argument)| {
+                if index >= explicit && is_projection(argument) {
+                    CheckedType::Inferred
+                } else {
+                    argument.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let context = TraitSelectionContext::new(self, Vec::new());
+        let Some(completed) = context.resolve_obligation(bound.trait_id, &query) else {
+            return bound;
+        };
+        let arguments = bound
+            .arguments
+            .iter()
+            .zip(completed)
+            .map(|(original, value)| {
+                if is_projection(original)
+                    && !contains_type_parameter(&value)
+                    && !contains_inferred_type(&value)
+                {
+                    value
+                } else {
+                    original.clone()
+                }
+            })
+            .collect();
+        CheckedTraitBound {
+            trait_id: bound.trait_id,
+            arguments,
+        }
+    }
+
     /// Completes hidden associated-type parameters (`Iterator.Item Iter`) from
     /// the instance's declared bounds once their explicit arguments are known.
     /// The body can name such a projection in a local annotation even when the
@@ -3717,10 +3785,13 @@ impl LoweredProgram {
         template: &LoweredFunction,
         environment: &mut SubstitutionEnvironment,
     ) {
-        let Some(scheme) = &template.scheme else {
-            return;
-        };
-        let mut bounds = scheme.trait_bounds.clone();
+        // A closure has no scheme of its own, but its declared bounds include
+        // its lexical ancestors', which is where its projections come from.
+        let mut bounds = template
+            .scheme
+            .as_ref()
+            .map(|scheme| scheme.trait_bounds.clone())
+            .unwrap_or_default();
         for bound in &template.declared_bounds {
             if !bounds.contains(bound) {
                 bounds.push(bound.clone());

@@ -1158,6 +1158,7 @@ pub(super) fn callee_runtime_obligations(
             .map(|argument| crate::substitute_type(argument, &enclosing_map))
             .collect(),
     })
+    .map(|obligation| program.complete_projection_arguments(obligation))
     .filter(|obligation| {
         obligation
             .arguments

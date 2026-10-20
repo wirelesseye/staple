@@ -4396,6 +4396,7 @@ impl TypeChecker {
         module: &ResolvedModule,
         trait_id: TraitId,
         arguments: &mut [CheckedType],
+        synthesize: bool,
     ) {
         let declaration = &module.traits()[&trait_id].declaration;
         let explicit = declaration
@@ -4406,6 +4407,7 @@ impl TypeChecker {
             return;
         }
         let (known, hidden) = arguments.split_at_mut(explicit);
+        let synthesize = synthesize && known.iter().any(contains_type_parameter);
         let known = canonical_projection_arguments(known);
         for (index, slot) in hidden.iter_mut().enumerate() {
             if *slot != CheckedType::Inferred {
@@ -4420,6 +4422,33 @@ impl TypeChecker {
                 *slot = CheckedType::Parameter {
                     id: projection.id,
                     name: projection.name.clone(),
+                    sized: true,
+                };
+            } else if synthesize {
+                // Nothing has named `Trait.Name known` yet, but a function's
+                // bound still determines it: a member call such as
+                // `Iterator.next iter` yields it, and a wildcard pattern over
+                // that result would otherwise keep an `Inferred` placeholder
+                // into lowering. Synthesize the parameter now so later
+                // projections and the bound share one identity.
+                let id =
+                    TypeParameterId(PROJECTION_PARAMETER_BASE + self.projection_parameters.len());
+                let name = format!(
+                    "{}.{}",
+                    declaration.name, declaration.associated_types[index].name
+                );
+                self.projection_parameters.push(ProjectionParameter {
+                    trait_id,
+                    associated: index,
+                    arguments: known.clone(),
+                    id,
+                    name: name.clone(),
+                    span: declaration.syntax.span.clone(),
+                    linked: true,
+                });
+                *slot = CheckedType::Parameter {
+                    id,
+                    name,
                     sized: true,
                 };
             }
@@ -4639,6 +4668,27 @@ impl TypeChecker {
         module: &ResolvedModule,
         bound: &staple_syntax::TraitBound,
     ) -> Option<CheckedTraitBound> {
+        self.resolve_trait_bound_with(module, bound, false)
+    }
+
+    /// Resolves a bound in a function's `where` clause. Unlike a trait
+    /// prerequisite or an implementation header, whose open associated slots
+    /// are solved per use, the function body treats every associated type of
+    /// its bounds as one rigid parameter.
+    fn resolve_function_trait_bound(
+        &mut self,
+        module: &ResolvedModule,
+        bound: &staple_syntax::TraitBound,
+    ) -> Option<CheckedTraitBound> {
+        self.resolve_trait_bound_with(module, bound, true)
+    }
+
+    fn resolve_trait_bound_with(
+        &mut self,
+        module: &ResolvedModule,
+        bound: &staple_syntax::TraitBound,
+        synthesize_projections: bool,
+    ) -> Option<CheckedTraitBound> {
         let trait_id = module.trait_for(bound.syntax.id)?;
         let (mut arguments, _) = self.resolve_trait_arguments(
             module,
@@ -4648,7 +4698,12 @@ impl TypeChecker {
             bound.syntax.span.clone(),
             true,
         )?;
-        self.link_projection_parameters(module, trait_id, &mut arguments);
+        self.link_projection_parameters(
+            module,
+            trait_id,
+            &mut arguments,
+            synthesize_projections,
+        );
         Some(CheckedTraitBound {
             trait_id,
             arguments,
@@ -5546,7 +5601,7 @@ impl TypeChecker {
         let trait_bounds = generics
             .trait_bounds
             .iter()
-            .filter_map(|b| self.resolve_trait_bound(module, b))
+            .filter_map(|b| self.resolve_function_trait_bound(module, b))
             .collect::<Vec<_>>();
         let subtype_bounds = generics
             .subtype_bounds
@@ -5852,7 +5907,7 @@ impl TypeChecker {
                 // own header's bounds while being checked.
                 let mut bounds = Vec::new();
                 for bound in &function.trait_bounds {
-                    if let Some(bound) = self.resolve_trait_bound(module, bound) {
+                    if let Some(bound) = self.resolve_function_trait_bound(module, bound) {
                         bounds.push(bound);
                     }
                 }
@@ -6041,7 +6096,7 @@ impl TypeChecker {
             self.function_types.insert(function.id, function_type);
             let mut bounds = Vec::new();
             for bound in &function.trait_bounds {
-                if let Some(bound) = self.resolve_trait_bound(module, bound) {
+                if let Some(bound) = self.resolve_function_trait_bound(module, bound) {
                     bounds.push(bound);
                 }
             }
@@ -15386,26 +15441,54 @@ impl TypeChecker {
                 (template, &instantiated)
         {
             // A partially applied function has fewer parameter slots than the
-            // scheme template, but its result still determines the parameters
-            // the projections need. Try each half on its own before giving up.
+            // scheme template: its remaining slots are the template's trailing
+            // ones. Infer from the result and from those slots separately and
+            // combine them, since each can determine parameters that the
+            // other leaves open (`Iterator.Item R` in the result, `R` in a
+            // slot not yet filled).
+            let mut combined = HashMap::new();
             let mut from_result = HashMap::new();
             if infer_type_parameters(
                 template.result.as_ref(),
                 instantiated.result.as_ref(),
                 &mut from_result,
             ) {
-                substitutions = from_result;
+                combined = from_result;
                 inferred = true;
-            } else {
-                let mut from_parameter = HashMap::new();
-                if infer_type_parameters(
-                    template.parameter.as_ref(),
-                    instantiated.parameter.as_ref(),
-                    &mut from_parameter,
-                ) {
-                    substitutions = from_parameter;
-                    inferred = true;
+            }
+            let mut from_parameter = HashMap::new();
+            let parameter_inferred = match (
+                template.parameter.as_ref(),
+                instantiated.parameter.as_ref(),
+            ) {
+                (CheckedType::Product(template), CheckedType::Product(remaining))
+                    if template.slotted
+                        && remaining.elements.len() < template.elements.len() =>
+                {
+                    let skipped = template.elements.len() - remaining.elements.len();
+                    template.elements[skipped..]
+                        .iter()
+                        .zip(&remaining.elements)
+                        .all(|(template, remaining)| {
+                            infer_type_parameters(
+                                &template.value_type,
+                                &remaining.value_type,
+                                &mut from_parameter,
+                            )
+                        })
                 }
+                (template, remaining) => {
+                    infer_type_parameters(template, remaining, &mut from_parameter)
+                }
+            };
+            if parameter_inferred {
+                for (id, value) in from_parameter {
+                    combined.entry(id).or_insert(value);
+                }
+                inferred = true;
+            }
+            if inferred {
+                substitutions = combined;
             }
         }
         if !inferred {

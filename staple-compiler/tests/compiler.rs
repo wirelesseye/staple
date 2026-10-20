@@ -10443,6 +10443,59 @@ fn infers_generic_wrapper_constructor_with_a_function_field() {
 }
 
 #[test]
+fn normalizes_the_projection_of_a_second_bound_on_the_same_trait_at_the_call() {
+    // Regression test: a slotted call normalizes its result after each slot.
+    // After the first slot, inference fell back to the result alone, which
+    // the still-open `Iterator.Item R` satisfies trivially, so `R` from the
+    // remaining slot was never learned and the item stayed a projection.
+    let module = type_check(concat!(
+        "use std.iterator.(Iterator, IterStep)\n",
+        "def pair = <L, R where Iterator L, Iterator R>\n",
+        "  (move left: L; move right: R) => (Iterator.Item L, Iterator.Item R) :: match Iterator.next left {\n",
+        "  IterStep.Done _ => panic \"empty\",\n",
+        "  IterStep.Yield (a, _) => match Iterator.next right {\n",
+        "    IterStep.Done _ => panic \"empty\",\n",
+        "    IterStep.Yield (b, _) => (a, b),\n",
+        "  },\n",
+        "}\n",
+        "let (number, byte) = pair (1 .. 3) (String.bytes \"hi\")\n",
+        "let checked_number: I32 = number\n",
+        "let checked_byte: U8 = byte\n",
+        "let (piped_number, piped_byte) = (1 .. 3) |> pair (String.bytes \"hi\")\n",
+        "let checked_piped: U8 = piped_byte\n",
+    ));
+    lower(&module);
+}
+
+#[test]
+fn lowers_wildcards_over_projections_the_signature_never_names() {
+    // Regression test: a function's `Iterator Iter` bound left its hidden
+    // `Item` slot open when nothing named `Iterator.Item Iter`, so
+    // `Iterator.next` produced a placeholder that wildcard patterns, inside
+    // the function and inside a closure it builds, carried into lowering.
+    let module = type_check(concat!(
+        "use std.iterator.(Iterator, IterStep)\n",
+        "def count = <Iter where Iterator Iter> (move iter: Iter) => USize :: match Iterator.next iter {\n",
+        "  IterStep.Done _ => 0,\n",
+        "  IterStep.Yield (_, rest) => 1 + count rest,\n",
+        "}\n",
+        "def both_present = <L, R where Iterator L, Iterator R> (move left: L; move right: R) => Bool :: {\n",
+        "  let present = move (l: L, r: R) => Bool :: match Iterator.next l {\n",
+        "    IterStep.Done _ => False,\n",
+        "    IterStep.Yield (_, _) => match Iterator.next r {\n",
+        "      IterStep.Done _ => False,\n",
+        "      IterStep.Yield (_, _) => True,\n",
+        "    },\n",
+        "  }\n",
+        "  present (left, right)\n",
+        "}\n",
+        "let total = count (0 .. 5)\n",
+        "let present = both_present (0 .. 3) (String.bytes \"hi\")\n",
+    ));
+    lower(&module);
+}
+
+#[test]
 fn resolves_associated_type_projections() {
     let module = type_check(concat!(
         "trait Container T { type Element; first: T -> Element }\n",
