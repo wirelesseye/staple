@@ -6695,10 +6695,14 @@ impl TypeChecker {
                             );
                         }
                     }
-                    result = result.union(&substitute_effect_set(
-                        function_type.effects.clone(),
-                        &substitutions,
-                    ));
+                    let mut effects =
+                        substitute_effect_set(function_type.effects.clone(), &substitutions);
+                    if effects.variable.is_some()
+                        && let Some(solved) = self.slotted_root_effects(&value.callee)
+                    {
+                        effects = solved;
+                    }
+                    result = result.union(&effects);
                 }
                 if let Some(function_id) = self.function_origin(module, &value.callee)
                     && let Some(accesses) = self.function_state_accesses.get(&function_id)
@@ -7668,6 +7672,11 @@ impl TypeChecker {
         {
             return false;
         }
+        // `function_origin` sees through a partial application to its root
+        // function, whose full type the residual callee cannot match.
+        if matches!(call.callee.as_ref(), Expression::Call(_)) {
+            return self.refresh_effect_generic_slot_call(module, call);
+        }
         let template = self
             .function_origin(module, &call.callee)
             .and_then(|id| self.function_types.get(&id).cloned())
@@ -7734,6 +7743,127 @@ impl TypeChecker {
         if self.expression_types.get(&call.syntax.id) != Some(&result) {
             self.expression_types.insert(call.syntax.id, result);
             changed = true;
+        }
+        changed
+    }
+
+    /// The solved effect row of a slotted function applied through `callee`.
+    /// One argument of a slotted call (`3` in `apply 3 (x => x + 1)`) cannot
+    /// determine an effect variable that only a later slot mentions, but
+    /// slot filling records the root callee at its instantiation, where every
+    /// slot has been taken into account.
+    fn slotted_root_effects(&self, callee: &Expression) -> Option<CheckedEffectSet> {
+        let mut root = callee;
+        while let Expression::Call(inner) = root {
+            root = inner.callee.as_ref();
+        }
+        let Some(CheckedType::Function(function)) = self.expression_types.get(&root.syntax().id)
+        else {
+            return None;
+        };
+        let CheckedType::Product(slots) = function.parameter.as_ref() else {
+            return None;
+        };
+        (slots.slotted && function.effects.variable.is_none()).then(|| function.effects.clone())
+    }
+
+    /// `refresh_effect_generic_call` for a juxtaposed call that fills a
+    /// slotted function's last slot (`apply 3 (x => x + 1)`). Slot filling
+    /// leaves the partial applications' residual types with the callee's
+    /// effect parameters still open when an earlier slot cannot determine
+    /// them, and the call's effects are read from that residual. Solve the
+    /// effect parameters from every slot's refreshed argument and substitute
+    /// them along the whole chain.
+    fn refresh_effect_generic_slot_call(
+        &mut self,
+        module: &ResolvedModule,
+        call: &staple_syntax::CallExpression,
+    ) -> bool {
+        if call.spread {
+            return false;
+        }
+        let mut arguments = vec![call.argument.as_ref()];
+        let mut partials = vec![call.callee.as_ref()];
+        let mut root = call.callee.as_ref();
+        while let Expression::Call(inner) = root {
+            if inner.spread {
+                return false;
+            }
+            arguments.push(inner.argument.as_ref());
+            root = inner.callee.as_ref();
+            if matches!(root, Expression::Call(_)) {
+                partials.push(root);
+            }
+        }
+        arguments.reverse();
+        let Some(template) = self
+            .function_origin(module, root)
+            .and_then(|id| self.function_types.get(&id).cloned())
+        else {
+            return false;
+        };
+        let template_type = CheckedType::Function(template.clone());
+        if !contains_effect_parameter(&template_type) {
+            return false;
+        }
+        let CheckedType::Product(slots) = template.parameter.as_ref() else {
+            return false;
+        };
+        if !slots.slotted || slots.elements.len() != arguments.len() {
+            return false;
+        }
+        let Some(existing @ CheckedType::Function(_)) =
+            self.expression_types.get(&root.syntax().id).cloned()
+        else {
+            return false;
+        };
+        let mut substitutions = HashMap::new();
+        let mut inference_template = template_type.clone();
+        let mut inference_existing = existing;
+        clear_function_effects(&mut inference_template);
+        clear_function_effects(&mut inference_existing);
+        if !infer_type_parameters(&inference_template, &inference_existing, &mut substitutions) {
+            return false;
+        }
+        substitutions.retain(|_, replacement| effect_substitution_value(replacement).is_none());
+        for (slot, argument) in slots.elements.iter().zip(&arguments) {
+            let Some(actual) = self.refreshed_argument_type(module, argument) else {
+                return false;
+            };
+            if !infer_type_parameters(&slot.value_type, &actual, &mut substitutions) {
+                return false;
+            }
+        }
+        for replacement in substitutions.values_mut() {
+            if let Some(effects) = effect_substitution_value(replacement)
+                && effects.state.is_some()
+            {
+                *replacement = effect_substitution_type(effects.clone().with_state(None));
+            }
+        }
+        let mut changed = false;
+        let mut update = |checker: &mut Self, id: SyntaxId, value_type: CheckedType| {
+            if checker.expression_types.get(&id) != Some(&value_type) {
+                checker.expression_types.insert(id, value_type);
+                changed = true;
+            }
+        };
+        update(
+            self,
+            root.syntax().id,
+            substitute_type(template_type, &substitutions),
+        );
+        for partial in partials {
+            if let Some(stored) = self.expression_types.get(&partial.syntax().id).cloned() {
+                update(
+                    self,
+                    partial.syntax().id,
+                    substitute_type(stored, &substitutions),
+                );
+            }
+        }
+        if let Some(stored) = self.expression_types.get(&call.syntax.id).cloned() {
+            update(self, call.syntax.id, substitute_type(stored, &substitutions));
         }
         changed
     }

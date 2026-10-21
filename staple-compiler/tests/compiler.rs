@@ -10503,6 +10503,36 @@ fn normalizes_the_projection_of_a_second_bound_on_the_same_trait_at_the_call() {
 }
 
 #[test]
+fn solves_effect_parameters_of_slotted_calls_from_later_slots() {
+    // Regression test: each call node of `apply 3 (x => ...)` tried to solve
+    // `E` from its own argument, and `3` cannot determine it, so the open `E`
+    // made the enclosing `def` look generic. The partial application's
+    // residual also kept the stale row solved before the lambda's effects
+    // were known.
+    let module = type_check(concat!(
+        "use std.io.println\n",
+        "def apply = <effect E> (x: I32; f: I32 ->{E} I32) =>{E} I32 :: f x\n",
+        "def pure = () => I32 :: apply 3 (x => x + 1)\n",
+        "def piped = () => I32 :: 3 |> apply (x => x + 1)\n",
+        "def loud = () => I32 :: apply 3 (x => { println \"called\"; x + 1 })\n",
+        "let results = (pure (), piped (), loud ())\n",
+    ));
+    lower(&module);
+    let errors = type_check_errors(
+        concat!(
+            "use std.io.println\n",
+            "def apply = <effect E> (x: I32; f: I32 ->{E} I32) =>{E} I32 :: f x\n",
+            "def quiet: () -> I32 = () => apply 3 (x => { println \"called\"; x + 1 })\n",
+        ),
+        "a pure function cannot call a slotted function with an effectful argument",
+    );
+    assert!(
+        errors.iter().any(|error| error.contains("IO")),
+        "{errors:?}"
+    );
+}
+
+#[test]
 fn lowers_wildcards_over_projections_the_signature_never_names() {
     // Regression test: a function's `Iterator Iter` bound left its hidden
     // `Item` slot open when nothing named `Iterator.Item Iter`, so
