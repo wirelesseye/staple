@@ -194,21 +194,97 @@ fn a_blanket_companion_obeys_the_orphan_rule() {
     );
 }
 
+const AMOUNTS: &str = concat!(
+    "trait Measure T { measure: T -> USize }\n",
+    "trait Weigh T { weigh: T -> USize }\n",
+    "type Meters = wrap I32\n",
+    "type Grams = wrap I32\n",
+    "impl Measure Meters { measure = value => 4 }\n",
+    "impl Weigh Grams { weigh = value => 9 }\n",
+    "companion<T where Measure T> T {\n",
+    "    pub def amount = value: T => USize :: Measure.measure value\n",
+    "}\n",
+    "companion<T where Weigh T> T {\n",
+    "    pub def amount = value: T => USize :: Weigh.weigh value * 10\n",
+    "}\n",
+);
+
+#[cfg(unix)]
 #[test]
-fn blanket_companion_member_names_are_unique() {
-    let errors = rejected(&format!(
-        "{MEASURE}{}",
+fn blanket_members_of_one_name_may_cover_disjoint_types() {
+    let source = format!(
+        "{AMOUNTS}{}",
         concat!(
-            "trait Other T {}\n",
-            "companion<U where Other U> U { pub def double_size = value: U => USize :: 1 }\n",
+            "use std.io.println\n",
+            "println \"${Meters 1 |> amount} ${Grams 1 |> amount}\"\n",
+            "println \"${Meters.amount (Meters 1)} ${Grams.amount (Grams 1)}\"\n",
         )
+    );
+    assert_eq!(run(&source), "4 90\n4 90\n");
+}
+
+#[test]
+fn blanket_members_of_one_name_may_not_cover_a_common_type() {
+    let errors = rejected(&format!(
+        "{AMOUNTS}impl Weigh Meters {{ weigh = value => 1 }}\n"
     ));
     assert!(
         errors.contains(
-            "blanket companion member `double_size` is already declared by another blanket companion"
+            "blanket companion member `amount` overlaps another blanket companion member `amount`"
         ),
         "{errors}"
     );
+    // The same bound always covers a common type.
+    let errors = rejected(&format!(
+        "{MEASURE}companion<U where Measure U> U {{ pub def double_size = value: U => USize :: 1 }}\n"
+    ));
+    assert!(
+        errors.contains("overlaps another blanket companion member `double_size`"),
+        "{errors}"
+    );
+}
+
+#[test]
+fn a_receiver_satisfying_two_blanket_members_is_ambiguous() {
+    let errors = rejected(&format!(
+        "{AMOUNTS}def both = <G where Measure G, Weigh G> value: G => USize :: value |> amount\n"
+    ));
+    assert!(errors.contains("ambiguous pipe stage `amount`"), "{errors}");
+    let errors = rejected(&format!(
+        "{AMOUNTS}type Plain = wrap I32\nlet plain: USize = Plain.amount (Plain 1)\n"
+    ));
+    assert!(
+        errors.contains("no blanket companion member `amount` applies to `"),
+        "{errors}"
+    );
+}
+
+#[test]
+fn try_helpers_are_blanket_members_another_package_trait_can_share() {
+    // `unwrap` is no longer a `Try` member an implementation could replace.
+    let errors = rejected(concat!(
+        "type Flag = wrap Bool\n",
+        "impl Try Flag {\n",
+        "    type Output = Bool\n",
+        "    type Residual = None\n",
+        "    branch = move flag => Ok true\n",
+        "    unwrap = move flag => true\n",
+        "}\n",
+    ));
+    assert!(errors.contains("unwrap"), "{errors}");
+    // A trait of its own may offer `unwrap` for types that are not `Try`.
+    check(concat!(
+        "trait Lazy T { force: move T -> I32 }\n",
+        "type Thunk = wrap I32\n",
+        "impl Lazy Thunk { force = move Thunk value => value }\n",
+        "companion<T where Lazy T> T {\n",
+        "    pub def unwrap = move value: T => I32 :: Lazy.force value\n",
+        "}\n",
+        "let forced: I32 = Thunk 1 |> unwrap\n",
+        "let some: Option I32 = Some 2\n",
+        "let tried: I32 = some |> unwrap\n",
+    ))
+    .unwrap_or_else(|errors| panic!("{errors}"));
 }
 
 #[test]

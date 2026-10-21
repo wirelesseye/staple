@@ -598,7 +598,7 @@ fn try_unwraps_results_options_and_wider_sums() {
         "let good: Result I32 String = Ok 1\n",
         "let wide: Ok I32 | String | Bool = Ok 2\n",
         "let some: Option I32 = Some 3\n",
-        "let parts = (good |> unwrap, Try.unwrap wide, some |> expect \"needs a value\")\n",
+        "let parts = (good |> unwrap, wide |> unwrap, some |> expect \"needs a value\")\n",
         "println \"${parts.0} ${parts.1} ${parts.2}\"\n",
     );
     assert_eq!(run_lines(source), ["1 2 3"]);
@@ -622,7 +622,7 @@ fn try_unwrap_and_expect_panic_at_their_caller() {
     let expect = execute(
         concat!(
             "let bad: Result I32 String = \"boom\"\n",
-            "let _ = Try.expect (bad; \"loading config\")\n",
+            "let _ = Result.expect bad \"loading config\"\n",
         ),
         false,
     );

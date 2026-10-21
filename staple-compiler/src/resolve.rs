@@ -599,8 +599,8 @@ pub struct ResolvedModule {
     compile_time_bindings: HashMap<SyntaxId, CompileTimeBindingInfo>,
     companion_members: HashMap<TypeId, HashMap<String, ResolvedCompanionMember>>,
     companion_type_for_module: HashMap<ModuleId, TypeId>,
-    blanket_companion_members: HashMap<String, ResolvedBlanketMember>,
-    blanket_companion_references: HashMap<SyntaxId, (TypeId, SymbolId)>,
+    blanket_companion_members: HashMap<String, Vec<ResolvedBlanketMember>>,
+    blanket_companion_references: HashMap<SyntaxId, (TypeId, Vec<SymbolId>)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -745,16 +745,21 @@ impl ResolvedModule {
             .then_some(member.symbol)
     }
 
-    /// The blanket companion member named `name`, if one is accessible from
-    /// `accessing_module`. It applies to any type satisfying its bounds.
-    pub fn blanket_companion_member(
+    /// The blanket companion members named `name` that are accessible from
+    /// `accessing_module`, in declaration order. Each applies to the types
+    /// satisfying its own bounds.
+    pub fn blanket_companion_members_named(
         &self,
         name: &str,
         accessing_module: Option<ModuleId>,
-    ) -> Option<SymbolId> {
-        let member = self.blanket_companion_members.get(name)?;
-        (member.public || accessing_module == Some(member.declaring_module))
-            .then_some(member.symbol)
+    ) -> Vec<SymbolId> {
+        self.blanket_companion_members
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|member| member.public || accessing_module == Some(member.declaring_module))
+            .map(|member| member.symbol)
+            .collect()
     }
 
     /// Every blanket companion member, by name, with its blanket parameter.
@@ -763,13 +768,18 @@ impl ResolvedModule {
     ) -> impl Iterator<Item = (&str, SymbolId, Option<TypeParameterId>)> {
         self.blanket_companion_members
             .iter()
-            .map(|(name, member)| (name.as_str(), member.symbol, member.parameter))
+            .flat_map(|(name, members)| {
+                members
+                    .iter()
+                    .map(move |member| (name.as_str(), member.symbol, member.parameter))
+            })
     }
 
     /// The blanket parameter of `symbol`, if it is a blanket companion member.
     pub fn blanket_companion_parameter(&self, symbol: SymbolId) -> Option<TypeParameterId> {
         self.blanket_companion_members
             .values()
+            .flatten()
             .find(|member| member.symbol == symbol)
             .and_then(|member| member.parameter)
     }
@@ -790,10 +800,13 @@ impl ResolvedModule {
         self.symbol_declaration_spans.get(&symbol)
     }
 
-    /// For `Type.member` naming a blanket companion member, the named type
-    /// and the member.
-    pub fn blanket_companion_reference(&self, syntax: SyntaxId) -> Option<(TypeId, SymbolId)> {
-        self.blanket_companion_references.get(&syntax).copied()
+    /// For `Type.member` naming blanket companion members, the named type
+    /// and the members of that name; the checker selects the one whose
+    /// bounds `Type` satisfies.
+    pub fn blanket_companion_reference(&self, syntax: SyntaxId) -> Option<(TypeId, &[SymbolId])> {
+        self.blanket_companion_references
+            .get(&syntax)
+            .map(|(ty, symbols)| (*ty, symbols.as_slice()))
     }
 
     pub fn companion_members(
@@ -1513,8 +1526,8 @@ pub struct NameResolver {
     associated_type_references: HashMap<SyntaxId, (TraitId, usize)>,
     trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
     pipe_local_references: HashMap<SyntaxId, SymbolId>,
-    blanket_companion_members: HashMap<String, ResolvedBlanketMember>,
-    blanket_companion_references: HashMap<SyntaxId, (TypeId, SymbolId)>,
+    blanket_companion_members: HashMap<String, Vec<ResolvedBlanketMember>>,
+    blanket_companion_references: HashMap<SyntaxId, (TypeId, Vec<SymbolId>)>,
     trait_implementations: Vec<ResolvedTraitImplementation>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
     mutable_symbols: HashSet<SymbolId>,
@@ -3289,9 +3302,9 @@ impl NameResolver {
         self.collect_reexports(program);
     }
 
-    /// Collects the members of every blanket companion block. They belong to
-    /// every type satisfying their bounds, so a name may be declared by only
-    /// one blanket block in the whole program.
+    /// Collects the members of every blanket companion block. Several blocks
+    /// may declare the same name; the checker rejects any two whose bounds a
+    /// type could satisfy at once.
     fn collect_blanket_companions(&mut self, program: &Program) {
         for block in program.modules().iter().filter(|module| module.blanket) {
             let declaring_module = block.parent.expect("a companion block has a parent");
@@ -3301,25 +3314,16 @@ impl NameResolver {
                 .collect::<Vec<_>>();
             values.sort_by_key(|(_, symbol)| symbol.0);
             for (name, symbol) in values {
-                if self.blanket_companion_members.contains_key(&name) {
-                    self.diagnostics.push(Diagnostic::new(
-                        self.symbol_declaration_spans[&symbol].clone(),
-                        format!(
-                            "blanket companion member `{name}` is already declared by another blanket companion"
-                        ),
-                    ));
-                    continue;
-                }
                 let public = self.interfaces[block.id.0].values.contains_key(&name);
-                self.blanket_companion_members.insert(
-                    name,
-                    ResolvedBlanketMember {
+                self.blanket_companion_members
+                    .entry(name)
+                    .or_default()
+                    .push(ResolvedBlanketMember {
                         symbol,
                         declaring_module,
                         public,
                         parameter: None,
-                    },
-                );
+                    });
             }
         }
     }
@@ -3373,6 +3377,7 @@ impl NameResolver {
                     if let Some(member) = self
                         .blanket_companion_members
                         .values_mut()
+                        .flatten()
                         .find(|member| Some(member.symbol) == symbol)
                     {
                         member.parameter = id;
@@ -7004,13 +7009,16 @@ impl NameResolver {
         else {
             return false;
         };
-        let Some(symbol) = self
+        let symbols = self
             .blanket_companion_members
             .get(member)
+            .into_iter()
+            .flatten()
             .map(|member| member.symbol)
-        else {
+            .collect::<Vec<_>>();
+        if symbols.is_empty() {
             return false;
-        };
+        }
         // A value of the same name keeps ordinary field access, unless it is
         // the type's own constructor or singleton.
         if let Some(value) = self.lookup(&head.name)
@@ -7023,9 +7031,11 @@ impl NameResolver {
             return false;
         };
         self.named_types.insert(head.syntax.id, ty);
-        self.symbols.insert(access.syntax.id, symbol);
+        if let [symbol] = symbols.as_slice() {
+            self.symbols.insert(access.syntax.id, *symbol);
+        }
         self.blanket_companion_references
-            .insert(access.syntax.id, (ty, symbol));
+            .insert(access.syntax.id, (ty, symbols));
         true
     }
 

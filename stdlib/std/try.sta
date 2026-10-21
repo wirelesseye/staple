@@ -13,10 +13,16 @@ pub trait Try T {
 
     /// Returns the success as `Ok`, or the failure's residual.
     branch: move T -> Ok Output | Residual
+}
+
+// Defined from `branch` for every `Try` value, so an implementation cannot
+// change what they do.
+companion<T where Try T> T {
+    use package.source.(track_caller)
 
     /// Returns the success value, panicking at the caller on a failure.
     @track_caller
-    unwrap: move T -> Output = move value => match (branch value) {
+    pub def unwrap = move value: T => Try.Output T :: match (Try.branch value) {
         Ok output => output,
         _ => panic "called `unwrap` on a failure",
     }
@@ -24,7 +30,7 @@ pub trait Try T {
     /// Returns the success value, panicking at the caller with `message` on
     /// a failure.
     @track_caller
-    expect: (move T; String) -> Output = (move value; message) => match (branch value) {
+    pub def expect = (move value: T; message: String) => Try.Output T :: match (Try.branch value) {
         Ok output => output,
         _ => panic message,
     }

@@ -2423,8 +2423,50 @@ impl TypedModule {
         checker
             .active_generic_parameters
             .push(type_parameter_ids(receiver));
+        let members = self
+            .resolved
+            .companion_members(ty, Some(owner))
+            .into_iter()
+            .map(|(name, symbol)| (name.to_owned(), symbol))
+            .collect();
+        self.receiver_compatible_members(&mut checker, members, receiver)
+    }
+
+    /// Receiver-compatible blanket companion members accessible from `owner`
+    /// at a pipe completion site.
+    pub fn pipe_blanket_methods(
+        &self,
+        owner: ModuleId,
+        receiver: &CheckedType,
+        syntax: Option<SyntaxId>,
+    ) -> Vec<(String, SymbolId)> {
+        let mut checker = self.pipe_completion_checker(syntax);
+        checker
+            .active_generic_parameters
+            .push(type_parameter_ids(receiver));
+        let members = self
+            .resolved
+            .blanket_companion_members()
+            .filter(|(name, symbol, _)| {
+                self.resolved
+                    .blanket_companion_members_named(name, Some(owner))
+                    .contains(symbol)
+            })
+            .map(|(name, symbol, _)| (name.to_owned(), symbol))
+            .collect();
+        self.receiver_compatible_members(&mut checker, members, receiver)
+    }
+
+    /// The `members` whose first parameter accepts `receiver` with their
+    /// bounds satisfied.
+    fn receiver_compatible_members(
+        &self,
+        checker: &mut TypeChecker,
+        members: Vec<(String, SymbolId)>,
+        receiver: &CheckedType,
+    ) -> Vec<(String, SymbolId)> {
         let mut methods = Vec::new();
-        for (name, symbol) in self.resolved.companion_members(ty, Some(owner)) {
+        for (name, symbol) in members {
             let Some(raw) = self.symbol_types.get(&symbol) else {
                 continue;
             };
@@ -2449,7 +2491,7 @@ impl TypedModule {
                 Span::Compiler,
             );
             if checker.diagnostics.is_empty() {
-                methods.push((name.to_owned(), symbol));
+                methods.push((name, symbol));
             }
         }
         methods
@@ -4091,80 +4133,243 @@ impl TypeChecker {
     /// both be the type's `member`. This runs once every implementation is
     /// collected, so an implementation declared after the companion counts.
     fn reject_blanket_companion_overlaps(&mut self, module: &ResolvedModule) {
-        let blanket = module
-            .blanket_companion_members()
-            .filter_map(|(name, symbol, parameter)| Some((name.to_owned(), (symbol, parameter?))))
-            .collect::<HashMap<_, _>>();
+        let mut blanket = HashMap::<String, Vec<(SymbolId, TypeParameterId)>>::new();
+        for (name, symbol, parameter) in module.blanket_companion_members() {
+            if let Some(parameter) = parameter {
+                blanket
+                    .entry(name.to_owned())
+                    .or_default()
+                    .push((symbol, parameter));
+            }
+        }
         if blanket.is_empty() {
             return;
+        }
+        let mut names = blanket.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        for name in names {
+            let mut members = blanket[&name].clone();
+            members.sort_by_key(|(symbol, _)| symbol.0);
+            for (index, &(later, later_parameter)) in members.iter().enumerate() {
+                if !members[..index]
+                    .iter()
+                    .any(|&earlier| self.blanket_members_overlap(earlier, (later, later_parameter)))
+                {
+                    continue;
+                }
+                let Some(span) = module.symbol_declaration_span(later).cloned() else {
+                    continue;
+                };
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!(
+                        "blanket companion member `{name}` overlaps another blanket companion member `{name}`: a type could satisfy the bounds of both"
+                    ),
+                ));
+            }
         }
         let mut entries = module.companion_member_entries();
         entries.sort_by_key(|(_, _, symbol)| symbol.0);
         for (ty, name, concrete) in entries {
-            let Some(&(blanket_symbol, parameter)) = blanket.get(name) else {
-                continue;
-            };
-            let Some(span) = module.symbol_declaration_span(concrete).cloned() else {
-                continue;
-            };
-            let type_name = module.type_name(ty).unwrap_or(name).to_owned();
-            let Some((target, _)) =
-                self.type_at_own_parameters(module, ty, &type_name, span.clone())
-            else {
-                continue;
-            };
-            if target == CheckedType::Error {
-                continue;
-            }
-            let substitutions = HashMap::from([(parameter, target.clone())]);
-            let (bounds, _) = self.symbol_bounds(blanket_symbol);
-            let satisfied = bounds
-                .iter()
-                .filter(|bound| {
-                    bound
-                        .arguments
-                        .iter()
-                        .any(|argument| type_contains_parameter(argument, parameter))
-                })
-                .map(|bound| {
-                    let arguments = bound
-                        .arguments
-                        .iter()
-                        .map(|argument| substitute_type(argument.clone(), &substitutions))
-                        .collect::<Vec<_>>();
-                    (bound.trait_id, arguments)
-                })
-                .collect::<Vec<_>>();
-            if satisfied
-                .iter()
-                .all(|(trait_id, arguments)| self.blanket_bound_could_hold(*trait_id, arguments))
-            {
-                let trait_names = satisfied
-                    .iter()
-                    .map(|(trait_id, arguments)| {
-                        let mut text = self
-                            .trait_names
-                            .get(trait_id)
-                            .cloned()
-                            .unwrap_or_else(|| format!("{trait_id:?}"));
-                        for argument in arguments {
-                            let argument = argument.to_string();
-                            if argument.contains(' ') {
-                                text.push_str(&format!(" ({argument})"));
-                            } else {
-                                text.push_str(&format!(" {argument}"));
-                            }
-                        }
-                        text
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                self.diagnostics.push(Diagnostic::new(
+            for &(blanket_symbol, parameter) in blanket.get(name).into_iter().flatten() {
+                let Some(span) = module.symbol_declaration_span(concrete).cloned() else {
+                    continue;
+                };
+                let type_name = module.type_name(ty).unwrap_or(name).to_owned();
+                let Some((target, _)) =
+                    self.type_at_own_parameters(module, ty, &type_name, span.clone())
+                else {
+                    continue;
+                };
+                if target == CheckedType::Error {
+                    continue;
+                }
+                let satisfied = self.blanket_bounds_at(blanket_symbol, parameter, &target);
+                if self.blanket_bounds_could_hold(&satisfied) {
+                    let trait_names = self.display_bounds(&satisfied);
+                    self.diagnostics.push(Diagnostic::new(
                     span,
                     format!(
                         "companion member `{name}` of `{type_name}` overlaps the blanket companion member `{name}`, which applies to `{type_name}` when `{trait_names}` holds"
                     ),
                 ));
+                }
+            }
+        }
+    }
+
+    /// Whether some type could satisfy the bounds of two blanket companion
+    /// members at once. Each bound naming the blanket parameter directly
+    /// admits only the types its trait's implementations cover, so two
+    /// members are disjoint when, for some pair of their bounds, no
+    /// implementation of one trait covers a type an implementation of the
+    /// other covers.
+    fn blanket_members_overlap(
+        &self,
+        (left, left_parameter): (SymbolId, TypeParameterId),
+        (right, right_parameter): (SymbolId, TypeParameterId),
+    ) -> bool {
+        // The trait and argument position of each bound `Trait .. T ..`.
+        let direct = |symbol: SymbolId, parameter: TypeParameterId| {
+            let (bounds, _) = self.symbol_bounds(symbol);
+            bounds
+                .iter()
+                .flat_map(|bound| {
+                    bound
+                        .arguments
+                        .iter()
+                        .enumerate()
+                        .filter(move |(_, argument)| {
+                            matches!(argument, CheckedType::Parameter { id, .. } if *id == parameter)
+                        })
+                        .map(move |(position, _)| (bound.trait_id, position))
+                })
+                .collect::<Vec<_>>()
+        };
+        let implemented = |trait_id: TraitId, position: usize| {
+            self.trait_implementations
+                .iter()
+                .filter_map(move |implementation| {
+                    (!implementation.negative && implementation.trait_id == trait_id)
+                        .then(|| {
+                            implementation
+                                .arguments
+                                .get(position)
+                                .map(|ty| (ty, implementation))
+                        })
+                        .flatten()
+                })
+        };
+        let left_bounds = direct(left, left_parameter);
+        let right_bounds = direct(right, right_parameter);
+        !left_bounds.iter().any(|&(left_trait, left_position)| {
+            right_bounds.iter().any(|&(right_trait, right_position)| {
+                !implemented(left_trait, left_position).any(|(left_type, left_impl)| {
+                    implemented(right_trait, right_position).any(|(right_type, right_impl)| {
+                        let free_parameters = left_impl
+                            .parameters
+                            .iter()
+                            .chain(&right_impl.parameters)
+                            .copied()
+                            .collect();
+                        unify_impl_headers(
+                            left_type,
+                            right_type,
+                            &free_parameters,
+                            &mut HashMap::new(),
+                        )
+                    })
+                })
+            })
+        })
+    }
+
+    /// The bounds of blanket companion member `symbol` on its blanket
+    /// `parameter`, at `target`.
+    fn blanket_bounds_at(
+        &self,
+        symbol: SymbolId,
+        parameter: TypeParameterId,
+        target: &CheckedType,
+    ) -> Vec<(TraitId, Vec<CheckedType>)> {
+        let substitutions = HashMap::from([(parameter, target.clone())]);
+        let (bounds, _) = self.symbol_bounds(symbol);
+        bounds
+            .iter()
+            .filter(|bound| {
+                bound
+                    .arguments
+                    .iter()
+                    .any(|argument| type_contains_parameter(argument, parameter))
+            })
+            .map(|bound| {
+                let arguments = bound
+                    .arguments
+                    .iter()
+                    .map(|argument| substitute_type(argument.clone(), &substitutions))
+                    .collect::<Vec<_>>();
+                (bound.trait_id, arguments)
+            })
+            .collect()
+    }
+
+    fn blanket_bounds_could_hold(&self, bounds: &[(TraitId, Vec<CheckedType>)]) -> bool {
+        bounds
+            .iter()
+            .all(|(trait_id, arguments)| self.blanket_bound_could_hold(*trait_id, arguments))
+    }
+
+    /// Displays bounds as source would write them, such as `Try (Option T)`.
+    fn display_bounds(&self, bounds: &[(TraitId, Vec<CheckedType>)]) -> String {
+        bounds
+            .iter()
+            .map(|(trait_id, arguments)| {
+                let mut text = self
+                    .trait_names
+                    .get(trait_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{trait_id:?}"));
+                for argument in arguments {
+                    let argument = argument.to_string();
+                    if argument.contains(' ') {
+                        text.push_str(&format!(" ({argument})"));
+                    } else {
+                        text.push_str(&format!(" {argument}"));
+                    }
+                }
+                text
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// For `Type.member` naming several blanket companion members, the one
+    /// whose bounds `Type` satisfies.
+    fn select_blanket_companion_member(
+        &mut self,
+        module: &ResolvedModule,
+        access: &staple_syntax::AccessExpression,
+        ty: TypeId,
+        candidates: &[SymbolId],
+    ) -> Option<SymbolId> {
+        if let [symbol] = candidates {
+            return Some(*symbol);
+        }
+        let type_name = module.type_name(ty).unwrap_or("type").to_owned();
+        let (target, _) =
+            self.type_at_own_parameters(module, ty, &type_name, access.syntax.span.clone())?;
+        let applicable = candidates
+            .iter()
+            .copied()
+            .filter(|symbol| {
+                module
+                    .blanket_companion_parameter(*symbol)
+                    .is_some_and(|parameter| {
+                        let bounds = self.blanket_bounds_at(*symbol, parameter, &target);
+                        self.blanket_bounds_could_hold(&bounds)
+                    })
+            })
+            .collect::<Vec<_>>();
+        let Accessor::Name(name) = &access.accessor else {
+            return None;
+        };
+        match applicable.as_slice() {
+            [symbol] => Some(*symbol),
+            [] => {
+                self.diagnostics.push(Diagnostic::new(
+                    access.syntax.span.clone(),
+                    format!("no blanket companion member `{name}` applies to `{type_name}`"),
+                ));
+                None
+            }
+            _ => {
+                self.diagnostics.push(Diagnostic::new(
+                    access.syntax.span.clone(),
+                    format!(
+                        "more than one blanket companion member `{name}` applies to `{type_name}`"
+                    ),
+                ));
+                None
             }
         }
     }
@@ -10862,11 +11067,15 @@ impl TypeChecker {
                     if self.did_return {
                         return CheckedType::empty_product();
                     }
-                    let local = match self.pipe_targets.get(&selector.syntax.id) {
-                        Some(PipeTarget::Local(symbol)) => Some(*symbol),
+                    // The pipe stage has already chosen among its candidates,
+                    // such as between blanket companion members of one name.
+                    let chosen = match self.pipe_targets.get(&selector.syntax.id) {
+                        Some(PipeTarget::Local(symbol) | PipeTarget::Companion(symbol)) => {
+                            Some(*symbol)
+                        }
                         _ => None,
                     };
-                    let symbol = if let Some(symbol) = local {
+                    let symbol = if let Some(symbol) = chosen {
                         symbol
                     } else {
                         let receiver_id = self
@@ -10874,7 +11083,13 @@ impl TypeChecker {
                             .or_else(|| checked_type_id(&receiver_type))
                             .or_else(|| checked_builtin_type_id(module, &receiver_type));
                         let accessing_module = self.checking_modules.last().copied();
-                        let blanket = module.blanket_companion_member(method, accessing_module);
+                        let blanket = match module
+                            .blanket_companion_members_named(method, accessing_module)
+                            .as_slice()
+                        {
+                            [symbol] => Some(*symbol),
+                            _ => None,
+                        };
                         if receiver_id.is_none() && blanket.is_none() {
                             self.diagnostics.push(Diagnostic::new(
                                 selector.syntax.span.clone(),
@@ -10959,7 +11174,10 @@ impl TypeChecker {
                         other => {
                             self.diagnostics.push(Diagnostic::new(
                                 selector.syntax.span.clone(),
-                                if local.is_some() {
+                                if matches!(
+                                    self.pipe_targets.get(&selector.syntax.id),
+                                    Some(PipeTarget::Local(_))
+                                ) {
                                     format!("`{method}` is not callable: `{other}`")
                                 } else {
                                     format!("companion item `{method}` is not callable: `{other}`")
@@ -12413,7 +12631,24 @@ impl TypeChecker {
                         .unwrap_or(CheckedType::Error);
                     return self.finish_expression_type(expression, raw, expected);
                 }
-                if let Some(symbol) = module.symbol_for(access.syntax.id) {
+                let blanket = match module.blanket_companion_reference(access.syntax.id) {
+                    Some((ty, candidates)) => {
+                        let candidates = candidates.to_vec();
+                        let Some(symbol) =
+                            self.select_blanket_companion_member(module, access, ty, &candidates)
+                        else {
+                            return self.finish_expression_type(
+                                expression,
+                                CheckedType::Error,
+                                expected,
+                            );
+                        };
+                        self.method_symbols.insert(access.syntax.id, symbol);
+                        Some(symbol)
+                    }
+                    None => None,
+                };
+                if let Some(symbol) = blanket.or_else(|| module.symbol_for(access.syntax.id)) {
                     self.ensure_binding_checked(module, symbol);
                     if let Some(function_id) = self.function_symbols.get(&symbol).copied() {
                         self.ensure_function_checked(module, function_id);
@@ -12426,10 +12661,7 @@ impl TypeChecker {
                             ));
                             CheckedType::Error
                         });
-                    if module
-                        .blanket_companion_reference(access.syntax.id)
-                        .is_some()
-                    {
+                    if blanket.is_some() {
                         raw_type =
                             self.pin_blanket_companion_type(module, access, symbol, raw_type);
                     }
@@ -15175,11 +15407,36 @@ impl TypeChecker {
         span: Span,
     ) {
         for bound in bounds {
+            // Associated types follow a trait's own parameters as projection
+            // placeholders.
+            let associated = bound
+                .arguments
+                .iter()
+                .map(|argument| {
+                    matches!(argument, CheckedType::Parameter { id, .. } if id.0 >= PROJECTION_PARAMETER_BASE)
+                })
+                .collect::<Vec<_>>();
             let arguments = bound
                 .arguments
                 .into_iter()
                 .map(|argument| substitute_type(argument, &substitutions))
                 .collect::<Vec<_>>();
+            // An associated type the use did not determine is whatever the
+            // selected implementation says; it must not defer the bound.
+            let projections = arguments
+                .iter()
+                .flat_map(type_parameter_ids)
+                .filter(|id| id.0 >= PROJECTION_PARAMETER_BASE)
+                .map(|id| (id, CheckedType::Inferred))
+                .collect::<HashMap<_, _>>();
+            let arguments = if projections.is_empty() {
+                arguments
+            } else {
+                arguments
+                    .into_iter()
+                    .map(|argument| substitute_type(argument, &projections))
+                    .collect()
+            };
             // A partially applied callee (the speculative pre-check of
             // `f a` in `f a b`) can leave some compile-time parameters
             // unresolved; their bounds become obligations of the enclosing
@@ -15195,9 +15452,16 @@ impl TypeChecker {
                 continue;
             }
             if !self.trait_obligation_available(bound.trait_id, &arguments) {
+                // Report the trait's own parameters, not its associated types.
+                let explicit = arguments
+                    .iter()
+                    .zip(&associated)
+                    .filter(|(_, associated)| !**associated)
+                    .map(|(argument, _)| argument.clone())
+                    .collect::<Vec<_>>();
                 self.diagnostics.push(Diagnostic::new(
                     span.clone(),
-                    trait_bound_failure(&arguments),
+                    trait_bound_failure(&explicit),
                 ));
             }
         }
@@ -16056,7 +16320,7 @@ impl TypeChecker {
             return CheckedType::empty_product();
         }
         self.pipe_receivers.insert(receiver.syntax().id);
-        let mut companion = None;
+        let mut companions = Vec::new();
         let mut companion_type = None;
         let mut local = None;
         let traits = module
@@ -16069,19 +16333,21 @@ impl TypeChecker {
                 .or_else(|| checked_builtin_type_id(module, &receiver_type))
             {
                 companion_type = Some(ty);
-                companion =
-                    module.companion_member(ty, name, self.checking_modules.last().copied());
+                companions.extend(module.companion_member(
+                    ty,
+                    name,
+                    self.checking_modules.last().copied(),
+                ));
             }
-            // A blanket companion member applies to any receiver, named or
-            // not; checking the candidate checks the receiver against its
-            // bounds.
-            if companion.is_none() {
-                companion =
-                    module.blanket_companion_member(name, self.checking_modules.last().copied());
+            // Blanket companion members apply to any receiver, named or not;
+            // checking each candidate checks the receiver against its bounds.
+            if companions.is_empty() {
+                companions = module
+                    .blanket_companion_members_named(name, self.checking_modules.last().copied());
             }
             local = module
                 .pipe_local_for_expression(access.syntax.id)
-                .filter(|symbol| Some(*symbol) != companion);
+                .filter(|symbol| !companions.contains(symbol));
             if let Some(symbol) = local {
                 self.ensure_binding_checked(module, symbol);
                 match self.symbol_types.get(&symbol).map(CheckedType::scheme_body) {
@@ -16107,11 +16373,12 @@ impl TypeChecker {
                 .and_then(|owner| module.companion_type_for_module(owner))
                 .is_some()
         {
-            companion = Some(symbol);
+            companions.push(symbol);
         }
-        let candidates = companion
+        let candidates = companions
+            .iter()
+            .copied()
             .map(PipeTarget::Companion)
-            .into_iter()
             .chain(local.map(PipeTarget::Local))
             .chain(traits.iter().copied().map(PipeTarget::Trait))
             .collect::<Vec<_>>();
@@ -16146,14 +16413,29 @@ impl TypeChecker {
         };
         // A compatible companion takes priority over trait methods, so they
         // are only probed when a local could still make the stage ambiguous.
-        let companion_match =
-            match companion.and_then(|symbol| try_candidate(PipeTarget::Companion(symbol))) {
-                Some((trial, actual)) if local.is_none() => {
-                    *self = trial;
-                    return actual;
-                }
-                matched => matched,
-            };
+        let mut companion_matches = companions
+            .iter()
+            .filter_map(|symbol| try_candidate(PipeTarget::Companion(*symbol)))
+            .collect::<Vec<_>>();
+        if companion_matches.len() > 1 {
+            self.pipe_receivers.remove(&receiver.syntax().id);
+            self.diagnostics.push(Diagnostic::new(
+                access.syntax.span.clone(),
+                format!(
+                    "ambiguous pipe stage `{}`: more than one blanket companion member of that \
+                     name accepts this receiver",
+                    place_expression_name(selector)
+                ),
+            ));
+            return CheckedType::Error;
+        }
+        let companion_match = match companion_matches.pop() {
+            Some((trial, actual)) if local.is_none() => {
+                *self = trial;
+                return actual;
+            }
+            matched => matched,
+        };
         let local_match = local.and_then(|symbol| try_candidate(PipeTarget::Local(symbol)));
         let mut trait_matches = Vec::new();
         if companion_match.is_none() {

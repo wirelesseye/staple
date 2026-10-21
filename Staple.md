@@ -1216,7 +1216,15 @@ program, so these rules keep them coherent:
   several packages. Adding blanket members to every `std.iterator.Iterator`
   is therefore reserved to the standard library. A package can still bound the
   parameter by its own trait as well.
-- A member name may be declared by only one blanket companion in the program.
+- Two blanket companions may declare the same member name only when no type
+  could satisfy both of their bounds. For each bound naming the parameter
+  directly, the types its trait's implementations cover are compared: the
+  members are disjoint when one pair of bounds covers no common type. The
+  standard library's `unwrap` for `Try` values therefore leaves room for a
+  package's own `unwrap` over a trait its `Try` types do not implement. A
+  receiver whose type is a parameter bounded by both traits makes the pipe
+  stage ambiguous, and `Type.member` picks the member whose bounds `Type`
+  satisfies.
 - A type's own companion member may not share a name with a blanket member
   whose bounds the type could satisfy. This is checked once every
   implementation is known, so it covers an implementation declared after the
@@ -5231,21 +5239,26 @@ pub trait Try T {
     type Output
     type Residual
     branch: move T -> Ok Output | Residual
+}
+
+companion<T where Try T> T {
     @track_caller
-    unwrap: move T -> Output = ...
+    pub def unwrap = move value: T => Try.Output T :: ...
     @track_caller
-    expect: (move T; String) -> Output = ...
+    pub def expect = (move value: T; message: String) => Try.Output T :: ...
 }
 ```
 
 `branch` returns the success as `Ok` and the failure as its residual, so its
 result is a `Result Output Residual` that `match`, `let ?` and the postfix
-[`?` operator](#propagating-with-) take apart. The
-default `unwrap` and `expect` return the success value and otherwise
+[`?` operator](#propagating-with-) take apart. `unwrap` and `expect` are
+[blanket companion](#blanket-companions) members defined from `branch`, so an
+implementation cannot replace them. They return the success value and otherwise
 [panic](#track_caller-and-location) at their caller, `expect` with the given message:
 
 ```staple
 let port = read_port () |> expect "reading the port"
+let config = Result.expect (load ()) "loading config"
 ```
 
 The standard library implements `Try (Result T E)`, with `Output = T` and

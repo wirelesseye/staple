@@ -10188,6 +10188,35 @@ fn string_templates_require_the_selected_formatting_trait() {
 }
 
 #[test]
+fn bounds_on_traits_with_associated_types_are_checked_at_calls() {
+    // The associated type rides along as a projection placeholder the call
+    // does not determine; it used to defer the bound, so any argument passed.
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Shaped T {\n",
+            "    type Shape\n",
+            "    shape: T -> I32\n",
+            "}\n",
+            "type Square = wrap I32\n",
+            "type Plain = wrap I32\n",
+            "impl Shaped Square { type Shape = I32; shape = value => 4 }\n",
+            "def sides = <T where Shaped T> value: T => I32 :: 1\n",
+            "let square = sides (Square 1)\n",
+            "let plain = sides (Plain 1)\n",
+        )))
+        .expect_err_diagnostics("`Plain` does not implement `Shaped`");
+    let messages = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages,
+        ["trait bound is not satisfied for `Plain`"],
+        "{messages:?}"
+    );
+}
+
+#[test]
 fn structural_debug_requires_debug_elements_and_does_not_expose_nominal_representations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
@@ -17701,7 +17730,7 @@ fn track_caller_flags_only_the_outer_stage() {
     assert!(!resolved.is_track_caller(tracked("plain")[0].id));
     // The curried inner stage and every other function stay untracked, apart
     // from the standard library's `Location.caller`, `panic`, the
-    // `Try.unwrap` and `Try.expect` defaults, and the number module's
+    // `Try` blanket companion's `unwrap` and `expect`, and the number module's
     // `Divide`/`Remainder` implementations and float `clamp`.
     assert_eq!(
         resolved

@@ -530,6 +530,23 @@ impl Collector<'_> {
                 }
             }
         }
+        // A blanket companion member stands in for a companion member the
+        // receiver's type does not declare.
+        let declared = items
+            .iter()
+            .map(|item| item.label.clone())
+            .collect::<HashSet<_>>();
+        for (name, symbol) in self.typed.pipe_blanket_methods(owner, receiver, syntax) {
+            if declared.contains(&name) {
+                continue;
+            }
+            if let Some(candidate) = self.definition(&name, DefinitionId::Symbol(symbol), 0) {
+                items.push(CompletionItem {
+                    kind: Some(CompletionItemKind::METHOD),
+                    ..candidate.item
+                });
+            }
+        }
         let companion_names = items
             .iter()
             .map(|item| item.label.clone())
