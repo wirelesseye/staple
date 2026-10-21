@@ -2343,8 +2343,14 @@ impl MacroExpander {
                         .or_insert_with(|| keys.clone());
                 }
                 for ((module, name), binding) in &public_helpers {
-                    if *module == prelude {
-                        scopes[source_module.id.0]
+                    let scope = &mut scopes[source_module.id.0];
+                    // As for a glob: the module's own macro of the same name
+                    // must not be hidden by a prelude value.
+                    if *module == prelude
+                        && !scope.macros.contains_key(name)
+                        && !scope.modifiers.contains_key(name)
+                    {
+                        scope
                             .helpers
                             .entry(name.clone())
                             .or_insert_with(|| binding.clone());
@@ -2417,8 +2423,16 @@ impl MacroExpander {
                                 .or_insert_with(|| keys.clone());
                         }
                         for ((module, name), binding) in helpers {
-                            if *module == imported {
-                                scopes[source_module.id.0]
+                            let scope = &mut scopes[source_module.id.0];
+                            // A glob never shadows a name the scope already
+                            // has. Helpers are looked up before macros, so a
+                            // glob-imported value would otherwise hide the
+                            // module's own macro of the same name.
+                            if *module == imported
+                                && !scope.macros.contains_key(name)
+                                && !scope.modifiers.contains_key(name)
+                            {
+                                scope
                                     .helpers
                                     .entry(name.clone())
                                     .or_insert_with(|| binding.clone());

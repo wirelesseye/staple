@@ -8322,6 +8322,19 @@ fn top_level_macro_sequences_capture_zero_one_and_many_arguments() {
 }
 
 #[test]
+fn a_modules_own_macro_is_not_hidden_by_a_prelude_value_of_the_same_name() {
+    // Regression test: the prelude installed its values as compile-time
+    // helpers, which the expander looks up before macros, so the prelude's
+    // `map` function hid this module's `map` macro.
+    let module = type_check(concat!(
+        "macro map: Expr -> Expr = value => parse_quote { $value + 1 }\n",
+        "let answer: I32 = map 41\n",
+        "let evens = (0 .. 6) |> filter (x => x / 2 * 2 == x) |> count\n",
+    ));
+    lower(&module);
+}
+
+#[test]
 fn top_level_macro_sequences_backtrack_for_visibility_and_fixed_suffixes() {
     let module = type_check(concat!(
         "macro classify = (_: Ident \"marker\";\n",

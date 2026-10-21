@@ -4011,6 +4011,80 @@ empty. Inclusive iteration yields a maximum integer endpoint without computing
 an overflowing successor. `Range T` and `RangeInclusive T` expose their
 representations so custom concrete iterator implementations can use them.
 
+### Iterator operations
+
+The prelude exports operations on iterators from `std.iterator`. Each takes
+the iterator in its first slot, so it reads as a pipeline:
+
+```staple
+let total = (0 .. 10) |> filter (x => x > 4) |> map (x => x * 2) |> fold 0 ((sum, x) => sum + x)
+
+for (index, word) in (words |> into_iterator |> enumerate) {
+    println "${index}: ${word}"
+}
+```
+
+The receiver must be an `Iterator`. Convert another `IntoIterator` source, such
+as a `List`, with `|> into_iterator` first.
+
+*Adapters* are lazy: each returns a new iterator that owns the one it was given
+and does its work only when advanced.
+
+| Operation | Arguments after the iterator | Yields |
+|---|---|---|
+| `map` | `f: move Item -> B` | `f` of each item |
+| `filter` | `keep: Item -> Bool` | the items `keep` accepts |
+| `filter_map` | `f: move Item -> Option B` | the values `f` returns as `Some` |
+| `take` | `count: USize` | at most the first `count` items |
+| `skip` | `count: USize` | the items after the first `count` |
+| `take_while` | `keep: Item -> Bool` | items up to the first one `keep` rejects |
+| `enumerate` | — | `(index, item)` pairs, counting from `0` |
+| `zip` | `move right: R` | `(item, right_item)` pairs, until either side runs out |
+| `chain` | `move second: Iter` | the items of the iterator, then those of `second` |
+
+*Consumers* drive the iterator to the end, or until they have their answer,
+and return a value.
+
+| Operation | Arguments after the iterator | Returns |
+|---|---|---|
+| `fold` | `move init: A; f: (move A, move Item) ->{E} A` | the final accumulator |
+| `for_each` | `f: move Item ->{E} ()` | `()` |
+| `reduce` | `f: (move Item, move Item) ->{E} Item` | `Option Item`, `None` when empty |
+| `count` | — | `USize` |
+| `any` / `all` | `test: Item ->{E} Bool` | `Bool`; an empty iterator satisfies `all` |
+| `find` | `test: Item ->{E} Bool` | the first matching item, or `None` |
+| `last` | — | `Option Item` |
+| `collect` | — | a `List Item` |
+| `sum` | — (`where Add Item, Default Item`) | the total, starting from `Default.default ()` |
+| `min` / `max` | — (`where Ord Item`) | `Option Item`; the first smallest, the last largest |
+
+**Effects.** `Iterator.next` is pure, so an adapter's function must be pure
+too: an adapter runs it when the iterator is advanced, perhaps far from where
+the pipeline was built. Consumers run immediately, so their functions may have
+any effect set `E`, which the call then requires. Put effects in the consumer:
+
+```staple
+(1 .. 4) |> map (x => x * x) |> for_each (square => println "${square}")
+```
+
+A closure that mutates a captured `let mut` has the `state` effect and is
+therefore rejected by adapters as well. Keep such state in a consumer's
+accumulator instead, as `fold` does.
+
+**Ownership.** Every operation takes the iterator by `move`. Functions that
+transform an item (`map`, `filter_map`, `fold`, `for_each`, `reduce`) receive
+it by `move`. Functions that only test an item (`filter`, `take_while`, `any`,
+`all`, `find`) borrow it, so the operation can still yield or return it, and
+this works for non-`Copy` items. `take_while` drops the first item it rejects.
+`zip` drops an item it has taken from the left side when the right side has
+run out. Consumers that stop early (`any`, `all`, `find`) drop the rest of the
+iterator.
+
+**Adapter types.** Each adapter has its own result type (`Map Iter B`,
+`Filter Iter Item`, `Take Iter Item`, and so on). Its closure is not part of
+that type, so two `map` pipelines over the same kind of source have the same
+type. `chain` relies on this: both of its iterators must have the same type.
+
 ## Types
 
 Named types are written as identifiers:
