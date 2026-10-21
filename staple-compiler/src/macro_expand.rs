@@ -1964,6 +1964,48 @@ impl MacroExpander {
             }
         }
 
+        // A type's `companion` blocks are modules of their own, so each keeps
+        // its imports to itself, but every block sees, and the type's
+        // namespace offers, the macros and helpers all of them declare.
+        let mut companion_groups = HashMap::<ModuleId, Vec<ModuleId>>::new();
+        for module in program.modules().iter().filter(|module| module.companion) {
+            companion_groups
+                .entry(program.companion_primary(module.id))
+                .or_default()
+                .push(module.id);
+        }
+        for blocks in companion_groups.values().filter(|blocks| blocks.len() > 1) {
+            let mut shared = ModuleScope::default();
+            for block in blocks {
+                let scope = &scopes[block.0];
+                for (name, keys) in &scope.macros {
+                    shared
+                        .macros
+                        .entry(name.clone())
+                        .or_default()
+                        .extend(keys.iter().cloned());
+                }
+                for (name, keys) in &scope.modifiers {
+                    shared
+                        .modifiers
+                        .entry(name.clone())
+                        .or_default()
+                        .extend(keys.iter().cloned());
+                }
+                for (name, helper) in &scope.helpers {
+                    shared
+                        .helpers
+                        .entry(name.clone())
+                        .or_insert_with(|| helper.clone());
+                }
+            }
+            for block in blocks {
+                scopes[block.0].macros = shared.macros.clone();
+                scopes[block.0].modifiers = shared.modifiers.clone();
+                scopes[block.0].helpers = shared.helpers.clone();
+            }
+        }
+
         let mut public_macros = HashMap::<(ModuleId, String, bool), Vec<MacroKey>>::new();
         for definition in definitions
             .values()
@@ -1971,7 +2013,7 @@ impl MacroExpander {
         {
             public_macros
                 .entry((
-                    definition.key.module,
+                    program.companion_primary(definition.key.module),
                     definition.key.name.clone(),
                     definition.key.modifier,
                 ))
@@ -2002,7 +2044,9 @@ impl MacroExpander {
             for item in &source_module.syntax.items {
                 if let Item::Submodule(submodule) = item
                     && submodule.visibility == Visibility::Public
-                    && let Some(child) = program.child_module(submodule.syntax.id)
+                    && let Some(child) = program
+                        .child_module(submodule.syntax.id)
+                        .map(|child| program.companion_primary(child))
                 {
                     public_namespaces.insert((source_module.id, submodule.name.clone()), child);
                 }
@@ -2091,7 +2135,7 @@ impl MacroExpander {
         {
             package_macros
                 .entry((
-                    definition.key.module,
+                    program.companion_primary(definition.key.module),
                     definition.key.name.clone(),
                     definition.key.modifier,
                 ))
@@ -2111,7 +2155,9 @@ impl MacroExpander {
             for item in &module.syntax.items {
                 if let Item::Submodule(submodule) = item
                     && submodule.visibility == Visibility::Package
-                    && let Some(child) = program.child_module(submodule.syntax.id)
+                    && let Some(child) = program
+                        .child_module(submodule.syntax.id)
+                        .map(|child| program.companion_primary(child))
                 {
                     package_namespaces.insert((module.id, submodule.name.clone()), child);
                 }
@@ -2229,7 +2275,9 @@ impl MacroExpander {
                     let Item::Submodule(submodule) = item else {
                         return None;
                     };
-                    let child = program.child_module(submodule.syntax.id)?;
+                    let child = program
+                        .child_module(submodule.syntax.id)
+                        .map(|child| program.companion_primary(child))?;
                     Some(((module.id, submodule.name.clone()), child))
                 })
             })
@@ -2318,7 +2366,9 @@ impl MacroExpander {
             }
             for item in &source_module.syntax.items {
                 if let Item::Submodule(submodule) = item
-                    && let Some(child) = program.child_module(submodule.syntax.id)
+                    && let Some(child) = program
+                        .child_module(submodule.syntax.id)
+                        .map(|child| program.companion_primary(child))
                 {
                     scopes[source_module.id.0]
                         .namespaces

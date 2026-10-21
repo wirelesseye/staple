@@ -25,8 +25,6 @@ extern "staple-intrinsic" {
 }
 
 companion<T> Buffer T {
-    use package.shared.(Shared)
-    use package.shared_buffer.SharedBuffer
     /// Allocates storage for exactly capacity elements without initialising values.
     pub def with_capacity = capacity: USize => Buffer T :: __buffer_with_capacity capacity
 

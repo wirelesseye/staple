@@ -25,7 +25,6 @@ def grow = <T> mut list: List T => () :: {
 }
 
 companion<T> List T {
-    use package.buffer.(Buffer)
     /// Returns the number of elements in the list.
     pub def length = list: List T => USize :: list.* |> length
 

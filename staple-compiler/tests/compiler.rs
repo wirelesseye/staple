@@ -17398,6 +17398,91 @@ fn companions_see_traits_their_parent_module_declares() {
 }
 
 #[test]
+fn companions_see_their_defining_modules_imports() {
+    type_check(concat!(
+        "use std.shared.(Shared)\n",
+        "type Box = wrap I32\n",
+        "companion Box {\n",
+        "    pub def share = (box: Box) => Shared Box :: Shared box\n",
+        "}\n",
+        "let shared: Shared Box = Box.share (Box 1)\n",
+    ));
+    // A block may import a name its defining module already imports.
+    type_check(concat!(
+        "use std.shared.(Shared)\n",
+        "type Box = wrap I32\n",
+        "companion Box {\n",
+        "    use std.shared.(Shared)\n",
+        "    pub def share = (box: Box) => Shared Box :: Shared box\n",
+        "}\n",
+    ));
+}
+
+#[test]
+fn companion_block_imports_reach_no_other_block() {
+    let diagnostics = resolve_result(concat!(
+        "type Box = wrap I32\n",
+        "companion Box {\n",
+        "    use std.shared.(Shared)\n",
+        "    pub def share = (box: Box) => Shared Box :: Shared box\n",
+        "}\n",
+        "companion Box {\n",
+        "    pub def again = (box: Box) => Shared Box :: Shared box\n",
+        "}\n",
+    ))
+    .expect_err_diagnostics("another block's import must not be visible");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("unknown type `Shared`")),
+        "{diagnostics:?}"
+    );
+    // Each block may import the same name for itself.
+    type_check(concat!(
+        "type Box = wrap I32\n",
+        "companion Box {\n",
+        "    use std.shared.(Shared)\n",
+        "    pub def share = (box: Box) => Shared Box :: Shared box\n",
+        "}\n",
+        "companion Box {\n",
+        "    use std.shared.(Shared)\n",
+        "    pub def again = (box: Box) => Shared Box :: Shared box\n",
+        "}\n",
+    ));
+}
+
+#[test]
+fn companion_blocks_share_their_members() {
+    type_check(concat!(
+        "type Box = wrap I32\n",
+        "companion Box { pub def one = (box: Box) => I32 :: 1 }\n",
+        "companion Box { pub def two = (box: Box) => I32 :: one box + 1 }\n",
+        "let total: I32 = Box.one (Box 1) + Box.two (Box 1)\n",
+    ));
+    type_check(concat!(
+        "use std.syntax.*\n",
+        "pub type Box T = pub wrap (value: T)\n",
+        "companion<T> Box T { pub def label = (box: Box T) => I32 :: 1 }\n",
+        "companion<T> Box T {\n",
+        "    pub macro of = value: Expr => parse_quote { Box (value: $value) }\n",
+        "}\n",
+        "let label: I32 = Box.label (Box.of 5)\n",
+    ));
+    let diagnostics = resolve_result(concat!(
+        "type Box = wrap I32\n",
+        "companion Box { pub def one = (box: Box) => I32 :: 1 }\n",
+        "companion Box { def one = (box: Box) => I32 :: 2 }\n",
+    ))
+    .expect_err_diagnostics("a member may be declared by only one block");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("duplicate definition of `one`")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
 fn track_caller_flags_only_the_outer_stage() {
     let resolved = resolve(concat!(
         "use std.source.(track_caller)\n@track_caller\n",

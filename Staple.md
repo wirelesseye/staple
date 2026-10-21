@@ -682,8 +682,8 @@ it.
 `@track_caller`, declared in `std.source` as `pub macro @track_caller: Item ->
 Item`, makes a function report where it was called from instead of where it is
 defined. It is not re-exported by `std.core` or the prelude, so it needs
-`use std.source.(track_caller)`, and a `companion` body that uses it imports it
-again. It applies only to a module-level or companion `def` whose value is a
+`use std.source.(track_caller)`; a `companion` body sees its defining
+module's import. It applies only to a module-level or companion `def` whose value is a
 function literal, or to a trait member. It takes no argument, and is rejected on
 `let`, `const`, `extern`, type, trait, and impl items, on implementation
 members, on local `def`s, and on a function that captures local variables
@@ -1165,7 +1165,14 @@ first slot; it is never combined with the stage's arguments into a product.
 
 More than one companion block may contribute to the same type. Companion
 blocks have no visibility of their own; visibility is declared on their items.
-Their bodies can refer directly to declarations in the containing module.
+A block's body sees everything its defining module sees, including the
+module's imports, so it can refer directly to the module's declarations and
+imported names. A `use` inside a block applies to that block only: it reaches
+neither the defining module nor the type's other companion blocks, and it may
+import a name the defining module already imports. The members of all of a
+type's companion blocks form the type's one namespace, so each block can refer
+directly to the others' members, and a member name may be declared by only one
+block.
 Generic and constrained targets use the same bracketed parameter syntax as
 trait implementations, for example `companion<T where Bound T> Box T`.
 Ordinary `mod` declarations may not share a name with a type; use `companion`

@@ -67,8 +67,6 @@ impl IntoIterator StringBytes {
 }
 
 companion String {
-    use package.list.List
-    use package.result.(Ok, Result)
 
     /// Copies the UTF-8 bytes of a string into a new list.
     pub def to_bytes = value: String => List U8 :: string_to_bytes value
