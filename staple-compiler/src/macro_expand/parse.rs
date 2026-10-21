@@ -1857,7 +1857,7 @@ impl MacroExpander {
                     return None;
                 };
                 let value = match float {
-                    FloatType::F32 => f64::from(f32::from_bits(bits as u32)),
+                    FloatType::F32 => widen_f32(f32::from_bits(bits as u32)),
                     FloatType::F64 => f64::from_bits(bits as u64),
                 };
                 return Some(Value::Float(value, Some(float)));
@@ -1911,7 +1911,7 @@ impl MacroExpander {
             }
             Intrinsic::FloatToBits { .. } => {
                 return Some(Value::Integer(match float {
-                    FloatType::F32 => i128::from((values[0] as f32).to_bits()),
+                    FloatType::F32 => i128::from(narrow_to_f32(values[0]).to_bits()),
                     FloatType::F64 => i128::from(values[0].to_bits()),
                 }));
             }
@@ -1924,9 +1924,60 @@ impl MacroExpander {
 /// Rounds an untyped compile-time float to `float`'s precision.
 pub(super) fn round_float(float: crate::FloatType, value: f64) -> f64 {
     match float {
-        crate::FloatType::F32 => f64::from(value as f32),
+        crate::FloatType::F32 => widen_f32(narrow_to_f32(value)),
         crate::FloatType::F64 => value,
     }
+}
+
+// Compile-time floats fold on the host, whose hardware decides the sign and
+// payload of a NaN that arithmetic produces (x86-64 sets the sign bit, ARM64
+// does not), and Rust leaves NaN casts unspecified. Folding fixes both, so a
+// constant has the same bits whichever machine compiles it.
+
+/// The quiet NaN an operation on non-NaN operands produces, as LLVM's own
+/// constant folding does.
+const CANONICAL_NAN: f64 = f64::from_bits(0x7FF8_0000_0000_0000);
+
+/// `result`, or for a NaN result, the first NaN operand quieted, or the
+/// canonical NaN when the operation itself produced one.
+fn determined_nan(result: f64, operands: &[f64]) -> f64 {
+    if !result.is_nan() {
+        return result;
+    }
+    operands
+        .iter()
+        .find(|operand| operand.is_nan())
+        .map_or(CANONICAL_NAN, |operand| {
+            f64::from_bits(operand.to_bits() | 0x0008_0000_0000_0000)
+        })
+}
+
+/// The `f64` that carries an `F32` value; a NaN keeps its sign, quiet bit
+/// and payload exactly, so it narrows back to the same bits.
+pub(super) fn widen_f32(value: f32) -> f64 {
+    if !value.is_nan() {
+        return f64::from(value);
+    }
+    let bits = value.to_bits();
+    let sign = u64::from(bits >> 31) << 63;
+    let mantissa = u64::from(bits & 0x007F_FFFF) << 29;
+    f64::from_bits(sign | 0x7FF0_0000_0000_0000 | mantissa)
+}
+
+/// The `F32` an `f64` carries, rounding a number to `F32` precision; a NaN
+/// keeps its sign, quiet bit and high payload bits.
+pub(super) fn narrow_to_f32(value: f64) -> f32 {
+    if !value.is_nan() {
+        return value as f32;
+    }
+    let bits = value.to_bits();
+    let sign = ((bits >> 63) as u32) << 31;
+    let mut mantissa = ((bits >> 29) & 0x007F_FFFF) as u32;
+    if mantissa == 0 {
+        // Only low payload bits were set; stay a NaN.
+        mantissa = 0x0040_0000;
+    }
+    f32::from_bits(sign | 0x7F80_0000 | mantissa)
 }
 
 pub(super) fn apply_float_unary(
@@ -1935,18 +1986,18 @@ pub(super) fn apply_float_unary(
     value: f64,
 ) -> f64 {
     use crate::FloatUnaryOperation;
-    match float {
+    let result = match float {
         crate::FloatType::F32 => {
-            let value = value as f32;
-            (match operation {
-                FloatUnaryOperation::Floor => value.floor(),
-                FloatUnaryOperation::Ceil => value.ceil(),
-                FloatUnaryOperation::Trunc => value.trunc(),
-                FloatUnaryOperation::Round => value.round(),
-                FloatUnaryOperation::RoundEven => value.round_ties_even(),
-                FloatUnaryOperation::Abs => value.abs(),
-                FloatUnaryOperation::Sqrt => value.sqrt(),
-            }) as f64
+            let operand = narrow_to_f32(value);
+            widen_f32(match operation {
+                FloatUnaryOperation::Floor => operand.floor(),
+                FloatUnaryOperation::Ceil => operand.ceil(),
+                FloatUnaryOperation::Trunc => operand.trunc(),
+                FloatUnaryOperation::Round => operand.round(),
+                FloatUnaryOperation::RoundEven => operand.round_ties_even(),
+                FloatUnaryOperation::Abs => operand.abs(),
+                FloatUnaryOperation::Sqrt => operand.sqrt(),
+            })
         }
         crate::FloatType::F64 => match operation {
             FloatUnaryOperation::Floor => value.floor(),
@@ -1957,7 +2008,12 @@ pub(super) fn apply_float_unary(
             FloatUnaryOperation::Abs => value.abs(),
             FloatUnaryOperation::Sqrt => value.sqrt(),
         },
+    };
+    // `abs` only clears the sign bit, even of a NaN.
+    if matches!(operation, FloatUnaryOperation::Abs) {
+        return result;
     }
+    determined_nan(result, &[value])
 }
 
 pub(super) fn apply_float_binary(
@@ -1967,11 +2023,10 @@ pub(super) fn apply_float_binary(
     right: f64,
 ) -> f64 {
     use crate::FloatBinaryOperation;
-    match float {
+    let result = match float {
         crate::FloatType::F32 => {
-            let left = left as f32;
-            let right = right as f32;
-            (match operation {
+            let (left, right) = (narrow_to_f32(left), narrow_to_f32(right));
+            widen_f32(match operation {
                 FloatBinaryOperation::Add => left + right,
                 FloatBinaryOperation::Subtract => left - right,
                 FloatBinaryOperation::Multiply => left * right,
@@ -1980,7 +2035,7 @@ pub(super) fn apply_float_binary(
                 FloatBinaryOperation::Min => left.min(right),
                 FloatBinaryOperation::Max => left.max(right),
                 FloatBinaryOperation::CopySign => left.copysign(right),
-            }) as f64
+            })
         }
         crate::FloatType::F64 => match operation {
             FloatBinaryOperation::Add => left + right,
@@ -1992,7 +2047,12 @@ pub(super) fn apply_float_binary(
             FloatBinaryOperation::Max => left.max(right),
             FloatBinaryOperation::CopySign => left.copysign(right),
         },
+    };
+    // `copysign` only moves a sign bit, even onto a NaN.
+    if matches!(operation, FloatBinaryOperation::CopySign) {
+        return result;
     }
+    determined_nan(result, &[left, right])
 }
 
 pub(super) fn apply_float_ternary(
@@ -2004,10 +2064,12 @@ pub(super) fn apply_float_ternary(
 ) -> f64 {
     use crate::FloatTernaryOperation;
     let FloatTernaryOperation::MulAdd = operation;
-    match float {
-        crate::FloatType::F32 => {
-            (first as f32).mul_add(second as f32, third as f32) as f64
-        }
+    let result = match float {
+        crate::FloatType::F32 => widen_f32(narrow_to_f32(first).mul_add(
+            narrow_to_f32(second),
+            narrow_to_f32(third),
+        )),
         crate::FloatType::F64 => first.mul_add(second, third),
-    }
+    };
+    determined_nan(result, &[first, second, third])
 }

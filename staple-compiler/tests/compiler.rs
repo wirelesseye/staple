@@ -12961,6 +12961,62 @@ fn folds_const_float_initializers_with_ieee_non_finite_results() {
 }
 
 #[test]
+fn folded_nans_have_the_same_bits_on_every_host() {
+    // A NaN an operation produces is the canonical quiet NaN, a NaN operand
+    // propagates quieted, and `F32` NaNs keep their exact bits, whatever
+    // the compiling machine's hardware would produce.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            concat!(
+                "const signaling: F64 = F64.from_bits 9218868437227405313\n",
+                "const propagated: F64 = signaling + 1.0\n",
+                "const negative: F64 = F64.from_bits 18444492273895866368 * 2.0\n",
+                "const root: F64 = F64.sqrt (-1.0)\n",
+                "const magnitude: F64 = F64.abs (F64.from_bits 18444492273895866368)\n",
+                "const narrow: F32 = 0.0 / 0.0\n",
+                "const narrow_signaling: F32 = F32.from_bits 2139095041\n",
+                "const narrow_propagated: F32 = narrow_signaling * 2.0\n",
+            ),
+            root,
+        )
+        .expect("source should parse");
+    let module = NameResolver::new()
+        .resolve_program(program)
+        .expect("NaN constants should fold");
+    let bits = |name: &str| {
+        let value = module
+            .syntax()
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Binding(binding) if binding.name == name => binding.value.clone(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("binding `{name}` should exist"));
+        let staple_syntax::Expression::Call(call) = value else {
+            panic!("expected `{name}` to reify as a bit cast, found {value:?}");
+        };
+        let staple_syntax::Expression::Integer(integer) = call.argument.as_ref() else {
+            panic!("expected an integer bit pattern, found {call:?}");
+        };
+        integer.literal.clone()
+    };
+    // 0x7FF0000000000001 stays signaling until arithmetic quiets it.
+    assert_eq!(bits("signaling"), "9218868437227405313");
+    assert_eq!(bits("propagated"), "9221120237041090561");
+    // The operand's sign survives, rather than the host's choice.
+    assert_eq!(bits("negative"), "18444492273895866368");
+    assert_eq!(bits("root"), "9221120237041090560");
+    assert_eq!(bits("magnitude"), "9221120237041090560");
+    // 0x7FC00000, 0x7F800001 and its quieted 0x7FC00001.
+    assert_eq!(bits("narrow"), "2143289344");
+    assert_eq!(bits("narrow_signaling"), "2139095041");
+    assert_eq!(bits("narrow_propagated"), "2143289345");
+}
+
+#[test]
 fn still_rejects_float_literals_that_overflow() {
     let resolved =
         resolve_result("const x: F64 = 1e999\n").expect("the literal should reach the checker");

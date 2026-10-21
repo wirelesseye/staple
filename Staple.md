@@ -1449,7 +1449,12 @@ keeps the float type it was computed at, so `const pi = F32.Pi` is an `F32`,
 and mixing `F32` and `F64` while folding is an error. A typed float that no
 literal can spell, such as an unannotated `F32` constant or a non-finite one,
 is represented exactly by its bit pattern, so NaN payload bits survive
-folding. `const` requires an initializer, and, like a compile-time
+folding. A folded NaN has the same bits whichever machine compiles it: an
+operation on non-NaN operands, such as `0.0 / 0.0` or `F64.sqrt (-1.0)`,
+produces the positive quiet NaN (`0x7FF8000000000000`, or `0x7FC00000` for
+`F32`), and a NaN operand propagates with its sign and payload, quieted. `abs`
+and `copysign` change only the sign bit, even of a NaN. A NaN the program
+computes at run time is whatever the target's hardware produces. `const` requires an initializer, and, like a compile-time
 helper's evaluation generally, an initializer that recurses without bound
 (including through a self-referential `const`) is rejected rather than left to
 hang or exhaust memory.

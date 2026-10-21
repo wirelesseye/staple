@@ -7795,7 +7795,7 @@ impl MacroExpander {
                     return None;
                 };
                 let bits = match float_type {
-                    FloatType::F32 => u64::from((float as f32).to_bits()),
+                    FloatType::F32 => u64::from(parse::narrow_to_f32(float).to_bits()),
                     FloatType::F64 => float.to_bits(),
                 };
                 let callee = Expression::Name(staple_syntax::NameExpression {
