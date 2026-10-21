@@ -599,6 +599,8 @@ pub struct ResolvedModule {
     compile_time_bindings: HashMap<SyntaxId, CompileTimeBindingInfo>,
     companion_members: HashMap<TypeId, HashMap<String, ResolvedCompanionMember>>,
     companion_type_for_module: HashMap<ModuleId, TypeId>,
+    blanket_companion_members: HashMap<String, ResolvedBlanketMember>,
+    blanket_companion_references: HashMap<SyntaxId, (TypeId, SymbolId)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -606,6 +608,17 @@ struct ResolvedCompanionMember {
     symbol: SymbolId,
     declaring_module: ModuleId,
     public: bool,
+}
+
+/// A member of a blanket `companion<T where Bound T> T` block, which belongs
+/// to every type satisfying the block's bounds.
+#[derive(Debug, Clone, Copy)]
+struct ResolvedBlanketMember {
+    symbol: SymbolId,
+    declaring_module: ModuleId,
+    public: bool,
+    /// The member's own copy of the block's blanket parameter.
+    parameter: Option<TypeParameterId>,
 }
 
 impl ResolvedModule {
@@ -730,6 +743,57 @@ impl ResolvedModule {
         let member = self.companion_members.get(&ty)?.get(name)?;
         (member.public || accessing_module == Some(member.declaring_module))
             .then_some(member.symbol)
+    }
+
+    /// The blanket companion member named `name`, if one is accessible from
+    /// `accessing_module`. It applies to any type satisfying its bounds.
+    pub fn blanket_companion_member(
+        &self,
+        name: &str,
+        accessing_module: Option<ModuleId>,
+    ) -> Option<SymbolId> {
+        let member = self.blanket_companion_members.get(name)?;
+        (member.public || accessing_module == Some(member.declaring_module))
+            .then_some(member.symbol)
+    }
+
+    /// Every blanket companion member, by name, with its blanket parameter.
+    pub fn blanket_companion_members(
+        &self,
+    ) -> impl Iterator<Item = (&str, SymbolId, Option<TypeParameterId>)> {
+        self.blanket_companion_members
+            .iter()
+            .map(|(name, member)| (name.as_str(), member.symbol, member.parameter))
+    }
+
+    /// The blanket parameter of `symbol`, if it is a blanket companion member.
+    pub fn blanket_companion_parameter(&self, symbol: SymbolId) -> Option<TypeParameterId> {
+        self.blanket_companion_members
+            .values()
+            .find(|member| member.symbol == symbol)
+            .and_then(|member| member.parameter)
+    }
+
+    /// Every type's companion members, accessible or not.
+    pub fn companion_member_entries(&self) -> Vec<(TypeId, &str, SymbolId)> {
+        self.companion_members
+            .iter()
+            .flat_map(|(ty, members)| {
+                members
+                    .iter()
+                    .map(move |(name, member)| (*ty, name.as_str(), member.symbol))
+            })
+            .collect()
+    }
+
+    pub fn symbol_declaration_span(&self, symbol: SymbolId) -> Option<&Span> {
+        self.symbol_declaration_spans.get(&symbol)
+    }
+
+    /// For `Type.member` naming a blanket companion member, the named type
+    /// and the member.
+    pub fn blanket_companion_reference(&self, syntax: SyntaxId) -> Option<(TypeId, SymbolId)> {
+        self.blanket_companion_references.get(&syntax).copied()
     }
 
     pub fn companion_members(
@@ -1449,6 +1513,8 @@ pub struct NameResolver {
     associated_type_references: HashMap<SyntaxId, (TraitId, usize)>,
     trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
     pipe_local_references: HashMap<SyntaxId, SymbolId>,
+    blanket_companion_members: HashMap<String, ResolvedBlanketMember>,
+    blanket_companion_references: HashMap<SyntaxId, (TypeId, SymbolId)>,
     trait_implementations: Vec<ResolvedTraitImplementation>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
     mutable_symbols: HashSet<SymbolId>,
@@ -1813,6 +1879,7 @@ impl NameResolver {
 
         self.validate_trait_prerequisite_cycles();
         self.validate_alias_companions(&program);
+        self.validate_blanket_companions(&program);
 
         if !self.diagnostics.is_empty() {
             if !recovering {
@@ -1994,6 +2061,8 @@ impl NameResolver {
             compile_time_bindings,
             companion_members,
             companion_type_for_module,
+            blanket_companion_members: self.blanket_companion_members,
+            blanket_companion_references: self.blanket_companion_references,
         };
         let analysis = InitializationAnalyzer::new(&resolved).analyze();
         if !analysis.diagnostics.is_empty() {
@@ -3216,7 +3285,124 @@ impl NameResolver {
             }
         }
         self.merge_companion_blocks(program);
+        self.collect_blanket_companions(program);
         self.collect_reexports(program);
+    }
+
+    /// Collects the members of every blanket companion block. They belong to
+    /// every type satisfying their bounds, so a name may be declared by only
+    /// one blanket block in the whole program.
+    fn collect_blanket_companions(&mut self, program: &Program) {
+        for block in program.modules().iter().filter(|module| module.blanket) {
+            let declaring_module = block.parent.expect("a companion block has a parent");
+            let mut values = self.module_values[block.id.0]
+                .iter()
+                .map(|(name, symbol)| (name.clone(), *symbol))
+                .collect::<Vec<_>>();
+            values.sort_by_key(|(_, symbol)| symbol.0);
+            for (name, symbol) in values {
+                if self.blanket_companion_members.contains_key(&name) {
+                    self.diagnostics.push(Diagnostic::new(
+                        self.symbol_declaration_spans[&symbol].clone(),
+                        format!(
+                            "blanket companion member `{name}` is already declared by another blanket companion"
+                        ),
+                    ));
+                    continue;
+                }
+                let public = self.interfaces[block.id.0].values.contains_key(&name);
+                self.blanket_companion_members.insert(
+                    name,
+                    ResolvedBlanketMember {
+                        symbol,
+                        declaring_module,
+                        public,
+                        parameter: None,
+                    },
+                );
+            }
+        }
+    }
+
+    /// A blanket companion needs a trait bound on its parameter, and obeys
+    /// the trait implementation orphan rule: its package must declare one of
+    /// those traits, so packages cannot add competing members to the same
+    /// external types. Also records each member's blanket parameter, which
+    /// is known once the members' headers are resolved.
+    fn validate_blanket_companions(&mut self, program: &Program) {
+        for module in program.modules() {
+            for item in &module.syntax.items {
+                let Item::Submodule(submodule) = item else {
+                    continue;
+                };
+                let Some(parameter) = submodule.blanket_parameter() else {
+                    continue;
+                };
+                let Some(block) = program.child_module(submodule.syntax.id) else {
+                    continue;
+                };
+                let on_parameter = |bound: &staple_syntax::TraitBound| {
+                    bound.arguments.iter().any(|argument| {
+                        matches!(argument, Type::Named(named) if named.namespace.is_none() && named.name == parameter)
+                    })
+                };
+                if !submodule.trait_bounds.iter().any(on_parameter) {
+                    self.diagnostics.push(Diagnostic::new(
+                        submodule.syntax.span.clone(),
+                        format!(
+                            "a blanket companion needs a trait bound on `{parameter}`, such as `companion<{parameter} where Trait {parameter}> {parameter}`"
+                        ),
+                    ));
+                    continue;
+                }
+                let members = blanket_member_bindings(&program.module(block).syntax.items);
+                for binding in &members {
+                    let Some(generics) = &binding.companion_generics else {
+                        continue;
+                    };
+                    let id = generics
+                        .parameters
+                        .iter()
+                        .find_map(|pattern| match pattern {
+                            TypeParameterPattern::Binding(binding) if binding.name == parameter => {
+                                self.type_parameters.get(&binding.syntax.id).copied()
+                            }
+                            _ => None,
+                        });
+                    let symbol = self.declared_symbols.get(&binding.syntax.id).copied();
+                    if let Some(member) = self
+                        .blanket_companion_members
+                        .values_mut()
+                        .find(|member| Some(member.symbol) == symbol)
+                    {
+                        member.parameter = id;
+                    }
+                }
+                // Members carry resolved copies of the block's bounds.
+                let Some(generics) = members
+                    .iter()
+                    .find_map(|binding| binding.companion_generics.as_ref())
+                else {
+                    continue;
+                };
+                let package = program.package_of(block);
+                let local = generics
+                    .trait_bounds
+                    .iter()
+                    .filter(|bound| on_parameter(bound))
+                    .filter_map(|bound| self.trait_references.get(&bound.trait_name.syntax.id))
+                    .filter_map(|trait_id| self.trait_modules.get(trait_id))
+                    .any(|trait_module| program.package_of(*trait_module) == package);
+                if !local {
+                    self.diagnostics.push(Diagnostic::new(
+                        submodule.syntax.span.clone(),
+                        format!(
+                            "a blanket companion must bound `{parameter}` by a trait defined in the current package"
+                        ),
+                    ));
+                }
+            }
+        }
     }
 
     /// A type's `companion` blocks are separate modules, so each keeps its
@@ -5851,6 +6037,8 @@ impl NameResolver {
                         self.qualified_interface(module).values.get(&item).copied()
                     {
                         self.symbols.insert(access.syntax.id, symbol);
+                    } else if self.resolve_blanket_companion_access(access) {
+                        // `Type.member` names a blanket companion member.
                     } else if self.qualified_interface(module).macros.contains_key(&item) {
                         self.diagnostics.push(Diagnostic::new(
                             access.syntax.span.clone(),
@@ -5862,7 +6050,7 @@ impl NameResolver {
                             format!("module `{}` has no public value named `{item}`", namespace),
                         ));
                     }
-                } else {
+                } else if !self.resolve_blanket_companion_access(access) {
                     self.resolve_expression(&access.value, None, None);
                 }
             }
@@ -6085,33 +6273,7 @@ impl NameResolver {
                         .and_then(|module| self.qualified_interface(module).types.get(&named.name))
                         .copied()
                 } else {
-                    named
-                        .syntax
-                        .definition_module()
-                        .and_then(|module| {
-                            self.definition_context_types
-                                .get(module)
-                                .and_then(|types| types.get(&named.name))
-                                .copied()
-                        })
-                        .or_else(|| {
-                            self.block_types
-                                .iter()
-                                .rev()
-                                .find_map(|frame| frame.get(&named.name).copied())
-                        })
-                        .or_else(|| {
-                            self.declared_types[self.current_module.0]
-                                .get(&named.name)
-                                .copied()
-                        })
-                        .or_else(|| {
-                            self.imported_types
-                                .iter()
-                                .rev()
-                                .find_map(|frame| frame.get(&named.name).copied())
-                        })
-                        .or_else(|| self.prelude_types.get(&named.name).copied())
+                    self.lookup_unqualified_type(&named.syntax, &named.name)
                 };
                 if let Some(id) = resolved {
                     self.named_types.insert(named.syntax.id, id);
@@ -6828,6 +6990,77 @@ impl NameResolver {
             .rev()
             .find_map(|scope| scope.get(name).copied())
             .or_else(|| self.prelude_values.get(name).copied())
+    }
+
+    /// Resolves `Type.member` where `member` is a blanket companion member
+    /// rather than one of `Type`'s own companion members. The checker
+    /// verifies that `Type` satisfies the member's bounds.
+    fn resolve_blanket_companion_access(
+        &mut self,
+        access: &staple_syntax::AccessExpression,
+    ) -> bool {
+        let (Accessor::Name(member), Expression::Name(head)) =
+            (&access.accessor, access.value.as_ref())
+        else {
+            return false;
+        };
+        let Some(symbol) = self
+            .blanket_companion_members
+            .get(member)
+            .map(|member| member.symbol)
+        else {
+            return false;
+        };
+        // A value of the same name keeps ordinary field access, unless it is
+        // the type's own constructor or singleton.
+        if let Some(value) = self.lookup(&head.name)
+            && !self.constructors.contains_key(&value)
+            && !self.singleton_values.contains_key(&value)
+        {
+            return false;
+        }
+        let Some(ty) = self.lookup_unqualified_type(&head.syntax, &head.name) else {
+            return false;
+        };
+        self.named_types.insert(head.syntax.id, ty);
+        self.symbols.insert(access.syntax.id, symbol);
+        self.blanket_companion_references
+            .insert(access.syntax.id, (ty, symbol));
+        true
+    }
+
+    /// The type an unqualified type name written at `syntax` denotes.
+    fn lookup_unqualified_type(
+        &self,
+        syntax: &staple_syntax::Syntax,
+        name: &str,
+    ) -> Option<TypeId> {
+        syntax
+            .definition_module()
+            .and_then(|module| {
+                self.definition_context_types
+                    .get(module)
+                    .and_then(|types| types.get(name))
+                    .copied()
+            })
+            .or_else(|| {
+                self.block_types
+                    .iter()
+                    .rev()
+                    .find_map(|frame| frame.get(name).copied())
+            })
+            .or_else(|| {
+                self.declared_types[self.current_module.0]
+                    .get(name)
+                    .copied()
+            })
+            .or_else(|| {
+                self.imported_types
+                    .iter()
+                    .rev()
+                    .find_map(|frame| frame.get(name).copied())
+            })
+            .or_else(|| self.prelude_types.get(name).copied())
     }
 
     fn lookup_namespace(&self, name: &str) -> Option<ModuleId> {
@@ -8057,12 +8290,34 @@ fn mangle_function_name(name: &str) -> String {
     }
 }
 
+/// The bindings a blanket companion block declares, looking through the
+/// modifiers and splices that may wrap them.
+fn blanket_member_bindings(items: &[Item]) -> Vec<&staple_syntax::Binding> {
+    let mut bindings = Vec::new();
+    for item in items {
+        match item {
+            Item::Binding(binding) => bindings.push(binding),
+            Item::ExternBlock(block) => bindings.extend(&block.bindings),
+            Item::Modified(modified) => bindings.extend(blanket_member_bindings(
+                std::slice::from_ref(&modified.item),
+            )),
+            Item::VisibilitySplice(splice) => {
+                bindings.extend(blanket_member_bindings(std::slice::from_ref(&splice.item)))
+            }
+            _ => {}
+        }
+    }
+    bindings
+}
+
 /// The module an inline submodule's name refers to: the submodule itself, or
 /// for a further `companion` block of a type, the type's first block, which
-/// stands for the type's namespace.
+/// stands for the type's namespace. A blanket companion belongs to every
+/// type satisfying its bounds, so its name refers to no module.
 fn namespace_child(program: &Program, submodule: &staple_syntax::Submodule) -> Option<ModuleId> {
     program
         .child_module(submodule.syntax.id)
+        .filter(|child| !program.module(*child).blanket)
         .map(|child| program.companion_primary(child))
 }
 

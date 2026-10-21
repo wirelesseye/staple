@@ -21,6 +21,9 @@ pub struct SourceModule {
     pub visibility: Visibility,
     pub qualified_name: String,
     pub companion: bool,
+    /// A blanket `companion<T where Bound T> T` block. It belongs to every
+    /// type satisfying its bounds, so it is never a named namespace.
+    pub blanket: bool,
 }
 
 /// A source position: package-relative file path with 1-based line and column.
@@ -199,6 +202,7 @@ impl Program {
                 visibility,
                 qualified_name: "<memory>".to_owned(),
                 companion: false,
+                blanket: false,
             }],
             imported_modules: HashMap::new(),
             dotted_imports: HashMap::new(),
@@ -236,6 +240,7 @@ impl Program {
             .collect::<Vec<_>>();
         for mut declaration in declarations {
             attach_companion_generics(&mut declaration, &mut self.next_syntax_id);
+            let blanket = declaration.blanket_parameter().is_some();
             let alias =
                 canonicalize_companion(&self.modules[parent.0].syntax.items, &mut declaration);
             // A further `companion` block for a type that already has one is
@@ -259,10 +264,11 @@ impl Program {
                 visibility: declaration.visibility,
                 qualified_name,
                 companion: declaration.companion,
+                blanket,
             });
             self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
-            if !additional_block {
+            if !additional_block && !blanket {
                 self.children[parent.0].insert(declaration.name, id);
                 if let Some(alias) = alias {
                     self.children[parent.0].insert(alias, id);
@@ -292,6 +298,7 @@ impl Program {
                 visibility: declaration.visibility,
                 qualified_name,
                 companion: false,
+                blanket: false,
             });
             self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
@@ -405,6 +412,7 @@ impl Program {
             );
             for (mut declaration, top_level) in declarations {
                 attach_companion_generics(&mut declaration, next_syntax_id);
+                let blanket = declaration.blanket_parameter().is_some();
                 let alias = if top_level {
                     canonicalize_companion(&self.modules[parent].syntax.items, &mut declaration)
                 } else {
@@ -432,10 +440,11 @@ impl Program {
                     visibility: declaration.visibility,
                     qualified_name,
                     companion: declaration.companion,
+                    blanket,
                 });
                 self.module_packages.push(self.module_packages[parent]);
                 self.children.push(HashMap::new());
-                if top_level && !additional_block {
+                if top_level && !additional_block && !blanket {
                     self.children[parent].insert(declaration.name, id);
                     if let Some(alias) = alias {
                         self.children[parent].insert(alias, id);
@@ -874,6 +883,7 @@ impl Program {
     pub fn companion_primary(&self, module: ModuleId) -> ModuleId {
         let source = &self.modules[module.0];
         if source.companion
+            && !source.blanket
             && let (Some(parent), Some(name)) = (source.parent, source.name.as_deref())
             && let Some(primary) = self.children[parent.0].get(name).copied()
             && self.modules[primary.0].companion
@@ -1365,7 +1375,12 @@ impl ProgramLoader {
                     .items
                     .into_iter()
                     .filter_map(|item| match item {
-                        Item::Submodule(module) if module.companion => Some(module),
+                        // A blanket companion names no type to discover it by.
+                        Item::Submodule(module)
+                            if module.companion && module.blanket_parameter().is_none() =>
+                        {
+                            Some(module)
+                        }
                         _ => None,
                     })
                     .collect::<Vec<_>>();
@@ -1423,6 +1438,7 @@ impl ProgramLoader {
             visibility: Visibility::Public,
             qualified_name: qualified_name.clone(),
             companion: true,
+            blanket: false,
         });
         self.module_packages.push(self.module_packages[parent.0]);
         self.children.push(HashMap::new());
@@ -1668,6 +1684,7 @@ impl ProgramLoader {
             visibility,
             qualified_name: qualified_name.clone(),
             companion: false,
+            blanket: false,
         });
         self.module_packages.push(package);
         self.children.push(HashMap::new());
@@ -1692,13 +1709,17 @@ impl ProgramLoader {
             .collect::<Vec<_>>();
         for mut declaration in declarations {
             attach_companion_generics(&mut declaration, &mut self.next_syntax_id);
+            let blanket = declaration.blanket_parameter().is_some();
             let alias =
                 canonicalize_companion(&self.modules[parent.0].syntax.items, &mut declaration);
             let additional_block = declaration.companion
                 && self.children[parent.0]
                     .get(&declaration.name)
                     .is_some_and(|existing| self.modules[existing.0].companion);
-            if !additional_block && self.children[parent.0].contains_key(&declaration.name) {
+            if !additional_block
+                && !blanket
+                && self.children[parent.0].contains_key(&declaration.name)
+            {
                 return Err(load_diagnostic_at(
                     &declaration.syntax.span,
                     format!("duplicate submodule definition of `{}`", declaration.name),
@@ -1715,10 +1736,11 @@ impl ProgramLoader {
                 visibility: declaration.visibility,
                 qualified_name: qualified_name.clone(),
                 companion: declaration.companion,
+                blanket,
             });
             self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
-            if !additional_block {
+            if !additional_block && !blanket {
                 self.children[parent.0].insert(declaration.name, id);
                 if let Some(alias) = alias {
                     self.children[parent.0].insert(alias, id);
@@ -1745,6 +1767,7 @@ impl ProgramLoader {
                 visibility: declaration.visibility,
                 qualified_name: qualified_name.clone(),
                 companion: false,
+                blanket: false,
             });
             self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
@@ -3312,7 +3335,7 @@ mod tests {
 /// namespace. Other alias companions keep their own name and are rejected
 /// during resolution.
 fn canonicalize_companion(items: &[Item], declaration: &mut Submodule) -> Option<String> {
-    if !declaration.companion {
+    if !declaration.companion || declaration.blanket_parameter().is_some() {
         return None;
     }
     let target = companion_alias_target(items, &declaration.name)?;

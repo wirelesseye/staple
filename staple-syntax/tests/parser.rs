@@ -1675,6 +1675,22 @@ fn parses_type_companion_blocks_losslessly() {
 }
 
 #[test]
+fn recognizes_blanket_companion_targets() {
+    let source = "companion<T where Iterator T> T { pub def size = iter: T => 0 }\n";
+    let root = parse(source).expect("a blanket companion should parse");
+    assert_eq!(root.text(), source);
+    let Item::Submodule(blanket) = &root.items[0] else {
+        panic!("companion")
+    };
+    assert_eq!(blanket.blanket_parameter(), Some("T"));
+    let Item::Submodule(generic) = &parse("companion<T> Box T {}\n").unwrap().items[0] else {
+        panic!("companion")
+    };
+    assert_eq!(generic.blanket_parameter(), None);
+    assert!(parse("companion<F, A> F A {}\n").is_err());
+}
+
+#[test]
 fn parses_pipe_method_calls_below_application_precedence() {
     let source = "animal |> move_to (1.0, 1.0)\n";
     let root = parse(source).expect("companion method call should parse");

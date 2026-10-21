@@ -161,6 +161,31 @@ pub struct Submodule {
     pub companion_target: Option<Type>,
 }
 
+impl Submodule {
+    /// The parameter a blanket companion such as
+    /// `companion<T where Bound T> T { ... }` targets: a companion whose
+    /// target is one of its own type parameters rather than a named type.
+    pub fn blanket_parameter(&self) -> Option<&str> {
+        if !self.companion {
+            return None;
+        }
+        let Some(Type::Named(target)) = &self.companion_target else {
+            return None;
+        };
+        if target.namespace.is_some() {
+            return None;
+        }
+        self.type_parameters
+            .iter()
+            .find_map(|parameter| match parameter {
+                TypeParameterPattern::Binding(binding) if binding.name == target.name => {
+                    Some(binding.name.as_str())
+                }
+                _ => None,
+            })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Visibility {
     Private,

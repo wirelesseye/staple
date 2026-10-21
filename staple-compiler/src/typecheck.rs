@@ -3078,6 +3078,7 @@ impl TypeChecker {
         self.seed_function_types(&module);
         self.inherit_and_validate_generic_function_bounds(&module);
         self.refresh_scheme_bounds();
+        self.reject_blanket_companion_overlaps(&module);
 
         let module_order = module.program().initialization_order().to_vec();
         for module_id in module_order {
@@ -4082,6 +4083,123 @@ impl TypeChecker {
                 .map(|argument| substitute_type_fixpoint(argument, &substitutions))
                 .collect::<Vec<_>>();
             self.bound_could_hold(bound.trait_id, &substituted_arguments)
+        })
+    }
+
+    /// A type's own companion member may not share a name with a blanket
+    /// companion member whose bounds the type could satisfy: the two would
+    /// both be the type's `member`. This runs once every implementation is
+    /// collected, so an implementation declared after the companion counts.
+    fn reject_blanket_companion_overlaps(&mut self, module: &ResolvedModule) {
+        let blanket = module
+            .blanket_companion_members()
+            .filter_map(|(name, symbol, parameter)| Some((name.to_owned(), (symbol, parameter?))))
+            .collect::<HashMap<_, _>>();
+        if blanket.is_empty() {
+            return;
+        }
+        let mut entries = module.companion_member_entries();
+        entries.sort_by_key(|(_, _, symbol)| symbol.0);
+        for (ty, name, concrete) in entries {
+            let Some(&(blanket_symbol, parameter)) = blanket.get(name) else {
+                continue;
+            };
+            let Some(span) = module.symbol_declaration_span(concrete).cloned() else {
+                continue;
+            };
+            let type_name = module.type_name(ty).unwrap_or(name).to_owned();
+            let Some((target, _)) =
+                self.type_at_own_parameters(module, ty, &type_name, span.clone())
+            else {
+                continue;
+            };
+            if target == CheckedType::Error {
+                continue;
+            }
+            let substitutions = HashMap::from([(parameter, target.clone())]);
+            let (bounds, _) = self.symbol_bounds(blanket_symbol);
+            let satisfied = bounds
+                .iter()
+                .filter(|bound| {
+                    bound
+                        .arguments
+                        .iter()
+                        .any(|argument| type_contains_parameter(argument, parameter))
+                })
+                .map(|bound| {
+                    let arguments = bound
+                        .arguments
+                        .iter()
+                        .map(|argument| substitute_type(argument.clone(), &substitutions))
+                        .collect::<Vec<_>>();
+                    (bound.trait_id, arguments)
+                })
+                .collect::<Vec<_>>();
+            if satisfied
+                .iter()
+                .all(|(trait_id, arguments)| self.blanket_bound_could_hold(*trait_id, arguments))
+            {
+                let trait_names = satisfied
+                    .iter()
+                    .map(|(trait_id, arguments)| {
+                        let mut text = self
+                            .trait_names
+                            .get(trait_id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("{trait_id:?}"));
+                        for argument in arguments {
+                            let argument = argument.to_string();
+                            if argument.contains(' ') {
+                                text.push_str(&format!(" ({argument})"));
+                            } else {
+                                text.push_str(&format!(" {argument}"));
+                            }
+                        }
+                        text
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!(
+                        "companion member `{name}` of `{type_name}` overlaps the blanket companion member `{name}`, which applies to `{type_name}` when `{trait_names}` holds"
+                    ),
+                ));
+            }
+        }
+    }
+
+    /// Whether a blanket companion's bound could hold for a type: for a
+    /// generic type, whether some implementation could cover it, since the
+    /// type's own parameters may be anything.
+    fn blanket_bound_could_hold(&self, trait_id: TraitId, arguments: &[CheckedType]) -> bool {
+        if !arguments.iter().any(contains_type_parameter) {
+            return self.bound_could_hold(trait_id, arguments);
+        }
+        let free_parameters = arguments
+            .iter()
+            .flat_map(type_parameter_ids)
+            .collect::<HashSet<_>>();
+        self.trait_implementations.iter().any(|implementation| {
+            if implementation.negative
+                || implementation.trait_id != trait_id
+                || implementation.arguments.len() != arguments.len()
+            {
+                return false;
+            }
+            let free_parameters = free_parameters
+                .iter()
+                .chain(&implementation.parameters)
+                .copied()
+                .collect();
+            let mut substitutions = HashMap::new();
+            implementation
+                .arguments
+                .iter()
+                .zip(arguments)
+                .all(|(implemented, argument)| {
+                    unify_impl_headers(implemented, argument, &free_parameters, &mut substitutions)
+                })
         })
     }
 
@@ -10755,18 +10873,21 @@ impl TypeChecker {
                             .companion_type_for_expression(module, &call.argument)
                             .or_else(|| checked_type_id(&receiver_type))
                             .or_else(|| checked_builtin_type_id(module, &receiver_type));
-                        let Some(receiver_id) = receiver_id else {
+                        let accessing_module = self.checking_modules.last().copied();
+                        let blanket = module.blanket_companion_member(method, accessing_module);
+                        if receiver_id.is_none() && blanket.is_none() {
                             self.diagnostics.push(Diagnostic::new(
                                 selector.syntax.span.clone(),
                                 format!("cannot use companion method `{method}` on a value without a named static type"),
                             ));
                             return CheckedType::Error;
-                        };
-                        let Some(symbol) = module.companion_member(
-                            receiver_id,
-                            method,
-                            self.checking_modules.last().copied(),
-                        ) else {
+                        }
+                        let Some(symbol) = receiver_id
+                            .and_then(|receiver_id| {
+                                module.companion_member(receiver_id, method, accessing_module)
+                            })
+                            .or(blanket)
+                        else {
                             self.diagnostics.push(Diagnostic::new(
                                 selector.syntax.span.clone(),
                                 format!("type has no accessible companion method named `{method}`"),
@@ -12297,13 +12418,21 @@ impl TypeChecker {
                     if let Some(function_id) = self.function_symbols.get(&symbol).copied() {
                         self.ensure_function_checked(module, function_id);
                     }
-                    let raw_type = self.symbol_types.get(&symbol).cloned().unwrap_or_else(|| {
-                        self.diagnostics.push(Diagnostic::new(
-                            access.syntax.span.clone(),
-                            "the type of the imported value is not available here",
-                        ));
-                        CheckedType::Error
-                    });
+                    let mut raw_type =
+                        self.symbol_types.get(&symbol).cloned().unwrap_or_else(|| {
+                            self.diagnostics.push(Diagnostic::new(
+                                access.syntax.span.clone(),
+                                "the type of the imported value is not available here",
+                            ));
+                            CheckedType::Error
+                        });
+                    if module
+                        .blanket_companion_reference(access.syntax.id)
+                        .is_some()
+                    {
+                        raw_type =
+                            self.pin_blanket_companion_type(module, access, symbol, raw_type);
+                    }
                     let value_type = self.instantiate_function_use(
                         raw_type,
                         None,
@@ -15414,6 +15543,113 @@ impl TypeChecker {
         instantiated
     }
 
+    /// `Type.member` for a blanket companion member is the member at
+    /// `Type`: its blanket parameter is replaced by `Type`, whose own
+    /// parameters (if any) the scheme quantifies instead, so its bounds are
+    /// checked against `Type` wherever the member is instantiated.
+    fn pin_blanket_companion_type(
+        &mut self,
+        module: &ResolvedModule,
+        access: &staple_syntax::AccessExpression,
+        symbol: SymbolId,
+        raw_type: CheckedType,
+    ) -> CheckedType {
+        let (Some(parameter), CheckedType::Forall(scheme), Expression::Name(head)) = (
+            module.blanket_companion_parameter(symbol),
+            &raw_type,
+            access.value.as_ref(),
+        ) else {
+            return raw_type;
+        };
+        let Some(ty) = module.type_for(head.syntax.id) else {
+            return CheckedType::Error;
+        };
+        let Some((target, type_parameters)) =
+            self.type_at_own_parameters(module, ty, &head.name, head.syntax.span.clone())
+        else {
+            self.diagnostics.push(Diagnostic::new(
+                access.syntax.span.clone(),
+                format!(
+                    "`{}` has compile-time parameters that `{}.member` cannot name; use `value |> member`",
+                    head.name, head.name
+                ),
+            ));
+            return CheckedType::Error;
+        };
+        if target == CheckedType::Error {
+            return CheckedType::Error;
+        }
+        let substitutions = HashMap::from([(parameter, target)]);
+        let mut scheme = scheme.as_ref().clone();
+        scheme.parameters.retain(|scheme_parameter| {
+            !matches!(scheme_parameter, CheckedSchemeParameter::Type { id, .. } if *id == parameter)
+        });
+        scheme.parameters.extend(type_parameters);
+        for bound in &mut scheme.trait_bounds {
+            for argument in &mut bound.arguments {
+                *argument = substitute_type(argument.clone(), &substitutions);
+            }
+        }
+        for bound in &mut scheme.subtype_bounds {
+            bound.supertype = substitute_type(bound.supertype.clone(), &substitutions);
+        }
+        scheme.body = Box::new(substitute_type(*scheme.body, &substitutions));
+        self.explicit_value_substitutions
+            .insert(access.syntax.id, substitutions);
+        if scheme.parameters.is_empty() {
+            // Nothing is left to infer, so the bounds are checked here.
+            let body = scheme.body.as_ref().clone();
+            self.check_instantiated_bounds(
+                scheme.trait_bounds,
+                scheme.subtype_bounds,
+                &body,
+                &body,
+                access.syntax.span.clone(),
+            );
+            return body;
+        }
+        CheckedType::Forall(Box::new(scheme))
+    }
+
+    /// The named type `id` applied to its own declared parameters, which the
+    /// caller quantifies over, so `List` stands for `List A` for every `A`.
+    /// `None` when a parameter is not a plain type parameter.
+    fn type_at_own_parameters(
+        &mut self,
+        module: &ResolvedModule,
+        id: TypeId,
+        name: &str,
+        span: Span,
+    ) -> Option<(CheckedType, Vec<CheckedSchemeParameter>)> {
+        let resolved = self.resolve_type_id(module, id, name);
+        let mut target = self.finish_defaulted_type(module, resolved);
+        let mut parameters = Vec::new();
+        if let CheckedType::TypeConstructor { id, arguments, .. } = &target
+            && arguments.is_empty()
+        {
+            for pattern in self.type_declarations[id].type_parameters.clone() {
+                let TypeParameterPattern::Binding(binding) = &pattern else {
+                    return None;
+                };
+                let id = module.type_parameter_for(binding.syntax.id)?;
+                let sized = module.type_parameter_is_sized(id);
+                parameters.push(CheckedSchemeParameter::Type {
+                    id,
+                    name: binding.name.clone(),
+                    sized,
+                });
+                let argument = CheckedType::Parameter {
+                    id,
+                    name: binding.name.clone(),
+                    sized,
+                };
+                target = self.apply_type_argument(module, target, argument, span.clone());
+            }
+        }
+        let target = self.require_applied_type_constructor(target, span);
+        Some((target, parameters))
+    }
+
     /// Expressions keep rank-1 templates. Reattach the known callee's scheme
     /// when instantiating a residual curried/default argument template.
     fn function_use_type(
@@ -15835,6 +16071,13 @@ impl TypeChecker {
                 companion_type = Some(ty);
                 companion =
                     module.companion_member(ty, name, self.checking_modules.last().copied());
+            }
+            // A blanket companion member applies to any receiver, named or
+            // not; checking the candidate checks the receiver against its
+            // bounds.
+            if companion.is_none() {
+                companion =
+                    module.blanket_companion_member(name, self.checking_modules.last().copied());
             }
             local = module
                 .pipe_local_for_expression(access.syntax.id)
@@ -17558,6 +17801,18 @@ impl TypeChecker {
         let Some(id) = module.type_for(named.syntax.id) else {
             return CheckedType::Error;
         };
+        self.resolve_type_id(module, id, &named.name)
+    }
+
+    /// The type a named type `id` denotes; a generic type is its
+    /// unapplied constructor. `fallback_name` displays a type whose
+    /// declaration has no recorded name.
+    fn resolve_type_id(
+        &mut self,
+        module: &ResolvedModule,
+        id: TypeId,
+        fallback_name: &str,
+    ) -> CheckedType {
         if let Some(builtin) = module.builtin_type(id) {
             return match builtin {
                 BuiltinType::Integer(integer) => CheckedType::integer(integer),
@@ -17666,13 +17921,13 @@ impl TypeChecker {
                         CheckedType::Opaque {
                             sized: true,
                             id,
-                            name: module.type_name(id).unwrap_or(&named.name).to_owned(),
+                            name: module.type_name(id).unwrap_or(fallback_name).to_owned(),
                             arguments: Vec::new(),
                         }
                     } else {
                         CheckedType::TypeConstructor {
                             id,
-                            name: module.type_name(id).unwrap_or(&named.name).to_owned(),
+                            name: module.type_name(id).unwrap_or(fallback_name).to_owned(),
                             arguments: Vec::new(),
                         }
                     }

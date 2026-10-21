@@ -16642,6 +16642,7 @@ mod tests {
             visibility: staple_syntax::Visibility::Public,
             qualified_name: format!("module{id}"),
             companion: false,
+            blanket: false,
         };
         let sources = vec![source(0), source(1)];
         let diagnostics =

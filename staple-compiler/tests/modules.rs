@@ -2475,6 +2475,90 @@ fn enforces_trait_implementation_orphan_rules_across_packages() {
 }
 
 #[test]
+fn applies_blanket_companions_across_packages_under_the_orphan_rule() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "lib/src/root.sta",
+        concat!(
+            "pub trait Measure T { measure: T -> USize }\n",
+            "companion<T where Measure T> T {\n",
+            "    pub def double_size = value: T => USize :: Measure.measure value * 2\n",
+            "}\n",
+        ),
+    );
+    fs::create_dir_all(fixture.root.join("app")).unwrap();
+    fs::write(
+        fixture.root.join("lib/staple.kdl"),
+        "package \"lib\" { kind \"library\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("app/staple.kdl"),
+        "package \"app\" { dependencies { lib path=\"../lib\" } }\n",
+    )
+    .unwrap();
+    let check = |source: &str| {
+        fixture.write("app/src/main.sta", source);
+        let graph =
+            staple_project::load_package_graph(&fixture.root.join("app/staple.kdl")).unwrap();
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .with_package_graph(graph)
+            .load_package_graph()
+            .expect("package graph should load");
+        NameResolver::new()
+            .resolve_program(program)
+            .map_err(format_diagnostics)
+            .and_then(|resolved| {
+                TypeChecker::new()
+                    .check(resolved)
+                    .map(|_| ())
+                    .map_err(format_diagnostics)
+            })
+    };
+
+    // A dependency's blanket companion applies to the consumer's types.
+    check(concat!(
+        "use lib.Measure\n",
+        "type Meters = wrap I32\n",
+        "impl Measure Meters { measure = value => 4 }\n",
+        "let piped: USize = Meters 1 |> double_size\n",
+        "let named: USize = Meters.double_size (Meters 1)\n",
+    ))
+    .expect("a dependency's blanket companion should apply to local types");
+
+    // The consumer cannot add a blanket companion over the external trait.
+    let error = check(concat!(
+        "use lib.Measure\n",
+        "companion<T where Measure T> T {\n",
+        "    pub def triple_size = value: T => USize :: Measure.measure value * 3\n",
+        "}\n",
+    ))
+    .expect_err("a blanket companion bounded only by an external trait is an orphan");
+    assert!(
+        error.contains(
+            "a blanket companion must bound `T` by a trait defined in the current package"
+        ),
+        "{error}"
+    );
+
+    // A bound by one of its own traits makes the blanket companion local.
+    check(concat!(
+        "use lib.Measure\n",
+        "trait Local T {}\n",
+        "companion<T where Measure T, Local T> T {\n",
+        "    pub def triple_size = value: T => USize :: Measure.measure value * 3\n",
+        "}\n",
+    ))
+    .expect("a blanket companion bounded by a local trait should be accepted");
+}
+
+#[test]
 fn resolves_package_visible_items_within_a_package() {
     let fixture = Fixture::new();
     fixture.write(

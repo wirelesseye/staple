@@ -1178,6 +1178,54 @@ trait implementations, for example `companion<T where Bound T> Box T`.
 Ordinary `mod` declarations may not share a name with a type; use `companion`
 when defining a type-qualified namespace.
 
+#### Blanket companions
+
+A companion whose target is one of its own type parameters is a *blanket
+companion*. Its members belong to every type that satisfies its bounds:
+
+```staple
+pub trait Measure T { measure: T -> USize }
+
+companion<T where Measure T> T {
+    pub def double_size = value: T => USize :: Measure.measure value * 2
+}
+
+type Meters = wrap I32
+impl Measure Meters { measure = value => 4 }
+
+let piped = Meters 1 |> double_size          // 8
+let named = Meters.double_size (Meters 1)    // 8
+```
+
+A blanket member is a pipe-stage candidate for any receiver, named or
+structural, including a value whose type is a bounded type parameter. It
+takes the place of the receiver type's own companion member, which the
+overlap rule below keeps from existing, so it has the same priority over
+trait functions. `Type.member` selects it for a named type that satisfies
+its bounds. The blanket parameter is then that type, so `Meters.double_size 3`
+is an error rather than a use at `I32`. For a generic type, `Box.member`
+stands for `Box A` at every `A`. A blanket member is not reachable as
+`T.member`, because the block declares no namespace.
+
+Like trait implementations, blanket companions apply throughout the loaded
+program, so these rules keep them coherent:
+
+- The block needs at least one trait bound on its parameter.
+- The orphan rule: one of those traits must be declared in the companion's
+  package. Otherwise a dependency's types could gain competing members from
+  several packages. Adding blanket members to every `std.iterator.Iterator`
+  is therefore reserved to the standard library. A package can still bound the
+  parameter by its own trait as well.
+- A member name may be declared by only one blanket companion in the program.
+- A type's own companion member may not share a name with a blanket member
+  whose bounds the type could satisfy. This is checked once every
+  implementation is known, so it covers an implementation declared after the
+  companion. For a generic type, it is an error if any implementation could
+  cover it.
+
+Visibility works as for other companion items: a member without `pub` is
+reachable only from the module that declares the block.
+
 An external import resolves the longest existing `.sta` file prefix and then
 traverses public inline submodules. Thus `use library.api.answer` first prefers
 `library/api.sta`; if that file does not exist, it loads `library.sta` and looks

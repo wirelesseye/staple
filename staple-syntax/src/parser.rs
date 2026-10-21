@@ -960,6 +960,16 @@ impl Grammar {
         let target = self.parse_type()?;
         let name = companion_target_name(&target)
             .ok_or_else(|| self.error("companion target must be a named type or type alias"))?;
+        if !matches!(target, Type::Named(_))
+            && type_parameters
+                .iter()
+                .any(|parameter| parameter.names().contains(&name.as_str()))
+        {
+            return Err(self.error(
+                "a companion target must be a named type, a type alias, or one of the \
+                 companion's own type parameters",
+            ));
+        }
         self.expect(TokenKind::LBrace, "expected `{` after companion target")?;
         let module_start = self.position;
         let (declaration_syntax, docs, module_visibility, modifiers) =
