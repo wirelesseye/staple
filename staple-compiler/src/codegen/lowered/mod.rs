@@ -2498,7 +2498,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
     /// Ensure constructor adapter's body: rebuild the product from
     /// the closure parameters (after the environment) and return it, or
-    /// GC-allocate it as a `Ref` payload with the planned finalizer.
+    /// GC-allocate it as a `Shared` payload with the planned finalizer.
     fn emit_constructor_adapter_body(
         &mut self,
         ordinal: ArtifactOrdinal,
@@ -2537,14 +2537,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 pointer.into()
             }
-            crate::ConstructorConstruction::ManagedRef {
+            crate::ConstructorConstruction::ManagedShared {
                 payload, finalizer, ..
             } => {
                 let payload_type = self.backend.compile_type(payload)?;
                 let size = self.backend.target_data.get_store_size(&payload_type);
                 let pointer = self.backend.build_gc_allocation(
                     self.backend.size_type.const_int(size, false),
-                    "ref.allocate",
+                    "shared.allocate",
                     span.clone(),
                 )?;
                 self.backend
@@ -3237,11 +3237,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             },
             LoweredPatternKind::Nominal { argument, .. } => {
                 let original_unique = value;
-                // A nominal pattern loads the payload only for a `Ref` pattern;
+                // A nominal pattern loads the payload only for a `Shared` pattern;
                 // every other nominal form binds its argument transparently.
                 let value = if matches!(
                     pattern.test.identity,
-                    crate::LoweredPatternIdentity::Ref | crate::LoweredPatternIdentity::Unique
+                    crate::LoweredPatternIdentity::Shared | crate::LoweredPatternIdentity::Unique
                 ) {
                     let payload = self
                         .view
@@ -3249,7 +3249,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map(|argument| argument.test.subject.clone())
                         .unwrap_or(CheckedType::Error);
                     self.backend
-                        .load_ref_payloads(value, std::slice::from_ref(&payload), span.clone())?
+                        .load_shared_payloads(value, std::slice::from_ref(&payload), span.clone())?
                         .as_any_value_enum()
                 } else {
                     value
@@ -3804,7 +3804,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Emits a structural access: load any Ref payload chain, then project the
+    /// Emits a structural access: load any Shared payload chain, then project the
     /// representation, scalar, product element, or bounds-checked slice element.
     fn emit_access(
         &mut self,
@@ -3825,7 +3825,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 } else {
                     let payload =
                         self.backend
-                            .load_ref_payloads(base, dereference, span.clone())?;
+                            .load_shared_payloads(base, dereference, span.clone())?;
                     if access.take_unique {
                         let pointer = value_as_basic(base)
                             .ok_or_else(|| Diagnostic::new(span.clone(), "invalid Unique pointer"))?
@@ -3841,7 +3841,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     Ok(base)
                 } else {
                     self.backend
-                        .load_ref_payloads(base, dereference, span.clone())
+                        .load_shared_payloads(base, dereference, span.clone())
                         .map(|value| value.as_any_value_enum())
                 }
             }
@@ -3851,7 +3851,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 } else {
                     Some(
                         self.backend
-                            .load_ref_payloads(base, dereference, span.clone())?,
+                            .load_shared_payloads(base, dereference, span.clone())?,
                     )
                 };
                 let Some(BasicValueEnum::StructValue(value)) = value else {
@@ -3872,7 +3872,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 } else {
                     Some(
                         self.backend
-                            .load_ref_payloads(base, dereference, span.clone())?,
+                            .load_shared_payloads(base, dereference, span.clone())?,
                     )
                 };
                 let Some(BasicValueEnum::PointerValue(buffer)) = value else {
@@ -3883,7 +3883,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 };
                 let position = self.backend.size_type.const_int(*index as u64, false);
                 let element_type = self.backend.compile_type(&expression.value_type)?;
-                let pointer = self.backend.build_shared_buffer_get_ref(
+                let pointer = self.backend.build_shared_buffer_get_shared(
                     buffer,
                     position,
                     element_type,
@@ -4656,13 +4656,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         environment,
                     )
                 }
-                CheckedType::Ref(payload) | CheckedType::Unique(payload)
+                CheckedType::Shared(payload) | CheckedType::Unique(payload)
                     if matches!(
                         pattern.test.identity,
-                        crate::LoweredPatternIdentity::Ref | crate::LoweredPatternIdentity::Unique
+                        crate::LoweredPatternIdentity::Shared | crate::LoweredPatternIdentity::Unique
                     ) =>
                 {
-                    let payload_value = self.backend.load_ref_payloads(
+                    let payload_value = self.backend.load_shared_payloads(
                         value.as_any_value_enum(),
                         std::slice::from_ref(payload),
                         span.clone(),
@@ -6096,7 +6096,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     recursive,
                     Some(crate::RecursiveConstruction::ManagedReference)
                 ) {
-                    return self.emit_managed_ref(owner, id, &call, &basic);
+                    return self.emit_managed_shared(owner, id, &call, &basic);
                 }
                 self.backend
                     .build_product_value(&basic, call.origin.span.clone())
@@ -6173,20 +6173,20 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         ))
     }
 
-    /// A `ManagedRef` constructor: GC-allocate the payload, store it, and set
-    /// the declared payload finalizer from the call's `RefConstruction`
+    /// A `ManagedShared` constructor: GC-allocate the payload, store it, and set
+    /// the declared payload finalizer from the call's `SharedConstruction`
     /// artifact use.
-    fn emit_managed_ref(
+    fn emit_managed_shared(
         &mut self,
         owner: EmissionOwner,
         id: LoweredCallId,
         call: &crate::LoweredCall,
         values: &[BasicValueEnum<'context>],
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let CheckedType::Ref(payload) = &call.result_type else {
+        let CheckedType::Shared(payload) = &call.result_type else {
             return Err(Diagnostic::new(
                 call.origin.span.clone(),
-                "Ref constructor has an invalid result type",
+                "Shared constructor has an invalid result type",
             ));
         };
         let value = self
@@ -6196,30 +6196,30 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let size = self.backend.target_data.get_store_size(&payload_type);
         let pointer = self.backend.build_gc_allocation(
             self.backend.size_type.const_int(size, false),
-            "ref.allocate",
+            "shared.allocate",
             call.origin.span.clone(),
         )?;
         self.backend
             .builder
             .build_store(pointer, value)
             .map_err(compiler_diagnostic)?;
-        if let Some(finalizer) = self.ref_construction_finalizer(owner, id) {
+        if let Some(finalizer) = self.shared_construction_finalizer(owner, id) {
             self.backend.set_gc_finalizer(pointer, finalizer)?;
         }
         Ok(pointer.as_any_value_enum())
     }
 
-    /// The declared payload finalizer for one `Ref` construction, named by the
-    /// call's `RefConstruction` artifact use. A payload that needs no
+    /// The declared payload finalizer for one `Shared` construction, named by the
+    /// call's `SharedConstruction` artifact use. A payload that needs no
     /// finalizer has no use.
-    fn ref_construction_finalizer(
+    fn shared_construction_finalizer(
         &self,
         owner: EmissionOwner,
         id: LoweredCallId,
     ) -> Option<FunctionValue<'context>> {
         let uses = self.view.artifact_uses(owner)?;
         let ordinal = uses.iter().find_map(|use_| {
-            (use_.site == crate::ArtifactUseSite::RefConstruction(id)).then_some(use_.artifact)
+            (use_.site == crate::ArtifactUseSite::SharedConstruction(id)).then_some(use_.artifact)
         })?;
         self.artifacts
             .get(&ordinal)
@@ -6826,7 +6826,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     place.origin.span.clone(),
                 )
             }
-            // A `Ref` payload chain: ref payload pointer leaves the
+            // A `Shared` payload chain: shared payload pointer leaves the
             // final payload address in place.
             crate::LoweredPlaceKind::Dereference {
                 reference,
@@ -6834,7 +6834,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             } => {
                 let value = self.emit_expression(owner, *reference, environment)?;
                 self.backend
-                    .ref_payload_pointer(value, dereference, place.origin.span.clone())
+                    .shared_payload_pointer(value, dereference, place.origin.span.clone())
             }
             crate::LoweredPlaceKind::ProductElement { base, index, slice } => {
                 let base_place = self.view.place(owner, *base).ok_or_else(|| {
@@ -6887,7 +6887,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     };
                     let position = self.backend.size_type.const_int(*index as u64, false);
                     let element_type = self.backend.compile_type(&place.value_type)?;
-                    return self.backend.build_shared_buffer_get_ref(
+                    return self.backend.build_shared_buffer_get_shared(
                         buffer,
                         position,
                         element_type,
@@ -8299,7 +8299,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 Ok(buffer.as_any_value_enum())
             }
-            IntrinsicFunction::SharedBufferGetRef => {
+            IntrinsicFunction::SharedBufferGetShared => {
                 let [
                     BasicMetadataValueEnum::PointerValue(buffer),
                     BasicMetadataValueEnum::IntValue(position),
@@ -8307,14 +8307,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 else {
                     return Err(Diagnostic::new(
                         span,
-                        "get_ref requires a SharedBuffer and a position",
+                        "get_shared requires a SharedBuffer and a position",
                     ));
                 };
-                let CheckedType::Ref(payload) = result_type else {
-                    return Err(Diagnostic::new(span, "unchecked get_ref result"));
+                let CheckedType::Shared(payload) = result_type else {
+                    return Err(Diagnostic::new(span, "unchecked get_shared result"));
                 };
                 let element_type = self.backend.compile_type(payload)?;
-                let pointer = self.backend.build_shared_buffer_get_ref(
+                let pointer = self.backend.build_shared_buffer_get_shared(
                     *buffer,
                     *position,
                     element_type,
@@ -8434,13 +8434,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 else {
                     return Err(Diagnostic::new(
                         span,
-                        "Buffer.get_ref_unchecked requires a buffer and USize index",
+                        "Buffer.get_shared_unchecked requires a buffer and USize index",
                     ));
                 };
-                let CheckedType::Ref(element) = result_type else {
+                let CheckedType::Shared(element) = result_type else {
                     return Err(Diagnostic::new(
                         span,
-                        "invalid Buffer.get_ref_unchecked result",
+                        "invalid Buffer.get_shared_unchecked result",
                     ));
                 };
                 let llvm_element = self.backend.compile_type(element)?;
@@ -8576,7 +8576,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 Ok(pointer.as_any_value_enum())
             }
-            IntrinsicFunction::RefReplace => {
+            IntrinsicFunction::SharedReplace => {
                 // Read the old payload, store the replacement, and return the
                 // old value (its drop is the surrounding site's recorded
                 // cleanup).
@@ -8584,14 +8584,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 else {
                     return Err(Diagnostic::new(
                         span,
-                        "replace requires a fixed Ref and a replacement value",
+                        "replace requires a fixed Shared and a replacement value",
                     ));
                 };
                 let payload_type = self.backend.compile_type(result_type)?;
                 let old = self
                     .backend
                     .builder
-                    .build_load(payload_type, *reference, "ref.replace.old")
+                    .build_load(payload_type, *reference, "shared.replace.old")
                     .map_err(compiler_diagnostic)?;
                 let replacement = BasicValueEnum::try_from(*replacement)
                     .map_err(|_| Diagnostic::new(span.clone(), "replacement is not storable"))?;

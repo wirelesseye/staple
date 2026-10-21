@@ -2454,8 +2454,8 @@ fn combines_inline_and_trailing_default_type_bounds() {
 #[test]
 fn parses_sized_relaxations_losslessly() {
     let source = concat!(
-        "pub type RefLike T where ?Sized T = pub wrap T\n",
-        "def preserve: <T where ?Sized T> Ref T -> Ref T = value => value\n",
+        "pub type SharedLike T where ?Sized T = pub wrap T\n",
+        "def preserve: <T where ?Sized T> Shared T -> Shared T = value => value\n",
         "def ordinary: <T> T -> T = value => value\n",
     );
     let root = parse(source).expect("`?Sized` clauses should parse");
@@ -2767,7 +2767,7 @@ fn parses_sum_types_and_propagating_patterns_losslessly() {
 #[test]
 fn parses_array_spread_and_variable_index_syntax() {
     let source = concat!(
-        "def fixed: Ref (I32 ^ 3)\n",
+        "def fixed: Shared (I32 ^ 3)\n",
         "def slices: Slice I32\n",
         "def mixed: (String, ...(I32 ^ 3), ...(I32, I32))\n",
         "let expanded = (prefix: \"value\", ...mixed, suffix: 1)\n",
@@ -3053,7 +3053,7 @@ fn negative_implementations_accept_effect_parameters() {
 fn parses_parameter_product_type_atoms_and_single_slots() {
     for source in [
         "def f: (I32; I32) -> I32 = (x; y) => x + y\n",
-        "def f: <T> (Ref T; T) -> ()\n",
+        "def f: <T> (Shared T; T) -> ()\n",
         "def f: (mut x: I32; move y: I32;) -> () = (mut x; move y) => ()\n",
         "def f: ((I32, I32); I32) -> I32 = ((a, b); c) => a\n",
         "type Inputs = alias (...Pair; String)\n",
@@ -3248,7 +3248,7 @@ fn rejects_malformed_call_site_type_arguments() {
 
 #[test]
 fn forall_annotations_own_parameters_and_constraints() {
-    let source = "def run: <T, effect E where ?Sized T, Clone T, T <: I32> (Ref T, () ->{E} ()) ->{E} Ref T = x => x\nextern \"staple-intrinsic\" { identity: <U> U -> U }\n";
+    let source = "def run: <T, effect E where ?Sized T, Clone T, T <: I32> (Shared T, () ->{E} ()) ->{E} Shared T = x => x\nextern \"staple-intrinsic\" { identity: <U> U -> U }\n";
     let module = parse(source).unwrap();
     let Item::Binding(binding) = unmodified_item(&module.items[0]) else {
         panic!("binding")

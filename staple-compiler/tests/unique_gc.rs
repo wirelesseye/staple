@@ -76,7 +76,7 @@ fn run(source: &str) -> String {
 const CHURN: &str = concat!(
     "def churn = () => () :: {\n",
     "    for index in (0 .. 200000) {\n",
-    "        let garbage = Ref (index, index, index, index)\n",
+    "        let garbage = Shared (index, index, index, index)\n",
     "        ()\n",
     "    }\n",
     "}\n",
@@ -85,17 +85,19 @@ const CHURN: &str = concat!(
 #[cfg(unix)]
 #[test]
 fn collects_unique_payloads_in_cycles_through_managed_references() {
-    // Ref Holder -> Unique Payload -> Ref (Option (Ref Holder)) -> Ref Holder.
+    // Shared Holder -> Unique Payload -> Shared (Option (Shared Holder)) -> Shared Holder.
     let source = format!(
         "{}{}",
         concat!(
+            "use std.shared.(Shared)\n",
+            "use std.unique.(Unique)\n",
             "use std.cinterop.*\n",
             "use std.ptr.*\n",
             "extern \"c\" {\n",
             "    printf: (RawPtr CChar, ...) -> I32\n",
             "}\n",
             "type Holder = wrap Unique Payload\n",
-            "type Payload = wrap (tag: I32, back: Ref (Option (Ref Holder)))\n",
+            "type Payload = wrap (tag: I32, back: Shared (Option (Shared Holder)))\n",
             "impl Drop Payload {\n",
             "    cleanup = Payload (tag, back) => {\n",
             "        printf (c_string \"dropped\\n\")\n",
@@ -103,10 +105,10 @@ fn collects_unique_payloads_in_cycles_through_managed_references() {
             "    }\n",
             "}\n",
             "def make_cycle = tag: I32 => () :: {\n",
-            "    let empty: Option (Ref Holder) = None\n",
-            "    let mut back: Ref (Option (Ref Holder)) = Ref empty\n",
-            "    let holder = Ref (Holder (Unique (Payload (tag: tag, back: back))))\n",
-            "    let previous = Ref.replace back (Some holder)\n",
+            "    let empty: Option (Shared Holder) = None\n",
+            "    let mut back: Shared (Option (Shared Holder)) = Shared empty\n",
+            "    let holder = Shared (Holder (Unique (Payload (tag: tag, back: back))))\n",
+            "    let previous = Shared.replace back (Some holder)\n",
             "    ()\n",
             "}\n",
             "def make_cycles = () => () :: {\n",
@@ -139,17 +141,19 @@ fn unique_payloads_survive_collections_while_owned_or_raw() {
         ),
         CHURN,
     ) + concat!(
+        "use std.shared.(Shared)\n",
+        "use std.unique.(Unique)\n",
         "def check = () => () :: {\n",
-        "    let first_pair: (Ref I32, Ref I32) = (Ref 41, Ref 1)\n",
-        "    let second_pair: (Ref I32, Ref I32) = (Ref 40, Ref 2)\n",
-        "    let owned: Unique (Ref I32, Ref I32) = Unique first_pair\n",
-        "    let lent: Unique (Ref I32, Ref I32) = Unique second_pair\n",
+        "    let first_pair: (Shared I32, Shared I32) = (Shared 41, Shared 1)\n",
+        "    let second_pair: (Shared I32, Shared I32) = (Shared 40, Shared 2)\n",
+        "    let owned: Unique (Shared I32, Shared I32) = Unique first_pair\n",
+        "    let lent: Unique (Shared I32, Shared I32) = Unique second_pair\n",
         "    let raw = Unique.unsafe_into_raw lent\n",
         "    churn ()\n",
-        "    let restored: Unique (Ref I32, Ref I32) = Unique.unsafe_from_raw raw\n",
+        "    let restored: Unique (Shared I32, Shared I32) = Unique.unsafe_from_raw raw\n",
         "    churn ()\n",
-        "    let (Ref first, Ref second) = owned.*\n",
-        "    let (Ref third, Ref fourth) = restored.*\n",
+        "    let (Shared first, Shared second) = owned.*\n",
+        "    let (Shared third, Shared fourth) = restored.*\n",
         "    printf (c_string \"%d %d\\n\", first + second, third + fourth)\n",
         "    ()\n",
         "}\n",
@@ -161,18 +165,19 @@ fn unique_payloads_survive_collections_while_owned_or_raw() {
 #[cfg(unix)]
 #[test]
 fn collects_list_storage_in_cycles_through_managed_references() {
-    // Ref Holder -> List Payload storage -> Ref (Option closure) -> closure
-    // environment -> Ref Holder. A closure closes the cycle because a type
+    // Shared Holder -> List Payload storage -> Shared (Option closure) -> closure
+    // environment -> Shared Holder. A closure closes the cycle because a type
     // cannot recurse through `List`.
     let source = format!(
         "{}{}",
         concat!(
+            "use std.shared.(Shared)\n",
             "use std.cinterop.*\n",
             "use std.ptr.*\n",
             "extern \"c\" {\n",
             "    printf: (RawPtr CChar, ...) -> I32\n",
             "}\n",
-            "type Payload = wrap (tag: I32, back: Ref (Option (() -> I32)))\n",
+            "type Payload = wrap (tag: I32, back: Shared (Option (() -> I32)))\n",
             "type Holder = wrap (items: List Payload)\n",
             "impl Drop Payload {\n",
             "    cleanup = Payload (tag, back) => {\n",
@@ -182,12 +187,12 @@ fn collects_list_storage_in_cycles_through_managed_references() {
             "}\n",
             "def make_cycle = tag: I32 => () :: {\n",
             "    let empty: Option (() -> I32) = None\n",
-            "    let mut back: Ref (Option (() -> I32)) = Ref empty\n",
+            "    let mut back: Shared (Option (() -> I32)) = Shared empty\n",
             "    let mut items: List Payload = List.new ()\n",
             "    List.push items (Payload (tag: tag, back: back))\n",
-            "    let holder: Ref Holder = Ref (Holder (items: items))\n",
+            "    let holder: Shared Holder = Shared (Holder (items: items))\n",
             "    let closure: () -> I32 = () => { let kept = holder; tag }\n",
-            "    let previous = Ref.replace back (Some closure)\n",
+            "    let previous = Shared.replace back (Some closure)\n",
             "    ()\n",
             "}\n",
             "def make_cycles = () => () :: {\n",
@@ -207,6 +212,7 @@ fn collects_list_storage_in_cycles_through_managed_references() {
 /// Declares a `Tag` whose drop prints its identifier.
 const TAG: &str = concat!(
     "use std.cinterop.*\n",
+    "use std.shared.(Shared)\n",
     "use std.ptr.*\n",
     "use std.buffer.Buffer\n",
     "use std.shared_buffer.SharedBuffer\n",
@@ -382,17 +388,18 @@ fn module_globals_keep_strings_closures_and_arrays_alive() {
         CHURN,
         REFILL,
     ) + concat!(
+        "use std.shared.(Shared)\n",
         "let text = \"abcd\" + \"efgh\"\n",
         "let mut cell = \"a\"\n",
         "let set_cell = () => { cell = \"ijkl\" + \"mnop\" }\n",
         "let reader = make_reader (\"qrst\" + \"uvwx\")\n",
-        "let pair: (Ref I32 ^ 2) = (Ref 40, Ref 2)\n",
+        "let pair: (Shared I32 ^ 2) = (Shared 40, Shared 2)\n",
         "set_cell ()\n",
         "churn ()\n",
         "refill ()\n",
         "churn ()\n",
         "refill ()\n",
-        "let (Ref first, Ref second) = pair\n",
+        "let (Shared first, Shared second) = pair\n",
         "printf (c_string \"%d %d %d %d\\n\",\n",
         "    if (text == \"abcdefgh\") { 1 } else { 0 },\n",
         "    if (cell == \"ijklmnop\") { 1 } else { 0 },\n",
@@ -406,6 +413,7 @@ fn module_globals_keep_strings_closures_and_arrays_alive() {
 #[test]
 fn trees_recursing_through_buffers_drop_every_node_once() {
     let source = concat!(
+        "use std.shared.(Shared)\n",
         "use std.buffer.Buffer\n",
         "use std.shared_buffer.SharedBuffer\n",
         "use std.cinterop.*\n",
@@ -421,14 +429,14 @@ fn trees_recursing_through_buffers_drop_every_node_once() {
         "    }\n",
         "}\n",
         "type Owned = wrap (tag: Tag, children: Buffer Owned)\n",
-        "type Shared = wrap (value: I32, children: SharedBuffer Shared)\n",
+        "type SharedTree = wrap (value: I32, children: SharedBuffer SharedTree)\n",
         "def leaf = value: I32 => Owned :: Owned (tag: Tag value, children: Buffer.with_capacity 0)\n",
-        "def shared_total = tree: Shared => I32 :: {\n",
-        "    let Shared (value, children) = tree\n",
+        "def shared_total = tree: SharedTree => I32 :: {\n",
+        "    let SharedTree (value, children) = tree\n",
         "    let mut sum = value\n",
         "    let mut index: USize = 0\n",
         "    while (index < SharedBuffer.length children) {\n",
-        "        let Ref child = SharedBuffer.get_ref_unchecked children index\n",
+        "        let Shared child = SharedBuffer.get_shared_unchecked children index\n",
         "        sum = sum + shared_total child\n",
         "        index = index + 1\n",
         "    }\n",
@@ -442,10 +450,10 @@ fn trees_recursing_through_buffers_drop_every_node_once() {
         "    Buffer.push top (leaf 2)\n",
         "    Buffer.push top (Owned (tag: Tag 5, children: middle))\n",
         "    let root = Owned (tag: Tag 1, children: top)\n",
-        "    let empty: SharedBuffer Shared = SharedBuffer.from_array ()\n",
-        "    let shared = Shared (value: 1, children: SharedBuffer.from_array (\n",
-        "        Shared (value: 2, children: empty),\n",
-        "        Shared (value: 3, children: empty),\n",
+        "    let empty: SharedBuffer SharedTree = SharedBuffer.from_array ()\n",
+        "    let shared = SharedTree (value: 1, children: SharedBuffer.from_array (\n",
+        "        SharedTree (value: 2, children: empty),\n",
+        "        SharedTree (value: 3, children: empty),\n",
         "    ))\n",
         "    printf (c_string \"total %d\\n\", shared_total shared)\n",
         "    ()\n",

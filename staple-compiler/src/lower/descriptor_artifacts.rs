@@ -186,7 +186,7 @@ pub(super) fn collect_compound_shapes(
             collect_compound_shapes(representation, shapes);
             return;
         }
-        CheckedType::Ref(pointee) => {
+        CheckedType::Shared(pointee) => {
             collect_compound_shapes(pointee, shapes);
             return;
         }
@@ -672,7 +672,7 @@ pub(super) fn scan_instance(
             plan: Plan::GcFinalizer(crate::GcFinalizerPlan::DynamicCell),
             kind: Kind::GcFinalizer,
             origin: body.origin.clone(),
-            use_site: Some(super::artifact_closure::ArtifactUseSite::RefConstruction(
+            use_site: Some(super::artifact_closure::ArtifactUseSite::SharedConstruction(
                 call_id,
             )),
         });

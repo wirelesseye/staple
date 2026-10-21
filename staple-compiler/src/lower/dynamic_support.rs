@@ -41,7 +41,7 @@ impl DynamicSupport {
 pub(crate) enum RejectionReason {
     /// A callable value expression (`CallableValue`).
     CallableValue,
-    /// Recursive (`Ref`/`SharedBuffer`/`Syntax`) construction.
+    /// Recursive (`Shared`/`SharedBuffer`/`Syntax`) construction.
     RecursiveConstruction,
     /// A deferred callable expression reached the scanner.
     Deferred,
@@ -190,7 +190,7 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::StringToCString
         | IntrinsicFunction::StringAdd
         | IntrinsicFunction::SharedBufferLength
-        | IntrinsicFunction::SharedBufferGetRef
+        | IntrinsicFunction::SharedBufferGetShared
         | IntrinsicFunction::BufferWithCapacity
         | IntrinsicFunction::BufferLength
         | IntrinsicFunction::BufferCapacity
@@ -199,7 +199,7 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::BufferGet
         | IntrinsicFunction::BufferIntoShared
         | IntrinsicFunction::BufferTransfer
-        | IntrinsicFunction::RefReplace
+        | IntrinsicFunction::SharedReplace
         | IntrinsicFunction::UniqueIntoRaw
         | IntrinsicFunction::UniqueFromRaw => {
             unreachable!("supported intrinsic passed to rejection classifier")
@@ -539,8 +539,8 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::FloatFromBits { .. }
             | IntrinsicFunction::FloatCompare { .. }
             | IntrinsicFunction::SharedBufferLength
-            | IntrinsicFunction::SharedBufferGetRef
-            | IntrinsicFunction::RefReplace
+            | IntrinsicFunction::SharedBufferGetShared
+            | IntrinsicFunction::SharedReplace
             | IntrinsicFunction::UniqueIntoRaw
             | IntrinsicFunction::UniqueFromRaw
             | IntrinsicFunction::BufferLength
@@ -561,7 +561,7 @@ fn contains_polymorphic_function(ty: &CheckedType) -> bool {
         CheckedType::Function(_) => contains_type_parameter(ty),
         CheckedType::RawPtr { pointee } => contains_polymorphic_function(pointee),
         CheckedType::RawMutPtr { pointee } => contains_polymorphic_function(pointee),
-        CheckedType::Ref(value)
+        CheckedType::Shared(value)
         | CheckedType::Unique(value)
         | CheckedType::SharedBuffer(value)
         | CheckedType::Buffer(value) => contains_polymorphic_function(value),
@@ -593,7 +593,7 @@ fn contains_polymorphic_function(ty: &CheckedType) -> bool {
 /// storage, so it is reported as an allowed restriction instead.
 fn contains_function_behind_reference(ty: &CheckedType) -> bool {
     match ty {
-        CheckedType::Ref(value)
+        CheckedType::Shared(value)
         | CheckedType::Unique(value)
         | CheckedType::SharedBuffer(value)
         | CheckedType::Buffer(value) => {
@@ -1879,7 +1879,7 @@ fn collect_parameter_ids(ty: &CheckedType, ids: &mut HashSet<crate::TypeParamete
             }
         }
         CheckedType::Wrapper { representation, .. } => collect_parameter_ids(representation, ids),
-        CheckedType::Ref(inner)
+        CheckedType::Shared(inner)
         | CheckedType::Unique(inner)
         | CheckedType::SharedBuffer(inner)
         | CheckedType::Buffer(inner) => collect_parameter_ids(inner, ids),

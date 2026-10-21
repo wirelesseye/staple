@@ -211,7 +211,7 @@ fn only_the_declaring_module_can_assign_a_public_mutable_global() {
     let fixture = Fixture::new();
     fixture.write(
         "state.sta",
-        "pub let mut counter = 1\ncounter = 2\npub let mut point = Ref (x: 1, y: 2)\npoint.x = 3\n",
+        "use std.shared.(Shared)\npub let mut counter = 1\ncounter = 2\npub let mut point = Shared (x: 1, y: 2)\npoint.x = 3\n",
     );
     fixture.write(
         "main.sta",

@@ -879,7 +879,7 @@ impl LoweredCoercionPlan {
             || matches!(
                 (source, target),
                 (CheckedType::Unique(_), CheckedType::Unique(_))
-                    | (CheckedType::Ref(_), CheckedType::Ref(_))
+                    | (CheckedType::Shared(_), CheckedType::Shared(_))
             );
         if source == target
             || (same_nominal && crate::merge_types(source.clone(), target.clone()).is_some())
@@ -2302,7 +2302,7 @@ pub(crate) struct LoweredAccess {
 pub(crate) enum LoweredAccessKind {
     /// Wrapper representation or single-element wrapper access.
     Representation { dereference: Vec<CheckedType> },
-    /// Element `index` of a fixed product, optionally behind `Ref` payloads.
+    /// Element `index` of a fixed product, optionally behind `Shared` payloads.
     Product {
         index: usize,
         dereference: Vec<CheckedType>,
@@ -2373,8 +2373,8 @@ pub(crate) enum LoweredPatternIdentity {
     None,
     /// A `String` nominal destructure over a subject of builtin `String`.
     String,
-    /// A `Ref` nominal destructure; the emitter loads the payload.
-    Ref,
+    /// A `Shared` nominal destructure; the emitter loads the payload.
+    Shared,
     Unique,
     /// A wrapper representation destructure where the subject is the wrapper
     /// type itself.
@@ -2493,12 +2493,12 @@ fn pattern_test_plan(
                 })?;
                 children.push(representation.clone());
             }
-            CheckedType::Ref(payload)
+            CheckedType::Shared(payload)
                 if target
                     .and_then(|target| builtin_of(target))
-                    .is_some_and(|builtin| builtin == BuiltinType::Ref) =>
+                    .is_some_and(|builtin| builtin == BuiltinType::Shared) =>
             {
-                plan.identity = LoweredPatternIdentity::Ref;
+                plan.identity = LoweredPatternIdentity::Shared;
                 children.push(payload.as_ref().clone());
             }
             CheckedType::Unique(payload)
@@ -2644,7 +2644,7 @@ pub(crate) enum LoweredPatternKind {
         mutable: bool,
         moved: bool,
     },
-    /// A nominal destructuring pattern (`Ref inner`, `Some value`, ...) with
+    /// A nominal destructuring pattern (`Shared inner`, `Some value`, ...) with
     /// the named type it selects and its argument pattern.
     Nominal {
         target: Option<TypeId>,
@@ -2684,7 +2684,7 @@ pub(crate) enum LoweredPlaceKind {
     Temporary { expression: ExpressionId },
     /// An ambient resource value in scope, bound to its selected provider.
     Resource { use_: LoweredResourceUseId },
-    /// A pointer into a reference value: `reference` evaluates the `Ref`
+    /// A pointer into a reference value: `reference` evaluates the `Shared`
     /// container and `dereference` records the crossed payloads
     /// outermost-first, matching `CheckedAccess`.
     Dereference {
@@ -3054,7 +3054,7 @@ pub(crate) struct LoweredSymbol {
     pub mutable_storage: bool,
     /// The symbol is captured by some function.
     pub captured: bool,
-    /// The symbol is non-owning (a value frozen by borrowing through `Ref`).
+    /// The symbol is non-owning (a value frozen by borrowing through `Shared`).
     pub non_owning: bool,
     pub derived: bool,
     pub signal: bool,
@@ -5293,7 +5293,7 @@ impl LoweredProgram {
         }
     }
 
-    /// The base of an access place: a recursive place when no `Ref` payloads
+    /// The base of an access place: a recursive place when no `Shared` payloads
     /// are crossed, or a dereference of the evaluated value expression.
     fn lower_access_base(
         &mut self,
@@ -14046,7 +14046,7 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::CallerLine
         | Intrinsic::CallerColumn
         | Intrinsic::SharedBufferLength
-        | Intrinsic::SharedBufferGetRef
+        | Intrinsic::SharedBufferGetShared
         | Intrinsic::BufferWithCapacity
         | Intrinsic::BufferLength
         | Intrinsic::BufferCapacity
@@ -14057,7 +14057,7 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::BufferFromArray
         | Intrinsic::BufferTransfer
         | Intrinsic::BufferClone
-        | Intrinsic::RefReplace
+        | Intrinsic::SharedReplace
         | Intrinsic::UniqueIntoRaw
         | Intrinsic::UniqueFromRaw => None,
     }
@@ -14435,7 +14435,7 @@ fn checked_type_holds_gc_pointer(value_type: &CheckedType) -> bool {
         | CheckedType::Parameter { .. } => false,
         CheckedType::String
         | CheckedType::StringLiteralSet(_)
-        | CheckedType::Ref(_)
+        | CheckedType::Shared(_)
         | CheckedType::SharedBuffer(_)
         | CheckedType::Unique(_)
         | CheckedType::Buffer(_)
@@ -16881,7 +16881,8 @@ mod tests {
     #[test]
     fn symbols_record_global_names_and_roots() {
         let program = snapshot(concat!(
-            "let managed: Ref I32 = Ref 0\n",
+            "use std.shared.(Shared)\n",
+            "let managed: Shared I32 = Shared 0\n",
             "let plain = 1\n",
             "def pick: () -> I32 = () => 1\n",
         ));
@@ -16898,7 +16899,7 @@ mod tests {
         assert_eq!(managed.len(), 1);
         let (_, managed) = managed[0];
         assert!(managed.has_global && managed.module_symbol);
-        assert!(managed.global_root, "a `Ref` global is a harness root");
+        assert!(managed.global_root, "a `Shared` global is a harness root");
 
         let (_, plain) = symbol_named("plain")[0];
         assert!(plain.has_global && !plain.global_root);
@@ -20331,13 +20332,13 @@ mod tests {
 
     fn step4_fixture() -> &'static str {
         concat!(
-            "use std.reference.(Ref)\n",
+            "use std.shared.(Shared)\n",
             "let pair_add: (x: I32; y: I32) -> I32 = (x; y) => x + y\n",
             "type Defaulted = wrap (String, x: I32 = 0, y: I32 = 0)\n",
             "def juxtaposed_samples: () -> I32 = () => {\n",
             "  let chained: I32 = pair_add 1 2\n",
-            "  let mut reference: Ref I32 = Ref 0\n",
-            "  let replaced: I32 = Ref.replace reference 1\n",
+            "  let mut reference: Shared I32 = Shared 0\n",
+            "  let replaced: I32 = Shared.replace reference 1\n",
             "  chained\n",
             "}\n",
             "let via_value = Defaulted\n",
@@ -20376,7 +20377,7 @@ mod tests {
         });
         assert_eq!(chains.len(), 2, "the fixture has two multi-layer chains");
 
-        // Both chains call closures: `Ref.replace` is an ordinary wrapper
+        // Both chains call closures: `Shared.replace` is an ordinary wrapper
         // over its intrinsic, so it is called like any other `def`.
         let mut indirect_chains = Vec::new();
         for chain in &chains {
@@ -20424,7 +20425,7 @@ mod tests {
                 .iter()
                 .any(|lowered| lowered.arguments[0].pass_mode
                     == LoweredArgumentPassMode::MutablePlace),
-            "`Ref.replace` mutates its reference in place"
+            "`Shared.replace` mutates its reference in place"
         );
     }
 
@@ -20611,13 +20612,13 @@ mod tests {
     #[test]
     fn constructor_calls_and_values_record_explicit_targets() {
         let module = checked_program(concat!(
-            "use std.reference.(Ref)\n",
+            "use std.shared.(Shared)\n",
             "type TestBox = wrap (value: I32)\n",
             "type TestEnabled\n",
             "let enabled: TestEnabled = TestEnabled\n",
             "let maker = TestBox\n",
             "let boxed: TestBox = TestBox (value: 1)\n",
-            "let single_ref: Ref I32 = Ref 0\n",
+            "let single_shared: Shared I32 = Shared 0\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -20643,7 +20644,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(constructor_names.contains(&"TestBox"));
-        assert!(constructor_names.contains(&"Ref"));
+        assert!(constructor_names.contains(&"Shared"));
 
         for (_, call) in &constructor_calls {
             assert!(call.callee.is_none());
@@ -20665,19 +20666,19 @@ mod tests {
             box_call.arguments[0].pass_mode,
             LoweredArgumentPassMode::Value
         );
-        let ref_call = constructor_calls
+        let shared_call = constructor_calls
             .iter()
             .find(|(type_id, _)| {
                 program
                     .types
                     .get(*type_id)
                     .map(|metadata| metadata.name.as_str())
-                    == Some("Ref")
+                    == Some("Shared")
             })
             .map(|(_, call)| *call)
-            .expect("Ref construction");
+            .expect("Shared construction");
         assert!(matches!(
-            ref_call.target,
+            shared_call.target,
             LoweredCallableTarget::Constructor {
                 recursive: Some(RecursiveConstruction::ManagedReference),
                 ..
@@ -20826,7 +20827,7 @@ mod tests {
     fn transition_fixture() -> &'static str {
         concat!(
             "use std.cinterop.*\n",
-            "use std.reference.(Ref)\n",
+            "use std.shared.(Shared)\n",
             "use std.io.IO\n",
             "extern \"c\" { external_identity: I32 -> I32 }\n",
             "trait TestShow T { test_show: T -> Bool }\n",
@@ -20840,8 +20841,8 @@ mod tests {
             "  let direct: I32 = generic_identity 1\n",
             "  let external_result: I32 = external_identity (1)\n",
             "  let chained: I32 = pair_add 1 2\n",
-            "  let mut reference: Ref I32 = Ref 0\n",
-            "  let replaced: I32 = Ref.replace reference 1\n",
+            "  let mut reference: Shared I32 = Shared 0\n",
+            "  let replaced: I32 = Shared.replace reference 1\n",
             "  let arithmetic: I32 = 1 + 2\n",
             "  indirect\n",
             "}\n",
@@ -21304,6 +21305,7 @@ mod tests {
     #[test]
     fn structural_access_lowers_representation_product_slice_and_scalar() {
         let module = checked_program(concat!(
+            "use std.shared.(Shared)\n",
             "use std.shared_buffer.SharedBuffer\n",
             "type MyString = wrap String\n",
             "type Pair = wrap (left: I32, right: I32)\n",
@@ -21316,8 +21318,8 @@ mod tests {
             "let inner = text.*\n",
             "let scalar = Scalar (value: 5)\n",
             "let shortcut = scalar.value\n",
-            "def slice_field: Ref (SharedBuffer I32) -> I32 = values => values.0\n",
-            "def through_ref: Ref Pair -> I32 = reference => reference.left\n",
+            "def slice_field: Shared (SharedBuffer I32) -> I32 = values => values.0\n",
+            "def through_shared: Shared Pair -> I32 = reference => reference.left\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -21363,7 +21365,7 @@ mod tests {
                 | LoweredAccessKind::Scalar { dereference } => !dereference.is_empty(),
                 LoweredAccessKind::Representation { dereference } => !dereference.is_empty(),
             }),
-            "access through `Ref` records its crossed payloads"
+            "access through `Shared` records its crossed payloads"
         );
 
         // Transition comparison: every access agrees with `CheckedAccess`.
@@ -22122,6 +22124,7 @@ mod tests {
     #[test]
     fn coercion_and_pattern_plans_match_checked_decisions() {
         let module = checked_program(concat!(
+            "use std.shared.(Shared)\n",
             "use std.shared_buffer.SharedBuffer\n",
             "type Ok T = wrap T\n",
             "type IOError = wrap String\n",
@@ -22143,7 +22146,7 @@ mod tests {
             "  False => 0,\n",
             "}\n",
             "def singleton: True -> I32 = True => 0\n",
-            "def borrowed: Ref I32 -> I32 = (Ref inner) => inner\n",
+            "def borrowed: Shared I32 -> I32 = (Shared inner) => inner\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -22280,11 +22283,11 @@ mod tests {
         let LoweredPatternKind::Product { elements, .. } = &product.kind else {
             panic!("borrowed parameter should be a product");
         };
-        let ref_pattern_id = elements[0];
-        let ref_pattern = lowered_pattern(&program, ref_pattern_id);
-        assert_eq!(ref_pattern.test.identity, LoweredPatternIdentity::Ref);
-        let LoweredPatternKind::Nominal { argument, .. } = &ref_pattern.kind else {
-            panic!("`Ref inner` should be nominal");
+        let shared_pattern_id = elements[0];
+        let shared_pattern = lowered_pattern(&program, shared_pattern_id);
+        assert_eq!(shared_pattern.test.identity, LoweredPatternIdentity::Shared);
+        let LoweredPatternKind::Nominal { argument, .. } = &shared_pattern.kind else {
+            panic!("`Shared inner` should be nominal");
         };
         assert_eq!(
             lowered_pattern(&program, *argument).test.subject,
@@ -22323,7 +22326,7 @@ mod tests {
 
         let mut corrupted = program.clone();
         let LoweredPatternKind::Nominal { argument, .. } =
-            &corrupted.patterns.values[ref_pattern_id.index()].kind
+            &corrupted.patterns.values[shared_pattern_id.index()].kind
         else {
             unreachable!()
         };
@@ -22379,6 +22382,7 @@ mod tests {
     #[test]
     fn index_reads_copy_checked_dispatch_recipes_and_temporaries() {
         let module = checked_program(concat!(
+            "use std.shared.(Shared)\n",
             "use std.shared_buffer.SharedBuffer\n",
             "type Counter = wrap I32\n",
             "impl Index Counter String { type Output = I32; index = (counter, key) => 0 }\n",
@@ -22392,7 +22396,7 @@ mod tests {
             "let values: (I32 ^ 2) = (10, 20)\n",
             "let element = values[0]\n",
             "def slice_read: (SharedBuffer I32, USize) -> I32 = (values, position) => values[position]\n",
-            "def ref_read: (Ref (I32 ^ 2), USize) -> I32 = (values, position) => values[position]\n",
+            "def shared_read: (Shared (I32 ^ 2), USize) -> I32 = (values, position) => values[position]\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -22481,9 +22485,9 @@ mod tests {
             assert!(assignment.mutate_index.is_some());
         }
 
-        // Structural product, slice, and ref reads all lower through the same
+        // Structural product, slice, and shared reads all lower through the same
         // checked dispatch recipe rather than a source-level access.
-        for name in ["slice_read", "ref_read"] {
+        for name in ["slice_read", "shared_read"] {
             let body = expression_body(&program, name);
             assert!(
                 matches!(body.kind, LoweredExpressionKind::Index(_)),
@@ -23382,13 +23386,14 @@ mod tests {
     #[test]
     fn function_parameter_patterns_lower_every_source_form() {
         let module = checked_program(concat!(
+            "use std.shared.(Shared)\n",
             "type TestOwned = wrap String\n",
             "def pair = (left: I32, right: I32) => left + right\n",
             "def wildcard = (_: I32) => 0\n",
             "def moved: move String -> String = move value => value\n",
             "def moved_nominal: move TestOwned -> String = move TestOwned value => value\n",
             "def singleton: True -> I32 = True => 0\n",
-            "def borrowed: Ref I32 -> I32 = (Ref inner) => inner\n",
+            "def borrowed: Shared I32 -> I32 = (Shared inner) => inner\n",
             "def literal: \"literal\" -> I32 = \"literal\" => 0\n",
         ));
         let mut program = LoweredProgram::default();
@@ -23483,7 +23488,7 @@ mod tests {
         let (_, borrowed) = lowered_function(&program, "borrowed");
         let pattern = lowered_pattern(&program, borrowed.parameter_pattern);
         let LoweredPatternKind::Product { elements, .. } = &pattern.kind else {
-            panic!("`(Ref inner)` should lower to a single-element product");
+            panic!("`(Shared inner)` should lower to a single-element product");
         };
         assert_eq!(elements.len(), 1);
         let pattern = lowered_pattern(&program, elements[0]);
@@ -23494,12 +23499,12 @@ mod tests {
             argument,
         } = &pattern.kind
         else {
-            panic!("`Ref inner` should lower to a nominal pattern");
+            panic!("`Shared inner` should lower to a nominal pattern");
         };
-        assert_eq!(name, "Ref");
+        assert_eq!(name, "Shared");
         assert_eq!(
             module.resolved().builtin_type(*target),
-            Some(BuiltinType::Ref)
+            Some(BuiltinType::Shared)
         );
         let argument = lowered_pattern(&program, *argument);
         assert!(matches!(
@@ -23522,6 +23527,7 @@ mod tests {
     #[test]
     fn pattern_binding_items_lower_patterns_and_propagation_metadata() {
         let module = checked_program(concat!(
+            "use std.shared.(Shared)\n",
             "pub type Wrapper = pub wrap (value: I32)\n",
             "pub type Ok T = pub wrap T\n",
             "pub type IOError = pub wrap String\n",
@@ -23530,7 +23536,7 @@ mod tests {
             "  let (first, second) = (1, 2)\n",
             "  let whole@(third, fourth) = (3, 4)\n",
             "  let Wrapper inner = Wrapper (value: 5)\n",
-            "  let Ref payload = Ref 6\n",
+            "  let Shared payload = Shared 6\n",
             "  let ?Ok(value) = read()\n",
             "  first + second + third + fourth + whole.0 + inner + payload + value\n",
             "}\n",
@@ -23712,17 +23718,18 @@ mod tests {
     #[test]
     fn assignment_places_cross_references_and_materialize_temporaries() {
         let module = checked_program(concat!(
-            "def make_ref: () -> Ref (I32, I32) = () => Ref (1, 2)\n",
-            "def through_ref = (mut reference: Ref (I32, I32)) => { reference.0 = 9 }\n",
-            "def through_call = () => { (make_ref())[0] = 9 }\n",
+            "use std.shared.(Shared)\n",
+            "def make_shared: () -> Shared (I32, I32) = () => Shared (1, 2)\n",
+            "def through_shared = (mut reference: Shared (I32, I32)) => { reference.0 = 9 }\n",
+            "def through_call = () => { (make_shared())[0] = 9 }\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert!(program.validate().is_empty());
 
-        let (_, through_ref) = lowered_function(&program, "through_ref");
-        let items = body_items(&program, through_ref);
+        let (_, through_shared) = lowered_function(&program, "through_shared");
+        let items = body_items(&program, through_shared);
         let LoweredItemKind::Assignment(assignment) = &items[0].kind else {
             panic!("the reference assignment should lower");
         };
@@ -23737,7 +23744,7 @@ mod tests {
             dereference: payloads,
         } = &deref_place.kind
         else {
-            panic!("crossing `Ref` should lower to a dereference place");
+            panic!("crossing `Shared` should lower to a dereference place");
         };
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads.last(), Some(&deref_place.value_type));
@@ -23752,7 +23759,7 @@ mod tests {
         let LoweredPlaceKind::Indexed { base, .. } =
             &lowered_place(&program, assignment.target).kind
         else {
-            panic!("`(make_ref())[0]` should lower to an indexed place");
+            panic!("`(make_shared())[0]` should lower to an indexed place");
         };
         let LoweredPlaceKind::Temporary { expression } = &lowered_place(&program, *base).kind
         else {

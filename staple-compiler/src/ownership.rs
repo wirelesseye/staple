@@ -1031,7 +1031,7 @@ impl<'a> OwnershipChecker<'a> {
                 if frozen && value.mutable {
                     self.diagnostics.push(Diagnostic::new(
                         value.syntax.span.clone(),
-                        "a move-only value borrowed through `Ref` cannot be bound as `mut`",
+                        "a move-only value borrowed through `Shared` cannot be bound as `mut`",
                     ));
                 }
                 self.states.insert(
@@ -1064,11 +1064,11 @@ impl<'a> OwnershipChecker<'a> {
                 {
                     self.info.taken_unique.insert(value.syntax.id);
                 }
-                let dereferences_ref = matches!(
+                let dereferences_shared = matches!(
                     self.module.type_of_pattern(value.syntax.id),
-                    Some(crate::CheckedType::Ref(_))
+                    Some(crate::CheckedType::Shared(_))
                 );
-                self.bind_pattern(&value.argument, freeze || dereferences_ref);
+                self.bind_pattern(&value.argument, freeze || dereferences_shared);
             }
             Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
         }

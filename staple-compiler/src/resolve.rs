@@ -89,7 +89,7 @@ pub enum BuiltinType {
     Integer(IntegerType),
     Float(FloatType),
     String,
-    Ref,
+    Shared,
     Unique,
     SharedBuffer,
     Buffer,
@@ -428,7 +428,7 @@ pub enum IntrinsicFunction {
     /// `std.source.__caller_column`: the column of that caller, as `U32`.
     CallerColumn,
     SharedBufferLength,
-    SharedBufferGetRef,
+    SharedBufferGetShared,
     BufferWithCapacity,
     BufferLength,
     BufferCapacity,
@@ -439,7 +439,7 @@ pub enum IntrinsicFunction {
     BufferFromArray,
     BufferTransfer,
     BufferClone,
-    RefReplace,
+    SharedReplace,
     UniqueIntoRaw,
     UniqueFromRaw,
     ReactiveScope,
@@ -1985,9 +1985,9 @@ impl NameResolver {
         for float in FloatType::ALL {
             self.register_builtin_type(core, "std.core", float.name(), BuiltinType::Float(float));
         }
-        self.register_builtin_type(core, "std.core", "Ref", BuiltinType::Ref);
-        self.register_builtin_type(core, "std.core", "Unique", BuiltinType::Unique);
         for (path, namespace, name, builtin) in [
+            ("std/shared.sta", "std.shared", "Shared", BuiltinType::Shared),
+            ("std/unique.sta", "std.unique", "Unique", BuiltinType::Unique),
             (
                 "std/string.sta",
                 "std.string",
@@ -2446,8 +2446,8 @@ impl NameResolver {
             ),
             (
                 "std.shared_buffer",
-                "__shared_buffer_get_ref",
-                IntrinsicFunction::SharedBufferGetRef,
+                "__shared_buffer_get_shared",
+                IntrinsicFunction::SharedBufferGetShared,
             ),
             (
                 "std.buffer",
@@ -2455,9 +2455,9 @@ impl NameResolver {
                 IntrinsicFunction::BufferFromArray,
             ),
             (
-                "std.reference",
-                "__ref_replace",
-                IntrinsicFunction::RefReplace,
+                "std.shared",
+                "__shared_replace",
+                IntrinsicFunction::SharedReplace,
             ),
             (
                 "std.unique",
@@ -2796,7 +2796,7 @@ impl NameResolver {
                 ));
             }
         } else if builtin != BuiltinType::Syntax {
-            let valid_kind = if matches!(builtin, BuiltinType::Ref | BuiltinType::Unique) {
+            let valid_kind = if matches!(builtin, BuiltinType::Shared | BuiltinType::Unique) {
                 declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper
                     && declaration.representation_visibility() == Visibility::Public
             } else if matches!(builtin, BuiltinType::Completed | BuiltinType::Cancelled) {
@@ -2827,7 +2827,7 @@ impl NameResolver {
             builtin,
             BuiltinType::RawPtr
                 | BuiltinType::RawMutPtr
-                | BuiltinType::Ref
+                | BuiltinType::Shared
                 | BuiltinType::Unique
                 | BuiltinType::SharedBuffer
                 | BuiltinType::Buffer
@@ -2883,7 +2883,7 @@ impl NameResolver {
                 format!("standard library type `{name}` must not accept compile-time arguments"),
             ));
         }
-        if matches!(builtin, BuiltinType::Ref | BuiltinType::Unique)
+        if matches!(builtin, BuiltinType::Shared | BuiltinType::Unique)
             && !matches!(
                 declaration.type_parameters.as_slice(),
                 [TypeParameterPattern::Binding(binding)]
@@ -2899,7 +2899,7 @@ impl NameResolver {
             ));
         }
         let recursive_construction = match builtin {
-            BuiltinType::Ref => Some(RecursiveConstruction::ManagedReference),
+            BuiltinType::Shared => Some(RecursiveConstruction::ManagedReference),
             BuiltinType::Unique => Some(RecursiveConstruction::Unique),
             BuiltinType::SharedBuffer => Some(RecursiveConstruction::SharedBuffer),
             BuiltinType::Buffer => Some(RecursiveConstruction::Buffer),

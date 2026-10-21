@@ -300,7 +300,7 @@ fn record_plan_requirements(
         LoweredArtifactPlan::ConstructorAdapter(plan) => {
             if matches!(
                 plan.construction,
-                ConstructorConstruction::ManagedRef { .. } | ConstructorConstruction::Unique { .. }
+                ConstructorConstruction::ManagedShared { .. } | ConstructorConstruction::Unique { .. }
             ) {
                 requirements.record(RuntimeRequirement::GarbageCollector);
             }

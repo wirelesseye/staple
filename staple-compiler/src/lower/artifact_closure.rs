@@ -174,8 +174,8 @@ pub(crate) enum ArtifactUseSite {
         call: LoweredCallId,
         argument: usize,
     },
-    /// A managed `Ref` allocation's payload finalizer.
-    RefConstruction(LoweredCallId),
+    /// A managed `Shared` allocation's payload finalizer.
+    SharedConstruction(LoweredCallId),
     /// A C-string conversion dropping its source `CString`.
     CStringConversion(LoweredCallId),
     /// A completion intrinsic dropping an orphaned handle.
@@ -1896,7 +1896,7 @@ impl LoweredProgram {
                     report("call", id.index());
                 }
             }
-            ArtifactUseSite::RefConstruction(id) => {
+            ArtifactUseSite::SharedConstruction(id) => {
                 if !call(id) {
                     report("call", id.index());
                 }
@@ -2620,9 +2620,9 @@ mod tests {
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let base = program.artifacts.len();
-        let a_type = CheckedType::Ref(Box::new(CheckedType::I32));
-        let b_type = CheckedType::Ref(Box::new(a_type.clone()));
-        let finalizer_type = CheckedType::Ref(Box::new(b_type.clone()));
+        let a_type = CheckedType::Shared(Box::new(CheckedType::I32));
+        let b_type = CheckedType::Shared(Box::new(a_type.clone()));
+        let finalizer_type = CheckedType::Shared(Box::new(b_type.clone()));
 
         let mut hooks = TestHooks::default();
         hooks.instance_requests.insert(
@@ -2707,7 +2707,7 @@ mod tests {
         let origin = instance_origin(&program, seed);
         let base_instances = program.instances.len();
         let base_artifacts = program.artifacts.len();
-        let new_type = CheckedType::Ref(Box::new(CheckedType::U8));
+        let new_type = CheckedType::Shared(Box::new(CheckedType::U8));
         let resolved = resolve_root_instance(&program, "identity", new_type.clone(), &origin);
 
         let mut hooks = TestHooks::default();
@@ -2780,7 +2780,7 @@ mod tests {
         let origin = instance_origin(&program, seed);
         let base_instances = program.instances.len();
         let base_artifacts = program.artifacts.len();
-        let value_type = CheckedType::Ref(Box::new(CheckedType::I32));
+        let value_type = CheckedType::Shared(Box::new(CheckedType::I32));
         let resolved = resolve_root_instance(&program, "identity", value_type.clone(), &origin);
 
         let mut hooks = TestHooks::default();
@@ -2845,8 +2845,8 @@ mod tests {
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let base = program.artifacts.len();
-        let a_type = CheckedType::Ref(Box::new(CheckedType::I32));
-        let b_type = CheckedType::Ref(Box::new(a_type.clone()));
+        let a_type = CheckedType::Shared(Box::new(CheckedType::I32));
+        let b_type = CheckedType::Shared(Box::new(a_type.clone()));
 
         let mut hooks = TestHooks::default();
         hooks.instance_requests.insert(
@@ -3062,7 +3062,7 @@ mod tests {
             seed.index(),
             vec![vec![
                 drop_glue_request(
-                    CheckedType::Ref(Box::new(CheckedType::I32)),
+                    CheckedType::Shared(Box::new(CheckedType::I32)),
                     &origin,
                     Some(ArtifactUseSite::Test(0)),
                 ),
@@ -3340,7 +3340,7 @@ mod tests {
         hooks.instance_requests.insert(
             seed.index(),
             vec![vec![drop_glue_request(
-                CheckedType::Ref(Box::new(CheckedType::I32)),
+                CheckedType::Shared(Box::new(CheckedType::I32)),
                 &origin,
                 Some(ArtifactUseSite::Test(0)),
             )]],
@@ -3485,7 +3485,7 @@ mod tests {
         hooks.instance_requests.insert(
             seed.index(),
             vec![vec![drop_glue_request(
-                CheckedType::Ref(Box::new(CheckedType::I32)),
+                CheckedType::Shared(Box::new(CheckedType::I32)),
                 &origin,
                 // The item position is far outside the owner's body arena.
                 Some(ArtifactUseSite::DiscardedResult(ItemId::from_index(
@@ -3514,23 +3514,23 @@ mod tests {
         // recorded, and an ID far outside the owner's body arenas.
         let broken = [
             (
-                CheckedType::Ref(Box::new(CheckedType::I32)),
+                CheckedType::Shared(Box::new(CheckedType::I32)),
                 ArtifactUseSite::CoroCreation(LoweredCoroId::from_index(1_000_000)),
             ),
             (
-                CheckedType::Ref(Box::new(CheckedType::U8)),
+                CheckedType::Shared(Box::new(CheckedType::U8)),
                 ArtifactUseSite::ReactiveCallbackEnvironment(
                     LoweredReactiveCallbackId::from_index(1_000_000),
                 ),
             ),
             (
-                CheckedType::Ref(Box::new(CheckedType::U16)),
+                CheckedType::Shared(Box::new(CheckedType::U16)),
                 ArtifactUseSite::DerivedEvaluatorEnvironment(
                     LoweredReactiveOperationId::from_index(1_000_000),
                 ),
             ),
             (
-                CheckedType::Ref(Box::new(CheckedType::I64)),
+                CheckedType::Shared(Box::new(CheckedType::I64)),
                 ArtifactUseSite::ReactiveRunner(LoweredReactiveOperationId::from_index(1_000_000)),
             ),
         ];
@@ -3565,7 +3565,7 @@ mod tests {
         hooks.instance_requests.insert(
             seed.index(),
             vec![vec![drop_glue_request(
-                CheckedType::Ref(Box::new(CheckedType::I32)),
+                CheckedType::Shared(Box::new(CheckedType::I32)),
                 &origin,
                 Some(ArtifactUseSite::Test(0)),
             )]],
@@ -3576,7 +3576,7 @@ mod tests {
             vec![
                 Vec::new(),
                 vec![drop_glue_request(
-                    CheckedType::Ref(Box::new(CheckedType::U8)),
+                    CheckedType::Shared(Box::new(CheckedType::U8)),
                     &origin,
                     None,
                 )],
@@ -3608,7 +3608,7 @@ mod tests {
         hooks.initializer_requests.insert(
             0,
             vec![vec![drop_glue_request(
-                CheckedType::Ref(Box::new(CheckedType::I32)),
+                CheckedType::Shared(Box::new(CheckedType::I32)),
                 &origin,
                 Some(ArtifactUseSite::Test(4)),
             )]],
@@ -3730,13 +3730,13 @@ mod tests {
         let from_instance = resolve_root_instance(
             &program,
             "identity",
-            CheckedType::Ref(Box::new(CheckedType::U8)),
+            CheckedType::Shared(Box::new(CheckedType::U8)),
             &origin,
         );
         let from_initializer = resolve_root_instance(
             &program,
             "identity",
-            CheckedType::Ref(Box::new(CheckedType::U16)),
+            CheckedType::Shared(Box::new(CheckedType::U16)),
             &initializer_origin,
         );
 
@@ -3800,7 +3800,7 @@ mod tests {
         let resolved = resolve_root_instance(
             &program,
             "identity",
-            CheckedType::Ref(Box::new(CheckedType::U8)),
+            CheckedType::Shared(Box::new(CheckedType::U8)),
             &origin,
         );
         let request = ClosureRequest::Instance {
@@ -3832,14 +3832,14 @@ mod tests {
         let resolved = resolve_root_instance(
             &program,
             "identity",
-            CheckedType::Ref(Box::new(CheckedType::U8)),
+            CheckedType::Shared(Box::new(CheckedType::U8)),
             &origin,
         );
         let mut hooks = TestHooks::default();
         hooks.instance_requests.insert(
             seed.index(),
             vec![vec![drop_glue_request(
-                CheckedType::Ref(Box::new(CheckedType::I32)),
+                CheckedType::Shared(Box::new(CheckedType::I32)),
                 &origin,
                 Some(ArtifactUseSite::Test(0)),
             )]],
@@ -3919,14 +3919,14 @@ mod tests {
         let origin = instance_origin(&program, seed);
         let base_instances = program.instances.len();
         let base_artifacts = program.artifacts.len();
-        let planned_type = CheckedType::Ref(Box::new(CheckedType::U8));
+        let planned_type = CheckedType::Shared(Box::new(CheckedType::U8));
         let resolved = resolve_root_instance(&program, "identity", planned_type, &origin);
         let write = PlannedInstance {
             key: resolved.key.clone(),
             instance: None,
             kind: LoweredInstanceDependencyKind::FormattingWrite,
         };
-        let drop_type = CheckedType::Ref(Box::new(CheckedType::I32));
+        let drop_type = CheckedType::Shared(Box::new(CheckedType::I32));
         let drop_key = ArtifactRequestKey::DropGlue(
             CanonicalType::concrete(&drop_type, &origin).expect("type"),
         );
@@ -4022,14 +4022,14 @@ mod tests {
         let origin = instance_origin(&program, seed);
         let base_artifacts = program.artifacts.len();
         // A planned instance the expander never requests: nothing interns it.
-        let missing_type = CheckedType::Ref(Box::new(CheckedType::U16));
+        let missing_type = CheckedType::Shared(Box::new(CheckedType::U16));
         let resolved = resolve_root_instance(&program, "identity", missing_type, &origin);
         let write = PlannedInstance {
             key: resolved.key.clone(),
             instance: None,
             kind: LoweredInstanceDependencyKind::FormattingWrite,
         };
-        let drop_type = CheckedType::Ref(Box::new(CheckedType::I32));
+        let drop_type = CheckedType::Shared(Box::new(CheckedType::I32));
         let drop_key = ArtifactRequestKey::DropGlue(
             CanonicalType::concrete(&drop_type, &origin).expect("type"),
         );
@@ -4107,7 +4107,7 @@ mod tests {
                 output: CheckedType::I32,
             },
         });
-        let drop_type = CheckedType::Ref(Box::new(CheckedType::I32));
+        let drop_type = CheckedType::Shared(Box::new(CheckedType::I32));
         let drop_key = ArtifactRequestKey::DropGlue(
             CanonicalType::concrete(&drop_type, &origin).expect("type"),
         );
@@ -4244,7 +4244,7 @@ mod tests {
             .expect("initializer")
             .origin
             .clone();
-        let value_type = CheckedType::Ref(Box::new(CheckedType::I32));
+        let value_type = CheckedType::Shared(Box::new(CheckedType::I32));
         let recorded =
             drop_glue_request(value_type.clone(), &origin, Some(ArtifactUseSite::Test(5)));
         // Same key and origin on the re-check, but a different edge kind.

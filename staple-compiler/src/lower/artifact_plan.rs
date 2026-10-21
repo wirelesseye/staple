@@ -642,7 +642,7 @@ impl LoweredArtifactPlan {
                         values(parameters, visit);
                         visit(Value(product));
                     }
-                    ConstructorConstruction::ManagedRef {
+                    ConstructorConstruction::ManagedShared {
                         parameters,
                         product,
                         payload,
@@ -1121,14 +1121,14 @@ pub(crate) enum ConstructorConstruction {
         product: CheckedType,
         payload: CheckedType,
     },
-    /// GC-allocate the product as a `Ref` payload, optionally with a payload
+    /// GC-allocate the product as a `Shared` payload, optionally with a payload
     /// finalizer when the payload needs drop.
-    ManagedRef {
+    ManagedShared {
         /// The flattened parameter slot types, in slot order.
         parameters: Vec<CheckedType>,
-        /// The product rebuilt from `parameters`, which is the `Ref` payload.
+        /// The product rebuilt from `parameters`, which is the `Shared` payload.
         product: CheckedType,
-        /// The `Ref` payload type (`product`).
+        /// The `Shared` payload type (`product`).
         payload: CheckedType,
         /// The payload's GC finalizer, requested when the payload needs drop.
         finalizer: Option<PlannedArtifact>,
@@ -1174,7 +1174,7 @@ impl ConstructorAdapterPlan {
                     }
                 }
                 CheckedType::Wrapper { representation, .. } => collect(representation, ids),
-                CheckedType::Ref(ty)
+                CheckedType::Shared(ty)
                 | CheckedType::Unique(ty)
                 | CheckedType::SharedBuffer(ty)
                 | CheckedType::Buffer(ty) => collect(ty, ids),
@@ -1198,7 +1198,7 @@ impl ConstructorAdapterPlan {
         for layout in &self.layout {
             visit(PlannedCalleeRef::Artifact(layout));
         }
-        if let ConstructorConstruction::ManagedRef {
+        if let ConstructorConstruction::ManagedShared {
             finalizer: Some(finalizer),
             ..
         } = &self.construction
@@ -1211,7 +1211,7 @@ impl ConstructorAdapterPlan {
         for layout in &mut self.layout {
             visit(PlannedCalleeRefMut::Artifact(layout));
         }
-        if let ConstructorConstruction::ManagedRef {
+        if let ConstructorConstruction::ManagedShared {
             finalizer: Some(finalizer),
             ..
         } = &mut self.construction

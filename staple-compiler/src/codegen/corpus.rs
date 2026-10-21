@@ -218,6 +218,8 @@ static CORPUS: [CorpusProgram; 161] = [
             inline(
                 "unique_ownership",
                 concat!(
+                    "use std.shared.(Shared)\n",
+                    "use std.unique.(Unique)\n",
                     "use std.io.println\n",
                     "use std.ptr.(RawMutPtr)\n",
                     "use std.cinterop.(CString, c_string)\n",
@@ -236,11 +238,11 @@ static CORPUS: [CorpusProgram; 161] = [
                     "  let mut tuple = Unique (10, 20)\n",
                     "  tuple[1] = 21\n",
                     "  println \"${tuple[0]} ${tuple[1]}\"\n",
-                    "  let nested = Unique (Ref (x: 7, y: 8))\n",
+                    "  let nested = Unique (Shared (x: 7, y: 8))\n",
                     "  println \"${nested.x}\"\n",
-                    "  let mut shared = Ref (Unique (x: 1, y: 2))\n",
+                    "  let mut shared = Shared (Unique (x: 1, y: 2))\n",
                     "  let mut alias = shared\n",
-                    "  shared.x = { drop (Ref.replace alias (Unique (x: 9, y: 8))); 42 }\n",
+                    "  shared.x = { drop (Shared.replace alias (Unique (x: 9, y: 8))); 42 }\n",
                     "  println \"${shared.x} ${shared.y}\"\n",
                     "  let r = make (Resource (c_string \"drop 1\"))\n",
                     "  let ptr = Unique.unsafe_into_raw r\n",
@@ -386,7 +388,8 @@ local ()
     expect_stdout(
         must_run(inline(
             "trait_dictionary_structural",
-            r#"use std.io.(IO, println)
+            r#"use std.shared.(Shared)
+use std.io.(IO, println)
 use std.fmt.Display
 def first: <T where Copy T> (T, T) -> T = <T where Copy T> pair => pair[USize :: 0]
 def second: <T where Copy T> (T, T) -> T = <T where Copy T> pair => pair[USize :: 1]
@@ -403,13 +406,13 @@ def total: <T where Copy T, Display T> (T, T, T) ->{IO} () = <T where Copy T, Di
 }
 let stored_total: <T where Copy T, Display T> (T, T, T) ->{IO} () = total
 stored_total (7, 8, 9)
-def get_ref: <T where Copy T> Ref (T, T) -> T = <T where Copy T> r => r[USize :: 0]
-let stored_get_ref: <T where Copy T> Ref (T, T) -> T = get_ref
-println "${stored_get_ref (Ref (5, 6))}"
-def put_ref: <T where Copy T> (mut Ref (T, T), T) -> () = <T where Copy T> (mut r, value) => { r[USize :: 1] = value }
-let stored_put_ref: <T where Copy T> (mut Ref (T, T), T) -> () = put_ref
-let mut cell: Ref (I32, I32) = Ref (1, 2)
-stored_put_ref (cell, 11)
+def get_shared: <T where Copy T> Shared (T, T) -> T = <T where Copy T> r => r[USize :: 0]
+let stored_get_shared: <T where Copy T> Shared (T, T) -> T = get_shared
+println "${stored_get_shared (Shared (5, 6))}"
+def put_shared: <T where Copy T> (mut Shared (T, T), T) -> () = <T where Copy T> (mut r, value) => { r[USize :: 1] = value }
+let stored_put_shared: <T where Copy T> (mut Shared (T, T), T) -> () = put_shared
+let mut cell: Shared (I32, I32) = Shared (1, 2)
+stored_put_shared (cell, 11)
 println "${cell[USize :: 1]}"
 "#,
             "trait-dictionaries",
@@ -697,14 +700,15 @@ debug_pair 5
         must_run(inline(
             "census_constructor_adapters",
             concat!(
+                "use std.shared.(Shared)\n",
                 "type Point = wrap (I32, I32)\n",
                 "let make: () -> ((I32, I32) -> Point) = () => Point\n",
                 "type Resource = wrap I32\n",
                 "impl Drop Resource { cleanup = Resource value => () }\n",
-                "let make_resource: () -> (Resource -> Ref Resource) = () => Ref\n",
-                "def ref_maker: <T where Copy T> () -> (T -> Ref T) = <T where Copy T> () => Ref\n",
-                "let maker_i32: I32 -> Ref I32 = ref_maker ()\n",
-                "let maker_u8: U8 -> Ref U8 = ref_maker ()\n",
+                "let make_resource: () -> (Resource -> Shared Resource) = () => Shared\n",
+                "def shared_maker: <T where Copy T> () -> (T -> Shared T) = <T where Copy T> () => Shared\n",
+                "let maker_i32: I32 -> Shared I32 = shared_maker ()\n",
+                "let maker_u8: U8 -> Shared U8 = shared_maker ()\n",
             ),
             "core",
         )),
@@ -714,6 +718,7 @@ debug_pair 5
         must_run(inline(
             "census_structural_methods",
             concat!(
+                "use std.shared.(Shared)\n",
                 "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
                 "def pick: Bool -> (I32 | U8) = condition => when { condition => 1, else => (U8 :: 1) }\n",
                 "def show_sum: (I32 | U8) -> String = value => \"${value:?}\"\n",
@@ -723,12 +728,12 @@ debug_pair 5
                 "  for item in pair { count = count + 1 }\n",
                 "  count\n",
                 "}\n",
-                "def deref_mixed: (Ref (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
+                "def deref_mixed: (Shared (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
                 "let a = show_pair (1, 2)\n",
                 "let b = show_sum (pick True)\n",
                 "let c = index_mixed ((U8 :: 1), 2)\n",
                 "let d = count_pair ((U8 :: 1), 2)\n",
-                "let e = deref_mixed (Ref ((U8 :: 1), 2))\n",
+                "let e = deref_mixed (Shared ((U8 :: 1), 2))\n",
             ),
             "core",
         )),
@@ -782,6 +787,7 @@ debug_pair 5
     compile_only(inline(
         "all_artifact_families",
         concat!(
+            "use std.shared.(Shared)\n",
             "use std.coroutine.*\n",
             "use std.cinterop.(CString, c_string)\n",
             "use std.buffer.*\n",
@@ -793,7 +799,7 @@ debug_pair 5
             "let shown = \"${pair:?}\"\n",
             "type Resource = wrap I32\n",
             "impl Drop Resource { cleanup = Resource value => () }\n",
-            "let reference: Ref Resource = Ref (Resource 1)\n",
+            "let reference: Shared Resource = Shared (Resource 1)\n",
             "def capture: move CString -> (() -> I32) = move value => () => inspect value\n",
             "def counter: () -> I32 = () => {\n",
             "  let mut total = 0\n",
@@ -1047,25 +1053,26 @@ debug_pair 5
             inline(
                 "constructors",
                 concat!(
+                    "use std.shared.(Shared)\n",
                     "type Point = wrap (I32, I32)\n",
                     "type Resource = wrap I32\n",
                     "impl Drop Resource { cleanup = Resource value => () }\n",
                     "def make: I32 -> Point = x => Point (x, x)\n",
                     "def call_make: I32 -> Point = x => make x\n",
-                    // A managed `Ref` construction inside a function, so the
+                    // A managed `Shared` construction inside a function, so the
                     // payload-finalizer path is a focus body, not only an
                     // initializer.
-                    "def make_ref: I32 -> Ref Resource = x => Ref (Resource x)\n",
-                    "let made = make_ref 5\n",
+                    "def make_shared: I32 -> Shared Resource = x => Shared (Resource x)\n",
+                    "let made = make_shared 5\n",
                     "let point = Point (1, 2)\n",
-                    "let reference: Ref Resource = Ref (Resource 1)\n",
+                    "let reference: Shared Resource = Shared (Resource 1)\n",
                     "let make_point: () -> ((I32, I32) -> Point) = () => Point\n",
                     "let point_value = make_point ()\n",
                     "let second = point_value (3, 4)\n",
                 ),
                 "calls",
             ),
-            &["make", "call_make", "make_ref"],
+            &["make", "call_make", "make_shared"],
         )),
         "",
     ),
@@ -1280,6 +1287,7 @@ debug_pair 5
             inline(
                 "places_assignment",
                 concat!(
+                    "use std.shared.(Shared)\n",
                     "type Counter = wrap I32\n",
                     "type Wrapper = wrap (value: I32)\n",
                     "impl Index Counter String { type Output = I32; index = (counter, key) => 0 }\n",
@@ -1295,7 +1303,7 @@ debug_pair 5
                     "    (make_counter())[\"key\"] = 6\n",
                     "}\n",
                     "\n",
-                    "def ref_place: mut Ref (I32, I32) -> () = mut reference => {\n",
+                    "def shared_place: mut Shared (I32, I32) -> () = mut reference => {\n",
                     "    reference.0 = 1\n",
                     "}\n",
                     "\n",
@@ -1308,7 +1316,7 @@ debug_pair 5
                 ),
                 "expressions",
             ),
-            &["places", "ref_place", "make_counter"],
+            &["places", "shared_place", "make_counter"],
         )),
         "",
     ),
@@ -1542,6 +1550,7 @@ debug_pair 5
             inline(
                 "drop_glue_shapes",
                 concat!(
+                    "use std.shared.(Shared)\n",
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Handle = wrap CString\n",
@@ -1550,7 +1559,7 @@ debug_pair 5
                     "type Left = wrap (CString, I32)\n",
                     "type Right = wrap (I32, I32)\n",
                     "type Empty = wrap ()\n",
-                    "type Chain = wrap (I32, Ref (Empty | Chain))\n",
+                    "type Chain = wrap (I32, Shared (Empty | Chain))\n",
                     "\n",
                     "def nested_product: () -> () = () => {\n",
                     "    let value: ((CString, I32), (I32, CString)) = ((c_string \"nested left\\n\", 1), (2, c_string \"nested right\\n\"))\n",
@@ -1568,7 +1577,7 @@ debug_pair 5
                     "}\n",
                     "\n",
                     "def recursive: () -> () = () => {\n",
-                    "    let value: Chain = Chain (1, Ref ((Empty | Chain) :: (Empty ())))\n",
+                    "    let value: Chain = Chain (1, Shared ((Empty | Chain) :: (Empty ())))\n",
                     "    ()\n",
                     "}\n",
                     "\n",
@@ -1589,12 +1598,13 @@ debug_pair 5
             inline(
                 "finalizers",
                 concat!(
+                    "use std.shared.(Shared)\n",
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Payload = wrap CString\n",
                     "impl Drop Payload { cleanup = Payload value => () }\n",
                     "\n",
-                    "def make_ref: () -> Ref Payload = () => Ref (Payload (c_string \"ref\"))\n",
+                    "def make_shared: () -> Shared Payload = () => Shared (Payload (c_string \"shared\"))\n",
                     "\n",
                     "def cell_finalizer: () -> (() -> I32) = () => {\n",
                     "    let mut cell = c_string \"cell\"\n",
@@ -1604,13 +1614,13 @@ debug_pair 5
                     "\n",
                     "def closure_environment: move CString -> (() -> I32) = move value => () => puts value\n",
                     "\n",
-                    "let reference = make_ref ()\n",
+                    "let reference = make_shared ()\n",
                     "let celled = cell_finalizer ()\n",
                     "let closure = closure_environment (c_string \"environment\")\n",
                 ),
                 "ownership",
             ),
-            &["make_ref", "cell_finalizer", "closure_environment"],
+            &["make_shared", "cell_finalizer", "closure_environment"],
         )),
         "",
     ),
@@ -1717,14 +1727,15 @@ debug_pair 5
     expect_stdout(
         must_run(emits(
             inline(
-                "ref_replace",
+                "shared_replace",
                 concat!(
+                    "use std.shared.(Shared)\n",
                     "use std.cinterop.(CString, c_string)\n",
                     "type Payload = wrap CString\n",
                     "\n",
                     "def replace: () -> () = () => {\n",
-                    "    let mut reference: Ref Payload = Ref (Payload (c_string \"original\"))\n",
-                    "    let replaced: Payload = Ref.replace reference (Payload (c_string \"replacement\"))\n",
+                    "    let mut reference: Shared Payload = Shared (Payload (c_string \"original\"))\n",
+                    "    let replaced: Payload = Shared.replace reference (Payload (c_string \"replacement\"))\n",
                     "    ()\n",
                     "}\n",
                     "\n",
@@ -1934,6 +1945,7 @@ debug_pair 5
         must_run(inline(
             "dynamic_constructor_values",
             concat!(
+                "use std.shared.(Shared)\n",
                 "use std.io.println\n",
                 "type Pair T = wrap (T, I32)\n",
                 "def wrapped: <T where Copy T> T -> T = <T where Copy T> value => {\n",
@@ -1941,18 +1953,18 @@ debug_pair 5
                 "    let Pair (first, second) = make (value, 5)\n",
                 "    first\n",
                 "}\n",
-                "def maker: <T where Copy T> () -> (T -> Ref T) = <T where Copy T> () => Ref\n",
+                "def maker: <T where Copy T> () -> (T -> Shared T) = <T where Copy T> () => Shared\n",
                 "def pair_maker: <T where Copy T> () -> ((T, I32) -> Pair T) = <T where Copy T> () => Pair\n",
                 "let make_pair: (I32, I32) -> Pair I32 = pair_maker ()\n",
                 "let Pair (pair_first, pair_second) = make_pair (11, 12)\n",
                 "println \"${pair_first} ${pair_second}\"\n",
                 "let first = wrapped 42\n",
                 "println \"${first}\"\n",
-                "let make_i32: I32 -> Ref I32 = maker ()\n",
-                "let Ref second = make_i32 17\n",
+                "let make_i32: I32 -> Shared I32 = maker ()\n",
+                "let Shared second = make_i32 17\n",
                 "println \"${second}\"\n",
-                "let make_u8: U8 -> Ref U8 = maker ()\n",
-                "let Ref third = make_u8 (U8 :: 9)\n",
+                "let make_u8: U8 -> Shared U8 = maker ()\n",
+                "let Shared third = make_u8 (U8 :: 9)\n",
                 "println \"${third}\"\n",
             ),
             "calls",
@@ -1961,17 +1973,18 @@ debug_pair 5
     ),
     expect_stdout(
         must_run(inline(
-            "dynamic_ref_construction",
+            "dynamic_shared_construction",
             concat!(
+                "use std.shared.(Shared)\n",
                 "use std.io.println\n",
-                "def make: <T where Sized T> move T -> Ref T = <T where Sized T> move value => Ref value\n",
-                "def replace: <T where Sized T> (mut Ref T; move T) -> T = <T where Sized T> (mut reference; move value) => Ref.replace reference value\n",
+                "def make: <T where Sized T> move T -> Shared T = <T where Sized T> move value => Shared value\n",
+                "def replace: <T where Sized T> (mut Shared T; move T) -> T = <T where Sized T> (mut reference; move value) => Shared.replace reference value\n",
                 "let mut reference = make 21\n",
-                "let Ref first = reference\n",
+                "let Shared first = reference\n",
                 "println \"${first}\"\n",
                 "let previous = replace reference 42\n",
                 "println \"${previous}\"\n",
-                "let Ref last = reference\n",
+                "let Shared last = reference\n",
                 "println \"${last}\"\n",
             ),
             "ownership",
@@ -2060,22 +2073,23 @@ puts (CString.from_string_unchecked (nested_sum (((I32, I32) | U8) :: (U8 :: 14)
         emits(
             inline(
                 "structural_index_references",
-                r#"use std.cinterop.CString
+                r#"use std.shared.(Shared)
+use std.cinterop.CString
 extern "c" { puts: CString -> I32 }
 type Row = wrap (I32, I32)
 impl Index Row USize { type Output = I32; index = (row, position) => 7 }
 def mixed: (U8, I32) -> (I32 | U8) = pair => pair[1]
 def uniform: (I32, I32) -> I32 = pair => pair[0]
 def replace: (I32, I32) -> (I32, I32) = pair => { let mut own = pair; own[0] = 3; own }
-def ref_uniform: Ref (I32, I32) -> I32 = reference => reference[1]
-def ref_mixed: Ref (U8, I32) -> (I32 | U8) = reference => reference[0]
-def ref_row: Ref Row -> I32 = reference => reference[0]
-def ref_replace: move (Ref (I32, I32)) -> Ref (I32, I32) = move reference => { let mut own = reference; own[0] = 8; own }
+def shared_uniform: Shared (I32, I32) -> I32 = reference => reference[1]
+def shared_mixed: Shared (U8, I32) -> (I32 | U8) = reference => reference[0]
+def shared_row: Shared Row -> I32 = reference => reference[0]
+def shared_replace: move (Shared (I32, I32)) -> Shared (I32, I32) = move reference => { let mut own = reference; own[0] = 8; own }
 puts (CString.from_string_unchecked "mixed=${mixed ((U8 :: 1), 2):?} uniform=${uniform (4, 5)}")
 puts (CString.from_string_unchecked "replace=${replace (1, 2):?}")
-puts (CString.from_string_unchecked "refs=${ref_uniform (Ref (5, 6))} ${ref_mixed (Ref ((U8 :: 9), 10)):?} ${ref_row (Ref (Row (1, 2)))}")
-let replaced = ref_replace (Ref (1, 2))
-puts (CString.from_string_unchecked "ref_replace=${replaced[0]} ${replaced[1]}")
+puts (CString.from_string_unchecked "shared=${shared_uniform (Shared (5, 6))} ${shared_mixed (Shared ((U8 :: 9), 10)):?} ${shared_row (Shared (Row (1, 2)))}")
+let replaced = shared_replace (Shared (1, 2))
+puts (CString.from_string_unchecked "shared_replace=${replaced[0]} ${replaced[1]}")
 "#,
                 "structural",
             ),
@@ -2083,13 +2097,13 @@ puts (CString.from_string_unchecked "ref_replace=${replaced[0]} ${replaced[1]}")
                 "mixed",
                 "uniform",
                 "replace",
-                "ref_uniform",
-                "ref_mixed",
-                "ref_row",
-                "ref_replace",
+                "shared_uniform",
+                "shared_mixed",
+                "shared_row",
+                "shared_replace",
             ],
         ),
-        "mixed=2 uniform=4\nreplace=(3, 2)\nrefs=6 9 7\nref_replace=8 2\n",
+        "mixed=2 uniform=4\nreplace=(3, 2)\nshared=6 9 7\nshared_replace=8 2\n",
     )),
     must_run(expect_stdout(
         emits(
@@ -2134,23 +2148,24 @@ replace_owned (Tag (c_string "old"), Tag (c_string "second"))
     must_run(expect_stdout(
         emits(
             inline(
-                "structural_ref_mutation_drop",
-                r#"use std.cinterop.(CString, c_string)
+                "structural_shared_mutation_drop",
+                r#"use std.shared.(Shared)
+use std.cinterop.(CString, c_string)
 extern "c" { puts: CString -> I32 }
 type Tag = wrap CString
 impl Drop Tag { cleanup = Tag text => { puts text; () } }
-def ref_mutate: move (Ref (Tag, Tag)) -> () = move reference => {
+def shared_mutate: move (Shared (Tag, Tag)) -> () = move reference => {
     let mut own = reference
-    own[0] = Tag (c_string "ref replacement")
+    own[0] = Tag (c_string "shared replacement")
     ()
 }
-ref_mutate (Ref (Tag (c_string "ref old"), Tag (c_string "ref second")))
+shared_mutate (Shared (Tag (c_string "shared old"), Tag (c_string "shared second")))
 "#,
                 "structural",
             ),
-            &["ref_mutate"],
+            &["shared_mutate"],
         ),
-        "ref old\n",
+        "shared old\n",
     )),
     expect_stdout(
         must_run(expect_trap(emits(
@@ -2169,8 +2184,9 @@ let value = at (((U8 :: 1), 2), (USize :: 5))
         must_run(expect_trap(emits(
             inline(
                 "structural_deref_trap",
-                r#"def at: (Ref (I32, I32), USize) -> I32 = (reference, position) => reference[position]
-let value = at (Ref (1, 2), (USize :: 5))
+                r#"use std.shared.(Shared)
+def at: (Shared (I32, I32), USize) -> I32 = (reference, position) => reference[position]
+let value = at (Shared (1, 2), (USize :: 5))
 "#,
                 "structural",
             ),
@@ -3865,30 +3881,31 @@ let value = at (Ref (1, 2), (USize :: 5))
         ),
         "direct borrowed\ndrop direct borrowed\ndirect moved\ndrop direct moved\nindirect borrowed\ndrop indirect borrowed\nindirect moved\ndrop indirect moved\ntrait borrowed\ndrop trait borrowed\nproduct element\ndrop product element\nnamed binding\nspread temporary\ndrop spread right\ndrop spread left\nspread temporary mixed\ndrop spread left\ndrop spread right\nspread temporary generic\ndrop spread right\ndrop spread left\nextern C string\nprinted by puts\nend of scope\ndrop spread first\ndrop spread second\ndrop named at scope exit\n",
     )),
-    // A `Ref` into the middle of a managed allocation keeps the whole
+    // A `Shared` into the middle of a managed allocation keeps the whole
     // allocation alive across collections: an array viewed as a slice and a
     // frozen buffer. No element is finalized during the churn.
     must_run(expect_stdout(
         emits(
             inline(
-                "interior_refs_keep_their_allocation_alive",
+                "interior_shared_values_keep_their_allocation_alive",
                 concat!(
+                    "use std.shared.(Shared)\n",
                     "use std.cinterop.(CString, c_string)\n",
                     "use std.shared_buffer.SharedBuffer\n",
                     "use std.buffer.Buffer\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Tag = wrap CString\n",
                     "impl Drop Tag { cleanup = Tag text => { puts text; () } }\n",
-                    "def from_array: () -> Ref Tag = () => {\n",
+                    "def from_array: () -> Shared Tag = () => {\n",
                     "    let values: SharedBuffer Tag = SharedBuffer.from_array (Tag (c_string \"drop array first\"), Tag (c_string \"drop array second\"), Tag (c_string \"drop array third\"))\n",
-                    "    SharedBuffer.get_ref_unchecked values 2\n",
+                    "    SharedBuffer.get_shared_unchecked values 2\n",
                     "}\n",
-                    "def from_frozen: () -> Ref Tag = () => {\n",
+                    "def from_frozen: () -> Shared Tag = () => {\n",
                     "    let mut buffer: Buffer Tag = Buffer.with_capacity 4\n",
                     "    Buffer.push buffer (Tag (c_string \"drop frozen first\"))\n",
                     "    Buffer.push buffer (Tag (c_string \"drop frozen second\"))\n",
                     "    let frozen = Buffer.into_shared_buffer buffer\n",
-                    "    SharedBuffer.get_ref_unchecked frozen 1\n",
+                    "    SharedBuffer.get_shared_unchecked frozen 1\n",
                     "}\n",
                     "def churn: I32 -> I32 = n => {\n",
                     "    let mut index = 0\n",
@@ -3903,8 +3920,8 @@ let value = at (Ref (1, 2), (USize :: 5))
                     "let frozen = from_frozen ()\n",
                     "let spins = churn 100000\n",
                     "puts (c_string \"after churn\")\n",
-                    "let first = Ref.replace array (Tag (c_string \"drop replacement\"))\n",
-                    "let third = Ref.replace frozen (Tag (c_string \"drop replacement\"))\n",
+                    "let first = Shared.replace array (Tag (c_string \"drop replacement\"))\n",
+                    "let third = Shared.replace frozen (Tag (c_string \"drop replacement\"))\n",
                     "puts (c_string \"replaced\")\n",
                 ),
                 "ownership",

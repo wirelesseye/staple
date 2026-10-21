@@ -936,7 +936,7 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 
     /// Bounds-check against the header length and return the element pointer.
-    pub(crate) fn build_shared_buffer_get_ref(
+    pub(crate) fn build_shared_buffer_get_shared(
         &self,
         buffer: inkwell::values::PointerValue<'context>,
         position: inkwell::values::IntValue<'context>,
@@ -1229,9 +1229,9 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 
     /// Loads the value reached by following `payloads` (outermost first),
-    /// loading the final payload as well. The lowered `Ref` access and nominal
+    /// loading the final payload as well. The lowered `Shared` access and nominal
     /// pattern paths share it.
-    pub(crate) fn load_ref_payloads(
+    pub(crate) fn load_shared_payloads(
         &self,
         value: inkwell::values::AnyValueEnum<'context>,
         payloads: &[crate::CheckedType],
@@ -1242,22 +1242,22 @@ impl<'program, 'context> Backend<'program, 'context> {
             let Some(inkwell::values::BasicValueEnum::PointerValue(pointer)) = value else {
                 return Err(Diagnostic::new(
                     span.clone(),
-                    "Ref value has an invalid representation",
+                    "Shared value has an invalid representation",
                 ));
             };
             let payload_type = self.compile_type(payload)?;
             value = Some(
                 self.builder
-                    .build_load(payload_type, pointer, "ref.payload")
+                    .build_load(payload_type, pointer, "shared.payload")
                     .map_err(compiler_diagnostic)?,
             );
         }
-        value.ok_or_else(|| Diagnostic::new(span, "Ref value has an invalid representation"))
+        value.ok_or_else(|| Diagnostic::new(span, "Shared value has an invalid representation"))
     }
 
     /// The address of the payload reached by following `payloads`, leaving
     /// the final payload in place rather than loading it.
-    pub(crate) fn ref_payload_pointer(
+    pub(crate) fn shared_payload_pointer(
         &self,
         value: inkwell::values::AnyValueEnum<'context>,
         payloads: &[crate::CheckedType],
@@ -1268,14 +1268,14 @@ impl<'program, 'context> Backend<'program, 'context> {
             _ => {
                 return Err(Diagnostic::new(
                     span,
-                    "Ref value has an invalid representation",
+                    "Shared value has an invalid representation",
                 ));
             }
         };
         for payload in &payloads[..payloads.len().saturating_sub(1)] {
             pointer = self
                 .builder
-                .build_load(self.compile_type(payload)?, pointer, "ref.payload")
+                .build_load(self.compile_type(payload)?, pointer, "shared.payload")
                 .map_err(compiler_diagnostic)?
                 .into_pointer_value();
         }

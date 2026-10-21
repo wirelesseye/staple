@@ -1,5 +1,6 @@
 pub mod
 
+use package.shared.(Shared)
 
 use package.shared_buffer.SharedBuffer
 use package.clone.Clone
@@ -16,7 +17,7 @@ extern "staple-intrinsic" {
     __buffer_capacity: <T> Buffer T -> USize
     __buffer_push: <T> (mut Buffer T, move T) -> ()
     __buffer_pop: <T> mut Buffer T -> Option T
-    __buffer_get: <T> (Buffer T, USize) -> Ref T
+    __buffer_get: <T> (Buffer T, USize) -> Shared T
     __buffer_into_shared: <T> move Buffer T -> SharedBuffer T
     __buffer_from_array: <T, N where Natural N> move (T ^ N) -> Buffer T
     __buffer_transfer: <T> (mut Buffer T, mut Buffer T) -> ()
@@ -24,6 +25,7 @@ extern "staple-intrinsic" {
 }
 
 companion<T> Buffer T {
+    use package.shared.(Shared)
     use package.shared_buffer.SharedBuffer
     /// Allocates storage for exactly capacity elements without initialising values.
     pub def with_capacity = capacity: USize => Buffer T :: __buffer_with_capacity capacity
@@ -53,7 +55,7 @@ companion<T> Buffer T {
     /// Replaces the element at a position and drops the old value, trapping if out of bounds.
     pub def set_unchecked = (mut buffer: Buffer T; position: USize; move value: T) => () :: {
         let mut reference = __buffer_get (buffer, position)
-        Ref.replace reference value
+        Shared.replace reference value
         ()
     }
 
@@ -81,7 +83,7 @@ companion<T where Copy T> Buffer T {
 
     /// Copies the element at a position, trapping if out of bounds.
     pub def get_unchecked = (buffer: Buffer T; position: USize) => T :: {
-        let Ref value = __buffer_get (buffer, position)
+        let Shared value = __buffer_get (buffer, position)
         value
     }
 }
