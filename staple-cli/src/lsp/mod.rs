@@ -44,6 +44,10 @@ struct Analysis {
     completion_index: CompletionIndex,
     semantic_entries: Vec<SemanticEntry>,
     hover_entries: Vec<HoverEntry>,
+    /// The last analysis of a buffer that parsed, kept while the buffer does
+    /// not: a region the recovered parse discards, such as a receiver typed
+    /// together with a trailing `|>`, has no completion entries of its own.
+    parsed: Option<Box<Analysis>>,
 }
 
 #[derive(Clone)]
@@ -291,39 +295,34 @@ impl Server {
                     let previous = document.last_analysis.as_ref()?;
                     let previous_offset =
                         TextChange::between(&previous.source, &document.text).old_offset(offset);
-                    let completion_receiver = completion_receiver(&document.text, offset).map(
-                        |(receiver, qualified, name)| {
-                            (
-                                TextChange::between(&previous.source, &document.text)
-                                    .old_offset(receiver),
-                                qualified,
-                                name,
-                            )
-                        },
-                    );
-                    Some(match completion_receiver {
-                        Some((receiver, true, name)) => {
-                            let indexed = previous.completion_index.qualifier_items(receiver);
-                            if indexed.is_empty() {
-                                previous
-                                    .completion_index
-                                    .named_qualifier_items(name, previous_offset)
-                            } else {
-                                indexed
+                    let Some((receiver, qualified, name)) =
+                        completion_receiver(&document.text, offset)
+                    else {
+                        return Some(previous.completion_index.items(previous_offset));
+                    };
+                    // A receiver the latest analysis discarded with a syntax
+                    // error is looked up in the last analysis that parsed.
+                    let indexed = std::iter::once(previous)
+                        .chain(previous.parsed.as_deref())
+                        .map(|analysis| {
+                            let receiver = TextChange::between(&analysis.source, &document.text)
+                                .old_offset(receiver);
+                            match qualified {
+                                true => analysis.completion_index.qualifier_items(receiver),
+                                false => analysis.completion_index.method_items(receiver),
                             }
+                        })
+                        .find(|items| !items.is_empty());
+                    Some(indexed.unwrap_or_else(|| {
+                        match qualified {
+                            true => previous
+                                .completion_index
+                                .named_qualifier_items(name, previous_offset),
+                            false => previous
+                                .completion_index
+                                .named_method_items(name, previous_offset),
                         }
-                        Some((receiver, false, name)) => {
-                            let indexed = previous.completion_index.method_items(receiver);
-                            if indexed.is_empty() {
-                                previous
-                                    .completion_index
-                                    .named_method_items(name, previous_offset)
-                            } else {
-                                indexed
-                            }
-                        }
-                        None => previous.completion_index.items(previous_offset),
-                    })
+                    }))
                 })
                 .unwrap_or_else(crate::lsp::completion::keywords);
             // Cross-module suggestions carry a `data` payload; stamp the
@@ -742,12 +741,19 @@ impl Server {
             }
             document.semantic_tokens = semantic::encode(&text, &current_semantic);
             document.hover_entries = hover_entries.clone();
+            let parsed = match parse_error {
+                Some(_) => document.last_analysis.take().map(|mut previous| {
+                    previous.parsed.take().unwrap_or_else(|| Box::new(previous))
+                }),
+                None => None,
+            };
             document.last_analysis = Some(Analysis {
                 source: text.clone(),
                 completion_index: document_completion
                     .expect("type-checked analysis builds completion data"),
                 semantic_entries: current_semantic,
                 hover_entries,
+                parsed,
             });
         } else if let Some(previous) = &document.last_analysis {
             let merged_semantic = merge_semantic_entries(&text, current_semantic, previous, true);
@@ -1476,6 +1482,7 @@ mod tests {
         let previous = Analysis {
             source: old.to_owned(),
             completion_index: CompletionIndex::default(),
+            parsed: None,
             semantic_entries: vec![
                 SemanticEntry {
                     start: declaration,
@@ -2771,6 +2778,74 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+    /// Typing `|>` breaks the parse, and the recovered analysis discards the
+    /// receiver's line; completion still finds the receiver in the analysis
+    /// from before the `|>`.
+    #[test]
+    fn pipe_completion_survives_the_syntax_error_of_a_trailing_pipe() {
+        let root =
+            std::env::temp_dir().join(format!("staple-lsp-trailing-pipe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("main.sta");
+        std::fs::write(&path, "").unwrap();
+        let path = std::fs::canonicalize(&path).unwrap();
+        let uri = path_to_uri(&path).unwrap();
+        for (head, tail) in [
+            ("", "\n"),
+            ("def f = () => {\n    let x = 1\n    ", "\n    0\n}\n"),
+        ] {
+            let (connection, client) = Connection::memory();
+            let mut server = Server {
+                connection,
+                documents: HashMap::from([(
+                    uri.clone(),
+                    Document {
+                        text: format!("{head}{tail}"),
+                        version: 1,
+                        ..Document::default()
+                    },
+                )]),
+                published_by_root: HashMap::new(),
+                stdlib: Some(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .parent()
+                        .unwrap()
+                        .join("stdlib"),
+                ),
+            };
+            let mut text = String::new();
+            for typed in ["\"hello\"", "\"hello\" |", "\"hello\" |>"] {
+                text = format!("{head}{typed}{tail}");
+                server.documents.get_mut(&uri).unwrap().text = text.clone();
+                server.analyze(&uri).unwrap();
+            }
+            let (line, character) = semantic::position(&text, text.find("|>").unwrap() + 2);
+            server
+                .request(Request {
+                    id: 1.into(),
+                    method: Completion::METHOD.to_owned(),
+                    params: serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": { "line": line, "character": character },
+                        "context": { "triggerKind": 2, "triggerCharacter": ">" },
+                    }),
+                })
+                .unwrap();
+            let response = loop {
+                if let Message::Response(response) = recv(&client) {
+                    break response;
+                }
+            };
+            let items: Vec<CompletionItem> =
+                serde_json::from_value(response.response_result.unwrap()).unwrap();
+            assert!(
+                items.iter().any(|item| item.label == "to_string"),
+                "{head:?}: {items:?}"
+            );
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
     /// A receiver typed together with its `|>`, so that it never type-checked
     /// on its own, falls back to the name of the innermost local binding or
