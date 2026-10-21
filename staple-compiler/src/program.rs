@@ -238,21 +238,13 @@ impl Program {
             attach_companion_generics(&mut declaration, &mut self.next_syntax_id);
             let alias =
                 canonicalize_companion(&self.modules[parent.0].syntax.items, &mut declaration);
-            if declaration.companion
-                && let Some(existing) = self.children[parent.0].get(&declaration.name).copied()
-                && self.modules[existing.0].companion
-            {
-                self.modules[existing.0]
-                    .syntax
-                    .items
-                    .extend(declaration.module.items);
-                self.child_modules.insert(declaration.syntax.id, existing);
-                if let Some(alias) = alias {
-                    self.children[parent.0].insert(alias, existing);
-                }
-                self.collect_single_submodules(existing);
-                continue;
-            }
+            // A further `companion` block for a type that already has one is
+            // a module of its own, so its imports stay private to the block;
+            // the first block remains the type's namespace.
+            let additional_block = declaration.companion
+                && self.children[parent.0]
+                    .get(&declaration.name)
+                    .is_some_and(|existing| self.modules[existing.0].companion);
             let id = ModuleId(self.modules.len());
             let qualified_name = format!(
                 "{}.{}",
@@ -270,11 +262,13 @@ impl Program {
             });
             self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
-            self.children[parent.0].insert(declaration.name, id);
-            self.child_modules.insert(declaration.syntax.id, id);
-            if let Some(alias) = alias {
-                self.children[parent.0].insert(alias, id);
+            if !additional_block {
+                self.children[parent.0].insert(declaration.name, id);
+                if let Some(alias) = alias {
+                    self.children[parent.0].insert(alias, id);
+                }
             }
+            self.child_modules.insert(declaration.syntax.id, id);
             self.collect_single_submodules(id);
         }
 
@@ -409,9 +403,6 @@ impl Program {
                     .filter(|declaration| !self.child_modules.contains_key(&declaration.syntax.id))
                     .map(|declaration| (declaration, false)),
             );
-            // A merge that folds items into an already-visited module; that
-            // module needs to be rescanned so nested inline items land too.
-            let mut rescan_from: Option<usize> = None;
             for (mut declaration, top_level) in declarations {
                 attach_companion_generics(&mut declaration, next_syntax_id);
                 let alias = if top_level {
@@ -419,29 +410,14 @@ impl Program {
                 } else {
                     None
                 };
-                // Mirror the companion merge in `collect_single_submodules` /
-                // `insert_submodules`: a generated `companion` block for a type
-                // that already has a companion module extends that module
-                // rather than registering a second one of the same name.
-                if top_level
+                // Mirror `collect_single_submodules` / `insert_submodules`: a
+                // generated `companion` block for a type that already has a
+                // companion is a further block of its own, not the namespace.
+                let additional_block = top_level
                     && declaration.companion
-                    && let Some(existing) = self.children[parent].get(&declaration.name).copied()
-                    && self.modules[existing.0].companion
-                {
-                    self.modules[existing.0]
-                        .syntax
-                        .items
-                        .extend(declaration.module.items);
-                    self.child_modules.insert(declaration.syntax.id, existing);
-                    if let Some(alias) = alias {
-                        self.children[parent].insert(alias, existing);
-                    }
-                    if existing.0 < parent {
-                        rescan_from =
-                            Some(rescan_from.map_or(existing.0, |from| from.min(existing.0)));
-                    }
-                    continue;
-                }
+                    && self.children[parent]
+                        .get(&declaration.name)
+                        .is_some_and(|existing| self.modules[existing.0].companion);
                 let id = ModuleId(self.modules.len());
                 let qualified_name = format!(
                     "{}.{}",
@@ -459,21 +435,15 @@ impl Program {
                 });
                 self.module_packages.push(self.module_packages[parent]);
                 self.children.push(HashMap::new());
-                if top_level {
+                if top_level && !additional_block {
                     self.children[parent].insert(declaration.name, id);
+                    if let Some(alias) = alias {
+                        self.children[parent].insert(alias, id);
+                    }
                 }
                 self.child_modules.insert(declaration.syntax.id, id);
-                if let Some(alias) = alias {
-                    self.children[parent].insert(alias, id);
-                }
             }
-            // Already-registered declarations are filtered out above, so a
-            // rescan only picks up items the merge just introduced and always
-            // makes progress toward the end of the module list.
-            parent = match rescan_from {
-                Some(from) => from,
-                None => parent + 1,
-            };
+            parent += 1;
         }
         self.resolve_single_inline_imports();
         self.initialization_order = initialization_order(
@@ -895,6 +865,38 @@ impl Program {
 
     pub fn child_named(&self, module: ModuleId, name: &str) -> Option<ModuleId> {
         self.children[module.0].get(name).copied()
+    }
+
+    /// The module that stands for `module`'s namespace. Every `companion`
+    /// block is a module of its own, so its imports stay private to it, but
+    /// the first block for a type is the one the type's namespace names;
+    /// any other module is its own namespace.
+    pub fn companion_primary(&self, module: ModuleId) -> ModuleId {
+        let source = &self.modules[module.0];
+        if source.companion
+            && let (Some(parent), Some(name)) = (source.parent, source.name.as_deref())
+            && let Some(primary) = self.children[parent.0].get(name).copied()
+            && self.modules[primary.0].companion
+        {
+            return primary;
+        }
+        module
+    }
+
+    /// Every `companion` block contributing to the same type as `module`, in
+    /// module order; just `module` for any other module.
+    pub fn companion_blocks(&self, module: ModuleId) -> Vec<ModuleId> {
+        let primary = self.companion_primary(module);
+        if !self.modules[primary.0].companion {
+            return vec![module];
+        }
+        self.modules
+            .iter()
+            .filter(|candidate| {
+                candidate.companion && self.companion_primary(candidate.id) == primary
+            })
+            .map(|candidate| candidate.id)
+            .collect()
     }
 
     pub fn parent_module(&self, module: ModuleId) -> Option<ModuleId> {
@@ -1405,13 +1407,8 @@ impl ProgramLoader {
                     ),
                 ));
             }
-            self.modules[existing.0]
-                .syntax
-                .items
-                .extend(declaration.module.items);
-            self.child_modules.insert(declaration.syntax.id, existing);
-            return Ok(());
         }
+        let additional_block = self.children[parent.0].contains_key(&declaration.name);
         let id = ModuleId(self.modules.len());
         let qualified_name = format!(
             "{}.{}",
@@ -1429,7 +1426,9 @@ impl ProgramLoader {
         });
         self.module_packages.push(self.module_packages[parent.0]);
         self.children.push(HashMap::new());
-        self.children[parent.0].insert(declaration.name, id);
+        if !additional_block {
+            self.children[parent.0].insert(declaration.name, id);
+        }
         self.child_modules.insert(declaration.syntax.id, id);
         self.insert_submodules(id, path, qualified_name)
     }
@@ -1695,26 +1694,11 @@ impl ProgramLoader {
             attach_companion_generics(&mut declaration, &mut self.next_syntax_id);
             let alias =
                 canonicalize_companion(&self.modules[parent.0].syntax.items, &mut declaration);
-            if declaration.companion
-                && let Some(existing) = self.children[parent.0].get(&declaration.name).copied()
-                && self.modules[existing.0].companion
-            {
-                self.modules[existing.0]
-                    .syntax
-                    .items
-                    .extend(declaration.module.items);
-                self.child_modules.insert(declaration.syntax.id, existing);
-                if let Some(alias) = alias {
-                    self.children[parent.0].insert(alias, existing);
-                }
-                self.insert_submodules(
-                    existing,
-                    path.clone(),
-                    format!("{parent_name}.{}", declaration.name),
-                )?;
-                continue;
-            }
-            if self.children[parent.0].contains_key(&declaration.name) {
+            let additional_block = declaration.companion
+                && self.children[parent.0]
+                    .get(&declaration.name)
+                    .is_some_and(|existing| self.modules[existing.0].companion);
+            if !additional_block && self.children[parent.0].contains_key(&declaration.name) {
                 return Err(load_diagnostic_at(
                     &declaration.syntax.span,
                     format!("duplicate submodule definition of `{}`", declaration.name),
@@ -1734,11 +1718,13 @@ impl ProgramLoader {
             });
             self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
-            self.children[parent.0].insert(declaration.name, id);
-            self.child_modules.insert(declaration.syntax.id, id);
-            if let Some(alias) = alias {
-                self.children[parent.0].insert(alias, id);
+            if !additional_block {
+                self.children[parent.0].insert(declaration.name, id);
+                if let Some(alias) = alias {
+                    self.children[parent.0].insert(alias, id);
+                }
             }
+            self.child_modules.insert(declaration.syntax.id, id);
             self.insert_submodules(id, path.clone(), qualified_name)?;
         }
 
@@ -1803,10 +1789,18 @@ impl ProgramLoader {
         if let Err(error) = self.load_root_qualified_references(module, &root) {
             self.import_error(error)?;
         }
-        let children = self.children[module.0]
+        let mut children = self.children[module.0]
             .values()
             .copied()
             .collect::<Vec<_>>();
+        // A type's further `companion` blocks are not reachable by name.
+        children.extend(
+            self.modules
+                .iter()
+                .filter(|child| child.companion && child.parent == Some(module))
+                .map(|child| child.id)
+                .filter(|child| !self.children[module.0].values().any(|named| named == child)),
+        );
         for child in children {
             self.load_imports(child, &root)?;
         }

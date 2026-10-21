@@ -1098,14 +1098,14 @@ impl<'a> LoweredWalker<'a> {
             super::LoweredCallableTarget::Constructor {
                 recursive: Some(_), ..
             } => {
-                if let CheckedType::Ref(payload) = &result_type
+                if let CheckedType::Shared(payload) = &result_type
                     && !crate::contains_type_parameter(payload)
                     && self.program.concrete_needs_drop(payload)
                 {
                     let canonical = CanonicalType::concrete(payload, &origin)
                         .map_err(|diagnostic| vec![diagnostic])?;
                     self.visitor.finalizer_site(
-                        ArtifactUseSite::RefConstruction(id),
+                        ArtifactUseSite::SharedConstruction(id),
                         GcFinalizerKey::Payload(canonical),
                         GcFinalizerPlan::Payload {
                             value_type: payload.as_ref().clone(),
@@ -2173,6 +2173,7 @@ mod tests {
 
     const CLEANUP_FIXTURE: &str = concat!(
         "use std.cinterop.(CString, c_string)\n",
+        "use std.shared.(Shared)\n",
         "use std.coroutine.*\n",
         "type Resource = wrap I32\n",
         "impl Drop Resource { cleanup = Resource value => () }\n",
@@ -2181,7 +2182,7 @@ mod tests {
         "type Wrapped = wrap CString\n",
         "type Box T = wrap (T)\n",
         "impl<T where Copy T> Drop (Box T) { cleanup = Box value => () }\n",
-        "type Chain = wrap ((CString) | (Ref Chain))\n",
+        "type Chain = wrap ((CString) | (Shared Chain))\n",
         "def expose_resource: Resource -> I32 = value => 0\n",
         "def expose_handle: Handle -> I32 = value => 0\n",
         "def expose_wrapped: Wrapped -> I32 = value => 0\n",
@@ -3229,6 +3230,7 @@ mod tests {
 
     const SCANNER_FIXTURE: &str = concat!(
         "use std.cinterop.*\n",
+        "use std.shared.(Shared)\n",
         "extern \"c\" { inspect: CString -> I32 }\n",
         "def make_c: () -> CString = () => c_string \"x\"\n",
         "def extern_temp: () -> I32 = () => inspect (c_string \"x\")\n",
@@ -3248,7 +3250,7 @@ mod tests {
         "  () => inspect cell\n",
         "}\n",
         "def closure_env: move CString -> (() -> I32) = move value => () => inspect value\n",
-        "def make_ref: () -> Ref CString = () => Ref (c_string \"x\")\n",
+        "def make_shared: () -> Shared CString = () => Shared (c_string \"x\")\n",
         "def convert: move CString -> String = move value => CString.to_string_unchecked value\n",
         "def nested: (I32) -> I32 = value => {\n",
         "  let outer = c_string \"a\"\n",
@@ -3265,7 +3267,7 @@ mod tests {
         "let mutated = mutate_c (c_string \"a\", c_string \"c\")\n",
         "let celled = cell_finalizer ()\n",
         "let closure = closure_env (c_string \"e\")\n",
-        "let reference = make_ref ()\n",
+        "let reference = make_shared ()\n",
         "let converted = convert (c_string \"c\")\n",
         "let nested_value = nested 1\n",
     );
@@ -3321,8 +3323,8 @@ mod tests {
             "a closure environment finalizer site"
         );
         assert!(
-            has(|site| matches!(site, ArtifactUseSite::RefConstruction(_))),
-            "a managed `Ref` construction finalizer site"
+            has(|site| matches!(site, ArtifactUseSite::SharedConstruction(_))),
+            "a managed `Shared` construction finalizer site"
         );
         assert!(
             has(|site| matches!(site, ArtifactUseSite::CStringConversion(_))),

@@ -682,8 +682,8 @@ it.
 `@track_caller`, declared in `std.source` as `pub macro @track_caller: Item ->
 Item`, makes a function report where it was called from instead of where it is
 defined. It is not re-exported by `std.core` or the prelude, so it needs
-`use std.source.(track_caller)`, and a `companion` body that uses it imports it
-again. It applies only to a module-level or companion `def` whose value is a
+`use std.source.(track_caller)`; a `companion` body sees its defining
+module's import. It applies only to a module-level or companion `def` whose value is a
 function literal, or to a trait member. It takes no argument, and is rejected on
 `let`, `const`, `extern`, type, trait, and impl items, on implementation
 members, on local `def`s, and on a function that captures local variables
@@ -871,12 +871,12 @@ needed, and a manifest may not bind `std` itself. Paths beginning with `std`
 therefore resolve from the standard-library source root through the same
 dependency-alias machinery as any local dependency. `std.core` is the small,
 always-imported language interface: booleans, numbers, indexing protocols,
-references, reactive primitives, ranges, flow macros (`if`, `when`, `while`,
+reactive primitives, ranges, flow macros (`if`, `when`, `while`,
 `for`, and the rest of `std.flow`), and compiler modifiers. The separate
 `std.prelude` interface is imported by default and provides strings, lists,
 iteration, formatting traits, defaults, and results. Lower-level
-modules such as `std.buffer`, `std.shared_buffer`, `std.io`, `std.syntax`, and
-`std.cinterop` require explicit imports.
+modules such as `std.shared`, `std.unique`, `std.buffer`, `std.shared_buffer`,
+`std.io`, `std.syntax`, and `std.cinterop` require explicit imports.
 
 `staple build` and `staple run` compile the standard library, like every other
 non-root package, into its own cached object (see README.md, "Incremental
@@ -1165,7 +1165,14 @@ first slot; it is never combined with the stage's arguments into a product.
 
 More than one companion block may contribute to the same type. Companion
 blocks have no visibility of their own; visibility is declared on their items.
-Their bodies can refer directly to declarations in the containing module.
+A block's body sees everything its defining module sees, including the
+module's imports, so it can refer directly to the module's declarations and
+imported names. A `use` inside a block applies to that block only: it reaches
+neither the defining module nor the type's other companion blocks, and it may
+import a name the defining module already imports. The members of all of a
+type's companion blocks form the type's one namespace, so each block can refer
+directly to the others' members, and a member name may be declared by only one
+block.
 Generic and constrained targets use the same bracketed parameter syntax as
 trait implementations, for example `companion<T where Bound T> Box T`.
 Ordinary `mod` declarations may not share a name with a type; use `companion`
@@ -1260,7 +1267,7 @@ let answer: I32 = 42
 `mut` marks a binding that may both be reassigned and have its value written
 into. Reassignment is an item whose right-hand side must have the type of
 the destination; writing into fields of a by-value product, or through a
-`Ref`, requires the same `mut` root:
+`Shared`, requires the same `mut` root:
 
 ```staple
 let mut counter = 0
@@ -1269,10 +1276,10 @@ counter = counter + 1
 let mut point = (x: 3, y: 4)
 point.x = 5
 
-let mut cell: Ref I32 = Ref 1
+let mut cell: Shared I32 = Shared 1
 cell.0 = 2
 
-let borrowed: Ref I32 = Ref 3
+let borrowed: Shared I32 = Shared 3
 borrowed.0 = 4 // error: `borrowed` is not declared `mut`
 ```
 
@@ -1845,9 +1852,9 @@ implements `Index (SharedBuffer T) USize` with `type Output = T` when `T` is `Co
 `SharedBuffer.get_unchecked`, so a `SharedBuffer T` is indexed like a fixed product of `T`. Known
 bad fixed-product indices are rejected and dynamic out-of-bounds indices trap.
 
-A `Ref T` is transparent for indexing, the same way it is for field access:
-`reference[index]` is `(*reference)[index]`, so `Index (Ref T)` and
-`MutateIndex (Ref T)` are derived whenever `T` itself has the corresponding
+A `Shared T` is transparent for indexing, the same way it is for field access:
+`reference[index]` is `(*reference)[index]`, so `Index (Shared T)` and
+`MutateIndex (Shared T)` are derived whenever `T` itself has the corresponding
 implementation, whether structural or explicit. This composes through nested
 references and lets a user-defined `Index`/`MutateIndex` implementation on a
 nominal type be used through a handle without an explicit dereference.
@@ -1862,10 +1869,10 @@ target[index] = replacement
 
 The compiler derives `MutateIndex` for non-empty arrays, by
 value. The standard library implements `MutateIndex (SharedBuffer T) USize T` for
-every `T`, backed by `SharedBuffer.set_unchecked`, which replaces the element through `Ref.replace`. The mutable `Target`
+every `T`, backed by `SharedBuffer.set_unchecked`, which replaces the element through `Shared.replace`. The mutable `Target`
 parameter passes by address either way (see the "Mutable parameters" subsection
 under "Functions"), so a by-value target's root binding must be declared
-`mut` just as a `Ref` target's must. These structural implementations cannot
+`mut` just as a `Shared` target's must. These structural implementations cannot
 be overridden. Other types may define ordinary explicit implementations of
 both traits.
 
@@ -1888,7 +1895,7 @@ let pair: (I32, Bool) = product_default ()
 This applies to heterogeneous, named, nested, and empty products. In
 particular, `()` is not default-constructible unless a legal implementation is
 provided by the package that owns `Default`. Because `(T ^ 1)` is normalized to
-`T`, it continues to use the `Default` implementation of `T`. `Ref T` does not
+`T`, it continues to use the `Default` implementation of `T`. `Shared T` does not
 implement `Default` merely because `T` does.
 
 ## Functions
@@ -2119,7 +2126,7 @@ Every type parameter has an implicit `Sized` bound. A function that forwards a
 type behind a constructor accepting unsized arguments can relax that default:
 
 ```staple
-def preserve_ref = <T where ?Sized T> value: Ref T => value
+def preserve_shared = <T where ?Sized T> value: Shared T => value
 ```
 
 `?Sized T` must name a parameter of the same list and may appear once per
@@ -2293,7 +2300,7 @@ called directly:
 * a scheme that names an associated type of its parameters, such as
   `<Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter)`;
 * a coroutine, async, or reactive body;
-* a function value behind `Ref`, `SharedBuffer`, `Buffer`, or a shared cell that
+* a function value behind `Shared`, `SharedBuffer`, `Buffer`, or a shared cell that
   crosses into the implementation.
 
 The checker also rejects schemes in signals and in ordinary `extern`
@@ -2665,12 +2672,12 @@ parameter value itself. A mutable argument is passed by address, so either
 kind of change is visible in the caller:
 
 ```staple
-def clear = mut cell: Ref (I32, I32) => () :: { cell.0 = 0 }
+def clear = mut cell: Shared (I32, I32) => () :: { cell.0 = 0 }
 
-let mut counter: Ref (I32, I32) = Ref (1, 2)
+let mut counter: Shared (I32, I32) = Shared (1, 2)
 clear counter
 
-let fixed: Ref (I32, I32) = Ref (1, 2)
+let fixed: Shared (I32, I32) = Shared (1, 2)
 clear fixed // error: `fixed` is not declared `mut`
 
 def replace = mut value: I32 => () :: { value = 42 }
@@ -2760,7 +2767,7 @@ repeat and match the annotation's `move` targets exactly, the same as for
 trait's method declaration, even when the parameter's type is `Copy`. A
 parameter cannot be marked both `mut` and `move`: a mutable borrow and an
 ownership transfer are different effects. `move` and `mut` never change the
-parameter's exposed type — it stays `T`, never `Ref T` — only its ownership
+parameter's exposed type — it stays `T`, never `Shared T` — only its ownership
 and calling convention.
 
 Like `mut`, `move` may prefix a destructuring pattern to own the whole
@@ -4024,7 +4031,7 @@ F64
 Never
 Bool
 String
-Ref T
+Shared T
 SharedBuffer T
 Buffer T
 CString
@@ -4123,43 +4130,44 @@ after validation. `String.from_utf8_unchecked: move List U8 => String` skips the
 validation when the caller knows the bytes are valid UTF-8. The underlying
 `SharedBuffer U8` is private to the standard library.
 
-`Ref T` is a garbage-collected reference to a value of type `T`. Its standard
-declaration is `pub type Ref T where ?Sized T = pub wrap T`, so its payload may be
+`Shared T` is a garbage-collected reference to a value of type `T`, declared in
+`std.shared` and imported with `use std.shared.(Shared)`. Its standard
+declaration is `pub type Shared T where ?Sized T = pub wrap T`, so its payload may be
 sized or unsized while the reference value itself always has a known
 representation.
-Constructing `Ref value` copies or moves `value` into a managed allocation;
-copying a `Ref` copies only its non-null handle. Product fields and indices,
+Constructing `Shared value` copies or moves `value` into a managed allocation;
+copying a `Shared` copies only its non-null handle. Product fields and indices,
 including bracket indexing and index assignment, can be accessed and assigned
 directly through the handle when the binding holding the handle is declared
-`mut`; a `Ref` is transparent for field access and indexing, so these compose
+`mut`; a `Shared` is transparent for field access and indexing, so these compose
 through nested references as well. The standard library implements
-`Eq (Ref T)` whenever `T` implements `Eq`, comparing the referenced values
+`Eq (Shared T)` whenever `T` implements `Eq`, comparing the referenced values
 rather than the handles. Every alias, not only the binding that performed
 the write, observes the resulting payload mutation, since they all share the
 same managed allocation:
 
 ```staple
-let mut point: Ref (x: I32, y: I32) = Ref (x: 10, y: 20)
+let mut point: Shared (x: I32, y: I32) = Shared (x: 10, y: 20)
 let x = point.x
 point.x = 30
-let Ref (captured_x, captured_y) = point
+let Shared (captured_x, captured_y) = point
 ```
 
-The companion method `Ref.replace: <T> (mut Ref T; move T) -> T` replaces a whole
+The companion method `Shared.replace: <T> (mut Shared T; move T) -> T` replaces a whole
 fixed payload and returns the previous value:
 
 ```staple
-let mut value = Ref 10
-let previous = Ref.replace value 20
+let mut value = Shared 10
+let previous = Shared.replace value 20
 ```
 
-`Ref` follows the ordinary literal representation rules when nested inside a
+`Shared` follows the ordinary literal representation rules when nested inside a
 nominal type. For example, this declaration retains both constructor layers:
 
 ```staple
-type RefPoint = wrap Ref (x: I32, y: I32)
-let point = RefPoint (Ref (x: 10, y: 20))
-let RefPoint (Ref (x, y)) = point
+type SharedPoint = wrap Shared (x: I32, y: I32)
+let point = SharedPoint (Shared (x: 10, y: 20))
+let SharedPoint (Shared (x, y)) = point
 ```
 
 An array can be moved into a `SharedBuffer`:
@@ -4194,9 +4202,9 @@ it directly, trapping when out of bounds. `SharedBuffer.set` replaces an
 element through a `mut` handle binding, dropping the old value, and returns
 `Some ()`, or `None` (dropping the new value) for an out-of-bounds position;
 `SharedBuffer.set_unchecked` traps instead.
-`SharedBuffer.get_ref: <T> (SharedBuffer T; USize) -> Option (Ref T)` returns a
+`SharedBuffer.get_shared: <T> (SharedBuffer T; USize) -> Option (Shared T)` returns a
 reference to an element, or `None` when out of bounds, and
-`SharedBuffer.get_ref_unchecked: <T> (SharedBuffer T; USize) -> Ref T` borrows
+`SharedBuffer.get_shared_unchecked: <T> (SharedBuffer T; USize) -> Shared T` borrows
 an element by position, trapping when out of bounds; these give access to
 non-`Copy` elements. Literal and variable indexing perform runtime bounds
 checks through the standard library's `Index`/`MutateIndex` implementations.
@@ -4238,7 +4246,7 @@ buffer and returns a `SharedBuffer T` over a managed copy of its initialized
 prefix; the original allocation is released without dropping the moved
 elements. The consumed buffer cannot subsequently be used or shared again.
 The managed copy drops exactly its initialized elements when unreachable; a
-`SharedBuffer` or a `Ref` to one of its elements keeps it alive.
+`SharedBuffer` or a `Shared` to one of its elements keeps it alive.
 
 `Buffer.transfer` moves every initialized element of one buffer onto the end
 of another's initialized prefix, in order, and empties the source. Both
@@ -4306,7 +4314,7 @@ whole-value destructuring, and closure capture move a non-`Copy` value; using
 it afterward is an error. Argument passing moves a non-`Copy` value only into
 a `move` parameter; an ordinary parameter borrows it instead (see "Move and
 borrow parameters" above). Integers, `Bool`, `String`,
-`Ref T`, C pointers, functions, and products/sums/wrapper values made entirely
+`Shared T`, C pointers, functions, and products/sums/wrapper values made entirely
 from `Copy` fields are copied implicitly. The public prelude trait `Copy` can be
 used as a generic bound, but implementations are compiler-inferred and an
 explicit `impl Copy` is rejected. A custom `Drop` implementation makes its
@@ -4403,7 +4411,7 @@ still exist, resurrection does not retain those objects, and allocation is
 allowed while nested collection is suppressed.
 
 A managed allocation stays reachable through a pointer to any position inside
-it, not only its start. A `Ref` to one element of a `SharedBuffer`, or a
+it, not only its start. A `Shared` to one element of a `SharedBuffer`, or a
 `SharedBuffer` made by `Buffer.into_shared_buffer`, keeps the whole allocation alive, including the other
 elements, until no such pointer remains.
 
@@ -4604,7 +4612,7 @@ pub type RawPtr Pointee = opaque
 
 Arguments are part of nominal identity, so two applications with different
 arguments are distinct. Opaque types are unsized and non-`Copy` by default.
-They may be referenced through `Ref`, whose parameter accepts unsized types,
+They may be referenced through `Shared`, whose parameter accepts unsized types,
 but cannot be used by value or satisfy implicit `Sized` bounds.
 
 The standard-library-only intrinsic modifier `@sized_opaque`, declared in
@@ -4814,12 +4822,12 @@ applies to a self-reference too: a recursive `type Node T` must still write its
 own ordinary arguments, as `Node T` or `Node I32`, never a bare `Node`.
 
 A represented type may refer to itself, directly or mutually, only where the
-reference passes through an out-of-line indirection — `Ref`, `Unique`,
+reference passes through an out-of-line indirection — `Shared`, `Unique`,
 `SharedBuffer`, `Buffer`, or a `Syntax` value — so that every instance has a
 finite layout. A representation that would contain itself by value
 (`type Loop = wrap (head: I32, tail: Loop)`) is rejected as a cyclic
-definition; routing the back-edge through `Ref`
-(`type Loop = wrap (head: I32, tail: Option (Ref Loop))`) or a buffer
+definition; routing the back-edge through `Shared`
+(`type Loop = wrap (head: I32, tail: Option (Shared Loop))`) or a buffer
 (`type Tree = wrap (value: I32, children: Buffer Tree)`) is well-founded and
 accepted. A represented type whose parameters all occur in its
 representation only behind such an indirection guards a back-edge the same
@@ -4868,7 +4876,7 @@ let exact: A | B = b    // selects `B`, not `A`
 At most one `from` conversion is inserted for a mismatch. Given
 `type A = from B` and `type C = from A`, both `B -> A` and `A -> C` are
 implicit, but `B -> C` is not. Conversions also do not lift through other
-types: `Ref B`, `(B, B)`, `List B`, and `() -> B` do not convert to the
+types: `Shared B`, `(B, B)`, `List B`, and `() -> B` do not convert to the
 corresponding `A` forms. A literal written directly in such a position is
 still checked element by element, so `let pair: (A, A) = (b1, b2)` converts
 each element.

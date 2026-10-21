@@ -1212,6 +1212,7 @@ pub(crate) mod tests {
     #[test]
     fn constructors_and_structural_selections_reserve_typed_artifacts() {
         let lowered = lower(concat!(
+            "use std.shared.(Shared)\n",
             "type Point = wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
@@ -1223,12 +1224,12 @@ pub(crate) mod tests {
             "  for item in pair { count = count + 1 }\n",
             "  count\n",
             "}\n",
-            "def deref_mixed: (Ref (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
+            "def deref_mixed: (Shared (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
             "let shown = show_pair (1, 2)\n",
             "let sum = show_sum (pick True)\n",
             "let picked = index_mixed ((U8 :: 1), 2)\n",
             "let counted = count_pair ((U8 :: 1), 2)\n",
-            "let dereferenced = deref_mixed (Ref ((U8 :: 1), 2))\n",
+            "let dereferenced = deref_mixed (Shared ((U8 :: 1), 2))\n",
             "let p = (1, 2)\n",
             "let text = \"${p:?}\"\n",
         ));

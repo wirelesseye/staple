@@ -390,7 +390,7 @@ pub(super) fn collect_referenced_parameters(
         CheckedType::Parameter { id, .. } => {
             out.insert(*id);
         }
-        CheckedType::Ref(payload)
+        CheckedType::Shared(payload)
         | CheckedType::Unique(payload)
         | CheckedType::SharedBuffer(payload)
         | CheckedType::Buffer(payload)
@@ -757,7 +757,7 @@ fn merge_substitution_values(
     // The complete checked callable type is authoritative for the target
     // template's own parameters. A nested trait request that re-instantiates
     // a declaration the enclosing instance already maps is legal same-function
-    // recursion at a different type (`Ref (Ref T)` comparing its `Ref T`
+    // recursion at a different type (`Shared (Shared T)` comparing its `Shared T`
     // elements); the fresh inferred value must win, exactly as the backend's
     // specialization queue keeps the inferred substitutions and only fills
     // missing entries from the active environment. The enclosing environment
@@ -977,7 +977,7 @@ pub(super) fn unresolved_type_problem_in_scope(
 fn contains_placeholder(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Inferred | CheckedType::Error => true,
-        CheckedType::Ref(payload)
+        CheckedType::Shared(payload)
         | CheckedType::Unique(payload)
         | CheckedType::SharedBuffer(payload)
         | CheckedType::Buffer(payload)
@@ -2121,7 +2121,7 @@ impl LoweredProgram {
             CheckedType::Wrapper { representation, .. } => {
                 self.contains_recursive_payload(representation)
             }
-            CheckedType::Unique(payload) | CheckedType::Ref(payload) | CheckedType::Buffer(payload) => {
+            CheckedType::Unique(payload) | CheckedType::Shared(payload) | CheckedType::Buffer(payload) => {
                 self.contains_recursive_payload(payload)
             }
             CheckedType::Product(product) => product
@@ -3051,7 +3051,7 @@ impl<'a> ParameterCollector<'a> {
             | CheckedType::RawOpaquePtr
             | CheckedType::CChar => {}
             CheckedType::Parameter { id, name, .. } => self.relevant.notice_type(*id, name),
-            CheckedType::Ref(payload)
+            CheckedType::Shared(payload)
             | CheckedType::Unique(payload)
             | CheckedType::SharedBuffer(payload)
             | CheckedType::Buffer(payload)
@@ -4510,7 +4510,7 @@ mod tests {
     fn self_and_longer_cycles_are_detected_before_substitution() {
         let error = build_environment(vec![(
             10,
-            SubstitutionValue::Type(CheckedType::Ref(Box::new(parameter_type(10, "T")))),
+            SubstitutionValue::Type(CheckedType::Shared(Box::new(parameter_type(10, "T")))),
             SubstitutionSource::Site,
         )])
         .expect_err("a self-reference diagnoses");
@@ -4724,14 +4724,14 @@ mod tests {
     #[test]
     fn inferred_values_override_a_stale_enclosing_instantiation() {
         // Legal same-function recursion at a different type: the enclosing
-        // instance maps `T` to `Ref I32` while the nested call re-instantiates
+        // instance maps `T` to `Shared I32` while the nested call re-instantiates
         // it to `I32`. The fresh inferred value must win, in either candidate
         // order, matching the backend's specialization queue.
         for candidates in [
             vec![
                 (
                     0,
-                    SubstitutionValue::Type(CheckedType::Ref(Box::new(CheckedType::I32))),
+                    SubstitutionValue::Type(CheckedType::Shared(Box::new(CheckedType::I32))),
                     SubstitutionSource::EnclosingInstance,
                 ),
                 (
@@ -4748,7 +4748,7 @@ mod tests {
                 ),
                 (
                     0,
-                    SubstitutionValue::Type(CheckedType::Ref(Box::new(CheckedType::I32))),
+                    SubstitutionValue::Type(CheckedType::Shared(Box::new(CheckedType::I32))),
                     SubstitutionSource::EnclosingInstance,
                 ),
             ],

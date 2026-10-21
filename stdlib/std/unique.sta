@@ -17,7 +17,6 @@ extern "staple-intrinsic" {
 }
 
 companion<T where ?Sized T> Unique T {
-    use package.ptr.(RawMutPtr)
     /// Transfers ownership to the caller without cleanup or deallocation.
     /// While raw, the allocation and its payload stay alive as collector roots.
     /// The caller must eventually reconstruct the owner or clean up and free

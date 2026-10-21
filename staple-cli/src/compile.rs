@@ -3243,34 +3243,35 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn runs_refs_across_automatic_collection() {
+    fn runs_shared_values_across_automatic_collection() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source = std::env::temp_dir().join(format!("staple-compiler-ref-{nonce}.sta"));
-        let output = std::env::temp_dir().join(format!("staple-compiler-ref-{nonce}"));
+        let source = std::env::temp_dir().join(format!("staple-compiler-shared-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-shared-{nonce}"));
         std::fs::write(
             &source,
             concat!(
+                "use std.shared.(Shared)\n",
                 "extern \"c\" { exit: I32 -> () }\n",
                 "def churn: I32 -> () = n => match n == 0 {\n",
                 "  True() => (),\n",
-                "  False() => { Ref n; churn (n - 1) },\n",
+                "  False() => { Shared n; churn (n - 1) },\n",
                 "}\n",
                 "def make_reader = () => {\n",
-                "  def captured = Ref 42\n",
+                "  def captured = Shared 42\n",
                 "  () => captured\n",
                 "}\n",
-                "let keep = Ref (x: 42, y: 7)\n",
+                "let keep = Shared (x: 42, y: 7)\n",
                 "let read = make_reader ()\n",
                 "churn 40000\n",
                 "churn 40000\n",
-                "let Ref captured = read ()\n",
+                "let Shared captured = read ()\n",
                 "exit ((keep.x - 42) + (captured - 42))\n",
             ),
         )
-        .expect("temporary Ref source should be writable");
+        .expect("temporary Shared source should be writable");
         let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -3284,10 +3285,10 @@ mod tests {
             output.clone().into_os_string(),
             source.clone().into_os_string(),
         ])
-        .expect("Ref executable should compile");
+        .expect("Shared executable should compile");
         let status = Command::new(&output)
             .status()
-            .expect("Ref executable should run");
+            .expect("Shared executable should run");
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(output);
         assert!(status.success());
@@ -3305,12 +3306,13 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
+                "use std.shared.(Shared)\n",
                 "use std.buffer.Buffer\n",
                 "use std.shared_buffer.SharedBuffer\n",
                 "extern \"c\" { exit: I32 -> () }\n",
                 "def churn: I32 -> () = n => match n == 0 {\n",
                 "  True() => (),\n",
-                "  False() => { Ref n; churn (n - 1) },\n",
+                "  False() => { Shared n; churn (n - 1) },\n",
                 "}\n",
                 "def make_slice = () => {\n",
                 "  let mut values: Buffer I32 = Buffer.with_capacity 2\n",
@@ -3653,6 +3655,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
+                "use std.shared.(Shared)\n",
                 "use std.shared_buffer.SharedBuffer\n",
                 "extern \"c\" { exit: I32 -> () }\n",
                 "let index: USize = 1\n",
@@ -3660,12 +3663,12 @@ mod tests {
                 "product[index] = 21\n",
                 "let mut slice: SharedBuffer I32 = SharedBuffer.from_array product\n",
                 "slice[index] = 22\n",
-                "match SharedBuffer.get_ref slice 0 { Some (Ref value) => if (value != 10) { exit 1 }, None() => exit 1 }\n",
-                "match slice |> get_ref 2 { Some (Ref value) => if (value != 30) { exit 1 }, None() => exit 1 }\n",
-                "match SharedBuffer.get_ref slice 3 { None() => (), Some _ => exit 1 }\n",
-                "match SharedBuffer.get_ref slice 100 { None() => (), Some _ => exit 1 }\n",
+                "match SharedBuffer.get_shared slice 0 { Some (Shared value) => if (value != 10) { exit 1 }, None() => exit 1 }\n",
+                "match slice |> get_shared 2 { Some (Shared value) => if (value != 30) { exit 1 }, None() => exit 1 }\n",
+                "match SharedBuffer.get_shared slice 3 { None() => (), Some _ => exit 1 }\n",
+                "match SharedBuffer.get_shared slice 100 { None() => (), Some _ => exit 1 }\n",
                 "let empty: SharedBuffer I32 = SharedBuffer.from_array ()\n",
-                "match SharedBuffer.get_ref empty 0 { None() => (), Some _ => exit 1 }\n",
+                "match SharedBuffer.get_shared empty 0 { None() => (), Some _ => exit 1 }\n",
 
                 "def score: ((I32, String, Bool), USize) -> I32 = (values, position) => match values[position] {\n",
                 "  value: I32 => value,\n",
@@ -3833,7 +3836,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn runs_mutable_bindings_captures_and_refs() {
+    fn runs_mutable_bindings_captures_and_shared_values() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -3843,11 +3846,12 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
+                "use std.shared.(Shared)\n",
                 "extern \"c\" { exit: I32 -> () }\n",
                 "type Resource = wrap I32\n",
                 "def release = () => { let mut handle = Resource 1; handle = Resource 2 }\n",
                 "def abandon = () => { let mut handle = Resource 4; let update = () => { handle = Resource 5 }; update () }\n",
-                "def churn: I32 -> () = n => match n == 0 { True() => (), False() => { Ref n; churn (n - 1) } }\n",
+                "def churn: I32 -> () = n => match n == 0 { True() => (), False() => { Shared n; churn (n - 1) } }\n",
                 "def update_data = mut data: I32 => { data = 42 }\n",
                 "def make_counter = () => {\n",
                 "  let mut value = 1\n",
@@ -3856,11 +3860,11 @@ mod tests {
                 "let counter = make_counter ()\n",
                 "let first = counter ()\n",
                 "let second = counter ()\n",
-                "let mut point = Ref (x: 4, y: 5)\n",
+                "let mut point = Shared (x: 4, y: 5)\n",
                 "point.x = 6\n",
-                "let mut scalar = Ref 7\n",
-                "let old = Ref.replace scalar 8\n",
-                "let Ref current = scalar\n",
+                "let mut scalar = Shared 7\n",
+                "let old = Shared.replace scalar 8\n",
+                "let Shared current = scalar\n",
                 "let mut data = 1\n",
                 "update_data data\n",
                 "update_data (20 + 22)\n",
@@ -4218,18 +4222,19 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
+                "use std.shared.(Shared)\n",
                 "extern \"c\" { exit: I32 -> () }\n",
-                "def churn: I32 -> () = n => match n == 0 { True() => (), False() => { Ref n; churn (n - 1) } }\n",
+                "def churn: I32 -> () = n => match n == 0 { True() => (), False() => { Shared n; churn (n - 1) } }\n",
                 "let mut disposed_runs = 0\n",
                 "let mut observed = 0\n",
-                "let captured = Ref 42\n",
+                "let captured = Shared 42\n",
                 "batch {\n",
                 "  with Reactive = reactive_scope () { reaction { disposed_runs = disposed_runs + 1; () } }\n",
                 "  ()\n",
                 "}\n",
                 "with Reactive = reactive_scope () {\n",
                 "  batch {\n",
-                "    reaction { let Ref value = captured; observed = value; () }\n",
+                "    reaction { let Shared value = captured; observed = value; () }\n",
                 "    churn 40000\n",
                 "    churn 40000\n",
                 "    ()\n",

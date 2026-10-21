@@ -71,7 +71,7 @@ fn invalid_spread_substitution(
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             arguments.iter().find_map(visit)
         }
-        CheckedType::Ref(ty)
+        CheckedType::Shared(ty)
         | CheckedType::Unique(ty)
         | CheckedType::SharedBuffer(ty)
         | CheckedType::Buffer(ty)

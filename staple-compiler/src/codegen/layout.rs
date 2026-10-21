@@ -300,7 +300,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             CheckedType::SharedBuffer(_) => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
-            CheckedType::Ref(_) | CheckedType::Unique(_) => {
+            CheckedType::Shared(_) | CheckedType::Unique(_) => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
             CheckedType::Buffer(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),

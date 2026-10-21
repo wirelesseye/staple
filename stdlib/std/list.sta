@@ -25,7 +25,6 @@ def grow = <T> mut list: List T => () :: {
 }
 
 companion<T> List T {
-    use package.buffer.(Buffer)
     /// Returns the number of elements in the list.
     pub def length = list: List T => USize :: list.* |> length
 
@@ -179,7 +178,7 @@ impl<T> MutateIndex (List T) USize {
 
 pub type ListIter T = pub wrap (list: List T, index: USize)
 
-// Copy-T-gated, like `get`/`Index` — yields owned copies. A Ref-yielding
+// Copy-T-gated, like `get`/`Index` — yields owned copies. A Shared-yielding
 // iterator for non-Copy element types is intentionally left for later.
 impl<T where Copy T> Iterator (ListIter T) {
     type Item = T

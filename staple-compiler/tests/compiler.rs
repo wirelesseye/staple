@@ -1899,7 +1899,7 @@ fn marks_compiler_owned_recursive_constructors() {
     };
 
     assert_eq!(
-        construction_for("Ref"),
+        construction_for("Shared"),
         Some(RecursiveConstruction::ManagedReference)
     );
     assert_eq!(
@@ -1957,22 +1957,23 @@ fn rejects_a_bare_generic_type_constructor_used_as_a_value_type() {
 
 #[test]
 fn allows_a_recursive_type_guarded_by_a_recursive_constructor() {
-    type_check("type Node T = wrap (value: T, next: Option (Ref (Node I32)))\n");
-    type_check("type List T = wrap (head: T, tail: Option (Ref (List T)))\n");
-    type_check("type Chain = wrap (head: I32, tail: Option (Ref Chain))\n");
+    type_check("use std.shared.(Shared)\ntype Node T = wrap (value: T, next: Option (Shared (Node I32)))\n");
+    type_check("use std.shared.(Shared)\ntype List T = wrap (head: T, tail: Option (Shared (List T)))\n");
+    type_check("use std.shared.(Shared)\ntype Chain = wrap (head: I32, tail: Option (Shared Chain))\n");
 }
 
 #[test]
 fn constructs_a_recursive_value_through_its_own_indirection_arm() {
     // The recursive self-reference stand-in carries an `Opaque` placeholder
-    // representation; passing `Ref node` back into the type's own constructor
-    // makes generic inference for `Ref` reconcile that placeholder against the
+    // representation; passing `Shared node` back into the type's own constructor
+    // makes generic inference for `Shared` reconcile that placeholder against the
     // fully-resolved `Node`, which must not be reported as a conflict.
     type_check(concat!(
-        "type Node = wrap () | (Ref Node)\n",
+        "use std.shared.(Shared)\n",
+        "type Node = wrap () | (Shared Node)\n",
         "let node1 = Node ()\n",
-        "let node2 = Node (Ref node1)\n",
-        "let node3 = Node (Ref node2)\n",
+        "let node2 = Node (Shared node1)\n",
+        "let node3 = Node (Shared node2)\n",
     ));
 }
 
@@ -1985,12 +1986,13 @@ fn still_rejects_a_recursive_type_with_no_indirection() {
 
 #[test]
 fn recursive_constructor_guard_does_not_leak_into_a_nested_type() {
-    // `Ref` is open while resolving `Outer`, but that must not license
+    // `Shared` is open while resolving `Outer`, but that must not license
     // `Inner`'s own by-value self-reference.
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
+            "use std.shared.(Shared)\n",
             "type Inner = wrap (here: I32, again: Inner)\n",
-            "type Outer = wrap (inner: Option (Ref Inner))\n",
+            "type Outer = wrap (inner: Option (Shared Inner))\n",
         )))
         .expect_err_diagnostics("a nested by-value cycle is still rejected");
     assert!(
@@ -2109,8 +2111,9 @@ fn from_array_accepts_generic_arrays_and_is_first_class() {
 #[test]
 fn checks_nullary_calls_inside_argument_positions() {
     let module = type_check(concat!(
-        "def take: <N where Natural N> Ref (I32 ^ N) -> I32 = <N where Natural N> value => 0\n",
-        "let result: I32 = take (Ref ())\n",
+        "use std.shared.(Shared)\n",
+        "def take: <N where Natural N> Shared (I32 ^ N) -> I32 = <N where Natural N> value => 0\n",
+        "let result: I32 = take (Shared ())\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
@@ -2802,18 +2805,19 @@ fn keeps_named_spread_override_behavior() {
 }
 
 #[test]
-fn type_checks_and_lowers_mutable_places_and_ref_replace() {
+fn type_checks_and_lowers_mutable_places_and_shared_replace() {
     let source = concat!(
+        "use std.shared.(Shared)\n",
         "let mut value = 1\n",
         "value = 2\n",
         "let mut pair = (x: 3, y: 4)\n",
         "pair.x = value\n",
-        "let mut fixed: Ref (I32 ^ 2) = Ref (5, 6)\n",
+        "let mut fixed: Shared (I32 ^ 2) = Shared (5, 6)\n",
         "fixed.0 = pair.x\n",
         "let index: USize = 1\n",
         "fixed[index] = 7\n",
-        "let mut scalar = Ref 8\n",
-        "let old = Ref.replace scalar 9\n",
+        "let mut scalar = Shared 8\n",
+        "let old = Shared.replace scalar 9\n",
         "def local = () => { let mut inside = 10; inside = old; inside }\n",
     );
     let module = type_check(source);
@@ -2823,7 +2827,7 @@ fn type_checks_and_lowers_mutable_places_and_ref_replace() {
         .expect("mutable places should generate LLVM");
     assert!(llvm.contains("binding.cell"));
     assert!(llvm.contains("place.field"));
-    assert!(llvm.contains("ref.replace.old"));
+    assert!(llvm.contains("shared.replace.old"));
 }
 
 #[test]
@@ -2853,9 +2857,10 @@ fn type_checks_the_two_binding_mutability_forms() {
     // effect covers the corresponding position. Match binders still use an
     // explicit `mut` pattern.
     type_check(concat!(
+        "use std.shared.(Shared)\n",
         "type Box = wrap I32\n",
         "def parameter = (value: I32) => { let mut value = value; value = value + 1; value }\n",
-        "def field_write: mut Ref (x: I32, y: I32) -> () = mut value => { value.x = 1 }\n",
+        "def field_write: mut Shared (x: I32, y: I32) -> () = mut value => { value.x = 1 }\n",
         "def matched = (value: Box) => match value { Box (mut inner) => { inner = 2; inner } }\n",
     ));
 
@@ -2877,27 +2882,29 @@ fn type_checks_the_two_binding_mutability_forms() {
 }
 
 #[test]
-fn writes_through_a_ref_require_mut_on_a_named_root() {
-    // A named `Ref`-typed binding needs `mut` to be written through.
+fn writes_through_a_shared_require_mut_on_a_named_root() {
+    // A named `Shared`-typed binding needs `mut` to be written through.
     type_check(concat!(
-        "let mut cell: Ref (I32 ^ 2) = Ref (1, 2)\n",
+        "use std.shared.(Shared)\n",
+        "let mut cell: Shared (I32 ^ 2) = Shared (1, 2)\n",
         "cell.0 = 3\n",
     ));
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "let cell: Ref (I32 ^ 2) = Ref (1, 2)\ncell.0 = 3\n",
+            "use std.shared.(Shared)\nlet cell: Shared (I32 ^ 2) = Shared (1, 2)\ncell.0 = 3\n",
         ))
-        .expect_err_diagnostics("writing through a `Ref` requires `mut` on the binding");
+        .expect_err_diagnostics("writing through a `Shared` requires `mut` on the binding");
     assert!(
         diagnostics
             .iter()
             .any(|d| d.message.contains("not declared `mut`"))
     );
 
-    // A rootless `Ref` temporary remains writable regardless.
+    // A rootless `Shared` temporary remains writable regardless.
     type_check(concat!(
-        "def make_ref = () => Ref (3, 4)\n",
-        "(make_ref ()).0 = 5\n",
+        "use std.shared.(Shared)\n",
+        "def make_shared = () => Shared (3, 4)\n",
+        "(make_shared ()).0 = 5\n",
     ));
 }
 
@@ -2933,8 +2940,9 @@ fn function_mutations(module: &staple_compiler::TypedModule, name: &str) -> Vec<
 #[test]
 fn a_parameter_marker_declares_a_positional_mutation() {
     let module = type_check(concat!(
-        "def f = (mut p: Ref (I32, I32)) => { p.0 = 1 }\n",
-        "def g = () => { let mut pair: Ref (I32, I32) = Ref (1, 2); f pair }\n",
+        "use std.shared.(Shared)\n",
+        "def f = (mut p: Shared (I32, I32)) => { p.0 = 1 }\n",
+        "def g = () => { let mut pair: Shared (I32, I32) = Shared (1, 2); f pair }\n",
     ));
     assert_eq!(
         function_mutations(&module, "f"),
@@ -2945,7 +2953,7 @@ fn a_parameter_marker_declares_a_positional_mutation() {
 #[test]
 fn rejects_a_declared_empty_effect_set_when_the_body_mutates_a_parameter() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("def f: Ref (I32, I32) -> () = p => { p.0 = 1 }\n"))
+        .check(resolve("use std.shared.(Shared)\ndef f: Shared (I32, I32) -> () = p => { p.0 = 1 }\n"))
         .expect_err_diagnostics("an empty declared effect set forbids mutation");
     assert!(
         diagnostics
@@ -2958,7 +2966,8 @@ fn rejects_a_declared_empty_effect_set_when_the_body_mutates_a_parameter() {
 fn rejects_a_declared_mutation_target_the_body_does_not_write() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "def f: (mut a: Ref (I32, I32), b: Ref (I32, I32)) -> () = (a, b) => { b.0 = 1 }\n",
+            "use std.shared.(Shared)\n",
+            "def f: (mut a: Shared (I32, I32), b: Shared (I32, I32)) -> () = (a, b) => { b.0 = 1 }\n",
         )))
         .expect_err_diagnostics("writing `b` exceeds the declared `mut a`");
     assert!(
@@ -2971,9 +2980,9 @@ fn rejects_a_declared_mutation_target_the_body_does_not_write() {
 #[test]
 fn resolves_named_and_positional_mutation_targets_to_the_same_type() {
     let by_index =
-        type_check("def f: (mut a: Ref (I32, I32), b: I32) -> () = (mut a, b) => { a.0 = 1 }\n");
+        type_check("use std.shared.(Shared)\ndef f: (mut a: Shared (I32, I32), b: I32) -> () = (mut a, b) => { a.0 = 1 }\n");
     let by_name =
-        type_check("def f: (mut a: Ref (I32, I32), b: I32) -> () = (mut a, b) => { a.0 = 1 }\n");
+        type_check("use std.shared.(Shared)\ndef f: (mut a: Shared (I32, I32), b: I32) -> () = (mut a, b) => { a.0 = 1 }\n");
     assert_eq!(
         function_mutations(&by_index, "f"),
         function_mutations(&by_name, "f"),
@@ -2982,15 +2991,16 @@ fn resolves_named_and_positional_mutation_targets_to_the_same_type() {
 
 #[test]
 fn a_whole_parameter_declaration_covers_writing_a_single_element() {
-    type_check("def f: mut Ref (I32, I32) -> () = mut p => { p.0 = 1 }\n");
+    type_check("use std.shared.(Shared)\ndef f: mut Shared (I32, I32) -> () = mut p => { p.0 = 1 }\n");
 }
 
 #[test]
 fn call_site_mutation_requires_an_explicit_caller_marker() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "def f: mut Ref (I32, I32) -> () = mut p => { p.0 = 1 }\n",
-            "def g = (q: Ref (I32, I32)) => { f q }\n",
+            "use std.shared.(Shared)\n",
+            "def f: mut Shared (I32, I32) -> () = mut p => { p.0 = 1 }\n",
+            "def g = (q: Shared (I32, I32)) => { f q }\n",
         )))
         .expect_err_diagnostics("mutation permissions must not propagate into callers");
     assert!(
@@ -3000,8 +3010,9 @@ fn call_site_mutation_requires_an_explicit_caller_marker() {
     );
 
     let module = type_check(concat!(
-        "def f: mut Ref (I32, I32) -> () = mut p => { p.0 = 1 }\n",
-        "def g = (mut q: Ref (I32, I32)) => { f q }\n",
+        "use std.shared.(Shared)\n",
+        "def f: mut Shared (I32, I32) -> () = mut p => { p.0 = 1 }\n",
+        "def g = (mut q: Shared (I32, I32)) => { f q }\n",
     ));
     assert_eq!(
         function_mutations(&module, "g"),
@@ -3013,8 +3024,9 @@ fn call_site_mutation_requires_an_explicit_caller_marker() {
 fn rejects_passing_a_non_mut_binding_to_a_mutating_parameter() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "def f: mut Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
-            "def g = () => { let pair: Ref (I32, I32) = Ref (1, 2); f pair }\n",
+            "use std.shared.(Shared)\n",
+            "def f: mut Shared (I32, I32) -> () = p => { p.0 = 1 }\n",
+            "def g = () => { let pair: Shared (I32, I32) = Shared (1, 2); f pair }\n",
         )))
         .expect_err_diagnostics("the caller's binding must be declared `mut`");
     assert!(diagnostics.iter().any(|d| {
@@ -3026,7 +3038,8 @@ fn rejects_passing_a_non_mut_binding_to_a_mutating_parameter() {
 #[test]
 fn a_closure_may_mutate_an_explicitly_marked_captured_parameter() {
     let module = type_check(concat!(
-        "def outer = (mut p: Ref (I32, I32)) => {\n",
+        "use std.shared.(Shared)\n",
+        "def outer = (mut p: Shared (I32, I32)) => {\n",
         "  let update = () => { p.0 = 1 }\n",
         "  update ()\n",
         "}\n",
@@ -3041,8 +3054,9 @@ fn a_closure_may_mutate_an_explicitly_marked_captured_parameter() {
 fn rejects_an_impl_member_that_mutates_beyond_its_trait_declaration() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
+            "use std.shared.(Shared)\n",
             "trait Reset T { reset: T -> () }\n",
-            "impl Reset (Ref (I32, I32)) { reset = p => { p.0 = 0 } }\n",
+            "impl Reset (Shared (I32, I32)) { reset = p => { p.0 = 0 } }\n",
         )))
         .expect_err_diagnostics("the impl mutates a parameter its trait does not declare");
     assert!(
@@ -3053,12 +3067,13 @@ fn rejects_an_impl_member_that_mutates_beyond_its_trait_declaration() {
 }
 
 #[test]
-fn an_explicit_mut_effect_passes_through_a_ref_crossing_local_alias() {
+fn an_explicit_mut_effect_passes_through_a_shared_crossing_local_alias() {
     let module = type_check(concat!(
-        "type MyInt = wrap Ref I32\n",
+        "use std.shared.(Shared)\n",
+        "type MyInt = wrap Shared I32\n",
         "def mutate_my_int: (mut MyInt, I32) -> () = (mut my_int, value) => {\n",
         "  let MyInt mut inner = my_int\n",
-        "  Ref.replace inner value\n",
+        "  Shared.replace inner value\n",
         "  ()\n",
         "}\n",
         "def foo = (mut my_int: MyInt) => { mutate_my_int (my_int, 42) }\n",
@@ -3070,14 +3085,15 @@ fn an_explicit_mut_effect_passes_through_a_ref_crossing_local_alias() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type MyInt = wrap Ref I32\n",
+            "use std.shared.(Shared)\n",
+            "type MyInt = wrap Shared I32\n",
             "def mutate_my_int: (mut MyInt, I32) -> () = (mut my_int, value) => {\n",
             "  let MyInt mut inner = my_int\n",
-            "  Ref.replace inner value\n",
+            "  Shared.replace inner value\n",
             "  ()\n",
             "}\n",
             "def bad = () => {\n",
-            "  let my_int: MyInt = MyInt (Ref 1)\n",
+            "  let my_int: MyInt = MyInt (Shared 1)\n",
             "  mutate_my_int (my_int, 42)\n",
             "}\n",
         )))
@@ -3106,9 +3122,10 @@ fn llvm_parameter_count(llvm: &str, function: &str) -> usize {
 #[test]
 fn a_mut_effect_adds_no_hidden_parameter_to_the_abi() {
     let module = type_check(concat!(
+        "use std.shared.(Shared)\n",
         "type Clock = wrap I32\n",
-        "def f: mut Ref (I32, I32) -> () = mut p => { p.0 = 1 }\n",
-        "def g: mut Ref (I32, I32) ->{Clock} () = mut p => { p.0 = 1 }\n",
+        "def f: mut Shared (I32, I32) -> () = mut p => { p.0 = 1 }\n",
+        "def g: mut Shared (I32, I32) ->{Clock} () = mut p => { p.0 = 1 }\n",
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
@@ -3123,15 +3140,16 @@ fn a_mut_effect_adds_no_hidden_parameter_to_the_abi() {
 }
 
 #[test]
-fn a_mutated_ref_parameter_lowers_and_the_caller_observes_the_write() {
+fn a_mutated_shared_parameter_lowers_and_the_caller_observes_the_write() {
     let module = type_check(concat!(
-        "def f: mut Ref (I32, I32) -> () = mut p => { p.0 = p.0 + 1 }\n",
-        "def use_it = () => { let mut pair: Ref (I32, I32) = Ref (1, 2); f pair; pair.0 }\n",
+        "use std.shared.(Shared)\n",
+        "def f: mut Shared (I32, I32) -> () = mut p => { p.0 = p.0 + 1 }\n",
+        "def use_it = () => { let mut pair: Shared (I32, I32) = Shared (1, 2); f pair; pair.0 }\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_root(&lower(&module))
-        .expect("a mutated Ref parameter should lower");
+        .expect("a mutated Shared parameter should lower");
 }
 
 #[test]
@@ -3326,6 +3344,7 @@ fn rejects_invalid_assignment_targets_and_uninitialized_mutable_lets() {
 #[test]
 fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
     let module = type_check(concat!(
+        "use std.shared.(Shared)\n",
         "use std.cinterop.*\n",
         "def local = (move first: CString, move second: CString) => {\n",
         "  let mut value = first\n",
@@ -3340,8 +3359,8 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
         "  () => { let old = value; value = c_string \"next\"; drop old }\n",
         "}\n",
         "def managed = (move initial: CString, move next: CString) => {\n",
-        "  let mut reference = Ref initial\n",
-        "  let old = Ref.replace reference next\n",
+        "  let mut reference = Shared initial\n",
+        "  let old = Shared.replace reference next\n",
         "  drop old\n",
         "}\n",
     ));
@@ -3352,30 +3371,32 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
         .expect("move-only mutable cells should generate LLVM");
     assert!(llvm.contains("cell.drop.is_live"));
     assert_artifact_definition(&llvm, &lowered, PlannedArtifactFamily::GcCellFinalizer);
-    assert!(llvm.contains("ref.replace.old"));
+    assert!(llvm.contains("shared.replace.old"));
 }
 
 #[test]
-fn supports_mutable_parameter_match_and_copy_ref_pattern_binders() {
+fn supports_mutable_parameter_match_and_copy_shared_pattern_binders() {
     type_check(concat!(
+        "use std.shared.(Shared)\n",
         "type Box = wrap I32\n",
         "type Empty\n",
         "def parameter = (value: I32) => { let mut value = value; value = value + 1; value }\n",
         "def matched = (value: Box | Empty) => match value { Box (mut inner) => { inner = 3; inner }, Empty() => 0 }\n",
-        "def borrowed = (value: Ref I32) => { let Ref (mut inner) = value; inner = 4; inner }\n",
+        "def borrowed = (value: Shared I32) => { let Shared (mut inner) = value; inner = 4; inner }\n",
     ));
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
+            "use std.shared.(Shared)\n",
             "type Resource = wrap I32\n",
             "impl Drop Resource { cleanup = Resource value => () }\n",
-            "def invalid = (value: Ref Resource) => { let Ref (mut inner) = value; inner }\n",
+            "def invalid = (value: Shared Resource) => { let Shared (mut inner) = value; inner }\n",
         )))
-        .expect_err_diagnostics("move-only Ref borrows cannot become mutable locals");
+        .expect_err_diagnostics("move-only Shared borrows cannot become mutable locals");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("borrowed through `Ref` cannot be bound as `mut`")
+            .contains("borrowed through `Shared` cannot be bound as `mut`")
     }));
 }
 
@@ -3415,6 +3436,7 @@ fn rejects_invalid_product_spreads_and_indices() {
 #[test]
 fn derives_trait_delegated_product_indexing() {
     let source = concat!(
+        "use std.shared.(Shared)\n",
         "use std.shared_buffer.SharedBuffer\n",
         "def select: <A, B where Copy A, Copy B> ((A, B), USize) -> A | B = <A, B where Copy A, Copy B> (pair, position) => pair[position]\n",
         "let pair = (1, \"two\")\n",
@@ -3428,8 +3450,8 @@ fn derives_trait_delegated_product_indexing() {
         "updated[position] = 9\n",
         "let mutate_by_value: (mut (I32 ^ 3), USize, I32) -> () = MutateIndex.mutate_index\n",
         "mutate_by_value (updated, position, 10)\n",
-        "let mut fixed: Ref (I32 ^ 3) = Ref updated\n",
-        "let mutate_operation: (mut Ref (I32 ^ 3), USize, I32) -> () = MutateIndex.mutate_index\n",
+        "let mut fixed: Shared (I32 ^ 3) = Shared updated\n",
+        "let mutate_operation: (mut Shared (I32 ^ 3), USize, I32) -> () = MutateIndex.mutate_index\n",
         "mutate_operation (fixed, position, 6)\n",
         "fixed[position] = 7\n",
         "let mut erased: SharedBuffer I32 = SharedBuffer.from_array updated\n",
@@ -3492,7 +3514,7 @@ fn rejects_by_value_indexed_assignment_without_mut_binding() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "let values: Ref (I32 ^ 2) = Ref (1, 2)\nvalues[2] = 3\n",
+            "use std.shared.(Shared)\nlet values: Shared (I32 ^ 2) = Shared (1, 2)\nvalues[2] = 3\n",
         ))
         .expect_err_diagnostics("known out-of-bounds MutateIndex must be rejected");
     assert!(
@@ -3505,10 +3527,11 @@ fn rejects_by_value_indexed_assignment_without_mut_binding() {
 #[test]
 fn derives_mutate_index_for_move_only_homogeneous_products() {
     let source = concat!(
+        "use std.shared.(Shared)\n",
         "use std.cinterop.CString\n",
         "def mutate_by_value = (mut values: (CString ^ 2), position: USize, move replacement: CString) => { ",
         "values[position] = replacement; () }\n",
-        "def mutate = (mut values: Ref (CString ^ 2), position: USize, move replacement: CString) => { ",
+        "def mutate = (mut values: Shared (CString ^ 2), position: USize, move replacement: CString) => { ",
         "values[position] = replacement; () }\n",
     );
     let module = type_check(source);
@@ -3536,63 +3559,65 @@ fn rejects_overlapping_structural_indexing_implementations() {
 }
 
 #[test]
-fn delegates_indexing_through_refs_to_the_payload() {
+fn delegates_indexing_through_shared_values_to_the_payload() {
     let source = concat!(
+        "use std.shared.(Shared)\n",
         "use std.list.List\n",
         "use std.shared_buffer.SharedBuffer\n",
-        "def mixed_at: (Ref (I32, Bool), USize) -> I32 | Bool = (pair, position) => pair[position]\n",
-        "def list_at: (Ref (List I32), USize) -> I32 = (list, position) => list[position]\n",
+        "def mixed_at: (Shared (I32, Bool), USize) -> I32 | Bool = (pair, position) => pair[position]\n",
+        "def list_at: (Shared (List I32), USize) -> I32 = (list, position) => list[position]\n",
         "let fixed: (I32 ^ 3) = (1, 2, 3)\n",
         "let values: SharedBuffer I32 = SharedBuffer.from_array fixed\n",
-        "def slice_at: (Ref (SharedBuffer I32), USize) -> I32 = (slice, position) => slice[position]\n",
+        "def slice_at: (Shared (SharedBuffer I32), USize) -> I32 = (slice, position) => slice[position]\n",
         "type Keyed = wrap (key: String, value: I32)\n",
         "impl Index Keyed String { type Output = I32; index = (entry, key) => entry.value }\n",
-        "def keyed_at: (Ref Keyed, String) -> I32 = (entry, key) => entry[key]\n",
-        "def nested_at: (Ref (Ref (I32 ^ 3)), USize) -> I32 = (values, position) => values[position]\n",
-        "def fixed_at: (Ref (I32 ^ 3), USize) -> I32 = (values, position) => values[position]\n",
-        "def generic_at: <T where Index T USize> (Ref T, USize) -> Index.Output T USize = <T where Index T USize> (values, position) => values[position]\n",
+        "def keyed_at: (Shared Keyed, String) -> I32 = (entry, key) => entry[key]\n",
+        "def nested_at: (Shared (Shared (I32 ^ 3)), USize) -> I32 = (values, position) => values[position]\n",
+        "def fixed_at: (Shared (I32 ^ 3), USize) -> I32 = (values, position) => values[position]\n",
+        "def generic_at: <T where Index T USize> (Shared T, USize) -> Index.Output T USize = <T where Index T USize> (values, position) => values[position]\n",
         "let list = List.of (1, 2, 3)\n",
-        "let value: I32 = generic_at (Ref (Clone.clone list), 0)\n",
-        "let operation: (Ref (List I32), USize) -> I32 = Index.index\n",
+        "let value: I32 = generic_at (Shared (Clone.clone list), 0)\n",
+        "let operation: (Shared (List I32), USize) -> I32 = Index.index\n",
     );
     let module = type_check(source);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_root(&lower(&module))
-        .expect("indexing through a Ref should generate LLVM");
+        .expect("indexing through a Shared should generate LLVM");
     assert!(llvm.contains("index.deref"));
 }
 
 #[test]
-fn delegates_indexed_assignment_through_refs_to_the_payload() {
+fn delegates_indexed_assignment_through_shared_values_to_the_payload() {
     let source = concat!(
+        "use std.shared.(Shared)\n",
         "use std.list.List\n",
-        "def set_list = (mut list: Ref (List I32), position: USize, value: I32) => { list[position] = value }\n",
-        "def set_nested = (mut values: Ref (Ref (I32 ^ 2)), position: USize, value: I32) => { values[position] = value }\n",
-        "def set_fixed = (mut values: Ref (I32 ^ 2), position: USize, value: I32) => { values[position] = value }\n",
+        "def set_list = (mut list: Shared (List I32), position: USize, value: I32) => { list[position] = value }\n",
+        "def set_nested = (mut values: Shared (Shared (I32 ^ 2)), position: USize, value: I32) => { values[position] = value }\n",
+        "def set_fixed = (mut values: Shared (I32 ^ 2), position: USize, value: I32) => { values[position] = value }\n",
         "type Counter = wrap I32\n",
         "impl MutateIndex Counter String { type Value = I32; mutate_index = (mut counter, key, move value) => () }\n",
-        "def set_keyed = (mut counter: Ref Counter, key: String, value: I32) => { counter[key] = value }\n",
+        "def set_keyed = (mut counter: Shared Counter, key: String, value: I32) => { counter[key] = value }\n",
         "let list = List.of (1, 2, 3)\n",
-        "let operation: (mut Ref (List I32), USize, I32) -> () = MutateIndex.mutate_index\n",
-        "let mut reference = Ref (Clone.clone list)\n",
+        "let operation: (mut Shared (List I32), USize, I32) -> () = MutateIndex.mutate_index\n",
+        "let mut reference = Shared (Clone.clone list)\n",
         "operation (reference, 0, 9)\n",
     );
     let module = type_check(source);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_root(&lower(&module))
-        .expect("indexed assignment through a Ref should generate LLVM");
+        .expect("indexed assignment through a Shared should generate LLVM");
     assert!(llvm.contains("mutate_index.deref"));
 }
 
 #[test]
-fn rejects_out_of_bounds_indices_known_through_a_ref() {
+fn rejects_out_of_bounds_indices_known_through_a_shared() {
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "def invalid = (values: Ref (I32 ^ 2)) => values[2]\n",
+            "use std.shared.(Shared)\ndef invalid = (values: Shared (I32 ^ 2)) => values[2]\n",
         ))
-        .expect_err_diagnostics("a known out-of-bounds Ref index must be rejected");
+        .expect_err_diagnostics("a known out-of-bounds Shared index must be rejected");
     assert!(
         diagnostics
             .iter()
@@ -3601,9 +3626,9 @@ fn rejects_out_of_bounds_indices_known_through_a_ref() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "def invalid = (values: Ref (Ref (I32 ^ 2))) => values[2]\n",
+            "use std.shared.(Shared)\ndef invalid = (values: Shared (Shared (I32 ^ 2))) => values[2]\n",
         ))
-        .expect_err_diagnostics("a known out-of-bounds nested Ref index must be rejected");
+        .expect_err_diagnostics("a known out-of-bounds nested Shared index must be rejected");
     assert!(
         diagnostics
             .iter()
@@ -3718,14 +3743,15 @@ fn rejects_slice_iteration_for_non_copy_elements() {
 }
 
 #[test]
-fn rejects_explicit_indexing_implementations_for_ref_targets() {
+fn rejects_explicit_indexing_implementations_for_shared_targets() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
+            "use std.shared.(Shared)\n",
             "type Target = wrap I32\n",
             "impl Index Target String { type Output = Target; index = (target, position) => target }\n",
-            "impl Index (Ref Target) String { type Output = Target; index = (target, position) => target }\n",
+            "impl Index (Shared Target) String { type Output = Target; index = (target, position) => target }\n",
         )))
-        .expect_err_diagnostics("Ref indexing is derived from the payload's implementation");
+        .expect_err_diagnostics("Shared indexing is derived from the payload's implementation");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -3734,12 +3760,13 @@ fn rejects_explicit_indexing_implementations_for_ref_targets() {
 }
 
 #[test]
-fn auto_derefs_fields_through_nested_refs_and_slices() {
+fn auto_derefs_fields_through_nested_shared_values_and_slices() {
     type_check(concat!(
+        "use std.shared.(Shared)\n",
         "use std.shared_buffer.SharedBuffer\n",
-        "def slice_field: Ref (SharedBuffer I32) -> I32 = values => values.0\n",
-        "def nested_field = (point: Ref (Ref (x: I32, y: I32))) => point.x\n",
-        "def nested_write = (mut point: Ref (Ref (x: I32, y: I32))) => { point.x = 1; () }\n",
+        "def slice_field: Shared (SharedBuffer I32) -> I32 = values => values.0\n",
+        "def nested_field = (point: Shared (Shared (x: I32, y: I32))) => point.x\n",
+        "def nested_write = (mut point: Shared (Shared (x: I32, y: I32))) => { point.x = 1; () }\n",
     ));
 }
 
@@ -3828,12 +3855,12 @@ fn rejects_overlapping_structural_iterator_implementations() {
 }
 
 #[test]
-fn rejects_slice_ref_destructuring() {
+fn rejects_slice_shared_destructuring() {
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "use std.shared_buffer.SharedBuffer\nlet fixed: (I32 ^ 2) = (1, 2)\nlet values: SharedBuffer I32 = SharedBuffer.from_array fixed\nlet Ref payload = values\n",
+            "use std.shared.(Shared)\nuse std.shared_buffer.SharedBuffer\nlet fixed: (I32 ^ 2) = (1, 2)\nlet values: SharedBuffer I32 = SharedBuffer.from_array fixed\nlet Shared payload = values\n",
         ))
-        .expect_err_diagnostics("a slice cannot be destructured as a Ref");
+        .expect_err_diagnostics("a slice cannot be destructured as a Shared");
     assert!(
         diagnostics
             .iter()
@@ -3891,13 +3918,14 @@ fn aliases_complete_slice_references_and_reject_ffi() {
 #[test]
 fn enforces_implicit_sized_and_supports_question_sized_parameters() {
     type_check(concat!(
+        "use std.shared.(Shared)\n",
         "use std.shared_buffer.SharedBuffer\n",
         "def preserve_slice: <T> SharedBuffer T -> SharedBuffer T = <T> value => value\n",
-        "def explicitly_sized: <T where ?Sized T, Sized T> Ref T -> Ref T = <T where ?Sized T, Sized T> value => value\n",
+        "def explicitly_sized: <T where ?Sized T, Sized T> Shared T -> Shared T = <T where ?Sized T, Sized T> value => value\n",
         "let fixed: (I32 ^ 2) = (1, 2)\n",
         "let erased: SharedBuffer I32 = SharedBuffer.from_array fixed\n",
         "let same: SharedBuffer I32 = preserve_slice erased\n",
-        "let same_fixed: Ref (I32 ^ 2) = explicitly_sized (Ref fixed)\n",
+        "let same_fixed: Shared (I32 ^ 2) = explicitly_sized (Shared fixed)\n",
     ));
 
     let diagnostics = TypeChecker::new()
@@ -3933,7 +3961,7 @@ fn rejects_question_sized_clauses_naming_unknown_or_repeated_parameters() {
             "duplicate `?Sized` clause for compile-time parameter `T`",
         ),
         (
-            "def bad: <T where ?Sized U> Ref T -> Ref T = <T> value => value\n",
+            "def bad: <T where ?Sized U> Shared T -> Shared T = <T> value => value\n",
             "`U` was not found",
         ),
     ] {
@@ -4023,8 +4051,9 @@ fn enforces_trait_implementation_orphan_rules_without_a_manifest() {
             "impl Default (Local, I32) { default = () => (Local 0, 0) }\n",
         ),
         concat!(
+            "use std.shared.(Shared)\n",
             "type Local = wrap I32\n",
-            "impl Default (Ref Local) { default = () => loop {} }\n",
+            "impl Default (Shared Local) { default = () => loop {} }\n",
         ),
         concat!(
             "type LocalAlias = alias I32\n",
@@ -5433,8 +5462,9 @@ fn c_pointer_preserves_its_pointee_type() {
 #[test]
 fn generic_opaque_arguments_are_part_of_type_identity() {
     let module = resolve(concat!(
+        "use std.shared.(Shared)\n",
         "type Handle T = opaque\n",
-        "def invalid: Ref (Handle I32) -> Ref (Handle String) = value => value\n",
+        "def invalid: Shared (Handle I32) -> Shared (Handle String) = value => value\n",
     ));
     let diagnostics = TypeChecker::new()
         .check(module)
@@ -5442,7 +5472,7 @@ fn generic_opaque_arguments_are_part_of_type_identity() {
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("expected `Ref Handle String`, found `Ref Handle I32`")
+            .contains("expected `Shared Handle String`, found `Shared Handle I32`")
     }));
 }
 
@@ -5463,6 +5493,7 @@ fn string_literals_have_the_canonical_string_type() {
 #[test]
 fn buffer_intrinsics_type_check_and_compile() {
     let module = type_check(concat!(
+        "use std.shared.(Shared)\n",
         "use std.buffer.Buffer\nuse std.shared_buffer.SharedBuffer\n",
         "def exercise: () -> () = () => {\n",
         "let mut values: Buffer I32 = Buffer.with_capacity (USize :: 2)\n",
@@ -5477,7 +5508,7 @@ fn buffer_intrinsics_type_check_and_compile() {
         "let popped: Option I32 = Buffer.pop values\n",
         "let frozen: SharedBuffer I32 = Buffer.into_shared_buffer values\n",
         "let frozen_length: USize = SharedBuffer.length frozen\n",
-        "let safe_frozen: Option (Ref I32) = SharedBuffer.get_ref frozen (USize :: 0)\n",
+        "let safe_frozen: Option (Shared I32) = SharedBuffer.get_shared frozen (USize :: 0)\n",
         "()\n",
         "}\n",
     ));
@@ -7924,7 +7955,7 @@ fn type_and_pattern_macro_inputs_support_atomic_and_compound_forms() {
         "macro applied_type = _: Type => parse_quote { let applied: I32 = 2 }\n",
         "macro nominal_pattern = _: Pattern => parse_quote { let nominal: I32 = 3 }\n",
         "atomic_type I32\n",
-        "applied_type (Ref I32)\n",
+        "applied_type (Shared I32)\n",
         "nominal_pattern (Some value)\n",
         "let result: I32 = atomic + applied + nominal\n",
     ));
@@ -9453,66 +9484,69 @@ fn lowers_captured_locals_into_closure_environments() {
 }
 
 #[test]
-fn type_checks_and_lowers_managed_refs() {
+fn type_checks_and_lowers_managed_shared_values() {
     let module = type_check(concat!(
-        "let point: Ref (x: I32, y: I32) = Ref (x: 1, y: 2)\n",
+        "use std.shared.(Shared)\n",
+        "let point: Shared (x: I32, y: I32) = Shared (x: 1, y: 2)\n",
         "let copy = point\n",
         "let x: I32 = copy.x\n",
-        "let Ref (captured_x, captured_y) = point\n",
-        "def sum_ref: (Ref (x: I32, y: I32)) -> I32 = value => match value {\n",
-        "  Ref (x, y) => x + y,\n",
+        "let Shared (captured_x, captured_y) = point\n",
+        "def sum_shared: (Shared (x: I32, y: I32)) -> I32 = value => match value {\n",
+        "  Shared (x, y) => x + y,\n",
         "}\n",
-        "let nested: Ref (Ref I32) = Ref (Ref 9)\n",
-        "let empty: Ref () = Ref ()\n",
+        "let nested: Shared (Shared I32) = Shared (Shared 9)\n",
+        "let empty: Shared () = Shared ()\n",
         "let total: I32 = captured_x + captured_y\n",
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_root(&lower(&module))
-        .expect("Ref values should generate valid LLVM");
+        .expect("Shared values should generate valid LLVM");
     assert!(llvm.contains("call ptr @__staple_gc_alloc"));
-    assert!(llvm.contains("ref.payload"));
+    assert!(llvm.contains("shared.payload"));
     assert!(llvm.contains("@__staple_gc_collect"));
     assert!(llvm.contains("call void @__staple_gc_register_root"));
 }
 
 #[test]
-fn compares_refs_through_the_standard_library_eq_implementation() {
+fn compares_shared_values_through_the_standard_library_eq_implementation() {
     let source = concat!(
+        "use std.shared.(Shared)\n",
         "use std.buffer.Buffer\n",
         "use std.cmp.Eq\n",
-        "def refs_equal: <T where Eq T> (Ref T, Ref T) -> Bool = <T where Eq T> (left, right) => left == right\n",
-        "let a: Ref I32 = Ref 1\n",
-        "let b: Ref I32 = Ref 1\n",
-        "let c: Ref I32 = Ref 2\n",
+        "def shared_equal: <T where Eq T> (Shared T, Shared T) -> Bool = <T where Eq T> (left, right) => left == right\n",
+        "let a: Shared I32 = Shared 1\n",
+        "let b: Shared I32 = Shared 1\n",
+        "let c: Shared I32 = Shared 2\n",
         "let same: Bool = a == b\n",
         "let different: Bool = a != c\n",
-        "let generic: Bool = refs_equal (a, b)\n",
-        "let nested: Bool = Ref (Ref 3) == Ref (Ref 3)\n",
+        "let generic: Bool = shared_equal (a, b)\n",
+        "let nested: Bool = Shared (Shared 3) == Shared (Shared 3)\n",
         "type Bag = wrap Buffer I32\n",
         "impl Eq Bag {\n",
         "  eq = (left; right) => Buffer.capacity left.* == Buffer.capacity right.*\n",
         "}\n",
-        "let bags: Bool = Ref (Bag (Buffer.with_capacity 2)) == Ref (Bag (Buffer.with_capacity 2))\n",
-        "let bags_differ: Bool = Ref (Bag (Buffer.with_capacity 2)) != Ref (Bag (Buffer.with_capacity 3))\n",
+        "let bags: Bool = Shared (Bag (Buffer.with_capacity 2)) == Shared (Bag (Buffer.with_capacity 2))\n",
+        "let bags_differ: Bool = Shared (Bag (Buffer.with_capacity 2)) != Shared (Bag (Buffer.with_capacity 3))\n",
     );
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_root(&lower(&module))
-        .expect("comparing Refs should use the standard-library Eq implementation");
+        .expect("comparing Shared values should use the standard-library Eq implementation");
 }
 
 #[test]
-fn rejects_ref_equality_when_the_payload_is_not_eq() {
+fn rejects_shared_equality_when_the_payload_is_not_eq() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
+            "use std.shared.(Shared)\n",
             "use std.buffer.Buffer\n",
-            "let left: Ref (Buffer I32) = Ref (Buffer.with_capacity 1)\n",
-            "let right: Ref (Buffer I32) = Ref (Buffer.with_capacity 1)\n",
+            "let left: Shared (Buffer I32) = Shared (Buffer.with_capacity 1)\n",
+            "let right: Shared (Buffer I32) = Shared (Buffer.with_capacity 1)\n",
             "let same: Bool = left == right\n",
         )))
-        .expect_err_diagnostics("a payload without Eq must not make its Ref comparable");
+        .expect_err_diagnostics("a payload without Eq must not make its Shared comparable");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -9521,30 +9555,31 @@ fn rejects_ref_equality_when_the_payload_is_not_eq() {
 }
 
 #[test]
-fn preserves_literal_nominal_ref_container_semantics() {
+fn preserves_literal_nominal_shared_container_semantics() {
     let module = type_check(concat!(
-        "type RefPoint = wrap Ref (x: I32, y: I32)\n",
-        "let point: RefPoint = RefPoint (Ref (x: 3, y: 4))\n",
+        "use std.shared.(Shared)\n",
+        "type SharedPoint = wrap Shared (x: I32, y: I32)\n",
+        "let point: SharedPoint = SharedPoint (Shared (x: 3, y: 4))\n",
         "let x: I32 = point.x\n",
-        "let RefPoint (Ref (captured_x, captured_y)) = point\n",
+        "let SharedPoint (Shared (captured_x, captured_y)) = point\n",
         "let y: I32 = captured_y\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_root(&lower(&module))
-        .expect("nominal Ref containers should compile");
+        .expect("nominal Shared containers should compile");
 }
 
 #[test]
-fn rejects_incomplete_and_overapplied_ref_types() {
+fn rejects_incomplete_and_overapplied_shared_types() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("def value: Ref\n"))
-        .expect_err_diagnostics("Ref requires a payload type");
+        .check(resolve("use std.shared.(Shared)\ndef value: Shared\n"))
+        .expect_err_diagnostics("Shared requires a payload type");
     assert!(!diagnostics.is_empty());
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("def value: Ref I32 I32\n"))
-        .expect_err_diagnostics("Ref accepts exactly one payload type");
+        .check(resolve("use std.shared.(Shared)\ndef value: Shared I32 I32\n"))
+        .expect_err_diagnostics("Shared accepts exactly one payload type");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -11867,10 +11902,11 @@ fn generic_drop_selection_rules_are_enforced_at_declaration() {
 #[test]
 fn lowers_custom_drop_and_gc_finalizer_glue() {
     let module = type_check(concat!(
+        "use std.shared.(Shared)\n",
         "type Resource = wrap I32\n",
         "impl Drop Resource { cleanup = Resource value => () }\n",
         "def release = () => { let handle = Resource 7; drop handle }\n",
-        "def managed = () => Ref (Resource 9)\n",
+        "def managed = () => Shared (Resource 9)\n",
     ));
     let context = Context::create();
     let lowered = lower(&module);
@@ -11987,7 +12023,7 @@ fn rejects_moving_a_move_only_global_out_of_a_function() {
 }
 
 #[test]
-fn moves_resources_into_managed_closures_and_borrows_ref_payloads() {
+fn moves_resources_into_managed_closures_and_borrows_shared_payloads() {
     let module = type_check(concat!(
         "use std.cinterop.*\n",
         "extern \"c\" { inspect: CString -> I32 }\n",
@@ -12007,13 +12043,14 @@ fn moves_resources_into_managed_closures_and_borrows_ref_payloads() {
             "def invalid = (move value: CString) => { let callback = () => inspect value; value }\n",
         ),
         concat!(
+            "use std.shared.(Shared)\n",
             "use std.cinterop.*\n",
-            "def invalid = (value: Ref CString) => { let Ref inner = value; drop inner }\n",
+            "def invalid = (value: Shared CString) => { let Shared inner = value; drop inner }\n",
         ),
     ] {
         let diagnostics = TypeChecker::new()
             .check(resolve(source))
-            .expect_err_diagnostics("captured and Ref-owned resources cannot be moved again");
+            .expect_err_diagnostics("captured and Shared-owned resources cannot be moved again");
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.message.contains("moved value")
                 || diagnostic
@@ -13445,12 +13482,13 @@ fn checks_inferred_and_explicit_compile_time_match_binding_types() {
 #[test]
 fn opaque_types_are_unsized_but_can_be_referenced() {
     let module = type_check(concat!(
+        "use std.shared.(Shared)\n",
         "type Token = opaque\n",
         "type Handle T = opaque\n",
-        "def token: Ref Token -> Ref Token = value => value\n",
-        "def handle: Ref (Handle I32) -> Ref (Handle I32) = value => value\n",
-        "def any: <T where ?Sized T> Ref T -> Ref T = <T where ?Sized T> value => value\n",
-        "def use_any: Ref Token -> Ref Token = value => any value\n",
+        "def token: Shared Token -> Shared Token = value => value\n",
+        "def handle: Shared (Handle I32) -> Shared (Handle I32) = value => value\n",
+        "def any: <T where ?Sized T> Shared T -> Shared T = <T where ?Sized T> value => value\n",
+        "def use_any: Shared Token -> Shared Token = value => any value\n",
     ));
     let opaque = CheckedType::Opaque {
         sized: false,
@@ -13460,7 +13498,7 @@ fn opaque_types_are_unsized_but_can_be_referenced() {
     };
     assert!(!opaque.is_sized());
     assert!(!module.is_copy_type(&opaque));
-    assert!(CheckedType::Ref(Box::new(opaque)).is_sized());
+    assert!(CheckedType::Shared(Box::new(opaque)).is_sized());
     assert!(module.is_copy_type(&CheckedType::I32));
 }
 
@@ -13474,11 +13512,11 @@ fn rejects_opaque_types_in_sized_positions() {
         ),
         ("type Invalid = wrap Token\n", "must be sized"),
         (
-            "type Invalid = alias (Token, I32)\ndef use_invalid: Ref Invalid -> () = _ => ()\n",
+            "use std.shared.(Shared)\ntype Invalid = alias (Token, I32)\ndef use_invalid: Shared Invalid -> () = _ => ()\n",
             "must be sized",
         ),
         (
-            "type Invalid = alias Token | I32\ndef use_invalid: Ref Invalid -> () = _ => ()\n",
+            "use std.shared.(Shared)\ntype Invalid = alias Token | I32\ndef use_invalid: Shared Invalid -> () = _ => ()\n",
             "sized",
         ),
         (
@@ -13486,7 +13524,7 @@ fn rejects_opaque_types_in_sized_positions() {
             "implicit `Sized` bound",
         ),
         (
-            "type Box T = wrap T\ntype Invalid = alias Box Token\ndef use_invalid: Ref Invalid -> () = _ => ()\n",
+            "use std.shared.(Shared)\ntype Box T = wrap T\ntype Invalid = alias Box Token\ndef use_invalid: Shared Invalid -> () = _ => ()\n",
             "implicit `Sized` bound",
         ),
     ] {
@@ -13899,14 +13937,15 @@ fn slotted_product_template_spreads_and_markers_normalize_after_substitution() {
 #[test]
 fn opaque_and_phantom_parameters_accept_slotted_products() {
     type_check(concat!(
+        "use std.shared.(Shared)\n",
         "use std.ptr.RawPtr\n",
         "use std.coroutine.Task\n",
         "type Inputs = alias (I32; I32)\n",
         "type Handle Args = opaque\n",
         "def pointer: RawPtr Inputs -> RawPtr Inputs = value => value\n",
         "def task: move Task Inputs -> Task Inputs = move value => value\n",
-        "type Outer P = wrap (handle: Ref (Handle P))\n",
-        "extern \"c\" { foreign: Ref (Handle Inputs) -> Outer Inputs }\n",
+        "type Outer P = wrap (handle: Shared (Handle P))\n",
+        "extern \"c\" { foreign: Shared (Handle Inputs) -> Outer Inputs }\n",
     ));
 }
 
@@ -14089,14 +14128,15 @@ fn from_coercion_prefers_exact_sum_alternatives_and_rejects_ambiguity() {
 fn from_coercion_applies_once_to_the_whole_expression() {
     let messages = type_check_errors(
         concat!(
+            "use std.shared.(Shared)\n",
             "type B = wrap I32\n",
             "type A = from B\n",
             "type C = from A\n",
             "let chained: C = B 1\n",
             "let pair = (B 1, B 2)\n",
             "let lifted_pair: (A, A) = pair\n",
-            "let reference = Ref (B 1)\n",
-            "let lifted_reference: Ref A = reference\n",
+            "let reference = Shared (B 1)\n",
+            "let lifted_reference: Shared A = reference\n",
             "def make: () -> B = () => B 1\n",
             "let lifted_function: () -> A = make\n",
         ),
@@ -14105,7 +14145,7 @@ fn from_coercion_applies_once_to_the_whole_expression() {
     for expected in [
         "expected `C`, found `B`",
         "expected `(A, A)`, found `(B, B)`",
-        "expected `Ref A`, found `Ref B`",
+        "expected `Shared A`, found `Shared B`",
         "expected `() -> A`, found `() -> B`",
     ] {
         assert!(
@@ -14295,9 +14335,9 @@ fn named_types_are_indexed_only_through_their_own_implementations() {
 #[test]
 fn from_types_reject_recursive_constructors() {
     let diagnostics = stdlib_modifier_diagnostics(
-        "std/reference.sta",
-        "pub type Ref T where ?Sized T = pub wrap T",
-        "pub type Ref T where ?Sized T = pub from T",
+        "std/shared.sta",
+        "pub type Shared T where ?Sized T = pub wrap T",
+        "pub type Shared T where ?Sized T = pub from T",
     );
     assert!(
         diagnostics.iter().any(|diagnostic| diagnostic
@@ -14311,21 +14351,21 @@ fn from_types_reject_recursive_constructors() {
 fn recursive_constructor_stdlib_contract_and_validation() {
     for (path, original, replacement, expected) in [
         (
-            "std/reference.sta",
-            "@recursive_constructor\npub type Ref",
-            "@recursive_constructor(1)\npub type Ref",
+            "std/shared.sta",
+            "@recursive_constructor\npub type Shared",
+            "@recursive_constructor(1)\npub type Shared",
             "`@recursive_constructor` does not accept an argument",
         ),
         (
-            "std/reference.sta",
-            "@recursive_constructor\npub type Ref",
-            "pub type Ref",
-            "type `Ref` must be marked `@recursive_constructor`",
+            "std/shared.sta",
+            "@recursive_constructor\npub type Shared",
+            "pub type Shared",
+            "type `Shared` must be marked `@recursive_constructor`",
         ),
         (
-            "std/reference.sta",
-            "@recursive_constructor\npub type Ref",
-            "@recursive_constructor\nlet value = 1\npub type Ref",
+            "std/shared.sta",
+            "@recursive_constructor\npub type Shared",
+            "@recursive_constructor\nlet value = 1\npub type Shared",
             "`@recursive_constructor` may only modify a type declaration",
         ),
         (
@@ -14342,9 +14382,9 @@ fn recursive_constructor_stdlib_contract_and_validation() {
         );
     }
     let diagnostics = stdlib_modifier_diagnostics(
-        "std/reference.sta",
-        "@recursive_constructor\npub type Ref",
-        "@std.annotation.recursive_constructor\npub type Ref",
+        "std/shared.sta",
+        "@recursive_constructor\npub type Shared",
+        "@std.annotation.recursive_constructor\npub type Shared",
     );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
@@ -14407,10 +14447,10 @@ fn intrinsic_registration_checks_names_and_loaded_modules() {
             "unknown Staple intrinsic `__unknown`",
         ),
         (
-            "std/reference.sta",
-            "    __ref_replace: <T> (mut Ref T; move T) -> T\n",
+            "std/shared.sta",
+            "    __shared_replace: <T> (mut Shared T; move T) -> T\n",
             "",
-            "standard library `std.reference` does not declare intrinsic `__ref_replace`",
+            "standard library `std.shared` does not declare intrinsic `__shared_replace`",
         ),
         (
             "std/coroutine.sta",
@@ -14456,7 +14496,7 @@ fn wrapped_intrinsics_are_registered_once() {
         IntrinsicFunction::TaskCancel,
         IntrinsicFunction::ResolverCancel,
         IntrinsicFunction::CompletionTokenCancel,
-        IntrinsicFunction::RefReplace,
+        IntrinsicFunction::SharedReplace,
         IntrinsicFunction::SharedBufferLength,
     ] {
         assert_eq!(
@@ -14538,9 +14578,10 @@ fn fixed_arrays_do_not_convert_to_shared_buffers_implicitly() {
     }
     // The explicit conversion infers the element type for generic callers.
     type_check(concat!(
+        "use std.shared.(Shared)\n",
         "use std.shared_buffer.SharedBuffer\n",
         "let fixed: (I32 ^ 3) = (1, 2, 3)\n",
-        "let first: Ref I32 = SharedBuffer.get_ref_unchecked (SharedBuffer.from_array fixed) 0\n",
+        "let first: Shared I32 = SharedBuffer.get_shared_unchecked (SharedBuffer.from_array fixed) 0\n",
         "let count: USize = SharedBuffer.length (SharedBuffer.from_array fixed)\n",
     ));
 }
@@ -14644,7 +14685,7 @@ fn call_site_type_arguments_work_in_generic_bodies_and_macro_quotes() {
 fn call_site_type_arguments_enforce_sized_and_subtype_bounds() {
     for (source, message) in [
         (
-            "type Token = opaque\ndef f: <T> Ref T -> Ref T = <T> x => x\nlet specialized = f.<Token>\n",
+            "use std.shared.(Shared)\ntype Token = opaque\ndef f: <T> Shared T -> Shared T = <T> x => x\nlet specialized = f.<Token>\n",
             "Sized",
         ),
         (
@@ -14675,7 +14716,7 @@ fn call_site_type_arguments_enforce_sized_and_subtype_bounds() {
         );
     }
     let module = type_check(
-        "type Token = opaque\ndef f: <T where ?Sized T> Ref T -> Ref T = <T where ?Sized T> x => x\nlet specialized = f.<Token>\n",
+        "use std.shared.(Shared)\ntype Token = opaque\ndef f: <T where ?Sized T> Shared T -> Shared T = <T where ?Sized T> x => x\nlet specialized = f.<Token>\n",
     );
     lower(&module);
 }
@@ -15051,7 +15092,8 @@ fn reports_each_polymorphic_value_restriction_at_its_construction() {
         ),
         (
             concat!(
-                "def read: <T> Ref (T -> T) -> I32 = <T> r => 1\n",
+                "use std.shared.(Shared)\n",
+                "def read: <T> Shared (T -> T) -> I32 = <T> r => 1\n",
                 "let stored = read\n",
             ),
             "function values inside references cannot be passed to a polymorphic value's implementation",
@@ -17033,7 +17075,7 @@ fn function_value_type_parameters_check_kinds_sizedness_and_extra_bounds() {
             SHAPE,
         ),
         (
-            "def f: <T where ?Sized T> Ref T -> Ref T = <U> x: Ref U => x",
+            "use std.shared.(Shared)\ndef f: <T where ?Sized T> Shared T -> Shared T = <U> x: Shared U => x",
             SHAPE,
         ),
         (
@@ -17315,6 +17357,7 @@ fn raw_pointer_memory_intrinsics_require_copy_and_matching_types() {
 #[test]
 fn unique_constructs_dereferences_and_transfers_raw_ownership() {
     let module = type_check(concat!(
+        "use std.unique.(Unique)\n",
         "use std.ptr.(RawMutPtr)\n",
         "def roundtrip = () => {\n",
         "  let value = Unique (x: 12, y: 30)\n",
@@ -17340,10 +17383,10 @@ fn unique_constructs_dereferences_and_transfers_raw_ownership() {
 #[test]
 fn unique_is_affine_and_borrowed_payloads_cannot_move() {
     for source in [
-        "def bad = () => { let value = Unique 1; let other = value; value }\n",
-        "def bad = (value: Unique I32) => Unique.unsafe_into_raw value\n",
-        "use std.cinterop.*\ndef bad = (value: Unique CString) => value.*\n",
-        "use std.cinterop.*\ndef bad = () => { let mut owner = Unique (c_string \"owned\"); owner.* = owner.*; () }\n",
+        "use std.unique.(Unique)\ndef bad = () => { let value = Unique 1; let other = value; value }\n",
+        "use std.unique.(Unique)\ndef bad = (value: Unique I32) => Unique.unsafe_into_raw value\n",
+        "use std.unique.(Unique)\nuse std.cinterop.*\ndef bad = (value: Unique CString) => value.*\n",
+        "use std.unique.(Unique)\nuse std.cinterop.*\ndef bad = () => { let mut owner = Unique (c_string \"owned\"); owner.* = owner.*; () }\n",
     ] {
         let errors = TypeChecker::new()
             .check(resolve(source))
@@ -17361,6 +17404,7 @@ fn unique_is_affine_and_borrowed_payloads_cannot_move() {
 #[test]
 fn unique_and_raw_pointers_accept_unsized_pointees() {
     let module = type_check(concat!(
+        "use std.unique.(Unique)\n",
         "use std.ptr.*\n",
         "type Unsized = opaque\n",
         "def adopt = pointer: RawMutPtr Unsized => Unique Unsized :: Unique.unsafe_from_raw pointer\n",
@@ -17385,8 +17429,8 @@ fn unique_and_raw_pointers_accept_unsized_pointees() {
         .compile_root(&dynamic)
         .expect("unsized handles should emit with generic dictionary passing enabled");
     for source in [
-        "use std.ptr.*\ndef invalid = move value: Unique I32 => RawMutPtr I32 :: Convert.convert value\n",
-        "use std.ptr.*\ndef invalid = value: RawMutPtr I32 => Unique I32 :: Convert.convert value\n",
+        "use std.unique.(Unique)\nuse std.ptr.*\ndef invalid = move value: Unique I32 => RawMutPtr I32 :: Convert.convert value\n",
+        "use std.unique.(Unique)\nuse std.ptr.*\ndef invalid = value: RawMutPtr I32 => Unique I32 :: Convert.convert value\n",
     ] {
         TypeChecker::new()
             .check(resolve(source))
@@ -17397,6 +17441,7 @@ fn unique_and_raw_pointers_accept_unsized_pointees() {
 #[test]
 fn unique_guards_recursive_types_and_borrows_non_copy_payloads() {
     type_check(concat!(
+        "use std.unique.(Unique)\n",
         "type Node T = wrap (head: T, tail: Option (Unique (Node T)))\n",
         "def make: () -> Node I32 = () => Node.<I32> (head: 42, tail: None)\n",
         "def nest: () -> Node I32 = () => { let leaf = make (); Node.<I32> (head: 1, tail: Some (Unique leaf)) }\n",
@@ -17404,6 +17449,7 @@ fn unique_guards_recursive_types_and_borrows_non_copy_payloads() {
     ));
     let errors = TypeChecker::new()
         .check(resolve(concat!(
+            "use std.unique.(Unique)\n",
             "use std.cinterop.*\n",
             "def invalid: Unique CString -> CString = Unique value => value\n",
         )))
@@ -17420,7 +17466,7 @@ fn unique_guards_recursive_types_and_borrows_non_copy_payloads() {
 fn unique_builtin_cleanup_cannot_be_overridden() {
     let errors = TypeChecker::new()
         .check(resolve(
-            "impl Drop (Unique I32) { cleanup = owner => () }\n",
+            "use std.unique.(Unique)\nimpl Drop (Unique I32) { cleanup = owner => () }\n",
         ))
         .expect_err_diagnostics("Unique owns its built-in cleanup");
     assert!(
@@ -17502,6 +17548,91 @@ fn companions_see_traits_their_parent_module_declares() {
         "}\n",
         "let shown = Box.via_trait 3\n",
     ));
+}
+
+#[test]
+fn companions_see_their_defining_modules_imports() {
+    type_check(concat!(
+        "use std.shared.(Shared)\n",
+        "type Box = wrap I32\n",
+        "companion Box {\n",
+        "    pub def share = (box: Box) => Shared Box :: Shared box\n",
+        "}\n",
+        "let shared: Shared Box = Box.share (Box 1)\n",
+    ));
+    // A block may import a name its defining module already imports.
+    type_check(concat!(
+        "use std.shared.(Shared)\n",
+        "type Box = wrap I32\n",
+        "companion Box {\n",
+        "    use std.shared.(Shared)\n",
+        "    pub def share = (box: Box) => Shared Box :: Shared box\n",
+        "}\n",
+    ));
+}
+
+#[test]
+fn companion_block_imports_reach_no_other_block() {
+    let diagnostics = resolve_result(concat!(
+        "type Box = wrap I32\n",
+        "companion Box {\n",
+        "    use std.shared.(Shared)\n",
+        "    pub def share = (box: Box) => Shared Box :: Shared box\n",
+        "}\n",
+        "companion Box {\n",
+        "    pub def again = (box: Box) => Shared Box :: Shared box\n",
+        "}\n",
+    ))
+    .expect_err_diagnostics("another block's import must not be visible");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("unknown type `Shared`")),
+        "{diagnostics:?}"
+    );
+    // Each block may import the same name for itself.
+    type_check(concat!(
+        "type Box = wrap I32\n",
+        "companion Box {\n",
+        "    use std.shared.(Shared)\n",
+        "    pub def share = (box: Box) => Shared Box :: Shared box\n",
+        "}\n",
+        "companion Box {\n",
+        "    use std.shared.(Shared)\n",
+        "    pub def again = (box: Box) => Shared Box :: Shared box\n",
+        "}\n",
+    ));
+}
+
+#[test]
+fn companion_blocks_share_their_members() {
+    type_check(concat!(
+        "type Box = wrap I32\n",
+        "companion Box { pub def one = (box: Box) => I32 :: 1 }\n",
+        "companion Box { pub def two = (box: Box) => I32 :: one box + 1 }\n",
+        "let total: I32 = Box.one (Box 1) + Box.two (Box 1)\n",
+    ));
+    type_check(concat!(
+        "use std.syntax.*\n",
+        "pub type Box T = pub wrap (value: T)\n",
+        "companion<T> Box T { pub def label = (box: Box T) => I32 :: 1 }\n",
+        "companion<T> Box T {\n",
+        "    pub macro of = value: Expr => parse_quote { Box (value: $value) }\n",
+        "}\n",
+        "let label: I32 = Box.label (Box.of 5)\n",
+    ));
+    let diagnostics = resolve_result(concat!(
+        "type Box = wrap I32\n",
+        "companion Box { pub def one = (box: Box) => I32 :: 1 }\n",
+        "companion Box { def one = (box: Box) => I32 :: 2 }\n",
+    ))
+    .expect_err_diagnostics("a member may be declared by only one block");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("duplicate definition of `one`")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]

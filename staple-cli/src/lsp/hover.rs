@@ -2303,7 +2303,7 @@ mod tests {
 
     #[test]
     fn wrapped_intrinsic_hover_shows_the_public_def() {
-        let source = "let mut reference = Ref 1\nlet previous = Ref.replace reference 2\n";
+        let source = "use std.shared.(Shared)\nlet mut reference = Shared 1\nlet previous = Shared.replace reference 2\n";
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -2335,7 +2335,7 @@ mod tests {
             .find(|entry| entry.range.start == start)
             .expect("intrinsic definition");
         assert!(definition.targets.iter().any(|target| {
-            target.path.ends_with("std/reference.sta")
+            target.path.ends_with("std/shared.sta")
                 && std::fs::read_to_string(&target.path).unwrap()[target.selection_range.clone()]
                     == *"replace"
         }));
@@ -3958,11 +3958,12 @@ mod tests {
         )
         .unwrap();
         let source = concat!(
+            "use std.shared.(Shared)\n",
             "use dependency.(Hidden, HiddenGeneric, Visible, Secret, Alias)\n",
             "def hidden: Hidden -> Hidden = value => value\n",
             "def hidden_generic: HiddenGeneric I32 -> HiddenGeneric I32 = value => value\n",
             "def visible: Visible -> Visible = value => value\n",
-            "def secret: Ref Secret -> Ref Secret\n",
+            "def secret: Shared Secret -> Shared Secret\n",
             "def alias_value: Alias -> Alias = value => value\n",
         );
         let path = root.join("main.sta");

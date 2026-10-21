@@ -4600,15 +4600,15 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_refs_preserve_payload_and_own_their_descriptor() {
+    fn dynamic_shared_values_preserve_payload_and_own_their_descriptor() {
         let (text, name) = dynamic_test_module(
-            "def make: <T where Sized T> move T -> Ref T = <T where Sized T> move value => Ref value\nlet reference = make 42\n",
+            "use std.shared.(Shared)\ndef make: <T where Sized T> move T -> Shared T = <T where Sized T> move value => Shared value\nlet reference = make 42\n",
             "make",
         );
         let context = inkwell::context::Context::create();
         let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
             text.as_bytes(),
-            "dynamic-ref",
+            "dynamic-shared",
         );
         let llvm = context.create_module_from_ir(buffer).unwrap();
         let finalizer_name = llvm
@@ -5455,9 +5455,10 @@ mod tests {
     fn dynamic_slice_access_reads_runtime_strides() {
         let (text, name) = dynamic_test_module(
             concat!(
+                "use std.shared.(Shared)\n",
                 "use std.shared_buffer.SharedBuffer\n",
-                "def head: <T where Copy T> Ref (SharedBuffer T) -> T = <T where Copy T> values => values.0\n",
-                "def unused: Ref (SharedBuffer I32) -> I32 = values => head values\n",
+                "def head: <T where Copy T> Shared (SharedBuffer T) -> T = <T where Copy T> values => values.0\n",
+                "def unused: Shared (SharedBuffer I32) -> I32 = values => head values\n",
                 "let result = 0\n",
             ),
             "head",

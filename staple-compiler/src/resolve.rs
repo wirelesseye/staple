@@ -9,7 +9,7 @@
 //! The checker uses these identities rather than source spellings to associate
 //! types, effects, and ownership facts with declarations and occurrences.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{ModuleId, Program};
 use staple_syntax::{
@@ -89,7 +89,7 @@ pub enum BuiltinType {
     Integer(IntegerType),
     Float(FloatType),
     String,
-    Ref,
+    Shared,
     Unique,
     SharedBuffer,
     Buffer,
@@ -428,7 +428,7 @@ pub enum IntrinsicFunction {
     /// `std.source.__caller_column`: the column of that caller, as `U32`.
     CallerColumn,
     SharedBufferLength,
-    SharedBufferGetRef,
+    SharedBufferGetShared,
     BufferWithCapacity,
     BufferLength,
     BufferCapacity,
@@ -439,7 +439,7 @@ pub enum IntrinsicFunction {
     BufferFromArray,
     BufferTransfer,
     BufferClone,
-    RefReplace,
+    SharedReplace,
     UniqueIntoRaw,
     UniqueFromRaw,
     ReactiveScope,
@@ -1181,6 +1181,30 @@ struct Interface {
     namespaces: HashMap<String, ModuleId>,
 }
 
+/// Adds `other`'s items to `into`, keeping `into`'s on a name both define.
+fn merge_interface(into: &mut Interface, other: &Interface) {
+    for (name, symbol) in &other.values {
+        into.values.entry(name.clone()).or_insert(*symbol);
+    }
+    for (name, ty) in &other.types {
+        into.types.entry(name.clone()).or_insert(*ty);
+    }
+    for (name, macros) in &other.macros {
+        let into = into.macros.entry(name.clone()).or_default();
+        for id in macros {
+            if !into.contains(id) {
+                into.push(*id);
+            }
+        }
+    }
+    for (name, id) in &other.traits {
+        into.traits.entry(name.clone()).or_insert(*id);
+    }
+    for (name, module) in &other.namespaces {
+        into.namespaces.entry(name.clone()).or_insert(*module);
+    }
+}
+
 fn add_private_candidate(candidates: &mut HashMap<String, Vec<String>>, name: &str, module: &str) {
     let modules = candidates.entry(name.to_owned()).or_default();
     if !modules.iter().any(|candidate| candidate == module) {
@@ -1451,6 +1475,9 @@ pub struct NameResolver {
     definition_context_traits: Vec<HashMap<String, TraitId>>,
     definition_context_namespaces: Vec<HashMap<String, ModuleId>>,
     binding_companion_targets: HashMap<SyntaxId, Type>,
+    /// The scope layers beneath the current module's own: one for a
+    /// `companion` block, holding what its defining module sees.
+    inherited_layers: usize,
     /// The representation product of the `wrap`/`from` declaration being
     /// resolved and the products nested in its fields: the only products
     /// whose fields may declare defaults.
@@ -1688,36 +1715,78 @@ impl NameResolver {
             self.install_root_namespaces(&program, source_module.id);
             self.install_child_namespaces(&program, source_module.id);
             self.install_prelude(&program, source_module.id);
-            self.install_imports(&program, source_module.id);
-            self.install_local_traits(source_module.id);
-            // Taken before a companion inherits its parent's namespaces: those
-            // include the parent's imports and implicit namespaces, which a
-            // companion sees but which do not shadow its implicit items.
-            let own_namespaces = self
+            // A companion block sees what its defining module sees: the
+            // module's declarations and imports, beneath a scope layer of
+            // its own for the block's imports, so a block may import a name
+            // again and its imports reach no other block. Names its defining
+            // module only sees implicitly do not shadow the block's own
+            // implicit items.
+            let mut own_namespaces = self
                 .namespaces
                 .iter()
                 .flat_map(HashMap::keys)
                 .cloned()
                 .collect::<HashSet<_>>();
+            let inherits_parent = source_module.companion && source_module.parent.is_some();
+            self.inherited_layers = 0;
             if source_module.companion
                 && let Some(parent) = source_module.parent
             {
+                let diagnostics = self.diagnostics.len();
+                let import_definitions = self.import_definitions.clone();
+                self.install_imports(&program, parent);
+                self.diagnostics.truncate(diagnostics);
+                self.import_definitions = import_definitions;
+                own_namespaces.extend(
+                    self.namespaces
+                        .last()
+                        .expect("resolver namespace scope")
+                        .keys()
+                        .cloned(),
+                );
+                let mut values = self.module_values[parent.0].clone();
+                let mut types = self.declared_types[parent.0].clone();
+                let mut traits = self.declared_traits[parent.0].clone();
+                for block in program.companion_blocks(source_module.id) {
+                    if block != source_module.id {
+                        values.extend(self.module_values[block.0].clone());
+                        types.extend(self.declared_types[block.0].clone());
+                        traits.extend(self.declared_traits[block.0].clone());
+                    }
+                }
                 self.scopes
                     .last_mut()
                     .expect("resolver value scope")
-                    .extend(self.module_values[parent.0].clone());
+                    .extend(values);
                 self.imported_types
                     .last_mut()
                     .expect("resolver type scope")
-                    .extend(self.declared_types[parent.0].clone());
+                    .extend(types);
                 self.imported_traits
                     .last_mut()
                     .expect("resolver trait scope")
-                    .extend(self.declared_traits[parent.0].clone());
-                let own_namespaces = self.namespaces.pop().expect("resolver namespace scope");
+                    .extend(traits);
+                let inherited = self.namespaces.pop().expect("resolver namespace scope");
                 let mut namespaces = self.definition_context_namespaces[parent.0].clone();
-                namespaces.extend(own_namespaces);
+                namespaces.extend(inherited);
                 self.namespaces.push(namespaces);
+                self.push_scope();
+                self.namespaces.push(HashMap::new());
+                self.imported_types.push(HashMap::new());
+                self.imported_macros.push(HashMap::new());
+                self.imported_traits.push(HashMap::new());
+                self.inherited_layers = 1;
+            }
+            self.install_imports(&program, source_module.id);
+            self.install_local_traits(source_module.id);
+            if inherits_parent {
+                own_namespaces.extend(
+                    self.namespaces
+                        .last()
+                        .expect("resolver namespace scope")
+                        .keys()
+                        .cloned(),
+                );
             }
             self.predeclare_items(&source_module.syntax.items);
             self.shadow_prelude(own_namespaces);
@@ -1732,11 +1801,14 @@ impl NameResolver {
             {
                 self.resolve_compile_time_helper_annotations(helper);
             }
-            self.imported_traits.pop();
-            self.imported_macros.pop();
-            self.imported_types.pop();
-            self.namespaces.pop();
-            self.pop_scope();
+            for _ in 0..if inherits_parent { 2 } else { 1 } {
+                self.imported_traits.pop();
+                self.imported_macros.pop();
+                self.imported_types.pop();
+                self.namespaces.pop();
+                self.pop_scope();
+            }
+            self.inherited_layers = 0;
         }
 
         self.validate_trait_prerequisite_cycles();
@@ -1805,19 +1877,21 @@ impl NameResolver {
             let Some(target) = self.alias_companion_target(*ty) else {
                 continue;
             };
-            companion_type_for_module.insert(child, target);
-            companion_members.entry(target).or_default().extend(
-                self.module_values[child.0].iter().map(|(name, symbol)| {
-                    (
-                        name.clone(),
-                        ResolvedCompanionMember {
-                            symbol: *symbol,
-                            declaring_module: *owner,
-                            public: self.interfaces[child.0].values.contains_key(name),
-                        },
-                    )
-                }),
-            );
+            for block in program.companion_blocks(child) {
+                companion_type_for_module.insert(block, target);
+                companion_members.entry(target).or_default().extend(
+                    self.module_values[block.0].iter().map(|(name, symbol)| {
+                        (
+                            name.clone(),
+                            ResolvedCompanionMember {
+                                symbol: *symbol,
+                                declaring_module: *owner,
+                                public: self.interfaces[block.0].values.contains_key(name),
+                            },
+                        )
+                    }),
+                );
+            }
         }
         let exported_module_definitions = self
             .interfaces
@@ -1985,9 +2059,9 @@ impl NameResolver {
         for float in FloatType::ALL {
             self.register_builtin_type(core, "std.core", float.name(), BuiltinType::Float(float));
         }
-        self.register_builtin_type(core, "std.core", "Ref", BuiltinType::Ref);
-        self.register_builtin_type(core, "std.core", "Unique", BuiltinType::Unique);
         for (path, namespace, name, builtin) in [
+            ("std/shared.sta", "std.shared", "Shared", BuiltinType::Shared),
+            ("std/unique.sta", "std.unique", "Unique", BuiltinType::Unique),
             (
                 "std/string.sta",
                 "std.string",
@@ -2446,8 +2520,8 @@ impl NameResolver {
             ),
             (
                 "std.shared_buffer",
-                "__shared_buffer_get_ref",
-                IntrinsicFunction::SharedBufferGetRef,
+                "__shared_buffer_get_shared",
+                IntrinsicFunction::SharedBufferGetShared,
             ),
             (
                 "std.buffer",
@@ -2455,9 +2529,9 @@ impl NameResolver {
                 IntrinsicFunction::BufferFromArray,
             ),
             (
-                "std.reference",
-                "__ref_replace",
-                IntrinsicFunction::RefReplace,
+                "std.shared",
+                "__shared_replace",
+                IntrinsicFunction::SharedReplace,
             ),
             (
                 "std.unique",
@@ -2796,7 +2870,7 @@ impl NameResolver {
                 ));
             }
         } else if builtin != BuiltinType::Syntax {
-            let valid_kind = if matches!(builtin, BuiltinType::Ref | BuiltinType::Unique) {
+            let valid_kind = if matches!(builtin, BuiltinType::Shared | BuiltinType::Unique) {
                 declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper
                     && declaration.representation_visibility() == Visibility::Public
             } else if matches!(builtin, BuiltinType::Completed | BuiltinType::Cancelled) {
@@ -2827,7 +2901,7 @@ impl NameResolver {
             builtin,
             BuiltinType::RawPtr
                 | BuiltinType::RawMutPtr
-                | BuiltinType::Ref
+                | BuiltinType::Shared
                 | BuiltinType::Unique
                 | BuiltinType::SharedBuffer
                 | BuiltinType::Buffer
@@ -2883,7 +2957,7 @@ impl NameResolver {
                 format!("standard library type `{name}` must not accept compile-time arguments"),
             ));
         }
-        if matches!(builtin, BuiltinType::Ref | BuiltinType::Unique)
+        if matches!(builtin, BuiltinType::Shared | BuiltinType::Unique)
             && !matches!(
                 declaration.type_parameters.as_slice(),
                 [TypeParameterPattern::Binding(binding)]
@@ -2899,7 +2973,7 @@ impl NameResolver {
             ));
         }
         let recursive_construction = match builtin {
-            BuiltinType::Ref => Some(RecursiveConstruction::ManagedReference),
+            BuiltinType::Shared => Some(RecursiveConstruction::ManagedReference),
             BuiltinType::Unique => Some(RecursiveConstruction::Unique),
             BuiltinType::SharedBuffer => Some(RecursiveConstruction::SharedBuffer),
             BuiltinType::Buffer => Some(RecursiveConstruction::Buffer),
@@ -3100,7 +3174,7 @@ impl NameResolver {
                     | Item::Expression(_) => {}
                     Item::Submodule(submodule) => {
                         if submodule.visibility != Visibility::Private
-                            && let Some(child) = program.child_module(submodule.syntax.id)
+                            && let Some(child) = namespace_child(program, submodule)
                         {
                             for name in submodule_namespace_names(program, submodule, child) {
                                 self.package_interfaces[source_module.id.0]
@@ -3141,7 +3215,50 @@ impl NameResolver {
                 }
             }
         }
+        self.merge_companion_blocks(program);
         self.collect_reexports(program);
+    }
+
+    /// A type's `companion` blocks are separate modules, so each keeps its
+    /// imports to itself, but together they form the type's one namespace:
+    /// every block's members are reachable through the type, and a name may
+    /// be declared by only one of them.
+    fn merge_companion_blocks(&mut self, program: &Program) {
+        let mut groups = BTreeMap::<ModuleId, Vec<ModuleId>>::new();
+        for module in program.modules().iter().filter(|module| module.companion) {
+            groups
+                .entry(program.companion_primary(module.id))
+                .or_default()
+                .push(module.id);
+        }
+        for blocks in groups.into_values().filter(|blocks| blocks.len() > 1) {
+            let mut declared = HashSet::new();
+            for block in &blocks {
+                let mut values = self.module_values[block.0]
+                    .iter()
+                    .map(|(name, symbol)| (name.clone(), *symbol))
+                    .collect::<Vec<_>>();
+                values.sort_by_key(|(_, symbol)| symbol.0);
+                for (name, symbol) in values {
+                    if !declared.insert(name.clone()) {
+                        self.diagnostics.push(Diagnostic::new(
+                            self.symbol_declaration_spans[&symbol].clone(),
+                            format!("duplicate definition of `{name}`"),
+                        ));
+                    }
+                }
+            }
+            let mut interface = Interface::default();
+            let mut package_interface = Interface::default();
+            for block in &blocks {
+                merge_interface(&mut interface, &self.interfaces[block.0]);
+                merge_interface(&mut package_interface, &self.package_interfaces[block.0]);
+            }
+            for block in &blocks {
+                self.interfaces[block.0] = interface.clone();
+                self.package_interfaces[block.0] = package_interface.clone();
+            }
+        }
     }
 
     fn register_type_declaration(
@@ -3239,17 +3356,27 @@ impl NameResolver {
         let mut explicit_names = vec![HashSet::<String>::new(); program.modules().len()];
         // Unlike an ordinary inline module, a companion is an extension of
         // its declaring module's type namespace. Its body therefore sees the
-        // parent's declarations without spelling `use super.*`.
+        // parent's declarations without spelling `use super.*`, and the
+        // members of the type's other companion blocks.
         for module in program.modules() {
             if module.companion
                 && let Some(parent) = module.parent
             {
-                self.definition_context_values[module.id.0]
-                    .extend(self.module_values[parent.0].clone());
-                self.definition_context_types[module.id.0]
-                    .extend(self.declared_types[parent.0].clone());
-                self.definition_context_traits[module.id.0]
-                    .extend(self.declared_traits[parent.0].clone());
+                let mut sources = vec![parent];
+                sources.extend(
+                    program
+                        .companion_blocks(module.id)
+                        .into_iter()
+                        .filter(|block| *block != module.id),
+                );
+                for source in sources {
+                    self.definition_context_values[module.id.0]
+                        .extend(self.module_values[source.0].clone());
+                    self.definition_context_types[module.id.0]
+                        .extend(self.declared_types[source.0].clone());
+                    self.definition_context_traits[module.id.0]
+                        .extend(self.declared_traits[source.0].clone());
+                }
             }
         }
         for module in program.modules() {
@@ -3259,7 +3386,7 @@ impl NameResolver {
             }
             for item in &module.syntax.items {
                 if let Item::Submodule(submodule) = item
-                    && let Some(child) = program.child_module(submodule.syntax.id)
+                    && let Some(child) = namespace_child(program, submodule)
                 {
                     for name in submodule_namespace_names(program, submodule, child) {
                         self.definition_context_namespaces[module.id.0].insert(name, child);
@@ -3349,6 +3476,29 @@ impl NameResolver {
                         }
                     }
                 }
+            }
+        }
+        // A companion block also sees its defining module's imports, beneath
+        // its own. Parents precede their children in module order.
+        for module in program.modules() {
+            if module.companion
+                && let Some(parent) = module.parent
+            {
+                let (id, parent) = (module.id.0, parent.0);
+                let mut values = self.definition_context_values[parent].clone();
+                values.extend(std::mem::take(&mut self.definition_context_values[id]));
+                self.definition_context_values[id] = values;
+                let mut types = self.definition_context_types[parent].clone();
+                types.extend(std::mem::take(&mut self.definition_context_types[id]));
+                self.definition_context_types[id] = types;
+                let mut traits = self.definition_context_traits[parent].clone();
+                traits.extend(std::mem::take(&mut self.definition_context_traits[id]));
+                self.definition_context_traits[id] = traits;
+                let mut namespaces = self.definition_context_namespaces[parent].clone();
+                namespaces.extend(std::mem::take(&mut self.definition_context_namespaces[id]));
+                self.definition_context_namespaces[id] = namespaces;
+                let inherited = explicit_names[parent].clone();
+                explicit_names[id].extend(inherited);
             }
         }
         // Core and prelude items come last and only fill names the module
@@ -3756,7 +3906,7 @@ impl NameResolver {
             let Item::Submodule(submodule) = item else {
                 continue;
             };
-            let Some(child) = program.child_module(submodule.syntax.id) else {
+            let Some(child) = namespace_child(program, submodule) else {
                 continue;
             };
             for name in submodule_namespace_names(program, submodule, child) {
@@ -3939,6 +4089,7 @@ impl NameResolver {
             || self
                 .namespaces
                 .iter()
+                .skip(self.inherited_layers)
                 .any(|frame| frame.contains_key(&name))
         {
             self.duplicate_import(&name, span);
@@ -3969,6 +4120,7 @@ impl NameResolver {
             || self
                 .namespaces
                 .iter()
+                .skip(self.inherited_layers)
                 .any(|frame| frame.contains_key(&name))
             || self
                 .imported_macros
@@ -4044,7 +4196,7 @@ impl NameResolver {
     /// shadow module-level values.
     fn defined_locally(&self, name: &str) -> bool {
         let module = self.current_module.0;
-        self.scopes.len() == 1
+        self.scopes.len() == 1 + self.inherited_layers
             && (self.module_values[module].contains_key(name)
                 || self.declared_types[module].contains_key(name)
                 || self.declared_traits[module].contains_key(name)
@@ -7903,6 +8055,15 @@ fn mangle_function_name(name: &str) -> String {
             .collect::<String>();
         format!("operator.{encoded}")
     }
+}
+
+/// The module an inline submodule's name refers to: the submodule itself, or
+/// for a further `companion` block of a type, the type's first block, which
+/// stands for the type's namespace.
+fn namespace_child(program: &Program, submodule: &staple_syntax::Submodule) -> Option<ModuleId> {
+    program
+        .child_module(submodule.syntax.id)
+        .map(|child| program.companion_primary(child))
 }
 
 /// The namespace names an inline submodule is reachable by: its own name,

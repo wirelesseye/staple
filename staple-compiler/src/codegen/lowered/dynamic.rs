@@ -1689,7 +1689,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         };
         let (product, managed) = match &plan.construction {
             crate::ConstructorConstruction::Value { product, .. } => (product, false),
-            crate::ConstructorConstruction::ManagedRef { product, .. } => (product, true),
+            crate::ConstructorConstruction::ManagedShared { product, .. } => (product, true),
             crate::ConstructorConstruction::Unique { product, .. } => (product, false),
             _ => {
                 return Err(Diagnostic::new(
@@ -3781,7 +3781,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 return Ok(storage);
             }
-            crate::IntrinsicFunction::SharedBufferGetRef => {
+            crate::IntrinsicFunction::SharedBufferGetShared => {
                 let buffer = self.load_buffer_pointer(slot_pointer(0)?)?;
                 let position = slot_pointer(1)?;
                 let length = self.load_buffer_metadata(buffer, 0)?;
@@ -3800,8 +3800,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )
                     .map_err(compiler_diagnostic)?;
                 self.backend.build_trap_if(out_of_bounds, span.clone())?;
-                let crate::CheckedType::Ref(payload) = &call.result_type else {
-                    return Err(Diagnostic::new(span.clone(), "get_ref result is not a Ref"));
+                let crate::CheckedType::Shared(payload) = &call.result_type else {
+                    return Err(Diagnostic::new(span.clone(), "get_shared result is not a Shared"));
                 };
                 let descriptor = self.dynamic_descriptor(payload, environment, span)?;
                 let layout = self.dynamic_buffer_layout(descriptor)?;
@@ -3873,14 +3873,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 return Ok(storage);
             }
-            crate::IntrinsicFunction::RefReplace => {
+            crate::IntrinsicFunction::SharedReplace => {
                 let reference = slot_pointer(0)?;
                 let replacement = slot_pointer(1)?;
                 let payload = self
                     .load_dynamic_storage(
                         self.backend.context.ptr_type(AddressSpace::default()),
                         reference,
-                        "ref.replace.reference",
+                        "shared.replace.reference",
                     )
                     .map_err(compiler_diagnostic)?
                     .into_pointer_value();
@@ -6428,7 +6428,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         {
             // A reference's pointee still gets its descriptor: structural
             // dictionaries reached through the reference use it.
-            if let CheckedType::Ref(pointee) = ty {
+            if let CheckedType::Shared(pointee) = ty {
                 self.prepare_dynamic_descriptor(pointee, environment, span)?;
             }
             let layout = self.backend.descriptor_layout(ty)?;
@@ -7247,7 +7247,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )
                 }
 
-                CheckedType::Ref(_) | CheckedType::Unique(_) => {
+                CheckedType::Shared(_) | CheckedType::Unique(_) => {
                     let payload = self
                         .load_dynamic_storage(
                             self.backend.context.ptr_type(AddressSpace::default()),
@@ -7397,7 +7397,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Cross one `Ref` payload per recorded dereference. Every pointer-like
+    /// Cross one `Shared` payload per recorded dereference. Every pointer-like
     /// representation stores the payload pointer in its own storage.
     fn dereference_dynamic_pointer(
         &self,
@@ -7863,7 +7863,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredPatternKind::Nominal { argument, .. } => {
                 if matches!(
                     pattern.test.identity,
-                    crate::LoweredPatternIdentity::Ref | crate::LoweredPatternIdentity::Unique
+                    crate::LoweredPatternIdentity::Shared | crate::LoweredPatternIdentity::Unique
                 ) {
                     let payload = self
                         .load_dynamic_storage(
@@ -8966,13 +8966,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .first()
                             .and_then(|argument| argument.expression)
                             .ok_or_else(|| {
-                                Diagnostic::new(call.origin.span.clone(), "missing Ref payload")
+                                Diagnostic::new(call.origin.span.clone(), "missing Shared payload")
                             })?;
                         let value = self.emit_dynamic_expression(owner, argument, environment)?;
-                        let CheckedType::Ref(payload) = &call.result_type else {
+                        let CheckedType::Shared(payload) = &call.result_type else {
                             return Err(Diagnostic::new(
                                 call.origin.span.clone(),
-                                "Ref constructor has non-Ref result",
+                                "Shared constructor has non-Shared result",
                             ));
                         };
                         let descriptor =
@@ -8984,7 +8984,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         self.backend
                             .copy_dynamic_value(descriptor, value, allocation)?;
                         let result = *environment.temporaries.get(&id).ok_or_else(|| {
-                            Diagnostic::new(call.origin.span.clone(), "missing Ref result storage")
+                            Diagnostic::new(call.origin.span.clone(), "missing Shared result storage")
                         })?;
                         self.backend
                             .builder
@@ -9519,7 +9519,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 fn is_static_layout_type(value_type: &CheckedType) -> bool {
     matches!(
         value_type,
-        CheckedType::Ref(_)
+        CheckedType::Shared(_)
             | CheckedType::Unique(_)
             | CheckedType::SharedBuffer(_)
             | CheckedType::Buffer(_)

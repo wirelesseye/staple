@@ -1,5 +1,6 @@
 pub mod
 
+use package.shared.(Shared)
 use package.buffer.Buffer
 use package.cmp.(Eq)
 
@@ -16,7 +17,7 @@ pub type SharedBuffer T = opaque
 
 extern "staple-intrinsic" {
     __shared_buffer_length: <T> SharedBuffer T -> USize
-    __shared_buffer_get_ref: <T> (SharedBuffer T, USize) -> Ref T
+    __shared_buffer_get_shared: <T> (SharedBuffer T, USize) -> Shared T
 }
 
 companion<T> SharedBuffer T {
@@ -28,17 +29,17 @@ companion<T> SharedBuffer T {
     pub def length = value: SharedBuffer T => USize :: __shared_buffer_length value
 
     /// Borrows an element by position, or `None` if out of bounds.
-    pub def get_ref = (buffer: SharedBuffer T; position: USize) => Option (Ref T) :: {
+    pub def get_shared = (buffer: SharedBuffer T; position: USize) => Option (Shared T) :: {
         if (position < SharedBuffer.length buffer) {
-            Some (SharedBuffer.get_ref_unchecked buffer position)
+            Some (SharedBuffer.get_shared_unchecked buffer position)
         } else {
             None
         }
     }
 
     /// Borrows an element by position, trapping if out of bounds.
-    pub def get_ref_unchecked = (buffer: SharedBuffer T; position: USize) =>
-        Ref T :: __shared_buffer_get_ref (buffer, position)
+    pub def get_shared_unchecked = (buffer: SharedBuffer T; position: USize) =>
+        Shared T :: __shared_buffer_get_shared (buffer, position)
 
     /// Replaces the element at a position and drops the old value; `None` if out of bounds.
     pub def set = (mut buffer: SharedBuffer T; position: USize; move value: T) => Option () :: {
@@ -52,8 +53,8 @@ companion<T> SharedBuffer T {
 
     /// Replaces the element at a position and drops the old value, trapping if out of bounds.
     pub def set_unchecked = (mut buffer: SharedBuffer T; position: USize; move value: T) => () :: {
-        let mut reference = SharedBuffer.get_ref_unchecked buffer position
-        Ref.replace reference value
+        let mut reference = SharedBuffer.get_shared_unchecked buffer position
+        Shared.replace reference value
         ()
     }
 }
@@ -70,7 +71,7 @@ companion<T where Copy T> SharedBuffer T {
 
     /// Copies the element at a position, trapping if out of bounds.
     pub def get_unchecked = (buffer: SharedBuffer T; position: USize) => T :: {
-        let Ref value = SharedBuffer.get_ref_unchecked buffer position
+        let Shared value = SharedBuffer.get_shared_unchecked buffer position
         value
     }
 }
@@ -92,7 +93,7 @@ pub type SharedBufferIter T = pub wrap (buffer: SharedBuffer T, index: USize)
 impl<T where Copy T> Iterator (SharedBufferIter T) {
     type Item = T
     next = move SharedBufferIter (buffer, index) => if (index < SharedBuffer.length buffer) {
-        let Ref value = SharedBuffer.get_ref_unchecked buffer index
+        let Shared value = SharedBuffer.get_shared_unchecked buffer index
         Yield (value, SharedBufferIter (buffer: buffer, index: index + 1))
     } else {
         Done (SharedBufferIter (buffer: buffer, index: index))
@@ -111,7 +112,7 @@ impl<T where Eq T> Eq (SharedBuffer T) {
             let mut index: USize = 0
             let mut equal: Bool = True
             while (index < length) {
-                if (Eq.eq (SharedBuffer.get_ref_unchecked left index; SharedBuffer.get_ref_unchecked right index)) {
+                if (Eq.eq (SharedBuffer.get_shared_unchecked left index; SharedBuffer.get_shared_unchecked right index)) {
                     index = index + 1
                 } else {
                     equal = False

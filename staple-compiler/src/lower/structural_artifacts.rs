@@ -32,7 +32,7 @@ use crate::{
 
 /// Expands one constructor-adapter artifact: the flattened parameter slots,
 /// the product the adapter rebuilds, and either ordinary wrapping or a managed
-/// `Ref` allocation with its payload finalizer.
+/// `Shared` allocation with its payload finalizer.
 pub(super) fn expand_constructor_adapter(
     program: &LoweredProgram,
     artifact: LoweredArtifactRequestId,
@@ -104,7 +104,7 @@ pub(super) fn expand_constructor_adapter(
                 payload: payload.as_ref().clone(),
             }
         }
-        CheckedType::Ref(payload) => {
+        CheckedType::Shared(payload) => {
             if declared != Some(RecursiveConstruction::ManagedReference) {
                 return Err(vec![Diagnostic::new(
                     origin.span.clone(),
@@ -153,7 +153,7 @@ pub(super) fn expand_constructor_adapter(
             } else {
                 None
             };
-            ConstructorConstruction::ManagedRef {
+            ConstructorConstruction::ManagedShared {
                 parameters,
                 product,
                 payload,
@@ -517,7 +517,7 @@ fn structural_deref_index_body(
     let target = structural_argument(plan, 0, origin)?;
     let position = structural_argument(plan, 1, origin)?;
     let output = structural_argument(plan, 2, origin)?;
-    let (CheckedType::Ref(payload) | CheckedType::Unique(payload)) = &target else {
+    let (CheckedType::Shared(payload) | CheckedType::Unique(payload)) = &target else {
         return Err(Diagnostic::new(
             origin.span.clone(),
             "structural DerefIndex target is not a reference".to_string(),
@@ -570,7 +570,7 @@ fn structural_deref_mutate_body(
     let target = structural_argument(plan, 0, origin)?;
     let position = structural_argument(plan, 1, origin)?;
     let element = structural_argument(plan, 2, origin)?;
-    let (CheckedType::Ref(payload) | CheckedType::Unique(payload)) = &target else {
+    let (CheckedType::Shared(payload) | CheckedType::Unique(payload)) = &target else {
         return Err(Diagnostic::new(
             origin.span.clone(),
             "structural DerefMutateIndex target is not a reference".to_string(),
@@ -1166,26 +1166,27 @@ mod tests {
     }
 
     #[test]
-    fn managed_ref_constructor_plans_a_finalizer_exactly_when_drop_is_needed() {
+    fn managed_shared_constructor_plans_a_finalizer_exactly_when_drop_is_needed() {
         let (module, lowered) = lower(concat!(
+            "use std.shared.(Shared)\n",
             "type Resource = wrap I32\n",
             "impl Drop Resource { cleanup = Resource value => () }\n",
-            "let make: () -> (Resource -> Ref Resource) = () => Ref\n",
-            "let make_copy: () -> (I32 -> Ref I32) = () => Ref\n",
+            "let make: () -> (Resource -> Shared Resource) = () => Shared\n",
+            "let make_copy: () -> (I32 -> Shared I32) = () => Shared\n",
         ));
         let plans = constructor_plans(&lowered);
-        assert_eq!(plans.len(), 2, "one managed-ref adapter per payload type");
+        assert_eq!(plans.len(), 2, "one managed-shared adapter per payload type");
         let mut saw_droppable = false;
         let mut saw_copy = false;
         for (_, plan) in &plans {
-            let ConstructorConstruction::ManagedRef {
+            let ConstructorConstruction::ManagedShared {
                 parameters,
                 product,
                 payload,
                 finalizer,
             } = &plan.construction
             else {
-                panic!("a `Ref` constructor result classifies as ManagedRef");
+                panic!("a `Shared` constructor result classifies as ManagedShared");
             };
             // The adapter rebuilds the payload from its flattened slots.
             assert_eq!(product, payload);
@@ -1195,7 +1196,7 @@ mod tests {
             assert_eq!(
                 finalizer.is_some(),
                 expected_finalizer,
-                "the planned finalizer matches build ref value predicate"
+                "the planned finalizer matches build shared value predicate"
             );
             if expected_finalizer {
                 saw_droppable = true;
@@ -1226,16 +1227,17 @@ mod tests {
     #[test]
     fn generic_constructor_values_produce_one_adapter_per_instantiation() {
         let (_, lowered) = lower(concat!(
-            "def ref_maker: <T where Copy T> () -> (T -> Ref T) = <T where Copy T> () => Ref\n",
-            "let maker_i32: I32 -> Ref I32 = ref_maker ()\n",
-            "let maker_u8: U8 -> Ref U8 = ref_maker ()\n",
+            "use std.shared.(Shared)\n",
+            "def shared_maker: <T where Copy T> () -> (T -> Shared T) = <T where Copy T> () => Shared\n",
+            "let maker_i32: I32 -> Shared I32 = shared_maker ()\n",
+            "let maker_u8: U8 -> Shared U8 = shared_maker ()\n",
         ));
         let plans = constructor_plans(&lowered);
         assert_eq!(plans.len(), 2, "one adapter per concrete callable type");
         let mut payloads = plans
             .iter()
             .filter_map(|(_, plan)| match &plan.construction {
-                ConstructorConstruction::ManagedRef { payload, .. } => Some(payload.clone()),
+                ConstructorConstruction::ManagedShared { payload, .. } => Some(payload.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -1660,10 +1662,11 @@ mod tests {
     #[test]
     fn deref_index_loads_copy_products_and_delegates_heterogeneous_ones() {
         let (module, lowered) = lower(concat!(
-            "def deref_uniform: (Ref (I32, I32)) -> I32 = reference => reference[0]\n",
-            "def deref_mixed: (Ref (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
-            "let uniform = deref_uniform (Ref (1, 2))\n",
-            "let mixed = deref_mixed (Ref ((U8 :: 1), 2))\n",
+            "use std.shared.(Shared)\n",
+            "def deref_uniform: (Shared (I32, I32)) -> I32 = reference => reference[0]\n",
+            "def deref_mixed: (Shared (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
+            "let uniform = deref_uniform (Shared (1, 2))\n",
+            "let mixed = deref_mixed (Shared ((U8 :: 1), 2))\n",
         ));
         let plans = structural_plans(&lowered, StructuralTraitMethod::DerefIndex);
         assert_eq!(plans.len(), 2);
@@ -1724,10 +1727,11 @@ mod tests {
     #[test]
     fn deref_index_delegates_to_an_explicit_index_implementation() {
         let (_, lowered) = lower(concat!(
+            "use std.shared.(Shared)\n",
             "type Row = wrap (I32, I32)\n",
             "impl Index Row USize { type Output = I32; index = (row, position) => 7 }\n",
-            "def deref_row: (Ref Row, USize) -> I32 = (reference, position) => reference[position]\n",
-            "let value = deref_row (Ref (Row (1, 2)), 0)\n",
+            "def deref_row: (Shared Row, USize) -> I32 = (reference, position) => reference[position]\n",
+            "let value = deref_row (Shared (Row (1, 2)), 0)\n",
         ));
         let plans = structural_plans(&lowered, StructuralTraitMethod::DerefIndex);
         assert_eq!(plans.len(), 1);
@@ -1767,12 +1771,13 @@ mod tests {
     #[test]
     fn deref_mutate_index_delegates_to_the_payloads_mutate_index() {
         let (_, lowered) = lower(concat!(
-            "def deref_replace: move (Ref (I32, I32)) -> Ref (I32, I32) = move reference => {\n",
+            "use std.shared.(Shared)\n",
+            "def deref_replace: move (Shared (I32, I32)) -> Shared (I32, I32) = move reference => {\n",
             "  let mut own = reference\n",
             "  own[0] = 3\n",
             "  own\n",
             "}\n",
-            "let replaced = deref_replace (Ref (1, 2))\n",
+            "let replaced = deref_replace (Shared (1, 2))\n",
         ));
         let plans = structural_plans(&lowered, StructuralTraitMethod::DerefMutateIndex);
         assert_eq!(plans.len(), 1);

@@ -49,7 +49,7 @@ pub(crate) enum CanonicalType {
     NumberLiteral(u64),
     String,
     StringLiteralSet(Vec<String>),
-    Ref(Box<CanonicalType>),
+    Shared(Box<CanonicalType>),
     Unique(Box<CanonicalType>),
     SharedBuffer(Box<CanonicalType>),
     Buffer(Box<CanonicalType>),
@@ -170,7 +170,7 @@ impl CanonicalType {
         };
         1 + match self {
             CanonicalType::Forall { body, .. } => body.nesting_depth(),
-            CanonicalType::Ref(inner)
+            CanonicalType::Shared(inner)
             | CanonicalType::Unique(inner)
             | CanonicalType::SharedBuffer(inner)
             | CanonicalType::Buffer(inner)
@@ -294,8 +294,8 @@ impl CanonicalType {
             CheckedType::StringLiteralSet(values) => {
                 CanonicalType::StringLiteralSet(values.clone())
             }
-            CheckedType::Ref(payload) => {
-                CanonicalType::Ref(Box::new(Self::convert(payload, origin, runtime, binders)?))
+            CheckedType::Shared(payload) => {
+                CanonicalType::Shared(Box::new(Self::convert(payload, origin, runtime, binders)?))
             }
             CheckedType::Unique(payload) => {
                 CanonicalType::Unique(Box::new(Self::convert(payload, origin, runtime, binders)?))
@@ -975,7 +975,7 @@ pub(crate) type DropGlueKey = CanonicalType;
 /// The identity of one garbage-collector finalizer body.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum GcFinalizerKey {
-    /// A managed `Ref` allocation's payload type.
+    /// A managed `Shared` allocation's payload type.
     Payload(CanonicalType),
     /// A captured binding cell's value type.
     Cell(CanonicalType),
@@ -1148,7 +1148,7 @@ pub(crate) enum DynamicStructuralShape {
     MutateProduct {
         length: usize,
     },
-    /// `Index` or `MutateIndex` through a `Ref`, delegating to the payload.
+    /// `Index` or `MutateIndex` through a `Shared`, delegating to the payload.
     DerefIndex,
     DerefMutateIndex,
     /// `IntoIterator` of a product: the source paired with cursor zero.
@@ -1668,7 +1668,7 @@ mod tests {
 
     fn node_count(value_type: &CanonicalType) -> usize {
         match value_type {
-            CanonicalType::Ref(payload)
+            CanonicalType::Shared(payload)
             | CanonicalType::Unique(payload)
             | CanonicalType::SharedBuffer(payload)
             | CanonicalType::Buffer(payload)
@@ -2109,7 +2109,7 @@ mod tests {
 
         assert!(
             CanonicalType::concrete(
-                &CheckedType::Ref(Box::new(CheckedType::Parameter {
+                &CheckedType::Shared(Box::new(CheckedType::Parameter {
                     id: TypeParameterId(6),
                     name: "Nested".to_owned(),
                     sized: false,

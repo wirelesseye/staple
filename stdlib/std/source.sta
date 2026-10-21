@@ -87,7 +87,6 @@ pub type Location = wrap (file: String, line: U32, column: U32)
 
 companion Location {
     use package.source.(track_caller)
-    use package.string.String
 
     /// Returns the location of the call to `caller` itself. Inside a
     /// `@track_caller` function, it returns the location of that function's
