@@ -1089,13 +1089,33 @@ let moved = animal |> move_to (1.0, 1.0)
 Unlike a slotted call, a bare `animal |> move_to` is complete: it is the
 receiver-applied value, which here is a function still awaiting `position`.
 
-Companion lookup uses the receiver's static named type. Type aliases are
-transparent, so `companion A` for `type A = alias B` is the same as
-`companion B`: its members belong to `B` and are reachable as both `A.member`
-and `B.member`, and by method syntax on any `B` value. `B` must be a nominal
-type declared in the same module as the alias, where `companion B` could be
-written directly. A companion for an alias of a structural type, such as a sum
-or product, is rejected, because those types cannot have companion items.
+Companion lookup uses the receiver's static named type. A companion belongs
+to its target's identity rather than its name. Type aliases are transparent,
+so `companion A` for `type A = alias B` is the same as `companion B`: its
+members belong to `B` and are reachable as `B.member`, as `A.member` or
+through any other alias of `B`, and by method syntax on any `B` value. An
+alias of a structural type gives a structural companion, described below.
+
+A companion block may be written in any module of the package that declares
+its target. Like trait implementations, companions obey a package-level
+orphan rule: a companion of a type declared in another package is rejected,
+whether the block names the type directly or through an alias, so a
+dependency's types cannot gain competing members from several packages.
+
+```staple
+// units.sta
+pub type Meters = pub wrap I32
+
+// conversions.sta, in the same package
+use package.units.Meters
+
+companion Meters {
+    pub def to_feet = value: Meters => I32 :: value.* * 3
+}
+
+// anywhere `Meters` and the member are visible
+let feet = Meters 2 |> to_feet           // Meters.to_feet (Meters 2)
+```
 
 The builtin numeric types have companions too, so their per-type helpers need
 no import. `F32` and `F64` provide the standard floating-point toolbox:
@@ -1172,7 +1192,10 @@ neither the defining module nor the type's other companion blocks, and it may
 import a name the defining module already imports. The members of all of a
 type's companion blocks form the type's one namespace, so each block can refer
 directly to the others' members, and a member name may be declared by only one
-block.
+block. A block outside the type's module adds its members to the same
+namespace, and may not redeclare a name, but its body does not see the other
+blocks' members directly; it names them as `Type.member`, like any other
+module.
 Generic and constrained targets use the same bracketed parameter syntax as
 trait implementations, for example `companion<T where Bound T> Box T`.
 Ordinary `mod` declarations may not share a name with a type; use `companion`
@@ -1233,6 +1256,51 @@ program, so these rules keep them coherent:
 
 Visibility works as for other companion items: a member without `pub` is
 reachable only from the module that declares the block.
+
+#### Structural companions
+
+A companion's target may be a structural type, such as a sum or product,
+written directly or through an alias. The standard library could give every
+`Result` a member this way; `companion<T, E> Result T E` is the same block,
+since `Result T E` is an alias of `Ok T | E`:
+
+```staple
+companion<T, E> (Ok T | E) {
+    pub def succeeded = value: Ok T | E => Bool :: match value {
+        Ok _ => True,
+        _ => False,
+    }
+}
+```
+
+A structural companion belongs to its target's identity. Its members apply,
+by method syntax, to a receiver whose static type is the target, comparing
+sum alternatives as an unordered set after aliases are expanded, and taking
+priority over trait functions as a type's own members do. A wider sum is a
+different type: a companion of `Ok I32 | String` does not apply to
+`Ok I32 | String | Bool`. The target has no namespace of its own, so outside
+method syntax its members are reached through an alias of a matching type,
+from any package: after `type Answer = alias Ok I32 | String`,
+`Answer.succeeded` is the member at `Ok I32 | String`.
+
+The companion's own parameters match any type. A bare parameter alternative
+of a sum stands for the rest of the receiver's alternatives, of which there
+must be at least one: `Ok T | E` matches `Ok I32 | String` with `E` as
+`String`, and `Ok I32 | String | Bool` with `E` as `String | Bool`, but not
+`Ok I32` alone. A sum in a target may have at most one bare parameter
+alternative. A target that matches a receiver in more than one way, as
+`Ok T | E` does `Ok I32 | Ok U8`, makes its members ambiguous for that
+receiver.
+
+These rules keep structural companions coherent:
+
+- The orphan rule: one of the nominal types named in the target, looking
+  through aliases, must be declared in the companion's package. Thus only the
+  standard library may write `companion (Ok I32 | String)`, while a package
+  may write `companion (Ok I32 | Meters)` for its own `Meters`.
+- Two structural members may share a name only when no type could match both
+  targets, and a structural member may not share a name with a blanket member
+  whose bounds its target could satisfy.
 
 An external import resolves the longest existing `.sta` file prefix and then
 traverses public inline submodules. Thus `use library.api.answer` first prefers

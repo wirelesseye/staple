@@ -958,16 +958,17 @@ impl Grammar {
         let generics_syntax = self.annotation_syntax(generics_start, 1);
         self.reject_effect_parameters(&type_parameters, "companion declarations")?;
         let target = self.parse_type()?;
-        let name = companion_target_name(&target)
-            .ok_or_else(|| self.error("companion target must be a named type or type alias"))?;
+        // A structural target, such as `(Ok T | E)`, has no name of its own;
+        // its written form names the block.
+        let name = companion_target_name(&target).unwrap_or_else(|| target.to_string());
         if !matches!(target, Type::Named(_))
             && type_parameters
                 .iter()
                 .any(|parameter| parameter.names().contains(&name.as_str()))
         {
             return Err(self.error(
-                "a companion target must be a named type, a type alias, or one of the \
-                 companion's own type parameters",
+                "a companion target must be a named type, a type alias, a structural type, \
+                 or one of the companion's own type parameters",
             ));
         }
         self.expect(TokenKind::LBrace, "expected `{` after companion target")?;

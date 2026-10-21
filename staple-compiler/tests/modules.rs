@@ -3219,3 +3219,159 @@ fn package_from_representation_is_projected_locally_but_not_by_a_dependency() {
     assert!(message.contains("is private"), "{message}");
     assert!(!message.contains("root.sta"), "{message}");
 }
+
+#[test]
+fn a_companion_may_extend_a_type_from_another_module_of_its_package() {
+    let fixture = Fixture::new();
+    fixture.write("units.sta", "pub type Meters = pub wrap I32\n");
+    fixture.write(
+        "conversions.sta",
+        concat!(
+            "use units.Meters\n",
+            "companion Meters {\n",
+            "    pub def to_feet = value: Meters => I32 :: value.* * 3\n",
+            "    def hidden = value: Meters => I32 :: 0\n",
+            "    pub def through_type = value: Meters => I32 :: Meters.hidden value\n",
+            "}\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use units.Meters\n",
+            "use conversions\n",
+            "let piped: I32 = Meters 2 |> to_feet\n",
+            "let named: I32 = Meters.to_feet (Meters 2)\n",
+            "piped + named\n",
+        ),
+    );
+    fixture
+        .compile()
+        .expect("a companion in another module of the package should apply");
+
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use units.Meters\n",
+            "use conversions\n",
+            "let hidden: I32 = Meters.hidden (Meters 2)\n",
+        ),
+    );
+    let error = fixture
+        .compile()
+        .expect_err("a member without `pub` stays in its block's module");
+    assert!(
+        error.contains("`Meters` has no accessible companion member named `hidden`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_companion_in_another_module_may_not_redeclare_a_member() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "units.sta",
+        concat!(
+            "pub type Meters = pub wrap I32\n",
+            "companion Meters { pub def size = value: Meters => I32 :: 1 }\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use units.Meters\n",
+            "companion Meters { pub def size = value: Meters => I32 :: 2 }\n",
+        ),
+    );
+    let error = fixture
+        .compile()
+        .expect_err("a type's member name is declared by one block");
+    assert!(error.contains("duplicate definition of `size`"), "{error}");
+}
+
+/// Loads `app` with a `lib` dependency and checks it.
+fn check_with_library(fixture: &Fixture, library: &str, app: &str) -> Result<(), String> {
+    fixture.write("lib/src/root.sta", library);
+    fixture.write("app/src/main.sta", app);
+    fs::write(
+        fixture.root.join("lib/staple.kdl"),
+        "package \"lib\" { kind \"library\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("app/staple.kdl"),
+        "package \"app\" { dependencies { lib path=\"../lib\" } }\n",
+    )
+    .unwrap();
+    let graph = staple_project::load_package_graph(&fixture.root.join("app/staple.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
+        .with_package_graph(graph)
+        .load_package_graph()
+        .expect("package graph should load");
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .map_err(format_diagnostics)?;
+    TypeChecker::new()
+        .check(resolved)
+        .map(|_| ())
+        .map_err(format_diagnostics)
+}
+
+#[test]
+fn companions_obey_a_package_level_orphan_rule() {
+    let library = concat!(
+        "pub type Tag = pub wrap I32\n",
+        "companion (Tag | String) {\n",
+        "    pub def describe = value: Tag | String => I32 :: 1\n",
+        "}\n",
+    );
+    let fixture = Fixture::new();
+    check_with_library(
+        &fixture,
+        library,
+        concat!(
+            "use lib.Tag\n",
+            "type Labelled = alias Tag | String\n",
+            "let value: Tag | String = Tag 1\n",
+            "let piped: I32 = value |> describe\n",
+            "let named: I32 = Labelled.describe value\n",
+        ),
+    )
+    .expect("a dependency's structural companion applies through a local alias");
+
+    for (app, message) in [
+        (
+            "use lib.Tag\ncompanion Tag { pub def size = () => I32 :: 1 }\n",
+            "companion target `Tag` is declared in another package",
+        ),
+        (
+            "use lib.Tag\ntype Local = alias Tag\ncompanion Local { pub def size = () => I32 :: 1 }\n",
+            "companion target `Local` is declared in another package",
+        ),
+        (
+            "use lib.Tag\ncompanion (Tag | String) { pub def size = () => I32 :: 1 }\n",
+            "has no component declared in the current package",
+        ),
+    ] {
+        let error = check_with_library(&fixture, library, app)
+            .expect_err("a package cannot add members to another package's types");
+        assert!(error.contains(message), "{app}\n{error}");
+    }
+
+    check_with_library(
+        &fixture,
+        library,
+        concat!(
+            "use lib.Tag\n",
+            "type Local = wrap I32\n",
+            "companion (Tag | Local) { pub def size = () => I32 :: 1 }\n",
+        ),
+    )
+    .expect("a structural companion with a local component is allowed");
+}

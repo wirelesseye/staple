@@ -24,6 +24,11 @@ pub struct SourceModule {
     /// A blanket `companion<T where Bound T> T` block. It belongs to every
     /// type satisfying its bounds, so it is never a named namespace.
     pub blanket: bool,
+    /// A companion block whose target is not a nominal type declared in the
+    /// same module: a type declared elsewhere in the package, or a
+    /// structural type. It is attached to its target by identity during
+    /// resolution, so it is never a named namespace either.
+    pub detached: bool,
 }
 
 /// A source position: package-relative file path with 1-based line and column.
@@ -203,6 +208,7 @@ impl Program {
                 qualified_name: "<memory>".to_owned(),
                 companion: false,
                 blanket: false,
+                detached: false,
             }],
             imported_modules: HashMap::new(),
             dotted_imports: HashMap::new(),
@@ -243,6 +249,7 @@ impl Program {
             let blanket = declaration.blanket_parameter().is_some();
             let alias =
                 canonicalize_companion(&self.modules[parent.0].syntax.items, &mut declaration);
+            let detached = detached_companion(&self.modules[parent.0].syntax.items, &declaration);
             // A further `companion` block for a type that already has one is
             // a module of its own, so its imports stay private to the block;
             // the first block remains the type's namespace.
@@ -265,10 +272,11 @@ impl Program {
                 qualified_name,
                 companion: declaration.companion,
                 blanket,
+                detached,
             });
             self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
-            if !additional_block && !blanket {
+            if !additional_block && !blanket && !detached {
                 self.children[parent.0].insert(declaration.name, id);
                 if let Some(alias) = alias {
                     self.children[parent.0].insert(alias, id);
@@ -299,6 +307,7 @@ impl Program {
                 qualified_name,
                 companion: false,
                 blanket: false,
+                detached: false,
             });
             self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
@@ -387,6 +396,7 @@ impl Program {
     /// Registers inline modules introduced after parsing, such as macro output.
     /// `next_syntax_id` continues the identities macro expansion allocated.
     pub(crate) fn rebuild_generated_inline_modules(&mut self, next_syntax_id: &mut usize) {
+        self.reattach_expanded_companions();
         let mut parent = 0;
         while parent < self.modules.len() {
             let mut declarations = self.modules[parent]
@@ -418,6 +428,7 @@ impl Program {
                 } else {
                     None
                 };
+                let detached = detached_companion(&self.modules[parent].syntax.items, &declaration);
                 // Mirror `collect_single_submodules` / `insert_submodules`: a
                 // generated `companion` block for a type that already has a
                 // companion is a further block of its own, not the namespace.
@@ -441,10 +452,11 @@ impl Program {
                     qualified_name,
                     companion: declaration.companion,
                     blanket,
+                    detached,
                 });
                 self.module_packages.push(self.module_packages[parent]);
                 self.children.push(HashMap::new());
-                if top_level && !additional_block && !blanket {
+                if top_level && !additional_block && !blanket && !detached {
                     self.children[parent].insert(declaration.name, id);
                     if let Some(alias) = alias {
                         self.children[parent].insert(alias, id);
@@ -463,6 +475,45 @@ impl Program {
             &self.module_packages,
             &package_dependency_order(self.package_graph.as_ref()),
         );
+    }
+
+    /// A companion block counts as detached when its module declares no
+    /// nominal type of its name, which is only certain once macros such as
+    /// `typegroup` have declared theirs. A detached block whose type a macro
+    /// declared joins that type's namespace, as its first block or a further
+    /// one.
+    fn reattach_expanded_companions(&mut self) {
+        for id in 0..self.modules.len() {
+            let module = &self.modules[id];
+            let (Some(parent), Some(name)) = (module.parent, module.name.clone()) else {
+                continue;
+            };
+            if !module.detached {
+                continue;
+            }
+            let items = &self.modules[parent.0].syntax.items;
+            let Some(mut declaration) = items.iter().find_map(|item| match item {
+                Item::Submodule(submodule)
+                    if self.child_modules.get(&submodule.syntax.id) == Some(&ModuleId(id)) =>
+                {
+                    Some(submodule.clone())
+                }
+                _ => None,
+            }) else {
+                continue;
+            };
+            declaration.name = name.clone();
+            if detached_companion(items, &declaration) {
+                continue;
+            }
+            self.modules[id].detached = false;
+            let first_block = !self.children[parent.0]
+                .get(&name)
+                .is_some_and(|existing| self.modules[existing.0].companion);
+            if first_block {
+                self.children[parent.0].insert(name, ModuleId(id));
+            }
+        }
     }
 
     /// Copies the expanded contents of flattened inline modules back into the
@@ -876,6 +927,19 @@ impl Program {
         self.children[module.0].get(name).copied()
     }
 
+    /// The namespace an inline submodule declaration introduces: its module,
+    /// or for a type's further `companion` block, the type's first block.
+    /// Blanket and detached companion blocks introduce none, since their
+    /// members are found through the types they apply to.
+    pub fn namespace_child(&self, submodule_syntax: SyntaxId) -> Option<ModuleId> {
+        self.child_module(submodule_syntax)
+            .filter(|child| {
+                let child = &self.modules[child.0];
+                !child.blanket && !child.detached
+            })
+            .map(|child| self.companion_primary(child))
+    }
+
     /// The module that stands for `module`'s namespace. Every `companion`
     /// block is a module of its own, so its imports stay private to it, but
     /// the first block for a type is the one the type's namespace names;
@@ -884,6 +948,7 @@ impl Program {
         let source = &self.modules[module.0];
         if source.companion
             && !source.blanket
+            && !source.detached
             && let (Some(parent), Some(name)) = (source.parent, source.name.as_deref())
             && let Some(primary) = self.children[parent.0].get(name).copied()
             && self.modules[primary.0].companion
@@ -1439,6 +1504,7 @@ impl ProgramLoader {
             qualified_name: qualified_name.clone(),
             companion: true,
             blanket: false,
+            detached: false,
         });
         self.module_packages.push(self.module_packages[parent.0]);
         self.children.push(HashMap::new());
@@ -1685,6 +1751,7 @@ impl ProgramLoader {
             qualified_name: qualified_name.clone(),
             companion: false,
             blanket: false,
+            detached: false,
         });
         self.module_packages.push(package);
         self.children.push(HashMap::new());
@@ -1712,12 +1779,14 @@ impl ProgramLoader {
             let blanket = declaration.blanket_parameter().is_some();
             let alias =
                 canonicalize_companion(&self.modules[parent.0].syntax.items, &mut declaration);
+            let detached = detached_companion(&self.modules[parent.0].syntax.items, &declaration);
             let additional_block = declaration.companion
                 && self.children[parent.0]
                     .get(&declaration.name)
                     .is_some_and(|existing| self.modules[existing.0].companion);
             if !additional_block
                 && !blanket
+                && !detached
                 && self.children[parent.0].contains_key(&declaration.name)
             {
                 return Err(load_diagnostic_at(
@@ -1737,10 +1806,11 @@ impl ProgramLoader {
                 qualified_name: qualified_name.clone(),
                 companion: declaration.companion,
                 blanket,
+                detached,
             });
             self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
-            if !additional_block && !blanket {
+            if !additional_block && !blanket && !detached {
                 self.children[parent.0].insert(declaration.name, id);
                 if let Some(alias) = alias {
                     self.children[parent.0].insert(alias, id);
@@ -1768,6 +1838,7 @@ impl ProgramLoader {
                 qualified_name: qualified_name.clone(),
                 companion: false,
                 blanket: false,
+                detached: false,
             });
             self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
@@ -3332,14 +3403,51 @@ mod tests {
 /// the same module, whose underlying type is headed by a type `B` also
 /// declared there: aliases are transparent, so their companion items belong
 /// to `B`. Returns the alias name, which keeps naming the merged companion
-/// namespace. Other alias companions keep their own name and are rejected
-/// during resolution.
+/// namespace. Other alias companions keep their own name and are detached
+/// (see `detached_companion`).
 fn canonicalize_companion(items: &[Item], declaration: &mut Submodule) -> Option<String> {
     if !declaration.companion || declaration.blanket_parameter().is_some() {
         return None;
     }
     let target = companion_alias_target(items, &declaration.name)?;
     Some(std::mem::replace(&mut declaration.name, target))
+}
+
+/// Whether `declaration` is a companion attached to its target by identity
+/// rather than as a namespace of its module: its target, after
+/// `canonicalize_companion`, is not a nominal type declared in `items`. Such
+/// a target is declared elsewhere, or is an alias of one, or is structural.
+fn detached_companion(items: &[Item], declaration: &Submodule) -> bool {
+    fn head(ty: &staple_syntax::Type) -> Option<&staple_syntax::Type> {
+        match ty {
+            staple_syntax::Type::Application(application) => head(&application.callee),
+            staple_syntax::Type::EffectApplication(application) => head(&application.callee),
+            other => Some(other),
+        }
+    }
+    if !declaration.companion || declaration.blanket_parameter().is_some() {
+        return false;
+    }
+    match declaration.companion_target.as_ref().and_then(head) {
+        // A macro template's target is only known once it is expanded.
+        Some(staple_syntax::Type::Splice(_)) | None => false,
+        Some(staple_syntax::Type::Named(named)) if named.namespace.is_none() => {
+            fn declares_nominal(item: &Item, name: &str) -> bool {
+                match item {
+                    Item::TypeDeclaration(declaration) => {
+                        declaration.name == name
+                            && declaration.kind() != staple_syntax::TypeDeclarationKind::Alias
+                    }
+                    Item::Modified(modified) => declares_nominal(&modified.item, name),
+                    _ => false,
+                }
+            }
+            !items
+                .iter()
+                .any(|item| declares_nominal(item, &declaration.name))
+        }
+        Some(_) => true,
+    }
 }
 
 /// The type a same-module alias chain starting at `name` ends at, when every

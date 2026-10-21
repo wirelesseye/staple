@@ -6854,7 +6854,11 @@ fn alias_companions_extend_the_aliased_type() {
 }
 
 #[test]
-fn rejects_companions_on_aliases_of_types_without_companions() {
+fn rejects_alias_companions_of_another_package_s_types() {
+    // An alias is transparent, so its companion belongs to the aliased type,
+    // which here the standard library declares: the structural `I32 | String`
+    // and `(T, T)` have no component of this package, and `I32` is
+    // nominal.
     let diagnostics = resolve_result(concat!(
         "type Either = alias I32 | String\n",
         "companion Either { pub def zero = 0 }\n",
@@ -6863,7 +6867,7 @@ fn rejects_companions_on_aliases_of_types_without_companions() {
         "type Number = alias I32\n",
         "companion Number { pub def one = 1 }\n",
     ))
-    .expect_err_diagnostics("alias companions need a nominal type declared alongside them");
+    .expect_err_diagnostics("alias companions follow the package orphan rule");
     let messages = diagnostics
         .iter()
         .map(|diagnostic| diagnostic.message.as_str())
@@ -6871,9 +6875,9 @@ fn rejects_companions_on_aliases_of_types_without_companions() {
     assert_eq!(
         messages,
         [
-            "companion target `Either` is an alias of a type that cannot have companion items",
-            "companion target `Pair` is an alias of a type that cannot have companion items",
-            "companion target `Number` is an alias of `I32`, which is declared in another module; add companion items where `I32` is declared",
+            "companion target `Either` has no component declared in the current package; a structural companion needs a type of its own package in its target",
+            "companion target `Pair T` has no component declared in the current package; a structural companion needs a type of its own package in its target",
+            "companion target `Number` is declared in another package; a package can add companion items only to its own types",
         ]
     );
 }

@@ -16643,6 +16643,7 @@ mod tests {
             qualified_name: format!("module{id}"),
             companion: false,
             blanket: false,
+            detached: false,
         };
         let sources = vec![source(0), source(1)];
         let diagnostics =

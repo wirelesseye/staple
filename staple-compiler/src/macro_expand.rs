@@ -2044,9 +2044,7 @@ impl MacroExpander {
             for item in &source_module.syntax.items {
                 if let Item::Submodule(submodule) = item
                     && submodule.visibility == Visibility::Public
-                    && let Some(child) = program
-                        .child_module(submodule.syntax.id)
-                        .map(|child| program.companion_primary(child))
+                    && let Some(child) = program.namespace_child(submodule.syntax.id)
                 {
                     public_namespaces.insert((source_module.id, submodule.name.clone()), child);
                 }
@@ -2155,9 +2153,7 @@ impl MacroExpander {
             for item in &module.syntax.items {
                 if let Item::Submodule(submodule) = item
                     && submodule.visibility == Visibility::Package
-                    && let Some(child) = program
-                        .child_module(submodule.syntax.id)
-                        .map(|child| program.companion_primary(child))
+                    && let Some(child) = program.namespace_child(submodule.syntax.id)
                 {
                     package_namespaces.insert((module.id, submodule.name.clone()), child);
                 }
@@ -2275,9 +2271,7 @@ impl MacroExpander {
                     let Item::Submodule(submodule) = item else {
                         return None;
                     };
-                    let child = program
-                        .child_module(submodule.syntax.id)
-                        .map(|child| program.companion_primary(child))?;
+                    let child = program.namespace_child(submodule.syntax.id)?;
                     Some(((module.id, submodule.name.clone()), child))
                 })
             })
@@ -2372,9 +2366,7 @@ impl MacroExpander {
             }
             for item in &source_module.syntax.items {
                 if let Item::Submodule(submodule) = item
-                    && let Some(child) = program
-                        .child_module(submodule.syntax.id)
-                        .map(|child| program.companion_primary(child))
+                    && let Some(child) = program.namespace_child(submodule.syntax.id)
                 {
                     scopes[source_module.id.0]
                         .namespaces

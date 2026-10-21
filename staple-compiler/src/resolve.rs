@@ -601,6 +601,8 @@ pub struct ResolvedModule {
     companion_type_for_module: HashMap<ModuleId, TypeId>,
     blanket_companion_members: HashMap<String, Vec<ResolvedBlanketMember>>,
     blanket_companion_references: HashMap<SyntaxId, (TypeId, Vec<SymbolId>)>,
+    detached_companion_members: HashMap<String, Vec<ResolvedDetachedMember>>,
+    binding_companion_targets: HashMap<SyntaxId, Type>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -619,6 +621,29 @@ struct ResolvedBlanketMember {
     public: bool,
     /// The member's own copy of the block's blanket parameter.
     parameter: Option<TypeParameterId>,
+}
+
+/// A `Type.member` reference awaiting the targets of detached companions.
+#[derive(Debug, Clone)]
+struct TypeMemberReference {
+    span: Span,
+    module: ModuleId,
+    head: String,
+    member: String,
+}
+
+/// A member of a detached companion block: one whose target is not a
+/// nominal type declared in the block's module. It belongs to its target by
+/// identity rather than through a namespace.
+#[derive(Debug, Clone, Copy)]
+struct ResolvedDetachedMember {
+    symbol: SymbolId,
+    block: ModuleId,
+    declaring_module: ModuleId,
+    public: bool,
+    /// The nominal type the target denotes, once resolved; `None` for a
+    /// structural target, which the checker matches against receivers.
+    nominal: Option<TypeId>,
 }
 
 impl ResolvedModule {
@@ -782,6 +807,52 @@ impl ResolvedModule {
             .flatten()
             .find(|member| member.symbol == symbol)
             .and_then(|member| member.parameter)
+    }
+
+    /// The members named `name` of companions with a structural target that
+    /// are accessible from `accessing_module`, in declaration order. Each
+    /// applies to the types its target matches.
+    pub fn structural_companion_members_named(
+        &self,
+        name: &str,
+        accessing_module: Option<ModuleId>,
+    ) -> Vec<SymbolId> {
+        self.detached_companion_members
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|member| {
+                member.nominal.is_none()
+                    && (member.public || accessing_module == Some(member.declaring_module))
+            })
+            .map(|member| member.symbol)
+            .collect()
+    }
+
+    /// Every member of a companion with a structural target, by name.
+    pub fn structural_companion_members(&self) -> impl Iterator<Item = (&str, SymbolId)> {
+        self.detached_companion_members
+            .iter()
+            .flat_map(|(name, members)| {
+                members
+                    .iter()
+                    .filter(|member| member.nominal.is_none())
+                    .map(move |member| (name.as_str(), member.symbol))
+            })
+    }
+
+    /// Whether `symbol` is a member of a companion with a structural target.
+    pub fn is_structural_companion_member(&self, symbol: SymbolId) -> bool {
+        self.detached_companion_members
+            .values()
+            .flatten()
+            .any(|member| member.symbol == symbol && member.nominal.is_none())
+    }
+
+    /// The resolved target of the companion block declaring member `symbol`.
+    pub fn companion_target_of(&self, symbol: SymbolId) -> Option<&Type> {
+        self.binding_companion_targets
+            .get(self.symbol_declarations.get(&symbol)?)
     }
 
     /// Every type's companion members, accessible or not.
@@ -1528,6 +1599,17 @@ pub struct NameResolver {
     pipe_local_references: HashMap<SyntaxId, SymbolId>,
     blanket_companion_members: HashMap<String, Vec<ResolvedBlanketMember>>,
     blanket_companion_references: HashMap<SyntaxId, (TypeId, Vec<SymbolId>)>,
+    detached_companion_members: HashMap<String, Vec<ResolvedDetachedMember>>,
+    /// The nominal type each detached companion block extends.
+    detached_companion_types: HashMap<ModuleId, TypeId>,
+    /// `Type.member` references that may name a detached companion member,
+    /// settled once every detached block's target is resolved.
+    type_member_references: HashMap<SyntaxId, TypeMemberReference>,
+    /// The module declaring each companion block, whose access the block's
+    /// body shares.
+    companion_parents: HashMap<ModuleId, ModuleId>,
+    /// The resolved target of each detached companion block without members.
+    memberless_companion_targets: HashMap<ModuleId, Type>,
     trait_implementations: Vec<ResolvedTraitImplementation>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
     mutable_symbols: HashSet<SymbolId>,
@@ -1858,6 +1940,9 @@ impl NameResolver {
             }
             self.install_imports(&program, source_module.id);
             self.install_local_traits(source_module.id);
+            if source_module.detached {
+                self.resolve_memberless_companion_target(&program, source_module);
+            }
             if inherits_parent {
                 own_namespaces.extend(
                     self.namespaces
@@ -1891,7 +1976,7 @@ impl NameResolver {
         }
 
         self.validate_trait_prerequisite_cycles();
-        self.validate_alias_companions(&program);
+        self.resolve_detached_companions(&program);
         self.validate_blanket_companions(&program);
 
         if !self.diagnostics.is_empty() {
@@ -1971,6 +2056,23 @@ impl NameResolver {
                         )
                     }),
                 );
+            }
+        }
+        // A detached block for a nominal type extends that type like its own
+        // blocks; duplicate names were rejected when its target was resolved.
+        companion_type_for_module.extend(self.detached_companion_types.iter());
+        for (name, members) in &self.detached_companion_members {
+            for member in members {
+                if let Some(ty) = member.nominal {
+                    companion_members.entry(ty).or_default().insert(
+                        name.clone(),
+                        ResolvedCompanionMember {
+                            symbol: member.symbol,
+                            declaring_module: member.declaring_module,
+                            public: member.public,
+                        },
+                    );
+                }
             }
         }
         let exported_module_definitions = self
@@ -2076,6 +2178,8 @@ impl NameResolver {
             companion_type_for_module,
             blanket_companion_members: self.blanket_companion_members,
             blanket_companion_references: self.blanket_companion_references,
+            detached_companion_members: self.detached_companion_members,
+            binding_companion_targets: self.binding_companion_targets,
         };
         let analysis = InitializationAnalyzer::new(&resolved).analyze();
         if !analysis.diagnostics.is_empty() {
@@ -3299,7 +3403,78 @@ impl NameResolver {
         }
         self.merge_companion_blocks(program);
         self.collect_blanket_companions(program);
+        self.collect_detached_companions(program);
         self.collect_reexports(program);
+    }
+
+    /// Resolves the target of a detached companion block with no members, in
+    /// the block's scope. A member carries a resolved copy of the target, so
+    /// a block with members needs none.
+    fn resolve_memberless_companion_target(
+        &mut self,
+        program: &Program,
+        block: &crate::SourceModule,
+    ) {
+        if !blanket_member_bindings(&block.syntax.items).is_empty() {
+            return;
+        }
+        let Some(submodule) = block.parent.and_then(|parent| {
+            find_submodule(&program.module(parent).syntax.items, |submodule| {
+                program.child_module(submodule.syntax.id) == Some(block.id)
+            })
+        }) else {
+            return;
+        };
+        let Some(target) = &submodule.companion_target else {
+            return;
+        };
+        let generics = staple_syntax::GenericParameters {
+            syntax: submodule
+                .generics_syntax
+                .clone()
+                .unwrap_or_else(staple_syntax::Syntax::compiler),
+            parameters: submodule.type_parameters.clone(),
+            trait_bounds: submodule.trait_bounds.clone(),
+            subtype_bounds: submodule.subtype_bounds.clone(),
+            sized_relaxations: submodule.sized_relaxations.clone(),
+        };
+        self.push_type_parameter_scope();
+        self.resolve_value_generics(&generics, true);
+        self.resolve_type(target);
+        self.pop_type_parameter_scope();
+        self.memberless_companion_targets
+            .insert(block.id, target.clone());
+    }
+
+    /// Collects the members of every detached companion block. Which type
+    /// each belongs to is known once the blocks' targets are resolved.
+    fn collect_detached_companions(&mut self, program: &Program) {
+        for module in program.modules().iter().filter(|module| module.companion) {
+            if let Some(parent) = module.parent {
+                self.companion_parents.insert(module.id, parent);
+            }
+        }
+        for block in program.modules().iter().filter(|module| module.detached) {
+            let declaring_module = block.parent.expect("a companion block has a parent");
+            let mut values = self.module_values[block.id.0]
+                .iter()
+                .map(|(name, symbol)| (name.clone(), *symbol))
+                .collect::<Vec<_>>();
+            values.sort_by_key(|(_, symbol)| symbol.0);
+            for (name, symbol) in values {
+                let public = self.interfaces[block.id.0].values.contains_key(&name);
+                self.detached_companion_members
+                    .entry(name)
+                    .or_default()
+                    .push(ResolvedDetachedMember {
+                        symbol,
+                        block: block.id,
+                        declaring_module,
+                        public,
+                        nominal: None,
+                    });
+            }
+        }
     }
 
     /// Collects the members of every blanket companion block. Several blocks
@@ -6547,54 +6722,250 @@ impl NameResolver {
         Some(current)
     }
 
-    /// `companion A` for `type A = alias B` is `companion B`, so B must be a
-    /// nominal type declared alongside the alias, where `companion B` could
-    /// be written directly.
-    fn validate_alias_companions(&mut self, program: &Program) {
-        let mut problems = Vec::new();
-        let mut types = self.type_modules.iter().collect::<Vec<_>>();
-        types.sort_by_key(|(ty, _)| ty.0);
-        for (ty, owner) in types {
-            let declaration = &self.type_declarations[ty];
-            if declaration.kind() != staple_syntax::TypeDeclarationKind::Alias {
+    /// Attaches each detached companion block to its target. A target that
+    /// denotes a nominal type, directly or through aliases, extends that
+    /// type, which must be declared in the block's package. A structural
+    /// target needs a component declared in the block's package; the checker
+    /// matches it against receivers by identity. Like the trait
+    /// implementation orphan rule, this keeps packages from adding competing
+    /// members to the same type.
+    fn resolve_detached_companions(&mut self, program: &Program) {
+        let mut own_members = self.local_companion_member_names(program);
+        for module in program.modules().iter().filter(|module| module.detached) {
+            let parent = module.parent.expect("a companion block has a parent");
+            let Some(submodule) =
+                find_submodule(&program.module(parent).syntax.items, |submodule| {
+                    program.child_module(submodule.syntax.id) == Some(module.id)
+                })
+            else {
                 continue;
+            };
+            // Each member carries a resolved copy of the block's target.
+            let Some(target) = blanket_member_bindings(&module.syntax.items)
+                .into_iter()
+                .find_map(|binding| self.binding_companion_targets.get(&binding.syntax.id))
+                .or_else(|| self.memberless_companion_targets.get(&module.id))
+                .cloned()
+            else {
+                continue;
+            };
+            let package = program.package_of(module.id);
+            let span = submodule.syntax.span.clone();
+            let Some(nominal) = self.detached_companion_nominal(&target) else {
+                continue;
+            };
+            if let Some(ty) = nominal {
+                if program.package_of(self.type_modules[&ty]) != package {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        format!(
+                            "companion target `{target}` is declared in another package; a package can add companion items only to its own types"
+                        ),
+                    ));
+                    continue;
+                }
+                self.detached_companion_types.insert(module.id, ty);
+                let mut values = self.module_values[module.id.0]
+                    .iter()
+                    .map(|(name, symbol)| (name.clone(), *symbol))
+                    .collect::<Vec<_>>();
+                values.sort_by_key(|(_, symbol)| symbol.0);
+                for (name, symbol) in values {
+                    if !own_members.insert((ty, name.clone())) {
+                        self.diagnostics.push(Diagnostic::new(
+                            self.symbol_declaration_spans[&symbol].clone(),
+                            format!("duplicate definition of `{name}`"),
+                        ));
+                    }
+                }
+                for member in self
+                    .detached_companion_members
+                    .values_mut()
+                    .flatten()
+                    .filter(|member| member.block == module.id)
+                {
+                    member.nominal = Some(ty);
+                }
+            } else {
+                let mut components = Vec::new();
+                self.collect_type_components(&target, &mut components, &mut HashSet::new());
+                if !components
+                    .iter()
+                    .any(|ty| program.package_of(self.type_modules[ty]) == package)
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        format!(
+                            "companion target `{target}` has no component declared in the current package; a structural companion needs a type of its own package in its target"
+                        ),
+                    ));
+                }
             }
-            let Some(child) = program.child_named(*owner, &declaration.name) else {
+        }
+        self.settle_type_member_references();
+    }
+
+    /// The nominal type a detached companion target denotes: `Some(Some(ty))`
+    /// for a nominal type, reached through aliases, `Some(None)` for a
+    /// structural type, and `None` when the target did not resolve.
+    fn detached_companion_nominal(&self, target: &Type) -> Option<Option<TypeId>> {
+        match target {
+            Type::Application(application) => self.detached_companion_nominal(&application.callee),
+            Type::EffectApplication(application) => {
+                self.detached_companion_nominal(&application.callee)
+            }
+            Type::Named(named) => {
+                let ty = *self.named_types.get(&named.syntax.id)?;
+                if self.type_declarations[&ty].kind() == staple_syntax::TypeDeclarationKind::Alias {
+                    Some(self.alias_companion_target(ty))
+                } else {
+                    Some(Some(ty))
+                }
+            }
+            _ => Some(None),
+        }
+    }
+
+    /// The names of the members of every type's own companion blocks.
+    fn local_companion_member_names(&self, program: &Program) -> HashSet<(TypeId, String)> {
+        let mut names = HashSet::new();
+        for (ty, owner) in &self.type_modules {
+            let Some(child) = program.child_named(*owner, &self.type_declarations[ty].name) else {
                 continue;
             };
             if !program.module(child).companion {
                 continue;
             }
-            let problem = match self.alias_companion_target(*ty) {
-                None => format!(
-                    "companion target `{}` is an alias of a type that cannot have companion items",
-                    declaration.name
-                ),
-                Some(target) if self.type_modules.get(&target) != Some(owner) => format!(
-                    "companion target `{}` is an alias of `{}`, which is declared in another module; add companion items where `{}` is declared",
-                    declaration.name,
-                    self.type_declarations[&target].name,
-                    self.type_declarations[&target].name
-                ),
-                Some(_) => continue,
+            let Some(target) = self.alias_companion_target(*ty) else {
+                continue;
             };
-            let span = program
-                .module(*owner)
-                .syntax
-                .items
-                .iter()
-                .find_map(|item| match item {
-                    Item::Submodule(submodule)
-                        if submodule.companion && submodule.name == declaration.name =>
-                    {
-                        Some(submodule.syntax.span.clone())
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|| declaration.syntax.span.clone());
-            problems.push(Diagnostic::new(span, problem));
+            for block in program.companion_blocks(child) {
+                names.extend(
+                    self.module_values[block.0]
+                        .keys()
+                        .map(|name| (target, name.clone())),
+                );
+            }
         }
-        self.diagnostics.extend(problems);
+        names
+    }
+
+    /// The nominal types named anywhere in `ty`, looking through aliases.
+    fn collect_type_components(
+        &self,
+        ty: &Type,
+        components: &mut Vec<TypeId>,
+        aliases: &mut HashSet<TypeId>,
+    ) {
+        match ty {
+            Type::Named(named) => {
+                let Some(id) = self.named_types.get(&named.syntax.id).copied() else {
+                    return;
+                };
+                let declaration = &self.type_declarations[&id];
+                if declaration.kind() != staple_syntax::TypeDeclarationKind::Alias {
+                    components.push(id);
+                } else if aliases.insert(id)
+                    && let Some(underlying) = declaration.underlying()
+                {
+                    self.collect_type_components(underlying, components, aliases);
+                }
+            }
+            Type::Product(product) => {
+                for element in &product.elements {
+                    self.collect_type_components(&element.ty, components, aliases);
+                }
+            }
+            Type::Sum(sum) => {
+                for alternative in &sum.alternatives {
+                    self.collect_type_components(alternative, components, aliases);
+                }
+            }
+            Type::Function(function) => {
+                self.collect_type_components(&function.parameter, components, aliases);
+                self.collect_type_components(&function.result, components, aliases);
+            }
+            Type::Forall(forall) => self.collect_type_components(&forall.body, components, aliases),
+            Type::Application(application) => {
+                self.collect_type_components(&application.callee, components, aliases);
+                self.collect_type_components(&application.argument, components, aliases);
+            }
+            Type::EffectApplication(application) => {
+                self.collect_type_components(&application.callee, components, aliases);
+            }
+            Type::Array(array) => {
+                self.collect_type_components(&array.element, components, aliases);
+                self.collect_type_components(&array.count, components, aliases);
+            }
+            Type::Inferred(_)
+            | Type::NumberLiteral(_)
+            | Type::StringLiteral(_)
+            | Type::Splice(_) => {}
+        }
+    }
+
+    /// Settles each `Type.member` reference that named a detached companion
+    /// member, once every detached block's target is known. The type's own
+    /// member, including one from a detached block for it, is the reference;
+    /// otherwise blanket members and structural members remain candidates
+    /// for the checker, which matches them against `Type`.
+    fn settle_type_member_references(&mut self) {
+        let mut references = self.type_member_references.drain().collect::<Vec<_>>();
+        references.sort_by_key(|(syntax, _)| syntax.0);
+        for (access, reference) in references {
+            let Some((ty, candidates)) = self.blanket_companion_references.get(&access).cloned()
+            else {
+                continue;
+            };
+            let target = self.alias_companion_target(ty);
+            let detached = |symbol: SymbolId| {
+                self.detached_companion_members
+                    .values()
+                    .flatten()
+                    .find(|member| member.symbol == symbol)
+                    .copied()
+            };
+            let accessible = |member: &ResolvedDetachedMember| {
+                member.public || reference.module == member.declaring_module
+            };
+            if let Some(own) = candidates.iter().copied().find(|symbol| {
+                detached(*symbol).is_some_and(|member| {
+                    member.nominal.is_some() && member.nominal == target && accessible(&member)
+                })
+            }) {
+                self.blanket_companion_references.remove(&access);
+                self.symbols.insert(access, own);
+                continue;
+            }
+            let kept = candidates
+                .into_iter()
+                .filter(|symbol| match detached(*symbol) {
+                    Some(member) => member.nominal.is_none() && accessible(&member),
+                    None => true,
+                })
+                .collect::<Vec<_>>();
+            match kept.as_slice() {
+                [] => {
+                    self.blanket_companion_references.remove(&access);
+                    self.symbols.remove(&access);
+                    self.diagnostics.push(Diagnostic::new(
+                        reference.span,
+                        format!(
+                            "`{}` has no accessible companion member named `{}`",
+                            reference.head, reference.member
+                        ),
+                    ));
+                }
+                [symbol] => {
+                    self.symbols.insert(access, *symbol);
+                    self.blanket_companion_references.insert(access, (ty, kept));
+                }
+                _ => {
+                    self.symbols.remove(&access);
+                    self.blanket_companion_references.insert(access, (ty, kept));
+                }
+            }
+        }
     }
 
     fn validate_representation(&mut self, ty: &Type, required: Visibility) {
@@ -6997,9 +7368,11 @@ impl NameResolver {
             .or_else(|| self.prelude_values.get(name).copied())
     }
 
-    /// Resolves `Type.member` where `member` is a blanket companion member
-    /// rather than one of `Type`'s own companion members. The checker
-    /// verifies that `Type` satisfies the member's bounds.
+    /// Resolves `Type.member` where `member` is not in `Type`'s namespace:
+    /// a blanket companion member, or a member of a detached companion
+    /// block, which may be `Type`'s own. Detached candidates are settled once
+    /// their blocks' targets are known; the checker verifies that `Type`
+    /// satisfies a blanket member's bounds or a structural member's target.
     fn resolve_blanket_companion_access(
         &mut self,
         access: &staple_syntax::AccessExpression,
@@ -7009,12 +7382,20 @@ impl NameResolver {
         else {
             return false;
         };
+        let detached = self
+            .detached_companion_members
+            .get(member)
+            .into_iter()
+            .flatten()
+            .map(|member| member.symbol)
+            .collect::<Vec<_>>();
         let symbols = self
             .blanket_companion_members
             .get(member)
             .into_iter()
             .flatten()
             .map(|member| member.symbol)
+            .chain(detached.iter().copied())
             .collect::<Vec<_>>();
         if symbols.is_empty() {
             return false;
@@ -7036,6 +7417,21 @@ impl NameResolver {
         }
         self.blanket_companion_references
             .insert(access.syntax.id, (ty, symbols));
+        if !detached.is_empty() {
+            self.type_member_references.insert(
+                access.syntax.id,
+                TypeMemberReference {
+                    span: access.syntax.span.clone(),
+                    module: self
+                        .companion_parents
+                        .get(&self.current_module)
+                        .copied()
+                        .unwrap_or(self.current_module),
+                    head: head.name.clone(),
+                    member: member.clone(),
+                },
+            );
+        }
         true
     }
 
@@ -8302,6 +8698,19 @@ fn mangle_function_name(name: &str) -> String {
 
 /// The bindings a blanket companion block declares, looking through the
 /// modifiers and splices that may wrap them.
+/// The submodule declaration in `items` that `matches`, looking through
+/// modifiers.
+fn find_submodule<'a>(
+    items: &'a [Item],
+    matches: impl Fn(&staple_syntax::Submodule) -> bool + Copy,
+) -> Option<&'a staple_syntax::Submodule> {
+    items.iter().find_map(|item| match item {
+        Item::Submodule(submodule) if matches(submodule) => Some(submodule),
+        Item::Modified(modified) => find_submodule(std::slice::from_ref(&modified.item), matches),
+        _ => None,
+    })
+}
+
 fn blanket_member_bindings(items: &[Item]) -> Vec<&staple_syntax::Binding> {
     let mut bindings = Vec::new();
     for item in items {
@@ -8325,10 +8734,7 @@ fn blanket_member_bindings(items: &[Item]) -> Vec<&staple_syntax::Binding> {
 /// stands for the type's namespace. A blanket companion belongs to every
 /// type satisfying its bounds, so its name refers to no module.
 fn namespace_child(program: &Program, submodule: &staple_syntax::Submodule) -> Option<ModuleId> {
-    program
-        .child_module(submodule.syntax.id)
-        .filter(|child| !program.module(*child).blanket)
-        .map(|child| program.companion_primary(child))
+    program.namespace_child(submodule.syntax.id)
 }
 
 /// The namespace names an inline submodule is reachable by: its own name,

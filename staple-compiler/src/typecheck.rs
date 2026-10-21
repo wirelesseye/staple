@@ -1617,6 +1617,7 @@ pub(crate) struct CheckedSemanticIds {
 #[derive(Debug, Clone)]
 pub struct TypedModule {
     type_representations: HashMap<TypeId, CheckedType>,
+    structural_companion_targets: HashMap<SymbolId, CheckedType>,
     resolved: ResolvedModule,
     trait_prerequisites: HashMap<TraitId, Vec<CheckedTraitBound>>,
     expression_types: HashMap<SyntaxId, CheckedType>,
@@ -2432,8 +2433,9 @@ impl TypedModule {
         self.receiver_compatible_members(&mut checker, members, receiver)
     }
 
-    /// Receiver-compatible blanket companion members accessible from `owner`
-    /// at a pipe completion site.
+    /// Receiver-compatible blanket companion members, and structural
+    /// companion members whose targets match `receiver`, accessible from
+    /// `owner` at a pipe completion site.
     pub fn pipe_blanket_methods(
         &self,
         owner: ModuleId,
@@ -2453,6 +2455,22 @@ impl TypedModule {
                     .contains(symbol)
             })
             .map(|(name, symbol, _)| (name.to_owned(), symbol))
+            .chain(
+                self.resolved
+                    .structural_companion_members()
+                    .filter(|(name, symbol)| {
+                        self.resolved
+                            .structural_companion_members_named(name, Some(owner))
+                            .contains(symbol)
+                            && self
+                                .structural_companion_targets
+                                .get(symbol)
+                                .is_some_and(|target| {
+                                    companion_target_matches(target, receiver).len() == 1
+                                })
+                    })
+                    .map(|(name, symbol)| (name.to_owned(), symbol)),
+            )
             .collect();
         self.receiver_compatible_members(&mut checker, members, receiver)
     }
@@ -2821,6 +2839,9 @@ struct DeferredSchemeContract {
 #[derive(Default, Clone)]
 pub struct TypeChecker {
     pipe_targets: HashMap<SyntaxId, PipeTarget>,
+    /// The target of each structural companion member, with the companion's
+    /// own parameters free.
+    structural_companion_targets: HashMap<SymbolId, CheckedType>,
     /// Receivers already checked by the enclosing stage's candidate probe.
     pipe_receivers: HashSet<SyntaxId>,
     direct_callee_syntax: HashSet<SyntaxId>,
@@ -3121,6 +3142,7 @@ impl TypeChecker {
         self.inherit_and_validate_generic_function_bounds(&module);
         self.refresh_scheme_bounds();
         self.reject_blanket_companion_overlaps(&module);
+        self.check_structural_companions(&module);
 
         let module_order = module.program().initialization_order().to_vec();
         for module_id in module_order {
@@ -3236,6 +3258,7 @@ impl TypeChecker {
 
         let typed = TypedModule {
             type_representations: self.type_representations,
+            structural_companion_targets: self.structural_companion_targets,
             resolved: module,
             trait_prerequisites: self.trait_prerequisites,
             expression_types: self.expression_types,
@@ -4198,6 +4221,153 @@ impl TypeChecker {
         }
     }
 
+    /// The target of the structural companion declaring member `symbol`,
+    /// with the companion's own parameters free.
+    fn structural_companion_target(
+        &mut self,
+        module: &ResolvedModule,
+        symbol: SymbolId,
+    ) -> Option<CheckedType> {
+        if let Some(target) = self.structural_companion_targets.get(&symbol) {
+            return Some(target.clone());
+        }
+        let source = module.companion_target_of(symbol)?.clone();
+        // The member's own header already reported any problem with it.
+        let diagnostics = self.diagnostics.len();
+        let target = self.resolve_source_type(module, &source);
+        self.diagnostics.truncate(diagnostics);
+        self.structural_companion_targets
+            .insert(symbol, target.clone());
+        Some(target)
+    }
+
+    /// Validates the targets of structural companions and rejects members
+    /// of one name that could apply to the same type: two structural
+    /// members whose targets unify, or a structural member and a blanket
+    /// member whose bounds its target could satisfy.
+    fn check_structural_companions(&mut self, module: &ResolvedModule) {
+        let mut members = module
+            .structural_companion_members()
+            .map(|(name, symbol)| (name.to_owned(), symbol))
+            .collect::<Vec<_>>();
+        if members.is_empty() {
+            return;
+        }
+        members.sort_by_key(|(_, symbol)| symbol.0);
+        let mut reported = Vec::<Span>::new();
+        let mut targets = Vec::new();
+        for (name, symbol) in members {
+            let Some(target) = self.structural_companion_target(module, symbol) else {
+                continue;
+            };
+            if target == CheckedType::Error {
+                continue;
+            }
+            let span = module
+                .companion_target_of(symbol)
+                .map(|target| target.syntax().span.clone());
+            if let Some(span) = &span
+                && !reported.contains(span)
+            {
+                reported.push(span.clone());
+                if !matches!(
+                    target,
+                    CheckedType::Sum(_)
+                        | CheckedType::Product(_)
+                        | CheckedType::Function(_)
+                        | CheckedType::Array { .. }
+                ) {
+                    self.diagnostics.push(Diagnostic::new(
+                        span.clone(),
+                        format!(
+                            "companion target `{target}` is not a structural type, nor a nominal type of the current package"
+                        ),
+                    ));
+                } else if let Some(sum) = sum_with_several_rows(&target) {
+                    self.diagnostics.push(Diagnostic::new(
+                        span.clone(),
+                        format!(
+                            "companion target `{target}` has more than one type parameter alternative in `{sum}`, so it cannot match a receiver unambiguously"
+                        ),
+                    ));
+                }
+            }
+            targets.push((name, symbol, target));
+        }
+        let blanket = module
+            .blanket_companion_members()
+            .filter_map(|(name, symbol, parameter)| Some((name.to_owned(), symbol, parameter?)))
+            .collect::<Vec<_>>();
+        for (index, (name, symbol, target)) in targets.iter().enumerate() {
+            let Some(span) = module.symbol_declaration_span(*symbol).cloned() else {
+                continue;
+            };
+            let structural_overlap = targets[..index].iter().any(|(other_name, _, other)| {
+                let free_parameters = type_parameter_ids(target)
+                    .into_iter()
+                    .chain(type_parameter_ids(other))
+                    .collect();
+                other_name == name
+                    && unify_impl_headers(target, other, &free_parameters, &mut HashMap::new())
+            });
+            if structural_overlap {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!(
+                        "companion member `{name}` of `{target}` overlaps another companion member `{name}`: a type could match both targets"
+                    ),
+                ));
+                continue;
+            }
+            for (_, blanket_symbol, parameter) in blanket
+                .iter()
+                .filter(|(blanket_name, _, _)| blanket_name == name)
+            {
+                let satisfied = self.blanket_bounds_at(*blanket_symbol, *parameter, target);
+                if self.blanket_bounds_could_hold(&satisfied) {
+                    let trait_names = self.display_bounds(&satisfied);
+                    self.diagnostics.push(Diagnostic::new(
+                        span.clone(),
+                        format!(
+                            "companion member `{name}` of `{target}` overlaps the blanket companion member `{name}`, which applies to `{target}` when `{trait_names}` holds"
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+
+    /// The structural companion members named `name`, accessible from the
+    /// module being checked, whose targets match `receiver`. A target
+    /// matching in more than one way is reported at `span` and left out.
+    fn structural_companion_candidates(
+        &mut self,
+        module: &ResolvedModule,
+        name: &str,
+        receiver: &CheckedType,
+        span: &Span,
+    ) -> Vec<(SymbolId, HashMap<TypeParameterId, CheckedType>)> {
+        let mut candidates = Vec::new();
+        let accessing_module = self.checking_modules.last().copied();
+        for symbol in module.structural_companion_members_named(name, accessing_module) {
+            let Some(target) = self.structural_companion_target(module, symbol) else {
+                continue;
+            };
+            match companion_target_matches(&target, receiver).as_slice() {
+                [] => {}
+                [substitutions] => candidates.push((symbol, substitutions.clone())),
+                _ => self.diagnostics.push(Diagnostic::new(
+                    span.clone(),
+                    format!(
+                        "companion target `{target}` matches `{receiver}` in more than one way, so its member `{name}` is ambiguous here"
+                    ),
+                )),
+            }
+        }
+        candidates
+    }
+
     /// Whether some type could satisfy the bounds of two blanket companion
     /// members at once. Each bound naming the blanket parameter directly
     /// admits only the types its trait's implementations cover, so two
@@ -4332,33 +4502,44 @@ impl TypeChecker {
         ty: TypeId,
         candidates: &[SymbolId],
     ) -> Option<SymbolId> {
-        if let [symbol] = candidates {
+        let structural = candidates
+            .iter()
+            .any(|symbol| module.is_structural_companion_member(*symbol));
+        if let [symbol] = candidates
+            && !structural
+        {
             return Some(*symbol);
         }
         let type_name = module.type_name(ty).unwrap_or("type").to_owned();
         let (target, _) =
             self.type_at_own_parameters(module, ty, &type_name, access.syntax.span.clone())?;
-        let applicable = candidates
-            .iter()
-            .copied()
-            .filter(|symbol| {
+        let mut applicable = Vec::new();
+        for symbol in candidates.iter().copied() {
+            let applies = if module.is_structural_companion_member(symbol) {
+                self.structural_companion_target(module, symbol)
+                    .is_some_and(|pattern| companion_target_matches(&pattern, &target).len() == 1)
+            } else {
                 module
-                    .blanket_companion_parameter(*symbol)
+                    .blanket_companion_parameter(symbol)
                     .is_some_and(|parameter| {
-                        let bounds = self.blanket_bounds_at(*symbol, parameter, &target);
+                        let bounds = self.blanket_bounds_at(symbol, parameter, &target);
                         self.blanket_bounds_could_hold(&bounds)
                     })
-            })
-            .collect::<Vec<_>>();
+            };
+            if applies {
+                applicable.push(symbol);
+            }
+        }
         let Accessor::Name(name) = &access.accessor else {
             return None;
         };
+        let kind = if structural { "" } else { "blanket " };
         match applicable.as_slice() {
             [symbol] => Some(*symbol),
             [] => {
                 self.diagnostics.push(Diagnostic::new(
                     access.syntax.span.clone(),
-                    format!("no blanket companion member `{name}` applies to `{type_name}`"),
+                    format!("no {kind}companion member `{name}` applies to `{type_name}`"),
                 ));
                 None
             }
@@ -4366,7 +4547,7 @@ impl TypeChecker {
                 self.diagnostics.push(Diagnostic::new(
                     access.syntax.span.clone(),
                     format!(
-                        "more than one blanket companion member `{name}` applies to `{type_name}`"
+                        "more than one {kind}companion member `{name}` applies to `{type_name}`"
                     ),
                 ));
                 None
@@ -11083,10 +11264,19 @@ impl TypeChecker {
                             .or_else(|| checked_type_id(&receiver_type))
                             .or_else(|| checked_builtin_type_id(module, &receiver_type));
                         let accessing_module = self.checking_modules.last().copied();
-                        let blanket = match module
-                            .blanket_companion_members_named(method, accessing_module)
-                            .as_slice()
-                        {
+                        let mut type_keyed =
+                            module.blanket_companion_members_named(method, accessing_module);
+                        type_keyed.extend(
+                            self.structural_companion_candidates(
+                                module,
+                                method,
+                                &receiver_type,
+                                &selector.syntax.span,
+                            )
+                            .into_iter()
+                            .map(|(symbol, _)| symbol),
+                        );
+                        let blanket = match type_keyed.as_slice() {
                             [symbol] => Some(*symbol),
                             _ => None,
                         };
@@ -12661,7 +12851,10 @@ impl TypeChecker {
                             ));
                             CheckedType::Error
                         });
-                    if blanket.is_some() {
+                    if blanket.is_some() && module.is_structural_companion_member(symbol) {
+                        raw_type =
+                            self.pin_structural_companion_type(module, access, symbol, raw_type);
+                    } else if blanket.is_some() {
                         raw_type =
                             self.pin_blanket_companion_type(module, access, symbol, raw_type);
                     }
@@ -15844,9 +16037,55 @@ impl TypeChecker {
             return CheckedType::Error;
         }
         let substitutions = HashMap::from([(parameter, target)]);
-        let mut scheme = scheme.as_ref().clone();
+        self.pin_companion_scheme(access, scheme, substitutions, type_parameters)
+    }
+
+    /// `Type.member` for a structural companion member is the member at
+    /// `Type`: the parameters its target binds when matched against `Type`
+    /// are replaced, and `Type`'s own parameters quantified instead.
+    fn pin_structural_companion_type(
+        &mut self,
+        module: &ResolvedModule,
+        access: &staple_syntax::AccessExpression,
+        symbol: SymbolId,
+        raw_type: CheckedType,
+    ) -> CheckedType {
+        let (CheckedType::Forall(scheme), Expression::Name(head)) =
+            (&raw_type, access.value.as_ref())
+        else {
+            return raw_type;
+        };
+        let Some(ty) = module.type_for(head.syntax.id) else {
+            return CheckedType::Error;
+        };
+        let Some((target, type_parameters)) =
+            self.type_at_own_parameters(module, ty, &head.name, head.syntax.span.clone())
+        else {
+            return raw_type;
+        };
+        let Some(pattern) = self.structural_companion_target(module, symbol) else {
+            return raw_type;
+        };
+        let mut matches = companion_target_matches(&pattern, &target);
+        if matches.len() != 1 {
+            return raw_type;
+        }
+        let substitutions = matches.remove(0);
+        self.pin_companion_scheme(access, scheme, substitutions, type_parameters)
+    }
+
+    /// Replaces the scheme parameters `substitutions` binds, quantifying
+    /// `type_parameters` instead, and records the substitution for `access`.
+    fn pin_companion_scheme(
+        &mut self,
+        access: &staple_syntax::AccessExpression,
+        scheme: &CheckedScheme,
+        substitutions: HashMap<TypeParameterId, CheckedType>,
+        type_parameters: Vec<CheckedSchemeParameter>,
+    ) -> CheckedType {
+        let mut scheme = scheme.clone();
         scheme.parameters.retain(|scheme_parameter| {
-            !matches!(scheme_parameter, CheckedSchemeParameter::Type { id, .. } if *id == parameter)
+            !matches!(scheme_parameter, CheckedSchemeParameter::Type { id, .. } if substitutions.contains_key(id))
         });
         scheme.parameters.extend(type_parameters);
         for bound in &mut scheme.trait_bounds {
@@ -16341,9 +16580,21 @@ impl TypeChecker {
             }
             // Blanket companion members apply to any receiver, named or not;
             // checking each candidate checks the receiver against its bounds.
+            // Structural companion members apply to the receivers their
+            // targets match.
             if companions.is_empty() {
                 companions = module
                     .blanket_companion_members_named(name, self.checking_modules.last().copied());
+                companions.extend(
+                    self.structural_companion_candidates(
+                        module,
+                        name,
+                        &receiver_type,
+                        &access.syntax.span,
+                    )
+                    .into_iter()
+                    .map(|(symbol, _)| symbol),
+                );
             }
             local = module
                 .pipe_local_for_expression(access.syntax.id)
@@ -16368,10 +16619,11 @@ impl TypeChecker {
                 }
             }
         } else if let Some(symbol) = module.symbol_for(access.syntax.id)
-            && module
+            && (module
                 .symbol_module(symbol)
                 .and_then(|owner| module.companion_type_for_module(owner))
                 .is_some()
+                || module.is_structural_companion_member(symbol))
         {
             companions.push(symbol);
         }
@@ -16422,8 +16674,8 @@ impl TypeChecker {
             self.diagnostics.push(Diagnostic::new(
                 access.syntax.span.clone(),
                 format!(
-                    "ambiguous pipe stage `{}`: more than one blanket companion member of that \
-                     name accepts this receiver",
+                    "ambiguous pipe stage `{}`: more than one blanket or structural companion \
+                     member of that name accepts this receiver",
                     place_expression_name(selector)
                 ),
             ));
@@ -19915,6 +20167,244 @@ fn canonicalize_impl_header(
         .cloned()
         .map(|argument| substitute_type(argument, &substitutions))
         .collect()
+}
+
+/// Every way a structural companion `target` matches `actual` exactly, as
+/// bindings of the target's parameters. Sums are unordered, and a bare
+/// parameter alternative stands for the rest of the receiver's alternatives,
+/// which must be at least one, so `Ok T | E` matches `Ok I32 | String` and
+/// `Ok I32 | String | Bool`, but not `Ok I32`. More than one result means the
+/// target matches ambiguously, as `Ok T | E` does against `Ok I32 | Ok U8`.
+fn companion_target_matches(
+    target: &CheckedType,
+    actual: &CheckedType,
+) -> Vec<HashMap<TypeParameterId, CheckedType>> {
+    fn bind(
+        target: &CheckedType,
+        actual: &CheckedType,
+        free: &HashSet<TypeParameterId>,
+        substitutions: HashMap<TypeParameterId, CheckedType>,
+    ) -> Vec<HashMap<TypeParameterId, CheckedType>> {
+        if let CheckedType::Parameter { id, .. } = target
+            && free.contains(id)
+        {
+            return match substitutions.get(id) {
+                Some(bound) if !types_equivalent(bound, actual) => Vec::new(),
+                Some(_) => vec![substitutions],
+                None => {
+                    let mut substitutions = substitutions;
+                    substitutions.insert(*id, actual.clone());
+                    vec![substitutions]
+                }
+            };
+        }
+        if let CheckedType::Sum(sum) = target {
+            return bind_sum(&sum.alternatives, actual, free, substitutions);
+        }
+        let pairs = match (target, actual) {
+            (CheckedType::Product(target), CheckedType::Product(actual))
+                if target.elements.len() == actual.elements.len() =>
+            {
+                target
+                    .elements
+                    .iter()
+                    .zip(&actual.elements)
+                    .map(|(target, actual)| (&target.value_type, &actual.value_type))
+                    .collect::<Vec<_>>()
+            }
+            (
+                CheckedType::TypeConstructor {
+                    id: target_id,
+                    arguments: target_arguments,
+                    ..
+                },
+                CheckedType::TypeConstructor {
+                    id: actual_id,
+                    arguments: actual_arguments,
+                    ..
+                },
+            )
+            | (
+                CheckedType::Opaque {
+                    id: target_id,
+                    arguments: target_arguments,
+                    ..
+                },
+                CheckedType::Opaque {
+                    id: actual_id,
+                    arguments: actual_arguments,
+                    ..
+                },
+            )
+            | (
+                CheckedType::Wrapper {
+                    id: target_id,
+                    arguments: target_arguments,
+                    ..
+                },
+                CheckedType::Wrapper {
+                    id: actual_id,
+                    arguments: actual_arguments,
+                    ..
+                },
+            ) if target_id == actual_id && target_arguments.len() == actual_arguments.len() => {
+                target_arguments.iter().zip(actual_arguments).collect()
+            }
+            (CheckedType::Shared(target), CheckedType::Shared(actual))
+            | (CheckedType::Unique(target), CheckedType::Unique(actual))
+            | (CheckedType::SharedBuffer(target), CheckedType::SharedBuffer(actual))
+            | (CheckedType::Buffer(target), CheckedType::Buffer(actual))
+            | (CheckedType::RawPtr { pointee: target }, CheckedType::RawPtr { pointee: actual })
+            | (
+                CheckedType::RawMutPtr { pointee: target },
+                CheckedType::RawMutPtr { pointee: actual },
+            ) => vec![(target.as_ref(), actual.as_ref())],
+            (CheckedType::Function(target), CheckedType::Function(actual)) => vec![
+                (target.parameter.as_ref(), actual.parameter.as_ref()),
+                (target.result.as_ref(), actual.result.as_ref()),
+            ],
+            (
+                CheckedType::Array {
+                    element: target_element,
+                    count: target_count,
+                },
+                CheckedType::Array {
+                    element: actual_element,
+                    count: actual_count,
+                },
+            ) => vec![
+                (target_element.as_ref(), actual_element.as_ref()),
+                (target_count.as_ref(), actual_count.as_ref()),
+            ],
+            // Anything else holds no parameter to bind; the final
+            // comparison decides it.
+            _ => Vec::new(),
+        };
+        pairs
+            .into_iter()
+            .fold(vec![substitutions], |states, (target, actual)| {
+                states
+                    .into_iter()
+                    .flat_map(|state| bind(target, actual, free, state))
+                    .collect()
+            })
+    }
+
+    fn bind_sum(
+        alternatives: &[CheckedType],
+        actual: &CheckedType,
+        free: &HashSet<TypeParameterId>,
+        substitutions: HashMap<TypeParameterId, CheckedType>,
+    ) -> Vec<HashMap<TypeParameterId, CheckedType>> {
+        let actual_alternatives = match actual {
+            CheckedType::Sum(sum) => sum.alternatives.clone(),
+            CheckedType::Never => Vec::new(),
+            other => vec![other.clone()],
+        };
+        let (rows, concrete): (Vec<_>, Vec<_>) = alternatives.iter().partition(|alternative| {
+            matches!(alternative, CheckedType::Parameter { id, .. } if free.contains(id))
+        });
+        if rows.len() > 1 {
+            return Vec::new();
+        }
+        // Assigns each concrete alternative a distinct actual alternative.
+        fn assign(
+            concrete: &[&CheckedType],
+            remaining: Vec<CheckedType>,
+            free: &HashSet<TypeParameterId>,
+            substitutions: HashMap<TypeParameterId, CheckedType>,
+            results: &mut Vec<(HashMap<TypeParameterId, CheckedType>, Vec<CheckedType>)>,
+        ) {
+            let Some((first, rest)) = concrete.split_first() else {
+                results.push((substitutions, remaining));
+                return;
+            };
+            for index in 0..remaining.len() {
+                for state in bind(first, &remaining[index], free, substitutions.clone()) {
+                    let mut left = remaining.clone();
+                    left.remove(index);
+                    assign(rest, left, free, state, results);
+                }
+            }
+        }
+        let mut assignments = Vec::new();
+        assign(
+            &concrete,
+            actual_alternatives,
+            free,
+            substitutions,
+            &mut assignments,
+        );
+        assignments
+            .into_iter()
+            .flat_map(|(state, remaining)| match rows.first() {
+                None if remaining.is_empty() => vec![state],
+                None => Vec::new(),
+                Some(_) if remaining.is_empty() => Vec::new(),
+                Some(row) => {
+                    let rest = match remaining.len() {
+                        1 => remaining.into_iter().next().expect("one alternative"),
+                        _ => normalize_substituted_sum(remaining),
+                    };
+                    bind(row, &rest, free, state)
+                }
+            })
+            .collect()
+    }
+
+    let free = type_parameter_ids(target);
+    let mut matches: Vec<HashMap<TypeParameterId, CheckedType>> = Vec::new();
+    for candidate in bind(target, actual, &free, HashMap::new()) {
+        if !types_equivalent(&substitute_type(target.clone(), &candidate), actual) {
+            continue;
+        }
+        let duplicate = matches.iter().any(|existing| {
+            existing.len() == candidate.len()
+                && existing.iter().all(|(id, ty)| {
+                    candidate
+                        .get(id)
+                        .is_some_and(|other| types_equivalent(ty, other))
+                })
+        });
+        if !duplicate {
+            matches.push(candidate);
+        }
+    }
+    matches
+}
+
+/// A sum in `ty` with more than one bare type parameter alternative.
+fn sum_with_several_rows(ty: &CheckedType) -> Option<CheckedType> {
+    match ty {
+        CheckedType::Sum(sum) => {
+            let rows = sum
+                .alternatives
+                .iter()
+                .filter(|alternative| matches!(alternative, CheckedType::Parameter { .. }))
+                .count();
+            if rows > 1 {
+                return Some(ty.clone());
+            }
+            sum.alternatives.iter().find_map(sum_with_several_rows)
+        }
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .find_map(|element| sum_with_several_rows(&element.value_type)),
+        CheckedType::TypeConstructor { arguments, .. }
+        | CheckedType::Opaque { arguments, .. }
+        | CheckedType::Wrapper { arguments, .. } => {
+            arguments.iter().find_map(sum_with_several_rows)
+        }
+        CheckedType::Function(function) => sum_with_several_rows(&function.parameter)
+            .or_else(|| sum_with_several_rows(&function.result)),
+        CheckedType::Shared(inner)
+        | CheckedType::Unique(inner)
+        | CheckedType::SharedBuffer(inner)
+        | CheckedType::Buffer(inner) => sum_with_several_rows(inner),
+        CheckedType::Array { element, .. } => sum_with_several_rows(element),
+        _ => None,
+    }
 }
 
 /// Unifies two trait-implementation header types against each other,

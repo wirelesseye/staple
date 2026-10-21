@@ -1671,7 +1671,11 @@ fn parses_type_companion_blocks_losslessly() {
         matches!(&root.items[1], Item::Submodule(module) if module.companion && module.name == "Box")
     );
     assert!(parse("pub companion Animal {}\n").is_err());
-    assert!(parse("companion (I32, I32) {}\n").is_err());
+    // A structural target is named by its written form.
+    let structural = parse("companion (I32, I32) {}\n").expect("structural targets should parse");
+    assert!(
+        matches!(&structural.items[0], Item::Submodule(module) if module.companion && module.name == "(I32, I32)")
+    );
 }
 
 #[test]
