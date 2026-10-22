@@ -1630,7 +1630,7 @@ fn preserves_doc_comments_interleaved_with_metadata_modifiers() {
 fn parses_declaration_style_item_macro_punctuation_losslessly() {
     let source = concat!(
         "typegroup Local { Unit, }\n",
-        "pub typegroup Result T E { Ok wrap pub T, Err wrap pub E, }\n",
+        "pub typegroup Result<T, E> { Ok wrap pub T, Err wrap pub E, }\n",
         "value = 1\n",
         "identity = argument => argument\n",
     );
@@ -4331,4 +4331,91 @@ fn a_function_body_error_is_not_masked_by_a_generic_parameter_annotation() {
     let source = "def f = (value: Result<I32, String>) => I32 :: {\n    value |>\n    0\n}\n";
     let error = parse(source).expect_err("the pipe stage is incomplete");
     assert_eq!(error.location.line, 3, "{error}");
+}
+
+#[test]
+fn declaration_parameter_nodes_share_the_type_header_grammar() {
+    let source = "type Example<T = Map<I32, String>, U = T where U <: T> wrap U\n";
+    let module = parse(source).unwrap();
+    let Item::TypeDeclaration(declaration) = &module.items[0] else {
+        panic!("type declaration");
+    };
+    let mut header = declaration.syntax.clone();
+    header.token_range.start += header
+        .tokens()
+        .iter()
+        .position(|token| token.text == "<")
+        .unwrap();
+    let (parameters, consumed) =
+        staple_syntax::parse_type_parameters_prefix(&header, &mut 0).unwrap();
+    assert_eq!(parameters.parameters.len(), 2);
+    assert_eq!(parameters.parameters[0].pattern.names(), ["T"]);
+    assert_eq!(
+        parameters.parameters[0]
+            .default
+            .as_ref()
+            .unwrap()
+            .to_string(),
+        "Map<I32, String>"
+    );
+    assert_eq!(
+        parameters.parameters[1]
+            .default
+            .as_ref()
+            .unwrap()
+            .to_string(),
+        "T"
+    );
+    assert_eq!(
+        parameters
+            .bounds
+            .tokens()
+            .iter()
+            .map(|t| t.text.as_str())
+            .collect::<String>()
+            .trim(),
+        "where U <: T"
+    );
+    assert_eq!(
+        header.tokens()[consumed..]
+            .iter()
+            .find(|t| !t.kind.is_trivia())
+            .unwrap()
+            .text,
+        "wrap"
+    );
+    let (parameter, _) =
+        staple_syntax::parse_type_parameter_prefix(&parameters.parameters[0].syntax, &mut 0)
+            .unwrap();
+    assert_eq!(
+        parameter.default.unwrap().to_string(),
+        parameters.parameters[0]
+            .default
+            .as_ref()
+            .unwrap()
+            .to_string()
+    );
+}
+
+#[test]
+fn angle_macro_headers_do_not_change_comparisons() {
+    for source in [
+        "typegroup Generic<T> { Value wrap T, }\n",
+        "pub typegroup Generic<T, E> { Left wrap T, Right wrap E, }\n",
+        "let result = inspect<T = I32>\n",
+        "let comparison = 1<2\n",
+        "let comparison = 1 < 2 > 0\n",
+        "let comparison = f 1<2\n",
+        "typegroup Defaults<T = (List<Result<I32, String>>, I32)> { Value wrap T, }\n",
+        "first<Result<I32, String>, List<String>>\n",
+    ] {
+        assert_eq!(
+            parse(source)
+                .unwrap_or_else(|error| panic!("{source}: {error}"))
+                .text(),
+            source
+        );
+        staple_syntax::format_source(source)
+            .unwrap_or_else(|error| panic!("formatting {source}: {error}"));
+    }
 }

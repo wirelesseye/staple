@@ -45,6 +45,27 @@ pub type Bracketed<Contents> wrap pub Contents
 /// A braced syntax fragment.
 @recursive_constructor
 pub type Braced<Contents> wrap pub Contents
+/// An explicitly requested angle-bracketed syntax fragment. Comparisons are
+/// not implicitly treated as delimited syntax.
+@recursive_constructor
+pub type Angled<Contents> wrap pub Contents
+/// One declaration parameter, retaining its original syntax and optional default.
+@recursive_constructor
+pub type TypeParameter wrap pub (
+    name: Ident<String>,
+    default: Option<Type>,
+    declaration: Syntax,
+    argument: Type,
+)
+/// A declaration's complete `<...>` header, including defaults and bounds.
+/// `arguments` contains only `<T, U, ...>`, suitable for applying the type.
+@recursive_constructor
+pub type TypeParameters wrap pub (
+    parameters: Sequence<TypeParameter>,
+    declaration: Syntax,
+    arguments: Syntax,
+    bounds: Syntax,
+)
 /// An expression syntax node without structured fields.
 @sized_opaque
 pub type UnstructuredExpr opaque
@@ -147,7 +168,7 @@ pub type Visibility = Private | Package | Public
 pub type Syntax opaque
 impl !Copy Syntax {}
 /// Exactly one structural syntax node.
-pub type SyntaxNode = Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | Parenthesized<Syntax> | Bracketed<Syntax> | Braced<Syntax>
+pub type SyntaxNode = Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | TypeParameter | TypeParameters | Angled<Syntax> | Parenthesized<Syntax> | Bracketed<Syntax> | Braced<Syntax>
 
 /// Produces opaque syntax from a braced quotation without reparsing it.
 ///
@@ -204,9 +225,11 @@ extern "staple-intrinsic" {
     __parse_primitive: <T> mut ParseStream -> Result<T, ParseError>
     __parenthesized_group: mut ParseStream -> Result<(Syntax; ParseStream), ParseError>
     __bracketed_group: mut ParseStream -> Result<(Syntax; ParseStream), ParseError>
+    __angled_group: mut ParseStream -> Result<(Syntax; ParseStream), ParseError>
     __braced_group: mut ParseStream -> Result<(Syntax; ParseStream), ParseError>
     __parenthesized: <C> (Syntax; C) -> Parenthesized<C>
     __bracketed: <C> (Syntax; C) -> Bracketed<C>
+    __angled: <C> (Syntax; C) -> Angled<C>
     __braced: <C> (Syntax; C) -> Braced<C>
     __take_rest: mut ParseStream -> Syntax
     __offset: ParseStream -> USize
@@ -228,6 +251,8 @@ impl Parse TypeDeclarationItem { parse = mut input => __parse_primitive.<TypeDec
 impl Parse UnstructuredItem { parse = mut input => __parse_primitive.<UnstructuredItem> input }
 impl Parse Modifier { parse = mut input => __parse_primitive.<Modifier> input }
 impl Parse TypeBody { parse = mut input => __parse_primitive.<TypeBody> input }
+impl Parse TypeParameter { parse = mut input => __parse_primitive.<TypeParameter> input }
+impl Parse TypeParameters { parse = mut input => __parse_primitive.<TypeParameters> input }
 // One token, checked against the spelling the type names.
 impl<S where S <: String> Parse Ident<S> { parse = mut input => __parse_primitive.<Ident<S>> input }
 impl Parse Comma { parse = mut input => __parse_primitive.<Comma> input }
@@ -279,6 +304,18 @@ impl<C where Parse C> Parse Bracketed<C> {
         let value = Parse.parse.<C> contents?
         if (is_empty contents) {
             Ok (__bracketed.<C> (source; value))
+        } else {
+            error_at (contents; "unexpected syntax")
+        }
+    }
+}
+impl<C where Parse C> Parse Angled<C> {
+    parse = mut input => {
+        let (source, inner) = __angled_group input?
+        let mut contents = inner
+        let value = Parse.parse.<C> contents?
+        if (is_empty contents) {
+            Ok (__angled.<C> (source; value))
         } else {
             error_at (contents; "unexpected syntax")
         }

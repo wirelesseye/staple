@@ -96,6 +96,7 @@ struct MacroDefinition {
 
 #[derive(Clone)]
 enum MacroArgument {
+    Parsed(Value),
     Expression(Expression),
     Visibility(VisibilitySyntax),
     Metadata(MacroCallMetadata),
@@ -140,6 +141,8 @@ pub(crate) enum MetaType {
     ModifiedItem,
     TypeDeclarationItem,
     TypeBody,
+    TypeParameter,
+    TypeParameters,
     UnstructuredItem,
     Visibility,
     MacroCallMetadata,
@@ -210,6 +213,7 @@ enum CompileCoveragePattern {
 pub(crate) enum DelimiterKind {
     Parenthesized,
     Bracketed,
+    Angled,
     Braced,
 }
 
@@ -270,6 +274,11 @@ enum SyntaxValue {
     Equals(Syntax),
     FatArrow(Syntax),
     Delimited(DelimitedSyntaxValue),
+    Parameters {
+        kind: MetaType,
+        syntax: Syntax,
+        fields: Vec<(Option<String>, Value)>,
+    },
 }
 
 #[derive(Clone)]
@@ -317,7 +326,7 @@ impl SyntaxValue {
 
     fn into_expression(self) -> Option<Expression> {
         match self {
-            Self::Raw(_) => None,
+            Self::Raw(_) | Self::Parameters { .. } => None,
             Self::Ident(name) => Some(Expression::Name(name)),
             Self::Call(call) => Some(Expression::Call(call)),
             Self::Unstructured(expression) => Some(expression),
@@ -336,6 +345,7 @@ impl SyntaxValue {
 
     fn syntax(&self) -> Option<&Syntax> {
         match self {
+            Self::Parameters { syntax, .. } => Some(syntax),
             Self::Raw(syntax)
             | Self::Comma(syntax)
             | Self::Equals(syntax)
@@ -361,7 +371,7 @@ impl DelimitedSyntaxValue {
         }
         let mut generated = self.generated.into_iter();
         match self.kind {
-            DelimiterKind::Bracketed => None,
+            DelimiterKind::Bracketed | DelimiterKind::Angled => None,
             DelimiterKind::Parenthesized => {
                 let values = match self.contents {
                     DelimitedValueContents::Slotted(values) => values,
@@ -443,6 +453,7 @@ impl DelimitedSyntaxValue {
 fn syntax_category(value: &SyntaxValue) -> &'static str {
     match value {
         SyntaxValue::Raw(_) => "syntax fragment",
+        SyntaxValue::Parameters { .. } => "type parameter syntax",
         SyntaxValue::Ident(_) | SyntaxValue::Call(_) | SyntaxValue::Unstructured(_) => "expression",
         SyntaxValue::Type(_) => "type",
         SyntaxValue::Pattern(_) => "pattern",
@@ -465,6 +476,7 @@ fn syntax_category(value: &SyntaxValue) -> &'static str {
         SyntaxValue::Delimited(value) => match value.kind {
             DelimiterKind::Parenthesized => "parenthesized",
             DelimiterKind::Bracketed => "bracketed",
+            DelimiterKind::Angled => "angle-bracketed",
             DelimiterKind::Braced => "braced",
         },
     }
@@ -576,7 +588,16 @@ fn quote_contains_raw_splice(contents: &Syntax, environment: &Environment) -> bo
             && environment
                 .get(&pair[1].text)
                 .map(EnvironmentBinding::get)
-                .is_some_and(|value| matches!(value, Value::Syntax(SyntaxValue::Raw(_))))
+                .is_some_and(|value| {
+                    matches!(
+                        value,
+                        Value::Syntax(SyntaxValue::Raw(_) | SyntaxValue::Parameters { .. })
+                            | Value::Syntax(SyntaxValue::Delimited(DelimitedSyntaxValue {
+                                kind: DelimiterKind::Angled,
+                                ..
+                            }))
+                    )
+                })
     })
 }
 
@@ -3697,15 +3718,14 @@ impl MacroExpander {
                     },
                 ));
             }
-            if definition.parameters.iter().any(|parameter| {
-                matches!(
-                    parameter,
-                    MetaType::Optional(_) | MetaType::SlottedProduct(_)
-                )
-            }) {
+            if definition
+                .parameters
+                .iter()
+                .any(|parameter| matches!(parameter, MetaType::SlottedProduct(_)))
+            {
                 self.diagnostics.push(Diagnostic::new(
                     definition.declaration.syntax.span.clone(),
-                    "`Option` and slotted product syntax shapes may only appear inside delimited contents",
+                    "slotted product syntax shapes may only appear inside delimited contents",
                 ));
             }
             validate_top_level_sequence(definition, &mut self.diagnostics);
@@ -5379,6 +5399,7 @@ impl MacroExpander {
                     | "FatArrow"
                     | "Parenthesized"
                     | "Bracketed"
+                    | "Angled"
                     | "Braced"
                     | "Private"
                     | "Package"
@@ -5611,6 +5632,19 @@ impl MacroExpander {
             })
             .collect::<Vec<_>>();
         if complete.is_empty() {
+            if definitions.iter().any(|definition| definition.parameters.iter().any(|parameter| {
+                matches!(parameter, MetaType::TypeParameters)
+                    || matches!(parameter, MetaType::Optional(inner) if **inner == MetaType::TypeParameters)
+            })) {
+                for argument in arguments {
+                    if argument.syntax().tokens().iter().find(|token| !token.kind.is_trivia()).is_some_and(|token| token.text == "<") {
+                        if let Err(error) = staple_syntax::parse_type_parameters_prefix(argument.syntax(), &mut 0) {
+                            self.diagnostics.push(Diagnostic::new(argument.syntax().span.clone(), error.message));
+                            return None;
+                        }
+                    }
+                }
+            }
             let has_visibility_parameters = definitions.iter().any(|definition| {
                 definition.parameters.iter().any(|parameter| {
                     matches!(
@@ -5875,6 +5909,10 @@ impl MacroExpander {
                         self.eval_expression(definition.key.module, body, &mut Environment::new())?;
                     for (expected, argument) in definition.parameters.iter().zip(arguments) {
                         let argument = match argument {
+                            MacroArgument::Parsed(argument) => {
+                                value = self.apply_value(value, argument, call_span.clone())?;
+                                continue;
+                            }
                             // A product parameter receives a parenthesized,
                             // comma-separated argument as a product of syntax.
                             MacroArgument::Expression(argument)
@@ -6014,6 +6052,14 @@ impl MacroExpander {
             .then(|| SyntaxValue::Visibility(visibility.clone()));
         }
         match expected {
+            MetaType::TypeParameter | MetaType::TypeParameters => {
+                let Value::Syntax(value) =
+                    match_syntax_fragment(expected, argument.syntax(), &mut self.next_syntax_id)?
+                else {
+                    return None;
+                };
+                Some(value)
+            }
             MetaType::Type => {
                 parse_type_argument(argument, &mut self.next_syntax_id).map(SyntaxValue::Type)
             }
@@ -6066,6 +6112,8 @@ impl MacroExpander {
                     MetaType::ModifiedItem => "a modified item".to_owned(),
                     MetaType::TypeDeclarationItem => "a type declaration item".to_owned(),
                     MetaType::TypeBody => "a type declaration body".to_owned(),
+                    MetaType::TypeParameter => "a type parameter".to_owned(),
+                    MetaType::TypeParameters => "type parameters".to_owned(),
                     MetaType::UnstructuredItem => "an unstructured item".to_owned(),
                     MetaType::Visibility => "visibility syntax".to_owned(),
                     MetaType::MacroCallMetadata => "macro-call metadata".to_owned(),
@@ -6514,6 +6562,7 @@ impl MacroExpander {
                             | "Separated"
                             | "Parenthesized"
                             | "Bracketed"
+                            | "Angled"
                             | "Braced"
                     ) {
                         return self.construct_syntax(
@@ -6581,6 +6630,9 @@ impl MacroExpander {
                             None
                         }
                     };
+                }
+                if let Value::Syntax(SyntaxValue::Parameters { fields, .. }) = &value {
+                    value = Value::Product(fields.clone(), false);
                 }
                 if let Value::Syntax(SyntaxValue::Item(item)) = &value {
                     if let Item::TypeDeclaration(declaration) = item.as_ref() {
@@ -7190,7 +7242,7 @@ impl MacroExpander {
                     trailing,
                 })
             }
-            "Parenthesized" | "Bracketed" | "Braced" => {
+            "Parenthesized" | "Bracketed" | "Braced" | "Angled" => {
                 let kind = delimiter_kind(constructor).expect("matched delimiter constructor");
                 let contents = match argument {
                     Value::Syntax(SyntaxValue::Raw(syntax)) => DelimitedValueContents::Slotted(
@@ -8247,6 +8299,10 @@ impl MacroExpander {
             let syntax = self.substitute_raw_quote(module, &quote.contents, environment)?;
             return self.instantiate_substituted_fragment(module, &syntax, expected);
         }
+        if matches!(expected, MetaType::TypeParameter | MetaType::TypeParameters) {
+            let syntax = self.substitute_raw_quote(module, &quote.contents, environment)?;
+            return self.instantiate_substituted_fragment(module, &syntax, expected);
+        }
         if *expected == MetaType::Type {
             return self.instantiate_type_quote(module, quote, environment);
         }
@@ -8384,6 +8440,9 @@ impl MacroExpander {
         let mark = self.next_mark;
         self.next_mark += 1;
         let value = match expected {
+            MetaType::TypeParameter | MetaType::TypeParameters | MetaType::Delimited(_, _) => {
+                return match_syntax_fragment(expected, syntax, &mut self.next_syntax_id);
+            }
             MetaType::SyntaxNode => structural_syntax_value(syntax, &mut self.next_syntax_id)?,
             MetaType::Expr => {
                 let mut expression =
@@ -8909,6 +8968,8 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
             "ModifiedItem" => Some(MetaType::ModifiedItem),
             "TypeDeclarationItem" => Some(MetaType::TypeDeclarationItem),
             "TypeBody" => Some(MetaType::TypeBody),
+            "TypeParameter" => Some(MetaType::TypeParameter),
+            "TypeParameters" => Some(MetaType::TypeParameters),
             "UnstructuredItem" => Some(MetaType::UnstructuredItem),
             "Visibility" => Some(MetaType::Visibility),
             "MacroCallMetadata" => Some(MetaType::MacroCallMetadata),
@@ -8993,6 +9054,7 @@ fn delimiter_kind(name: &str) -> Option<DelimiterKind> {
     match name {
         "Parenthesized" => Some(DelimiterKind::Parenthesized),
         "Bracketed" => Some(DelimiterKind::Bracketed),
+        "Angled" => Some(DelimiterKind::Angled),
         "Braced" => Some(DelimiterKind::Braced),
         _ => None,
     }
@@ -9131,6 +9193,10 @@ fn meta_type_contains_macro_call_metadata(meta: &MetaType) -> bool {
 fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
     let expression_argument = meta_argument_expression(expected, argument);
     match expected {
+        MetaType::TypeParameter | MetaType::TypeParameters => {
+            let mut next_syntax_id = 0;
+            match_syntax_fragment(expected, argument.syntax(), &mut next_syntax_id).is_some()
+        }
         MetaType::Type => {
             let mut next_syntax_id = 0;
             parse_type_argument(argument, &mut next_syntax_id).is_some()
@@ -9204,17 +9270,24 @@ fn delimiter_argument_value(
     let tokens = syntax.tokens();
     let first = tokens.iter().position(|token| !token.kind.is_trivia())?;
     let last = tokens.iter().rposition(|token| !token.kind.is_trivia())?;
-    let kind = match (tokens[first].kind, tokens[last].kind) {
-        (staple_syntax::TokenKind::LParen, staple_syntax::TokenKind::RParen) => {
-            DelimiterKind::Parenthesized
+    let kind = if *expected_kind == DelimiterKind::Angled {
+        if tokens[first].text != "<" || matching_angle_close(tokens, first) != Some(last) {
+            return None;
         }
-        (staple_syntax::TokenKind::LBracket, staple_syntax::TokenKind::RBracket) => {
-            DelimiterKind::Bracketed
+        DelimiterKind::Angled
+    } else {
+        match (tokens[first].kind, tokens[last].kind) {
+            (staple_syntax::TokenKind::LParen, staple_syntax::TokenKind::RParen) => {
+                DelimiterKind::Parenthesized
+            }
+            (staple_syntax::TokenKind::LBracket, staple_syntax::TokenKind::RBracket) => {
+                DelimiterKind::Bracketed
+            }
+            (staple_syntax::TokenKind::LBrace, staple_syntax::TokenKind::RBrace) => {
+                DelimiterKind::Braced
+            }
+            _ => return None,
         }
-        (staple_syntax::TokenKind::LBrace, staple_syntax::TokenKind::RBrace) => {
-            DelimiterKind::Braced
-        }
-        _ => return None,
     };
     if kind != *expected_kind {
         return None;
@@ -9279,14 +9352,9 @@ fn match_separated_contents(
     }
     let mut elements = Vec::new();
     loop {
-        let separator_at = find_top_level_separator(parent.tokens(), cursor, end, separator);
-        let element_end = separator_at.unwrap_or(end);
-        let element_end_trimmed = trim_trailing_trivia(parent.tokens(), cursor, element_end);
-        if element_end_trimmed == cursor {
-            return None;
-        }
-        let fragment = syntax_slice(parent, cursor, element_end_trimmed);
-        elements.push(match_syntax_fragment(element, &fragment, next_syntax_id)?);
+        let (value, separator_at) =
+            match_before_separator(parent, cursor, end, element, separator, next_syntax_id)?;
+        elements.push(value);
         let Some(separator_at) = separator_at else {
             return Some((elements, separator_value, false));
         };
@@ -9301,6 +9369,33 @@ fn match_separated_contents(
         if skip_trivia(parent.tokens(), cursor, end) == end {
             return Some((elements, separator_value, true));
         }
+    }
+}
+
+/// Let the expected syntax grammar decide which comma ends an element. A comma
+/// inside `Map<K, V>` is not a separator, while commas after comparisons are.
+fn match_before_separator(
+    parent: &Syntax,
+    cursor: usize,
+    end: usize,
+    element: &MetaType,
+    separator: &MetaType,
+    next_syntax_id: &mut usize,
+) -> Option<(Value, Option<usize>)> {
+    let mut search = cursor;
+    loop {
+        let separator_at = find_top_level_separator(parent.tokens(), search, end, separator);
+        let element_end =
+            trim_trailing_trivia(parent.tokens(), cursor, separator_at.unwrap_or(end));
+        let checkpoint = *next_syntax_id;
+        if element_end > cursor {
+            let fragment = syntax_slice(parent, cursor, element_end);
+            if let Some(value) = match_syntax_fragment(element, &fragment, next_syntax_id) {
+                return Some((value, separator_at));
+            }
+        }
+        *next_syntax_id = checkpoint;
+        search = separator_at? + 1;
     }
 }
 
@@ -9367,11 +9462,14 @@ fn match_product_contents(
     let mut values = Vec::with_capacity(expected.len());
     for (index, element) in expected.iter().enumerate() {
         cursor = skip_trivia(parent.tokens(), cursor, end);
-        let separator_at = find_top_level_separator(parent.tokens(), cursor, end, &MetaType::Comma);
-        let element_end =
-            trim_trailing_trivia(parent.tokens(), cursor, separator_at.unwrap_or(end));
-        let fragment = syntax_slice(parent, cursor, element_end);
-        let Some(value) = match_syntax_fragment(element, &fragment, next_syntax_id) else {
+        let Some((value, separator_at)) = match_before_separator(
+            parent,
+            cursor,
+            end,
+            element,
+            &MetaType::Comma,
+            next_syntax_id,
+        ) else {
             *next_syntax_id = checkpoint;
             return None;
         };
@@ -9610,6 +9708,13 @@ fn match_syntax_fragment(
                 match_sequence_contents(syntax, 0, syntax.tokens().len(), element, next_syntax_id)?;
             return Some(Value::Sequence(values));
         }
+        MetaType::TypeParameter | MetaType::TypeParameters => {
+            let (value, consumed) =
+                parse_parameter_syntax(expected, syntax, next_syntax_id).ok()?;
+            return (skip_trivia(syntax.tokens(), consumed, syntax.tokens().len())
+                == syntax.tokens().len())
+            .then_some(value);
+        }
         MetaType::TypeBody => {
             let body = staple_syntax::parse_type_body_fragment(syntax, next_syntax_id).ok()?;
             return Some(type_body_value(&body));
@@ -9728,7 +9833,9 @@ fn match_syntax_fragment(
         | MetaType::Optional(_)
         | MetaType::Nominal(_, _)
         | MetaType::Sequence(_) => unreachable!(),
-        MetaType::TypeBody => unreachable!("type bodies are matched before expression parsing"),
+        MetaType::TypeBody | MetaType::TypeParameter | MetaType::TypeParameters => {
+            unreachable!("declaration syntax is matched before expression parsing")
+        }
         MetaType::MacroCallMetadata => unreachable!(),
     };
     Some(Value::Syntax(syntax_value))
@@ -9817,6 +9924,30 @@ fn skip_trivia(tokens: &[staple_syntax::SyntaxToken], mut cursor: usize, end: us
 }
 
 /// Finds the token that closes the delimiter opened at `open`.
+fn matching_angle_close(tokens: &[staple_syntax::SyntaxToken], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut cursor = open;
+    while let Some(token) = tokens.get(cursor) {
+        match token.kind {
+            staple_syntax::TokenKind::LParen
+            | staple_syntax::TokenKind::LBracket
+            | staple_syntax::TokenKind::LBrace => {
+                cursor = matching_close(tokens, cursor)?;
+            }
+            staple_syntax::TokenKind::Operator if token.text == "<" => depth += 1,
+            staple_syntax::TokenKind::Operator if token.text == ">" => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(cursor);
+                }
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    None
+}
+
 fn matching_close(tokens: &[staple_syntax::SyntaxToken], open: usize) -> Option<usize> {
     let mut depth = 0usize;
     for (index, token) in tokens.iter().enumerate().skip(open) {
@@ -9895,6 +10026,41 @@ fn match_macro_parameter_suffix(
         return Some(argument_index);
     };
     match expected {
+        MetaType::Optional(element) => {
+            let checkpoint = matched.len();
+            let effective_checkpoint = effective.len();
+            if let Some(argument) = arguments.get(argument_index) {
+                let mut ids = 0;
+                if let Some(value) = match_syntax_fragment(element, argument.syntax(), &mut ids) {
+                    matched.push(MacroArgument::Parsed(Value::Nominal(
+                        "Some".into(),
+                        Box::new(value),
+                    )));
+                    effective.push(((**element).clone(), false));
+                    if let Some(consumed) = match_macro_parameter_suffix(
+                        rest,
+                        arguments,
+                        argument_index + 1,
+                        matched,
+                        effective,
+                    ) {
+                        return Some(consumed);
+                    }
+                    matched.truncate(checkpoint);
+                    effective.truncate(effective_checkpoint);
+                }
+            }
+            matched.push(MacroArgument::Parsed(Value::Nominal(
+                "None".into(),
+                Box::new(Value::Product(vec![], false)),
+            )));
+            let result =
+                match_macro_parameter_suffix(rest, arguments, argument_index, matched, effective);
+            if result.is_none() {
+                matched.truncate(checkpoint);
+            }
+            result
+        }
         MetaType::Visibility => {
             let matched_len = matched.len();
             let effective_len = effective.len();
@@ -10227,6 +10393,8 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::ModifiedItem => "ModifiedItem".to_owned(),
             MetaType::TypeDeclarationItem => "TypeDeclarationItem".to_owned(),
             MetaType::TypeBody => "TypeBody".to_owned(),
+            MetaType::TypeParameter => "TypeParameter".to_owned(),
+            MetaType::TypeParameters => "TypeParameters".to_owned(),
             MetaType::UnstructuredItem => "UnstructuredItem".to_owned(),
             MetaType::Visibility => "Visibility".to_owned(),
             MetaType::MacroCallMetadata => "MacroCallMetadata".to_owned(),
@@ -10323,6 +10491,8 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
         MetaType::ModifiedItem => "ModifiedItem".to_owned(),
         MetaType::TypeDeclarationItem => "TypeDeclarationItem".to_owned(),
         MetaType::TypeBody => "TypeBody".to_owned(),
+        MetaType::TypeParameter => "TypeParameter".to_owned(),
+        MetaType::TypeParameters => "TypeParameters".to_owned(),
         MetaType::UnstructuredItem => "UnstructuredItem".to_owned(),
         MetaType::Visibility => "Visibility".to_owned(),
         MetaType::MacroCallMetadata => "MacroCallMetadata".to_owned(),
@@ -10349,6 +10519,7 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
             let name = match kind {
                 DelimiterKind::Parenthesized => "Parenthesized",
                 DelimiterKind::Bracketed => "Bracketed",
+                DelimiterKind::Angled => "Angled",
                 DelimiterKind::Braced => "Braced",
             };
             let contents = match contents {
@@ -10558,6 +10729,8 @@ fn compile_constructor_type(name: &str, argument: CompileType) -> CompileType {
         "ModifiedItem" => CompileType::Meta(MetaType::ModifiedItem),
         "TypeDeclarationItem" => CompileType::Meta(MetaType::TypeDeclarationItem),
         "TypeBody" => CompileType::Meta(MetaType::TypeBody),
+        "TypeParameter" => CompileType::Meta(MetaType::TypeParameter),
+        "TypeParameters" => CompileType::Meta(MetaType::TypeParameters),
         "UnstructuredItem" => CompileType::Meta(MetaType::UnstructuredItem),
         "Parenthesized" => CompileType::Meta(MetaType::Delimited(
             DelimiterKind::Parenthesized,
@@ -10565,6 +10738,10 @@ fn compile_constructor_type(name: &str, argument: CompileType) -> CompileType {
         )),
         "Bracketed" => CompileType::Meta(MetaType::Delimited(
             DelimiterKind::Bracketed,
+            compile_delimited_contents(&argument),
+        )),
+        "Angled" => CompileType::Meta(MetaType::Delimited(
+            DelimiterKind::Angled,
             compile_delimited_contents(&argument),
         )),
         "Braced" => CompileType::Meta(MetaType::Delimited(
@@ -10906,6 +11083,23 @@ fn compile_field_type(ty: &CompileType, accessor: &Accessor) -> Option<CompileTy
         return None;
     };
     match (ty, name.as_str()) {
+        (CompileType::Meta(MetaType::TypeParameters), "parameters") => Some(CompileType::Meta(
+            MetaType::Sequence(Box::new(MetaType::TypeParameter)),
+        )),
+        (CompileType::Meta(MetaType::TypeParameter), "name") => {
+            Some(CompileType::Meta(MetaType::Ident(None)))
+        }
+        (CompileType::Meta(MetaType::TypeParameter), "default") => Some(CompileType::Meta(
+            MetaType::Optional(Box::new(MetaType::Type)),
+        )),
+        (CompileType::Meta(MetaType::TypeParameter), "argument") => {
+            Some(CompileType::Meta(MetaType::Type))
+        }
+        (CompileType::Meta(MetaType::TypeParameter | MetaType::TypeParameters), "declaration")
+        | (CompileType::Meta(MetaType::TypeParameters), "arguments" | "bounds") => {
+            Some(CompileType::Meta(MetaType::Syntax))
+        }
+
         (CompileType::Meta(MetaType::CallExpr), "callee" | "argument") => {
             Some(CompileType::Meta(MetaType::Expr))
         }
@@ -10939,6 +11133,22 @@ fn compile_product_fields(ty: &CompileType, length: usize) -> Vec<CompileType> {
 
 fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<CompileType> {
     match (ty, name) {
+        (CompileType::Meta(MetaType::TypeParameter), "TypeParameter") => {
+            Some(CompileType::Product(vec![
+                CompileType::Meta(MetaType::Ident(None)),
+                CompileType::Meta(MetaType::Optional(Box::new(MetaType::Type))),
+                CompileType::Meta(MetaType::Syntax),
+                CompileType::Meta(MetaType::Type),
+            ]))
+        }
+        (CompileType::Meta(MetaType::TypeParameters), "TypeParameters") => {
+            Some(CompileType::Product(vec![
+                CompileType::Meta(MetaType::Sequence(Box::new(MetaType::TypeParameter))),
+                CompileType::Meta(MetaType::Syntax),
+                CompileType::Meta(MetaType::Syntax),
+                CompileType::Meta(MetaType::Syntax),
+            ]))
+        }
         (CompileType::Result(ok, _), "Ok") => Some(ok.as_ref().clone()),
         (CompileType::Result(_, error), "ParseError") if matches!(error.as_ref(), CompileType::Named(name) if name == "ParseError") => {
             Some(CompileType::Product(vec![CompileType::String]))
@@ -11127,6 +11337,7 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
             let expected = match kind {
                 DelimiterKind::Parenthesized => "Parenthesized",
                 DelimiterKind::Bracketed => "Bracketed",
+                DelimiterKind::Angled => "Angled",
                 DelimiterKind::Braced => "Braced",
             };
             patterns.iter().any(|pattern| {
@@ -11145,6 +11356,7 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
             nominal.name == "Ident" && matches!(nominal.argument.as_ref(), Pattern::StringLiteral(value) if staple_syntax::string_literal::decode(&value.literal).is_ok_and(|value| &value == spelling))
         }),
         CompileType::Meta(MetaType::ModifiedItem) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("ModifiedItem")),
+        CompileType::Meta(MetaType::TypeParameter | MetaType::TypeParameters) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(format_compile_type(ty).as_str())),
         CompileType::Meta(MetaType::TypeDeclarationItem) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("TypeDeclarationItem")),
         CompileType::Meta(MetaType::TypeBody) => ["AliasBody", "WrapperBody", "FromBody", "OpaqueBody"]
             .iter()
@@ -11306,6 +11518,14 @@ fn compile_sequence_coverage_pattern(
 
 fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<CompileType>)>> {
     Some(match ty {
+        CompileType::Meta(MetaType::TypeParameter | MetaType::TypeParameters) => {
+            let name = format_compile_type(ty);
+            let CompileType::Product(fields) = compile_constructor_representation(ty, &name)?
+            else {
+                return None;
+            };
+            vec![(name, fields)]
+        }
         CompileType::Bool => vec![
             ("True".to_owned(), Vec::new()),
             ("False".to_owned(), Vec::new()),
@@ -11451,6 +11671,7 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
             let name = match kind {
                 DelimiterKind::Parenthesized => "Parenthesized",
                 DelimiterKind::Bracketed => "Bracketed",
+                DelimiterKind::Angled => "Angled",
                 DelimiterKind::Braced => "Braced",
             };
             let contents = match contents {
@@ -11805,6 +12026,7 @@ fn type_contains_syntax(ty: &Type) -> bool {
                 | "FatArrow"
                 | "Parenthesized"
                 | "Bracketed"
+                | "Angled"
                 | "Braced"
                 | "UnstructuredExpr"
                 | "Type"
@@ -12188,7 +12410,9 @@ fn quote_result_type(meta: &MetaType) -> bool {
         | MetaType::Comma
         | MetaType::Equals
         | MetaType::FatArrow
-        | MetaType::Visibility => true,
+        | MetaType::Visibility
+        | MetaType::TypeParameter
+        | MetaType::TypeParameters => true,
         MetaType::Sequence(element) => **element == MetaType::Item,
         MetaType::Delimited(_, _) => !invalid_raw_syntax_shape(meta),
         _ => false,
@@ -12391,6 +12615,16 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                 return bind_pattern(
                     &pattern.argument,
                     modified_item_value(modified),
+                    environment,
+                );
+            }
+            if pattern.namespace.is_none()
+                && let Value::Syntax(SyntaxValue::Parameters { kind, fields, .. }) = &value
+                && pattern.name == format_meta_type(kind)
+            {
+                return bind_pattern(
+                    &pattern.argument,
+                    Value::Product(fields.clone(), false),
                     environment,
                 );
             }
@@ -12704,6 +12938,162 @@ fn modified_item_value(modified: &staple_syntax::ModifiedItem) -> Value {
     )
 }
 
+fn parameter_node(parameter: &staple_syntax::TypeParameter) -> Value {
+    let name = parameter
+        .pattern
+        .names()
+        .first()
+        .copied()
+        .unwrap_or("")
+        .to_owned();
+    let mut name_syntax = parameter.pattern.syntax().clone();
+    if let Some(index) = name_syntax
+        .tokens()
+        .iter()
+        .position(|token| token.text == name)
+    {
+        name_syntax.token_range =
+            name_syntax.token_range.start + index..name_syntax.token_range.start + index + 1;
+    }
+    let identifier = Value::Syntax(SyntaxValue::Ident(staple_syntax::NameExpression {
+        syntax: name_syntax.clone(),
+        name: name.clone(),
+    }));
+    let argument = Type::Named(staple_syntax::NamedType {
+        syntax: name_syntax,
+        namespace: None,
+        name,
+    });
+    let default = match &parameter.default {
+        Some(ty) => Value::Nominal(
+            "Some".into(),
+            Box::new(Value::Syntax(SyntaxValue::Type(ty.clone()))),
+        ),
+        None => Value::Nominal("None".into(), Box::new(Value::Product(vec![], false))),
+    };
+    Value::Syntax(SyntaxValue::Parameters {
+        kind: MetaType::TypeParameter,
+        syntax: parameter.syntax.clone(),
+        fields: vec![
+            (Some("name".into()), identifier),
+            (Some("default".into()), default),
+            (
+                Some("declaration".into()),
+                Value::Syntax(SyntaxValue::Raw(parameter.syntax.clone())),
+            ),
+            (
+                Some("argument".into()),
+                Value::Syntax(SyntaxValue::Type(argument)),
+            ),
+        ],
+    })
+}
+
+fn parse_parameter_syntax(
+    expected: &MetaType,
+    syntax: &Syntax,
+    next: &mut usize,
+) -> Result<(Value, usize), staple_syntax::ParseError> {
+    if *expected == MetaType::TypeParameter {
+        let (parameter, consumed) = staple_syntax::parse_type_parameter_prefix(syntax, next)?;
+        return Ok((parameter_node(&parameter), consumed));
+    }
+    let (parameters, consumed) = staple_syntax::parse_type_parameters_prefix(syntax, next)?;
+    let mut argument_tokens = Vec::new();
+    let tokens = parameters.syntax.tokens();
+    let punctuation = |kind, text: &str| {
+        let mut token = tokens[0].clone();
+        token.kind = kind;
+        token.text = text.into();
+        token
+    };
+    let effects = parameters
+        .parameters
+        .iter()
+        .filter(|parameter| {
+            matches!(
+                parameter.pattern,
+                staple_syntax::TypeParameterPattern::Effect(_)
+            )
+        })
+        .collect::<Vec<_>>();
+    if !effects.is_empty() {
+        argument_tokens.push(punctuation(staple_syntax::TokenKind::LBrace, "{"));
+        for (index, parameter) in effects.iter().enumerate() {
+            if index > 0 {
+                argument_tokens.push(punctuation(staple_syntax::TokenKind::Comma, ","));
+            }
+            argument_tokens.extend(
+                parameter
+                    .pattern
+                    .syntax()
+                    .tokens()
+                    .iter()
+                    .filter(|token| parameter.pattern.names().contains(&token.text.as_str()))
+                    .cloned(),
+            );
+        }
+        argument_tokens.push(punctuation(staple_syntax::TokenKind::RBrace, "}"));
+    }
+    let ordinary = parameters
+        .parameters
+        .iter()
+        .filter(|parameter| {
+            !matches!(
+                parameter.pattern,
+                staple_syntax::TypeParameterPattern::Effect(_)
+            )
+        })
+        .collect::<Vec<_>>();
+    if !ordinary.is_empty() {
+        argument_tokens.push(punctuation(staple_syntax::TokenKind::Operator, "<"));
+        for (index, parameter) in ordinary.iter().enumerate() {
+            if index > 0 {
+                argument_tokens.push(punctuation(staple_syntax::TokenKind::Comma, ","));
+            }
+            argument_tokens.extend(
+                parameter
+                    .pattern
+                    .syntax()
+                    .tokens()
+                    .iter()
+                    .filter(|token| !token.kind.is_trivia())
+                    .cloned(),
+            );
+        }
+        argument_tokens.push(punctuation(staple_syntax::TokenKind::Operator, ">"));
+    }
+    let mut arguments = parameters.syntax.clone();
+    arguments.token_range = 0..argument_tokens.len();
+    arguments.tokens = argument_tokens.into();
+    let fields = vec![
+        (
+            Some("parameters".into()),
+            Value::Sequence(parameters.parameters.iter().map(parameter_node).collect()),
+        ),
+        (
+            Some("declaration".into()),
+            Value::Syntax(SyntaxValue::Raw(parameters.syntax.clone())),
+        ),
+        (
+            Some("arguments".into()),
+            Value::Syntax(SyntaxValue::Raw(arguments)),
+        ),
+        (
+            Some("bounds".into()),
+            Value::Syntax(SyntaxValue::Raw(parameters.bounds)),
+        ),
+    ];
+    Ok((
+        Value::Syntax(SyntaxValue::Parameters {
+            kind: MetaType::TypeParameters,
+            syntax: parameters.syntax,
+            fields,
+        }),
+        consumed,
+    ))
+}
+
 fn type_parameter_pattern_type(parameter: &staple_syntax::TypeParameterPattern) -> Type {
     match parameter {
         staple_syntax::TypeParameterPattern::Binding(binding) => {
@@ -12789,6 +13179,10 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
         (MetaType::TypeDeclarationItem, Value::Syntax(SyntaxValue::Item(item))) => {
             matches!(item.as_ref(), Item::TypeDeclaration(_))
         }
+        (
+            MetaType::TypeParameter | MetaType::TypeParameters,
+            Value::Syntax(SyntaxValue::Parameters { kind, .. }),
+        ) => expected == kind,
         (MetaType::TypeBody, Value::Nominal(name, _)) => {
             matches!(
                 name.as_str(),

@@ -6734,7 +6734,7 @@ fn expands_standard_typegroup_into_module_variants_and_alias() {
 fn typegroup_applies_call_modifiers_to_the_alias_and_entry_modifiers_to_variants() {
     let resolved = resolve(concat!(
         "@doc(\"alias docs\")\n",
-        "typegroup Tagged T {\n",
+        "typegroup Tagged<T> {\n",
         "    ///outer\n",
         "    @doc(\"inner\")\n",
         "    Marked wrap T,\n",
@@ -7038,7 +7038,7 @@ fn rejects_incomplete_method_call_on_a_juxtaposed_companion_method() {
 #[test]
 fn typegroup_supports_generic_groups_and_reexports_their_variants() {
     let module = type_check(concat!(
-        "pub typegroup Maybe T {\n",
+        "pub typegroup Maybe<T> {\n",
         "    Missing,\n",
         "    Present wrap pub T,\n",
         "}\n",
@@ -7046,11 +7046,11 @@ fn typegroup_supports_generic_groups_and_reexports_their_variants() {
         "let missing: Maybe<I32> = Missing\n",
         "let present: Maybe<I32> = Present 1\n",
         "let qualified: Maybe<String> = Maybe.Present \"value\"\n",
-        "pub typegroup Either L R {\n",
+        "pub typegroup Either<L, R> {\n",
         "    Left wrap pub L,\n",
         "    Right wrap pub R,\n",
         "}\n",
-        "pub typegroup Mixed A B C D {\n",
+        "pub typegroup Mixed<A, B, C, D> {\n",
         "    Empty,\n",
         "    Value wrap pub (A, B, C, D),\n",
         "}\n",
@@ -7254,6 +7254,7 @@ fn parse_quote_rejects_spliced_visibility_result() {
 fn rejects_legacy_typegroup_call_syntax() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for source in [
+        "typegroup Legacy T { Wrapped wrap T, }\n",
         "typegroup Legacy = { Unit, }\n",
         "typegroup Legacy = T => { Wrapped T, }\n",
         "typegroup Legacy = (T, E) => { Left T, Right E, }\n",
@@ -7327,7 +7328,7 @@ fn typegroup_supports_private_construction_compound_types_and_trailing_commas() 
 }
 
 #[test]
-fn rejects_empty_typegroups_and_top_level_optional_macro_parameters() {
+fn rejects_empty_typegroups_and_top_level_slotted_macro_parameters() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
@@ -7335,8 +7336,8 @@ fn rejects_empty_typegroups_and_top_level_optional_macro_parameters() {
             "macro `typegroup` panicked: empty typegroup is unsupported",
         ),
         (
-            "macro invalid: Option<Type> -> Expr = value => parse_quote { 0 }\ninvalid I32\n",
-            "`Option` and slotted product syntax shapes may only appear inside delimited contents",
+            "macro invalid: ((Type; Type); Expr) -> Expr = (types; value) => value\n",
+            "slotted product syntax shapes may only appear inside delimited contents",
         ),
     ] {
         let program = ProgramLoader::new()
@@ -19199,4 +19200,128 @@ fn associated_type_equalities_do_not_infer_iterator_types_from_items() {
             .any(|d| d.message.contains("could not infer")),
         "{diagnostics:?}"
     );
+}
+
+#[test]
+fn typegroup_angle_parameters_preserve_defaults_and_bounds() {
+    type_check(concat!(
+        "trait Allowed T {}\n",
+        "impl Allowed I32 {}\n",
+        "typegroup Bounded<T = I32 where Allowed T> { Empty, Value wrap pub T, }\n",
+        "let value: Bounded = Bounded.Value 42\n",
+        "let empty: Bounded = Bounded.Empty\n",
+        "pub typegroup Nested<T = (I32, String)> { Value wrap pub T, }\n",
+        "let nested: Nested = Nested.Value (1, \"one\")\n",
+    ));
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Allowed T {}\n",
+            "impl Allowed I32 {}\n",
+            "typegroup Bounded<T where Allowed T> { Value wrap pub T, }\n",
+            "let invalid: Bounded<String> = Bounded.Value \"bad\"\n",
+        )))
+        .expect_err_diagnostics("the generated group must retain its bounds");
+    assert!(!diagnostics.is_empty());
+}
+
+#[test]
+fn syntax_parameter_nodes_parse_inspect_and_splice_headers() {
+    type_check(concat!(
+        "use std.syntax.*\n",
+        "trait Allowed T {}\n",
+        "impl Allowed I32 {}\n",
+        "macro generated: (Ident<String>; TypeParameters; Braced<Syntax>) -> Item = (name; parameters; body) => {\n",
+        "    let declaration = parameters.declaration\n",
+        "    match parameters.parameters {\n",
+        "        Sequence (first, rest) => {\n",
+        "            let argument = first.argument\n",
+        "            parse_quote { pub type $name$parameters wrap pub $argument }\n",
+        "        },\n",
+        "        _ => parse_quote { type EmptyGenerated },\n",
+        "    }\n",
+        "}\n",
+        "generated Number<T = I32 where Allowed T> {}\n",
+        "let number: Number = Number 42\n",
+        "macro inspect: TypeParameters -> Expr = parameters => {\n",
+        "    match parameters.parameters {\n",
+        "        Sequence (first, rest) => match first.default {\n",
+        "            Some _ => parse_quote { 42 },\n",
+        "            None => parse_quote { 0 },\n",
+        "        },\n",
+        "        _ => parse_quote { 0 },\n",
+        "    }\n",
+        "}\n",
+        "let inspected: I32 = inspect<T = I32>\n",
+        "macro primitive: () -> Item = () => {\n",
+        "    let header: TypeParameters = parse_quote { <U = I32 where U <: I32> }\n",
+        "    let parameter: TypeParameter = Parse.parse_all.<TypeParameter> (quote { T = I32 })?\n",
+        "    let copied: TypeParameter = parse_quote { $parameter }\n",
+        "    let name = copied.name\n",
+        "    parse_quote { type $name = I32 }\n",
+        "}\n",
+        "primitive ()\n",
+        "let primitive_value: T = 1\n",
+    ));
+}
+
+#[test]
+fn angled_syntax_supports_nested_types_and_parse_streams() {
+    type_check(concat!(
+        "use std.syntax.*\n",
+        "macro first: Angled<Separated<Type, Comma>> -> Item = angled => match angled {\n",
+        "    Angled (Separated (_, Sequence (ty, _), _)) => parse_quote { type Chosen = $ty },\n",
+        "    _ => parse_quote { type Chosen = I32 },\n",
+        "}\n",
+        "first<Result<I32, String>, String>\n",
+        "let chosen: Chosen = \"chosen\"\n",
+        "macro parsed: () -> Item = () => {\n",
+        "    let angled: Angled<Separated<Type, Comma>> = Parse.parse_all.<Angled<Separated<Type, Comma>>> (quote { <Result<I32, String>, String> })?\n",
+        "    match angled {\n",
+        "        Angled (Separated (_, Sequence (ty, _), _)) => parse_quote { type Parsed = $ty },\n",
+        "        _ => parse_quote { type Parsed = I32 },\n",
+        "    }\n",
+        "}\n",
+        "parsed ()\n",
+        "let parsed_value: Parsed = \"parsed\"\n",
+        "macro applied: Angled<Type> -> Item = angles => parse_quote { type Applied = List$angles }\n",
+        "applied<I32>\n",
+        "let applied_value: Applied = List.new ()\n",
+        "let comparison = 1 < 2\n",
+        "let tight_comparison = 1<2\n",
+    ));
+}
+
+#[test]
+fn syntax_optional_macro_parameters_backtrack_without_consuming_arguments() {
+    type_check(concat!(
+        "use std.syntax.*\n",
+        "macro choose: (Option<Ident<\"special\">>; Expr) -> Expr = (prefix; value) => value\n",
+        "let present = choose special 42\n",
+        "let absent = choose 42\n",
+        "macro backtrack: (Option<Ident<String>>; Ident<String>) -> Expr = (prefix; name) => parse_quote { 1 }\n",
+        "let backtracked = backtrack only\n",
+    ));
+}
+
+#[test]
+fn typegroup_angle_parameters_reject_invalid_parameter_patterns() {
+    for (source, expected) in [
+        (
+            "pub typegroup Bad<(T, U)> { Value wrap T, }\n",
+            "product type parameters",
+        ),
+        (
+            "pub typegroup Bad<T<I32>> { Value wrap T, }\n",
+            "expected `>`",
+        ),
+    ] {
+        let diagnostics = resolve_result(&with_syntax_imports(source))
+            .expect_err_diagnostics("invalid typegroup headers must use declaration diagnostics");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "{diagnostics:?}"
+        );
+    }
 }

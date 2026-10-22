@@ -575,6 +575,24 @@ pub struct GenericParameters {
     pub sized_relaxations: Vec<SizedRelaxation>,
 }
 
+/// One declaration parameter, including its optional default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeParameter {
+    pub syntax: Syntax,
+    pub pattern: TypeParameterPattern,
+    pub default: Option<Type>,
+}
+
+/// An angle-bracketed declaration parameter list, retaining defaults and bounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeParameters {
+    pub syntax: Syntax,
+    pub parameters: Vec<TypeParameter>,
+    pub generics: GenericParameters,
+    /// The `where` clause, without the enclosing angle brackets.
+    pub bounds: Syntax,
+}
+
 /// A generic function type, `<T where …> body`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForallType {

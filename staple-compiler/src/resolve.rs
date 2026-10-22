@@ -2285,6 +2285,9 @@ impl NameResolver {
             "Comma",
             "Parenthesized",
             "Bracketed",
+            "Angled",
+            "TypeParameter",
+            "TypeParameters",
             "Braced",
             "UnstructuredExpr",
             "Expr",
@@ -7826,6 +7829,7 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         ),
         "Parenthesized" => Some("<Contents> Contents -> Parenthesized<Contents>"),
         "Bracketed" => Some("<Contents> Contents -> Bracketed<Contents>"),
+        "Angled" => Some("<Contents> Contents -> Angled<Contents>"),
         "Braced" => Some("<Contents> Contents -> Braced<Contents>"),
         "TypeDeclarationItem" => Some(
             "(kind: TypeDeclarationKind, name: Ident<String>, name_spelling: String, declared_type: Type, type_parameters: Sequence<Ident<String>>, underlying: Option<Type>) -> TypeDeclarationItem",

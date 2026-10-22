@@ -141,10 +141,38 @@ String)` accepts `(left, right)`, with an optional trailing comma:
 (1, 2, 3) // Parenthesized (Expr, Expr, Expr)
 ```
 
+`Angled<C>` explicitly captures `<...>` using the same content shapes, such as
+`Angled<Separated<Type, Comma>>` for `<I32, List<String>>`. Nested type arguments
+are preserved, and comparisons inside ordinary bracketed groups do not close
+an angle capture. Angle groups are recognized in macro argument syntax; ordinary
+comparison expressions retain priority when they parse successfully.
+
+`TypeParameter` parses one declaration parameter and its optional default.
+`TypeParameters` parses a complete `<...>` declaration header, using the same
+grammar as `type`, including defaults and the inner `where` clause. Both support
+`Parse`, contextual `parse_quote`, inspection, and lossless quotation splices.
+Their fields are:
+
+- `TypeParameter.name`: `Ident<String>`.
+- `TypeParameter.default`: `Option<Type>`.
+- `TypeParameter.declaration`: the parameter's original `Syntax`.
+- `TypeParameter.argument`: the parameter's name as `Type`.
+- `TypeParameters.parameters`: `Sequence<TypeParameter>`.
+- `TypeParameters.declaration`: the complete original `<...>` header as `Syntax`.
+- `TypeParameters.arguments`: the corresponding application header, without
+  defaults or bounds, as `Syntax`.
+- `TypeParameters.bounds`: the original `where` clause, or empty `Syntax`.
+
+For example, a header `<T = String where T <: String>` retains that entire
+header in `declaration`, while `arguments` is `<T>`. A macro can accept
+`Option<TypeParameters>` to make the header optional. Top-level `Option<T>`
+macro parameters try consuming one matching argument and backtrack to `None`
+if the remaining parameters cannot match.
+
 Matched contents destructure the same way, as in `Parenthesized (left; right)`
 or `Parenthesized (left, right)`. A product nested inside slotted contents is
 itself a parenthesized, comma-separated group, so `Parenthesized (Ident String;
-(Expr, Expr))` accepts `(pair (1, 2))`. `Parenthesized`, `Bracketed`, and `Braced` may
+(Expr, Expr))` accepts `(pair (1, 2))`. `Parenthesized`, `Bracketed`, `Braced`, and `Angled` may
 instead contain `Sequence<T>`, which accepts zero or more consecutive values of
 `T`; for example, `Bracketed<Sequence<Ident<String>>>` accepts `[]` and `[one
 two]`. A function-style macro may also use one `Sequence T` as a top-level
@@ -5393,18 +5421,19 @@ pub typegroup Pattern {
 }
 ```
 
-Generic parameters are macro arguments written between the group name and its
-body, each one a type parameter name; the macro declares the group and its
-variants with them as ordinary `<...>` type parameters. A product such as
-`(B, C)` is not a type parameter pattern, so each parameter is named separately:
+Generic parameters follow the group name in `<...>`, using the same declaration
+parameter grammar as `type`. Defaults and an inner `where` clause are retained
+on the group and every represented variant; singleton variants remain
+unparameterized. Applications of variants use only argument names, excluding
+defaults and bounds:
 
 ```staple
-pub typegroup Exchange T E {
+pub typegroup Exchange<T, E> {
     Request wrap pub T,
     Response wrap pub E,
 }
 
-pub typegroup Mixed A B C D {
+pub typegroup Mixed<A, B, C, D> {
     Empty,
     Value wrap pub (A, B, C, D),
 }

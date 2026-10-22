@@ -236,6 +236,74 @@ pub fn parse_type_body_fragment(
     })
 }
 
+/// Parses a declaration parameter, including its optional default, from a stream.
+pub fn parse_type_parameter_prefix(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<(crate::TypeParameter, usize), ParseError> {
+    parse_fragment_with(syntax, false, next_syntax_id, false, |grammar| {
+        grammar.parse_declaration_parameter()
+    })
+}
+
+/// Parses a complete angle-bracketed declaration parameter list from a stream.
+pub fn parse_type_parameters_prefix(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<(crate::TypeParameters, usize), ParseError> {
+    parse_fragment_with(syntax, false, next_syntax_id, false, |grammar| {
+        let start = grammar.position;
+        if !grammar.at_operator("<") {
+            return Err(grammar.error("expected `<` to start type parameters"));
+        }
+        let (patterns, clause, defaults) = grammar.parse_bracketed_generics_with(true)?;
+        let syntax = grammar.syntax(start);
+        let tokens = syntax.tokens();
+        let mut angles = 0usize;
+        let mut groups = 0usize;
+        let bounds_start = tokens.iter().position(|token| {
+            match token.kind {
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => groups += 1,
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    groups = groups.saturating_sub(1)
+                }
+                TokenKind::Operator if groups == 0 && token.text == "<" => angles += 1,
+                TokenKind::Operator if groups == 0 && token.text == ">" => {
+                    angles = angles.saturating_sub(1)
+                }
+                TokenKind::Where if groups == 0 && angles == 1 => return true,
+                _ => {}
+            }
+            false
+        });
+        let mut bounds = syntax.clone();
+        bounds.token_range = bounds_start
+            .map_or(syntax.token_range.end..syntax.token_range.end, |offset| {
+                syntax.token_range.start + offset..syntax.token_range.end - 1
+            });
+        let parameters = patterns
+            .iter()
+            .map(|pattern| {
+                let default = defaults.iter().find(|bound| {
+                    pattern.names().first().copied() == Some(bound.parameter.name.as_str())
+                });
+                crate::TypeParameter {
+                    syntax: default
+                        .map_or_else(|| pattern.syntax().clone(), |bound| bound.syntax.clone()),
+                    pattern: pattern.clone(),
+                    default: default.map(|bound| bound.default.clone()),
+                }
+            })
+            .collect();
+        Ok(crate::TypeParameters {
+            generics: clause.into_generics(syntax.clone(), patterns),
+            syntax,
+            parameters,
+            bounds,
+        })
+    })
+}
+
 /// Reinterprets one macro argument's original tokens as exactly one pattern.
 pub fn parse_pattern_fragment(
     syntax: &Syntax,
@@ -513,6 +581,7 @@ struct Grammar {
     conversion_target: bool,
     brace_terminates_expression: bool,
     macro_punctuation_arguments: bool,
+    angle_syntax_arguments: bool,
     quote_depth: usize,
     source_name: Option<Arc<str>>,
     /// Token indices of every `<` and `>` that delimit type arguments or type
@@ -563,6 +632,7 @@ impl Grammar {
             conversion_target: false,
             brace_terminates_expression: false,
             macro_punctuation_arguments: false,
+            angle_syntax_arguments: false,
             quote_depth: 0,
             source_name,
             type_brackets: Rc::default(),
@@ -2114,6 +2184,27 @@ impl Grammar {
         Ok((parameters, clause))
     }
 
+    fn parse_declaration_parameter(&mut self) -> Result<crate::TypeParameter, ParseError> {
+        let start = self.position;
+        let pattern = self.parse_type_parameter_pattern()?;
+        if matches!(pattern, TypeParameterPattern::Product(_)) {
+            return Err(self.error("product type parameters aren't allowed inside `<...>`; declare each parameter separately"));
+        }
+        let default = if self.eat(TokenKind::Equals) {
+            if !matches!(pattern, TypeParameterPattern::Binding(_)) {
+                return Err(self.error("only a plain type parameter may have a default"));
+            }
+            Some(self.parse_type_union()?)
+        } else {
+            None
+        };
+        Ok(crate::TypeParameter {
+            syntax: self.syntax(start),
+            pattern,
+            default,
+        })
+    }
+
     /// Parses the bracketed generic-parameter list, optionally allowing an
     /// inline default (`<Name = Default>`) on a parameter, as `type`
     /// declarations do. Returns the defaults alongside the parameters.
@@ -2136,24 +2227,28 @@ impl Grammar {
         let mut defaults = Vec::new();
         loop {
             let param_start = self.position;
-            let pattern = self.parse_type_parameter_pattern()?;
-            if matches!(pattern, TypeParameterPattern::Product(_)) {
-                self.position = param_start;
-                return Err(self.error(
-                    "product type parameters aren't allowed inside `<...>`; declare each parameter separately",
-                ));
-            }
-            if allow_defaults && self.at(TokenKind::Equals) {
+            let parameter = if allow_defaults {
+                self.parse_declaration_parameter()?
+            } else {
+                let pattern = self.parse_type_parameter_pattern()?;
+                if matches!(pattern, TypeParameterPattern::Product(_)) {
+                    return Err(self.error("product type parameters aren't allowed inside `<...>`; declare each parameter separately"));
+                }
+                crate::TypeParameter {
+                    syntax: self.syntax(param_start),
+                    pattern,
+                    default: None,
+                }
+            };
+            let pattern = parameter.pattern;
+            if let Some(default) = parameter.default {
                 let TypeParameterPattern::Binding(binding) = &pattern else {
-                    return Err(self.error("only a plain type parameter may have a default"));
+                    unreachable!()
                 };
-                self.bump_token();
-                let default = self.parse_type_union()?;
-                let syntax = self.syntax(param_start);
                 defaults.push(DefaultTypeBound {
-                    syntax: syntax.clone(),
+                    syntax: parameter.syntax.clone(),
                     parameter: NamedType {
-                        syntax,
+                        syntax: parameter.syntax,
                         namespace: None,
                         name: binding.name.clone(),
                     },
@@ -2325,6 +2420,7 @@ impl Grammar {
     /// because types, parameter patterns, and values can begin with the same tokens.
     fn parse_expression(&mut self) -> Result<Expression, ParseError> {
         let checkpoint = self.position;
+        let syntax_checkpoint = self.next_syntax_id;
         let mut candidate = self.clone();
         candidate.newline_terminates_type = true;
         candidate.any_newline_terminates_type = true;
@@ -2358,6 +2454,31 @@ impl Grammar {
             // names the real problem (for example, in the body). An annotation
             // such as `Result<I32, String>` can also fail as a comparison
             // chain much earlier than the actual mistake.
+            Err(error)
+                if !self.macro_punctuation_arguments
+                    && !self.angle_syntax_arguments
+                    && self
+                        .tokens
+                        .get(checkpoint..self.position)
+                        .is_some_and(|tokens| {
+                            tokens
+                                .iter()
+                                .any(|token| token.kind == TokenKind::Operator && token.text == "<")
+                        }) =>
+            {
+                self.position = checkpoint;
+                self.next_syntax_id = syntax_checkpoint;
+                self.angle_syntax_arguments = true;
+                let retry = self.parse_expression();
+                self.angle_syntax_arguments = false;
+                return retry.map_err(|_| {
+                    if function_error.offset > error.offset {
+                        function_error
+                    } else {
+                        error
+                    }
+                });
+            }
             Err(error) if function_error.offset > error.offset => return Err(function_error),
             Err(error) => return Err(error),
         };
@@ -3609,6 +3730,19 @@ impl Grammar {
         }
         let mut expression = self.parse_access_expression()?;
         while self.starts_atom()
+            || (self.at_operator("<")
+                && self.angle_argument_end().is_some_and(|end| {
+                    self.macro_punctuation_arguments
+                        || self.angle_syntax_arguments
+                        || (!self.has_trivia_before_next_token()
+                            && self.angle_header_punctuation(end))
+                        || (matches!(expression, Expression::Call(_))
+                            && !self.has_trivia_before_next_token()
+                            && self
+                                .tokens
+                                .get(self.next_non_trivia(end + 1))
+                                .is_some_and(|token| token.kind == TokenKind::LBrace))
+                }))
             || (self.at(TokenKind::Ellipsis)
                 && !(self.newline_terminates_expression && self.has_newline_before_next_token()))
         {
@@ -3618,24 +3752,55 @@ impl Grammar {
             }
             let checkpoint = self.position;
             let next_syntax_id = self.next_syntax_id;
-            let argument = match self.parse_access_expression() {
-                Ok(argument) => argument,
-                Err(error)
-                    if self
-                        .tokens
-                        .get(self.next_non_trivia(checkpoint))
-                        .is_some_and(|token| {
-                            matches!(
-                                token.kind,
-                                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace
-                            )
-                        }) =>
-                {
-                    self.position = checkpoint;
-                    self.next_syntax_id = next_syntax_id;
-                    self.parse_syntax_argument().map_err(|_| error)?
+            let argument = if self.at_operator("<") {
+                let end = self.angle_argument_end().expect("checked angle argument");
+                let argument_start = self.position;
+                // Record nested angle delimiters for formatting without treating
+                // comparisons inside ordinary groups as angle punctuation.
+                let mut groups = 0usize;
+                for index in self.next_non_trivia(argument_start)..=end {
+                    match self.tokens[index].kind {
+                        TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => groups += 1,
+                        TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                            groups = groups.saturating_sub(1)
+                        }
+                        TokenKind::Operator
+                            if groups == 0
+                                && matches!(self.tokens[index].text.as_str(), "<" | ">") =>
+                        {
+                            self.type_brackets.borrow_mut().push(index)
+                        }
+                        _ => {}
+                    }
                 }
-                Err(error) => return Err(error),
+                // A declaration header can also contain type arguments inside
+                // parenthesized defaults. Let its grammar classify those tokens.
+                let mut header = self.clone();
+                let _ = header.parse_bracketed_generics_with(true);
+                self.position = end + 1;
+                Expression::SyntaxArgument(SyntaxArgumentExpression {
+                    syntax: self.syntax(argument_start),
+                })
+            } else {
+                match self.parse_access_expression() {
+                    Ok(argument) => argument,
+                    Err(error)
+                        if self
+                            .tokens
+                            .get(self.next_non_trivia(checkpoint))
+                            .is_some_and(|token| {
+                                matches!(
+                                    token.kind,
+                                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace
+                                )
+                            }) =>
+                    {
+                        self.position = checkpoint;
+                        self.next_syntax_id = next_syntax_id;
+                        self.parse_syntax_argument().map_err(|_| error)?
+                    }
+                    Err(error) => return Err(error),
+                }
             };
             expression = Expression::Call(CallExpression {
                 spread,
@@ -3645,6 +3810,57 @@ impl Grammar {
             });
         }
         Ok(expression)
+    }
+
+    fn angle_header_punctuation(&self, end: usize) -> bool {
+        let mut groups = 0usize;
+        self.tokens[self.next_non_trivia(self.position)..end]
+            .iter()
+            .any(|token| {
+                match token.kind {
+                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => groups += 1,
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                        groups = groups.saturating_sub(1)
+                    }
+                    TokenKind::Comma | TokenKind::Equals | TokenKind::Where if groups == 0 => {
+                        return true;
+                    }
+                    _ => {}
+                }
+                false
+            })
+    }
+
+    /// Looks for an explicitly requested angle group. Ordinary brackets protect
+    /// comparisons in nested expressions from being read as angle delimiters.
+    fn angle_argument_end(&self) -> Option<usize> {
+        let first = self.next_non_trivia(self.position);
+        if self.tokens.get(first)?.text != "<" {
+            return None;
+        }
+        let mut depth = 0usize;
+        let mut groups = Vec::new();
+        for (index, token) in self.tokens.iter().enumerate().skip(first) {
+            match token.kind {
+                TokenKind::LParen => groups.push(TokenKind::RParen),
+                TokenKind::LBracket => groups.push(TokenKind::RBracket),
+                TokenKind::LBrace => groups.push(TokenKind::RBrace),
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    if groups.pop() != Some(token.kind) {
+                        return None;
+                    }
+                }
+                TokenKind::Operator if groups.is_empty() && token.text == "<" => depth += 1,
+                TokenKind::Operator if groups.is_empty() && token.text == ">" => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Captures one balanced delimited macro argument whose contents are

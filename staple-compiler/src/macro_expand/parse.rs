@@ -39,9 +39,11 @@ impl SyntaxIntrinsic {
             "__parse_primitive" => Self::ParsePrimitive,
             "__parenthesized_group" => Self::Group(DelimiterKind::Parenthesized),
             "__bracketed_group" => Self::Group(DelimiterKind::Bracketed),
+            "__angled_group" => Self::Group(DelimiterKind::Angled),
             "__braced_group" => Self::Group(DelimiterKind::Braced),
             "__parenthesized" => Self::Delimited(DelimiterKind::Parenthesized),
             "__bracketed" => Self::Delimited(DelimiterKind::Bracketed),
+            "__angled" => Self::Delimited(DelimiterKind::Angled),
             "__braced" => Self::Delimited(DelimiterKind::Braced),
             "__take_rest" => Self::TakeRest,
             "__offset" => Self::Offset,
@@ -826,6 +828,11 @@ impl MacroExpander {
                         staple_syntax::TokenKind::RBracket,
                         "bracketed",
                     ),
+                    DelimiterKind::Angled => (
+                        staple_syntax::TokenKind::Operator,
+                        staple_syntax::TokenKind::Operator,
+                        "angle-bracketed",
+                    ),
                     DelimiterKind::Braced => (
                         staple_syntax::TokenKind::LBrace,
                         staple_syntax::TokenKind::RBrace,
@@ -834,7 +841,15 @@ impl MacroExpander {
                 };
                 let first = skip_trivia(tokens, cursor, tokens.len());
                 let close = (first < tokens.len() && tokens[first].kind == open)
-                    .then(|| matching_close(tokens, first))
+                    .then(|| {
+                        if kind == DelimiterKind::Angled {
+                            (tokens[first].text == "<")
+                                .then(|| matching_angle_close(tokens, first))
+                                .flatten()
+                        } else {
+                            matching_close(tokens, first)
+                        }
+                    })
                     .flatten()
                     .filter(|close| tokens[*close].kind == close_kind);
                 let Some(close) = close else {
@@ -1052,6 +1067,12 @@ impl MacroExpander {
                         })),
                         consumed,
                     ),
+                    Err(error) => return fail(Some(error.message)),
+                }
+            }
+            MetaType::TypeParameter | MetaType::TypeParameters => {
+                match parse_parameter_syntax(target, &rest, &mut self.next_syntax_id) {
+                    Ok(result) => result,
                     Err(error) => return fail(Some(error.message)),
                 }
             }
