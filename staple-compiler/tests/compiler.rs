@@ -8329,10 +8329,13 @@ fn top_level_macro_sequences_capture_zero_one_and_many_arguments() {
 fn a_modules_own_macro_is_not_hidden_by_a_prelude_value_of_the_same_name() {
     // Regression test: the prelude installed its values as compile-time
     // helpers, which the expander looks up before macros, so the prelude's
-    // `map` function hid this module's `map` macro.
+    // `panic` function hid this module's `panic` macro. A macro named like an
+    // iterator operation leaves the blanket member usable in a pipe.
     let module = type_check(concat!(
-        "macro map: Expr -> Expr = value => parse_quote { $value + 1 }\n",
-        "let answer: I32 = map 41\n",
+        "macro panic: Expr -> Expr = value => parse_quote { $value + 1 }\n",
+        "macro count: Expr -> Expr = value => parse_quote { $value * 2 }\n",
+        "let answer: I32 = panic 41\n",
+        "let doubled: I32 = count 21\n",
         "let evens = (0 .. 6) |> filter (x => x / 2 * 2 == x) |> count\n",
     ));
     lower(&module);

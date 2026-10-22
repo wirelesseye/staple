@@ -4142,8 +4142,10 @@ representations so custom concrete iterator implementations can use them.
 
 ### Iterator operations
 
-The prelude exports operations on iterators from `std.iterator`. Each takes
-the iterator in its first slot, so it reads as a pipeline:
+Every `Iterator` has the following operations as
+[blanket companion](#blanket-companions) members, declared in
+`std.iterator`. Each takes the iterator in its first slot, so it reads as a
+pipeline:
 
 ```staple
 let total = (0 .. 10) |> filter (x => x > 4) |> map (x => x * 2) |> fold 0 ((sum, x) => sum + x)
@@ -4154,7 +4156,10 @@ for (index, word) in (words |> into_iterator |> enumerate) {
 ```
 
 The receiver must be an `Iterator`. Convert another `IntoIterator` source, such
-as a `List`, with `|> into_iterator` first.
+as a `List`, with `|> into_iterator` first. Being members rather than free
+functions, the operations take no names from a program: a module may define
+its own `count` or `map` and still pipe into the iterator's. Outside a pipe,
+name one through an iterator type, as in `Range.sum (1 .. 5)`.
 
 *Adapters* are lazy: each returns a new iterator that owns the one it was given
 and does its work only when advanced.

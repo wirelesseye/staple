@@ -20,9 +20,7 @@ fn check(source: &str) -> Result<staple_compiler::TypedModule, Vec<Diagnostic>> 
         .with_standard_library_root(root.join("stdlib"))
         .load_source(source, root)
         .unwrap_or_else(|error| panic!("load: {error}"));
-    let resolved = NameResolver::new()
-        .resolve_program(program)
-        .unwrap_or_else(|errors| panic!("resolve: {errors:?}"));
+    let resolved = NameResolver::new().resolve_program(program)?;
     TypeChecker::new().check(resolved)
 }
 
@@ -164,6 +162,36 @@ fn consumers_propagate_their_function_effects() {
     .expect("a pure function cannot call `for_each` with an effectful function");
     assert!(
         errors.iter().any(|error| error.message.contains("IO")),
+        "{errors:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn operations_are_iterator_members_rather_than_prelude_names() {
+    // The operations are blanket companion members of every `Iterator`, so a
+    // program keeps names such as `count` for itself and still pipes into the
+    // operation, and `Type.member` reaches them through an iterator type.
+    let output = run(&lower(concat!(
+        "use std.io.println\n",
+        "def count = (label: String; n: I32) => \"${label}: ${n}\"\n",
+        "def run = () => {\n",
+        "    println (count \"own count\" 3)\n",
+        "    println \"pipe count: ${(0 .. 4) |> count}\"\n",
+        "    println \"named sum: ${Range.sum (1 .. 5)}\"\n",
+        "    println \"named map: ${Range.map (1 .. 4) (x => x * 3) |> sum}\"\n",
+        "}\n",
+        "run ()\n",
+    )));
+    assert_eq!(
+        output,
+        "own count: 3\npipe count: 4\nnamed sum: 10\nnamed map: 18\n"
+    );
+    let errors = check("let total = map (0 .. 3) (x => x)\n")
+        .err()
+        .expect("`map` is no longer a free function");
+    assert!(
+        errors.iter().any(|error| error.message.contains("map")),
         "{errors:?}"
     );
 }
