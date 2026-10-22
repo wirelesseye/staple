@@ -78,6 +78,13 @@ fn iterator_operations_produce_their_documented_output() {
         output,
         concat!(
             "map: 10 20 30\n",
+            "collect list: 10 20 30\n",
+            "collect string: w1w2w3\n",
+            "collect explicit: 1 2 3\n",
+            "collect custom: 3\n",
+            "to_list: 2 4 6\n",
+            "extend list: 0 1 2 3\n",
+            "extend string: start<1><2>\n",
             "filter: 4 5 6\n",
             "filter_map: 4 16 36\n",
             "take: 0 1 2\n",
@@ -198,4 +205,120 @@ fn operations_are_iterator_members_rather_than_prelude_names() {
         errors.iter().any(|error| error.message.contains("map")),
         "{errors:?}"
     );
+}
+
+fn errors_of(source: &str, reason: &str) -> Vec<String> {
+    check(source)
+        .err()
+        .unwrap_or_else(|| panic!("{reason}"))
+        .into_iter()
+        .map(|error| error.message)
+        .collect()
+}
+
+#[test]
+fn collect_rejects_targets_that_cannot_hold_the_items() {
+    // The bounds of an explicit `collect.<_, Target, _>` are checked at the
+    // call that supplies the iterator, so an unsuitable target is reported.
+    let errors = errors_of(
+        "def run = () => {\n    let wrong = (1 .. 4) |> collect.<_, Bool, _>\n    ()\n}\n",
+        "a target without a `FromIterator` implementation is rejected",
+    );
+    assert!(
+        errors.iter().any(|error| error.contains("(Bool, I32)")),
+        "{errors:?}"
+    );
+    let errors = errors_of(
+        concat!(
+            "use std.list.List\n",
+            "def run = () => {\n",
+            "    let wrong = (1 .. 4) |> collect.<_, List String, _>\n",
+            "    ()\n",
+            "}\n",
+        ),
+        "a target for a different item type is rejected",
+    );
+    assert!(
+        errors.iter().any(|error| error.contains("(List String, I32)")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn collect_without_a_target_suggests_an_annotation_or_to_list() {
+    let errors = errors_of(
+        "def run = () => {\n    let items = (1 .. 4) |> collect\n    ()\n}\n",
+        "nothing chooses the target",
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("`collect`") && error.contains("to_list")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn generic_code_must_state_the_item_bounds_an_operation_needs() {
+    // Regression test: a bound on the item type of a generic iterator, such as
+    // `FromIterator (List I32) (Iterator.Item Iter)`, was never checked in the
+    // generic definition, and the mistake surfaced inside `std.iterator` once
+    // the definition was used.
+    let errors = errors_of(
+        concat!(
+            "use std.list.List\n",
+            "def gather = <Iter where Iterator Iter> move iter: Iter => List I32 :: iter |> collect\n",
+        ),
+        "the item type is unknown, so `List I32` cannot be proven",
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("(List I32, Iterator.Item)")),
+        "{errors:?}"
+    );
+    let errors = errors_of(
+        "def total = <Iter where Iterator Iter> move iter: Iter => Iterator.Item Iter :: iter |> sum\n",
+        "`sum` needs `Add` and `Default` on the item type",
+    );
+    assert!(
+        errors.iter().any(|error| error.contains("`Iterator.Item`")),
+        "{errors:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn generic_and_multi_item_targets_collect() {
+    // A target may accept several item types, and generic code that states its
+    // bounds collects into whatever its caller expects.
+    let output = run(&lower(concat!(
+        "use std.io.println\n",
+        "use std.list.List\n",
+        "use std.ops.(Add)\n",
+        "use std.default.(Default)\n",
+        "type Word = wrap String\n",
+        "impl FromIterator String Word {\n",
+        "    insert = (move text; move word) => {\n",
+        "        let Word inner = word\n",
+        "        \"${text}[${inner}]\"\n",
+        "    }\n",
+        "}\n",
+        "def integers = <Iter where Iterator Iter, Iterator.Item Iter == I32>\n",
+        "    move iter: Iter => List I32 :: iter |> collect\n",
+        "def total = <Iter where Iterator Iter, Add (Iterator.Item Iter), Default (Iterator.Item Iter)>\n",
+        "    move iter: Iter => Iterator.Item Iter :: iter |> sum\n",
+        "def gather = <Iter, C where Iterator Iter, Default C, FromIterator C (Iterator.Item Iter)>\n",
+        "    move iter: Iter => C :: iter |> collect\n",
+        "def run = () => {\n",
+        "    let words: String = (1 .. 3) |> map (x => Word \"w${x}\") |> collect\n",
+        "    let pieces: String = (1 .. 3) |> map (x => \"p${x}\") |> collect\n",
+        "    let extended = (1 .. 3) |> map (x => Word \"e${x}\") |> extend \"start\"\n",
+        "    println \"${words} ${pieces} ${extended}\"\n",
+        "    let gathered: String = gather ((1 .. 3) |> map (x => \"g${x}\"))\n",
+        "    println \"${List.length (integers (1 .. 4))} ${total (1 .. 4)} ${gathered}\"\n",
+        "}\n",
+        "run ()\n",
+    )));
+    assert_eq!(output, "[w1][w2] p1p2 start[e1][e2]\n3 6 g1g2\n");
 }

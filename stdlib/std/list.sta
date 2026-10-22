@@ -1,14 +1,23 @@
 pub mod
 
-use package.iterator.(Iterator, IntoIterator)
+use package.iterator.(IntoIterator, Iterator, FromIterator)
 use package.iterator.IterStep.(Done, Yield)
 use package.buffer.(Buffer)
 use package.clone.Clone
+use package.default.Default
 use package.index.(Index, MutateIndex)
 use package.syntax.*
 
 /// A growable sequence backed by a mutable buffer.
 pub type List T = wrap Buffer T
+
+impl<T> Default (List T) {
+    default = () => List.new ()
+}
+
+impl<T> FromIterator (List T) T {
+    insert = (move list: List T; move item: T) => List T :: List.push_and_return list item
+}
 
 impl<T where Clone T> Clone (List T) {
     clone = List buffer => List (Clone.clone buffer)

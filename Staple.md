@@ -3091,7 +3091,8 @@ headers must name every trait parameter explicitly; see
 [Generic trait implementations](#generic-trait-implementations) below for how
 an implementation may still be generic over its own compile-time parameters.
 
-Trait members must have function types, must mention every trait parameter, and
+Trait members must have function types, must mention every trait parameter
+(see below for a member that fixes one through its own bounds instead), and
 cannot contain inferred types. Traits may be exported with `pub trait` and are
 imported with the same namespace, selected, renamed, and glob forms as other
 public declarations.
@@ -3222,7 +3223,10 @@ uses its own header's parameter names and does not inherit the member's names.
 A member parameter that the function type does not mention is
 allowed; its argument must then be given explicitly, as in
 `Measure.measure.<_, String>`. Each member must mention every explicit trait
-parameter in its function type.
+parameter in its function type, or fix it through one of its own bounds. An
+equality is the usual way: in
+`insert_all: <Iter where Iterator Iter, Iterator.Item Iter == Item> (move Target; move Iter) -> Target`,
+`Item` appears only in the equality, and a use determines it from `Iter`.
 
 As a polymorphic value, `Visit.visit` has the scheme
 `<T, A where Visit T> (T, move A) -> A`. The trait's explicit parameters precede
@@ -4229,9 +4233,55 @@ and return a value.
 | `any` / `all` | `test: Item ->{E} Bool` | `Bool`; an empty iterator satisfies `all` |
 | `find` | `test: Item ->{E} Bool` | the first matching item, or `None` |
 | `last` | — | `Option Item` |
-| `collect` | — | a `List Item` |
+| `collect` | — (target from the expected type; `where Default C, FromIterator C Item`) | the collected target |
+| `to_list` | — | a new `List Item` |
+| `extend` | `move target: C` (`where FromIterator C Item`) | `target` with every item added |
 | `sum` | — (`where Add Item, Default Item`) | the total, starting from `Default.default ()` |
 | `min` / `max` | — (`where Ord Item`) | `Option Item`; the first smallest, the last largest |
+
+**Collecting.** `collect` is generic in its target: the expected type chooses
+it. It starts from `Default.default ()` and adds the items with
+`FromIterator.insert_all`, which by default inserts them one at a time with
+`insert`. The trait takes the target and the item type as separate
+parameters, so one target can accept more than one item type:
+
+```staple
+pub trait FromIterator Target Item {
+    insert: (move Target; move Item) -> Target
+    insert_all: <Iter where Iterator Iter, Iterator.Item Iter == Item>
+        (move Target; move Iter) -> Target = ...
+}
+
+let numbers: List I32 = (1 .. 4) |> map (x => x * 10) |> collect
+let words: String = (1 .. 4) |> map (x => "w${x}") |> collect
+```
+
+`List T` collects its items in order, and `String` concatenates string pieces.
+`String` overrides `insert_all` to build its bytes in one pass, since each
+`insert` copies the text built so far. Override it for any target whose
+`insert` is expensive. In generic code, state the bound the target needs,
+such as `FromIterator C (Iterator.Item Iter)` or `Iterator.Item Iter == I32`
+for a `List I32`.
+
+With no expected type to choose a target, use `to_list`; `extend` adds the items
+to an existing value instead of starting from a default:
+
+```staple
+let values = (1 .. 4) |> map (x => x * 10) |> to_list
+let extended = (1 .. 4) |> extend values
+```
+
+A new target implements the trait, starting from whatever `Default` provides:
+
+```staple
+type Count = wrap USize
+
+impl Default Count { default = () => Count 0 }
+
+impl FromIterator Count I32 {
+    insert = (move Count total; move item) => Count (total + 1)
+}
+```
 
 **Effects.** `Iterator.next` is pure, so an adapter's function must be pure
 too: an adapter runs it when the iterator is advanced, perhaps far from where
@@ -4262,7 +4312,7 @@ type. `chain` accepts different iterator types with equal item types, and return
 `Chain L R Item`:
 
 ```staple
-(0 .. 3) |> chain ((3 .. 6) |> filter (x => x > 3)) |> collect
+(0 .. 3) |> chain ((3 .. 6) |> filter (x => x > 3)) |> to_list
 // contains 0, 1, 2, 4, 5
 ```
 

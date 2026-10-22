@@ -14,7 +14,7 @@ use package.default.Default
 use package.shared_buffer.(SharedBuffer)
 use package.buffer.(Buffer)
 use package.list.List
-use package.iterator.(Iterator, IntoIterator)
+use package.iterator.(Iterator, IntoIterator, FromIterator)
 use package.iterator.IterStep.(Done, Yield)
 
 /// A UTF-8 byte sequence used as Staple's string type.
@@ -97,6 +97,26 @@ impl Eq String {
 }
 
 impl Default String { default = () => "" }
+
+impl FromIterator String String {
+    insert = (move left; move right) => left + right
+    // Concatenating piece by piece would copy the text built so far each time.
+    // Gather the bytes into one list instead, and build the string once.
+    insert_all = <Iter where Iterator Iter, Iterator.Item Iter == String> (move start; move pieces) => {
+        let mut bytes = string_to_bytes start
+        let mut remaining = pieces
+        loop {
+            match Iterator.next remaining {
+                Done _ => { break },
+                Yield (piece, rest) => {
+                    remaining = rest
+                    for byte in (String.bytes piece) { List.push bytes byte }
+                },
+            }
+        }
+        string_from_utf8_unchecked bytes
+    }
+}
 
 extern "staple-intrinsic" {
     __parse_i8: String -> (U8, I8)

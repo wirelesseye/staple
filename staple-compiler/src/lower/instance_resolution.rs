@@ -3787,34 +3787,28 @@ impl LoweredProgram {
         &self,
         bound: CheckedTraitBound,
     ) -> CheckedTraitBound {
-        let Some(trait_metadata) = self.traits.get(bound.trait_id) else {
+        if self.traits.get(bound.trait_id).is_none() {
             return bound;
-        };
-        let explicit = trait_metadata
-            .parameters
-            .len()
-            .saturating_sub(trait_metadata.associated_types.len());
+        }
         let is_projection = |argument: &CheckedType| {
             matches!(argument, CheckedType::Parameter { id, .. }
                 if id.0 >= crate::typecheck::PROJECTION_PARAMETER_BASE)
         };
-        if !bound.arguments.iter().skip(explicit).any(is_projection)
-            || bound
-                .arguments
-                .iter()
-                .take(explicit)
-                .any(|argument| {
-                    contains_type_parameter(argument) || contains_inferred_type(argument)
-                })
+        // A projection can be an associated slot of this trait or an ordinary
+        // argument, such as `FromIterator C (Iterator.Item Iter)`.
+        if !bound.arguments.iter().any(is_projection)
+            || bound.arguments.iter().any(|argument| {
+                !is_projection(argument)
+                    && (contains_type_parameter(argument) || contains_inferred_type(argument))
+            })
         {
             return bound;
         }
         let query = bound
             .arguments
             .iter()
-            .enumerate()
-            .map(|(index, argument)| {
-                if index >= explicit && is_projection(argument) {
+            .map(|argument| {
+                if is_projection(argument) {
                     CheckedType::Inferred
                 } else {
                     argument.clone()

@@ -747,6 +747,28 @@ fn call_chain_root_and_arguments(mut expression: &Expression) -> (&Expression, V
     (expression, arguments)
 }
 
+/// The name of the function an expression applies, looking through a call
+/// chain and explicit type arguments: `collect` in `iter |> collect` and in
+/// `Range.collect.<_, List I32, _> iter`.
+fn called_function_name(expression: &Expression) -> Option<&str> {
+    let (root, arguments) = call_chain_root_and_arguments(expression);
+    if arguments.is_empty() {
+        return None;
+    }
+    let root = match root {
+        Expression::TypeApplication(application) => application.value.as_ref(),
+        root => root,
+    };
+    match root {
+        Expression::Access(access) => match &access.accessor {
+            Accessor::Method(name) | Accessor::Name(name) => Some(name),
+            _ => None,
+        },
+        Expression::Name(name) => Some(&name.name),
+        _ => None,
+    }
+}
+
 fn call_chain_root_and_calls(
     mut expression: &Expression,
 ) -> (&Expression, Vec<&staple_syntax::CallExpression>) {
@@ -3683,7 +3705,23 @@ impl TypeChecker {
                     // reported by the resolver.
                     let shadowed = matches!(&member.annotation, Type::Forall(ty)
                         if ty.generics.parameters.iter().any(|own| own.names().contains(&name)));
-                    if !shadowed && !contains_type_parameter_id(&value_type, *parameter) {
+                    // A member's own bound can fix the parameter instead, as
+                    // `Iterator.Item Iter == Item` does in
+                    // `<Iter where Iterator Iter, Iterator.Item Iter == Item>`:
+                    // the equality places `Item` in the bound, and a use solves
+                    // it from `Iter`.
+                    let fixed_by_own_bound = own.as_ref().is_some_and(|own| {
+                        own.trait_bounds.iter().any(|bound| {
+                            bound
+                                .arguments
+                                .iter()
+                                .any(|argument| contains_type_parameter_id(argument, *parameter))
+                        })
+                    });
+                    if !shadowed
+                        && !fixed_by_own_bound
+                        && !contains_type_parameter_id(&value_type, *parameter)
+                    {
                         self.diagnostics.push(Diagnostic::new(
                             member.syntax.span.clone(),
                             format!(
@@ -9810,10 +9848,25 @@ impl TypeChecker {
                 .any(|id| id.0 < PROJECTION_PARAMETER_BASE && !bound_parameters.contains(id))
         };
         if !binding.is_generic() && has_free_type_parameter && checked_type != CheckedType::Error {
+            // `collect` takes its target from the expected type, so a binding
+            // without an annotation leaves nothing to choose it.
+            let hint = if binding
+                .value
+                .as_ref()
+                .and_then(called_function_name)
+                .is_some_and(|name| name == "collect")
+            {
+                format!(
+                    "; `collect` builds the type `{}` is expected to have, so annotate it, as in `let {}: List I32 = ...`, or use `to_list` to collect into a `List`",
+                    binding.name, binding.name
+                )
+            } else {
+                String::new()
+            };
             self.diagnostics.push(Diagnostic::new(
                 binding.syntax.span.clone(),
                 format!(
-                    "generic value `{}` requires a concrete expected type",
+                    "generic value `{}` requires a concrete expected type{hint}",
                     binding.name
                 ),
             ));
@@ -16020,14 +16073,16 @@ impl TypeChecker {
             .flat_map(|bound| bound.arguments.iter().flat_map(type_parameter_ids))
             .collect::<HashSet<_>>();
         for bound in bounds {
-            // Associated types follow a trait's own parameters as projection
-            // placeholders.
-            let associated = bound
-                .arguments
-                .iter()
-                .map(|argument| {
-                    matches!(argument, CheckedType::Parameter { id, .. } if id.0 >= PROJECTION_PARAMETER_BASE)
-                })
+            // Associated types follow a trait's own parameters. A projection
+            // can also be one of the trait's own arguments (`Add
+            // (Iterator.Item Iter)`), so they are told apart by position.
+            let hidden = self
+                .trait_functional_dependencies
+                .get(&bound.trait_id)
+                .map_or(0, Vec::len);
+            let explicit_count = bound.arguments.len().saturating_sub(hidden);
+            let associated = (0..bound.arguments.len())
+                .map(|index| index >= explicit_count)
                 .collect::<Vec<_>>();
             let arguments = bound
                 .arguments
@@ -16055,13 +16110,17 @@ impl TypeChecker {
             // A partially applied callee (the speculative pre-check of
             // `f a` in `f a b`) can leave some compile-time parameters
             // unresolved; their bounds become obligations of the enclosing
-            // application that supplies them, and are checked then.
+            // application that supplies them, and are checked then. An
+            // associated type of the enclosing function's own bounds
+            // (`Iterator.Item Iter` in generic code) is as fixed as its
+            // parameters, so a bound on it is checked here.
             if arguments.iter().any(|argument| {
                 type_parameter_ids(argument).iter().any(|id| {
-                    !self
-                        .active_generic_parameters
-                        .iter()
-                        .any(|parameters| parameters.contains(id))
+                    !rigid_projections.contains(id)
+                        && !self
+                            .active_generic_parameters
+                            .iter()
+                            .any(|parameters| parameters.contains(id))
                 })
             }) {
                 if has_equality
@@ -16195,9 +16254,11 @@ impl TypeChecker {
         let mut substitutions = HashMap::new();
         let mut arguments = Vec::new();
         let mut partial = Vec::new();
+        let mut has_inferred_argument = false;
         for (parameter, argument) in parameters.iter().zip(&application.arguments) {
             let actual = self.resolve_source_type(module, argument);
             if actual == CheckedType::Inferred {
+                has_inferred_argument = true;
                 continue;
             }
             if contains_inferred_type(&actual) {
@@ -16358,15 +16419,36 @@ impl TypeChecker {
             ),
             None => instantiated,
         };
-        if let Some(function) = self.function_origin(module, &application.value) {
-            self.check_function_bounds(
-                function,
-                &raw,
+        // A `_` argument that still appears in the instantiated type is solved
+        // by the enclosing application. Its bounds may mention that parameter,
+        // or a parameter an equality will determine from it, so they are
+        // checked there. A `_` the expected type already completed is checked
+        // here as usual.
+        let deferred_bounds = has_inferred_argument
+            && parameters
+                .iter()
+                .filter_map(|parameter| match parameter {
+                    CheckedType::Parameter { id, .. } => Some(*id),
+                    _ => None,
+                })
+                .any(|id| {
+                    !substitutions.contains_key(&id) && type_contains_parameter(&instantiated, id)
+                });
+        if !deferred_bounds {
+            if let Some(function) = self.function_origin(module, &application.value) {
+                self.check_function_bounds(
+                    function,
+                    &raw,
+                    &instantiated,
+                    application.syntax.span.clone(),
+                );
+            }
+            self.check_callable_symbol_bounds(
+                symbol,
                 &instantiated,
                 application.syntax.span.clone(),
             );
         }
-        self.check_callable_symbol_bounds(symbol, &instantiated, application.syntax.span.clone());
         if !methods.is_empty() {
             self.explicit_value_substitutions
                 .insert(application.syntax.id, substitutions.clone());
@@ -16390,12 +16472,17 @@ impl TypeChecker {
                 .or_insert_with(|| scheme.clone());
             let mut bound_substitutions = substitutions.clone();
             infer_type_parameters(&scheme.body, &instantiated, &mut bound_substitutions);
-            self.check_substituted_bounds(
-                scheme.trait_bounds.clone(),
-                scheme.subtype_bounds.clone(),
-                &bound_substitutions,
-                application.syntax.span.clone(),
-            );
+            // A `_` argument is solved by the enclosing application. Its
+            // bounds may still mention that parameter, or a parameter an
+            // equality will determine from it, so they are checked there.
+            if !deferred_bounds {
+                self.check_substituted_bounds(
+                    scheme.trait_bounds.clone(),
+                    scheme.subtype_bounds.clone(),
+                    &bound_substitutions,
+                    application.syntax.span.clone(),
+                );
+            }
             // Explicit `_` arguments are solved by the enclosing application,
             // including when the value has no statically known symbol.
             scheme.body = Box::new(instantiated.clone());

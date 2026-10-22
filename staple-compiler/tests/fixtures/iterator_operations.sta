@@ -1,6 +1,14 @@
 use std.io.println
 use std.list.List
 
+type Count = wrap USize
+
+impl Default Count { default = () => Count 0 }
+
+impl FromIterator Count I32 {
+    insert = (move Count total; move _item) => Count (total + 1)
+}
+
 def show_list = (label: String; move items: List I32) => {
     let mut text = ""
     for item in items {
@@ -23,6 +31,22 @@ def show_flag = (label: String; value: Bool) => if value {
 def run = () => {
     // Adapters
     show_list "map" ((1 .. 4) |> map (x => x * 10) |> collect)
+    let numbers: List I32 = (1 .. 4) |> map (x => x * 10) |> collect
+    show_list "collect list" numbers
+    let words: String = (1 .. 4) |> map (x => "w${x}") |> collect
+    println "collect string: ${words}"
+    let explicit = (1 .. 4) |> collect.<_, List I32, _>
+    show_list "collect explicit" explicit
+    let counted: Count = (1 .. 4) |> collect
+    let Count count = counted
+    println "collect custom: ${count}"
+    show_list "to_list" ((1 .. 4) |> map (x => x * 2) |> to_list)
+    let mut prefix: List I32 = List.new ()
+    List.push prefix 0
+    let extended = (1 .. 4) |> extend prefix
+    show_list "extend list" extended
+    let greeting: String = (1 .. 3) |> map (x => "<${x}>") |> extend "start"
+    println "extend string: ${greeting}"
     show_list "filter" ((1 .. 7) |> filter (x => x > 3) |> collect)
     show_list "filter_map" ((1 .. 7) |> filter_map (x => if (x / 2 * 2 == x) { Some (x * x) } else { None }) |> collect)
     show_list "take" ((0 .. 100) |> take 3 |> collect)
@@ -37,10 +61,10 @@ def run = () => {
     show_list "chain different" ((0 .. 3) |> chain ((3 .. 6) |> filter (x => x > 3)) |> collect)
     show_list "chain empty first" ((0 .. 0) |> chain ((3 .. 5) |> map (x => x * 2)) |> collect)
     show_list "chain empty second" ((1 .. 3) |> map (x => x * 2) |> chain (0 .. 0) |> collect)
-    let chained_lists = (1 .. 3) |> map (x => (x .. x + 1) |> collect)
-        |> chain ((3 .. 5) |> filter (x => x > 3) |> map (x => (x .. x + 1) |> collect))
+    let chained_lists = (1 .. 3) |> map (x => (x .. x + 1) |> to_list)
+        |> chain ((3 .. 5) |> filter (x => x > 3) |> map (x => (x .. x + 1) |> to_list))
         |> map (move items => items |> into_iterator |> sum)
-        |> collect
+        |> to_list
     show_list "chain owned" chained_lists
 
     // Consumers
@@ -71,12 +95,12 @@ def run = () => {
     List.push numbers 2
     println "list sum: ${numbers |> into_iterator |> map (x => x * 2) |> sum}"
 
-    // Non-`Copy` items: `filter` borrows them, `map` and `collect` own them.
+    // Non-`Copy` items: `filter` borrows them, `map` and `to_list` own them.
     let lists = (0 .. 4)
-        |> map (n => (1 .. n + 1) |> collect)
+        |> map (n => (1 .. n + 1) |> to_list)
         |> filter (items => List.length items > 1)
         |> map (move items => items |> into_iterator |> sum)
-        |> collect
+        |> to_list
     show_list "nested" lists
 }
 

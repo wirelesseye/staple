@@ -35,6 +35,33 @@ pub trait IntoIterator Source {
     into_iterator: move Source -> Iter
 }
 
+/// A type that can be built up one item at a time, starting from its default.
+pub trait FromIterator Target Item {
+    /// Adds one item to a partly built value.
+    insert: (move Target; move Item) -> Target
+
+    /// Adds every item of `iter` to `target`. `collect` and `extend` build
+    /// through this member. The default inserts the items one by one; a
+    /// target whose `insert` copies the value built so far, such as `String`,
+    /// overrides it to build in a single pass.
+    insert_all: <Iter where Iterator Iter, Iterator.Item Iter == Item>
+        (move Target; move Iter) -> Target =
+        <Iter where Iterator Iter, Iterator.Item Iter == Item> (move target; move iter) => {
+            let mut built = target
+            let mut remaining = iter
+            loop {
+                match Iterator.next remaining {
+                    Done _ => { break },
+                    Yield (item, rest) => {
+                        remaining = rest
+                        built = insert built item
+                    },
+                }
+            }
+            built
+        }
+}
+
 // Adapters
 //
 // Every adapter owns its inner iterator and rebuilds itself around the
@@ -535,21 +562,22 @@ companion<Iter where Iterator Iter> Iter {
         latest
     }
 
+    /// Collects the items into a target chosen by the expected type, starting
+    /// from that target's default value.
+    ///
+    /// ```staple
+    /// let numbers: List I32 = (1 .. 4) |> map (x => x * 10) |> collect
+    /// let words: String = (1 .. 4) |> map (x => "w${x}") |> collect
+    /// ```
+    pub def collect = <C, A where Iterator.Item Iter == A, Default C, FromIterator C A>
+        move iter: Iter => C :: FromIterator.insert_all (C :: Default.default ()) iter
+
     /// Collects the items into a new `List`, in order.
-    pub def collect = move iter: Iter => List (Iterator.Item Iter) :: {
-        let mut items: List (Iterator.Item Iter) = List.new ()
-        let mut remaining = iter
-        loop {
-            match Iterator.next remaining {
-                Done _ => { break },
-                Yield (item, rest) => {
-                    remaining = rest
-                    List.push items item
-                },
-            }
-        }
-        items
-    }
+    pub def to_list = move iter: Iter => List (Iterator.Item Iter) :: iter |> collect
+
+    /// Adds every item to an existing value, returning the extended value.
+    pub def extend = <C, A where Iterator.Item Iter == A, FromIterator C A>
+        (move iter: Iter; move target: C) => C :: FromIterator.insert_all target iter
 }
 
 companion<Iter where Iterator Iter, Add (Iterator.Item Iter), Default (Iterator.Item Iter)> Iter {

@@ -18782,10 +18782,136 @@ fn associated_type_equalities_unify_iterator_items() {
         def join = <L, R where Iterator L, Iterator R, Iterator.Item L == Iterator.Item R>
             (move left: L; move right: R) => left |> chain right
         def test = () => {
-            let items = (0 .. 3) |> join ((3 .. 6) |> filter (x => x > 3)) |> collect
+            let items = (0 .. 3) |> join ((3 .. 6) |> filter (x => x > 3)) |> to_list
             items |> into_iterator |> fold 0 ((a, b) => a + b)
         }
         let total = test ()
+    "#,
+    );
+    lower(&module);
+}
+
+#[test]
+fn a_trait_member_may_fix_a_trait_parameter_through_its_own_equality() {
+    // `insert_all` mentions `Item` only in `Iterator.Item Iter == Item`. The
+    // equality places `Item` in the member's own bound, which a use solves
+    // from `Iter`, so the member is accepted, with a default body and with an
+    // implementation's override.
+    let module = type_check(
+        r#"
+        use std.iterator.IterStep.(Done, Yield)
+        trait Bulk Target Item {
+            insert: (move Target; move Item) -> Target
+            insert_all: <Iter where Iterator Iter, Iterator.Item Iter == Item>
+                (move Target; move Iter) -> Target =
+                <Iter where Iterator Iter, Iterator.Item Iter == Item> (move target; move iter) => {
+                    let mut built = target
+                    let mut remaining = iter
+                    loop {
+                        match Iterator.next remaining {
+                            Done _ => { break },
+                            Yield (item, rest) => { remaining = rest; built = insert built item },
+                        }
+                    }
+                    built
+                }
+        }
+        type Count = wrap USize
+        impl Bulk Count I32 { insert = (move Count total; move _item) => Count (total + 1) }
+        type Last = wrap I32
+        impl Bulk Last I32 {
+            insert = (move _last; move item) => Last item
+            insert_all = <Iter where Iterator Iter, Iterator.Item Iter == I32> (move last; move _iter) => last
+        }
+        let counted = Bulk.insert_all (Count 0) (1 .. 5)
+        let kept = Bulk.insert_all (Last 7) (1 .. 5)
+    "#,
+    );
+    lower(&module);
+    let errors = type_check_errors(
+        "trait Unfixed Target Item { make: () -> Target }\n",
+        "a member that fixes `Item` nowhere is still rejected",
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("must mention trait parameter `Item`")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn bounds_on_a_generic_item_type_are_checked_in_generic_code() {
+    // Regression test: a bound whose argument is the enclosing function's own
+    // associated type was treated as unsolved and skipped, so a generic
+    // caller could omit it.
+    let errors = type_check_errors(
+        concat!(
+            "use std.ops.(Add)\n",
+            "def needs = <Iter where Iterator Iter, Add (Iterator.Item Iter)> move iter: Iter => () :: ()\n",
+            "def user = <Iter where Iterator Iter> move iter: Iter => () :: needs iter\n",
+        ),
+        "`user` does not provide `Add (Iterator.Item Iter)`",
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error == "trait bound is not satisfied for `Iterator.Item`"),
+        "{errors:?}"
+    );
+    let module = type_check(concat!(
+        "use std.ops.(Add)\n",
+        "def needs = <Iter where Iterator Iter, Add (Iterator.Item Iter)> move iter: Iter => () :: ()\n",
+        "def user = <Iter where Iterator Iter, Add (Iterator.Item Iter)> move iter: Iter => () :: needs iter\n",
+        "let used = user (0 .. 3)\n",
+    ));
+    lower(&module);
+}
+
+#[test]
+fn explicit_underscores_complete_collect_through_equality_bounds() {
+    let module = type_check(
+        r#"
+        use std.list.List
+        def run = () => {
+            let items = (0 .. 3) |> collect.<_, List I32, _>
+            items |> into_iterator |> fold 0 ((a, b) => a + b)
+        }
+        let total = run ()
+    "#,
+    );
+    lower(&module);
+}
+
+#[test]
+fn projection_arguments_complete_in_ordinary_trait_bounds() {
+    let module = type_check(
+        r#"
+        use std.list.List
+        use std.iterator.IterStep.(Done, Yield)
+
+        def gather = <Iter, C where Iterator Iter, FromIterator C (Iterator.Item Iter)>
+            (move iter: Iter; move seed: C) => C :: {
+            let mut result = seed
+            let mut remaining = iter
+            loop {
+                match Iterator.next remaining {
+                    Done _ => { break },
+                    Yield (item, rest) => {
+                        remaining = rest
+                        result = FromIterator.insert result item
+                    },
+                }
+            }
+            result
+        }
+
+        def run = () => {
+            let seed: List I32 = List.new ()
+            let items = gather (0 .. 3) seed
+            items |> into_iterator |> fold 0 ((a, b) => a + b)
+        }
+        let total = run ()
     "#,
     );
     lower(&module);
