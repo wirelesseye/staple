@@ -10101,8 +10101,30 @@ impl TypeChecker {
                 .push(scheme.subtype_bounds.clone());
             let actual = if matches!(expression, Expression::Function(_)) {
                 if let Some(id) = module.function_for(expression.syntax().id) {
-                    self.function_declared_bounds
-                        .insert(id, scheme.trait_bounds.clone());
+                    // A companion member's value declares only its own
+                    // parameters, while its declared bounds already include
+                    // the companion's (`Bag T` for `<R where Bag R>` in
+                    // `companion<T where Bag T>`). Keep those, in front as the
+                    // member's scheme orders them, and add the value's own.
+                    let own = scheme.bound_ids();
+                    let mut declared = self
+                        .function_declared_bounds
+                        .get(&id)
+                        .into_iter()
+                        .flatten()
+                        .filter(|bound| {
+                            !scheme.trait_bounds.contains(bound)
+                                && bound.arguments.iter().all(|argument| {
+                                    type_parameter_ids(argument).iter().all(|parameter| {
+                                        parameter.0 >= PROJECTION_PARAMETER_BASE
+                                            || !own.contains(parameter)
+                                    })
+                                })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    declared.extend(scheme.trait_bounds.iter().cloned());
+                    self.function_declared_bounds.insert(id, declared);
                     self.function_schemes.insert(id, scheme.as_ref().clone());
                     // A contextually checked scheme fixes the lambda's effect
                     // ABI just as a written function annotation does. Its body
@@ -16080,9 +16102,16 @@ impl TypeChecker {
         &mut self,
         access: &staple_syntax::AccessExpression,
         scheme: &CheckedScheme,
-        substitutions: HashMap<TypeParameterId, CheckedType>,
+        mut substitutions: HashMap<TypeParameterId, CheckedType>,
         type_parameters: Vec<CheckedSchemeParameter>,
     ) -> CheckedType {
+        // Pinning a blanket member's parameter to a concrete receiver also
+        // fixes the associated types its bounds determine, so a bound such as
+        // `Add (Iterator.Item Iter)` is checked at the item type itself.
+        let projections = self.projection_values(&scheme.trait_bounds, &substitutions);
+        for (id, value) in projections {
+            substitutions.entry(id).or_insert(value);
+        }
         let mut scheme = scheme.clone();
         scheme.parameters.retain(|scheme_parameter| {
             !matches!(scheme_parameter, CheckedSchemeParameter::Type { id, .. } if substitutions.contains_key(id))
@@ -16188,6 +16217,26 @@ impl TypeChecker {
         {
             let mut scheme = scheme.clone();
             scheme.body = Box::new(body);
+            // A pinned companion member (`Pair.member`) already has its
+            // blanket parameter and the associated types it determines
+            // replaced in `body`. Its bounds must say the same, or the
+            // parameters left in them have nothing to be inferred from.
+            if let Some(substitutions) = self
+                .explicit_value_substitutions
+                .get(&expression.syntax().id)
+            {
+                scheme.parameters.retain(|parameter| {
+                    !matches!(parameter, CheckedSchemeParameter::Type { id, .. } if substitutions.contains_key(id))
+                });
+                for bound in &mut scheme.trait_bounds {
+                    for argument in &mut bound.arguments {
+                        *argument = substitute_type(argument.clone(), substitutions);
+                    }
+                }
+                for bound in &mut scheme.subtype_bounds {
+                    bound.supertype = substitute_type(bound.supertype.clone(), substitutions);
+                }
+            }
             CheckedType::Forall(scheme)
         } else {
             body
@@ -16363,6 +16412,23 @@ impl TypeChecker {
         if !inferred {
             return instantiated;
         }
+        let projections = self.projection_values(bounds, &substitutions);
+        if projections.is_empty() {
+            instantiated
+        } else {
+            substitute_type(instantiated, &projections)
+        }
+    }
+
+    /// The associated types (`Iterator.Item Iter`) that `bounds` determine once
+    /// `substitutions` fixes their explicit arguments, keyed by the projection
+    /// parameters standing for them.
+    fn projection_values(
+        &self,
+        bounds: &[CheckedTraitBound],
+        substitutions: &HashMap<TypeParameterId, CheckedType>,
+    ) -> HashMap<TypeParameterId, CheckedType> {
+        let is_placeholder = |argument: &CheckedType| matches!(argument, CheckedType::Parameter { id, .. } if id.0 >= PROJECTION_PARAMETER_BASE);
         let mut projections = HashMap::new();
         for bound in bounds {
             if !bound.arguments.iter().any(is_placeholder) {
@@ -16375,7 +16441,7 @@ impl TypeChecker {
                     if is_placeholder(argument) {
                         CheckedType::Inferred
                     } else {
-                        substitute_type(argument.clone(), &substitutions)
+                        substitute_type(argument.clone(), substitutions)
                     }
                 })
                 .collect::<Vec<_>>();
@@ -16400,11 +16466,7 @@ impl TypeChecker {
                 }
             }
         }
-        if projections.is_empty() {
-            instantiated
-        } else {
-            substitute_type(instantiated, &projections)
-        }
+        projections
     }
 
     fn instantiate_function_template(

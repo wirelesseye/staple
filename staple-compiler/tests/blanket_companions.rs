@@ -356,3 +356,64 @@ fn a_private_blanket_member_is_reachable_only_from_its_module() {
         "{errors}"
     );
 }
+
+const BAG: &str = concat!(
+    "trait Bag T { type Item; first: T -> Item }\n",
+    "type Pair = wrap (left: I32, right: I32)\n",
+    "impl Bag Pair { type Item = I32; first = Pair (left, right) => left }\n",
+    "type Box T = wrap T\n",
+);
+
+#[test]
+fn companion_members_may_declare_their_own_bounded_parameters() {
+    // Regression test: a member value declaring `<R where Bag R>` stored only
+    // that bound as the function's declared bounds, dropping the companion's
+    // `Bag T` that its scheme carries, and the checker's consistency check
+    // panicked. This held for blanket and ordinary generic companions alike.
+    let source = format!(
+        "{BAG}{}",
+        concat!(
+            "use std.io.println\n",
+            "companion<T where Bag T> T {\n",
+            "    pub def with_other = <R where Bag R> (value: T; other: R) => (Bag.Item T, Bag.Item R) ::\n",
+            "        (Bag.first value, Bag.first other)\n",
+            "}\n",
+            "companion<T where Bag T> Box T {\n",
+            "    pub def boxed_with = <R where Bag R> (move value: Box T; other: R) => Bag.Item R ::\n",
+            "        Bag.first other\n",
+            "}\n",
+            "def run = () => {\n",
+            "    let (a, b) = Pair (left: 1, right: 2) |> with_other (Pair (left: 3, right: 4))\n",
+            "    let c = Box (Pair (left: 5, right: 6)) |> boxed_with (Pair (left: 7, right: 8))\n",
+            "    println \"${a} ${b} ${c}\"\n",
+            "}\n",
+            "run ()\n",
+        )
+    );
+    assert_eq!(run(&source), "1 3 7\n");
+}
+
+#[test]
+fn blanket_bounds_on_an_associated_type_hold_at_the_receiver() {
+    // Regression test: pinning a blanket member to its receiver substituted
+    // the blanket parameter into `Add (Bag.Item T)` but left `Bag.Item T` a
+    // projection, so the bound was reported unsatisfied for `Pair`.
+    let source = format!(
+        "{BAG}{}",
+        concat!(
+            "use std.io.println\n",
+            "use std.ops.(Add)\n",
+            "use std.default.(Default)\n",
+            "companion<T where Bag T, Add (Bag.Item T), Default (Bag.Item T)> T {\n",
+            "    pub def plus_default = value: T => Bag.Item T ::\n",
+            "        Bag.first value + (Bag.Item T :: Default.default ())\n",
+            "}\n",
+            "def run = () => {\n",
+            "    println \"pipe: ${Pair (left: 3, right: 4) |> plus_default}\"\n",
+            "    println \"named: ${Pair.plus_default (Pair (left: 5, right: 6))}\"\n",
+            "}\n",
+            "run ()\n",
+        )
+    );
+    assert_eq!(run(&source), "pipe: 3\nnamed: 5\n");
+}
