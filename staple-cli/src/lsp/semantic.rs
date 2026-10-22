@@ -368,6 +368,10 @@ impl<'a> Classifier<'a> {
                 for bound in &value.trait_bounds {
                     self.trait_bound(bound, resolved);
                 }
+                for bound in &value.equality_bounds {
+                    self.ty(&bound.left, resolved);
+                    self.ty(&bound.right, resolved);
+                }
                 if let Some(ty) = value.underlying() {
                     self.ty(ty, resolved);
                 }
@@ -385,6 +389,10 @@ impl<'a> Classifier<'a> {
                 }
                 for bound in &value.trait_bounds {
                     self.trait_bound(bound, resolved);
+                }
+                for bound in &value.equality_bounds {
+                    self.ty(&bound.left, resolved);
+                    self.ty(&bound.right, resolved);
                 }
                 if let Some(annotation) = &value.annotation {
                     self.ty(annotation, resolved);
@@ -407,6 +415,10 @@ impl<'a> Classifier<'a> {
                 for prerequisite in &value.prerequisites {
                     self.trait_bound(prerequisite, resolved);
                 }
+                for bound in &value.equality_bounds {
+                    self.ty(&bound.left, resolved);
+                    self.ty(&bound.right, resolved);
+                }
                 for member in &value.members {
                     self.mark_first(
                         &member.syntax,
@@ -427,6 +439,10 @@ impl<'a> Classifier<'a> {
                 }
                 for bound in &value.trait_bounds {
                     self.trait_bound(bound, resolved);
+                }
+                for bound in &value.equality_bounds {
+                    self.ty(&bound.left, resolved);
+                    self.ty(&bound.right, resolved);
                 }
                 self.mark_last(
                     &value.trait_name.syntax,
@@ -496,6 +512,10 @@ impl<'a> Classifier<'a> {
                 }
                 for bound in &value.trait_bounds {
                     self.trait_bound(bound, resolved);
+                }
+                for bound in &value.equality_bounds {
+                    self.ty(&bound.left, resolved);
+                    self.ty(&bound.right, resolved);
                 }
                 if let Some(ty) = value.underlying() {
                     self.ty(ty, resolved);
@@ -632,6 +652,10 @@ impl<'a> Classifier<'a> {
         for bound in &binding.all_trait_bounds() {
             self.trait_bound(bound, resolved);
         }
+        for bound in &binding.all_equality_bounds() {
+            self.ty(&bound.left, resolved);
+            self.ty(&bound.right, resolved);
+        }
         if let Some(annotation) = &binding.annotation {
             self.ty(annotation, resolved);
         }
@@ -678,6 +702,10 @@ impl<'a> Classifier<'a> {
                     }
                     for bound in &g.trait_bounds {
                         self.trait_bound(bound, resolved);
+                    }
+                    for bound in &g.equality_bounds {
+                        self.ty(&bound.left, resolved);
+                        self.ty(&bound.right, resolved);
                     }
                     for bound in &g.subtype_bounds {
                         self.ty(&bound.supertype, resolved);
@@ -1127,6 +1155,10 @@ impl<'a> Classifier<'a> {
                 }
                 for bound in &ty.generics.trait_bounds {
                     self.trait_bound(bound, resolved);
+                }
+                for bound in &ty.generics.equality_bounds {
+                    self.ty(&bound.left, resolved);
+                    self.ty(&bound.right, resolved);
                 }
                 for bound in &ty.generics.subtype_bounds {
                     self.ty(&bound.supertype, resolved);

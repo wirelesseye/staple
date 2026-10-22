@@ -4195,3 +4195,50 @@ fn prefix_parses_reject_input_that_does_not_start_the_construct() {
     let syntax = delimited_fragment("let x = ()\n", 0);
     assert!(parse_expression_prefix(&syntax, &mut ids).is_err());
 }
+
+#[test]
+fn parses_associated_type_equality_constraints() {
+    let source = "def join = <L, R where Iterator.Item L == Iterator.Item R, Iterator L, Iterator R> (move l: L; move r: R) => l\n";
+    let module = parse(source).expect("associated equality should parse");
+    assert_eq!(module.syntax.text(), source);
+    let Item::Binding(binding) = &module.items[0] else {
+        panic!("binding")
+    };
+    let generics = binding.generics().unwrap();
+    assert_eq!(generics.trait_bounds.len(), 2);
+    assert_eq!(generics.equality_bounds.len(), 1);
+    assert_eq!(
+        generics.equality_bounds[0].left.to_string(),
+        "Iterator.Item L"
+    );
+    assert_eq!(
+        generics.equality_bounds[0].right.to_string(),
+        "Iterator.Item R"
+    );
+    assert!(
+        generics
+            .to_string()
+            .contains("Iterator.Item L == Iterator.Item R")
+    );
+    let formatted = staple_syntax::format_source(source).unwrap();
+    assert!(formatted.contains("Iterator.Item L == Iterator.Item R"));
+    assert_eq!(staple_syntax::format_source(&formatted).unwrap(), formatted);
+}
+
+#[test]
+fn parses_equalities_in_every_where_clause() {
+    for source in [
+        "type Box T where Iterator T, Iterator.Item T == I32 = wrap T",
+        "trait Ints T where Iterator T, Iterator.Item T == I32 { get: T -> I32 }",
+        "trait Source T { type Iter where Iterator Iter, Iterator.Item Iter == I32; get: T -> Iter }",
+        "impl<T where Iterator T, Iterator.Item T == I32> Ints (Box T) { get = x => 0 }",
+        "companion<T where Iterator T, Iterator.Item T == I32> Box T { def get = x => 0 }",
+        "def get: <T where Iterator T, Iterator.Item T == I32> T -> I32 = x => 0",
+        "def get = <T where Iterator T, Iterator.Item T == (I32 -> I32)> x: T => 0",
+    ] {
+        parse(source).unwrap_or_else(|error| panic!("{source}: {error:?}"));
+    }
+    assert!(
+        parse("def f = <T where Iterator T, Iterator.Item T == I32 == String> x: T => x").is_err()
+    );
+}

@@ -227,41 +227,43 @@ impl<L, R, A, B> IntoIterator (Zip L R A B) {
 }
 
 /// The iterator returned by `chain`.
-pub type Chain S Out = wrap (
-    first: S,
-    second: S,
+pub type Chain L R Out = wrap (
+    first: L,
+    second: R,
     on_second: Bool,
-    step: move S -> IterStep (S, Out),
+    first_step: move L -> IterStep (L, Out),
+    second_step: move R -> IterStep (R, Out),
 )
 
-impl<S, Out> Iterator (Chain S Out) {
+impl<L, R, Out> Iterator (Chain L R Out) {
     type Item = Out
-    next = move Chain (first, second, on_second, step) => if on_second {
-        match step second {
-            Done rest => Done (Chain.<S, Out> (first: first, second: rest, on_second: True, step: step)),
+    next = move Chain (first, second, on_second, first_step, second_step) => if on_second {
+        match second_step second {
+            Done rest => Done (Chain.<L, R, Out> (first: first, second: rest, on_second: True, first_step: first_step, second_step: second_step)),
             Yield (item, rest) => Yield (
                 item,
-                Chain.<S, Out> (first: first, second: rest, on_second: True, step: step),
+                Chain.<L, R, Out> (first: first, second: rest, on_second: True, first_step: first_step, second_step: second_step),
             ),
         }
     } else {
-        match step first {
-            Done rest => Iterator.next (Chain.<S, Out> (
+        match first_step first {
+            Done rest => Iterator.next (Chain.<L, R, Out> (
                 first: rest,
                 second: second,
                 on_second: True,
-                step: step,
+                first_step: first_step,
+                second_step: second_step,
             )),
             Yield (item, rest) => Yield (
                 item,
-                Chain.<S, Out> (first: rest, second: second, on_second: False, step: step),
+                Chain.<L, R, Out> (first: rest, second: second, on_second: False, first_step: first_step, second_step: second_step),
             ),
         }
     }
 }
 
-impl<S, Out> IntoIterator (Chain S Out) {
-    type Iter = Chain S Out
+impl<L, R, Out> IntoIterator (Chain L R Out) {
+    type Iter = Chain L R Out
     into_iterator = move iterator => iterator
 }
 
@@ -382,15 +384,20 @@ companion<Iter where Iterator Iter> Iter {
     }
 
     /// Lazily yields every item of `iter`, then every item of `second`.
-    ///
-    /// Both iterators must have the same type. Adapters do not include their
-    /// closures in their type, so two `map` or `filter` pipelines over the same
-    /// kind of source chain together.
-    pub def chain =
-        (move iter: Iter; move second: Iter) => Chain Iter (Iterator.Item Iter) :: {
-        let step = move current: Iter => IterStep (Iter, Iterator.Item Iter) ::
+    /// Both iterators must yield the same item type; their iterator types may differ.
+    pub def chain = <R where Iterator R, Iterator.Item Iter == Iterator.Item R>
+        (move iter: Iter; move second: R) => Chain Iter R (Iterator.Item Iter) :: {
+        let first_step = move current: Iter => IterStep (Iter, Iterator.Item Iter) ::
             Iterator.next current
-        Chain.<Iter, Iterator.Item Iter> (first: iter, second: second, on_second: False, step: step)
+        let second_step = move current: R => IterStep (R, Iterator.Item Iter) ::
+            Iterator.next current
+        Chain.<Iter, R, Iterator.Item Iter> (
+            first: iter,
+            second: second,
+            on_second: False,
+            first_step: first_step,
+            second_step: second_step,
+        )
     }
 
     /// Combines every item into an accumulator, from first to last.

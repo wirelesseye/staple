@@ -118,6 +118,7 @@ fn matching_template_brace(content: &str, opening: usize) -> Option<usize> {
 struct WhereClause {
     trait_bounds: Vec<TraitBound>,
     subtype_bounds: Vec<SubtypeBound>,
+    equality_bounds: Vec<EqualityBound>,
     sized_relaxations: Vec<SizedRelaxation>,
 }
 
@@ -128,6 +129,7 @@ impl WhereClause {
             parameters,
             trait_bounds: self.trait_bounds,
             subtype_bounds: self.subtype_bounds,
+            equality_bounds: self.equality_bounds,
             sized_relaxations: self.sized_relaxations,
         }
     }
@@ -939,6 +941,7 @@ impl Grammar {
             type_parameters: Vec::new(),
             trait_bounds: Vec::new(),
             subtype_bounds: Vec::new(),
+            equality_bounds: Vec::new(),
             sized_relaxations: Vec::new(),
             companion_target: None,
         })
@@ -952,6 +955,7 @@ impl Grammar {
             WhereClause {
                 trait_bounds,
                 subtype_bounds,
+                equality_bounds,
                 sized_relaxations,
             },
         ) = self.parse_bracketed_generics()?;
@@ -1008,6 +1012,7 @@ impl Grammar {
             type_parameters,
             trait_bounds,
             subtype_bounds,
+            equality_bounds,
             sized_relaxations,
             companion_target: Some(target),
         })
@@ -1026,6 +1031,7 @@ impl Grammar {
         let mut type_parameters = Vec::new();
         let mut trait_bounds = Vec::new();
         let mut subtype_bounds = Vec::new();
+        let mut equality_bounds = Vec::new();
         let mut sized_relaxations = Vec::new();
         let annotation = if self.eat(TokenKind::Colon) {
             let previous = self.newline_terminates_type;
@@ -1035,6 +1041,7 @@ impl Grammar {
             type_parameters = parameters;
             trait_bounds = clause.trait_bounds;
             subtype_bounds = clause.subtype_bounds;
+            equality_bounds = clause.equality_bounds;
             sized_relaxations = clause.sized_relaxations;
             let annotation = self.parse_type();
             self.newline_terminates_type = previous;
@@ -1056,6 +1063,7 @@ impl Grammar {
             type_parameters,
             trait_bounds,
             subtype_bounds,
+            equality_bounds,
             sized_relaxations,
             annotation,
             value,
@@ -1133,6 +1141,7 @@ impl Grammar {
         let WhereClause {
             trait_bounds: prerequisites,
             subtype_bounds,
+            equality_bounds,
             sized_relaxations,
         } = self.parse_where_clause()?;
         let mut associated_types = Vec::new();
@@ -1180,6 +1189,7 @@ impl Grammar {
                     name: associated_name,
                     trait_bounds: clause.trait_bounds,
                     subtype_bounds: clause.subtype_bounds,
+                    equality_bounds: clause.equality_bounds,
                     sized_relaxations: clause.sized_relaxations,
                 });
                 self.eat(TokenKind::Semicolon);
@@ -1221,6 +1231,7 @@ impl Grammar {
             associated_types,
             prerequisites,
             subtype_bounds,
+            equality_bounds,
             sized_relaxations,
             default_bounds,
             members,
@@ -1228,8 +1239,9 @@ impl Grammar {
     }
 
     /// Parses the unified `where` clause shared by every generic-parameter
-    /// header: trait bounds, subtype bounds, `?Sized` relaxations, and
-    /// all as one flat comma-separated list in any order. Returns empty lists when no
+    /// header: trait bounds, subtype bounds, associated-type equalities, and
+    /// `?Sized` relaxations, as a flat comma-separated list in any order.
+    /// Returns empty lists when no
     /// `where` keyword is present.
     fn parse_where_clause(&mut self) -> Result<WhereClause, ParseError> {
         let mut clause = WhereClause::default();
@@ -1262,6 +1274,21 @@ impl Grammar {
                     },
                 });
             } else {
+                let saved = self.position;
+                let left = self.parse_type_union()?;
+                if self.eat_operator("==") {
+                    let right = self.parse_type_union()?;
+                    clause.equality_bounds.push(EqualityBound {
+                        syntax: self.syntax(start),
+                        left,
+                        right,
+                    });
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                    continue;
+                }
+                self.position = saved;
                 let first = self
                     .expect(TokenKind::Identifier, "expected constraint")?
                     .text;
@@ -1314,6 +1341,7 @@ impl Grammar {
             WhereClause {
                 trait_bounds,
                 subtype_bounds,
+                equality_bounds,
                 sized_relaxations,
             },
         ) = self.parse_bracketed_generics()?;
@@ -1399,6 +1427,7 @@ impl Grammar {
             type_parameters,
             trait_bounds,
             subtype_bounds,
+            equality_bounds,
             sized_relaxations,
             negative,
             trait_name,
@@ -1796,6 +1825,7 @@ impl Grammar {
         let WhereClause {
             trait_bounds,
             subtype_bounds,
+            equality_bounds,
             sized_relaxations,
         } = self.parse_where_clause()?;
         let has_body = self.eat(TokenKind::Equals);
@@ -1819,6 +1849,7 @@ impl Grammar {
             type_parameters,
             trait_bounds,
             subtype_bounds,
+            equality_bounds,
             sized_relaxations,
             default_bounds,
         })

@@ -1,7 +1,6 @@
 use super::{
-    SizedRelaxation,
-    DefaultTypeBound, Expression, NamedType, SubtypeBound, Syntax, TraitBound, Type,
-    TypeParameterPattern,
+    DefaultTypeBound, EqualityBound, Expression, NamedType, SizedRelaxation, SubtypeBound, Syntax,
+    TraitBound, Type, TypeParameterPattern,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +156,7 @@ pub struct Submodule {
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub equality_bounds: Vec<EqualityBound>,
     pub sized_relaxations: Vec<SizedRelaxation>,
     pub companion_target: Option<Type>,
 }
@@ -344,6 +344,7 @@ pub struct TypeDeclaration {
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub equality_bounds: Vec<EqualityBound>,
     pub sized_relaxations: Vec<SizedRelaxation>,
     pub default_bounds: Vec<DefaultTypeBound>,
 }
@@ -401,6 +402,7 @@ pub struct MacroDeclaration {
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub equality_bounds: Vec<EqualityBound>,
     pub sized_relaxations: Vec<SizedRelaxation>,
     pub annotation: Option<Type>,
     pub value: Option<Expression>,
@@ -418,6 +420,7 @@ pub struct TraitDeclaration {
     pub associated_types: Vec<AssociatedTypeDeclaration>,
     pub prerequisites: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub equality_bounds: Vec<EqualityBound>,
     pub sized_relaxations: Vec<SizedRelaxation>,
     pub default_bounds: Vec<DefaultTypeBound>,
     pub members: Vec<TraitMember>,
@@ -454,6 +457,7 @@ pub struct AssociatedTypeDeclaration {
     /// parameter and moves these constraints onto the trait.
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub equality_bounds: Vec<EqualityBound>,
     pub sized_relaxations: Vec<SizedRelaxation>,
 }
 
@@ -488,6 +492,7 @@ pub struct TraitImplementation {
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub equality_bounds: Vec<EqualityBound>,
     pub sized_relaxations: Vec<SizedRelaxation>,
     /// Whether this is a negative implementation (`impl !Trait T {}`),
     /// declaring that `T` explicitly does not implement `Trait`.
@@ -589,6 +594,13 @@ impl Binding {
             .iter()
             .chain(self.generics())
             .flat_map(|g| g.subtype_bounds.iter().cloned())
+            .collect()
+    }
+    pub fn all_equality_bounds(&self) -> Vec<EqualityBound> {
+        self.companion_generics
+            .iter()
+            .chain(self.generics())
+            .flat_map(|g| g.equality_bounds.iter().cloned())
             .collect()
     }
     pub fn is_generic(&self) -> bool {

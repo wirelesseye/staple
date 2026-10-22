@@ -1627,6 +1627,7 @@ pub struct TypedModule {
     symbol_types: HashMap<SymbolId, CheckedType>,
     polymorphic_storage_symbols: HashSet<SymbolId>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
+    equality_substitutions: HashMap<TypeParameterId, CheckedType>,
     function_schemes: HashMap<FunctionId, CheckedScheme>,
     expression_schemes: HashMap<SyntaxId, CheckedScheme>,
     explicit_value_substitutions: HashMap<SyntaxId, HashMap<TypeParameterId, CheckedType>>,
@@ -2390,6 +2391,7 @@ impl TypedModule {
             trait_parameter_arguments: self.trait_parameter_arguments.clone(),
             trait_functional_dependencies: self.trait_functional_dependencies.clone(),
             trait_prerequisites: self.trait_prerequisites.clone(),
+            equality_substitutions: self.equality_substitutions.clone(),
             trait_implementations: self.trait_implementations.clone(),
             copy_trait: self.copy_trait,
             debug_trait: self.debug_trait,
@@ -2959,6 +2961,13 @@ pub struct TypeChecker {
     /// from context rather than written out.
     permit_partial_type_constructor: bool,
     projection_parameters: Vec<ProjectionParameter>,
+    // Equality evidence is encoded in the existing associated slots of trait
+    // bounds. These substitutions give the declaration body its normal form;
+    // the original evidence is retained to check callers and implementation
+    // applicability, including explicit generic arguments.
+    equality_substitutions: HashMap<TypeParameterId, CheckedType>,
+    equality_evidence: HashMap<SyntaxId, Vec<CheckedTraitBound>>,
+    resolving_equality: bool,
     return_contexts: Vec<CheckedType>,
     return_contributions: Vec<Vec<ReturnContribution>>,
     pending_propagations: Vec<Vec<(SyntaxId, CheckedType, usize, Span)>>,
@@ -3269,6 +3278,7 @@ impl TypeChecker {
             polymorphic_storage_symbols: self.polymorphic_storage_symbols,
             function_types: self.function_types,
             function_schemes: self.function_schemes,
+            equality_substitutions: self.equality_substitutions,
             expression_schemes: self.expression_schemes,
             explicit_value_substitutions: self.explicit_value_substitutions,
             expression_effects: self.expression_effects,
@@ -3505,14 +3515,28 @@ impl TypeChecker {
                     })
                     .collect(),
             );
-            let mut prerequisites = Vec::new();
-            for prerequisite in &resolved_trait.declaration.prerequisites {
-                if let Some(prerequisite) = self.resolve_trait_bound(module, prerequisite) {
-                    prerequisites.push(prerequisite);
-                }
-            }
+        }
+        for resolved_trait in module.traits().values() {
+            let prerequisites = self.resolve_bound_clause(
+                module,
+                &resolved_trait.declaration.prerequisites,
+                &[],
+                false,
+            );
             self.trait_prerequisites
                 .insert(resolved_trait.id, prerequisites);
+        }
+        for resolved_trait in module.traits().values() {
+            if !resolved_trait.declaration.equality_bounds.is_empty() {
+                let prerequisites = self.resolve_bound_clause(
+                    module,
+                    &resolved_trait.declaration.prerequisites,
+                    &resolved_trait.declaration.equality_bounds,
+                    false,
+                );
+                self.trait_prerequisites
+                    .insert(resolved_trait.id, prerequisites);
+            }
         }
         for resolved_trait in module.traits().values() {
             let prerequisites = self.expand_trait_bounds(
@@ -3716,12 +3740,12 @@ impl TypeChecker {
                 self.diagnostics.truncate(diagnostics);
                 continue;
             }
-            let mut declaration_bounds = Vec::new();
-            for bound in &declaration.trait_bounds {
-                if let Some(bound) = self.resolve_trait_bound(module, bound) {
-                    declaration_bounds.push(bound);
-                }
-            }
+            let declaration_bounds = self.resolve_bound_clause(
+                module,
+                &declaration.trait_bounds,
+                &declaration.equality_bounds,
+                false,
+            );
             let declaration_bounds = self.expand_trait_bounds(declaration_bounds);
             let mut declaration_subtype_bounds = Vec::new();
             for bound in &declaration.subtype_bounds {
@@ -3806,14 +3830,24 @@ impl TypeChecker {
                 ));
                 continue;
             }
-            let Some((arguments, substitutions)) = self.resolve_trait_arguments(
+            let bounds = self.resolve_bound_clause(
+                module,
+                &implementation.trait_bounds,
+                &implementation.equality_bounds,
+                false,
+            );
+            self.active_function_bounds
+                .push(self.expand_trait_bounds(bounds.clone()));
+            let resolved_arguments = self.resolve_trait_arguments(
                 module,
                 implementation.trait_id,
                 &implementation.arguments,
                 &implementation.associated_arguments,
                 span.clone(),
                 false,
-            ) else {
+            );
+            self.active_function_bounds.pop();
+            let Some((arguments, substitutions)) = resolved_arguments else {
                 continue;
             };
             let target = &arguments[0];
@@ -3932,11 +3966,6 @@ impl TypeChecker {
                 ));
                 continue;
             }
-            let bounds = implementation
-                .trait_bounds
-                .iter()
-                .filter_map(|bound| self.resolve_trait_bound(module, bound))
-                .collect::<Vec<_>>();
             // A `Drop` implementation's bounds may constrain only its own type
             // parameters. A bound on any other type would make discharging it
             // ask about a type that may contain the header itself, so the
@@ -5167,26 +5196,6 @@ impl TypeChecker {
         CheckedType::Error
     }
 
-    fn resolve_trait_bound(
-        &mut self,
-        module: &ResolvedModule,
-        bound: &staple_syntax::TraitBound,
-    ) -> Option<CheckedTraitBound> {
-        self.resolve_trait_bound_with(module, bound, false)
-    }
-
-    /// Resolves a bound in a function's `where` clause. Unlike a trait
-    /// prerequisite or an implementation header, whose open associated slots
-    /// are solved per use, the function body treats every associated type of
-    /// its bounds as one rigid parameter.
-    fn resolve_function_trait_bound(
-        &mut self,
-        module: &ResolvedModule,
-        bound: &staple_syntax::TraitBound,
-    ) -> Option<CheckedTraitBound> {
-        self.resolve_trait_bound_with(module, bound, true)
-    }
-
     fn resolve_trait_bound_with(
         &mut self,
         module: &ResolvedModule,
@@ -5212,6 +5221,187 @@ impl TypeChecker {
             trait_id,
             arguments,
         })
+    }
+
+    fn equality_arguments_equivalent(&self, left: &[CheckedType], right: &[CheckedType]) -> bool {
+        let normalize = |types: &[CheckedType]| {
+            canonical_projection_arguments(
+                &types
+                    .iter()
+                    .cloned()
+                    .map(|ty| self.normalize_equalities(ty))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        types_equivalent_list(&normalize(left), &normalize(right))
+    }
+
+    fn normalize_equalities(&self, mut ty: CheckedType) -> CheckedType {
+        if self.resolving_equality
+            || self.equality_substitutions.is_empty()
+            || !contains_type_parameter(&ty)
+            || !type_parameter_ids(&ty)
+                .iter()
+                .any(|id| self.equality_substitutions.contains_key(id))
+        {
+            return ty;
+        }
+        for _ in 0..=self.equality_substitutions.len() {
+            let next = substitute_type(ty.clone(), &self.equality_substitutions);
+            if types_equivalent(&ty, &next) {
+                return next;
+            }
+            ty = next;
+        }
+        ty
+    }
+
+    /// Resolve a complete clause together: equations constrain the hidden
+    /// associated slots, so existing dictionary selection, scheme comparison,
+    /// and coherence checking also enforce them.
+    fn resolve_bound_clause(
+        &mut self,
+        module: &ResolvedModule,
+        sources: &[staple_syntax::TraitBound],
+        equalities: &[staple_syntax::EqualityBound],
+        function: bool,
+    ) -> Vec<CheckedTraitBound> {
+        let mut bounds = sources
+            .iter()
+            .filter_map(|bound| {
+                self.resolve_trait_bound_with(module, bound, function || !equalities.is_empty())
+            })
+            .collect::<Vec<_>>();
+        for equality in equalities {
+            if self.equality_evidence.contains_key(&equality.syntax.id) {
+                continue;
+            }
+            // Resolve both sides without the body's substitutions: e.g. the
+            // requirements Item == A and Item == B must retain both A and B.
+            let previous = self.resolving_equality;
+            self.resolving_equality = true;
+            self.active_function_bounds
+                .push(self.expand_trait_bounds(bounds.clone()));
+            let left = self.resolve_source_type(module, &equality.left);
+            let right = self.resolve_source_type(module, &equality.right);
+            let projection = equality_projection_head(module, &equality.left)
+                .map(|head| (head, right.clone()))
+                .or_else(|| {
+                    equality_projection_head(module, &equality.right)
+                        .map(|head| (head, left.clone()))
+                });
+            let mut evidence = Vec::new();
+            if let Some(((trait_id, associated, arguments), target)) = projection {
+                let explicit = module.traits()[&trait_id]
+                    .declaration
+                    .explicit_type_parameters()
+                    .len();
+                let arguments = if explicit == 1 && arguments.len() > 1 {
+                    let mut joined = arguments[0].clone();
+                    for argument in &arguments[1..] {
+                        joined = Type::Application(staple_syntax::TypeApplication {
+                            syntax: joined.syntax().clone(),
+                            callee: Box::new(joined),
+                            argument: Box::new((*argument).clone()),
+                        });
+                    }
+                    vec![self.resolve_source_type(module, &joined)]
+                } else {
+                    arguments
+                        .iter()
+                        .map(|argument| self.resolve_source_type(module, argument))
+                        .collect::<Vec<_>>()
+                };
+                let expanded = self.expand_trait_bounds(bounds.clone());
+                if let Some(bound) = expanded.iter().find(|bound| {
+                    bound.trait_id == trait_id
+                        && bound.arguments.len() > explicit + associated
+                        && types_equivalent_list(&bound.arguments[..explicit], &arguments)
+                }) {
+                    let mut bound = bound.clone();
+                    bound.arguments[explicit + associated] = target;
+                    evidence.push(bound);
+                } else {
+                    self.diagnostics.push(Diagnostic::new(
+                        equality.syntax.span.clone(),
+                        "associated-type equality requires a matching trait bound",
+                    ));
+                }
+            } else {
+                self.diagnostics.push(Diagnostic::new(
+                    equality.syntax.span.clone(),
+                    "at least one side of a type equality must be an associated-type projection",
+                ));
+            }
+            self.active_function_bounds.pop();
+            self.resolving_equality = previous;
+            // Orient a projection-to-parameter equation toward the ordinary
+            // parameter, preserving that parameter in the public signature.
+            let (left, right) = if equality_projection_head(module, &equality.left).is_none() {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            let left = self.normalize_equalities(left);
+            let right = self.normalize_equalities(right);
+            if contains_inferred_type(&left) || contains_inferred_type(&right) {
+                self.diagnostics.push(Diagnostic::new(
+                    equality.syntax.span.clone(),
+                    "associated-type equalities cannot contain inferred types",
+                ));
+            } else if !evidence.is_empty()
+                && left != CheckedType::Error
+                && right != CheckedType::Error
+            {
+                let free = type_parameter_ids(&left)
+                    .into_iter()
+                    .chain(type_parameter_ids(&right))
+                    .collect();
+                let mut substitutions = HashMap::new();
+                if !unify_equality_types(&left, &right, &free, &mut substitutions)
+                    || equality_substitutions_are_cyclic(&substitutions)
+                {
+                    self.diagnostics.push(Diagnostic::new(equality.syntax.span.clone(),
+                        format!("associated-type equality `{} == {}` cannot hold: `{left}` differs from `{right}`", equality.left, equality.right)));
+                } else {
+                    self.equality_substitutions.extend(substitutions);
+                }
+            }
+            self.equality_evidence.insert(equality.syntax.id, evidence);
+        }
+        for bound in &mut bounds {
+            for argument in &mut bound.arguments {
+                *argument = self.normalize_equalities(argument.clone());
+            }
+        }
+        for equality in equalities {
+            let projections = self
+                .equality_substitutions
+                .iter()
+                .filter(|(id, _)| id.0 >= PROJECTION_PARAMETER_BASE)
+                .map(|(id, ty)| (*id, ty.clone()))
+                .collect::<HashMap<_, _>>();
+            bounds.extend(
+                self.equality_evidence
+                    .get(&equality.syntax.id)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                    .map(|mut bound| {
+                        for argument in &mut bound.arguments {
+                            for _ in 0..=projections.len() {
+                                let next = substitute_type(argument.clone(), &projections);
+                                if types_equivalent(argument, &next) {
+                                    break;
+                                }
+                                *argument = next;
+                            }
+                        }
+                        bound
+                    }),
+            );
+        }
+        bounds
     }
 
     fn resolve_subtype_bound(
@@ -5277,6 +5467,18 @@ impl TypeChecker {
     }
 
     fn bounds_violate_functional_dependencies(&self, bounds: &[CheckedTraitBound]) -> bool {
+        let bounds = bounds
+            .iter()
+            .map(|bound| CheckedTraitBound {
+                trait_id: bound.trait_id,
+                arguments: bound
+                    .arguments
+                    .iter()
+                    .cloned()
+                    .map(|argument| self.normalize_equalities(argument))
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
         for (index, left) in bounds.iter().enumerate() {
             let Some(parameters) = self.trait_parameter_arguments.get(&left.trait_id) else {
                 continue;
@@ -5468,12 +5670,12 @@ impl TypeChecker {
             // must already be active for that reflexive check to succeed,
             // mirroring the push `instantiate_type_declaration` performs
             // around resolving the representation itself.
-            let mut declaration_bounds = Vec::new();
-            for bound in &declaration.trait_bounds {
-                if let Some(bound) = self.resolve_trait_bound(module, bound) {
-                    declaration_bounds.push(bound);
-                }
-            }
+            let declaration_bounds = self.resolve_bound_clause(
+                module,
+                &declaration.trait_bounds,
+                &declaration.equality_bounds,
+                false,
+            );
             let mut declaration_subtype_bounds = Vec::new();
             for bound in &declaration.subtype_bounds {
                 if let Some(bound) = self.resolve_subtype_bound(module, bound) {
@@ -5654,11 +5856,12 @@ impl TypeChecker {
                 .collect();
             self.record_function_symbol_type(symbol, value_type, parameters);
             if module.intrinsic_function(symbol).is_some() {
-                let bounds = binding
-                    .all_trait_bounds()
-                    .iter()
-                    .filter_map(|bound| self.resolve_trait_bound(module, bound))
-                    .collect::<Vec<_>>();
+                let bounds = self.resolve_bound_clause(
+                    module,
+                    &binding.all_trait_bounds(),
+                    &binding.all_equality_bounds(),
+                    false,
+                );
                 let subtype_bounds = binding
                     .all_subtype_bounds()
                     .iter()
@@ -6102,11 +6305,12 @@ impl TypeChecker {
                 CheckedSchemeParameter::from_pattern(self.checked_type_parameter_pattern(module, p))
             })
             .collect();
-        let trait_bounds = generics
-            .trait_bounds
-            .iter()
-            .filter_map(|b| self.resolve_function_trait_bound(module, b))
-            .collect::<Vec<_>>();
+        let trait_bounds = self.resolve_bound_clause(
+            module,
+            &generics.trait_bounds,
+            &generics.equality_bounds,
+            true,
+        );
         let subtype_bounds = generics
             .subtype_bounds
             .iter()
@@ -6252,9 +6456,21 @@ impl TypeChecker {
             }
         }
         for function in module.functions() {
+            self.resolve_bound_clause(
+                module,
+                &function.trait_bounds,
+                &function.equality_bounds,
+                true,
+            );
             let expected_scheme = if let Some(annotation) = &function.binding_annotation {
                 match annotation {
                     Type::Forall(ty) => {
+                        self.resolve_bound_clause(
+                            module,
+                            &ty.generics.trait_bounds,
+                            &ty.generics.equality_bounds,
+                            true,
+                        );
                         let body = self.resolve_source_type(module, &ty.body);
                         Some(self.value_scheme(module, &ty.generics, body))
                     }
@@ -6409,12 +6625,12 @@ impl TypeChecker {
                 // implementation's. Wire them the same way plain `def`s are
                 // below, so an implementation member's body can rely on its
                 // own header's bounds while being checked.
-                let mut bounds = Vec::new();
-                for bound in &function.trait_bounds {
-                    if let Some(bound) = self.resolve_function_trait_bound(module, bound) {
-                        bounds.push(bound);
-                    }
-                }
+                let mut bounds = self.resolve_bound_clause(
+                    module,
+                    &function.trait_bounds,
+                    &function.equality_bounds,
+                    true,
+                );
                 if !bounds.is_empty() {
                     bounds.extend(
                         self.function_declared_bounds
@@ -6598,12 +6814,12 @@ impl TypeChecker {
                 );
             }
             self.function_types.insert(function.id, function_type);
-            let mut bounds = Vec::new();
-            for bound in &function.trait_bounds {
-                if let Some(bound) = self.resolve_function_trait_bound(module, bound) {
-                    bounds.push(bound);
-                }
-            }
+            let bounds = self.resolve_bound_clause(
+                module,
+                &function.trait_bounds,
+                &function.equality_bounds,
+                true,
+            );
             self.function_declared_bounds
                 .insert(function.id, bounds.clone());
             let bounds = self.expand_trait_bounds(bounds);
@@ -10102,28 +10318,24 @@ impl TypeChecker {
             let actual = if matches!(expression, Expression::Function(_)) {
                 if let Some(id) = module.function_for(expression.syntax().id) {
                     // A companion member's value declares only its own
-                    // parameters, while its declared bounds already include
-                    // the companion's (`Bag T` for `<R where Bag R>` in
-                    // `companion<T where Bag T>`). Keep those, in front as the
-                    // member's scheme orders them, and add the value's own.
+                    // parameters (`<R where Bag R>`), while the member's
+                    // scheme also quantifies the companion's and carries its
+                    // bounds (`Bag T` in `companion<T where Bag T>`). That
+                    // scheme is the member's declaration, so its bounds are
+                    // the declared ones.
                     let own = scheme.bound_ids();
-                    let mut declared = self
-                        .function_declared_bounds
+                    let declared = self
+                        .symbols_by_function
                         .get(&id)
-                        .into_iter()
-                        .flatten()
-                        .filter(|bound| {
-                            !scheme.trait_bounds.contains(bound)
-                                && bound.arguments.iter().all(|argument| {
-                                    type_parameter_ids(argument).iter().all(|parameter| {
-                                        parameter.0 >= PROJECTION_PARAMETER_BASE
-                                            || !own.contains(parameter)
-                                    })
-                                })
+                        .and_then(|symbol| match self.symbol_types.get(symbol) {
+                            Some(CheckedType::Forall(full)) => {
+                                let full_ids = full.bound_ids();
+                                (full_ids.is_superset(&own) && full_ids != own)
+                                    .then(|| full.trait_bounds.clone())
+                            }
+                            _ => None,
                         })
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    declared.extend(scheme.trait_bounds.iter().cloned());
+                        .unwrap_or_else(|| scheme.trait_bounds.clone());
                     self.function_declared_bounds.insert(id, declared);
                     self.function_schemes.insert(id, scheme.as_ref().clone());
                     // A contextually checked scheme fixes the lambda's effect
@@ -15134,11 +15346,25 @@ impl TypeChecker {
         trait_id: TraitId,
         arguments: &[CheckedType],
     ) -> Option<Vec<CheckedType>> {
+        let normalized = arguments
+            .iter()
+            .cloned()
+            .map(|ty| self.normalize_equalities(ty))
+            .collect::<Vec<_>>();
+        let arguments = normalized.as_slice();
         let bounds = self
             .active_function_bounds
             .iter()
             .flatten()
-            .cloned()
+            .map(|bound| CheckedTraitBound {
+                trait_id: bound.trait_id,
+                arguments: bound
+                    .arguments
+                    .iter()
+                    .cloned()
+                    .map(|ty| self.normalize_equalities(ty))
+                    .collect(),
+            })
             .collect::<Vec<_>>();
         if let Some((arguments, _)) = structural_trait_arguments(
             trait_id,
@@ -15161,10 +15387,8 @@ impl TypeChecker {
             return Some(arguments);
         }
         if arguments.iter().any(contains_inferred_type) {
-            let bound_candidates = self
-                .active_function_bounds
+            let bound_candidates = bounds
                 .iter()
-                .flatten()
                 .filter(|bound| bound.trait_id == trait_id)
                 // Every in-scope bound on the trait is a candidate, but only
                 // those whose already-known arguments match the query may
@@ -15179,7 +15403,10 @@ impl TypeChecker {
                             .zip(arguments)
                             .all(|(candidate, actual)| {
                                 contains_inferred_type(actual)
-                                    || types_equivalent(actual, candidate)
+                                    || self.equality_arguments_equivalent(
+                                        std::slice::from_ref(actual),
+                                        std::slice::from_ref(candidate),
+                                    )
                             })
                 })
                 .map(|bound| bound.arguments.clone());
@@ -15312,7 +15539,7 @@ impl TypeChecker {
             return self.active_function_bounds.iter().rev().any(|bounds| {
                 bounds.iter().any(|bound| {
                     bound.trait_id == trait_id
-                        && types_equivalent_list(&bound.arguments, &arguments)
+                        && self.equality_arguments_equivalent(&bound.arguments, arguments)
                 })
             }) || !self
                 .matching_trait_implementations(trait_id, arguments)
@@ -15321,13 +15548,15 @@ impl TypeChecker {
         if Some(trait_id) == self.natural_trait {
             return matches!(target, CheckedType::NumberLiteral(_))
                 || self.active_function_bounds.iter().flatten().any(|bound| {
-                    bound.trait_id == trait_id && types_equivalent_list(&bound.arguments, arguments)
+                    bound.trait_id == trait_id
+                        && self.equality_arguments_equivalent(&bound.arguments, arguments)
                 });
         }
         if Some(trait_id) == self.sized_trait {
             return target.is_sized()
                 || self.active_function_bounds.iter().flatten().any(|bound| {
-                    bound.trait_id == trait_id && types_equivalent_list(&bound.arguments, arguments)
+                    bound.trait_id == trait_id
+                        && self.equality_arguments_equivalent(&bound.arguments, arguments)
                 });
         }
         if Some(trait_id) == self.copy_trait {
@@ -15359,7 +15588,8 @@ impl TypeChecker {
         }
         self.active_function_bounds.iter().rev().any(|bounds| {
             bounds.iter().any(|bound| {
-                bound.trait_id == trait_id && types_equivalent_list(&bound.arguments, &arguments)
+                bound.trait_id == trait_id
+                    && self.equality_arguments_equivalent(&bound.arguments, arguments)
             })
         }) || !self
             .matching_trait_implementations(trait_id, arguments)
@@ -15407,12 +15637,19 @@ impl TypeChecker {
                 if !unifies {
                     return None;
                 }
+                let substitutions =
+                    self.complete_bound_substitutions(&implementation.bounds, &substitutions);
                 let bounds_hold = implementation.bounds.iter().all(|bound| {
                     let bound_arguments = bound
                         .arguments
                         .iter()
                         .cloned()
-                        .map(|argument| substitute_type(argument, &substitutions))
+                        .map(|argument| {
+                            self.normalize_equalities(substitute_type_fixpoint(
+                                argument,
+                                &substitutions,
+                            ))
+                        })
                         .collect::<Vec<_>>();
                     self.trait_obligation_available_exact(bound.trait_id, &bound_arguments)
                 });
@@ -15531,7 +15768,7 @@ impl TypeChecker {
     fn check_function_bounds(
         &mut self,
         function_id: FunctionId,
-        template: &CheckedType,
+        _template: &CheckedType,
         instantiated: &CheckedType,
         span: Span,
     ) {
@@ -15542,6 +15779,7 @@ impl TypeChecker {
         else {
             return;
         };
+        let template = scheme.body.as_ref().clone();
         let bounds = scheme.trait_bounds.clone();
         let subtype_bounds = scheme.subtype_bounds.clone();
         if self
@@ -15562,13 +15800,7 @@ impl TypeChecker {
                     .unwrap_or(&Vec::new())
             );
         }
-        self.check_instantiated_bounds(
-            bounds,
-            subtype_bounds,
-            template.scheme_body(),
-            instantiated,
-            span,
-        );
+        self.check_instantiated_bounds(bounds, subtype_bounds, &template, instantiated, span);
     }
 
     fn check_callable_symbol_bounds(
@@ -15614,6 +15846,150 @@ impl TypeChecker {
         self.check_substituted_bounds(bounds, subtype_bounds, &substitutions, span);
     }
 
+    fn bounds_have_associated_parameters(&self, bounds: &[CheckedTraitBound]) -> bool {
+        bounds.iter().any(|bound| {
+            let associated = self
+                .trait_functional_dependencies
+                .get(&bound.trait_id)
+                .map_or(0, Vec::len);
+            bound
+                .arguments
+                .iter()
+                .skip(bound.arguments.len().saturating_sub(associated))
+                .any(contains_type_parameter)
+        })
+    }
+
+    /// Infer only associated outputs, sharing the answers between all bounds
+    /// in a clause. In particular Item L == Item R must not become two
+    /// unrelated wildcard queries when the result does not mention Item.
+    fn complete_bound_substitutions(
+        &self,
+        bounds: &[CheckedTraitBound],
+        substitutions: &HashMap<TypeParameterId, CheckedType>,
+    ) -> HashMap<TypeParameterId, CheckedType> {
+        let mut substitutions = substitutions.clone();
+        if !self.bounds_have_associated_parameters(bounds) {
+            return substitutions;
+        }
+        let rigid = self
+            .active_generic_parameters
+            .iter()
+            .flatten()
+            .copied()
+            .chain(
+                self.active_function_bounds
+                    .iter()
+                    .flatten()
+                    .flat_map(|bound| {
+                        bound.arguments.iter().flat_map(|ty| {
+                            type_parameter_ids(&self.normalize_equalities(ty.clone()))
+                        })
+                    }),
+            )
+            .collect::<HashSet<_>>();
+        for _ in 0..=bounds.len() {
+            let before = substitutions.clone();
+            for bound in bounds {
+                let Some(metadata) = self.trait_parameter_arguments.get(&bound.trait_id) else {
+                    continue;
+                };
+                let associated = self
+                    .trait_functional_dependencies
+                    .get(&bound.trait_id)
+                    .map_or(0, Vec::len);
+                let explicit = metadata.len().saturating_sub(associated);
+                let arguments = bound
+                    .arguments
+                    .iter()
+                    .cloned()
+                    .map(|ty| {
+                        self.normalize_equalities(substitute_type_fixpoint(ty, &substitutions))
+                    })
+                    .collect::<Vec<_>>();
+                let free = arguments
+                    .iter()
+                    .skip(explicit)
+                    .flat_map(type_parameter_ids)
+                    .filter(|id| !rigid.contains(id))
+                    .collect::<HashSet<_>>();
+                if free.is_empty() {
+                    continue;
+                }
+                let unknown = free.iter().map(|id| (*id, CheckedType::Inferred)).collect();
+                let query = arguments
+                    .iter()
+                    .enumerate()
+                    .map(|(index, ty)| {
+                        if index < explicit {
+                            ty.clone()
+                        } else {
+                            substitute_type(ty.clone(), &unknown)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let Some(completed) = self.resolve_trait_obligation(bound.trait_id, &query) else {
+                    continue;
+                };
+                let mut inferred = HashMap::new();
+                let matches =
+                    arguments
+                        .iter()
+                        .zip(&completed)
+                        .skip(explicit)
+                        .all(|(template, value)| {
+                            !contains_inferred_type(value)
+                                && unify_equality_types(template, value, &free, &mut inferred)
+                        });
+                if matches && !equality_substitutions_are_cyclic(&inferred) {
+                    substitutions.extend(inferred);
+                }
+            }
+            if substitutions == before {
+                break;
+            }
+        }
+        substitutions
+    }
+
+    fn associated_equality_failure(
+        &self,
+        trait_id: TraitId,
+        arguments: &[CheckedType],
+    ) -> Option<String> {
+        let associated = self.trait_functional_dependencies.get(&trait_id)?.len();
+        if associated == 0 {
+            return None;
+        }
+        let explicit = arguments.len().checked_sub(associated)?;
+        let mut query = arguments[..explicit].to_vec();
+        query.resize(arguments.len(), CheckedType::Inferred);
+        let completed = self.resolve_trait_obligation(trait_id, &query)?;
+        for index in explicit..arguments.len() {
+            if contains_inferred_type(&arguments[index])
+                || self.equality_arguments_equivalent(
+                    &arguments[index..=index],
+                    &completed[index..=index],
+                )
+            {
+                continue;
+            }
+            let projection = self.projection_parameters.iter().find(|projection| {
+                projection.trait_id == trait_id && projection.associated == index - explicit
+            })?;
+            let receiver = arguments[..explicit]
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Some(format!(
+                "associated-type equality is not satisfied: `{} ({receiver})` is `{}`, expected `{}`",
+                projection.name, completed[index], arguments[index]
+            ));
+        }
+        None
+    }
+
     fn check_substituted_bounds(
         &mut self,
         bounds: Vec<CheckedTraitBound>,
@@ -15621,6 +15997,28 @@ impl TypeChecker {
         substitutions: &HashMap<TypeParameterId, CheckedType>,
         span: Span,
     ) {
+        let has_equality = bounds.iter().any(|bound| {
+            let associated = self
+                .trait_functional_dependencies
+                .get(&bound.trait_id)
+                .map_or(0, Vec::len);
+            let explicit = bound.arguments.len().saturating_sub(associated);
+            self.equality_evidence.values().flatten().any(|evidence| {
+                evidence.trait_id == bound.trait_id
+                    && evidence.arguments.len() == bound.arguments.len()
+                    && self.equality_arguments_equivalent(
+                        &bound.arguments[..explicit],
+                        &evidence.arguments[..explicit],
+                    )
+            })
+        });
+        let substitutions = self.complete_bound_substitutions(&bounds, substitutions);
+        let rigid_projections = self
+            .active_function_bounds
+            .iter()
+            .flatten()
+            .flat_map(|bound| bound.arguments.iter().flat_map(type_parameter_ids))
+            .collect::<HashSet<_>>();
         for bound in bounds {
             // Associated types follow a trait's own parameters as projection
             // placeholders.
@@ -15634,14 +16032,16 @@ impl TypeChecker {
             let arguments = bound
                 .arguments
                 .into_iter()
-                .map(|argument| substitute_type(argument, &substitutions))
+                .map(|argument| {
+                    self.normalize_equalities(substitute_type_fixpoint(argument, &substitutions))
+                })
                 .collect::<Vec<_>>();
             // An associated type the use did not determine is whatever the
             // selected implementation says; it must not defer the bound.
             let projections = arguments
                 .iter()
                 .flat_map(type_parameter_ids)
-                .filter(|id| id.0 >= PROJECTION_PARAMETER_BASE)
+                .filter(|id| id.0 >= PROJECTION_PARAMETER_BASE && !rigid_projections.contains(id))
                 .map(|id| (id, CheckedType::Inferred))
                 .collect::<HashMap<_, _>>();
             let arguments = if projections.is_empty() {
@@ -15664,6 +16064,19 @@ impl TypeChecker {
                         .any(|parameters| parameters.contains(id))
                 })
             }) {
+                if has_equality
+                    && arguments.iter().flat_map(type_parameter_ids).any(|id| {
+                        id.0 < PROJECTION_PARAMETER_BASE
+                            && !substitutions.contains_key(&id)
+                            && !self
+                                .active_generic_parameters
+                                .iter()
+                                .any(|parameters| parameters.contains(&id))
+                    })
+                {
+                    self.diagnostics.push(Diagnostic::new(span.clone(),
+                        "could not infer all compile-time parameters; supply explicit type arguments"));
+                }
                 continue;
             }
             if !self.trait_obligation_available(bound.trait_id, &arguments) {
@@ -15676,7 +16089,12 @@ impl TypeChecker {
                     .collect::<Vec<_>>();
                 self.diagnostics.push(Diagnostic::new(
                     span.clone(),
-                    trait_bound_failure(&explicit),
+                    if has_equality {
+                        self.associated_equality_failure(bound.trait_id, &arguments)
+                            .unwrap_or_else(|| trait_bound_failure(&explicit))
+                    } else {
+                        trait_bound_failure(&explicit)
+                    },
                 ));
             }
         }
@@ -16102,16 +16520,13 @@ impl TypeChecker {
         &mut self,
         access: &staple_syntax::AccessExpression,
         scheme: &CheckedScheme,
-        mut substitutions: HashMap<TypeParameterId, CheckedType>,
+        substitutions: HashMap<TypeParameterId, CheckedType>,
         type_parameters: Vec<CheckedSchemeParameter>,
     ) -> CheckedType {
         // Pinning a blanket member's parameter to a concrete receiver also
         // fixes the associated types its bounds determine, so a bound such as
         // `Add (Iterator.Item Iter)` is checked at the item type itself.
-        let projections = self.projection_values(&scheme.trait_bounds, &substitutions);
-        for (id, value) in projections {
-            substitutions.entry(id).or_insert(value);
-        }
+        let substitutions = self.complete_bound_substitutions(&scheme.trait_bounds, &substitutions);
         let mut scheme = scheme.clone();
         scheme.parameters.retain(|scheme_parameter| {
             !matches!(scheme_parameter, CheckedSchemeParameter::Type { id, .. } if substitutions.contains_key(id))
@@ -16190,6 +16605,30 @@ impl TypeChecker {
         expression: &Expression,
         body: CheckedType,
     ) -> CheckedType {
+        let reattach = |mut scheme: CheckedScheme, body: CheckedType| {
+            // A cached use-site type may already have solved the function's
+            // parameters. Move its bounds through the same substitution before
+            // replacing the body, so both retain the same parameter identities.
+            let mut substitutions = HashMap::new();
+            if infer_type_parameters(&scheme.body, &body, &mut substitutions) {
+                for bound in &mut scheme.trait_bounds {
+                    for argument in &mut bound.arguments {
+                        *argument = substitute_type_fixpoint(argument.clone(), &substitutions);
+                    }
+                }
+                for bound in &mut scheme.subtype_bounds {
+                    if let Some(CheckedType::Parameter { id, .. }) =
+                        substitutions.get(&bound.parameter)
+                    {
+                        bound.parameter = *id;
+                    }
+                    bound.supertype =
+                        substitute_type_fixpoint(bound.supertype.clone(), &substitutions);
+                }
+            }
+            scheme.body = Box::new(body);
+            CheckedType::Forall(Box::new(scheme))
+        };
         if matches!(body, CheckedType::Forall(_)) {
             return body;
         }
@@ -16197,9 +16636,7 @@ impl TypeChecker {
             .explicit_application_schemes
             .get(&expression.syntax().id)
         {
-            let mut scheme = scheme.clone();
-            scheme.body = Box::new(body);
-            return CheckedType::Forall(Box::new(scheme));
+            return reattach(scheme.clone(), body);
         }
         let symbol = module.symbol_for(expression.syntax().id).or_else(|| {
             let function = self.function_origin(module, expression)?;
@@ -16208,36 +16645,12 @@ impl TypeChecker {
         if let Some(CheckedType::Forall(scheme)) =
             self.expression_types.get(&expression.syntax().id)
         {
-            let mut scheme = scheme.clone();
-            scheme.body = Box::new(body);
-            return CheckedType::Forall(scheme);
+            return reattach(scheme.as_ref().clone(), body);
         }
         if let Some(CheckedType::Forall(scheme)) =
             symbol.and_then(|symbol| self.symbol_types.get(&symbol))
         {
-            let mut scheme = scheme.clone();
-            scheme.body = Box::new(body);
-            // A pinned companion member (`Pair.member`) already has its
-            // blanket parameter and the associated types it determines
-            // replaced in `body`. Its bounds must say the same, or the
-            // parameters left in them have nothing to be inferred from.
-            if let Some(substitutions) = self
-                .explicit_value_substitutions
-                .get(&expression.syntax().id)
-            {
-                scheme.parameters.retain(|parameter| {
-                    !matches!(parameter, CheckedSchemeParameter::Type { id, .. } if substitutions.contains_key(id))
-                });
-                for bound in &mut scheme.trait_bounds {
-                    for argument in &mut bound.arguments {
-                        *argument = substitute_type(argument.clone(), substitutions);
-                    }
-                }
-                for bound in &mut scheme.subtype_bounds {
-                    bound.supertype = substitute_type(bound.supertype.clone(), substitutions);
-                }
-            }
-            CheckedType::Forall(scheme)
+            reattach(scheme.as_ref().clone(), body)
         } else {
             body
         }
@@ -16344,16 +16757,11 @@ impl TypeChecker {
         template: &CheckedType,
         instantiated: CheckedType,
     ) -> CheckedType {
-        let is_placeholder = |argument: &CheckedType| matches!(argument, CheckedType::Parameter { id, .. } if id.0 >= PROJECTION_PARAMETER_BASE);
-        if !bounds
-            .iter()
-            .any(|bound| bound.arguments.iter().any(is_placeholder))
-        {
+        if !self.bounds_have_associated_parameters(bounds) {
             return instantiated;
         }
         let mut substitutions = HashMap::new();
-        let mut inferred =
-            infer_type_parameters(template, &instantiated, &mut substitutions);
+        let mut inferred = infer_type_parameters(template, &instantiated, &mut substitutions);
         if !inferred
             && let (CheckedType::Function(template), CheckedType::Function(instantiated)) =
                 (template, &instantiated)
@@ -16412,61 +16820,8 @@ impl TypeChecker {
         if !inferred {
             return instantiated;
         }
-        let projections = self.projection_values(bounds, &substitutions);
-        if projections.is_empty() {
-            instantiated
-        } else {
-            substitute_type(instantiated, &projections)
-        }
-    }
-
-    /// The associated types (`Iterator.Item Iter`) that `bounds` determine once
-    /// `substitutions` fixes their explicit arguments, keyed by the projection
-    /// parameters standing for them.
-    fn projection_values(
-        &self,
-        bounds: &[CheckedTraitBound],
-        substitutions: &HashMap<TypeParameterId, CheckedType>,
-    ) -> HashMap<TypeParameterId, CheckedType> {
-        let is_placeholder = |argument: &CheckedType| matches!(argument, CheckedType::Parameter { id, .. } if id.0 >= PROJECTION_PARAMETER_BASE);
-        let mut projections = HashMap::new();
-        for bound in bounds {
-            if !bound.arguments.iter().any(is_placeholder) {
-                continue;
-            }
-            let arguments = bound
-                .arguments
-                .iter()
-                .map(|argument| {
-                    if is_placeholder(argument) {
-                        CheckedType::Inferred
-                    } else {
-                        substitute_type(argument.clone(), substitutions)
-                    }
-                })
-                .collect::<Vec<_>>();
-            if arguments
-                .iter()
-                .zip(&bound.arguments)
-                .any(|(argument, original)| {
-                    !is_placeholder(original) && contains_inferred_type(argument)
-                })
-            {
-                continue;
-            }
-            let Some(completed) = self.resolve_trait_obligation(bound.trait_id, &arguments) else {
-                continue;
-            };
-            for (original, value) in bound.arguments.iter().zip(&completed) {
-                if let CheckedType::Parameter { id, .. } = original
-                    && id.0 >= PROJECTION_PARAMETER_BASE
-                    && !contains_inferred_type(value)
-                {
-                    projections.insert(*id, value.clone());
-                }
-            }
-        }
-        projections
+        let substitutions = self.complete_bound_substitutions(bounds, &substitutions);
+        substitute_type_fixpoint(instantiated, &substitutions)
     }
 
     fn instantiate_function_template(
@@ -17148,6 +17503,7 @@ impl TypeChecker {
             type_parameters: Vec::new(),
             trait_bounds: Vec::new(),
             subtype_bounds: Vec::new(),
+            equality_bounds: Vec::new(),
             captures,
             track_caller: false,
             body: expression.clone(),
@@ -17199,6 +17555,15 @@ impl TypeChecker {
     }
 
     fn resolve_source_type_inner(
+        &mut self,
+        module: &ResolvedModule,
+        source_type: &Type,
+    ) -> CheckedType {
+        let ty = self.resolve_source_type_raw(module, source_type);
+        self.normalize_equalities(ty)
+    }
+
+    fn resolve_source_type_raw(
         &mut self,
         module: &ResolvedModule,
         source_type: &Type,
@@ -17450,7 +17815,12 @@ impl TypeChecker {
                 }
             }
             Type::Forall(ty) => {
-                // Resolve projections in the body before linking generic bounds.
+                self.resolve_bound_clause(
+                    module,
+                    &ty.generics.trait_bounds,
+                    &ty.generics.equality_bounds,
+                    true,
+                );
                 let body = self.resolve_source_type_inner(module, &ty.body);
                 if !matches!(body, CheckedType::Function(_) | CheckedType::Error) {
                     self.diagnostics.push(Diagnostic::new(
@@ -17892,12 +18262,12 @@ impl TypeChecker {
             .iter()
             .map(|pattern| self.checked_type_parameter_pattern(module, pattern))
             .collect::<Vec<_>>();
-        let mut declaration_bounds = Vec::new();
-        for bound in &declaration.trait_bounds {
-            if let Some(bound) = self.resolve_trait_bound(module, bound) {
-                declaration_bounds.push(bound);
-            }
-        }
+        let declaration_bounds = self.resolve_bound_clause(
+            module,
+            &declaration.trait_bounds,
+            &declaration.equality_bounds,
+            false,
+        );
         let declaration_bounds = self.expand_trait_bounds(declaration_bounds);
         self.active_function_bounds.push(declaration_bounds);
         self.active_subtype_bounds.push(Vec::new());
@@ -17994,10 +18364,14 @@ impl TypeChecker {
                 return CheckedType::Error;
             }
         }
-        for bound in &declaration.trait_bounds {
-            let Some(checked_bound) = self.resolve_trait_bound(module, bound) else {
-                continue;
-            };
+        let checked_bounds = self.resolve_bound_clause(
+            module,
+            &declaration.trait_bounds,
+            &declaration.equality_bounds,
+            false,
+        );
+        substitutions = self.complete_bound_substitutions(&checked_bounds, &substitutions);
+        for checked_bound in checked_bounds {
             let arguments = checked_bound
                 .arguments
                 .into_iter()
@@ -18005,7 +18379,7 @@ impl TypeChecker {
                 .collect::<Vec<_>>();
             if !self.trait_obligation_available(checked_bound.trait_id, &arguments) {
                 self.diagnostics.push(Diagnostic::new(
-                    bound.syntax.span.clone(),
+                    declaration.syntax.span.clone(),
                     trait_bound_failure(&arguments),
                 ));
                 return CheckedType::Error;
@@ -18093,12 +18467,12 @@ impl TypeChecker {
             ));
             return CheckedType::Error;
         }
-        let mut declaration_bounds = Vec::new();
-        for bound in &declaration.trait_bounds {
-            if let Some(bound) = self.resolve_trait_bound(module, bound) {
-                declaration_bounds.push(bound);
-            }
-        }
+        let declaration_bounds = self.resolve_bound_clause(
+            module,
+            &declaration.trait_bounds,
+            &declaration.equality_bounds,
+            false,
+        );
         let declaration_bounds = self.expand_trait_bounds(declaration_bounds);
         if self.bounds_violate_functional_dependencies(&declaration_bounds) {
             self.diagnostics.push(Diagnostic::new(
@@ -20126,7 +20500,7 @@ fn parameters_only_behind_indirection(
     }
 }
 
-fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
+pub(crate) fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
     fn collect(value_type: &CheckedType, ids: &mut HashSet<TypeParameterId>) {
         match value_type {
             CheckedType::Forall(scheme) => ids.extend(scheme.free_ids(false)),
@@ -20477,6 +20851,216 @@ fn sum_with_several_rows(ty: &CheckedType) -> Option<CheckedType> {
 /// two impls (a generic one or a concrete one) was declared first: e.g.
 /// unifying a concrete existing impl's `I32` against a new generic impl's
 /// bare `T` binds `T ↦ I32` just as readily as the reverse.
+fn equality_reaches(
+    from: TypeParameterId,
+    target: TypeParameterId,
+    substitutions: &HashMap<TypeParameterId, CheckedType>,
+    visited: &mut HashSet<TypeParameterId>,
+) -> bool {
+    if from == target {
+        return true;
+    }
+    if !visited.insert(from) {
+        return false;
+    }
+    substitutions.get(&from).is_some_and(|ty| {
+        type_parameter_ids(ty)
+            .iter()
+            .any(|id| equality_reaches(*id, target, substitutions, visited))
+    })
+}
+
+fn equality_substitutions_are_cyclic(
+    substitutions: &HashMap<TypeParameterId, CheckedType>,
+) -> bool {
+    substitutions.iter().any(|(id, ty)| {
+        type_parameter_ids(ty)
+            .iter()
+            .any(|from| equality_reaches(*from, *id, substitutions, &mut HashSet::new()))
+    })
+}
+
+fn unify_equality_types(
+    left: &CheckedType,
+    right: &CheckedType,
+    free_parameters: &HashSet<TypeParameterId>,
+    substitutions: &mut HashMap<TypeParameterId, CheckedType>,
+) -> bool {
+    fn resolve(
+        value_type: &CheckedType,
+        free_parameters: &HashSet<TypeParameterId>,
+        substitutions: &HashMap<TypeParameterId, CheckedType>,
+    ) -> CheckedType {
+        let mut current = value_type.clone();
+        for _ in 0..=substitutions.len() {
+            let CheckedType::Parameter { id, .. } = &current else {
+                break;
+            };
+            if !free_parameters.contains(id) {
+                break;
+            }
+            match substitutions.get(id) {
+                Some(next) => current = next.clone(),
+                None => break,
+            }
+        }
+        current
+    }
+
+    let left = resolve(left, free_parameters, substitutions);
+    let right = resolve(right, free_parameters, substitutions);
+    match (&left, &right) {
+        (
+            CheckedType::Parameter { id: left_id, .. },
+            CheckedType::Parameter { id: right_id, .. },
+        ) if free_parameters.contains(left_id) && free_parameters.contains(right_id) => {
+            if left_id != right_id {
+                substitutions.insert(*left_id, right);
+            }
+            true
+        }
+        (CheckedType::Parameter { id, .. }, _) if free_parameters.contains(id) => {
+            if type_parameter_ids(&right).iter().any(|parameter| {
+                equality_reaches(*parameter, *id, substitutions, &mut HashSet::new())
+            }) {
+                return false;
+            }
+            substitutions.insert(*id, right);
+            true
+        }
+        (_, CheckedType::Parameter { id, .. }) if free_parameters.contains(id) => {
+            if type_parameter_ids(&left).iter().any(|parameter| {
+                equality_reaches(*parameter, *id, substitutions, &mut HashSet::new())
+            }) {
+                return false;
+            }
+            substitutions.insert(*id, left);
+            true
+        }
+        (CheckedType::RawPtr { pointee: left }, CheckedType::RawPtr { pointee: right }) => {
+            unify_equality_types(left, right, free_parameters, substitutions)
+        }
+        (CheckedType::RawMutPtr { pointee: left }, CheckedType::RawMutPtr { pointee: right }) => {
+            unify_equality_types(left, right, free_parameters, substitutions)
+        }
+        (CheckedType::Shared(left), CheckedType::Shared(right))
+        | (CheckedType::Unique(left), CheckedType::Unique(right))
+        | (CheckedType::SharedBuffer(left), CheckedType::SharedBuffer(right))
+        | (CheckedType::Buffer(left), CheckedType::Buffer(right)) => {
+            unify_equality_types(left, right, free_parameters, substitutions)
+        }
+        (
+            CheckedType::Opaque {
+                id: left_id,
+                arguments: left_arguments,
+                ..
+            },
+            CheckedType::Opaque {
+                id: right_id,
+                arguments: right_arguments,
+                ..
+            },
+        )
+        | (
+            CheckedType::TypeConstructor {
+                id: left_id,
+                arguments: left_arguments,
+                ..
+            },
+            CheckedType::TypeConstructor {
+                id: right_id,
+                arguments: right_arguments,
+                ..
+            },
+        )
+        | (
+            CheckedType::Wrapper {
+                id: left_id,
+                arguments: left_arguments,
+                ..
+            },
+            CheckedType::Wrapper {
+                id: right_id,
+                arguments: right_arguments,
+                ..
+            },
+        ) => {
+            left_id == right_id
+                && left_arguments.len() == right_arguments.len()
+                && left_arguments
+                    .iter()
+                    .zip(right_arguments)
+                    .all(|(left, right)| {
+                        unify_equality_types(left, right, free_parameters, substitutions)
+                    })
+        }
+        (CheckedType::Product(left), CheckedType::Product(right)) => {
+            left.slotted == right.slotted
+                && left.spreads == right.spreads
+                && left.variadic == right.variadic
+                && left.elements.len() == right.elements.len()
+                && left
+                    .elements
+                    .iter()
+                    .zip(&right.elements)
+                    .all(|(left, right)| {
+                        left.name == right.name
+                            && unify_equality_types(
+                                &left.value_type,
+                                &right.value_type,
+                                free_parameters,
+                                substitutions,
+                            )
+                    })
+        }
+        (CheckedType::Function(left), CheckedType::Function(right)) => {
+            left.moves == right.moves
+                && left.mutations == right.mutations
+                && left.effects == right.effects
+                && unify_equality_types(
+                    &left.parameter,
+                    &right.parameter,
+                    free_parameters,
+                    substitutions,
+                )
+                && unify_equality_types(&left.result, &right.result, free_parameters, substitutions)
+        }
+        (
+            CheckedType::Array {
+                element: le,
+                count: lc,
+            },
+            CheckedType::Array {
+                element: re,
+                count: rc,
+            },
+        ) => {
+            unify_equality_types(le, re, free_parameters, substitutions)
+                && unify_equality_types(lc, rc, free_parameters, substitutions)
+        }
+        // Union construction is not injective: A | I32 == String | I32
+        // does not imply A == String (A could also be String | I32). Compare
+        // known unions without inferring their individual alternatives.
+        (CheckedType::Sum(_), CheckedType::Sum(_)) => {
+            let left = substitute_type_fixpoint(left, substitutions);
+            let right = substitute_type_fixpoint(right, substitutions);
+            match (&left, &right) {
+                (CheckedType::Sum(left), CheckedType::Sum(right)) => {
+                    left.alternatives.len() == right.alternatives.len()
+                        && left.alternatives.iter().all(|alternative| {
+                            right
+                                .alternatives
+                                .iter()
+                                .any(|candidate| types_equivalent(alternative, candidate))
+                        })
+                }
+                _ => types_equivalent(&left, &right),
+            }
+        }
+        _ => types_equivalent(&left, &right),
+    }
+}
+
 fn unify_impl_headers(
     left: &CheckedType,
     right: &CheckedType,
@@ -23273,6 +23857,22 @@ mod opaque_sizedness_tests {
             );
         }
     }
+}
+
+/// Singleton products are grouping in type syntax, including equality operands.
+fn equality_projection_head<'a>(
+    module: &ResolvedModule,
+    source: &'a Type,
+) -> Option<(TraitId, usize, Vec<&'a Type>)> {
+    if let Type::Product(product) = source
+        && !product.slotted
+        && !product.variadic
+        && product.elements.len() == 1
+        && !product.elements[0].spread
+    {
+        return equality_projection_head(module, &product.elements[0].ty);
+    }
+    projection_head(module, source)
 }
 
 /// Splits an application spine headed by a `Trait.Name` projection into the

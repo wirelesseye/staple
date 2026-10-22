@@ -2248,7 +2248,8 @@ Parameters are positional: `first` declares `<A, B>` even though its runtime
 parameter is a product. Product patterns are not allowed inside angle brackets.
 The `where` clause holds trait bounds (see [Traits and bounded generic
 functions](#traits-and-bounded-generic-functions)), subtype bounds (see
-[Subtype bounds](#subtype-bounds)), and `?Sized` relaxations. Effect parameters
+[Subtype bounds](#subtype-bounds)), associated-type equalities (`==`), and
+`?Sized` relaxations. Effect parameters
 stand for effect sets; see [Typed resources](#typed-resources).
 
 Every type parameter has an implicit `Sized` bound. A function that forwards a
@@ -3033,6 +3034,46 @@ def next_item = <Iter where Iterator Iter> move iter: Iter =>
     IterStep (Iter, Iterator.Item Iter) :: Iterator.next iter
 ```
 
+A `where` clause may require exact equality of associated types with `==`:
+
+```staple
+def chain = <L, R where Iterator L, Iterator R,
+    Iterator.Item L == Iterator.Item R>
+    (move left: L; move right: R) => Chain L R (Iterator.Item L) :: ...
+
+def integer_item = <Iter where Iterator Iter, Iterator.Item Iter == I32>
+    move iter: Iter => Option I32 :: iter |> find (x => True)
+```
+
+At least one side must be an associated-type projection; the other may be
+another projection, a type parameter, or a concrete or compound type. Both
+sides use ordinary type syntax, including parentheses around applied projection
+arguments. Equalities are symmetric, transitive, and independent of the order
+of constraints. Write multiple equalities as separate comma-separated clauses.
+`==` requires the same type, including ownership markers and effects in function
+types; it performs no conversion or subtype widening.
+
+The projections require matching trait bounds, including bounds supplied by
+trait prerequisites. An equality does not introduce a trait bound implicitly.
+Inside the declaration the equal types are interchangeable, including inside
+other types. At each call or type instantiation the caller must establish the
+equality. Associated types can determine an ordinary type argument, but an
+equality does not select an iterator or other trait argument by searching for
+implementations with the requested associated type. Contradictory and recursive
+equalities are errors. A union may appear in an equality, but the compiler does
+not infer its individual alternatives from that equality: union construction is
+not injective (`A | I32 == String | I32` does not determine `A`). Associated-type
+equality constraints are available wherever trait bounds are allowed, including
+generic function types, type and
+trait declarations, associated-type declarations, implementations, and companions.
+Implementation arguments retain their existing restrictions; put projection
+relationships in the implementation's `where` clause. The existing restriction
+on polymorphic values whose schemes retain an associated-type projection still
+applies; an equality with a concrete type or an explicit type parameter can
+remove that projection. Other existing restrictions on polymorphic
+implementations still apply, including transitive calls to consumers whose
+associated item type is not available to their runtime implementation.
+
 An implementation binds every associated type exactly once with
 `type Name = Type`:
 
@@ -3221,9 +3262,9 @@ Here `Target` is implemented for every `T` that implements `Bound`, so
 `Target.act` is available for `I32` because of the concrete `Bound I32`
 implementation above. A generic implementation's own bounds are available
 inside its members' bodies, exactly as they are inside a bounded generic
-`def`. `?Sized` relaxations and `<:` subtype bounds may also appear in an
-implementation's `where` clause, alongside trait bounds, exactly as in a
-generic `def`.
+`def`. `?Sized` relaxations, `<:` subtype bounds, and associated-type equality
+constraints may also appear in an implementation's `where` clause, alongside
+trait bounds, exactly as in a generic `def`.
 
 Two implementations of the same trait overlap when their headers unify and
 every bound of both could hold for the unified arguments; overlapping
@@ -4174,7 +4215,7 @@ and does its work only when advanced.
 | `take_while` | `keep: Item -> Bool` | items up to the first one `keep` rejects |
 | `enumerate` | — | `(index, item)` pairs, counting from `0` |
 | `zip` | `move right: R` | `(item, right_item)` pairs, until either side runs out |
-| `chain` | `move second: Iter` | the items of the iterator, then those of `second` |
+| `chain` | `move second: R` (same item type) | the items of the iterator, then those of `second` |
 
 *Consumers* drive the iterator to the end, or until they have their answer,
 and return a value.
@@ -4217,7 +4258,13 @@ iterator.
 **Adapter types.** Each adapter has its own result type (`Map Iter B`,
 `Filter Iter Item`, `Take Iter Item`, and so on). Its closure is not part of
 that type, so two `map` pipelines over the same kind of source have the same
-type. `chain` relies on this: both of its iterators must have the same type.
+type. `chain` accepts different iterator types with equal item types, and returns
+`Chain L R Item`:
+
+```staple
+(0 .. 3) |> chain ((3 .. 6) |> filter (x => x > 3)) |> collect
+// contains 0, 1, 2, 4, 5
+```
 
 ## Types
 

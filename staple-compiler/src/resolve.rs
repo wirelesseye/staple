@@ -79,6 +79,7 @@ pub struct ResolvedTraitImplementation {
     pub associated_arguments: Vec<Type>,
     pub trait_bounds: Vec<staple_syntax::TraitBound>,
     pub subtype_bounds: Vec<staple_syntax::SubtypeBound>,
+    pub equality_bounds: Vec<staple_syntax::EqualityBound>,
     pub negative: bool,
     pub methods: HashMap<TraitMethodId, FunctionId>,
 }
@@ -510,6 +511,7 @@ pub struct ResolvedFunction {
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<staple_syntax::TraitBound>,
     pub subtype_bounds: Vec<staple_syntax::SubtypeBound>,
+    pub equality_bounds: Vec<staple_syntax::EqualityBound>,
     pub captures: Vec<SymbolId>,
     /// Set on the outermost function stage of a `@track_caller` binding. Its
     /// closure environment carries the caller's source location.
@@ -1639,6 +1641,7 @@ pub struct NameResolver {
     binding_type_parameters: HashMap<SyntaxId, Vec<TypeParameterPattern>>,
     binding_trait_bounds: HashMap<SyntaxId, Vec<staple_syntax::TraitBound>>,
     binding_subtype_bounds: HashMap<SyntaxId, Vec<staple_syntax::SubtypeBound>>,
+    binding_equality_bounds: HashMap<SyntaxId, Vec<staple_syntax::EqualityBound>>,
     declared_types: Vec<HashMap<String, TypeId>>,
     declared_macros: Vec<HashMap<String, Vec<MacroId>>>,
     declared_traits: Vec<HashMap<String, TraitId>>,
@@ -3423,6 +3426,7 @@ impl NameResolver {
             parameters: submodule.type_parameters.clone(),
             trait_bounds: submodule.trait_bounds.clone(),
             subtype_bounds: submodule.subtype_bounds.clone(),
+            equality_bounds: submodule.equality_bounds.clone(),
             sized_relaxations: submodule.sized_relaxations.clone(),
         };
         self.push_type_parameter_scope();
@@ -3923,6 +3927,8 @@ impl NameResolver {
             .insert(binding.syntax.id, binding.all_trait_bounds());
         self.binding_subtype_bounds
             .insert(binding.syntax.id, binding.all_subtype_bounds());
+        self.binding_equality_bounds
+            .insert(binding.syntax.id, binding.all_equality_bounds());
         self.symbols.insert(binding.syntax.id, symbol);
         self.symbol_owners.insert(symbol, None);
         self.symbol_modules.insert(symbol, self.current_module);
@@ -4719,6 +4725,10 @@ impl NameResolver {
             }
             self.resolve_type(&bound.supertype);
         }
+        for bound in &declaration.equality_bounds {
+            self.resolve_type(&bound.left);
+            self.resolve_type(&bound.right);
+        }
         let mut defaulted_parameters = HashSet::new();
         for bound in &declaration.default_bounds {
             if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
@@ -4811,6 +4821,10 @@ impl NameResolver {
                         self.resolve_type(argument);
                     }
                 }
+                for bound in &declaration.equality_bounds {
+                    self.resolve_type(&bound.left);
+                    self.resolve_type(&bound.right);
+                }
                 let mut defaulted_parameters = HashSet::new();
                 for bound in &declaration.default_bounds {
                     if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
@@ -4878,11 +4892,17 @@ impl NameResolver {
                             }
                             self.resolve_type(&bound.supertype);
                         }
+                        for bound in &ty.generics.equality_bounds {
+                            self.resolve_type(&bound.left);
+                            self.resolve_type(&bound.right);
+                        }
                         self.resolve_type(&ty.body);
                         self.binding_trait_bounds
                             .insert(member.syntax.id, ty.generics.trait_bounds.clone());
                         self.binding_subtype_bounds
                             .insert(member.syntax.id, ty.generics.subtype_bounds.clone());
+                        self.binding_equality_bounds
+                            .insert(member.syntax.id, ty.generics.equality_bounds.clone());
                     } else {
                         self.resolve_type(&member.annotation);
                     }
@@ -4903,6 +4923,8 @@ impl NameResolver {
                                 .insert(member.syntax.id, g.trait_bounds.clone());
                             self.binding_subtype_bounds
                                 .insert(member.syntax.id, g.subtype_bounds.clone());
+                            self.binding_equality_bounds
+                                .insert(member.syntax.id, g.equality_bounds.clone());
                         }
                     }
                     self.binding_type_parameters
@@ -4974,6 +4996,10 @@ impl NameResolver {
                         ));
                     }
                     self.resolve_type(&bound.supertype);
+                }
+                for bound in &implementation.equality_bounds {
+                    self.resolve_type(&bound.left);
+                    self.resolve_type(&bound.right);
                 }
                 let mut associated_arguments = Vec::new();
                 for binding in &implementation.associated_types {
@@ -5053,6 +5079,8 @@ impl NameResolver {
                         .insert(member.syntax.id, implementation.trait_bounds.clone());
                     self.binding_subtype_bounds
                         .insert(member.syntax.id, implementation.subtype_bounds.clone());
+                    self.binding_equality_bounds
+                        .insert(member.syntax.id, implementation.equality_bounds.clone());
                     self.resolve_expression(
                         &member.value,
                         None,
@@ -5089,6 +5117,7 @@ impl NameResolver {
                             associated_arguments,
                             trait_bounds: implementation.trait_bounds.clone(),
                             subtype_bounds: implementation.subtype_bounds.clone(),
+                            equality_bounds: implementation.equality_bounds.clone(),
                             negative: implementation.negative,
                             methods,
                         });
@@ -5200,6 +5229,9 @@ impl NameResolver {
         self.binding_subtype_bounds
             .entry(binding.syntax.id)
             .or_insert_with(|| binding.all_subtype_bounds());
+        self.binding_equality_bounds
+            .entry(binding.syntax.id)
+            .or_insert_with(|| binding.all_equality_bounds());
         self.push_type_parameter_scope();
         if let Some(generics) = &binding.companion_generics {
             self.resolve_value_generics(generics, true);
@@ -5924,6 +5956,12 @@ impl NameResolver {
                             bounds.push(b.clone());
                         }
                     }
+                    let bounds = self.binding_equality_bounds.entry(syntax).or_default();
+                    for b in &g.equality_bounds {
+                        if !bounds.contains(b) {
+                            bounds.push(b.clone());
+                        }
+                    }
                 }
                 let function_id = FunctionId(self.next_function_id);
                 self.next_function_id += 1;
@@ -6018,6 +6056,9 @@ impl NameResolver {
                         .unwrap_or_default(),
                     subtype_bounds: suggested_function
                         .and_then(|(_, syntax)| self.binding_subtype_bounds.get(&syntax).cloned())
+                        .unwrap_or_default(),
+                    equality_bounds: suggested_function
+                        .and_then(|(_, syntax)| self.binding_equality_bounds.get(&syntax).cloned())
                         .unwrap_or_default(),
                     captures,
                     track_caller,
@@ -6417,6 +6458,10 @@ impl NameResolver {
                 ));
             }
             self.resolve_type_with(&bound.supertype, strict);
+        }
+        for bound in &generics.equality_bounds {
+            self.resolve_type_with(&bound.left, strict);
+            self.resolve_type_with(&bound.right, strict);
         }
     }
 
@@ -6949,6 +6994,10 @@ impl NameResolver {
                 }
                 for bound in &ty.generics.subtype_bounds {
                     self.validate_type_visibility(&bound.supertype, required, subject);
+                }
+                for bound in &ty.generics.equality_bounds {
+                    self.validate_type_visibility(&bound.left, required, subject);
+                    self.validate_type_visibility(&bound.right, required, subject);
                 }
             }
 
