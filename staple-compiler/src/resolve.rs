@@ -632,18 +632,13 @@ struct TypeMemberReference {
     member: String,
 }
 
-/// A member of a detached companion block: one whose target is not a
-/// nominal type declared in the block's module. It belongs to its target by
-/// identity rather than through a namespace.
+/// A member of a detached companion block: one whose target is structural.
+/// It belongs to its target by identity rather than through a namespace.
 #[derive(Debug, Clone, Copy)]
 struct ResolvedDetachedMember {
     symbol: SymbolId,
-    block: ModuleId,
     declaring_module: ModuleId,
     public: bool,
-    /// The nominal type the target denotes, once resolved; `None` for a
-    /// structural target, which the checker matches against receivers.
-    nominal: Option<TypeId>,
 }
 
 impl ResolvedModule {
@@ -821,10 +816,7 @@ impl ResolvedModule {
             .get(name)
             .into_iter()
             .flatten()
-            .filter(|member| {
-                member.nominal.is_none()
-                    && (member.public || accessing_module == Some(member.declaring_module))
-            })
+            .filter(|member| member.public || accessing_module == Some(member.declaring_module))
             .map(|member| member.symbol)
             .collect()
     }
@@ -836,7 +828,6 @@ impl ResolvedModule {
             .flat_map(|(name, members)| {
                 members
                     .iter()
-                    .filter(|member| member.nominal.is_none())
                     .map(move |member| (name.as_str(), member.symbol))
             })
     }
@@ -846,7 +837,7 @@ impl ResolvedModule {
         self.detached_companion_members
             .values()
             .flatten()
-            .any(|member| member.symbol == symbol && member.nominal.is_none())
+            .any(|member| member.symbol == symbol)
     }
 
     /// The resolved target of the companion block declaring member `symbol`.
@@ -1600,14 +1591,16 @@ pub struct NameResolver {
     blanket_companion_members: HashMap<String, Vec<ResolvedBlanketMember>>,
     blanket_companion_references: HashMap<SyntaxId, (TypeId, Vec<SymbolId>)>,
     detached_companion_members: HashMap<String, Vec<ResolvedDetachedMember>>,
-    /// The nominal type each detached companion block extends.
-    detached_companion_types: HashMap<ModuleId, TypeId>,
     /// `Type.member` references that may name a detached companion member,
     /// settled once every detached block's target is resolved.
     type_member_references: HashMap<SyntaxId, TypeMemberReference>,
     /// The module declaring each companion block, whose access the block's
     /// body shares.
     companion_parents: HashMap<ModuleId, ModuleId>,
+    /// The companion blocks of each type namespace.
+    namespace_blocks: HashMap<ModuleId, Vec<ModuleId>>,
+    /// Every type namespace module.
+    type_namespaces: HashSet<ModuleId>,
     /// The resolved target of each detached companion block without members.
     memberless_companion_targets: HashMap<ModuleId, Type>,
     trait_implementations: Vec<ResolvedTraitImplementation>,
@@ -1851,6 +1844,11 @@ impl NameResolver {
         self.build_definition_context_values(&program);
         self.collect_standard_library_contract(&program);
         for source_module in program.modules() {
+            // A type namespace has no source; its blocks are resolved as
+            // modules of their own.
+            if source_module.namespace {
+                continue;
+            }
             self.current_module = source_module.id;
             self.scopes.clear();
             self.shadowable.clear();
@@ -1905,16 +1903,9 @@ impl NameResolver {
                         .keys()
                         .cloned(),
                 );
-                let mut values = self.module_values[parent.0].clone();
-                let mut types = self.declared_types[parent.0].clone();
-                let mut traits = self.declared_traits[parent.0].clone();
-                for block in program.companion_blocks(source_module.id) {
-                    if block != source_module.id {
-                        values.extend(self.module_values[block.0].clone());
-                        types.extend(self.declared_types[block.0].clone());
-                        traits.extend(self.declared_traits[block.0].clone());
-                    }
-                }
+                let values = self.module_values[parent.0].clone();
+                let types = self.declared_types[parent.0].clone();
+                let traits = self.declared_traits[parent.0].clone();
                 self.scopes
                     .last_mut()
                     .expect("resolver value scope")
@@ -1976,7 +1967,7 @@ impl NameResolver {
         }
 
         self.validate_trait_prerequisite_cycles();
-        self.resolve_detached_companions(&program);
+        self.validate_companion_targets(&program);
         self.validate_blanket_companions(&program);
 
         if !self.diagnostics.is_empty() {
@@ -2028,51 +2019,35 @@ impl NameResolver {
                     .map(DefinitionId::Type);
             }
         }
+        // Each nominal type with companion items has one namespace, holding
+        // the members of every block for the type wherever it is written.
         let mut companion_type_for_module = HashMap::new();
         let mut companion_members = HashMap::<TypeId, HashMap<_, _>>::new();
-        for (ty, owner) in &self.type_modules {
-            let name = &self.type_declarations[ty].name;
-            let Some(child) = program.child_named(*owner, name) else {
+        for namespace in program.modules().iter().filter(|module| module.namespace) {
+            let (Some(owner), Some(name)) = (namespace.parent, namespace.name.as_deref()) else {
                 continue;
             };
-            if !program.module(child).companion {
-                continue;
-            }
-            // A companion of an alias is the companion of the aliased type.
-            let Some(target) = self.alias_companion_target(*ty) else {
+            let Some(ty) = self.declared_types[owner.0].get(name).copied() else {
                 continue;
             };
-            for block in program.companion_blocks(child) {
-                companion_type_for_module.insert(block, target);
-                companion_members.entry(target).or_default().extend(
+            for block in program.companion_blocks(namespace.id) {
+                companion_type_for_module.insert(block, ty);
+                if block == namespace.id {
+                    continue;
+                }
+                let declaring_module = program.module(block).parent.unwrap_or(owner);
+                companion_members.entry(ty).or_default().extend(
                     self.module_values[block.0].iter().map(|(name, symbol)| {
                         (
                             name.clone(),
                             ResolvedCompanionMember {
                                 symbol: *symbol,
-                                declaring_module: *owner,
+                                declaring_module,
                                 public: self.interfaces[block.0].values.contains_key(name),
                             },
                         )
                     }),
                 );
-            }
-        }
-        // A detached block for a nominal type extends that type like its own
-        // blocks; duplicate names were rejected when its target was resolved.
-        companion_type_for_module.extend(self.detached_companion_types.iter());
-        for (name, members) in &self.detached_companion_members {
-            for member in members {
-                if let Some(ty) = member.nominal {
-                    companion_members.entry(ty).or_default().insert(
-                        name.clone(),
-                        ResolvedCompanionMember {
-                            symbol: member.symbol,
-                            declaring_module: member.declaring_module,
-                            public: member.public,
-                        },
-                    );
-                }
             }
         }
         let exported_module_definitions = self
@@ -3362,15 +3337,13 @@ impl NameResolver {
                         if submodule.visibility != Visibility::Private
                             && let Some(child) = namespace_child(program, submodule)
                         {
-                            for name in submodule_namespace_names(program, submodule, child) {
-                                self.package_interfaces[source_module.id.0]
+                            self.package_interfaces[source_module.id.0]
+                                .namespaces
+                                .insert(submodule.name.clone(), child);
+                            if submodule.visibility == Visibility::Public {
+                                self.interfaces[source_module.id.0]
                                     .namespaces
-                                    .insert(name.clone(), child);
-                                if submodule.visibility == Visibility::Public {
-                                    self.interfaces[source_module.id.0]
-                                        .namespaces
-                                        .insert(name, child);
-                                }
+                                    .insert(submodule.name.clone(), child);
                             }
                         }
                     }
@@ -3379,6 +3352,20 @@ impl NameResolver {
                     | Item::VisibilitySplice(_)
                     | Item::RepeatedItemSplice(_)
                     | Item::UseDeclaration(_) => {}
+                }
+            }
+            // A type's namespace is offered by name with the type, wherever
+            // its companion blocks are written.
+            for (name, namespace, visibility) in program.type_namespaces(source_module.id) {
+                if visibility != Visibility::Private {
+                    self.package_interfaces[source_module.id.0]
+                        .namespaces
+                        .insert(name.clone(), namespace);
+                    if visibility == Visibility::Public {
+                        self.interfaces[source_module.id.0]
+                            .namespaces
+                            .insert(name, namespace);
+                    }
                 }
             }
             let mut block_type_declarations = Vec::new();
@@ -3450,8 +3437,17 @@ impl NameResolver {
     /// each belongs to is known once the blocks' targets are resolved.
     fn collect_detached_companions(&mut self, program: &Program) {
         for module in program.modules().iter().filter(|module| module.companion) {
+            if module.namespace {
+                self.type_namespaces.insert(module.id);
+            }
             if let Some(parent) = module.parent {
                 self.companion_parents.insert(module.id, parent);
+            }
+            if let Some(namespace) = module.companion_namespace {
+                self.namespace_blocks
+                    .entry(namespace)
+                    .or_default()
+                    .push(module.id);
             }
         }
         for block in program.modules().iter().filter(|module| module.detached) {
@@ -3468,10 +3464,8 @@ impl NameResolver {
                     .or_default()
                     .push(ResolvedDetachedMember {
                         symbol,
-                        block: block.id,
                         declaring_module,
                         public,
-                        nominal: None,
                     });
             }
         }
@@ -3720,22 +3714,15 @@ impl NameResolver {
             .map(|_| HashMap::new())
             .collect();
         let mut explicit_names = vec![HashSet::<String>::new(); program.modules().len()];
-        // Unlike an ordinary inline module, a companion is an extension of
-        // its declaring module's type namespace. Its body therefore sees the
-        // parent's declarations without spelling `use super.*`, and the
-        // members of the type's other companion blocks.
+        // Unlike an ordinary inline module, a companion block sees the
+        // declarations of the module it is written in without spelling
+        // `use super.*`. The type's other blocks are reached through the
+        // type, like any other module's.
         for module in program.modules() {
             if module.companion
                 && let Some(parent) = module.parent
             {
-                let mut sources = vec![parent];
-                sources.extend(
-                    program
-                        .companion_blocks(module.id)
-                        .into_iter()
-                        .filter(|block| *block != module.id),
-                );
-                for source in sources {
+                for source in [parent] {
                     self.definition_context_values[module.id.0]
                         .extend(self.module_values[source.0].clone());
                     self.definition_context_types[module.id.0]
@@ -3754,10 +3741,12 @@ impl NameResolver {
                 if let Item::Submodule(submodule) = item
                     && let Some(child) = namespace_child(program, submodule)
                 {
-                    for name in submodule_namespace_names(program, submodule, child) {
-                        self.definition_context_namespaces[module.id.0].insert(name, child);
-                    }
+                    self.definition_context_namespaces[module.id.0]
+                        .insert(submodule.name.clone(), child);
                 }
+            }
+            for (name, namespace, _) in program.type_namespaces(module.id) {
+                self.definition_context_namespaces[module.id.0].insert(name, namespace);
             }
         }
         // A companion also sees the parent's submodule namespaces, the same
@@ -4275,16 +4264,20 @@ impl NameResolver {
             let Some(child) = namespace_child(program, submodule) else {
                 continue;
             };
-            for name in submodule_namespace_names(program, submodule, child) {
-                let previous = self
-                    .namespaces
-                    .last_mut()
-                    .expect("resolver namespace scope")
-                    .insert(name.clone(), child);
-                if previous.is_some_and(|previous| previous != child) {
-                    self.duplicate_import(&name, submodule.syntax.span.clone());
-                }
+            let previous = self
+                .namespaces
+                .last_mut()
+                .expect("resolver namespace scope")
+                .insert(submodule.name.clone(), child);
+            if previous.is_some_and(|previous| previous != child) {
+                self.duplicate_import(&submodule.name, submodule.syntax.span.clone());
             }
+        }
+        for (name, namespace, _) in program.type_namespaces(module) {
+            self.namespaces
+                .last_mut()
+                .expect("resolver namespace scope")
+                .insert(name, namespace);
         }
     }
 
@@ -6213,8 +6206,12 @@ impl NameResolver {
                         self.namespace_references.insert(*syntax_id, current);
                         segment_module = self.module_parents.get(&current).copied();
                     }
-                    if let Some(symbol) =
-                        self.qualified_interface(module).values.get(&item).copied()
+                    if let Some(symbol) = self
+                        .qualified_interface(module)
+                        .values
+                        .get(&item)
+                        .copied()
+                        .or_else(|| self.own_companion_member(module, &item))
                     {
                         self.symbols.insert(access.syntax.id, symbol);
                     } else if self.resolve_blanket_companion_access(access) {
@@ -6223,6 +6220,13 @@ impl NameResolver {
                         self.diagnostics.push(Diagnostic::new(
                             access.syntax.span.clone(),
                             format!("macro `{item}` must be invoked"),
+                        ));
+                    } else if self.type_namespaces.contains(&module) {
+                        self.diagnostics.push(Diagnostic::new(
+                            access.syntax.span.clone(),
+                            format!(
+                                "`{namespace}` has no accessible companion member named `{item}`"
+                            ),
                         ));
                     } else {
                         self.diagnostics.push(Diagnostic::new(
@@ -6722,16 +6726,18 @@ impl NameResolver {
         Some(current)
     }
 
-    /// Attaches each detached companion block to its target. A target that
-    /// denotes a nominal type, directly or through aliases, extends that
-    /// type, which must be declared in the block's package. A structural
-    /// target needs a component declared in the block's package; the checker
+    /// Checks every companion block's target. A block for a nominal type,
+    /// which the loader grouped into the type's namespace, must belong to
+    /// the type's package. A detached block's target is structural, and
+    /// needs a component declared in the block's package; the checker
     /// matches it against receivers by identity. Like the trait
     /// implementation orphan rule, this keeps packages from adding competing
     /// members to the same type.
-    fn resolve_detached_companions(&mut self, program: &Program) {
-        let mut own_members = self.local_companion_member_names(program);
-        for module in program.modules().iter().filter(|module| module.detached) {
+    fn validate_companion_targets(&mut self, program: &Program) {
+        for module in program.modules() {
+            if !module.companion || module.blanket || module.namespace {
+                continue;
+            }
             let parent = module.parent.expect("a companion block has a parent");
             let Some(submodule) =
                 find_submodule(&program.module(parent).syntax.items, |submodule| {
@@ -6740,6 +6746,24 @@ impl NameResolver {
             else {
                 continue;
             };
+            let package = program.package_of(module.id);
+            let span = submodule.syntax.span.clone();
+            if let Some(namespace) = module.companion_namespace {
+                let owner = program.module(namespace).parent;
+                if owner.is_some_and(|owner| program.package_of(owner) != package) {
+                    let target = submodule
+                        .companion_target
+                        .as_ref()
+                        .map_or_else(|| submodule.name.clone(), ToString::to_string);
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        format!(
+                            "companion target `{target}` is declared in another package; a package can add companion items only to its own types"
+                        ),
+                    ));
+                }
+                continue;
+            }
             // Each member carries a resolved copy of the block's target.
             let Some(target) = blanket_member_bindings(&module.syntax.items)
                 .into_iter()
@@ -6749,56 +6773,37 @@ impl NameResolver {
             else {
                 continue;
             };
-            let package = program.package_of(module.id);
-            let span = submodule.syntax.span.clone();
-            let Some(nominal) = self.detached_companion_nominal(&target) else {
-                continue;
-            };
-            if let Some(ty) = nominal {
-                if program.package_of(self.type_modules[&ty]) != package {
+            match self.detached_companion_nominal(&target) {
+                // Unresolved; already reported.
+                None => {}
+                Some(Some(ty)) if program.package_of(self.type_modules[&ty]) != package => {
                     self.diagnostics.push(Diagnostic::new(
                         span,
                         format!(
                             "companion target `{target}` is declared in another package; a package can add companion items only to its own types"
                         ),
                     ));
-                    continue;
                 }
-                self.detached_companion_types.insert(module.id, ty);
-                let mut values = self.module_values[module.id.0]
-                    .iter()
-                    .map(|(name, symbol)| (name.clone(), *symbol))
-                    .collect::<Vec<_>>();
-                values.sort_by_key(|(_, symbol)| symbol.0);
-                for (name, symbol) in values {
-                    if !own_members.insert((ty, name.clone())) {
+                Some(Some(_)) => self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!(
+                        "companion target `{target}` must name its type through a declaration or import of the module the block is written in"
+                    ),
+                )),
+                Some(None) => {
+                    let mut components = Vec::new();
+                    self.collect_type_components(&target, &mut components, &mut HashSet::new());
+                    if !components
+                        .iter()
+                        .any(|ty| program.package_of(self.type_modules[ty]) == package)
+                    {
                         self.diagnostics.push(Diagnostic::new(
-                            self.symbol_declaration_spans[&symbol].clone(),
-                            format!("duplicate definition of `{name}`"),
+                            span,
+                            format!(
+                                "companion target `{target}` has no component declared in the current package; a structural companion needs a type of its own package in its target"
+                            ),
                         ));
                     }
-                }
-                for member in self
-                    .detached_companion_members
-                    .values_mut()
-                    .flatten()
-                    .filter(|member| member.block == module.id)
-                {
-                    member.nominal = Some(ty);
-                }
-            } else {
-                let mut components = Vec::new();
-                self.collect_type_components(&target, &mut components, &mut HashSet::new());
-                if !components
-                    .iter()
-                    .any(|ty| program.package_of(self.type_modules[ty]) == package)
-                {
-                    self.diagnostics.push(Diagnostic::new(
-                        span,
-                        format!(
-                            "companion target `{target}` has no component declared in the current package; a structural companion needs a type of its own package in its target"
-                        ),
-                    ));
                 }
             }
         }
@@ -6824,30 +6829,6 @@ impl NameResolver {
             }
             _ => Some(None),
         }
-    }
-
-    /// The names of the members of every type's own companion blocks.
-    fn local_companion_member_names(&self, program: &Program) -> HashSet<(TypeId, String)> {
-        let mut names = HashSet::new();
-        for (ty, owner) in &self.type_modules {
-            let Some(child) = program.child_named(*owner, &self.type_declarations[ty].name) else {
-                continue;
-            };
-            if !program.module(child).companion {
-                continue;
-            }
-            let Some(target) = self.alias_companion_target(*ty) else {
-                continue;
-            };
-            for block in program.companion_blocks(child) {
-                names.extend(
-                    self.module_values[block.0]
-                        .keys()
-                        .map(|name| (target, name.clone())),
-                );
-            }
-        }
-        names
     }
 
     /// The nominal types named anywhere in `ty`, looking through aliases.
@@ -6904,11 +6885,9 @@ impl NameResolver {
         }
     }
 
-    /// Settles each `Type.member` reference that named a detached companion
-    /// member, once every detached block's target is known. The type's own
-    /// member, including one from a detached block for it, is the reference;
-    /// otherwise blanket members and structural members remain candidates
-    /// for the checker, which matches them against `Type`.
+    /// Settles each `Type.member` reference that named a structural
+    /// companion member, keeping the accessible candidates for the checker,
+    /// which matches them against `Type`.
     fn settle_type_member_references(&mut self) {
         let mut references = self.type_member_references.drain().collect::<Vec<_>>();
         references.sort_by_key(|(syntax, _)| syntax.0);
@@ -6917,31 +6896,16 @@ impl NameResolver {
             else {
                 continue;
             };
-            let target = self.alias_companion_target(ty);
-            let detached = |symbol: SymbolId| {
-                self.detached_companion_members
-                    .values()
-                    .flatten()
-                    .find(|member| member.symbol == symbol)
-                    .copied()
-            };
-            let accessible = |member: &ResolvedDetachedMember| {
-                member.public || reference.module == member.declaring_module
-            };
-            if let Some(own) = candidates.iter().copied().find(|symbol| {
-                detached(*symbol).is_some_and(|member| {
-                    member.nominal.is_some() && member.nominal == target && accessible(&member)
-                })
-            }) {
-                self.blanket_companion_references.remove(&access);
-                self.symbols.insert(access, own);
-                continue;
-            }
             let kept = candidates
                 .into_iter()
-                .filter(|symbol| match detached(*symbol) {
-                    Some(member) => member.nominal.is_none() && accessible(&member),
-                    None => true,
+                .filter(|symbol| {
+                    self.detached_companion_members
+                        .values()
+                        .flatten()
+                        .find(|member| member.symbol == *symbol)
+                        .is_none_or(|member| {
+                            member.public || reference.module == member.declaring_module
+                        })
                 })
                 .collect::<Vec<_>>();
             match kept.as_slice() {
@@ -7366,6 +7330,21 @@ impl NameResolver {
             .rev()
             .find_map(|scope| scope.get(name).copied())
             .or_else(|| self.prelude_values.get(name).copied())
+    }
+
+    /// A member without `pub` of a block in type namespace `namespace`,
+    /// reached from the module the block is written in.
+    fn own_companion_member(&self, namespace: ModuleId, item: &str) -> Option<SymbolId> {
+        let module = self
+            .companion_parents
+            .get(&self.current_module)
+            .copied()
+            .unwrap_or(self.current_module);
+        self.namespace_blocks
+            .get(&namespace)?
+            .iter()
+            .filter(|block| self.companion_parents.get(block) == Some(&module))
+            .find_map(|block| self.module_values[block.0].get(item).copied())
     }
 
     /// Resolves `Type.member` where `member` is not in `Type`'s namespace:
@@ -8729,30 +8708,10 @@ fn blanket_member_bindings(items: &[Item]) -> Vec<&staple_syntax::Binding> {
     bindings
 }
 
-/// The module an inline submodule's name refers to: the submodule itself, or
-/// for a further `companion` block of a type, the type's first block, which
-/// stands for the type's namespace. A blanket companion belongs to every
-/// type satisfying its bounds, so its name refers to no module.
+/// The module an inline submodule's name refers to. A `companion` block's
+/// name refers to no module: its members are reached through its target.
 fn namespace_child(program: &Program, submodule: &staple_syntax::Submodule) -> Option<ModuleId> {
     program.namespace_child(submodule.syntax.id)
-}
-
-/// The namespace names an inline submodule is reachable by: its own name,
-/// plus, for an alias's companion merged into the aliased type's companion
-/// module, that type's name.
-fn submodule_namespace_names(
-    program: &Program,
-    submodule: &staple_syntax::Submodule,
-    child: ModuleId,
-) -> Vec<String> {
-    let mut names = vec![submodule.name.clone()];
-    if submodule.companion
-        && let Some(name) = &program.module(child).name
-        && *name != submodule.name
-    {
-        names.push(name.clone());
-    }
-    names
 }
 
 /// Collects the products whose fields may declare defaults in a `wrap`/`from`

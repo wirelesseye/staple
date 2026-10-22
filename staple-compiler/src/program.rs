@@ -24,11 +24,16 @@ pub struct SourceModule {
     /// A blanket `companion<T where Bound T> T` block. It belongs to every
     /// type satisfying its bounds, so it is never a named namespace.
     pub blanket: bool,
-    /// A companion block whose target is not a nominal type declared in the
-    /// same module: a type declared elsewhere in the package, or a
-    /// structural type. It is attached to its target by identity during
-    /// resolution, so it is never a named namespace either.
+    /// A companion block whose target is not a nominal type: a structural
+    /// type, or one the loader could not find. It is attached to its target
+    /// by identity during resolution.
     pub detached: bool,
+    /// The namespace of a nominal type with companion items: a module the
+    /// loader makes for the type, with no source of its own, holding the
+    /// members of every block for the type wherever the blocks are written.
+    pub namespace: bool,
+    /// For a companion block of a nominal type, the type's namespace.
+    pub companion_namespace: Option<ModuleId>,
 }
 
 /// A source position: package-relative file path with 1-based line and column.
@@ -209,6 +214,8 @@ impl Program {
                 companion: false,
                 blanket: false,
                 detached: false,
+                namespace: false,
+                companion_namespace: None,
             }],
             imported_modules: HashMap::new(),
             dotted_imports: HashMap::new(),
@@ -222,6 +229,12 @@ impl Program {
             import_errors: Vec::new(),
         };
         program.collect_single_submodules(ModuleId(0));
+        program.resolve_single_inline_imports();
+        // Targets are found through imports, and imports through a type's
+        // namespace need its companions grouped.
+        let mut next_syntax_id = program.next_syntax_id;
+        program.group_companions(&mut next_syntax_id);
+        program.next_syntax_id = next_syntax_id;
         program.resolve_single_inline_imports();
         program.initialization_order = initialization_order(
             &program.modules,
@@ -247,16 +260,6 @@ impl Program {
         for mut declaration in declarations {
             attach_companion_generics(&mut declaration, &mut self.next_syntax_id);
             let blanket = declaration.blanket_parameter().is_some();
-            let alias =
-                canonicalize_companion(&self.modules[parent.0].syntax.items, &mut declaration);
-            let detached = detached_companion(&self.modules[parent.0].syntax.items, &declaration);
-            // A further `companion` block for a type that already has one is
-            // a module of its own, so its imports stay private to the block;
-            // the first block remains the type's namespace.
-            let additional_block = declaration.companion
-                && self.children[parent.0]
-                    .get(&declaration.name)
-                    .is_some_and(|existing| self.modules[existing.0].companion);
             let id = ModuleId(self.modules.len());
             let qualified_name = format!(
                 "{}.{}",
@@ -272,15 +275,16 @@ impl Program {
                 qualified_name,
                 companion: declaration.companion,
                 blanket,
-                detached,
+                detached: false,
+                namespace: false,
+                companion_namespace: None,
             });
             self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
-            if !additional_block && !blanket && !detached {
+            // A companion block is a module of its own, never reachable by
+            // name; its members are reached through its target.
+            if !declaration.companion {
                 self.children[parent.0].insert(declaration.name, id);
-                if let Some(alias) = alias {
-                    self.children[parent.0].insert(alias, id);
-                }
             }
             self.child_modules.insert(declaration.syntax.id, id);
             self.collect_single_submodules(id);
@@ -308,6 +312,8 @@ impl Program {
                 companion: false,
                 blanket: false,
                 detached: false,
+                namespace: false,
+                companion_namespace: None,
             });
             self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
@@ -396,7 +402,6 @@ impl Program {
     /// Registers inline modules introduced after parsing, such as macro output.
     /// `next_syntax_id` continues the identities macro expansion allocated.
     pub(crate) fn rebuild_generated_inline_modules(&mut self, next_syntax_id: &mut usize) {
-        self.reattach_expanded_companions();
         let mut parent = 0;
         while parent < self.modules.len() {
             let mut declarations = self.modules[parent]
@@ -423,20 +428,6 @@ impl Program {
             for (mut declaration, top_level) in declarations {
                 attach_companion_generics(&mut declaration, next_syntax_id);
                 let blanket = declaration.blanket_parameter().is_some();
-                let alias = if top_level {
-                    canonicalize_companion(&self.modules[parent].syntax.items, &mut declaration)
-                } else {
-                    None
-                };
-                let detached = detached_companion(&self.modules[parent].syntax.items, &declaration);
-                // Mirror `collect_single_submodules` / `insert_submodules`: a
-                // generated `companion` block for a type that already has a
-                // companion is a further block of its own, not the namespace.
-                let additional_block = top_level
-                    && declaration.companion
-                    && self.children[parent]
-                        .get(&declaration.name)
-                        .is_some_and(|existing| self.modules[existing.0].companion);
                 let id = ModuleId(self.modules.len());
                 let qualified_name = format!(
                     "{}.{}",
@@ -452,20 +443,23 @@ impl Program {
                     qualified_name,
                     companion: declaration.companion,
                     blanket,
-                    detached,
+                    detached: false,
+                    namespace: false,
+                    companion_namespace: None,
                 });
                 self.module_packages.push(self.module_packages[parent]);
                 self.children.push(HashMap::new());
-                if top_level && !additional_block && !blanket && !detached {
+                if top_level && !declaration.companion {
                     self.children[parent].insert(declaration.name, id);
-                    if let Some(alias) = alias {
-                        self.children[parent].insert(alias, id);
-                    }
                 }
                 self.child_modules.insert(declaration.syntax.id, id);
             }
             parent += 1;
         }
+        // Macros such as `typegroup` declare types, so companion targets are
+        // found again over the expanded items.
+        self.group_companions(next_syntax_id);
+        self.next_syntax_id = self.next_syntax_id.max(*next_syntax_id);
         self.resolve_single_inline_imports();
         self.initialization_order = initialization_order(
             &self.modules,
@@ -477,43 +471,30 @@ impl Program {
         );
     }
 
-    /// A companion block counts as detached when its module declares no
-    /// nominal type of its name, which is only certain once macros such as
-    /// `typegroup` have declared theirs. A detached block whose type a macro
-    /// declared joins that type's namespace, as its first block or a further
-    /// one.
-    fn reattach_expanded_companions(&mut self) {
-        for id in 0..self.modules.len() {
-            let module = &self.modules[id];
-            let (Some(parent), Some(name)) = (module.parent, module.name.clone()) else {
-                continue;
-            };
-            if !module.detached {
-                continue;
-            }
-            let items = &self.modules[parent.0].syntax.items;
-            let Some(mut declaration) = items.iter().find_map(|item| match item {
-                Item::Submodule(submodule)
-                    if self.child_modules.get(&submodule.syntax.id) == Some(&ModuleId(id)) =>
-                {
-                    Some(submodule.clone())
-                }
-                _ => None,
-            }) else {
-                continue;
-            };
-            declaration.name = name.clone();
-            if detached_companion(items, &declaration) {
-                continue;
-            }
-            self.modules[id].detached = false;
-            let first_block = !self.children[parent.0]
-                .get(&name)
-                .is_some_and(|existing| self.modules[existing.0].companion);
-            if first_block {
-                self.children[parent.0].insert(name, ModuleId(id));
-            }
+    /// Groups `companion` blocks by the nominal types they extend; see
+    /// `CompanionGrouping`.
+    fn group_companions(&mut self, next_syntax_id: &mut usize) {
+        let module_prelude = self.module_prelude.clone();
+        CompanionGrouping {
+            modules: &mut self.modules,
+            children: &mut self.children,
+            module_packages: &mut self.module_packages,
+            next_syntax_id,
+            child_modules: &self.child_modules,
+            imported_modules: &self.imported_modules,
+            dotted_imports: &self.dotted_imports,
+            prelude: self.standard_library_prelude,
+            uses_prelude: &|module: ModuleId| module_prelude.get(module.0).copied().unwrap_or(true),
         }
+        .group();
+        self.initialization_order = initialization_order(
+            &self.modules,
+            &self.imported_modules,
+            &self.additional_imported_namespaces,
+            &self.root_qualified_modules,
+            &self.module_packages,
+            &package_dependency_order(self.package_graph.as_ref()),
+        );
     }
 
     /// Copies the expanded contents of flattened inline modules back into the
@@ -927,49 +908,50 @@ impl Program {
         self.children[module.0].get(name).copied()
     }
 
-    /// The namespace an inline submodule declaration introduces: its module,
-    /// or for a type's further `companion` block, the type's first block.
-    /// Blanket and detached companion blocks introduce none, since their
-    /// members are found through the types they apply to.
+    /// The namespace an inline submodule declaration introduces. A
+    /// `companion` block introduces none: its members are reached through
+    /// its target.
     pub fn namespace_child(&self, submodule_syntax: SyntaxId) -> Option<ModuleId> {
         self.child_module(submodule_syntax)
-            .filter(|child| {
-                let child = &self.modules[child.0];
-                !child.blanket && !child.detached
+            .filter(|child| !self.modules[child.0].companion)
+    }
+
+    /// The type namespaces `module` offers by name: one for each nominal
+    /// type it declares that has companion items, and for each alias of
+    /// such a type, with the declaration's visibility.
+    pub fn type_namespaces(&self, module: ModuleId) -> Vec<(String, ModuleId, Visibility)> {
+        let mut namespaces = self.children[module.0]
+            .iter()
+            .filter(|(_, child)| self.modules[child.0].namespace)
+            .filter_map(|(name, child)| {
+                let declaration = declared_type(&self.modules[module.0].syntax.items, name)?;
+                Some((name.clone(), *child, declaration.visibility))
             })
-            .map(|child| self.companion_primary(child))
+            .collect::<Vec<_>>();
+        namespaces.sort_by(|left, right| left.0.cmp(&right.0));
+        namespaces
     }
 
-    /// The module that stands for `module`'s namespace. Every `companion`
-    /// block is a module of its own, so its imports stay private to it, but
-    /// the first block for a type is the one the type's namespace names;
-    /// any other module is its own namespace.
+    /// The module that stands for `module`'s namespace: for a companion
+    /// block of a nominal type, the type's namespace; any other module is
+    /// its own namespace.
     pub fn companion_primary(&self, module: ModuleId) -> ModuleId {
-        let source = &self.modules[module.0];
-        if source.companion
-            && !source.blanket
-            && !source.detached
-            && let (Some(parent), Some(name)) = (source.parent, source.name.as_deref())
-            && let Some(primary) = self.children[parent.0].get(name).copied()
-            && self.modules[primary.0].companion
-        {
-            return primary;
-        }
-        module
+        self.modules[module.0]
+            .companion_namespace
+            .unwrap_or(module)
     }
 
-    /// Every `companion` block contributing to the same type as `module`, in
-    /// module order; just `module` for any other module.
+    /// Every `companion` block contributing to the same type as `module`,
+    /// with the type's namespace, in module order; just `module` for any
+    /// other module.
     pub fn companion_blocks(&self, module: ModuleId) -> Vec<ModuleId> {
         let primary = self.companion_primary(module);
-        if !self.modules[primary.0].companion {
+        if !self.modules[primary.0].namespace {
             return vec![module];
         }
         self.modules
             .iter()
-            .filter(|candidate| {
-                candidate.companion && self.companion_primary(candidate.id) == primary
-            })
+            .filter(|candidate| self.companion_primary(candidate.id) == primary)
             .map(|candidate| candidate.id)
             .collect()
     }
@@ -1436,83 +1418,27 @@ impl ProgramLoader {
                     location: Some(error.location),
                     message: error.message,
                 })?;
-                let companions = syntax
-                    .items
-                    .into_iter()
-                    .filter_map(|item| match item {
-                        // A blanket companion names no type to discover it by.
-                        Item::Submodule(module)
-                            if module.companion && module.blanket_parameter().is_none() =>
-                        {
-                            Some(module)
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                for companion in companions {
-                    let owner = self.modules.iter().find(|module| {
-                        !module.companion
-                            && module.path.starts_with(&root)
-                            && module.syntax.items.iter().any(|item| matches!(
-                                item,
-                                Item::TypeDeclaration(declaration) if declaration.name == companion.name
-                            ))
-                    }).map(|module| module.id);
-                    let Some(owner) = owner else { continue };
-                    self.modules[owner.0]
-                        .syntax
-                        .items
-                        .push(Item::Submodule(companion.clone()));
-                    self.insert_discovered_companion(owner, canonical.clone(), companion)?;
+                // A companion applies wherever its target is used, so a file
+                // with a companion for a loaded type is part of the program
+                // even when nothing imports it.
+                let extends_loaded_type = syntax.items.iter().any(|item| match item {
+                    Item::Submodule(companion)
+                        if companion.companion && companion.blanket_parameter().is_none() =>
+                    {
+                        self.modules.iter().any(|module| {
+                            !module.companion
+                                && module.path.starts_with(&root)
+                                && declared_type(&module.syntax.items, &companion.name).is_some()
+                        })
+                    }
+                    _ => false,
+                });
+                if extends_loaded_type {
+                    self.load_file(&canonical)?;
                 }
             }
         }
         Ok(())
-    }
-
-    fn insert_discovered_companion(
-        &mut self,
-        parent: ModuleId,
-        path: PathBuf,
-        mut declaration: Submodule,
-    ) -> Result<(), LoadDiagnostic> {
-        attach_companion_generics(&mut declaration, &mut self.next_syntax_id);
-        if let Some(existing) = self.children[parent.0].get(&declaration.name).copied() {
-            if !self.modules[existing.0].companion {
-                return Err(load_diagnostic_at(
-                    &declaration.syntax.span,
-                    format!(
-                        "companion `{}` conflicts with an ordinary module",
-                        declaration.name
-                    ),
-                ));
-            }
-        }
-        let additional_block = self.children[parent.0].contains_key(&declaration.name);
-        let id = ModuleId(self.modules.len());
-        let qualified_name = format!(
-            "{}.{}",
-            self.modules[parent.0].qualified_name, declaration.name
-        );
-        self.modules.push(SourceModule {
-            id,
-            path: path.clone(),
-            syntax: declaration.module,
-            parent: Some(parent),
-            name: Some(declaration.name.clone()),
-            visibility: Visibility::Public,
-            qualified_name: qualified_name.clone(),
-            companion: true,
-            blanket: false,
-            detached: false,
-        });
-        self.module_packages.push(self.module_packages[parent.0]);
-        self.children.push(HashMap::new());
-        if !additional_block {
-            self.children[parent.0].insert(declaration.name, id);
-        }
-        self.child_modules.insert(declaration.syntax.id, id);
-        self.insert_submodules(id, path, qualified_name)
     }
 
     fn infer_package(&self, path: &Path) -> Option<staple_project::PackageId> {
@@ -1752,6 +1678,8 @@ impl ProgramLoader {
             companion: false,
             blanket: false,
             detached: false,
+            namespace: false,
+            companion_namespace: None,
         });
         self.module_packages.push(package);
         self.children.push(HashMap::new());
@@ -1777,18 +1705,7 @@ impl ProgramLoader {
         for mut declaration in declarations {
             attach_companion_generics(&mut declaration, &mut self.next_syntax_id);
             let blanket = declaration.blanket_parameter().is_some();
-            let alias =
-                canonicalize_companion(&self.modules[parent.0].syntax.items, &mut declaration);
-            let detached = detached_companion(&self.modules[parent.0].syntax.items, &declaration);
-            let additional_block = declaration.companion
-                && self.children[parent.0]
-                    .get(&declaration.name)
-                    .is_some_and(|existing| self.modules[existing.0].companion);
-            if !additional_block
-                && !blanket
-                && !detached
-                && self.children[parent.0].contains_key(&declaration.name)
-            {
+            if !declaration.companion && self.children[parent.0].contains_key(&declaration.name) {
                 return Err(load_diagnostic_at(
                     &declaration.syntax.span,
                     format!("duplicate submodule definition of `{}`", declaration.name),
@@ -1806,15 +1723,14 @@ impl ProgramLoader {
                 qualified_name: qualified_name.clone(),
                 companion: declaration.companion,
                 blanket,
-                detached,
+                detached: false,
+                namespace: false,
+                companion_namespace: None,
             });
             self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
-            if !additional_block && !blanket && !detached {
+            if !declaration.companion {
                 self.children[parent.0].insert(declaration.name, id);
-                if let Some(alias) = alias {
-                    self.children[parent.0].insert(alias, id);
-                }
             }
             self.child_modules.insert(declaration.syntax.id, id);
             self.insert_submodules(id, path.clone(), qualified_name)?;
@@ -1839,6 +1755,8 @@ impl ProgramLoader {
                 companion: false,
                 blanket: false,
                 detached: false,
+                namespace: false,
+                companion_namespace: None,
             });
             self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
@@ -1887,7 +1805,7 @@ impl ProgramLoader {
             .values()
             .copied()
             .collect::<Vec<_>>();
-        // A type's further `companion` blocks are not reachable by name.
+        // Companion blocks are not reachable by name.
         children.extend(
             self.modules
                 .iter()
@@ -2163,6 +2081,12 @@ impl ProgramLoader {
         }
 
         if let Some(first) = parts.first()
+            && (parts.len() > 1 || declaration.kind != UseKind::Dotted)
+            && let Some(child) = self.child_or_type_namespace(module, first)
+        {
+            return self.traverse_children(module, child, &parts[1..], true, declaration);
+        }
+        if let Some(first) = parts.first()
             && let Some(child) = self.children[module.0].get(first).copied()
         {
             return self.traverse_children(module, child, &parts[1..], true, declaration);
@@ -2211,15 +2135,23 @@ impl ProgramLoader {
     }
 
     fn traverse_children(
-        &self,
+        &mut self,
         importing_module: ModuleId,
         mut module: ModuleId,
         parts: &[String],
         allow_private: bool,
         declaration: &UseDeclaration,
     ) -> Result<ModuleId, LoadDiagnostic> {
-        for part in parts {
-            let child = self.children[module.0].get(part).copied().ok_or_else(|| {
+        for (index, part) in parts.iter().enumerate() {
+            // A bare dotted import ending at a type imports the type itself,
+            // which brings its namespace along.
+            let item = declaration.kind == UseKind::Dotted && index + 1 == parts.len();
+            let child = if item {
+                self.children[module.0].get(part).copied()
+            } else {
+                self.child_or_type_namespace(module, part)
+            };
+            let child = child.ok_or_else(|| {
                 load_diagnostic_at(
                     &declaration.syntax.span,
                     format!("module has no submodule named `{part}`"),
@@ -2234,6 +2166,27 @@ impl ProgramLoader {
             module = child;
         }
         Ok(module)
+    }
+
+    /// The child of `module` named `part`, or the namespace of the nominal
+    /// type of that name `module` declares, made when an import path goes
+    /// through it.
+    fn child_or_type_namespace(&mut self, module: ModuleId, part: &str) -> Option<ModuleId> {
+        if let Some(child) = self.children[module.0].get(part) {
+            return Some(*child);
+        }
+        let declaration = declared_type(&self.modules[module.0].syntax.items, part)?;
+        if declaration.kind() == staple_syntax::TypeDeclarationKind::Alias {
+            return None;
+        }
+        Some(type_namespace(
+            &mut self.modules,
+            &mut self.children,
+            &mut self.module_packages,
+            &mut self.next_syntax_id,
+            module,
+            part,
+        ))
     }
 
     fn module_visible_from(&self, target: ModuleId, importing: ModuleId) -> bool {
@@ -2346,7 +2299,7 @@ impl ProgramLoader {
                     })
             })
             .collect();
-        Program {
+        let mut program = Program {
             entry,
             executable_entry: self.executable_entry,
             package_graph: self.package_graph,
@@ -2377,7 +2330,11 @@ impl ProgramLoader {
             initialization_order,
             next_syntax_id: self.next_syntax_id,
             import_errors: self.import_errors.unwrap_or_default(),
-        }
+        };
+        let mut next_syntax_id = program.next_syntax_id;
+        program.group_companions(&mut next_syntax_id);
+        program.next_syntax_id = next_syntax_id;
+        program
     }
 }
 
@@ -3399,84 +3356,306 @@ mod tests {
     }
 }
 
-/// Renames `companion A` to `companion B` when `A` is an alias, declared in
-/// the same module, whose underlying type is headed by a type `B` also
-/// declared there: aliases are transparent, so their companion items belong
-/// to `B`. Returns the alias name, which keeps naming the merged companion
-/// namespace. Other alias companions keep their own name and are detached
-/// (see `detached_companion`).
-fn canonicalize_companion(items: &[Item], declaration: &mut Submodule) -> Option<String> {
-    if !declaration.companion || declaration.blanket_parameter().is_some() {
-        return None;
-    }
-    let target = companion_alias_target(items, &declaration.name)?;
-    Some(std::mem::replace(&mut declaration.name, target))
-}
-
-/// Whether `declaration` is a companion attached to its target by identity
-/// rather than as a namespace of its module: its target, after
-/// `canonicalize_companion`, is not a nominal type declared in `items`. Such
-/// a target is declared elsewhere, or is an alias of one, or is structural.
-fn detached_companion(items: &[Item], declaration: &Submodule) -> bool {
-    fn head(ty: &staple_syntax::Type) -> Option<&staple_syntax::Type> {
-        match ty {
-            staple_syntax::Type::Application(application) => head(&application.callee),
-            staple_syntax::Type::EffectApplication(application) => head(&application.callee),
-            other => Some(other),
+/// The top-level type declaration of `name` in `items`, looking through
+/// modifiers.
+fn declared_type<'a>(items: &'a [Item], name: &str) -> Option<&'a staple_syntax::TypeDeclaration> {
+    items.iter().find_map(|item| {
+        let mut item = item;
+        while let Item::Modified(modified) = item {
+            item = &modified.item;
         }
-    }
-    if !declaration.companion || declaration.blanket_parameter().is_some() {
-        return false;
-    }
-    match declaration.companion_target.as_ref().and_then(head) {
-        // A macro template's target is only known once it is expanded.
-        Some(staple_syntax::Type::Splice(_)) | None => false,
-        Some(staple_syntax::Type::Named(named)) if named.namespace.is_none() => {
-            fn declares_nominal(item: &Item, name: &str) -> bool {
-                match item {
-                    Item::TypeDeclaration(declaration) => {
-                        declaration.name == name
-                            && declaration.kind() != staple_syntax::TypeDeclarationKind::Alias
-                    }
-                    Item::Modified(modified) => declares_nominal(&modified.item, name),
-                    _ => false,
-                }
-            }
-            !items
-                .iter()
-                .any(|item| declares_nominal(item, &declaration.name))
-        }
-        Some(_) => true,
-    }
-}
-
-/// The type a same-module alias chain starting at `name` ends at, when every
-/// link is a top-level `type _ = alias Head ...` whose head is a bare name
-/// declared in `items` and the chain ends at a non-alias declaration there.
-fn companion_alias_target(items: &[Item], name: &str) -> Option<String> {
-    fn head(ty: &staple_syntax::Type) -> Option<&str> {
-        match ty {
-            staple_syntax::Type::Named(named) if named.namespace.is_none() => Some(&named.name),
-            staple_syntax::Type::Application(application) => head(&application.callee),
-            staple_syntax::Type::EffectApplication(application) => head(&application.callee),
-            _ => None,
-        }
-    }
-    let declaration = |name: &str| {
-        items.iter().find_map(|item| match item {
+        match item {
             Item::TypeDeclaration(declaration) if declaration.name == name => Some(declaration),
             _ => None,
-        })
-    };
-    let mut current = declaration(name)?;
-    let mut seen = HashSet::new();
-    while current.kind() == staple_syntax::TypeDeclarationKind::Alias {
-        if !seen.insert(current.name.as_str()) {
+        }
+    })
+}
+
+/// The nominal type a companion target names, as the module declaring it and
+/// its name.
+type TypeKey = (ModuleId, String);
+
+/// Groups `companion` blocks by the nominal types they extend. A block's
+/// target is found from the block's own module: its declarations, its
+/// imports, and the prelude, following aliases to the type they name. Each
+/// such type gets one namespace module holding the members of all its
+/// blocks, wherever they are written; no block is the namespace itself. A
+/// block whose target is structural, or not found here, is detached, and
+/// name resolution attaches it to its target by identity.
+struct CompanionGrouping<'a> {
+    modules: &'a mut Vec<SourceModule>,
+    children: &'a mut Vec<HashMap<String, ModuleId>>,
+    module_packages: &'a mut Vec<Option<staple_project::PackageId>>,
+    next_syntax_id: &'a mut usize,
+    child_modules: &'a HashMap<SyntaxId, ModuleId>,
+    imported_modules: &'a HashMap<SyntaxId, ModuleId>,
+    dotted_imports: &'a HashMap<SyntaxId, DottedImport>,
+    prelude: Option<ModuleId>,
+    uses_prelude: &'a dyn Fn(ModuleId) -> bool,
+}
+
+impl CompanionGrouping<'_> {
+    fn group(self) {
+        let blocks = self
+            .modules
+            .iter()
+            .filter(|module| module.companion && !module.blanket && !module.namespace)
+            .map(|module| module.id)
+            .collect::<Vec<_>>();
+        for block in blocks {
+            let target = self.block_target(block);
+            let namespace = target.as_ref().map(|(module, name)| {
+                type_namespace(
+                    self.modules,
+                    self.children,
+                    self.module_packages,
+                    self.next_syntax_id,
+                    *module,
+                    name,
+                )
+            });
+            let module = &mut self.modules[block.0];
+            module.companion_namespace = namespace;
+            module.detached = namespace.is_none();
+        }
+        // An alias offers the namespace of the type it names.
+        for module in 0..self.modules.len() {
+            let aliases = self.modules[module]
+                .syntax
+                .items
+                .iter()
+                .filter_map(|item| {
+                    let mut item = item;
+                    while let Item::Modified(modified) = item {
+                        item = &modified.item;
+                    }
+                    match item {
+                        Item::TypeDeclaration(declaration)
+                            if declaration.kind() == staple_syntax::TypeDeclarationKind::Alias =>
+                        {
+                            Some(declaration.name.clone())
+                        }
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            for alias in aliases {
+                if self.children[module].contains_key(&alias) {
+                    continue;
+                }
+                let Some((target_module, target)) =
+                    self.follow_aliases((ModuleId(module), alias.clone()), &mut HashSet::new())
+                else {
+                    continue;
+                };
+                if let Some(namespace) = self.children[target_module.0].get(&target).copied()
+                    && self.modules[namespace.0].namespace
+                {
+                    self.children[module].insert(alias, namespace);
+                }
+            }
+        }
+    }
+
+    /// The nominal type companion `block`'s header names.
+    fn block_target(&self, block: ModuleId) -> Option<TypeKey> {
+        let parent = self.modules[block.0].parent?;
+        let header = self.modules[parent.0].syntax.items.iter().find_map(|item| {
+            let mut item = item;
+            while let Item::Modified(modified) = item {
+                item = &modified.item;
+            }
+            match item {
+                Item::Submodule(submodule)
+                    if self.child_modules.get(&submodule.syntax.id) == Some(&block) =>
+                {
+                    Some(submodule)
+                }
+                _ => None,
+            }
+        })?;
+        let named = type_head(header.companion_target.as_ref()?)?;
+        let key = self.lookup_qualified(parent, named.namespace.as_deref(), &named.name)?;
+        self.follow_aliases(key, &mut HashSet::new())
+    }
+
+    /// The nominal type `key` names: itself, or for an alias, the type at
+    /// the head of its underlying type. `None` for an alias of a structural
+    /// type or of a type parameter.
+    fn follow_aliases(&self, key: TypeKey, seen: &mut HashSet<TypeKey>) -> Option<TypeKey> {
+        if !seen.insert(key.clone()) {
             return None;
         }
-        current = declaration(head(current.underlying()?)?)?;
+        let (module, name) = &key;
+        let declaration = declared_type(&self.modules[module.0].syntax.items, name)?;
+        if declaration.kind() != staple_syntax::TypeDeclarationKind::Alias {
+            return Some(key);
+        }
+        let named = type_head(declaration.underlying()?)?;
+        if named.namespace.is_none()
+            && declaration
+                .type_parameters
+                .iter()
+                .any(|parameter| parameter.names().contains(&named.name.as_str()))
+        {
+            return None;
+        }
+        let next = self.lookup_qualified(*module, named.namespace.as_deref(), &named.name)?;
+        self.follow_aliases(next, seen)
     }
-    (current.name != name).then(|| current.name.clone())
+
+    /// Where the type `name`, qualified by `namespace` when written so, seen
+    /// from `module`, is declared.
+    fn lookup_qualified(
+        &self,
+        module: ModuleId,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> Option<TypeKey> {
+        let Some(namespace) = namespace else {
+            return self.lookup(module, name, false, &mut HashSet::new());
+        };
+        let mut segments = namespace.split('.');
+        let first = segments.next()?;
+        let mut target = self.children[module.0].get(first).copied().or_else(|| {
+            self.uses(module).find_map(|declaration| {
+                (declaration.path.last().map(String::as_str) == Some(first)
+                    && matches!(declaration.kind, UseKind::Namespace | UseKind::Dotted))
+                .then(|| self.imported_modules.get(&declaration.syntax.id).copied())
+                .flatten()
+            })
+        })?;
+        for segment in segments {
+            target = self.children[target.0].get(segment).copied()?;
+        }
+        self.lookup(target, name, true, &mut HashSet::new())
+    }
+
+    /// Where the type `name` seen from `module` is declared: in `module`,
+    /// or through its imports and the prelude. `exported` limits the search
+    /// to what `module` offers to its importers.
+    fn lookup(
+        &self,
+        module: ModuleId,
+        name: &str,
+        exported: bool,
+        seen: &mut HashSet<(ModuleId, String)>,
+    ) -> Option<TypeKey> {
+        if !seen.insert((module, name.to_owned())) {
+            return None;
+        }
+        if let Some(declaration) = declared_type(&self.modules[module.0].syntax.items, name)
+            && (!exported || declaration.visibility != Visibility::Private)
+        {
+            return Some((module, name.to_owned()));
+        }
+        let uses = self
+            .uses(module)
+            .filter(|declaration| !exported || declaration.visibility != Visibility::Private)
+            .cloned()
+            .collect::<Vec<_>>();
+        for declaration in uses {
+            let imported = self.imported_modules.get(&declaration.syntax.id).copied();
+            let found = match &declaration.kind {
+                UseKind::Selected(entries) => entries.iter().find_map(|entry| {
+                    (entry.alias.as_deref().unwrap_or(&entry.name) == name)
+                        .then(|| self.lookup(imported?, &entry.name, true, seen))
+                        .flatten()
+                }),
+                UseKind::Renamed { item, alias } if alias == name => {
+                    imported.and_then(|source| self.lookup(source, item, true, seen))
+                }
+                UseKind::Dotted if declaration.path.last().map(String::as_str) == Some(name) => self
+                    .dotted_imports
+                    .get(&declaration.syntax.id)
+                    .and_then(|import| import.item_module)
+                    .and_then(|source| self.lookup(source, name, true, seen)),
+                UseKind::Glob => imported.and_then(|source| self.lookup(source, name, true, seen)),
+                _ => None,
+            };
+            if found.is_some() {
+                return found;
+            }
+        }
+        if !exported
+            && (self.uses_prelude)(module)
+            && let Some(prelude) = self.prelude
+            && prelude != module
+        {
+            return self.lookup(prelude, name, true, seen);
+        }
+        None
+    }
+
+    /// The top-level `use` declarations of `module`.
+    fn uses(&self, module: ModuleId) -> impl Iterator<Item = &UseDeclaration> {
+        self.modules[module.0]
+            .syntax
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::UseDeclaration(declaration) => Some(declaration),
+                _ => None,
+            })
+    }
+}
+
+/// The named type at the head of `ty`, through type applications.
+fn type_head(ty: &staple_syntax::Type) -> Option<&staple_syntax::NamedType> {
+    match ty {
+        staple_syntax::Type::Named(named) => Some(named),
+        staple_syntax::Type::Application(application) => type_head(&application.callee),
+        staple_syntax::Type::EffectApplication(application) => type_head(&application.callee),
+        _ => None,
+    }
+}
+
+/// The namespace module of the nominal type `name` declared in `module`,
+/// made on first use. It is a companion module without source, named after
+/// the type, so the type's name reaches it.
+fn type_namespace(
+    modules: &mut Vec<SourceModule>,
+    children: &mut Vec<HashMap<String, ModuleId>>,
+    module_packages: &mut Vec<Option<staple_project::PackageId>>,
+    next_syntax_id: &mut usize,
+    module: ModuleId,
+    name: &str,
+) -> ModuleId {
+    if let Some(existing) = children[module.0].get(name).copied() {
+        return existing;
+    }
+    let id = ModuleId(modules.len());
+    let parent = &modules[module.0];
+    let mut module_syntax = Syntax::compiler();
+    module_syntax.id = SyntaxId(*next_syntax_id);
+    *next_syntax_id += 1;
+    let syntax = Module {
+        syntax: module_syntax,
+        declaration_syntax: None,
+        docs: Vec::new(),
+        visibility: Visibility::Public,
+        modifiers: Vec::new(),
+        items: Vec::new(),
+    };
+    let namespace = SourceModule {
+        id,
+        path: parent.path.clone(),
+        syntax,
+        parent: Some(module),
+        name: Some(name.to_owned()),
+        visibility: Visibility::Public,
+        qualified_name: format!("{}.{name}", parent.qualified_name),
+        companion: true,
+        blanket: false,
+        detached: false,
+        namespace: true,
+        companion_namespace: None,
+    };
+    modules.push(namespace);
+    module_packages.push(module_packages[module.0]);
+    children.push(HashMap::new());
+    children[module.0].insert(name.to_owned(), id);
+    id
 }
 
 /// Gives each member binding of a `companion` block its own copy of the

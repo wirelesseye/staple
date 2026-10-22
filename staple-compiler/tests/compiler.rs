@@ -17737,13 +17737,27 @@ fn companion_block_imports_reach_no_other_block() {
 }
 
 #[test]
-fn companion_blocks_share_their_members() {
+fn companion_blocks_share_one_namespace() {
+    // Every block's members are the type's, but a block reaches another
+    // block's members through the type, like any other module.
     type_check(concat!(
         "type Box = wrap I32\n",
         "companion Box { pub def one = (box: Box) => I32 :: 1 }\n",
-        "companion Box { pub def two = (box: Box) => I32 :: one box + 1 }\n",
+        "companion Box { pub def two = (box: Box) => I32 :: Box.one box + (box |> one) }\n",
         "let total: I32 = Box.one (Box 1) + Box.two (Box 1)\n",
     ));
+    let diagnostics = resolve_result(concat!(
+        "type Box = wrap I32\n",
+        "companion Box { pub def one = (box: Box) => I32 :: 1 }\n",
+        "companion Box { pub def two = (box: Box) => I32 :: one box }\n",
+    ))
+    .expect_err_diagnostics("a block does not see another block's members directly");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "unknown name `one`"),
+        "{diagnostics:?}"
+    );
     type_check(concat!(
         "use std.syntax.*\n",
         "pub type Box T = pub wrap (value: T)\n",

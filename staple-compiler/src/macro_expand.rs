@@ -1640,6 +1640,8 @@ struct MacroExpander {
     /// intrinsics are evaluated at compile time, and a reified non-finite
     /// float constant is rebuilt as a call to their `from_bits` intrinsic.
     float_companion_modules: [Option<ModuleId>; 2],
+    /// The namespaces of `F32` and `F64`, which their names reach.
+    float_namespaces: [Option<ModuleId>; 2],
     /// Every implementation of `Parse`, standard and user-written.
     parse_impls: Vec<ParseImpl>,
     /// The default body of `Parse.parse_all`, with the module it was written in.
@@ -1704,7 +1706,18 @@ impl MacroExpander {
             .iter()
             .find(|module| module.path.ends_with(std::path::Path::new("std/number/types.sta")))
             .map(|module| module.id);
-        let float_companion_modules = [
+        // The companion block written beside each float type declares its
+        // intrinsics.
+        let float_companion = |name: &str| {
+            let module = number_types?;
+            let namespace = program.child_named(module, name)?;
+            program
+                .companion_blocks(namespace)
+                .into_iter()
+                .find(|block| program.module(*block).parent == Some(module) && *block != namespace)
+        };
+        let float_companion_modules = [float_companion("F32"), float_companion("F64")];
+        let float_namespaces = [
             number_types.and_then(|module| program.child_named(module, "F32")),
             number_types.and_then(|module| program.child_named(module, "F64")),
         ];
@@ -1964,19 +1977,12 @@ impl MacroExpander {
             }
         }
 
-        // A type's `companion` blocks are modules of their own, so each keeps
-        // its imports to itself, but every block sees, and the type's
-        // namespace offers, the macros and helpers all of them declare.
-        let mut companion_groups = HashMap::<ModuleId, Vec<ModuleId>>::new();
-        for module in program.modules().iter().filter(|module| module.companion) {
-            companion_groups
-                .entry(program.companion_primary(module.id))
-                .or_default()
-                .push(module.id);
-        }
-        for blocks in companion_groups.values().filter(|blocks| blocks.len() > 1) {
+        // A type's namespace offers the macros and helpers of all its
+        // companion blocks; each block itself sees only its own and those of
+        // the module it is written in.
+        for namespace in program.modules().iter().filter(|module| module.namespace) {
             let mut shared = ModuleScope::default();
-            for block in blocks {
+            for block in program.companion_blocks(namespace.id) {
                 let scope = &scopes[block.0];
                 for (name, keys) in &scope.macros {
                     shared
@@ -1999,11 +2005,10 @@ impl MacroExpander {
                         .or_insert_with(|| helper.clone());
                 }
             }
-            for block in blocks {
-                scopes[block.0].macros = shared.macros.clone();
-                scopes[block.0].modifiers = shared.modifiers.clone();
-                scopes[block.0].helpers = shared.helpers.clone();
-            }
+            let scope = &mut scopes[namespace.id.0];
+            scope.macros = shared.macros;
+            scope.modifiers = shared.modifiers;
+            scope.helpers = shared.helpers;
         }
 
         let mut public_macros = HashMap::<(ModuleId, String, bool), Vec<MacroKey>>::new();
@@ -2047,6 +2052,11 @@ impl MacroExpander {
                     && let Some(child) = program.namespace_child(submodule.syntax.id)
                 {
                     public_namespaces.insert((source_module.id, submodule.name.clone()), child);
+                }
+            }
+            for (name, namespace, visibility) in program.type_namespaces(source_module.id) {
+                if visibility == Visibility::Public {
+                    public_namespaces.insert((source_module.id, name), namespace);
                 }
             }
         }
@@ -2156,6 +2166,11 @@ impl MacroExpander {
                     && let Some(child) = program.namespace_child(submodule.syntax.id)
                 {
                     package_namespaces.insert((module.id, submodule.name.clone()), child);
+                }
+            }
+            for (name, namespace, visibility) in program.type_namespaces(module.id) {
+                if visibility == Visibility::Package {
+                    package_namespaces.insert((module.id, name), namespace);
                 }
             }
         }
@@ -2275,6 +2290,12 @@ impl MacroExpander {
                     Some(((module.id, submodule.name.clone()), child))
                 })
             })
+            .chain(program.modules().iter().flat_map(|module| {
+                program
+                    .type_namespaces(module.id)
+                    .into_iter()
+                    .map(move |(name, namespace, _)| ((module.id, name), namespace))
+            }))
             .collect::<HashMap<_, _>>();
 
         for source_module in program.modules() {
@@ -2372,6 +2393,11 @@ impl MacroExpander {
                         .namespaces
                         .insert(submodule.name.clone(), child);
                 }
+            }
+            for (name, namespace, _) in program.type_namespaces(source_module.id) {
+                scopes[source_module.id.0]
+                    .namespaces
+                    .insert(name, namespace);
             }
             for item in &source_module.syntax.items {
                 let Item::UseDeclaration(use_) = item else {
@@ -2536,6 +2562,7 @@ impl MacroExpander {
             source_files: source_files(program),
             syntax_module: syntax,
             float_companion_modules,
+            float_namespaces,
             parse_impls: Vec::new(),
             parse_all_default: None,
             type_env: TypeEnv::default(),
@@ -7420,7 +7447,7 @@ impl MacroExpander {
             if let Some(target) = self.scopes[cursor.0].namespaces.get(&named.name) {
                 return FloatType::ALL
                     .into_iter()
-                    .find(|float| self.float_companion(*float) == Some(*target));
+                    .find(|float| self.float_namespaces[*float as usize] == Some(*target));
             }
             if !self.companion_modules[cursor.0] {
                 return None;

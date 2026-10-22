@@ -1183,19 +1183,19 @@ candidate must already be known where the stage is checked. Arbitrary
 callable expressions are not pipe stages. The receiver only ever fills the
 first slot; it is never combined with the stage's arguments into a product.
 
-More than one companion block may contribute to the same type. Companion
-blocks have no visibility of their own; visibility is declared on their items.
-A block's body sees everything its defining module sees, including the
-module's imports, so it can refer directly to the module's declarations and
-imported names. A `use` inside a block applies to that block only: it reaches
-neither the defining module nor the type's other companion blocks, and it may
-import a name the defining module already imports. The members of all of a
-type's companion blocks form the type's one namespace, so each block can refer
-directly to the others' members, and a member name may be declared by only one
-block. A block outside the type's module adds its members to the same
-namespace, and may not redeclare a name, but its body does not see the other
-blocks' members directly; it names them as `Type.member`, like any other
-module.
+More than one companion block may contribute to the same type, from any
+modules of its package, and no block is special: the members of all of them,
+values, types and macros alike, form the type's one namespace, reached as
+`Type.member` wherever the type is visible, and a member name may be declared
+by only one block. Companion blocks have no visibility of their own;
+visibility is declared on their items, and a member without `pub` is
+reachable only from the module its block is written in. A block's body sees everything the
+module it is written in sees, including that module's imports, and its own
+members. It does not see the members of the type's other blocks directly; it
+names them as `Type.member` or calls them with method syntax, like any other
+module. A `use` inside a block applies to that block only: it reaches neither
+the module the block is written in nor the type's other blocks, and it may
+import a name that module already imports.
 Generic and constrained targets use the same bracketed parameter syntax as
 trait implementations, for example `companion<T where Bound T> Box T`.
 Ordinary `mod` declarations may not share a name with a type; use `companion`

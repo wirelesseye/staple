@@ -16550,10 +16550,12 @@ mod tests {
         let program =
             snapshot("pub type User = from I32\ncompanion User { pub let id: I32 = 42 }\n");
         let (entry_id, _) = entry_module(&program);
+        // The block, not the type's namespace module, holds the member.
         let companion = program
             .modules
             .iter()
-            .find(|(_, _, info)| info.companion && info.parent == Some(entry_id))
+            .filter(|(_, _, info)| info.companion && info.parent == Some(entry_id))
+            .find(|(_, initializer, _)| !runtime_categories(&program, *initializer).is_empty())
             .expect("the companion module should be lowered");
         assert_eq!(companion.2.parent, Some(entry_id));
         assert_eq!(runtime_categories(&program, companion.1), vec!["binding"]);
@@ -16644,6 +16646,8 @@ mod tests {
             companion: false,
             blanket: false,
             detached: false,
+            namespace: false,
+            companion_namespace: None,
         };
         let sources = vec![source(0), source(1)];
         let diagnostics =

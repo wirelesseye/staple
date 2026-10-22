@@ -543,7 +543,10 @@ fn discovers_companions_in_otherwise_unreachable_files() {
     fixture.write("animals.sta", "pub type Animal = from I32\n");
     fixture.write(
         "animal_extensions.sta",
-        "companion Animal { pub def move_to: Animal -> Animal = animal => animal }\n",
+        concat!(
+            "use animals.Animal\n",
+            "companion Animal { pub def move_to: Animal -> Animal = animal => animal }\n",
+        ),
     );
     fixture.write(
         "main.sta",
@@ -3374,4 +3377,31 @@ fn companions_obey_a_package_level_orphan_rule() {
         ),
     )
     .expect("a structural companion with a local component is allowed");
+}
+
+#[test]
+fn a_companion_macro_in_another_module_is_reached_through_the_type() {
+    let fixture = Fixture::new();
+    fixture.write("units.sta", "pub type Meters = pub wrap I32\n");
+    fixture.write(
+        "constructors.sta",
+        concat!(
+            "use std.syntax.*\n",
+            "use units.Meters\n",
+            "companion Meters {\n",
+            "    pub macro of = value: Expr => parse_quote { Meters $value }\n",
+            "}\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use units.Meters\n",
+            "use constructors\n",
+            "let length: Meters = Meters.of 3\n",
+        ),
+    );
+    fixture
+        .compile()
+        .expect("a companion macro belongs to the type's namespace wherever it is written");
 }
