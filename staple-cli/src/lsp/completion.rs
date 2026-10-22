@@ -2405,6 +2405,26 @@ mod tests {
         assert_eq!(panics[0].kind, Some(CompletionItemKind::FUNCTION));
     }
     #[test]
+    fn indexing_iterator_module_does_not_expand_recursive_substitutions() {
+        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        let path = stdlib.join("std/iterator.sta");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let program = ProgramLoader::new()
+            .with_standard_library_root(&stdlib)
+            .load_source_at(&path, &source)
+            .unwrap();
+        let typed = TypeChecker::new()
+            .check(NameResolver::new().resolve_program(program).unwrap())
+            .unwrap();
+        let module = parse(&source).unwrap();
+        let completion = index(&module, &typed);
+        assert!(!completion.items(source.len()).is_empty());
+    }
+
+    #[test]
     fn pipe_completion_filters_traits_and_qualifies_collisions() {
         let source = concat!(
             "trait First T { choose: T -> I32 }\n",

@@ -21368,22 +21368,34 @@ fn unify_sum_headers(
     cover(&obligations, free_parameters, substitutions)
 }
 
-/// Repeatedly applies `substitute_type` until it reaches a fixed point (or
-/// gives up after a small bound), so a chain of bindings produced by
-/// `unify_impl_headers` (e.g. `T ↦ U`, `U ↦ I32`) fully resolves to `I32`
-/// rather than leaving a partially-substituted `U` behind.
+/// Resolves substitution chains without expanding a parameter twice along one
+/// path. Completion can compare a generic declaration with a receiver containing
+/// that declaration's own parameters, producing mappings such as `T -> (T, T)`.
+/// Repeated whole-type substitution expands those mappings exponentially.
 fn substitute_type_fixpoint(
-    mut value_type: CheckedType,
+    value_type: CheckedType,
     substitutions: &HashMap<TypeParameterId, CheckedType>,
 ) -> CheckedType {
-    for _ in 0..8 {
-        let next = substitute_type(value_type.clone(), substitutions);
-        if types_equivalent(&next, &value_type) {
-            return next;
-        }
-        value_type = next;
+    fn resolve(
+        value_type: CheckedType,
+        substitutions: &HashMap<TypeParameterId, CheckedType>,
+        visiting: &mut HashSet<TypeParameterId>,
+    ) -> CheckedType {
+        let resolved = type_parameter_ids(&value_type)
+            .into_iter()
+            .filter_map(|id| {
+                let replacement = substitutions.get(&id)?;
+                if !visiting.insert(id) {
+                    return None;
+                }
+                let replacement = resolve(replacement.clone(), substitutions, visiting);
+                visiting.remove(&id);
+                Some((id, replacement))
+            })
+            .collect();
+        substitute_type(value_type, &resolved)
     }
-    value_type
+    resolve(value_type, substitutions, &mut HashSet::new())
 }
 
 /// Finds every trait implementation in `implementations` whose (possibly
@@ -23794,6 +23806,53 @@ pub(crate) fn float_bits_integer(float: FloatType) -> IntegerType {
 #[cfg(test)]
 mod opaque_sizedness_tests {
     use super::*;
+
+    #[test]
+    fn substitution_chains_stop_at_recursive_parameters() {
+        let parameter = |id| CheckedType::Parameter {
+            id: TypeParameterId(id),
+            name: format!("T{id}"),
+            sized: true,
+        };
+        let recursive = CheckedType::Product(CheckedProductType {
+            slotted: false,
+            spreads: vec![],
+            variadic: false,
+            elements: (0..2)
+                .map(|_| CheckedTypeElement {
+                    name: None,
+                    value_type: parameter(0),
+                    default: None,
+                })
+                .collect(),
+        });
+        let substitutions = HashMap::from([(TypeParameterId(0), recursive.clone())]);
+        assert_eq!(
+            substitute_type_fixpoint(parameter(0), &substitutions),
+            recursive
+        );
+
+        let substitutions = HashMap::from([
+            (
+                TypeParameterId(0),
+                CheckedType::Shared(Box::new(parameter(1))),
+            ),
+            (TypeParameterId(1), parameter(0)),
+        ]);
+        assert_eq!(
+            substitute_type_fixpoint(parameter(0), &substitutions),
+            CheckedType::Shared(Box::new(parameter(0))),
+        );
+
+        let mut substitutions = (0..12)
+            .map(|id| (TypeParameterId(id), parameter(id + 1)))
+            .collect::<HashMap<_, _>>();
+        substitutions.insert(TypeParameterId(12), CheckedType::I32);
+        assert_eq!(
+            substitute_type_fixpoint(parameter(0), &substitutions),
+            CheckedType::I32
+        );
+    }
 
     #[test]
     fn schemes_bind_type_and_effect_parameters_and_substitute_only_free_variables() {
