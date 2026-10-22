@@ -177,6 +177,9 @@ enum CompileType {
     Named(String),
     Meta(MetaType),
     Product(Vec<CompileType>),
+    /// A slotted product value `(A; B)`. Unlike a plain product, a function
+    /// parameter of this type takes one juxtaposed argument per slot.
+    SlottedProduct(Vec<CompileType>),
     Function(Box<CompileType>, Box<CompileType>),
     /// `Result T E`, whose success is `Ok T` and whose failure is an `E`.
     Result(Box<CompileType>, Box<CompileType>),
@@ -1646,6 +1649,11 @@ struct MacroExpander {
     checked_compile_helpers: HashSet<SyntaxId>,
     checking_compile_helpers: HashSet<SyntaxId>,
     compile_binding_types: HashMap<SyntaxId, String>,
+    /// Whether a statically checked call argument fills every remaining slot
+    /// of a slotted parameter, keyed by the argument's syntax identity.
+    /// Evaluation uses the same decision instead of guessing from value
+    /// shape, so nested products bind to the same slot.
+    slotted_argument_fills: HashMap<SyntaxId, bool>,
     /// The `std.syntax` module, which defines `Parse` and its intrinsics.
     syntax_module: Option<ModuleId>,
     /// The `companion F32` and `companion F64` modules. Their tier-1 float
@@ -2568,6 +2576,7 @@ impl MacroExpander {
             checked_compile_helpers: HashSet::new(),
             checking_compile_helpers: HashSet::new(),
             compile_binding_types: HashMap::new(),
+            slotted_argument_fills: HashMap::new(),
             invocation_spans: Vec::new(),
             root_invocation_span: None,
             caller_location_spans: HashMap::new(),
@@ -2768,7 +2777,8 @@ impl MacroExpander {
                 let mut subject =
                     self.check_compile_expression(module, &value.subject, environment, None);
                 // A parenthesized `Result` subject is the `Result` itself.
-                if let CompileType::Product(elements) = &subject
+                if let CompileType::Product(elements) | CompileType::SlottedProduct(elements) =
+                    &subject
                     && let [CompileType::Result(..)] = elements.as_slice()
                 {
                     subject = elements[0].clone();
@@ -2821,15 +2831,20 @@ impl MacroExpander {
             {
                 self.check_compile_expression(module, &product.elements[0].value, environment, None)
             }
-            Expression::Product(product) => CompileType::Product(
-                product
+            Expression::Product(product) => {
+                let elements = product
                     .elements
                     .iter()
                     .map(|element| {
                         self.check_compile_expression(module, &element.value, environment, None)
                     })
-                    .collect(),
-            ),
+                    .collect();
+                if product.slotted {
+                    CompileType::SlottedProduct(elements)
+                } else {
+                    CompileType::Product(elements)
+                }
+            }
             Expression::RepeatedProduct(value) => {
                 let element =
                     self.check_compile_expression(module, &value.value, environment, None);
@@ -2879,10 +2894,12 @@ impl MacroExpander {
                     index.index.syntax().span.clone(),
                 );
                 match value {
-                    CompileType::Product(elements) => elements
-                        .into_iter()
-                        .reduce(join_compile_types)
-                        .unwrap_or(CompileType::Unknown),
+                    CompileType::Product(elements) | CompileType::SlottedProduct(elements) => {
+                        elements
+                            .into_iter()
+                            .reduce(join_compile_types)
+                            .unwrap_or(CompileType::Unknown)
+                    }
                     CompileType::Error => CompileType::Error,
                     _ => {
                         self.diagnostics.push(Diagnostic::new(
@@ -3264,7 +3281,9 @@ impl MacroExpander {
         {
             self.require_mutable_argument(first, environment);
         }
-        for argument in arguments {
+        let mut index = 0;
+        while index < arguments.len() {
+            let argument = arguments[index];
             let CompileType::Function(parameter, result) = callee else {
                 if callee != CompileType::Error && callee != CompileType::Unknown {
                     self.diagnostics.push(Diagnostic::new(
@@ -3274,8 +3293,33 @@ impl MacroExpander {
                 }
                 return CompileType::Error;
             };
-            self.check_compile_expression(module, argument, environment, Some(&parameter));
-            callee = *result;
+            // A slotted parameter consumes one juxtaposed argument per slot,
+            // exactly like a runtime function. A whole slotted product value
+            // fills every remaining slot at once.
+            let Some(mut slots) = compile_function_slots(&parameter) else {
+                self.check_compile_expression(module, argument, environment, Some(&parameter));
+                callee = *result;
+                index += 1;
+                continue;
+            };
+            let multiple_slots = slots.len() > 1;
+            if multiple_slots && compile_argument_fills_slots(argument, environment, &slots) {
+                self.slotted_argument_fills
+                    .insert(argument.syntax().id, true);
+                let expected = CompileType::SlottedProduct(slots);
+                self.check_compile_expression(module, argument, environment, Some(&expected));
+                callee = *result;
+                index += 1;
+                continue;
+            }
+            if multiple_slots {
+                self.slotted_argument_fills
+                    .insert(argument.syntax().id, false);
+            }
+            let slot = slots.remove(0);
+            self.check_compile_expression(module, argument, environment, Some(&slot));
+            callee = compile_function_after_slots(slots, *result);
+            index += 1;
         }
         callee
     }
@@ -6486,7 +6530,11 @@ impl MacroExpander {
                 let (argument, place) =
                     self.eval_call_argument(module, &call.argument, environment, wants_place)?;
                 self.argument_place = place;
-                self.apply_value(callee, argument, call.syntax.span.clone())
+                let fills_slots = self
+                    .slotted_argument_fills
+                    .get(&call.argument.syntax().id)
+                    .copied();
+                self.apply_value_with_slots(callee, argument, call.syntax.span.clone(), fills_slots)
             }
             Expression::Access(access) => {
                 if let Some((namespace, item, definition_module)) =
@@ -7551,6 +7599,21 @@ impl MacroExpander {
     /// bare `Expression::Function` node is wrapped into a `Value::Function`
     /// — is where depth needs to be tracked.
     fn apply_value(&mut self, callee: Value, argument: Value, span: Span) -> Option<Value> {
+        self.apply_value_with_slots(callee, argument, span, None)
+    }
+
+    /// Applies a callable while carrying the static checker's decision about
+    /// whether `argument` fills every remaining slot of a slotted parameter.
+    /// `None` means the application was not statically checked (for example a
+    /// call produced by macro expansion), so evaluation falls back to the
+    /// argument's shape.
+    fn apply_value_with_slots(
+        &mut self,
+        callee: Value,
+        argument: Value,
+        span: Span,
+        fills_slots: Option<bool>,
+    ) -> Option<Value> {
         if self.helper_eval_depth >= MAX_HELPER_EVAL_DEPTH {
             self.diagnostics.push(Diagnostic::new(
                 span,
@@ -7560,12 +7623,18 @@ impl MacroExpander {
             return None;
         }
         self.helper_eval_depth += 1;
-        let result = self.apply_value_inner(callee, argument, span);
+        let result = self.apply_value_inner(callee, argument, span, fills_slots);
         self.helper_eval_depth -= 1;
         result
     }
 
-    fn apply_value_inner(&mut self, callee: Value, argument: Value, span: Span) -> Option<Value> {
+    fn apply_value_inner(
+        &mut self,
+        callee: Value,
+        argument: Value,
+        span: Span,
+        fills_slots: Option<bool>,
+    ) -> Option<Value> {
         let place = self.argument_place.take();
         match callee {
             Value::Function {
@@ -7576,13 +7645,14 @@ impl MacroExpander {
                 type_env,
             } => {
                 // A slotted function is curried by juxtaposed calls: after
-                // `F64.min a`, the remaining `b` is still awaited. A spread
-                // filling every slot at once is bound as one product.
+                // `F64.min a`, the remaining `b` is still awaited. When the
+                // static checker saw one argument fill every slot, bind the
+                // whole product; otherwise use the argument's shape.
                 let whole_product = matches!(
                     (&argument, &function.pattern),
                     (Value::Product(fields, true), Pattern::Product(product))
                         if product.slotted && product.elements.len() == fields.len()
-                );
+                ) && fills_slots.unwrap_or(true);
                 if !whole_product
                     && let Pattern::Product(product) = &mut function.pattern
                     && product.slotted
@@ -7685,7 +7755,7 @@ impl MacroExpander {
                 // (and the resulting recursion-depth budget) tracks actual
                 // call nesting rather than this implementation detail.
                 self.argument_place = place;
-                self.apply_value_inner(function?, argument, span)
+                self.apply_value_inner(function?, argument, span, fills_slots)
             }
             _ => {
                 self.diagnostics
@@ -10313,7 +10383,13 @@ fn format_meta_elements(elements: &[MetaType], separator: &str) -> String {
 }
 
 fn compile_type(ty: &Type) -> CompileType {
-    if let Some(meta) = meta_type(ty) {
+    // A bare product is a value type even when every element is a syntax
+    // category: `(Expr; Expr)` is a slotted value, not one macro parameter
+    // shape. Macro signatures read product shapes through `meta_type`
+    // directly, so they are unaffected.
+    if let Some(meta) = meta_type(ty)
+        && !matches!(ty, Type::Product(_))
+    {
         return CompileType::Meta(meta);
     }
     match ty {
@@ -10331,13 +10407,18 @@ fn compile_type(ty: &Type) -> CompileType {
         Type::StringLiteral(_) => CompileType::String,
         Type::Inferred(_) | Type::Splice(_) => CompileType::Unknown,
         Type::Forall(_) => CompileType::Error,
-        Type::Product(product) => CompileType::Product(
-            product
+        Type::Product(product) => {
+            let elements = product
                 .elements
                 .iter()
                 .map(|element| compile_type(&element.ty))
-                .collect(),
-        ),
+                .collect();
+            if product.slotted {
+                CompileType::SlottedProduct(elements)
+            } else {
+                CompileType::Product(elements)
+            }
+        }
         Type::Function(function) => CompileType::Function(
             Box::new(compile_type(&function.parameter)),
             Box::new(compile_type(&function.result)),
@@ -10376,13 +10457,27 @@ fn compile_pattern_annotation(pattern: &Pattern) -> Option<CompileType> {
             Some(compile_type(&at.binding.ty))
         }
         Pattern::At(at) => compile_pattern_annotation(&at.pattern),
-        Pattern::Product(product) => Some(CompileType::Product(
-            product
-                .elements
-                .iter()
-                .map(|element| compile_pattern_annotation(element).unwrap_or(CompileType::Unknown))
-                .collect(),
-        )),
+        Pattern::Product(product) => Some(if product.slotted {
+            CompileType::SlottedProduct(
+                product
+                    .elements
+                    .iter()
+                    .map(|element| {
+                        compile_pattern_annotation(element).unwrap_or(CompileType::Unknown)
+                    })
+                    .collect(),
+            )
+        } else {
+            CompileType::Product(
+                product
+                    .elements
+                    .iter()
+                    .map(|element| {
+                        compile_pattern_annotation(element).unwrap_or(CompileType::Unknown)
+                    })
+                    .collect(),
+            )
+        }),
         _ => None,
     }
 }
@@ -10506,12 +10601,14 @@ fn compile_constructor_type(name: &str, argument: CompileType) -> CompileType {
 
 fn compile_delimited_contents(argument: &CompileType) -> DelimitedMetaContents {
     match argument {
-        CompileType::Product(elements) => DelimitedMetaContents::Slotted(
-            elements
-                .iter()
-                .map(|element| compile_type_as_meta(element).unwrap_or(MetaType::SyntaxNode))
-                .collect(),
-        ),
+        CompileType::Product(elements) | CompileType::SlottedProduct(elements) => {
+            DelimitedMetaContents::Slotted(
+                elements
+                    .iter()
+                    .map(|element| compile_type_as_meta(element).unwrap_or(MetaType::SyntaxNode))
+                    .collect(),
+            )
+        }
         _ => DelimitedMetaContents::Slotted(vec![
             compile_type_as_meta(argument).unwrap_or(MetaType::SyntaxNode),
         ]),
@@ -10521,7 +10618,7 @@ fn compile_delimited_contents(argument: &CompileType) -> DelimitedMetaContents {
 fn compile_type_as_meta(ty: &CompileType) -> Option<MetaType> {
     match ty {
         CompileType::Meta(meta) => Some(meta.clone()),
-        CompileType::Product(elements) => elements
+        CompileType::Product(elements) | CompileType::SlottedProduct(elements) => elements
             .iter()
             .map(compile_type_as_meta)
             .collect::<Option<Vec<_>>>()
@@ -10554,6 +10651,18 @@ fn compile_types_compatible(actual: &CompileType, expected: &CompileType) -> boo
     }
     if format_compile_type(actual) == format_compile_type(expected) {
         return true;
+    }
+    // The same slotted product may be represented as a value type or as a
+    // syntax shape, depending on where the annotation came from.
+    if let (Some(actual), Some(expected)) = (
+        compile_function_slots(actual),
+        compile_function_slots(expected),
+    ) {
+        return actual.len() == expected.len()
+            && actual
+                .iter()
+                .zip(&expected)
+                .all(|(a, e)| compile_types_compatible(a, e));
     }
     match (actual, expected) {
         (CompileType::Meta(actual), CompileType::Meta(expected)) => {
@@ -10632,7 +10741,9 @@ fn unslotted_meta_type(meta: &MetaType) -> MetaType {
 fn compile_type_contains_unknown(ty: &CompileType) -> bool {
     match ty {
         CompileType::Unknown => true,
-        CompileType::Product(elements) => elements.iter().any(compile_type_contains_unknown),
+        CompileType::Product(elements) | CompileType::SlottedProduct(elements) => {
+            elements.iter().any(compile_type_contains_unknown)
+        }
         CompileType::Function(parameter, result) => {
             compile_type_contains_unknown(parameter) || compile_type_contains_unknown(result)
         }
@@ -10692,6 +10803,14 @@ fn format_compile_type(ty: &CompileType) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        CompileType::SlottedProduct(elements) => format!(
+            "({})",
+            elements
+                .iter()
+                .map(format_compile_type)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
         CompileType::Function(parameter, result) => format!(
             "{} -> {}",
             format_compile_type(parameter),
@@ -10705,6 +10824,81 @@ fn accessor_name(accessor: &Accessor) -> String {
         Accessor::Name(name) | Accessor::Index(name) | Accessor::Method(name) => name.clone(),
         Accessor::Representation => "representation".to_owned(),
     }
+}
+
+/// The individual slots of a function parameter, when it is a slotted
+/// product. Compile-time functions with such a parameter are curried by
+/// juxtaposed calls, matching runtime functions.
+fn compile_function_slots(parameter: &CompileType) -> Option<Vec<CompileType>> {
+    match parameter {
+        CompileType::SlottedProduct(elements) => Some(elements.clone()),
+        CompileType::Meta(MetaType::SlottedProduct(elements)) => {
+            Some(elements.iter().cloned().map(CompileType::Meta).collect())
+        }
+        _ => None,
+    }
+}
+
+/// The function type left after `slots` have been filled. A partially applied
+/// slotted function is still a function value.
+fn compile_function_after_slots(mut slots: Vec<CompileType>, result: CompileType) -> CompileType {
+    match slots.len() {
+        0 => result,
+        1 => CompileType::Function(Box::new(slots.remove(0)), Box::new(result)),
+        _ => CompileType::Function(
+            Box::new(CompileType::SlottedProduct(slots)),
+            Box::new(result),
+        ),
+    }
+}
+
+/// Whether one argument supplies a whole slotted product for `slots`.
+/// Only a syntactically slotted product literal or a binding of a slotted
+/// product type fills every slot at once. If the first slot is itself a
+/// product of the same arity, the argument may be filling that one slot
+/// instead, so keep the ordinary one-slot interpretation.
+fn compile_argument_fills_slots(
+    expression: &Expression,
+    environment: &CompileEnvironment,
+    slots: &[CompileType],
+) -> bool {
+    let count = slots.len();
+    let fills_whole = match ungroup_expression(expression) {
+        Expression::Product(product) => {
+            product.slotted
+                && product.elements.len() == count
+                && product.elements.iter().all(|element| !element.spread)
+        }
+        Expression::Name(name) => environment.get(&name.name).is_some_and(|binding| {
+            matches!(&binding.ty, CompileType::SlottedProduct(elements) if elements.len() == count)
+        }),
+        _ => false,
+    };
+    let first_slot_is_product = match slots.first() {
+        Some(CompileType::Product(elements) | CompileType::SlottedProduct(elements)) => {
+            elements.len() == count
+        }
+        Some(CompileType::Meta(
+            MetaType::Product(elements) | MetaType::SlottedProduct(elements),
+        )) => elements.len() == count,
+        _ => false,
+    };
+    fills_whole && !first_slot_is_product
+}
+
+/// A parenthesized single element stands for the element itself.
+fn ungroup_expression(expression: &Expression) -> &Expression {
+    let mut current = expression;
+    while let Expression::Product(product) = current {
+        let [element] = product.elements.as_slice() else {
+            break;
+        };
+        if product.slotted || element.name.is_some() || element.spread || element.named_spread {
+            break;
+        }
+        current = &element.value;
+    }
+    current
 }
 
 fn compile_field_type(ty: &CompileType, accessor: &Accessor) -> Option<CompileType> {
@@ -10727,7 +10921,7 @@ fn compile_field_type(ty: &CompileType, accessor: &Accessor) -> Option<CompileTy
 
 fn compile_product_fields(ty: &CompileType, length: usize) -> Vec<CompileType> {
     match ty {
-        CompileType::Product(elements) => elements.clone(),
+        CompileType::Product(elements) | CompileType::SlottedProduct(elements) => elements.clone(),
         CompileType::Meta(MetaType::SlottedProduct(elements) | MetaType::Product(elements)) => {
             elements.iter().cloned().map(CompileType::Meta).collect()
         }
@@ -10887,6 +11081,7 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
             .iter()
             .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
         CompileType::Product(_)
+        | CompileType::SlottedProduct(_)
         | CompileType::Meta(MetaType::SlottedProduct(_) | MetaType::Product(_)) => {
             compile_pattern_matrix_is_exhaustive(ty, patterns)
         }
@@ -11115,7 +11310,9 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
             ("True".to_owned(), Vec::new()),
             ("False".to_owned(), Vec::new()),
         ],
-        CompileType::Product(elements) => vec![("$product".to_owned(), elements.clone())],
+        CompileType::Product(elements) | CompileType::SlottedProduct(elements) => {
+            vec![("$product".to_owned(), elements.clone())]
+        }
         CompileType::Meta(MetaType::SlottedProduct(elements) | MetaType::Product(elements)) => {
             vec![(
                 "$product".to_owned(),

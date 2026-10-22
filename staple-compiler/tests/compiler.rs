@@ -17424,6 +17424,70 @@ fn annotated_nominal_patterns_supply_parameter_types() {
 }
 
 #[test]
+fn juxtaposed_calls_fill_compile_time_helper_slots() {
+    // A slotted parameter on a compile-time helper takes one juxtaposed
+    // argument per slot, the same as a runtime function. Unnamed slotted
+    // products used to collapse into a single macro shape and reject the call.
+    let module = type_check(concat!(
+        "def pair: (Expr; Expr) -> Expr = (left; right) => parse_quote { ($left, $right) }\n",
+        "def named: (left: Expr; right: Expr) -> Expr = (left; right) => parse_quote { ($left, $right) }\n",
+        "def triple: (Expr; Expr; Expr) -> Expr = (first; second; third) => parse_quote { ($first, $second, $third) }\n",
+        "def mixed: (Expr; I32) -> Expr = (value; count) => parse_quote { $value }\n",
+        "def plain: (Expr, Expr) -> Expr = (left, right) => parse_quote { ($left, $right) }\n",
+        "def inferred = (left: Expr; right: Expr) => Expr :: parse_quote { ($left, $right) }\n",
+        "macro pair_value: Expr -> Expr = value => pair value value\n",
+        "macro named_value: Expr -> Expr = value => named value value\n",
+        "macro triple_value: Expr -> Expr = value => triple value value value\n",
+        "macro mixed_value: Expr -> Expr = value => mixed value 2\n",
+        "macro plain_value: Expr -> Expr = value => plain (value, value)\n",
+        "macro inferred_value: Expr -> Expr = value => inferred value value\n",
+        "macro partial: Expr -> Expr = value => {\n",
+        "    let apply: Expr -> Expr = pair value\n",
+        "    apply value\n",
+        "}\n",
+        "let paired: (I32, I32) = pair_value 1\n",
+        "let named_pair: (I32, I32) = named_value 2\n",
+        "let tripled: (I32, I32, I32) = triple_value 3\n",
+        "let mixed_value_: I32 = mixed_value 4\n",
+        "let plain_pair: (I32, I32) = plain_value 5\n",
+        "let inferred_pair: (I32, I32) = inferred_value 6\n",
+        "let partial_pair: (I32, I32) = partial 7\n",
+    ));
+    lower(&module);
+}
+
+#[test]
+fn a_slotted_argument_can_fill_one_nested_product_slot() {
+    // `(Expr; Expr)` may be the first slot's own type rather than a whole
+    // two-slot argument, so the call must still bind it to that one slot.
+    let module = type_check(concat!(
+        "def count: ((Expr; Expr); I32) -> I32 = (pair; count) => count\n",
+        "macro read_count: Expr -> Expr = value => {\n",
+        "    let number: I32 = count (value; value) 2\n",
+        "    let _ = number\n",
+        "    value\n",
+        "}\n",
+        "let result: I32 = read_count 1\n",
+    ));
+    lower(&module);
+}
+
+#[test]
+fn compile_time_helpers_accept_whole_slotted_products() {
+    let module = type_check(concat!(
+        "def pair: (left: Expr; right: Expr) -> Expr = (left; right) => parse_quote { ($left, $right) }\n",
+        "macro literal: Expr -> Expr = value => pair (value; value)\n",
+        "macro binding: Expr -> Expr = value => {\n",
+        "    let arguments: (left: Expr; right: Expr) = (value; value)\n",
+        "    pair arguments\n",
+        "}\n",
+        "let from_literal: (I32, I32) = literal 1\n",
+        "let from_binding: (I32, I32) = binding 2\n",
+    ));
+    lower(&module);
+}
+
+#[test]
 fn value_defined_macro_helpers_supply_their_signature() {
     // A helper's parameter annotations and result ascription stand in for a
     // binding annotation, including `parse_quote`'s contextual syntax type.
