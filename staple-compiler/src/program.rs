@@ -3678,6 +3678,7 @@ fn attach_companion_generics(declaration: &mut Submodule, next_syntax_id: &mut u
         parameters: declaration.type_parameters.clone(),
         trait_bounds: declaration.trait_bounds.clone(),
         subtype_bounds: declaration.subtype_bounds.clone(),
+        equality_bounds: declaration.equality_bounds.clone(),
         sized_relaxations: declaration.sized_relaxations.clone(),
     };
     for item in &mut declaration.module.items {
@@ -3731,6 +3732,11 @@ fn refresh_generics_ids(
         refresh_syntax_id(&mut bound.syntax, next_syntax_id);
         refresh_syntax_id(&mut bound.parameter.syntax, next_syntax_id);
         refresh_type_ids(&mut bound.supertype, next_syntax_id);
+    }
+    for bound in &mut generics.equality_bounds {
+        refresh_syntax_id(&mut bound.syntax, next_syntax_id);
+        refresh_type_ids(&mut bound.left, next_syntax_id);
+        refresh_type_ids(&mut bound.right, next_syntax_id);
     }
     for relaxation in &mut generics.sized_relaxations {
         refresh_syntax_id(&mut relaxation.syntax, next_syntax_id);

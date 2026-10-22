@@ -241,6 +241,7 @@ impl Collector<'_> {
                 &binding.all_type_parameters(),
                 &binding.all_trait_bounds(),
                 &binding.all_subtype_bounds(),
+                &binding.all_equality_bounds(),
             );
             self.declarations.insert(
                 symbol,
@@ -574,6 +575,10 @@ impl Collector<'_> {
                 for bound in &declaration.trait_bounds {
                     self.trait_bound(bound);
                 }
+                for bound in &declaration.equality_bounds {
+                    self.ty(&bound.left);
+                    self.ty(&bound.right);
+                }
                 if let Some(annotation) = &declaration.annotation {
                     self.ty(annotation);
                 }
@@ -593,6 +598,10 @@ impl Collector<'_> {
                 }
                 for bound in &implementation.trait_bounds {
                     self.trait_bound(bound);
+                }
+                for bound in &implementation.equality_bounds {
+                    self.ty(&bound.left);
+                    self.ty(&bound.right);
                 }
                 for argument in &implementation.arguments {
                     self.ty(argument);
@@ -629,6 +638,7 @@ impl Collector<'_> {
                     declaration.explicit_type_parameters(),
                     &declaration.prerequisites,
                     &declaration.subtype_bounds,
+                    &declaration.equality_bounds,
                 );
                 let module = self.syntax_module_label(declaration.syntax.id);
                 self.named_with_docs(
@@ -653,6 +663,10 @@ impl Collector<'_> {
                 }
                 for prerequisite in &declaration.prerequisites {
                     self.trait_bound(prerequisite);
+                }
+                for bound in &declaration.equality_bounds {
+                    self.ty(&bound.left);
+                    self.ty(&bound.right);
                 }
                 for member in &declaration.members {
                     let module = self.syntax_module_label(declaration.syntax.id);
@@ -979,6 +993,7 @@ impl Collector<'_> {
                     declaration.explicit_type_parameters(),
                     &declaration.prerequisites,
                     &declaration.subtype_bounds,
+                    &declaration.equality_bounds,
                 );
                 (
                     format!("trait {}{parameters}{where_clause}", declaration.name),
@@ -1036,6 +1051,10 @@ impl Collector<'_> {
         for bound in &declaration.trait_bounds {
             self.trait_bound(bound);
         }
+        for bound in &declaration.equality_bounds {
+            self.ty(&bound.left);
+            self.ty(&bound.right);
+        }
         if let Some(underlying) = declaration.underlying() {
             self.ty(underlying);
         }
@@ -1051,15 +1070,25 @@ impl Collector<'_> {
             .collect()
     }
 
-    /// Builds the unified `where` clause text (trait bounds and subtype
-    /// bounds), e.g.
+    /// Builds the unified `where` clause text, including associated equalities,
+    /// e.g.
     /// ` where Debug T, T <: Super`, or an empty string when there are none.
-    fn where_clause(&self, trait_bounds: &[TraitBound], subtype_bounds: &[SubtypeBound]) -> String {
+    fn where_clause(
+        &self,
+        trait_bounds: &[TraitBound],
+        subtype_bounds: &[SubtypeBound],
+        equality_bounds: &[staple_syntax::EqualityBound],
+    ) -> String {
         let constraints = subtype_bounds
             .iter()
             .map(|bound| bound.syntax.text().trim().to_owned())
             .chain(
                 trait_bounds
+                    .iter()
+                    .map(|bound| bound.syntax.text().trim().to_owned()),
+            )
+            .chain(
+                equality_bounds
                     .iter()
                     .map(|bound| bound.syntax.text().trim().to_owned()),
             )
@@ -1079,12 +1108,13 @@ impl Collector<'_> {
         type_parameters: &[TypeParameterPattern],
         trait_bounds: &[TraitBound],
         subtype_bounds: &[SubtypeBound],
+        equality_bounds: &[staple_syntax::EqualityBound],
     ) -> String {
         if type_parameters.is_empty() {
             return String::new();
         }
         let parameters = self.parameter_names(type_parameters).join(", ");
-        let where_clause = self.where_clause(trait_bounds, subtype_bounds);
+        let where_clause = self.where_clause(trait_bounds, subtype_bounds, equality_bounds);
         format!("<{parameters}{where_clause}> ")
     }
 
@@ -1097,6 +1127,7 @@ impl Collector<'_> {
         type_parameters: &[TypeParameterPattern],
         trait_bounds: &[TraitBound],
         subtype_bounds: &[SubtypeBound],
+        equality_bounds: &[staple_syntax::EqualityBound],
     ) -> (String, String) {
         let parameters = self.parameter_names(type_parameters).join(" ");
         let parameters = if parameters.is_empty() {
@@ -1104,7 +1135,7 @@ impl Collector<'_> {
         } else {
             format!(" {parameters}")
         };
-        let where_clause = self.where_clause(trait_bounds, subtype_bounds);
+        let where_clause = self.where_clause(trait_bounds, subtype_bounds, equality_bounds);
         (parameters, where_clause)
     }
 
@@ -1131,6 +1162,7 @@ impl Collector<'_> {
             ordinary_parameters,
             &declaration.trait_bounds,
             &declaration.subtype_bounds,
+            &declaration.equality_bounds,
         );
         let head = format!(
             "type {}{effect_parameter}{parameters}{where_clause}",
@@ -1345,6 +1377,7 @@ impl Collector<'_> {
                 &binding.all_type_parameters(),
                 &binding.all_trait_bounds(),
                 &binding.all_subtype_bounds(),
+                &binding.all_equality_bounds(),
             );
             let docs = self
                 .typed
@@ -1542,6 +1575,10 @@ impl Collector<'_> {
                     }
                     for bound in &g.trait_bounds {
                         self.trait_bound(bound);
+                    }
+                    for bound in &g.equality_bounds {
+                        self.ty(&bound.left);
+                        self.ty(&bound.right);
                     }
                     for bound in &g.subtype_bounds {
                         self.ty(&bound.supertype);
@@ -1810,6 +1847,7 @@ impl Collector<'_> {
                 declaration.explicit_type_parameters(),
                 &declaration.prerequisites,
                 &declaration.subtype_bounds,
+                &declaration.equality_bounds,
             );
             let module = self.definition_module_label(DefinitionId::Trait(trait_id));
             self.named_with_docs(
@@ -1856,6 +1894,10 @@ impl Collector<'_> {
                 }
                 for bound in &ty.generics.trait_bounds {
                     self.trait_bound(bound);
+                }
+                for bound in &ty.generics.equality_bounds {
+                    self.ty(&bound.left);
+                    self.ty(&bound.right);
                 }
                 for bound in &ty.generics.subtype_bounds {
                     self.ty(&bound.supertype);
@@ -2076,6 +2118,7 @@ impl Collector<'_> {
             &declaration.type_parameters,
             &declaration.trait_bounds,
             &declaration.subtype_bounds,
+            &declaration.equality_bounds,
         );
         Some(Declaration {
             prefix: None,
@@ -2914,6 +2957,32 @@ mod tests {
                 "missing {name}: {signature} in {entries:?}"
             );
         }
+    }
+
+    #[test]
+    fn associated_equality_appears_in_generic_hover() {
+        let source = "def integer_count = <I where Iterator I, Iterator.Item I == I32> move iter: I => count iter\n";
+        let path = std::env::temp_dir().join("staple-hover-associated-equality.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| &source[entry.range.clone()] == "integer_count"
+                    && entry.signature.contains("Iterator.Item I == I32")),
+            "{entries:?}"
+        );
     }
 
     #[test]

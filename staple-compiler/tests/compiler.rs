@@ -18707,3 +18707,303 @@ fn parse_impl_members_are_checked_against_the_trait() {
         "{diagnostics:#?}"
     );
 }
+
+#[test]
+fn associated_type_equalities_unify_iterator_items() {
+    let module = type_check(
+        r#"
+        def join = <L, R where Iterator L, Iterator R, Iterator.Item L == Iterator.Item R>
+            (move left: L; move right: R) => chain left right
+        def test = () => {
+            let items = (0 .. 3) |> join ((3 .. 6) |> filter (x => x > 3)) |> collect
+            items |> into_iterator |> fold 0 ((a, b) => a + b)
+        }
+        let total = test ()
+    "#,
+    );
+    lower(&module);
+}
+
+#[test]
+fn associated_type_equalities_reject_mismatching_items() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            r#"
+        let items = (0 .. 3) |> chain (String.bytes "hi")
+    "#,
+        ))
+        .expect_err_diagnostics("different iterator items must fail");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("associated-type equality")
+                && d.message.contains("Iterator.Item")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn associated_type_equalities_support_concrete_generic_and_transitive_targets() {
+    let module = type_check(
+        r#"
+        trait Element T { type Value; value: T -> Value }
+        impl Element I32 { type Value = I32; value = x => x }
+        impl Element Bool { type Value = I32; value = x => 7 }
+        def integer = <T where Element.Value T == I32, Element T> x: T => I32 :: Element.value x
+        def generic = <T, A where Element T, A == Element.Value T> x: T => A :: Element.value x
+        def transitive = <T, U, A where Element T, Element U,
+            Element.Value T == A, Element.Value U == Element.Value T>
+            (x: T; y: U) => (A, A) :: (Element.value x, Element.value y)
+        def forwarded = <T where Element T, Element.Value T == I32> x: T => integer x
+        let flag: Bool = True
+        let a: I32 = integer flag
+        let b: I32 = generic 3
+        let c: (I32, I32) = transitive 3 flag
+        let d: I32 = forwarded flag
+        let f: <T where Element T, Element.Value T == I32> T -> I32 =
+            <T where Element T, Element.Value T == I32> x => Element.value x
+        let e: I32 = f flag
+        let getter: <T, A where Element T, Element.Value T == A> T -> A =
+            <T, A where Element T, Element.Value T == A> x => Element.value x
+        let recovered: I32 = getter flag
+    "#,
+    );
+    lower(&module);
+}
+
+#[test]
+fn associated_type_equalities_reject_invalid_requirements() {
+    for source in [
+        r#"def bad = <T where Iterator T, Iterator.Item T == I32, Iterator.Item T == String> move x: T => ()"#,
+        r#"def bad = <T where Iterator.Item T == I32> move x: T => ()"#,
+        r#"def bad = <T where T == I32> x: T => x"#,
+        r#"def bad = <T where Iterator T, Iterator.Item T == List (Iterator.Item T)> move x: T => ()"#,
+        r#"def only_int = <T where Iterator T, Iterator.Item T == I32> move x: T => count x
+           let bad = only_int (String.bytes "hi")"#,
+        r#"def same = <T, A, B where Iterator T, Iterator.Item T == A, Iterator.Item T == B> move x: T => count x
+           let bad = same.<Range I32, I32, String> (0 .. 2)"#,
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("invalid associated equality must fail");
+        assert!(!diagnostics.is_empty(), "{source}");
+    }
+}
+
+#[test]
+fn associated_type_equalities_constrain_types_and_implementations() {
+    let module = type_check(
+        r#"
+        trait Element T { type Value; value: T -> Value }
+        impl Element I32 { type Value = I32; value = x => x }
+        impl Element Bool { type Value = String; value = x => "text" }
+        type Integers T where Element T, Element.Value T == I32 = wrap T
+        trait Read T { read: T -> I32 }
+        impl<T where Element T, Element.Value T == I32> Read (Integers T) {
+            read = Integers x => Element.value x
+        }
+        let wrapped = Integers.<I32> 3
+        let value: I32 = Read.read wrapped
+    "#,
+    );
+    lower(&module);
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            r#"
+        type Integers T where Iterator T, Iterator.Item T == I32 = wrap T
+        let bad = Integers.<Range U8> (0 .. 2)
+    "#,
+        ))
+        .expect_err_diagnostics("type constructor must enforce equality");
+    assert!(!diagnostics.is_empty());
+}
+
+#[test]
+fn associated_type_equalities_infer_parameters_used_only_in_bounds() {
+    let module = type_check(
+        r#"
+        def count_as = <Iter, A where Iterator Iter, Iterator.Item Iter == A>
+            move iter: Iter => USize :: count iter
+        def count_as_twice = <Iter, A, B where Iterator Iter,
+            Iterator.Item Iter == A, Iterator.Item Iter == B>
+            move iter: Iter => USize :: count iter
+        let a = count_as (0 .. 3)
+        let b = count_as_twice (0 .. 4)
+    "#,
+    );
+    lower(&module);
+}
+
+#[test]
+fn associated_type_equalities_support_nested_projections_and_prerequisites() {
+    let module = type_check(
+        r#"
+        def integer_source = <Source where IntoIterator Source,
+            Iterator.Item (IntoIterator.Iter Source) == I32>
+            move source: Source => I32 :: source |> into_iterator |> sum
+        trait IntSource Source {
+            type Iter where Iterator Iter, Iterator.Item Iter == I32
+            iter: move Source -> Iter
+        }
+        type Source = wrap I32
+        impl IntSource Source {
+            type Iter = Range I32
+            iter = move Source n => 0 .. n
+        }
+        def source_sum = <S where IntSource S> move source: S => I32 :: IntSource.iter source |> sum
+        let a = integer_source (0 .. 4)
+        let b = source_sum (Source 4)
+    "#,
+    );
+    lower(&module);
+}
+
+#[test]
+fn associated_type_equalities_in_companions_and_generic_implementations() {
+    let module = type_check(
+        r#"
+        type Box T = wrap T
+        companion<T where Iterator T, Iterator.Item T == I32> Box T {
+            def total = move boxed: Box T => I32 :: match boxed { Box iter => sum iter }
+        }
+        trait Total T { total: move T -> I32 }
+        impl<T where Iterator T, Iterator.Item T == I32> Total (Box T) {
+            total = move boxed => match boxed { Box iter => sum iter }
+        }
+        let a = Box.<Range I32> (0 .. 4) |> Box.total
+        let b = Total.total (Box.<Range I32> (0 .. 4))
+    "#,
+    );
+    lower(&module);
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            r#"
+        type Box T = wrap T
+        trait Total T { total: move T -> I32 }
+        impl<T where Iterator T, Iterator.Item T == I32> Total (Box T) {
+            total = move boxed => match boxed { Box iter => sum iter }
+        }
+        let bad = Total.total (Box.<Range U8> (0 .. 3))
+    "#,
+        ))
+        .expect_err_diagnostics("conditional implementation equality must hold");
+    assert!(!diagnostics.is_empty());
+}
+
+#[test]
+fn associated_type_equalities_do_not_make_overlapping_implementations_disjoint() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            r#"
+        type Box T = wrap T
+        trait Total T { total: move T -> I32 }
+        impl<T where Iterator T, Iterator.Item T == I32> Total (Box T) {
+            total = move boxed => match boxed { Box iter => sum iter }
+        }
+        impl<T, A where Iterator T, Iterator.Item T == A> Total (Box T) {
+            total = move Box iter => 0
+        }
+    "#,
+        ))
+        .expect_err_diagnostics("unresolved equality does not disprove overlap");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("duplicate trait implementation")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn associated_type_equalities_are_checked_without_items_in_the_result() {
+    for source in [
+        r#"def same = <L, R where Iterator L, Iterator R, Iterator.Item L == Iterator.Item R>
+                (move l: L; move r: R) => ()
+            let bad = same (0 .. 3) (String.bytes "hi")"#,
+        r#"type Pair L R where Iterator L, Iterator R, Iterator.Item L == Iterator.Item R = wrap (L, R)
+            let bad = Pair.<Range I32, Range U8> (0 .. 3, 0 .. 3)"#,
+        r#"def same = <I where Iterator I, Iterator.Item I == _> move i: I => ()"#,
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics(source);
+        assert!(!diagnostics.is_empty(), "{source}");
+    }
+    let module = type_check(
+        r#"
+        type Pair L R where Iterator L, Iterator R, Iterator.Item L == Iterator.Item R = wrap (L, R)
+        let pair = Pair.<Range I32, Map (Range I32) I32> (0 .. 3, (0 .. 3) |> map (x => x + 1))
+    "#,
+    );
+    lower(&module);
+}
+
+#[test]
+fn associated_type_equalities_compare_compound_types_exactly() {
+    for source in [
+        r#"def bad = <T where Iterator T, Iterator.Item T == (left: I32, flag: Bool), Iterator.Item T == (right: I32, flag: Bool)> move x: T => ()"#,
+        r#"use std.io.IO
+           def bad = <T where Iterator T, Iterator.Item T == (I32 -> I32), Iterator.Item T == (I32 ->{IO} I32)> move x: T => ()"#,
+        r#"def bad = <T where Iterator T, Iterator.Item T == (move I32 -> I32), Iterator.Item T == (I32 -> I32)> move x: T => ()"#,
+        r#"def bad = <T where Iterator T, Iterator.Item T == (I32 | String), Iterator.Item T == (I32 | Bool)> move x: T => ()"#,
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics(source);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("equality") && d.message.contains("cannot hold")),
+            "{diagnostics:?}"
+        );
+    }
+    let module = type_check(
+        r#"
+        def valid = <T where Iterator T, Iterator.Item T == (I32 | String),
+            Iterator.Item T == (String | I32)> move x: T => ()
+    "#,
+    );
+    lower(&module);
+}
+
+#[test]
+fn associated_type_equalities_constrain_implementation_item_pairs() {
+    let module = type_check(
+        r#"
+        type Pair L R = wrap (L, R)
+        trait Amount T { amount: move T -> USize }
+        impl<L, R where Iterator L, Iterator R, Iterator.Item L == Iterator.Item R> Amount (Pair L R) {
+            amount = move Pair (l, r) => count l + count r
+        }
+        let amount = Amount.amount (Pair.<Range I32, Map (Range I32) I32> (0 .. 2, (0 .. 2) |> map (x => x * 2)))
+    "#,
+    );
+    lower(&module);
+    let diagnostics = TypeChecker::new().check(resolve(r#"
+        type Pair L R = wrap (L, R)
+        trait Amount T { amount: move T -> USize }
+        impl<L, R where Iterator L, Iterator R, Iterator.Item L == Iterator.Item R> Amount (Pair L R) {
+            amount = move Pair (l, r) => count l + count r
+        }
+        let bad = Amount.amount (Pair.<Range I32, Range U8> (0 .. 2, 0 .. 2))
+    "#)).expect_err_diagnostics("implementation item types must agree");
+    assert!(!diagnostics.is_empty());
+}
+
+#[test]
+fn associated_type_equalities_do_not_infer_iterator_types_from_items() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            r#"
+        def choose = <I where Iterator I, Iterator.Item I == I32> () => ()
+        let bad = choose ()
+    "#,
+        ))
+        .expect_err_diagnostics("an associated output must not select the iterator type");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("could not infer")),
+        "{diagnostics:?}"
+    );
+}

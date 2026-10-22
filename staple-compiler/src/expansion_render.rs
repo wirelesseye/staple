@@ -230,6 +230,7 @@ fn render_type_declaration(declaration: &staple_syntax::TypeDeclaration) -> Stri
         &declaration.sized_relaxations,
         &declaration.trait_bounds,
         &declaration.subtype_bounds,
+        &declaration.equality_bounds,
     );
     if !constraints.is_empty() {
         out.push_str(" where ");
@@ -286,6 +287,7 @@ fn render_constraints(
     relaxations: &[staple_syntax::SizedRelaxation],
     traits: &[staple_syntax::TraitBound],
     subtypes: &[staple_syntax::SubtypeBound],
+    equalities: &[staple_syntax::EqualityBound],
 ) -> String {
     let mut entries = relaxations
         .iter()
@@ -311,6 +313,11 @@ fn render_constraints(
         subtypes
             .iter()
             .map(|bound| format!("{} <: {}", bound.parameter.name, bound.supertype)),
+    );
+    entries.extend(
+        equalities
+            .iter()
+            .map(|bound| format!("{} == {}", bound.left, bound.right)),
     );
     entries.join(", ")
 }

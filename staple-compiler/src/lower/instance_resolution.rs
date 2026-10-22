@@ -1322,17 +1322,88 @@ impl<'a> TraitSelectionContext<'a> {
         matches
     }
 
+    fn complete_bound_outputs(
+        &self,
+        bounds: &[CheckedTraitBound],
+        initial: &HashMap<TypeParameterId, CheckedType>,
+    ) -> HashMap<TypeParameterId, CheckedType> {
+        let mut substitutions = initial.clone();
+        for _ in 0..=bounds.len() {
+            let before = substitutions.clone();
+            for bound in bounds {
+                let Some(metadata) = self.program.traits.get(bound.trait_id) else {
+                    continue;
+                };
+                let explicit = metadata
+                    .parameters
+                    .len()
+                    .saturating_sub(metadata.associated_types.len());
+                let arguments = bound
+                    .arguments
+                    .iter()
+                    .cloned()
+                    .map(|ty| substitute_type(ty, &substitutions))
+                    .collect::<Vec<_>>();
+                let unknown = arguments
+                    .iter()
+                    .skip(explicit)
+                    .flat_map(crate::typecheck::type_parameter_ids)
+                    .filter(|id| !self.runtime.contains(id))
+                    .map(|id| (id, CheckedType::Inferred))
+                    .collect::<HashMap<_, _>>();
+                if unknown.is_empty() {
+                    continue;
+                }
+                let query = arguments
+                    .iter()
+                    .enumerate()
+                    .map(|(index, ty)| {
+                        if index < explicit {
+                            ty.clone()
+                        } else {
+                            substitute_type(ty.clone(), &unknown)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let Some(completed) = self.resolve_obligation(bound.trait_id, &query) else {
+                    continue;
+                };
+                let mut inferred = HashMap::new();
+                if arguments
+                    .iter()
+                    .zip(&completed)
+                    .skip(explicit)
+                    .all(|(template, value)| {
+                        !contains_inferred_type(value)
+                            && infer_type_parameters(template, value, &mut inferred)
+                    })
+                {
+                    for (id, value) in inferred {
+                        if !crate::typecheck::type_parameter_ids(&value).contains(&id) {
+                            substitutions.insert(id, value);
+                        }
+                    }
+                }
+            }
+            if substitutions == before {
+                break;
+            }
+        }
+        substitutions
+    }
+
     fn implementation_bounds_hold(
         &self,
         implementation: &CheckedTraitImplementation,
         substitutions: &HashMap<TypeParameterId, CheckedType>,
     ) -> bool {
+        let substitutions = self.complete_bound_outputs(&implementation.bounds, substitutions);
         implementation.bounds.iter().all(|bound| {
             let bound_arguments = bound
                 .arguments
                 .iter()
                 .cloned()
-                .map(|argument| substitute_type(argument, substitutions))
+                .map(|argument| substitute_type(argument, &substitutions))
                 .collect::<Vec<_>>();
             if bound_arguments
                 .iter()
@@ -3775,8 +3846,9 @@ impl LoweredProgram {
         }
     }
 
-    /// Completes hidden associated-type parameters (`Iterator.Item Iter`) from
-    /// the instance's declared bounds once their explicit arguments are known.
+    /// Completes associated-type parameters and equality targets from the
+    /// instance's declared bounds once their explicit arguments are known.
+    /// Equality targets may be ordinary parameters or contain them (`List A`).
     /// The body can name such a projection in a local annotation even when the
     /// function's own signature never mentions it, so the template needs an
     /// entry for every projection the selected implementation determines.
@@ -3802,64 +3874,65 @@ impl LoweredProgram {
         // for evidence, but here their still-open hidden slot would compete
         // with the concrete answer, so leave them out of this selection.
         let context = TraitSelectionContext::new(self, Vec::new());
-        for bound in &bounds {
-            let Some(trait_metadata) = self.traits.get(bound.trait_id) else {
-                continue;
-            };
-            let explicit = trait_metadata
-                .parameters
-                .len()
-                .saturating_sub(trait_metadata.associated_types.len());
-            if !bound
-                .arguments
-                .iter()
-                .skip(explicit)
-                .any(|argument| {
-                    matches!(argument, CheckedType::Parameter { id, .. }
-                        if id.0 >= crate::typecheck::PROJECTION_PARAMETER_BASE)
-                })
-            {
-                continue;
-            }
-            let map = environment.substitution_map();
-            let mut query = bound.arguments.clone();
-            for (index, argument) in query.iter_mut().enumerate() {
-                *argument = if index < explicit {
-                    substitute_type(argument.clone(), &map)
-                } else {
-                    CheckedType::Inferred
-                };
-            }
-            if query
-                .iter()
-                .take(explicit)
-                .any(|argument| contains_inferred_type(argument))
-            {
-                continue;
-            }
-            let Some(completed) = context.resolve_obligation(bound.trait_id, &query) else {
-                continue;
-            };
-            for (index, argument) in bound.arguments.iter().enumerate().skip(explicit) {
-                let CheckedType::Parameter { id, .. } = argument else {
+        for _ in 0..=bounds.len() {
+            let before = environment.clone();
+            for bound in &bounds {
+                let Some(trait_metadata) = self.traits.get(bound.trait_id) else {
                     continue;
                 };
-                if id.0 < crate::typecheck::PROJECTION_PARAMETER_BASE {
+                let explicit = trait_metadata
+                    .parameters
+                    .len()
+                    .saturating_sub(trait_metadata.associated_types.len());
+                if !bound
+                    .arguments
+                    .iter()
+                    .skip(explicit)
+                    .any(contains_type_parameter)
+                {
                     continue;
                 }
-                let Some(value) = completed.get(index) else {
-                    continue;
-                };
-                if contains_type_parameter(value) || contains_inferred_type(value) {
+                let map = environment.substitution_map();
+                let mut query = bound.arguments.clone();
+                for (index, argument) in query.iter_mut().enumerate() {
+                    *argument = if index < explicit {
+                        substitute_type(argument.clone(), &map)
+                    } else {
+                        CheckedType::Inferred
+                    };
+                }
+                if query
+                    .iter()
+                    .take(explicit)
+                    .any(|argument| contains_inferred_type(argument))
+                {
                     continue;
                 }
-                environment.entries.insert(
-                    *id,
-                    SubstitutionEntry {
-                        source: SubstitutionSource::Inferred,
-                        value: SubstitutionValue::Type(value.clone()),
-                    },
-                );
+                let Some(completed) = context.resolve_obligation(bound.trait_id, &query) else {
+                    continue;
+                };
+                for (argument, value) in bound.arguments.iter().zip(&completed).skip(explicit) {
+                    if contains_type_parameter(value) || contains_inferred_type(value) {
+                        continue;
+                    }
+                    let template = substitute_type(argument.clone(), &map);
+                    let mut inferred = HashMap::new();
+                    if !infer_type_parameters(&template, value, &mut inferred) {
+                        continue;
+                    }
+                    for (id, value) in inferred {
+                        if contains_type_parameter(&value) || contains_inferred_type(&value) {
+                            continue;
+                        }
+                        environment.entries.entry(id).or_insert(SubstitutionEntry {
+                            source: SubstitutionSource::Inferred,
+                            value: SubstitutionValue::Type(value),
+                        });
+                    }
+                }
+            }
+            if *environment == before {
+                break;
             }
         }
     }

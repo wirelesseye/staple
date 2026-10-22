@@ -1164,15 +1164,26 @@ fn desugar_item(item: &mut Item, next_syntax_id: &mut usize, ops_module: StdModu
             // become the trait's. The hidden parameter shares the associated
             // type's syntax (see `TraitDeclaration::explicit_type_parameters`).
             for associated in &mut declaration.associated_types {
-                declaration.type_parameters.push(staple_syntax::TypeParameterPattern::Binding(
-                    staple_syntax::TypeParameterBinding {
-                        syntax: associated.syntax.clone(),
-                        name: associated.name.clone(),
-                    },
-                ));
-                declaration.prerequisites.append(&mut associated.trait_bounds);
-                declaration.subtype_bounds.append(&mut associated.subtype_bounds);
-                declaration.sized_relaxations.append(&mut associated.sized_relaxations);
+                declaration
+                    .type_parameters
+                    .push(staple_syntax::TypeParameterPattern::Binding(
+                        staple_syntax::TypeParameterBinding {
+                            syntax: associated.syntax.clone(),
+                            name: associated.name.clone(),
+                        },
+                    ));
+                declaration
+                    .prerequisites
+                    .append(&mut associated.trait_bounds);
+                declaration
+                    .subtype_bounds
+                    .append(&mut associated.subtype_bounds);
+                declaration
+                    .equality_bounds
+                    .append(&mut associated.equality_bounds);
+                declaration
+                    .sized_relaxations
+                    .append(&mut associated.sized_relaxations);
             }
             for member in &mut declaration.members {
                 if let Some(default) = &mut member.default {
@@ -1476,6 +1487,7 @@ pub(crate) fn expand_program_recovering(
                 type_parameters: Vec::new(),
                 trait_bounds: Vec::new(),
                 subtype_bounds: Vec::new(),
+                equality_bounds: Vec::new(),
                 sized_relaxations: Vec::new(),
                 companion_target: None,
             };
@@ -12906,6 +12918,9 @@ fn substitute_block_item(
             for bound in &mut declaration.subtype_bounds {
                 substitute_subtype_bound(bound, environment, diagnostics)?;
             }
+            for bound in &mut declaration.equality_bounds {
+                substitute_equality_bound(bound, environment, diagnostics)?;
+            }
             for bound in &mut declaration.default_bounds {
                 substitute_default_bound(bound, environment, diagnostics)?;
             }
@@ -13109,6 +13124,15 @@ fn substitute_subtype_bound(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<()> {
     substitute_type(&mut bound.supertype, environment, diagnostics)
+}
+
+fn substitute_equality_bound(
+    bound: &mut staple_syntax::EqualityBound,
+    environment: &Environment,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<()> {
+    substitute_type(&mut bound.left, environment, diagnostics)?;
+    substitute_type(&mut bound.right, environment, diagnostics)
 }
 
 fn substitute_default_bound(
@@ -13452,6 +13476,9 @@ fn substitute_item(
             for bound in &mut declaration.subtype_bounds {
                 substitute_subtype_bound(bound, environment, diagnostics)?;
             }
+            for bound in &mut declaration.equality_bounds {
+                substitute_equality_bound(bound, environment, diagnostics)?;
+            }
             for bound in &mut declaration.default_bounds {
                 substitute_default_bound(bound, environment, diagnostics)?;
             }
@@ -13461,6 +13488,9 @@ fn substitute_item(
                 }
                 for bound in &mut associated.subtype_bounds {
                     substitute_subtype_bound(bound, environment, diagnostics)?;
+                }
+                for bound in &mut associated.equality_bounds {
+                    substitute_equality_bound(bound, environment, diagnostics)?;
                 }
             }
             for member in &mut declaration.members {
@@ -13481,6 +13511,9 @@ fn substitute_item(
             }
             for bound in &mut implementation.subtype_bounds {
                 substitute_subtype_bound(bound, environment, diagnostics)?;
+            }
+            for bound in &mut implementation.equality_bounds {
+                substitute_equality_bound(bound, environment, diagnostics)?;
             }
             for argument in &mut implementation.arguments {
                 substitute_type(argument, environment, diagnostics)?;
@@ -13519,6 +13552,9 @@ fn substitute_item(
             for bound in &mut declaration.subtype_bounds {
                 substitute_subtype_bound(bound, environment, diagnostics)?;
             }
+            for bound in &mut declaration.equality_bounds {
+                substitute_equality_bound(bound, environment, diagnostics)?;
+            }
             for bound in &mut declaration.default_bounds {
                 substitute_default_bound(bound, environment, diagnostics)?;
             }
@@ -13543,6 +13579,9 @@ fn substitute_item(
             }
             for bound in &mut submodule.subtype_bounds {
                 substitute_subtype_bound(bound, environment, diagnostics)?;
+            }
+            for bound in &mut submodule.equality_bounds {
+                substitute_equality_bound(bound, environment, diagnostics)?;
             }
             if let Some(target) = &mut submodule.companion_target {
                 substitute_type(target, environment, diagnostics)?;
@@ -14123,6 +14162,9 @@ fn freshen_block_item(expander: &mut MacroExpander, item: &mut Item, module: Mod
             for bound in &mut submodule.subtype_bounds {
                 freshen_subtype_bound(expander, bound, module, mark);
             }
+            for bound in &mut submodule.equality_bounds {
+                freshen_equality_bound(expander, bound, module, mark);
+            }
             if let Some(target) = &mut submodule.companion_target {
                 freshen_type(expander, target, module, mark);
             }
@@ -14146,6 +14188,9 @@ fn freshen_block_item(expander: &mut MacroExpander, item: &mut Item, module: Mod
             }
             for bound in &mut declaration.subtype_bounds {
                 freshen_subtype_bound(expander, bound, module, mark);
+            }
+            for bound in &mut declaration.equality_bounds {
+                freshen_equality_bound(expander, bound, module, mark);
             }
             for bound in &mut declaration.default_bounds {
                 freshen_default_bound(expander, bound, module, mark);
@@ -14222,6 +14267,17 @@ fn freshen_trait_bound(
     for argument in &mut bound.arguments {
         freshen_type(expander, argument, module, mark);
     }
+}
+
+fn freshen_equality_bound(
+    expander: &mut MacroExpander,
+    bound: &mut staple_syntax::EqualityBound,
+    module: ModuleId,
+    mark: u64,
+) {
+    expander.freshen_syntax(&mut bound.syntax, module, mark);
+    freshen_type(expander, &mut bound.left, module, mark);
+    freshen_type(expander, &mut bound.right, module, mark);
 }
 
 fn freshen_subtype_bound(
@@ -14305,6 +14361,9 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
             for bound in &mut declaration.subtype_bounds {
                 freshen_subtype_bound(expander, bound, module, mark);
             }
+            for bound in &mut declaration.equality_bounds {
+                freshen_equality_bound(expander, bound, module, mark);
+            }
             for bound in &mut declaration.default_bounds {
                 freshen_default_bound(expander, bound, module, mark);
             }
@@ -14329,12 +14388,18 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
                 for bound in &mut associated.subtype_bounds {
                     freshen_subtype_bound(expander, bound, module, mark);
                 }
+                for bound in &mut associated.equality_bounds {
+                    freshen_equality_bound(expander, bound, module, mark);
+                }
             }
             for prerequisite in &mut declaration.prerequisites {
                 freshen_trait_bound(expander, prerequisite, module, mark);
             }
             for bound in &mut declaration.subtype_bounds {
                 freshen_subtype_bound(expander, bound, module, mark);
+            }
+            for bound in &mut declaration.equality_bounds {
+                freshen_equality_bound(expander, bound, module, mark);
             }
             for bound in &mut declaration.default_bounds {
                 freshen_default_bound(expander, bound, module, mark);
@@ -14357,6 +14422,9 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
             }
             for bound in &mut implementation.subtype_bounds {
                 freshen_subtype_bound(expander, bound, module, mark);
+            }
+            for bound in &mut implementation.equality_bounds {
+                freshen_equality_bound(expander, bound, module, mark);
             }
             expander.freshen_syntax(&mut implementation.trait_name.syntax, module, mark);
             for argument in &mut implementation.arguments {
@@ -14481,6 +14549,12 @@ fn forall_types(ty: &staple_syntax::ForallType) -> impl Iterator<Item = &Type> {
                 .iter()
                 .map(|bound| &bound.supertype),
         )
+        .chain(
+            ty.generics
+                .equality_bounds
+                .iter()
+                .flat_map(|bound| [&bound.left, &bound.right]),
+        )
 }
 
 fn substitute_generics(
@@ -14494,6 +14568,9 @@ fn substitute_generics(
     }
     for bound in &mut generics.subtype_bounds {
         substitute_subtype_bound(bound, environment, diagnostics)?;
+    }
+    for bound in &mut generics.equality_bounds {
+        substitute_equality_bound(bound, environment, diagnostics)?;
     }
     Some(())
 }
@@ -14513,6 +14590,9 @@ fn freshen_generics(
     }
     for bound in &mut generics.subtype_bounds {
         freshen_subtype_bound(expander, bound, module, mark);
+    }
+    for bound in &mut generics.equality_bounds {
+        freshen_equality_bound(expander, bound, module, mark);
     }
 }
 

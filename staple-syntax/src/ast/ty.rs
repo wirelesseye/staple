@@ -507,6 +507,14 @@ pub struct TraitBound {
     pub arguments: Vec<Type>,
 }
 
+/// Exact equality of types, at least one of which is an associated projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EqualityBound {
+    pub syntax: Syntax,
+    pub left: Type,
+    pub right: Type,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubtypeBound {
     pub syntax: Syntax,
@@ -536,6 +544,7 @@ pub struct GenericParameters {
     pub parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub equality_bounds: Vec<EqualityBound>,
     pub sized_relaxations: Vec<SizedRelaxation>,
 }
 
@@ -594,6 +603,11 @@ impl fmt::Display for GenericParameters {
                 .join(" ");
             format!("{name} {arguments}")
         }));
+        constraints.extend(
+            self.equality_bounds
+                .iter()
+                .map(|b| format!("{} == {}", b.left, b.right)),
+        );
         constraints.extend(
             self.subtype_bounds
                 .iter()

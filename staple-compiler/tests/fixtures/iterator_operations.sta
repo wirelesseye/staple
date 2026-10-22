@@ -34,6 +34,14 @@ def run = () => {
     show_list "zip" ((1 .. 4) |> zip (10 .. 100) |> map ((a, b) => a + b) |> collect)
     show_list "chain" ((1 .. 3) |> chain (7 .. 9) |> collect)
     show_list "chain mapped" ((1 .. 3) |> map (x => x * 2) |> chain ((5 .. 6) |> map (x => x - 1)) |> collect)
+    show_list "chain different" ((0 .. 3) |> chain ((3 .. 6) |> filter (x => x > 3)) |> collect)
+    show_list "chain empty first" ((0 .. 0) |> chain ((3 .. 5) |> map (x => x * 2)) |> collect)
+    show_list "chain empty second" ((1 .. 3) |> map (x => x * 2) |> chain (0 .. 0) |> collect)
+    let chained_lists = (1 .. 3) |> map (x => (x .. x + 1) |> collect)
+        |> chain ((3 .. 5) |> filter (x => x > 3) |> map (x => (x .. x + 1) |> collect))
+        |> map (move items => items |> into_iterator |> sum)
+        |> collect
+    show_list "chain owned" chained_lists
 
     // Consumers
     println "fold: ${(1 .. 5) |> fold 0 ((total, x) => total + x)}"
