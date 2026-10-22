@@ -1,7 +1,7 @@
 use std.io.println
 use std.list.List
 
-type Count = wrap USize
+type Count wrap USize
 
 impl Default Count { default = () => Count 0 }
 
@@ -9,7 +9,7 @@ impl FromIterator Count I32 {
     insert = (move Count total; move _item) => Count (total + 1)
 }
 
-def show_list = (label: String; move items: List I32) => {
+def show_list = (label: String; move items: List<I32>) => {
     let mut text = ""
     for item in items {
         text = "${text} ${item}"
@@ -17,7 +17,7 @@ def show_list = (label: String; move items: List I32) => {
     println "${label}:${text}"
 }
 
-def show_option = (label: String; value: Option I32) => match value {
+def show_option = (label: String; value: Option<I32>) => match value {
     Some found => println "${label}: ${found}",
     None => println "${label}: none",
 }
@@ -31,17 +31,17 @@ def show_flag = (label: String; value: Bool) => if value {
 def run = () => {
     // Adapters
     show_list "map" ((1 .. 4) |> map (x => x * 10) |> collect)
-    let numbers: List I32 = (1 .. 4) |> map (x => x * 10) |> collect
+    let numbers: List<I32> = (1 .. 4) |> map (x => x * 10) |> collect
     show_list "collect list" numbers
     let words: String = (1 .. 4) |> map (x => "w${x}") |> collect
     println "collect string: ${words}"
-    let explicit = (1 .. 4) |> collect.<_, List I32, _>
+    let explicit = (1 .. 4) |> collect.<_, List<I32>, _>
     show_list "collect explicit" explicit
     let counted: Count = (1 .. 4) |> collect
     let Count count = counted
     println "collect custom: ${count}"
     show_list "to_list" ((1 .. 4) |> map (x => x * 2) |> to_list)
-    let mut prefix: List I32 = List.new ()
+    let mut prefix: List<I32> = List.new ()
     List.push prefix 0
     let extended = (1 .. 4) |> extend prefix
     show_list "extend list" extended
@@ -89,7 +89,7 @@ def run = () => {
     for (index, x) in ((10 .. 13) |> enumerate) {
         println "for: ${index} ${x}"
     }
-    let mut numbers: List I32 = List.new ()
+    let mut numbers: List<I32> = List.new ()
     List.push numbers 3
     List.push numbers 1
     List.push numbers 2

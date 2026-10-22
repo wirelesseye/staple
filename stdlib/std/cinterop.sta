@@ -14,10 +14,10 @@ use package.syntax.(Expr)
 
 /// A C-compatible character.
 @sized_opaque
-pub type CChar = opaque
+pub type CChar opaque
 /// A null-terminated C string.
 @sized_opaque
-pub type CString = opaque
+pub type CString opaque
 impl !Copy CString {}
 
 /// Converts a string literal to a null-terminated C string.
@@ -42,10 +42,10 @@ companion CString {
     /// Validates UTF-8 and copies the bytes into a String.
     /// Consumes and frees the C string on both success and failure.
     pub def to_string = move value: CString =>
-        Result String InvalidUtf8 :: TryConvert.try_convert value
+        Result<String, InvalidUtf8> :: TryConvert.try_convert value
 
     /// Copies a String into a C string, rejecting embedded NUL bytes.
-    pub def from_string = value: String => Result CString InteriorNul :: TryConvert.try_convert value
+    pub def from_string = value: String => Result<CString, InteriorNul> :: TryConvert.try_convert value
 
     /// Copies bytes known to be valid UTF-8, consuming and freeing the C string.
     /// The caller must ensure the bytes are valid UTF-8.

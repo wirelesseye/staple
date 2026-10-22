@@ -147,7 +147,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .as_instruction_value()
             .expect("load is an instruction")
             .set_alignment(alignment)
-            .expect("type ABI alignment is valid");
+            .expect("type ABI<alignment, is, valid>");
         Ok(value)
     }
 

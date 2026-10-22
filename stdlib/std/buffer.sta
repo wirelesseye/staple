@@ -8,40 +8,40 @@ use package.clone.Clone
 /// A mutable, fixed-capacity buffer of values.
 @sized_opaque
 @recursive_constructor
-pub type Buffer T = opaque
-impl<T> !Copy (Buffer T) {}
+pub type Buffer<T> opaque
+impl<T> !Copy Buffer<T> {}
 
 extern "staple-intrinsic" {
-    __buffer_with_capacity: <T> USize -> Buffer T
-    __buffer_length: <T> Buffer T -> USize
-    __buffer_capacity: <T> Buffer T -> USize
-    __buffer_push: <T> (mut Buffer T, move T) -> ()
-    __buffer_pop: <T> mut Buffer T -> Option T
-    __buffer_get: <T> (Buffer T, USize) -> Shared T
-    __buffer_into_shared: <T> move Buffer T -> SharedBuffer T
-    __buffer_from_array: <T, N where Natural N> move (T ^ N) -> Buffer T
-    __buffer_transfer: <T> (mut Buffer T, mut Buffer T) -> ()
-    __buffer_clone: <T where Clone T> Buffer T -> Buffer T
+    __buffer_with_capacity: <T> USize -> Buffer<T>
+    __buffer_length: <T> Buffer<T> -> USize
+    __buffer_capacity: <T> Buffer<T> -> USize
+    __buffer_push: <T> (mut Buffer<T>, move T) -> ()
+    __buffer_pop: <T> mut Buffer<T> -> Option<T>
+    __buffer_get: <T> (Buffer<T>, USize) -> Shared<T>
+    __buffer_into_shared: <T> move Buffer<T> -> SharedBuffer<T>
+    __buffer_from_array: <T, N where Natural N> move (T ^ N) -> Buffer<T>
+    __buffer_transfer: <T> (mut Buffer<T>, mut Buffer<T>) -> ()
+    __buffer_clone: <T where Clone T> Buffer<T> -> Buffer<T>
 }
 
-companion<T> Buffer T {
+companion<T> Buffer<T> {
     /// Allocates storage for exactly capacity elements without initialising values.
-    pub def with_capacity = capacity: USize => Buffer T :: __buffer_with_capacity capacity
+    pub def with_capacity = capacity: USize => Buffer<T> :: __buffer_with_capacity capacity
 
     /// Returns the number of initialised elements in the buffer's prefix.
-    pub def length = buffer: Buffer T => USize :: __buffer_length buffer
+    pub def length = buffer: Buffer<T> => USize :: __buffer_length buffer
 
     /// Returns the fixed number of elements for which the buffer has storage.
-    pub def capacity = buffer: Buffer T => USize :: __buffer_capacity buffer
+    pub def capacity = buffer: Buffer<T> => USize :: __buffer_capacity buffer
 
     /// Appends an element, trapping if the buffer is full.
-    pub def push = (mut buffer: Buffer T; move value: T) => () :: __buffer_push (buffer, value)
+    pub def push = (mut buffer: Buffer<T>; move value: T) => () :: __buffer_push (buffer, value)
 
     /// Removes and returns the last element, or `None` if empty.
-    pub def pop = mut buffer: Buffer T => Option T :: __buffer_pop buffer
+    pub def pop = mut buffer: Buffer<T> => Option<T> :: __buffer_pop buffer
 
     /// Replaces the element at a position and drops the old value; `None` if out of bounds.
-    pub def set = (mut buffer: Buffer T; position: USize; move value: T) => Option () :: {
+    pub def set = (mut buffer: Buffer<T>; position: USize; move value: T) => Option<()> :: {
         if (position < Buffer.length buffer) {
             Buffer.set_unchecked buffer position value
             Some ()
@@ -51,27 +51,27 @@ companion<T> Buffer T {
     }
 
     /// Replaces the element at a position and drops the old value, trapping if out of bounds.
-    pub def set_unchecked = (mut buffer: Buffer T; position: USize; move value: T) => () :: {
+    pub def set_unchecked = (mut buffer: Buffer<T>; position: USize; move value: T) => () :: {
         let mut reference = __buffer_get (buffer, position)
         Shared.replace reference value
         ()
     }
 
     /// Moves the elements of a fixed array into a new buffer whose capacity is the array length.
-    pub def from_array = <N where Natural N> move value: (T ^ N) => Buffer T :: __buffer_from_array value
+    pub def from_array = <N where Natural N> move value: (T ^ N) => Buffer<T> :: __buffer_from_array value
 
     /// Consumes the buffer, moving its elements into a garbage-collected shared buffer.
-    pub def into_shared_buffer = move buffer: Buffer T => SharedBuffer T :: __buffer_into_shared buffer
+    pub def into_shared_buffer = move buffer: Buffer<T> => SharedBuffer<T> :: __buffer_into_shared buffer
 
     /// Moves every initialised source element to destination and empties source.
     /// Traps for overlapping or insufficient-capacity buffers.
-    pub def transfer = (mut source: Buffer T; mut destination: Buffer T) =>
+    pub def transfer = (mut source: Buffer<T>; mut destination: Buffer<T>) =>
         () :: __buffer_transfer (source, destination)
 }
 
-companion<T where Copy T> Buffer T {
+companion<T where Copy T> Buffer<T> {
     /// Copies the element at a position, or `None` if out of bounds.
-    pub def get = (buffer: Buffer T; position: USize) => Option T :: {
+    pub def get = (buffer: Buffer<T>; position: USize) => Option<T> :: {
         if (position < Buffer.length buffer) {
             Some (Buffer.get_unchecked buffer position)
         } else {
@@ -80,12 +80,12 @@ companion<T where Copy T> Buffer T {
     }
 
     /// Copies the element at a position, trapping if out of bounds.
-    pub def get_unchecked = (buffer: Buffer T; position: USize) => T :: {
+    pub def get_unchecked = (buffer: Buffer<T>; position: USize) => T :: {
         let Shared value = __buffer_get (buffer, position)
         value
     }
 }
 
-impl<T where Clone T> Clone (Buffer T) {
+impl<T where Clone T> Clone Buffer<T> {
     clone = buffer => __buffer_clone buffer
 }

@@ -757,7 +757,7 @@ fn merge_substitution_values(
     // The complete checked callable type is authoritative for the target
     // template's own parameters. A nested trait request that re-instantiates
     // a declaration the enclosing instance already maps is legal same-function
-    // recursion at a different type (`Shared (Shared T)` comparing its `Shared T`
+    // recursion at a different type (`Shared<Shared<T>>` comparing its `Shared<T>`
     // elements); the fresh inferred value must win, exactly as the backend's
     // specialization queue keeps the inferred substitutions and only fills
     // missing entries from the active environment. The enclosing environment
@@ -3842,7 +3842,7 @@ impl LoweredProgram {
 
     /// Completes associated-type parameters and equality targets from the
     /// instance's declared bounds once their explicit arguments are known.
-    /// Equality targets may be ordinary parameters or contain them (`List A`).
+    /// Equality targets may be ordinary parameters or contain them (`List<A>`).
     /// The body can name such a projection in a local annotation even when the
     /// function's own signature never mentions it, so the template needs an
     /// entry for every projection the selected implementation determines.
@@ -4204,10 +4204,10 @@ mod tests {
     #[test]
     fn body_only_parameter_is_found() {
         let (_, program) = lower(concat!(
-            "type Phantom T = wrap ()\n",
-            "def phantom: <T> () -> Phantom T = <T> () => Phantom ()\n",
+            "type Phantom<T> wrap ()\n",
+            "def phantom: <T> () -> Phantom<T> = <T> () => Phantom ()\n",
             "def body_only: <T> I32 -> I32 = <T> value => {\n",
-            "  let hidden: Phantom T = phantom ()\n",
+            "  let hidden: Phantom<T> = phantom ()\n",
             "  value\n",
             "}\n",
         ));
@@ -4305,13 +4305,13 @@ mod tests {
             "use std.fmt.Formatter\n",
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
-            "type Counter = wrap (value: I32)\n",
-            "type Ok T = wrap T\n",
-            "type IOError = wrap String\n",
-            "type Phantom T = wrap ()\n",
+            "type Counter wrap (value: I32)\n",
+            "type Ok<T> wrap T\n",
+            "type IOError wrap String\n",
+            "type Phantom<T> wrap ()\n",
             "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "def body_only: <T> I32 -> I32 = <T> value => {\n",
-            "  let hidden: Phantom T = Phantom ()\n",
+            "  let hidden: Phantom<T> = Phantom ()\n",
             "  value\n",
             "}\n",
             "def capture_only: <T where Copy T> T -> () -> I32 = <T where Copy T> value => () => {\n",
@@ -4334,7 +4334,7 @@ mod tests {
             "def looping = () => loop { break 1 }\n",
             "def continuing = () => loop { continue\nbreak 1 }\n",
             "def returning: () -> I32 = () => { return 1 }\n",
-            "def matching = (value: Ok I32 | IOError) => match value {\n",
+            "def matching = (value: Ok<I32> | IOError) => match value {\n",
             "  Ok inner => inner,\n",
             "  other => 0,\n",
             "}\n",
@@ -4346,8 +4346,8 @@ mod tests {
             "let template: String = \"value=${integer}\"\n",
             "let applied = callable 1\n",
             "let closure = callable\n",
-            "def task: () -> Coroutine{} I32 = () => coro { 7 }\n",
-            "def driver: () -> Coroutine{} I32 = () => coro { await (task ()) }\n",
+            "def task: () -> Coroutine{}<I32> = () => coro { 7 }\n",
+            "def driver: () -> Coroutine{}<I32> = () => coro { await (task ()) }\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = (resource Counter).value + 1\n",
             "}\n",
@@ -4696,9 +4696,9 @@ mod tests {
     #[test]
     fn result_only_parameter_infers_from_the_checked_callable_type() {
         let (_, program) = lower(concat!(
-            "type Phantom T = wrap ()\n",
-            "def phantom_result: <T> () -> Phantom T = <T> () => Phantom ()\n",
-            "let hidden: Phantom I32 = phantom_result ()\n",
+            "type Phantom<T> wrap ()\n",
+            "def phantom_result: <T> () -> Phantom<T> = <T> () => Phantom ()\n",
+            "let hidden: Phantom<I32> = phantom_result ()\n",
         ));
         let (environment, relevant) = resolve_named_call(&program, "phantom_result");
         let parameter = relevant.type_parameters().next().expect("T is relevant");
@@ -4791,7 +4791,7 @@ mod tests {
     #[test]
     fn inferred_values_override_a_stale_enclosing_instantiation() {
         // Legal same-function recursion at a different type: the enclosing
-        // instance maps `T` to `Shared I32` while the nested call re-instantiates
+        // instance maps `T` to `Shared<I32>` while the nested call re-instantiates
         // it to `I32`. The fresh inferred value must win, in either candidate
         // order, matching the backend's specialization queue.
         for candidates in [
@@ -5160,8 +5160,8 @@ mod tests {
     #[test]
     fn signature_identical_implementations_stay_distinct() {
         let (_, program) = lower(concat!(
-            "type Alpha = wrap ()\n",
-            "type Beta = wrap ()\n",
+            "type Alpha wrap ()\n",
+            "type Beta wrap ()\n",
             "trait TestTag T { test_tag: T -> I32 }\n",
             "impl TestTag Alpha { test_tag = _ => 1 }\n",
             "impl TestTag Beta { test_tag = _ => 2 }\n",
@@ -5199,7 +5199,7 @@ mod tests {
             "impl TestShow I32 { test_show = _ => True }\n",
             "trait TestGuarded T { guarded: T -> Bool }\n",
             "impl<T where TestShow T> TestGuarded T { guarded = value => test_show value }\n",
-            "type Plain = wrap ()\n",
+            "type Plain wrap ()\n",
             "def use_guarded: <T where TestGuarded T> T -> Bool = <T where TestGuarded T> value => guarded value\n",
             "let ok: Bool = use_guarded 1\n",
         ));
@@ -5414,7 +5414,7 @@ mod tests {
     #[test]
     fn negative_implementations_are_rejected() {
         let (_, program) = lower(concat!(
-            "type MyString = wrap String\n",
+            "type MyString wrap String\n",
             "impl !Copy MyString {}\n",
         ));
         let negative = program
@@ -6113,7 +6113,7 @@ mod tests {
     fn coroutine_body_thunks_keep_their_outer_parameters() {
         let (_, program) = lower(concat!(
             "use std.coroutine.*\n",
-            "def make_task: <T where Copy T> T -> Coroutine{} T = <T where Copy T> value => coro { value }\n",
+            "def make_task: <T where Copy T> T -> Coroutine{}<T> = <T where Copy T> value => coro { value }\n",
             "let task = make_task 1\n",
         ));
         let thunk = program
@@ -6148,7 +6148,7 @@ mod tests {
     fn coroutine_creation_does_not_collect_child_body_only_parameters() {
         let (_, mut program) = lower(concat!(
             "use std.coroutine.*\n",
-            "def make_task: <T where Copy T> T -> Coroutine{} T = <T where Copy T> value => coro { value }\n",
+            "def make_task: <T where Copy T> T -> Coroutine{}<T> = <T where Copy T> value => coro { value }\n",
             "let task = make_task 1\n",
         ));
         let (plan_id, thunk) = program
@@ -6176,12 +6176,12 @@ mod tests {
     #[test]
     fn resolved_values_agree_with_checked_specialization_inference() {
         let (module, program) = lower(concat!(
-            "type Phantom T = wrap ()\n",
+            "type Phantom<T> wrap ()\n",
             "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
-            "def phantom_result: <T> () -> Phantom T = <T> () => Phantom ()\n",
+            "def phantom_result: <T> () -> Phantom<T> = <T> () => Phantom ()\n",
             "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = <T, N where Copy T, Natural N> value => n => (value ^ N)\n",
             "let applied: I32 = identity 1\n",
-            "let hidden: Phantom I32 = phantom_result ()\n",
+            "let hidden: Phantom<I32> = phantom_result ()\n",
             "let repeated: (I32 ^ 3) = repeat 7 3\n",
         ));
         for name in ["identity", "phantom_result", "repeat"] {

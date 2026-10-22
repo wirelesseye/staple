@@ -181,7 +181,7 @@ enum CompileType {
     /// parameter of this type takes one juxtaposed argument per slot.
     SlottedProduct(Vec<CompileType>),
     Function(Box<CompileType>, Box<CompileType>),
-    /// `Result T E`, whose success is `Ok T` and whose failure is an `E`.
+    /// `Result<T, E>`, whose success is `Ok<T>` and whose failure is an `E`.
     Result(Box<CompileType>, Box<CompileType>),
     /// A `ParseStream`.
     Stream,
@@ -3222,7 +3222,7 @@ impl MacroExpander {
         if let Some(keys) = self.resolve_macro(module, head) {
             // Match overloads the same way real call sites and compile-time
             // evaluation do, so function-style macros with greedy `Expr *`
-            // parameters and a trailing `Sequence Expr` (`if`, `while`, `for`,
+            // parameters and a trailing `Sequence<Expr>` (`if`, `while`, `for`,
             // `when`) are usable inside compile-time helper and macro bodies.
             // `select_macro` reports its own diagnostic when nothing matches.
             let Some(selected) =
@@ -3805,7 +3805,7 @@ impl MacroExpander {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
                         format!(
-                            "modifier macro `@{}` must have signature `Item -> Item`, `Item -> Sequence Item`, or `Item -> Syntax`, optionally with a leading `Parenthesized (Expr | Type | Pattern) ->` argument",
+                            "modifier macro `@{}` must have signature `Item -> Item`, `Item -> Sequence<Item>`, or `Item -> Syntax`, optionally with a leading `Parenthesized<Expr | Type | Pattern> ->` argument",
                             definition.key.name
                         ),
                     ));
@@ -4816,7 +4816,7 @@ impl MacroExpander {
                 self.diagnostics.push(Diagnostic::new(
                     definition.declaration.syntax.span.clone(),
                     format!(
-                        "modifier macro `@{}` must return `Item`, `Sequence Item`, or `Syntax`, but returned {} syntax",
+                        "modifier macro `@{}` must return `Item`, `Sequence<Item>`, or `Syntax`, but returned {} syntax",
                         definition.key.name,
                         syntax_category(&syntax)
                     ),
@@ -4827,7 +4827,7 @@ impl MacroExpander {
                 self.diagnostics.push(Diagnostic::new(
                     definition.declaration.syntax.span.clone(),
                     format!(
-                        "modifier macro `@{}` did not return `Item`, `Sequence Item`, or `Syntax`",
+                        "modifier macro `@{}` did not return `Item`, `Sequence<Item>`, or `Syntax`",
                         definition.key.name
                     ),
                 ));
@@ -6997,7 +6997,7 @@ impl MacroExpander {
                 let Value::Product(fields, _) = argument else {
                     self.diagnostics.push(Diagnostic::new(
                         span,
-                        "`NominalPattern` requires `(name: Ident String, argument: Pattern)`",
+                        "`NominalPattern` requires `(name: Ident<String>, argument: Pattern)`",
                     ));
                     return None;
                 };
@@ -7025,7 +7025,7 @@ impl MacroExpander {
                 let Value::Product(fields, _) = argument else {
                     self.diagnostics.push(Diagnostic::new(
                         span,
-                        "`ModifiedItem` requires `(modifiers: Sequence Modifier, item: Item)`",
+                        "`ModifiedItem` requires `(modifiers: Sequence<Modifier>, item: Item)`",
                     ));
                     return None;
                 };
@@ -8504,7 +8504,7 @@ impl MacroExpander {
                         let Value::Syntax(value) = value else {
                             self.diagnostics.push(Diagnostic::new(
                                 contents.span.clone(),
-                                format!("repeated splice `${name}...` requires `Sequence Item`"),
+                                format!("repeated splice `${name}...` requires `Sequence<Item>`"),
                             ));
                             return None;
                         };
@@ -8526,7 +8526,7 @@ impl MacroExpander {
                     self.diagnostics.push(Diagnostic::new(
                         contents.span.clone(),
                         if repeated {
-                            format!("repeated splice `${name}...` requires `Sequence Item`")
+                            format!("repeated splice `${name}...` requires `Sequence<Item>`")
                         } else {
                             format!("splice `${name}` does not contain syntax")
                         },
@@ -9000,9 +9000,18 @@ fn delimiter_kind(name: &str) -> Option<DelimiterKind> {
 
 fn delimiter_contents_meta(ty: &Type) -> Option<DelimitedMetaContents> {
     // A single element doesn't need the grouping parens that separate
-    // multiple fixed contents, so `Parenthesized Expr` is read the same as
-    // `Parenthesized (Expr)`.
+    // multiple fixed contents, so `Parenthesized<Expr>` is read the same as
+    // `Parenthesized<(Expr)>`.
     let Type::Product(product) = ty else {
+        if let Some(element) = sequence_meta_type(ty) {
+            return Some(DelimitedMetaContents::Sequence(Box::new(element)));
+        }
+        if let Some((element, separator)) = separated_meta_type(ty) {
+            return Some(DelimitedMetaContents::Separated {
+                element: Box::new(element),
+                separator: Box::new(separator),
+            });
+        }
         return meta_type(ty).map(|single| DelimitedMetaContents::Slotted(vec![single]));
     };
     if product.elements.len() == 1
@@ -9073,8 +9082,7 @@ fn unwrap_singleton_product(mut ty: &Type) -> &Type {
     ty
 }
 
-/// `Sequence Ident String` is intentionally read as `Sequence (Ident String)`
-/// in syntax metadata, despite ordinary type application being left-associative.
+/// Reads `Sequence<T>` as a repeated syntax element of type `T`.
 fn sequence_meta_type(ty: &Type) -> Option<MetaType> {
     let mut arguments = Vec::new();
     let mut current = ty;
@@ -9091,19 +9099,6 @@ fn sequence_meta_type(ty: &Type) -> Option<MetaType> {
     }
     match arguments.as_slice() {
         [element] => meta_type(unwrap_singleton_product(element)),
-        [first, second] if matches!(first, Type::Named(name) if name.namespace.is_none() && name.name == "Ident") => {
-            match second {
-                Type::Named(name) if name.namespace.is_none() && name.name == "String" => {
-                    Some(MetaType::Ident(None))
-                }
-                Type::StringLiteral(literal) => {
-                    staple_syntax::string_literal::decode(&literal.literal)
-                        .ok()
-                        .map(|spelling| MetaType::Ident(Some(spelling)))
-                }
-                _ => None,
-            }
-        }
         _ => None,
     }
 }
@@ -9991,7 +9986,7 @@ fn private_visibility() -> VisibilitySyntax {
 }
 
 /// Unwraps a modifier's declared leading-argument type, which must be
-/// spelled `Parenthesized (...)` to match how every other delimited macro
+/// spelled `Parenthesized<(...)>` to match how every other delimited macro
 /// argument is declared, down to the single meta type it wraps.
 fn modifier_argument_meta_type(declared: &MetaType) -> Option<&MetaType> {
     let MetaType::Delimited(DelimiterKind::Parenthesized, DelimitedMetaContents::Slotted(inner)) =
@@ -10218,8 +10213,8 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::Syntax => "Syntax".to_owned(),
             MetaType::SyntaxNode => "SyntaxNode".to_owned(),
             MetaType::Expr => "Expr".to_owned(),
-            MetaType::Ident(None) => "Ident String".to_owned(),
-            MetaType::Ident(Some(spelling)) => format!("Ident {spelling:?}"),
+            MetaType::Ident(None) => "Ident<String>".to_owned(),
+            MetaType::Ident(Some(spelling)) => format!("Ident<{spelling:?}>"),
             MetaType::CallExpr => "CallExpr".to_owned(),
             MetaType::StringExpr => "StringExpr".to_owned(),
             MetaType::UnstructuredExpr => "UnstructuredExpr".to_owned(),
@@ -10314,8 +10309,8 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
         MetaType::Syntax => "Syntax".to_owned(),
         MetaType::SyntaxNode => "SyntaxNode".to_owned(),
         MetaType::Expr => "Expr".to_owned(),
-        MetaType::Ident(None) => "Ident String".to_owned(),
-        MetaType::Ident(Some(spelling)) => format!("Ident {spelling:?}"),
+        MetaType::Ident(None) => "Ident<String>".to_owned(),
+        MetaType::Ident(Some(spelling)) => format!("Ident<{spelling:?}>"),
         MetaType::CallExpr => "CallExpr".to_owned(),
         MetaType::StringExpr => "StringExpr".to_owned(),
         MetaType::UnstructuredExpr => "UnstructuredExpr".to_owned(),
@@ -10336,17 +10331,19 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
         MetaType::FatArrow => "FatArrow".to_owned(),
         MetaType::SlottedProduct(elements) => format_meta_elements(elements, "; "),
         MetaType::Product(elements) => format_meta_elements(elements, ", "),
-        MetaType::Optional(element) => format!("Option {}", format_meta_type(element)),
-        MetaType::Sequence(element) => format!("Sequence {}", format_meta_type(element)),
+        MetaType::Optional(element) => format!("Option<{}>", format_meta_type(element)),
+        MetaType::Sequence(element) => format!("Sequence<{}>", format_meta_type(element)),
         MetaType::Nominal(name, arguments) => {
-            arguments.iter().fold(name.clone(), |text, argument| {
-                let argument = format_meta_type(argument);
-                if argument.contains(' ') && !argument.starts_with('(') {
-                    format!("{text} ({argument})")
-                } else {
-                    format!("{text} {argument}")
-                }
-            })
+            let arguments = arguments
+                .iter()
+                .map(format_meta_type)
+                .collect::<Vec<_>>()
+                .join(", ");
+            if arguments.is_empty() {
+                name.clone()
+            } else {
+                format!("{name}<{arguments}>")
+            }
         }
         MetaType::Delimited(kind, contents) => {
             let name = match kind {
@@ -10355,18 +10352,21 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
                 DelimiterKind::Braced => "Braced",
             };
             let contents = match contents {
+                DelimitedMetaContents::Slotted(elements) if elements.len() == 1 => {
+                    format_meta_type(&elements[0])
+                }
                 DelimitedMetaContents::Slotted(elements) => format_meta_elements(elements, "; "),
                 DelimitedMetaContents::Product(elements) => format_meta_elements(elements, ", "),
                 DelimitedMetaContents::Sequence(element) => {
-                    format!("(Sequence {})", format_meta_type(element))
+                    format!("Sequence<{}>", format_meta_type(element))
                 }
                 DelimitedMetaContents::Separated { element, separator } => format!(
-                    "(Separated ({}) {})",
+                    "Separated<{}, {}>",
                     format_meta_type(element),
                     format_meta_type(separator)
                 ),
             };
-            format!("{name} {contents}")
+            format!("{name}<{contents}>")
         }
     }
 }
@@ -10424,7 +10424,7 @@ fn compile_type(ty: &Type) -> CompileType {
             Box::new(compile_type(&function.result)),
         ),
         Type::Application(application) => {
-            // `Result T E` is `Ok T | E`, whose two sides are tracked apart.
+            // `Result<T, E>` is `Ok<T> | E`, whose two sides are tracked apart.
             if let Type::Application(inner) = application.callee.as_ref()
                 && let Type::Named(head) = inner.callee.as_ref()
                 && head.namespace.is_none()
@@ -12642,6 +12642,7 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
             syntax: declaration.syntax.clone(),
             callee: Box::new(declared_type),
             argument: Box::new(argument),
+            bracketed: true,
         });
     }
     let underlying = match declaration.underlying() {
@@ -13847,7 +13848,7 @@ fn substitute_item_list(
                 diagnostics.push(Diagnostic::new(
                     splice.syntax.span,
                     format!(
-                        "repeated item splice `${}` requires `Sequence Item`",
+                        "repeated item splice `${}` requires `Sequence<Item>`",
                         splice.name
                     ),
                 ));
@@ -13897,7 +13898,7 @@ fn substitute_type_parameter_list(
             diagnostics.push(Diagnostic::new(
                 splice.syntax.span,
                 format!(
-                    "type-parameter splice `${}...` requires `Sequence (Ident String)`, but contains {actual}",
+                    "type-parameter splice `${}...` requires `Sequence<Ident<String>>`, but contains {actual}",
                     splice.name,
                 ),
             ));
@@ -13944,7 +13945,7 @@ fn substitute_identifier(
         _ => {
             diagnostics.push(Diagnostic::new(
                 Span::Compiler,
-                format!("identifier splice `${splice}` requires `Ident String`"),
+                format!("identifier splice `${splice}` requires `Ident<String>`"),
             ));
             None
         }

@@ -4,7 +4,7 @@ pub mod
 pub type None
 
 /// Contains a present value.
-pub type Some T = pub from T
+pub type Some<T> from pub T
 
 /// A value that may be absent.
-pub type Option T = alias None | Some T
+pub type Option<T> = None | Some<T>

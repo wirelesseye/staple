@@ -11,22 +11,22 @@ use package.reactive.Reactive
 /// is affine: constructing one moves its owned captures, and dropping it
 /// without awaiting destroys those captures without running the body.
 @sized_opaque
-pub type Coroutine{E} T = opaque
-impl<T, effect E> !Copy (Coroutine{E} T) {}
+pub type Coroutine{E}<T> opaque
+impl<T, effect E> !Copy Coroutine{E}<T> {}
 
 /// A scope-owned handle to a spawned coroutine's eventual result. Affine:
 /// `await` consumes the handle. Dropping a handle does not cancel its task.
 @sized_opaque
-pub type Task T = opaque
-impl<T> !Copy (Task T) {}
+pub type Task<T> opaque
+impl<T> !Copy Task<T> {}
 
 /// The result of `await`-ing a `Task` that ran to completion; wraps the value
 /// the task produced.
-pub type Completed T = pub wrap T
+pub type Completed<T> wrap pub T
 
 /// The result of `await`-ing a `Task` whose execution was cancelled before it
 /// produced a value.
-pub type Cancelled = pub wrap ()
+pub type Cancelled wrap pub ()
 
 pub extern "staple-intrinsic" {
     /// Runs a coroutine to completion on the current thread and yields its result,
@@ -36,16 +36,16 @@ pub extern "staple-intrinsic" {
     /// only coroutines that complete without a real suspension point (nested
     /// `await` of other coroutines is fine). Task scheduling, `spawn`, and bounded
     /// pumping arrive with the scheduler, which replaces this function.
-    block_on: <T, effect E> Coroutine{E} T ->{E} T
+    block_on: <T, effect E> Coroutine{E}<T> ->{E} T
 
     /// Consumes a coroutine, schedules it under the current `Tasks` scope, and
     /// returns a handle to its eventual result. Requires the coroutine's own
     /// effects `E` at the spawn site so its resources are captured now.
-    spawn: <T, effect E> Coroutine{E} T ->{Tasks, E} Task T
+    spawn: <T, effect E> Coroutine{E}<T> ->{Tasks, E} Task<T>
 
     /// A coroutine that suspends the awaiting task once, deferring the rest of its
     /// body to a later `pump`.
-    yield_now: () -> Coroutine{Tasks} ()
+    yield_now: () -> Coroutine{Tasks}<()>
 
     /// Suspends the current task until `predicate` first observes `True`. The
     /// predicate may only read signals (no writes, effects, or suspension); it is
@@ -53,20 +53,20 @@ pub extern "staple-intrinsic" {
     /// change to a signal it read, refreshing its dependencies. The first `True`
     /// latches, unsubscribes, and resumes the task. Cancelling the task while it is
     /// parked here tears the subscription down.
-    until: (() ->{state.read} Bool) -> Coroutine{Reactive} ()
+    until: (() ->{state.read} Bool) -> Coroutine{Reactive}<()>
 }
 
 extern "staple-intrinsic" {
     __scheduler: () -> Scheduler
     __task_scope: Scheduler -> Tasks
     __pump: (Scheduler, USize) -> (executed: USize, ready: USize)
-    __completion: <T> Scheduler -> (wait: Wait T, resolver: Resolver T)
-    __completion_with_cancel: <T> (Scheduler, () -> ()) -> (wait: Wait T, resolver: Resolver T)
-    __completion_token: Scheduler -> (wait: Wait (), token: CompletionToken)
-    __task_is_finished: <T> Task T -> Bool
-    __task_cancel: <T> Task T -> ()
-    __resolver_complete: <T> (Resolver T; T) -> ()
-    __resolver_cancel: <T> Resolver T -> ()
+    __completion: <T> Scheduler -> (wait: Wait<T>, resolver: Resolver<T>)
+    __completion_with_cancel: <T> (Scheduler, () -> ()) -> (wait: Wait<T>, resolver: Resolver<T>)
+    __completion_token: Scheduler -> (wait: Wait<()>, token: CompletionToken)
+    __task_is_finished: <T> Task<T> -> Bool
+    __task_cancel: <T> Task<T> -> ()
+    __resolver_complete: <T> (Resolver<T>; T) -> ()
+    __resolver_cancel: <T> Resolver<T> -> ()
     __completion_token_resolve: CompletionToken -> ()
     __completion_token_cancel: CompletionToken -> ()
 }
@@ -84,12 +84,12 @@ pub def task_scope = sched: Scheduler => Tasks :: __task_scope sched
 pub def pump = (sched: Scheduler, budget: USize) =>
     (executed: USize, ready: USize) :: __pump (sched, budget)
 
-/// Creates a one-shot completion bound to `scheduler`: a `Wait T` to `await`
-/// and a `Resolver T` to fulfil it. The wait may only be `await`ed from a task
+/// Creates a one-shot completion bound to `scheduler`: a `Wait<T>` to `await`
+/// and a `Resolver<T>` to fulfil it. The wait may only be `await`ed from a task
 /// on the same scheduler. Completing before the `await` registers still
 /// delivers the value.
 pub def completion = <T> sched: Scheduler =>
-    (wait: Wait T, resolver: Resolver T) :: __completion sched
+    (wait: Wait<T>, resolver: Resolver<T>) :: __completion sched
 
 /// Like `completion`, but with an owned cancellation callback. `on_cancel` runs
 /// exactly once if the consumer abandons the wait before it resolves — the
@@ -98,56 +98,56 @@ pub def completion = <T> sched: Scheduler =>
 /// Libraries use it to unregister a timer or external subscription. The
 /// callback may not suspend.
 pub def completion_with_cancel = <T> (sched: Scheduler, on_cancel: () -> ()) =>
-    (wait: Wait T, resolver: Resolver T) :: __completion_with_cancel (sched, on_cancel)
+    (wait: Wait<T>, resolver: Resolver<T>) :: __completion_with_cancel (sched, on_cancel)
 
 /// Creates a unit-valued completion bound to `scheduler` and returns the `Wait`
 /// to `await` plus an opaque `CompletionToken` for a host to resolve.
 pub def completion_token = sched: Scheduler =>
-    (wait: Wait (), token: CompletionToken) :: __completion_token sched
+    (wait: Wait<()>, token: CompletionToken) :: __completion_token sched
 
 /// An explicitly driven owner of coroutine ready queues. No coroutine runs
 /// until a `pump`. Multiple schedulers coexist on the one runtime thread.
 @sized_opaque
-pub type Scheduler = opaque
+pub type Scheduler opaque
 impl !Copy Scheduler {}
 
 /// An affine scope, bound to a scheduler, under which coroutines are spawned.
 /// Used as the provider of the implicit `Tasks` capability:
 /// `with Tasks = task_scope (sched) { ... }`.
 @sized_opaque
-pub type Tasks = opaque
+pub type Tasks opaque
 impl !Copy Tasks {}
 
 companion Task {
     /// Reports whether the task has finished (completed or cancelled), without
     /// consuming its result.
-    pub def is_finished = <T> task: Task T => Bool :: __task_is_finished task
+    pub def is_finished = <T> task: Task<T> => Bool :: __task_is_finished task
 
     /// Requests cancellation of the task. Idempotent, and a no-op once the task
     /// has finished. A running task unwinds at its next `await` / `yield_now` /
     /// return boundary rather than delivering a value to its body; a not-yet
     /// started task never runs its body. Borrows the handle.
-    pub def cancel = <T> task: Task T => () :: __task_cancel task
+    pub def cancel = <T> task: Task<T> => () :: __task_cancel task
 }
 
 /// A one-shot wait that a task `await`s and anything can resolve. Affine:
 /// `await` consumes it; dropping one unconsumed abandons the operation.
 @sized_opaque
-pub type Wait T = opaque
-impl<T> !Copy (Wait T) {}
+pub type Wait<T> opaque
+impl<T> !Copy Wait<T> {}
 
 /// The write end of a `completion`. Affine and single-use: `complete` or
 /// `cancel` consumes it, and dropping an unused resolver cancels the wait.
 @sized_opaque
-pub type Resolver T = opaque
-impl<T> !Copy (Resolver T) {}
+pub type Resolver<T> opaque
+impl<T> !Copy Resolver<T> {}
 
 /// An opaque, C-compatible one-shot wakeup handle for a unit-valued completion.
 /// A host holds it across the FFI boundary and calls one of the C entry points
 /// `__staple_completion_token_resolve` / `_cancel` / `_release` on it; dropping
 /// the token from Staple releases it (cancelling an unresolved completion).
 @sized_opaque
-pub type CompletionToken = opaque
+pub type CompletionToken opaque
 impl !Copy CompletionToken {}
 
 companion CompletionToken {
@@ -163,10 +163,10 @@ companion CompletionToken {
 companion Resolver {
     /// Consumes the resolver and the value, records completion, and wakes a
     /// registered waiter. If the waiter has already gone the value is dropped.
-    pub def complete = <T> (resolver: Resolver T; value: T) =>
+    pub def complete = <T> (resolver: Resolver<T>; value: T) =>
         () :: __resolver_complete resolver value
 
     /// Consumes the resolver and cancels the operation: a registered waiter is
     /// woken with `Cancelled`.
-    pub def cancel = <T> resolver: Resolver T => () :: __resolver_cancel resolver
+    pub def cancel = <T> resolver: Resolver<T> => () :: __resolver_cancel resolver
 }

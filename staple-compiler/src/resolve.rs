@@ -447,7 +447,7 @@ pub enum IntrinsicFunction {
     Reaction,
     Batch,
     Snapshot,
-    /// Synchronous coroutine driver: runs a `Coroutine{E} T` to
+    /// Synchronous coroutine driver: runs a `Coroutine{E}<T>` to
     /// completion and yields `T`. Scheduler-driven tasks advance through `pump`.
     CoroutineBlockOn,
     SchedulerCreate,
@@ -3038,9 +3038,9 @@ impl NameResolver {
                 declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper
                     && declaration.representation_visibility() == Visibility::Public
             } else if matches!(builtin, BuiltinType::Completed | BuiltinType::Cancelled) {
-                // `await Task` yields `Completed T | Cancelled`, a sum the body
+                // `await Task` yields `Completed<T> | Cancelled`, a sum the body
                 // can `match`; both alternatives are represented wrapper types
-                // (`Completed T` wraps `T`, `Cancelled` wraps `()`).
+                // (`Completed<T>` wraps `T`, `Cancelled` wraps `()`).
                 declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper
                     && declaration.representation_visibility() == Visibility::Public
             } else {
@@ -7813,28 +7813,28 @@ fn declare_compile_helper_parameter(
 
 fn compile_time_builtin_signature(name: &str) -> Option<&str> {
     match name {
-        "Ident" => Some("String -> Ident String"),
+        "Ident" => Some("String -> Ident<String>"),
         "CallExpr" => Some("(callee: Expr, argument: Expr) -> CallExpr"),
         "StringExpr" => Some("String -> StringExpr"),
-        "BindingPattern" => Some("Ident String -> BindingPattern"),
-        "NominalPattern" => Some("(name: Ident String, argument: Pattern) -> NominalPattern"),
+        "BindingPattern" => Some("Ident<String> -> BindingPattern"),
+        "NominalPattern" => Some("(name: Ident<String>, argument: Pattern) -> NominalPattern"),
         "Sequence" => {
-            Some("<Element> () | (first: Element, rest: Sequence Element) -> Sequence Element")
+            Some("<Element> () | (first: Element, rest: Sequence<Element>) -> Sequence<Element>")
         }
         "Separated" => Some(
-            "<Element Separator> (separator: Separator, elements: Sequence Element, trailing: Bool) -> Separated Element Separator",
+            "<Element, Separator> (separator: Separator, elements: Sequence<Element>, trailing: Bool) -> Separated<Element, Separator>",
         ),
-        "Parenthesized" => Some("<Contents> Contents -> Parenthesized Contents"),
-        "Bracketed" => Some("<Contents> Contents -> Bracketed Contents"),
-        "Braced" => Some("<Contents> Contents -> Braced Contents"),
+        "Parenthesized" => Some("<Contents> Contents -> Parenthesized<Contents>"),
+        "Bracketed" => Some("<Contents> Contents -> Bracketed<Contents>"),
+        "Braced" => Some("<Contents> Contents -> Braced<Contents>"),
         "TypeDeclarationItem" => Some(
-            "(kind: TypeDeclarationKind, name: Ident String, name_spelling: String, declared_type: Type, type_parameters: Sequence (Ident String), underlying: Option Type) -> TypeDeclarationItem",
+            "(kind: TypeDeclarationKind, name: Ident<String>, name_spelling: String, declared_type: Type, type_parameters: Sequence<Ident<String>>, underlying: Option<Type>) -> TypeDeclarationItem",
         ),
-        "AliasBody" => Some("Type -> AliasBody Type"),
-        "WrapperBody" => Some("(Visibility, Type) -> WrapperBody (Visibility, Type)"),
-        "FromBody" => Some("(Visibility, Type) -> FromBody (Visibility, Type)"),
+        "AliasBody" => Some("Type -> AliasBody<Type>"),
+        "WrapperBody" => Some("(Visibility, Type) -> WrapperBody<Visibility, Type>"),
+        "FromBody" => Some("(Visibility, Type) -> FromBody<Visibility, Type>"),
         "OpaqueBody" => Some("OpaqueBody"),
-        "ModifiedItem" => Some("(modifiers: Sequence Modifier, item: Item) -> ModifiedItem"),
+        "ModifiedItem" => Some("(modifiers: Sequence<Modifier>, item: Item) -> ModifiedItem"),
         "Syntax"
         | "SyntaxNode"
         | "Expr"

@@ -3,7 +3,7 @@ pub mod
 
 /// The lexical owner of reactions created within a reactive scope.
 @sized_opaque
-pub type Reactive = opaque
+pub type Reactive opaque
 impl !Copy Reactive {}
 
 /// Creates a resource that owns reactions until its `with` block exits.

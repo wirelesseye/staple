@@ -4,48 +4,48 @@ use package.syntax.*
 use package.process.(panic)
 
 def typegroup_apply_modifiers = (
-    modifiers: Sequence Modifier,
+    modifiers: Sequence<Modifier>,
     item: Item,
 ) => Item :: match modifiers {
     Sequence () => item,
     _ => ModifiedItem (modifiers: modifiers, item: item),
 }
 
-def typegroup_body_item = (variant: Ident String, body: TypeBody) => Item :: match body {
-    AliasBody underlying => parse_quote { pub type $variant = alias $underlying },
+def typegroup_body_item = (variant: Ident<String>, body: TypeBody) => Item :: match body {
+    AliasBody underlying => parse_quote { pub type $variant = $underlying },
     WrapperBody (visibility, underlying) => match visibility {
-        Private => parse_quote { pub type $variant = wrap $underlying },
-        Package => parse_quote { pub type $variant = pub(package) wrap $underlying },
-        Public => parse_quote { pub type $variant = pub wrap $underlying },
+        Private => parse_quote { pub type $variant wrap $underlying },
+        Package => parse_quote { pub type $variant wrap pub(package) $underlying },
+        Public => parse_quote { pub type $variant wrap pub $underlying },
     },
     FromBody (visibility, underlying) => match visibility {
-        Private => parse_quote { pub type $variant = from $underlying },
-        Package => parse_quote { pub type $variant = pub(package) from $underlying },
-        Public => parse_quote { pub type $variant = pub from $underlying },
+        Private => parse_quote { pub type $variant from $underlying },
+        Package => parse_quote { pub type $variant from pub(package) $underlying },
+        Public => parse_quote { pub type $variant from pub $underlying },
     },
     OpaqueBody => panic "opaque typegroup variants are unsupported",
 }
 
 def typegroup_generic_body_item = (
-    variant: Ident String,
+    variant: Ident<String>,
     parameters: Syntax,
     body: TypeBody,
 ) => Item :: match body {
-    AliasBody underlying => parse_quote { pub type $variant $parameters = alias $underlying },
+    AliasBody underlying => parse_quote { pub type $variant<$parameters> = $underlying },
     WrapperBody (visibility, underlying) => match visibility {
-        Private => parse_quote { pub type $variant $parameters = wrap $underlying },
-        Package => parse_quote { pub type $variant $parameters = pub(package) wrap $underlying },
-        Public => parse_quote { pub type $variant $parameters = pub wrap $underlying },
+        Private => parse_quote { pub type $variant<$parameters> wrap $underlying },
+        Package => parse_quote { pub type $variant<$parameters> wrap pub(package) $underlying },
+        Public => parse_quote { pub type $variant<$parameters> wrap pub $underlying },
     },
     FromBody (visibility, underlying) => match visibility {
-        Private => parse_quote { pub type $variant $parameters = from $underlying },
-        Package => parse_quote { pub type $variant $parameters = pub(package) from $underlying },
-        Public => parse_quote { pub type $variant $parameters = pub from $underlying },
+        Private => parse_quote { pub type $variant<$parameters> from $underlying },
+        Package => parse_quote { pub type $variant<$parameters> from pub(package) $underlying },
+        Public => parse_quote { pub type $variant<$parameters> from pub $underlying },
     },
     OpaqueBody => panic "opaque typegroup variants are unsupported",
 }
 
-def typegroup_items = entries: Sequence (Sequence Modifier; Ident String; Option (Equals; TypeBody)) => Sequence Item :: match entries {
+def typegroup_items = entries: Sequence<(Sequence<Modifier>; Ident<String>; Option<TypeBody>)> => Sequence<Item> :: match entries {
     Sequence () => Sequence (),
     Sequence (first, rest) => match first {
         (modifiers; variant; None) => {
@@ -53,7 +53,7 @@ def typegroup_items = entries: Sequence (Sequence Modifier; Ident String; Option
             let item = typegroup_apply_modifiers (modifiers, base)
             Sequence (first: item, rest: typegroup_items rest)
         },
-        (modifiers; variant; Some (_; body)) => {
+        (modifiers; variant; Some body) => {
             let base: Item = typegroup_body_item (variant, body)
             let item = typegroup_apply_modifiers (modifiers, base)
             Sequence (first: item, rest: typegroup_items rest)
@@ -63,8 +63,8 @@ def typegroup_items = entries: Sequence (Sequence Modifier; Ident String; Option
 
 def typegroup_generic_items = (
     parameters: Syntax,
-    entries: Sequence (Sequence Modifier; Ident String; Option (Equals; TypeBody)),
-) => Sequence Item :: match entries {
+    entries: Sequence<(Sequence<Modifier>; Ident<String>; Option<TypeBody>)>,
+) => Sequence<Item> :: match entries {
     Sequence () => Sequence (),
     Sequence (first, rest) => {
         let tail = typegroup_generic_items (parameters, rest)
@@ -74,7 +74,7 @@ def typegroup_generic_items = (
                 let item = typegroup_apply_modifiers (modifiers, base)
                 Sequence (first: item, rest: tail)
             },
-            (modifiers; variant; Some (_; body)) => {
+            (modifiers; variant; Some body) => {
                 let base: Item = typegroup_generic_body_item (variant, parameters, body)
                 let item = typegroup_apply_modifiers (modifiers, base)
                 Sequence (first: item, rest: tail)
@@ -84,8 +84,8 @@ def typegroup_generic_items = (
 }
 
 def typegroup_sum = (
-    group: Ident String,
-    entries: Sequence (Sequence Modifier; Ident String; Option (Equals; TypeBody)),
+    group: Ident<String>,
+    entries: Sequence<(Sequence<Modifier>; Ident<String>; Option<TypeBody>)>,
 ) => Type :: match entries {
     Sequence (first, rest) => match first {
         (_; variant; _) => {
@@ -102,24 +102,27 @@ def typegroup_sum = (
     _ => panic "empty typegroup is unsupported",
 }
 
-def typegroup_parameter_syntax = parameters: Sequence Type => Syntax :: match parameters {
+def typegroup_parameter_syntax = parameters: Sequence<Type> => Syntax :: match parameters {
     Sequence () => quote {},
-    Sequence (first, rest) => {
-        let tail = typegroup_parameter_syntax rest
-        quote { $first $tail }
+    Sequence (first, rest) => match rest {
+        Sequence () => quote { $first },
+        _ => {
+            let tail = typegroup_parameter_syntax rest
+            quote { $first, $tail }
+        },
     },
 }
 
 def typegroup_generic_sum_syntax = (
-    group: Ident String,
+    group: Ident<String>,
     parameters: Syntax,
-    entries: Sequence (Sequence Modifier; Ident String; Option (Equals; TypeBody)),
+    entries: Sequence<(Sequence<Modifier>; Ident<String>; Option<TypeBody>)>,
 ) => Syntax :: match entries {
     Sequence (first, rest) => match first {
         (_; variant; underlying) => {
             let head: Syntax = match underlying {
                 None => quote { $group.$variant },
-                Some _ => quote { $group.$variant $parameters },
+                Some _ => quote { $group.$variant<$parameters> },
             }
             match rest {
                 Sequence () => head,
@@ -137,7 +140,7 @@ def typegroup_generic_sum_syntax = (
 /// companion, from a compact definition.
 ///
 /// Every entry becomes a public declaration in the group's companion module.
-/// A bare name is a singleton variant; `wrap`, `from`, `alias`, and `opaque`
+/// A bare name is a singleton variant; `wrap`, `from`, `=`, and `opaque`
 /// bodies follow the ordinary type declaration body grammar. The group is a
 /// `from` type over the sum of every variant except an `opaque` one, with its
 /// representation as visible as the group, so a variant converts to the group
@@ -152,14 +155,14 @@ def typegroup_generic_sum_syntax = (
 /// }
 ///
 /// typegroup Example {
-///     Wrapped = pub wrap I32,
-///     Number = alias I32,
+///     Wrapped wrap pub I32,
+///     Number = I32,
 ///     Empty,
 /// }
 /// ```
 pub macro typegroup:
-    (MacroCallMetadata; Ident String; Sequence Type; Braced (Separated (Sequence Modifier; Ident String; Option (Equals; TypeBody)) Comma)) ->
-    Sequence Item =
+    (MacroCallMetadata; Ident<String>; Sequence<Type>; Braced<Separated<(Sequence<Modifier>; Ident<String>; Option<TypeBody>), Comma>>) ->
+    Sequence<Item> =
     ((modifiers, visibility); group; parameters; body) => {
     match body {
     Braced (Separated (
@@ -174,9 +177,9 @@ pub macro typegroup:
                 // The group is a `from` type over its variants' sum, exposing
                 // its representation as widely as the group itself.
                 let base: Item = match visibility {
-                    Private => Item :: parse_quote { $visibility type $group = from $sum },
-                    Package => Item :: parse_quote { $visibility type $group = pub(package) from $sum },
-                    Public => Item :: parse_quote { $visibility type $group = pub from $sum },
+                    Private => Item :: parse_quote { $visibility type $group from $sum },
+                    Package => Item :: parse_quote { $visibility type $group from pub(package) $sum },
+                    Public => Item :: parse_quote { $visibility type $group from pub $sum },
                 }
                 let group_item = typegroup_apply_modifiers (modifiers, base)
                 let companion_item: Item = parse_quote {
@@ -195,13 +198,13 @@ pub macro typegroup:
                 let sum = typegroup_generic_sum_syntax (group, parameter_syntax, elements)
                 let base: Item = match visibility {
                     Private => Item :: parse_quote {
-                        $visibility type $group $parameter_syntax = from $sum
+                        $visibility type $group<$parameter_syntax> from $sum
                     },
                     Package => Item :: parse_quote {
-                        $visibility type $group $parameter_syntax = pub(package) from $sum
+                        $visibility type $group<$parameter_syntax> from pub(package) $sum
                     },
                     Public => Item :: parse_quote {
-                        $visibility type $group $parameter_syntax = pub from $sum
+                        $visibility type $group<$parameter_syntax> from pub $sum
                     },
                 }
                 let group_item = typegroup_apply_modifiers (modifiers, base)

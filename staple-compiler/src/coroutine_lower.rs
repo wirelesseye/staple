@@ -23,7 +23,7 @@ pub(crate) struct CoroutinePlan {
     /// The `coro` body block's syntax id — the key the synthesized thunk and this
     /// plan share.
     pub body_syntax: SyntaxId,
-    /// The value the coroutine yields (`T` in `Coroutine{E} T`).
+    /// The value the coroutine yields (`T` in `Coroutine{E}<T>`).
     pub result_type: CheckedType,
     /// The coroutine's deferred effect row (`E`).
     pub deferred_effects: CheckedEffectSet,

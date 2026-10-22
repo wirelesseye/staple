@@ -8,26 +8,26 @@ use package.string.(String)
 /// through `UnstructuredExpr` without exposing fields.
 /// An identifier syntax node, optionally constrained to one spelling.
 @recursive_constructor
-pub type Ident (Spelling = String) where Spelling <: String = pub wrap Spelling
+pub type Ident<Spelling = String where Spelling <: String> wrap pub Spelling
 /// A structured call expression syntax node.
 @recursive_constructor
-pub type CallExpr = pub wrap (
+pub type CallExpr wrap pub (
     callee: Expr,
     argument: Expr,
 )
 /// A string-literal expression constructed from a compile-time string.
 @recursive_constructor
-pub type StringExpr = pub wrap String
+pub type StringExpr wrap pub String
 /// A sequence of syntax values.
 @recursive_constructor
-pub type Sequence Element = pub wrap
+pub type Sequence<Element> wrap pub
     () |
-    (first: Element, rest: Sequence Element)
+    (first: Element, rest: Sequence<Element>)
 /// A separated syntax sequence with its separator and trailing state.
 @recursive_constructor
-pub type Separated Element Separator = pub wrap (
+pub type Separated<Element, Separator> wrap pub (
     separator: Separator,
-    elements: Sequence Element,
+    elements: Sequence<Element>,
     trailing: Bool,
 )
 /// A comma punctuation syntax node.
@@ -38,43 +38,43 @@ pub type Equals
 pub type FatArrow
 /// A parenthesized syntax fragment.
 @recursive_constructor
-pub type Parenthesized Contents = pub wrap Contents
+pub type Parenthesized<Contents> wrap pub Contents
 /// A bracketed syntax fragment.
 @recursive_constructor
-pub type Bracketed Contents = pub wrap Contents
+pub type Bracketed<Contents> wrap pub Contents
 /// A braced syntax fragment.
 @recursive_constructor
-pub type Braced Contents = pub wrap Contents
+pub type Braced<Contents> wrap pub Contents
 /// An expression syntax node without structured fields.
 @sized_opaque
-pub type UnstructuredExpr = opaque
+pub type UnstructuredExpr opaque
 impl !Copy UnstructuredExpr {}
 /// The syntax category for expressions.
-pub type Expr = alias Ident String | CallExpr | StringExpr | UnstructuredExpr
+pub type Expr = Ident<String> | CallExpr | StringExpr | UnstructuredExpr
 
 /// The syntax category for types.
 @sized_opaque
-pub type Type = opaque
+pub type Type opaque
 impl !Copy Type {}
 /// A binding pattern constructed from an identifier.
 @recursive_constructor
-pub type BindingPattern = pub wrap Ident String
+pub type BindingPattern wrap pub Ident<String>
 /// A nominal destructuring pattern.
 @recursive_constructor
-pub type NominalPattern = pub wrap (name: Ident String, argument: Pattern)
+pub type NominalPattern wrap pub (name: Ident<String>, argument: Pattern)
 /// A pattern whose structure is not exposed yet.
 @sized_opaque
-pub type UnstructuredPattern = opaque
+pub type UnstructuredPattern opaque
 impl !Copy UnstructuredPattern {}
 /// The syntax category for patterns.
-pub type Pattern = alias BindingPattern | NominalPattern | UnstructuredPattern
+pub type Pattern = BindingPattern | NominalPattern | UnstructuredPattern
 /// The kind of a type declaration.
 pub type AliasDeclaration
 pub type WrapperDeclaration
 pub type FromDeclaration
 pub type SingletonDeclaration
 pub type OpaqueDeclaration
-pub type TypeDeclarationKind = alias
+pub type TypeDeclarationKind =
     AliasDeclaration |
     WrapperDeclaration |
     FromDeclaration |
@@ -83,53 +83,53 @@ pub type TypeDeclarationKind = alias
 /// An inspectable type declaration item. Type parameters are exposed by name;
 /// their original declaration syntax remains part of the lossless item value.
 @recursive_constructor
-pub type TypeDeclarationItem = pub wrap (
+pub type TypeDeclarationItem wrap pub (
     kind: TypeDeclarationKind,
-    name: Ident String,
+    name: Ident<String>,
     name_spelling: String,
     declared_type: Type,
-    type_parameters: Sequence (Ident String),
-    underlying: Option Type,
+    type_parameters: Sequence<Ident<String>>,
+    underlying: Option<Type>,
 )
-/// An `alias` type declaration body.
+/// A transparent alias type declaration body, written `= Type`.
 @recursive_constructor
-pub type AliasBody Element = wrap Element
+pub type AliasBody<Element> wrap Element
 /// A `wrap` type declaration body with its representation visibility.
 @recursive_constructor
-pub type WrapperBody Representation Element = wrap (Representation, Element)
+pub type WrapperBody<Representation, Element> wrap (Representation, Element)
 /// A `from` type declaration body with its representation visibility.
 @recursive_constructor
-pub type FromBody Representation Element = wrap (Representation, Element)
+pub type FromBody<Representation, Element> wrap (Representation, Element)
 /// An `opaque` type declaration body.
 pub type OpaqueBody
-/// The body of a type declaration written after `=`.
-pub type TypeBody = alias
-    AliasBody Type |
-    WrapperBody Visibility Type |
-    FromBody Visibility Type |
+/// The body of a type declaration: `= Type`, `wrap Type`, `from Type`, or `opaque`.
+pub type TypeBody =
+    AliasBody<Type> |
+    WrapperBody<Visibility, Type> |
+    FromBody<Visibility, Type> |
     OpaqueBody
 /// An item whose structure is not exposed yet.
 @sized_opaque
-pub type UnstructuredItem = opaque
+pub type UnstructuredItem opaque
 impl !Copy UnstructuredItem {}
 /// A lossless modifier invocation whose structure is intentionally opaque.
 @sized_opaque
-pub type Modifier = opaque
+pub type Modifier opaque
 impl !Copy Modifier {}
 /// An item carrying modifiers that have not yet been applied. Modifiers are
 /// ordered outermost first.
 @recursive_constructor
-pub type ModifiedItem = pub wrap (
-    modifiers: Sequence Modifier,
+pub type ModifiedItem wrap pub (
+    modifiers: Sequence<Modifier>,
     item: Item,
 )
 /// The syntax category for items.
-pub type Item = alias ModifiedItem | TypeDeclarationItem | UnstructuredItem
+pub type Item = ModifiedItem | TypeDeclarationItem | UnstructuredItem
 
 /// Compiler-owned metadata supplied to a function-style macro invocation.
 /// Modifiers are ordered outermost first.
-pub type MacroCallMetadata = wrap (
-    modifiers: Sequence Modifier,
+pub type MacroCallMetadata wrap (
+    modifiers: Sequence<Modifier>,
     visibility: Visibility,
 )
 /// Private visibility syntax.
@@ -139,15 +139,15 @@ pub type Package
 /// Public visibility syntax.
 pub type Public
 /// The syntax category for visibility markers.
-pub type Visibility = alias Private | Package | Public
+pub type Visibility = Private | Package | Public
 /// An arbitrary lossless syntax fragment. `SyntaxNode` is exactly one structural
 /// node; delimiter nodes retain their complete opaque contents.
 /// An opaque lossless syntax fragment.
 @sized_opaque
-pub type Syntax = opaque
+pub type Syntax opaque
 impl !Copy Syntax {}
 /// Exactly one structural syntax node.
-pub type SyntaxNode = alias Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | Parenthesized Syntax | Bracketed Syntax | Braced Syntax
+pub type SyntaxNode = Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | Parenthesized<Syntax> | Bracketed<Syntax> | Braced<Syntax>
 
 /// Produces opaque syntax from a braced quotation without reparsing it.
 ///
@@ -156,7 +156,7 @@ pub type SyntaxNode = alias Expr | Type | Pattern | Item | Visibility | Comma | 
 /// ```staple
 /// macro identity = value: Expr => quote { $value }
 /// ```
-pub macro quote: Braced Syntax -> Syntax
+pub macro quote: Braced<Syntax> -> Syntax
 /// Produces parsed syntax of the expected category from a braced quotation.
 ///
 /// # Example
@@ -164,14 +164,14 @@ pub macro quote: Braced Syntax -> Syntax
 /// ```staple
 /// macro identity: Expr -> Expr = value: Expr => parse_quote { $value }
 /// ```
-pub macro parse_quote: Braced Syntax -> Syntax
+pub macro parse_quote: Braced<Syntax> -> Syntax
 
 /// A compile-time parse failure.
-pub type ParseError = pub wrap (message: String)
+pub type ParseError wrap pub (message: String)
 /// A cursor over a syntax fragment. Copying a stream forks it: `let mut fork =
 /// input` is a backtracking point and `input = fork` commits it.
 @sized_opaque
-pub type ParseStream = opaque
+pub type ParseStream opaque
 
 pub extern "staple-intrinsic" {
     /// Starts a stream at the beginning of `syntax`.
@@ -189,9 +189,9 @@ pub extern "staple-intrinsic" {
 /// `parse` reads one `T` and advances the stream in place; it fails without
 /// consuming anything the caller keeps unless the caller commits a fork.
 pub trait Parse T {
-    parse: mut ParseStream -> Result T ParseError
+    parse: mut ParseStream -> Result<T, ParseError>
     /// Parses all of `syntax` as one `T`, rejecting leftover syntax.
-    parse_all: Syntax -> Result T ParseError = syntax => {
+    parse_all: Syntax -> Result<T, ParseError> = syntax => {
         let mut input = stream syntax
         let value = Parse.parse.<T> input?
         if (is_empty input) { Ok value } else { error_at (input; "unexpected syntax") }
@@ -201,13 +201,13 @@ pub trait Parse T {
 // Compiler building blocks for the implementations below. Like those
 // implementations, they exist only while macros expand.
 extern "staple-intrinsic" {
-    __parse_primitive: <T> mut ParseStream -> Result T ParseError
-    __parenthesized_group: mut ParseStream -> Result (Syntax; ParseStream) ParseError
-    __bracketed_group: mut ParseStream -> Result (Syntax; ParseStream) ParseError
-    __braced_group: mut ParseStream -> Result (Syntax; ParseStream) ParseError
-    __parenthesized: <C> (Syntax; C) -> Parenthesized C
-    __bracketed: <C> (Syntax; C) -> Bracketed C
-    __braced: <C> (Syntax; C) -> Braced C
+    __parse_primitive: <T> mut ParseStream -> Result<T, ParseError>
+    __parenthesized_group: mut ParseStream -> Result<(Syntax; ParseStream), ParseError>
+    __bracketed_group: mut ParseStream -> Result<(Syntax; ParseStream), ParseError>
+    __braced_group: mut ParseStream -> Result<(Syntax; ParseStream), ParseError>
+    __parenthesized: <C> (Syntax; C) -> Parenthesized<C>
+    __bracketed: <C> (Syntax; C) -> Bracketed<C>
+    __braced: <C> (Syntax; C) -> Braced<C>
     __take_rest: mut ParseStream -> Syntax
     __offset: ParseStream -> USize
 }
@@ -229,7 +229,7 @@ impl Parse UnstructuredItem { parse = mut input => __parse_primitive.<Unstructur
 impl Parse Modifier { parse = mut input => __parse_primitive.<Modifier> input }
 impl Parse TypeBody { parse = mut input => __parse_primitive.<TypeBody> input }
 // One token, checked against the spelling the type names.
-impl<S where S <: String> Parse (Ident S) { parse = mut input => __parse_primitive.<Ident S> input }
+impl<S where S <: String> Parse Ident<S> { parse = mut input => __parse_primitive.<Ident<S>> input }
 impl Parse Comma { parse = mut input => __parse_primitive.<Comma> input }
 impl Parse Equals { parse = mut input => __parse_primitive.<Equals> input }
 impl Parse FatArrow { parse = mut input => __parse_primitive.<FatArrow> input }
@@ -245,7 +245,7 @@ impl Parse Syntax { parse = mut input => Ok (__take_rest input) }
 impl Parse () { parse = mut input => Ok () }
 
 // `None` and no consumption when `T` does not parse here.
-impl<T where Parse T> Parse (Option T) {
+impl<T where Parse T> Parse Option<T> {
     parse = mut input => {
         let mut fork = input
         match (Parse.parse.<T> fork) {
@@ -260,7 +260,7 @@ impl<T where Parse T> Parse (Option T) {
 
 // Delimited groups parse their contents on an inner stream that must be
 // consumed completely. The result keeps the group's original syntax.
-impl<C where Parse C> Parse (Parenthesized C) {
+impl<C where Parse C> Parse Parenthesized<C> {
     parse = mut input => {
         let (source, inner) = __parenthesized_group input?
         let mut contents = inner
@@ -272,7 +272,7 @@ impl<C where Parse C> Parse (Parenthesized C) {
         }
     }
 }
-impl<C where Parse C> Parse (Bracketed C) {
+impl<C where Parse C> Parse Bracketed<C> {
     parse = mut input => {
         let (source, inner) = __bracketed_group input?
         let mut contents = inner
@@ -284,7 +284,7 @@ impl<C where Parse C> Parse (Bracketed C) {
         }
     }
 }
-impl<C where Parse C> Parse (Braced C) {
+impl<C where Parse C> Parse Braced<C> {
     parse = mut input => {
         let (source, inner) = __braced_group input?
         let mut contents = inner
@@ -322,7 +322,7 @@ impl<H, T where Parse H, Parse T> Parse (H, ...T) {
 }
 
 // Elements until the stream ends or `T` stops parsing.
-impl<T where Parse T> Parse (Sequence T) {
+impl<T where Parse T> Parse Sequence<T> {
     parse = mut input => {
         if (is_empty input) {
             Ok (Sequence ())
@@ -334,7 +334,7 @@ impl<T where Parse T> Parse (Sequence T) {
                     Ok (Sequence ())
                 } else {
                     input = fork
-                    let rest = Parse.parse.<Sequence T> input?
+                    let rest = Parse.parse.<Sequence<T>> input?
                     Ok (Sequence (first: first, rest: rest))
                 },
                 ParseError _ => Ok (Sequence ()),
@@ -344,7 +344,7 @@ impl<T where Parse T> Parse (Sequence T) {
 }
 
 // Comma-separated elements with an optional trailing comma.
-impl<T where Parse T> Parse (Separated T Comma) {
+impl<T where Parse T> Parse Separated<T, Comma> {
     parse = mut input => {
         if (is_empty input) {
             Ok (Separated (separator: Comma, elements: Sequence (), trailing: False))
@@ -366,7 +366,7 @@ impl<T where Parse T> Parse (Separated T Comma) {
                     ))
                 } else {
                     let Separated (separator, elements, trailing) =
-                        Parse.parse.<Separated T Comma> input?
+                        Parse.parse.<Separated<T, Comma>> input?
                     Ok (Separated (
                         separator: separator,
                         elements: Sequence (first: first, rest: elements),

@@ -1904,7 +1904,7 @@ mod tests {
     #[test]
     fn completes_bare_trait_function() {
         let source = concat!(
-            "type Wrapper = wrap I32\n",
+            "type Wrapper wrap I32\n",
             "impl ToString Wrapper { to_string = value => \"\" }\n",
             "def f: Wrapper -> String = to_string\n",
         );
@@ -1941,7 +1941,7 @@ mod tests {
             concat!(
                 "pub mod\n",
                 "pub def callable = () => 1\n",
-                "pub type Number = alias I32\n",
+                "pub type Number = I32\n",
                 "pub trait Printable T {}\n",
                 "pub macro identity = value => parse_quote { $value }\n",
             ),
@@ -1988,7 +1988,7 @@ mod tests {
     fn completes_accessible_companion_methods_for_a_typed_receiver() {
         let source = concat!(
             "def exercise = () => {\n",
-            "let mut numbers: List I32 = List.new ()\n",
+            "let mut numbers: List<I32> = List.new ()\n",
             "numbers\n",
             "}\n",
         );
@@ -2024,7 +2024,7 @@ mod tests {
             "trait Local T { render: T -> String }\n",
             "impl Local I32 { render = value => \"\" }\n",
             "let print = std.io.println\n",
-            "let list: List I32 = List.new ()\n",
+            "let list: List<I32> = List.new ()\n",
             "let render = Local.render\n",
         );
         let path = std::env::temp_dir().join("staple-completion-qualified.sta");
@@ -2145,7 +2145,7 @@ mod tests {
 
     #[test]
     fn completes_a_new_method_receiver_from_the_indexed_scope() {
-        let source = "let mut numbers: List I32 = List.new ()\n";
+        let source = "let mut numbers: List<I32> = List.new ()\n";
         let path = std::env::temp_dir().join("staple-completion-new-method-receiver.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(
@@ -2314,7 +2314,7 @@ mod tests {
         std::fs::write(root.join("src/root.sta"), "pub mod\n").unwrap();
         std::fs::write(
             root.join("src/helpers.sta"),
-            "pub mod\n\n/// Greets.\npub def greet = () => 0\npub type Widget = wrap ()\nlet secret = 1\n",
+            "pub mod\n\n/// Greets.\npub def greet = () => 0\npub type Widget wrap ()\nlet secret = 1\n",
         )
         .unwrap();
         let source = "pub mod\n\ndef main = () => 0\n";
@@ -2463,7 +2463,7 @@ mod tests {
         // function ending at the same place never is: its body takes the pipe.
         let source = concat!(
             "Ok 42\n",
-            "let pick = (value: Result I32 String) => value\n",
+            "let pick = (value: Result<I32, String>) => value\n",
         );
         let path = std::env::temp_dir().join("staple-pipe-outermost.sta");
         let program = ProgramLoader::new()
@@ -2496,7 +2496,7 @@ mod tests {
     #[test]
     fn pipe_completion_offers_compatible_local_functions() {
         let source = concat!(
-            "type Animal = wrap I32\n",
+            "type Animal wrap I32\n",
             "companion Animal { pub def legs: Animal -> I32 = animal => 4 }\n",
             "def double = value: I32 => value * 2\n",
             "def shout = value: String => value\n",

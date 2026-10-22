@@ -2,4 +2,4 @@ pub mod
 
 
 @sized_opaque
-pub type Never = opaque
+pub type Never opaque

@@ -42,19 +42,19 @@ def host_fixed_tick: Scheduler ->{state} () = s => {
 }
 
 // --- behaviours ------------------------------------------------------------
-def scaled_sleeper: (I32, I32) ->{state.read, IO} Coroutine{state.read, Reactive, IO} () =
+def scaled_sleeper: (I32, I32) ->{state.read, IO} Coroutine{state.read, Reactive, IO}<()> =
     (now, at) => coro {
         let _ = await (wait_deadline (r_game, r_frame, now + 250, at))
         println "scaled sleeper woke: game_ms=${game_ms:?}"
     }
 
-def wall_sleeper: (I32, I32) ->{state.read, IO} Coroutine{state.read, Reactive, IO} () =
+def wall_sleeper: (I32, I32) ->{state.read, IO} Coroutine{state.read, Reactive, IO}<()> =
     (now, at) => coro {
         let _ = await (wait_deadline (r_wall, r_frame, now + 250, at))
         println "wall sleeper woke: wall_ms=${wall_ms:?}"
     }
 
-def fixed_counter: I32 ->{IO} Coroutine{Reactive, IO} () =
+def fixed_counter: I32 ->{IO} Coroutine{Reactive, IO}<()> =
     start => coro {
         let _ = await (after_count (r_fixed, start))
         println "fixed tick 1"
@@ -66,7 +66,7 @@ def fixed_counter: I32 ->{IO} Coroutine{Reactive, IO} () =
 
 // An entity owns a list of behaviour tasks; destroying it cancels each one,
 // which unsubscribes any `until` it was parked in (registration cleanup).
-def destroy_entity: mut List (Task ()) ->{IO} () = mut tasks => {
+def destroy_entity: mut List<Task<()>> ->{IO} () = mut tasks => {
     loop {
         match List.pop tasks {
             Some(t) => { Task.cancel t },
@@ -85,7 +85,7 @@ with Reactive = reactive_scope () {
         let _ = spawn (wall_sleeper (wall_ms, frame))
 
         // An entity: one sleeping behaviour we cancel before it can wake.
-        let mut mob: List (Task ()) = List.new ()
+        let mut mob: List<Task<()>> = List.new ()
         let m = spawn (scaled_sleeper (game_ms, frame))
         List.push mob m
 

@@ -3173,7 +3173,7 @@ mod tests {
     #[test]
     fn companion_members_get_separate_fresh_copies_of_the_header() {
         let members = companion_members(
-            "companion<T where Clone T> Box T { def first: <U> (Box T, U) -> T = x => x; def second: Box T -> T = x => x }\n",
+            "companion<T where Clone T> Box<T> { def first: <U> (Box<T>, U) -> T = x => x; def second: Box<T> -> T = x => x }\n",
         );
         let [first, second] = members.as_slice() else {
             panic!("two members")
@@ -3200,11 +3200,11 @@ mod tests {
     #[test]
     fn companion_members_inside_modifiers_and_extern_blocks_get_the_header() {
         let members = companion_members(concat!(
-            "companion<T> Box T {\n",
+            "companion<T> Box<T> {\n",
             "    /// Documented.\n",
             "    @track_caller\n",
-            "    pub def first = (b: Box T) => b\n",
-            "    pub extern \"staple-intrinsic\" { second: Box T -> T; third: <U> (Box T, U) -> T }\n",
+            "    pub def first = (b: Box<T>) => b\n",
+            "    pub extern \"staple-intrinsic\" { second: Box<T> -> T; third: <U> (Box<T>, U) -> T }\n",
             "}\n",
         ));
         assert_eq!(members.len(), 3);

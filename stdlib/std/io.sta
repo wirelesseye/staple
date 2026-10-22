@@ -9,10 +9,10 @@ use package.string.(String)
 
 /// The capability required for standard output operations.
 @sized_opaque
-pub type IO = opaque
+pub type IO opaque
 
 pub(package) extern "c" {
-    printf: (RawPtr CChar, ...) -> I32
+    printf: (RawPtr<CChar>, ...) -> I32
 }
 
 /// Writes a string to standard output without a trailing newline.

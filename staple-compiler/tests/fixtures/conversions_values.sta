@@ -6,8 +6,8 @@ use std.list.List
 
 def require: Bool -> () = condition => if condition { () } else { panic "conversion assertion failed" }
 
-def invalid_bytes: () -> List U8 = () => {
-    let mut bytes: List U8 = List.new ()
+def invalid_bytes: () -> List<U8> = () => {
+    let mut bytes: List<U8> = List.new ()
     List.push bytes 195
     List.push bytes 40
     bytes
@@ -15,55 +15,55 @@ def invalid_bytes: () -> List U8 = () => {
 
 def run: () -> () = () => {
     let address: USize = 4096
-    let pointer: RawPtr I32 = Convert.convert address
+    let pointer: RawPtr<I32> = Convert.convert address
     let restored: USize = Convert.convert pointer
     require (restored == address)
-    let advanced: RawPtr I32 = Convert.convert (restored + 4)
+    let advanced: RawPtr<I32> = Convert.convert (restored + 4)
     let advanced_address: USize = Convert.convert advanced
     require (advanced_address == 4100)
-    let null: RawPtr CChar = Convert.convert (USize :: 0)
+    let null: RawPtr<CChar> = Convert.convert (USize :: 0)
     let null_address: USize = Convert.convert null
     require (null_address == 0)
 
     let text = "héllo"
-    let mut bytes: List U8 = String.to_bytes text
+    let mut bytes: List<U8> = String.to_bytes text
     require (List.length bytes == 6)
     List.set_unchecked bytes 0 0
     require (text == "héllo")
-    let decoded: Ok String | InvalidUtf8 = TryConvert.try_convert bytes
+    let decoded: Ok<String> | InvalidUtf8 = TryConvert.try_convert bytes
     match decoded { InvalidUtf8 => panic "mutated copy rejected", Ok value => require (value != text), }
-    let valid_bytes: Ok String | InvalidUtf8 = TryConvert.try_convert (String.to_bytes text)
+    let valid_bytes: Ok<String> | InvalidUtf8 = TryConvert.try_convert (String.to_bytes text)
     match valid_bytes { Ok value => require (value == text), _ => panic "valid UTF-8 rejected", }
-    let checked_bytes: Ok String | InvalidUtf8 = String.from_utf8 (invalid_bytes ())
+    let checked_bytes: Ok<String> | InvalidUtf8 = String.from_utf8 (invalid_bytes ())
     match checked_bytes { InvalidUtf8 => (), _ => panic "String.from_utf8 accepted invalid bytes", }
-    let invalid_result: Ok String | InvalidUtf8 = TryConvert.try_convert (invalid_bytes ())
+    let invalid_result: Ok<String> | InvalidUtf8 = TryConvert.try_convert (invalid_bytes ())
     match invalid_result { InvalidUtf8 => (), _ => panic "invalid UTF-8 accepted", }
-    let empty_bytes: List U8 = List.new ()
-    let empty_result: Ok String | InvalidUtf8 = TryConvert.try_convert empty_bytes
+    let empty_bytes: List<U8> = List.new ()
+    let empty_result: Ok<String> | InvalidUtf8 = TryConvert.try_convert empty_bytes
     match empty_result { Ok value => require (value == ""), _ => panic "empty UTF-8 rejected", }
 
-    let mut buffer: Buffer I32 = Buffer.with_capacity 2
+    let mut buffer: Buffer<I32> = Buffer.with_capacity 2
     Buffer.push buffer 10
     Buffer.push buffer 20
-    let frozen: SharedBuffer I32 = Buffer.into_shared_buffer buffer
+    let frozen: SharedBuffer<I32> = Buffer.into_shared_buffer buffer
     require (SharedBuffer.length frozen == 2)
     require (frozen[0] == 10)
     require (frozen[1] == 20)
 
-    let c_result: Ok CString | InteriorNul = TryConvert.try_convert text
+    let c_result: Ok<CString> | InteriorNul = TryConvert.try_convert text
     match c_result {
         Ok c => {
-            let result: Ok String | InvalidUtf8 = TryConvert.try_convert c
+            let result: Ok<String> | InvalidUtf8 = TryConvert.try_convert c
             match result { Ok value => require (value == text), _ => panic "CString round trip failed", }
         },
         _ => panic "String to CString failed",
     }
-    let nul_result: Ok CString | InteriorNul = TryConvert.try_convert "a\0b"
+    let nul_result: Ok<CString> | InteriorNul = TryConvert.try_convert "a\0b"
     match nul_result { InteriorNul => (), _ => panic "embedded NUL accepted", }
     let bad_c = CString.from_string_unchecked (String.from_utf8_unchecked (invalid_bytes ()))
-    let bad_c_result: Ok String | InvalidUtf8 = TryConvert.try_convert bad_c
+    let bad_c_result: Ok<String> | InvalidUtf8 = TryConvert.try_convert bad_c
     match bad_c_result { InvalidUtf8 => (), _ => panic "invalid CString UTF-8 accepted", }
-    let checked_c: Ok CString | InteriorNul = CString.from_string text
+    let checked_c: Ok<CString> | InteriorNul = CString.from_string text
     match checked_c {
         Ok c => match (CString.to_string c) {
             Ok value => require (value == text),
@@ -71,7 +71,7 @@ def run: () -> () = () => {
         },
         InteriorNul => panic "valid text rejected",
     }
-    let checked_nul: Ok CString | InteriorNul = CString.from_string "a\0b"
+    let checked_nul: Ok<CString> | InteriorNul = CString.from_string "a\0b"
     match checked_nul { InteriorNul => (), _ => panic "checked CString accepted NUL", }
     let unchecked_nul = CString.from_string_unchecked "a\0b"
     let prefix = CString.to_string_unchecked unchecked_nul

@@ -1180,7 +1180,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.drop_glue_plan(ordinal, span)
     }
 
-    /// One instance body, or `Ok(())` when the instance declares nothing
+    /// One instance body, or `Ok<()>` when the instance declares nothing
     /// emittable (no materialized body, no declaration, or no root block).
     fn emit_instance_body(&mut self, id: FunctionInstanceId) -> CodeGenerationResult<()> {
         let Some(body) = self

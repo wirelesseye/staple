@@ -167,8 +167,8 @@ fn opaque_pointer_conversions_run_and_emit_for_32_and_64_bit_targets() {
 fn opaque_pointer_requires_explicit_conversion() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for source in [
-        "use std.cinterop.*\nuse std.ptr.*\ndef erase: RawPtr I32 -> RawOpaquePtr = value => value\n",
-        "use std.cinterop.*\nuse std.ptr.*\ndef restore: RawOpaquePtr -> RawPtr I32 = value => value\n",
+        "use std.cinterop.*\nuse std.ptr.*\ndef erase: RawPtr<I32> -> RawOpaquePtr = value => value\n",
+        "use std.cinterop.*\nuse std.ptr.*\ndef restore: RawOpaquePtr -> RawPtr<I32> = value => value\n",
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
@@ -181,7 +181,7 @@ fn opaque_pointer_requires_explicit_conversion() {
         assert!(
             errors.iter().any(|error| error.message.contains("expected")
                 && error.message.contains("RawOpaquePtr")
-                && error.message.contains("RawPtr I32")),
+                && error.message.contains("RawPtr<I32>")),
             "{errors:?}"
         );
     }
@@ -225,12 +225,12 @@ fn raw_pointer_operations_reject_invalid_access_and_implicit_conversions() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let cases = [
         (
-            "def bad: RawPtr I32 -> RawMutPtr I32 = p => p",
-            "RawMutPtr I32",
+            "def bad: RawPtr<I32> -> RawMutPtr<I32> = p => p",
+            "RawMutPtr<I32>",
         ),
         (
-            "def bad: RawMutPtr I32 -> RawPtr I32 = p => p",
-            "RawPtr I32",
+            "def bad: RawMutPtr<I32> -> RawPtr<I32> = p => p",
+            "RawPtr<I32>",
         ),
         (
             "def bad: RawOpaquePtr -> RawOpaqueMutPtr = p => p",
@@ -241,11 +241,11 @@ fn raw_pointer_operations_reject_invalid_access_and_implicit_conversions() {
             "RawOpaquePtr",
         ),
         (
-            "def bad: RawMutPtr I32 -> RawMutPtr U8 = p => p as RawMutPtr U8",
+            "def bad: RawMutPtr<I32> -> RawMutPtr<U8> = p => p as RawMutPtr<U8>",
             "bound",
         ),
         (
-            "let p: RawPtr I32 = RawPtr.null ()\nRawMutPtr.store p 1",
+            "let p: RawPtr<I32> = RawPtr.null ()\nRawMutPtr.store p 1",
             "RawMutPtr",
         ),
         (
@@ -254,32 +254,32 @@ fn raw_pointer_operations_reject_invalid_access_and_implicit_conversions() {
         ),
         ("let p = RawOpaquePtr.null ()\nRawPtr.load p", "RawPtr"),
         (
-            "let p: RawPtr CString = RawPtr.null ()\nRawPtr.load p",
+            "let p: RawPtr<CString> = RawPtr.null ()\nRawPtr.load p",
             "bound",
         ),
         (
-            "let p: RawMutPtr CString = RawMutPtr.null ()\nRawMutPtr.load p",
+            "let p: RawMutPtr<CString> = RawMutPtr.null ()\nRawMutPtr.load p",
             "bound",
         ),
         (
-            "let p: RawMutPtr CString = RawMutPtr.null ()\nlet v = c_string \"bad\"\nRawMutPtr.store p v",
+            "let p: RawMutPtr<CString> = RawMutPtr.null ()\nlet v = c_string \"bad\"\nRawMutPtr.store p v",
             "bound",
         ),
         (
-            "let store = RawMutPtr.store\nlet p: RawMutPtr CString = RawMutPtr.null ()\nlet v = c_string \"bad\"\nstore p v",
+            "let store = RawMutPtr.store\nlet p: RawMutPtr<CString> = RawMutPtr.null ()\nlet v = c_string \"bad\"\nstore p v",
             "bound",
         ),
         (
-            "let p: RawMutPtr CString = RawMutPtr.null ()\nlet v = c_string \"bad\"\n(if True { RawMutPtr.store } else { RawMutPtr.store }) p v",
+            "let p: RawMutPtr<CString> = RawMutPtr.null ()\nlet v = c_string \"bad\"\n(if True { RawMutPtr.store } else { RawMutPtr.store }) p v",
             "bound",
         ),
         (
-            "let p: RawPtr I32 = RawPtr.null ()\nlet q: RawMutPtr I32 = RawMutPtr.null ()\nlet bad = p == q",
+            "let p: RawPtr<I32> = RawPtr.null ()\nlet q: RawMutPtr<I32> = RawMutPtr.null ()\nlet bad = p == q",
             "Raw",
         ),
-        ("def bad: CString -> RawMutPtr CChar = p => p", "RawMutPtr"),
+        ("def bad: CString -> RawMutPtr<CChar> = p => p", "RawMutPtr"),
         (
-            "type Token = opaque\nlet p: RawMutPtr Token = RawMutPtr.null ()\nRawMutPtr.load p",
+            "type Token opaque\nlet p: RawMutPtr<Token> = RawMutPtr.null ()\nRawMutPtr.load p",
             "bound",
         ),
     ];

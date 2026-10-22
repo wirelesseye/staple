@@ -428,7 +428,7 @@ fn a_dependency_package_object_links_with_its_consumer() {
         library.join("src/geometry.sta"),
         concat!(
             "pub mod\n",
-            "pub type Point = pub wrap (x: I32, y: I32)\n",
+            "pub type Point wrap pub (x: I32, y: I32)\n",
             "pub trait Label T {label: T -> String}\n",
             "impl Label Point {label = _ => \"point\"}\n",
             "pub let scale: I32 = 3\n",
@@ -449,7 +449,7 @@ fn a_dependency_package_object_links_with_its_consumer() {
         concat!(
             "use shapes.geometry.*\n",
             "use std.io.println\n",
-            "type Local = wrap I32\n",
+            "type Local wrap I32\n",
             "impl Label Local {label = _ => \"local\"}\n",
             "let p = scaled (Point (x: 1, y: 2))\n",
             "println (describe p)\n",

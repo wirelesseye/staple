@@ -2175,28 +2175,28 @@ mod tests {
         "use std.cinterop.(CString, c_string)\n",
         "use std.shared.(Shared)\n",
         "use std.coroutine.*\n",
-        "type Resource = wrap I32\n",
+        "type Resource wrap I32\n",
         "impl Drop Resource { cleanup = Resource value => () }\n",
-        "type Handle = wrap CString\n",
+        "type Handle wrap CString\n",
         "impl Drop Handle { cleanup = Handle value => () }\n",
-        "type Wrapped = wrap CString\n",
-        "type Box T = wrap (T)\n",
-        "impl<T where Copy T> Drop (Box T) { cleanup = Box value => () }\n",
-        "type Chain = wrap ((CString) | (Shared Chain))\n",
+        "type Wrapped wrap CString\n",
+        "type Box<T> wrap (T)\n",
+        "impl<T where Copy T> Drop Box<T> { cleanup = Box value => () }\n",
+        "type Chain wrap ((CString) | (Shared<Chain>))\n",
         "def expose_resource: Resource -> I32 = value => 0\n",
         "def expose_handle: Handle -> I32 = value => 0\n",
         "def expose_wrapped: Wrapped -> I32 = value => 0\n",
-        "def expose_box: (Box CString) -> I32 = value => 0\n",
-        "def expose_box_handle: (Box Handle) -> I32 = value => 0\n",
-        "def expose_box_i32: (Box I32) -> I32 = value => 0\n",
+        "def expose_box: (Box<CString>) -> I32 = value => 0\n",
+        "def expose_box_handle: (Box<Handle>) -> I32 = value => 0\n",
+        "def expose_box_i32: (Box<I32>) -> I32 = value => 0\n",
         "def expose_product: (I32, CString) -> I32 = value => 0\n",
         "def expose_nested: ((I32, CString), I32) -> I32 = value => 0\n",
         "def expose_sum: (CString | I32) -> I32 = value => 0\n",
         "def expose_chain: Chain -> I32 = value => 0\n",
-        "def expose_coroutine: (Coroutine{} I32) -> I32 = value => 0\n",
+        "def expose_coroutine: (Coroutine{}<I32>) -> I32 = value => 0\n",
         "def expose_scheduler: Scheduler -> I32 = value => 0\n",
-        "def expose_wait: (Wait I32) -> I32 = value => 0\n",
-        "def expose_resolver: (Resolver I32) -> I32 = value => 0\n",
+        "def expose_wait: (Wait<I32>) -> I32 = value => 0\n",
+        "def expose_resolver: (Resolver<I32>) -> I32 = value => 0\n",
         "def expose_token: CompletionToken -> I32 = value => 0\n",
         "let kept = 1\n",
     );
@@ -2414,9 +2414,9 @@ mod tests {
             DropGlueBody::RuntimeRelease(RuntimeRelease::CompletionTokenRelease)
         );
 
-        // The generic `impl<T where Copy T> Drop (Box T)` applies to `Box I32`
-        // (its bound discharges), so it selects a user drop; `Box CString` and
-        // `Box Handle` fail the `Copy` bound and keep the structural wrapper
+        // The generic `impl<T where Copy T> Drop (Box T)` applies to `Box<I32>`
+        // (its bound discharges), so it selects a user drop; `Box<CString>` and
+        // `Box<Handle>` fail the `Copy` bound and keep the structural wrapper
         // branch. Two instantiations produce two keys.
         assert_ne!(
             CanonicalType::concrete(&box_c_string, &Origin::compiler()).expect("concrete"),
@@ -2500,7 +2500,7 @@ mod tests {
     #[test]
     fn drop_glue_converges_and_reports_closure_stats() {
         let source = concat!(
-            "type Resource = wrap I32\n",
+            "type Resource wrap I32\n",
             "impl Drop Resource { cleanup = Resource value => () }\n",
             "def mutate_resource: move (Resource, Resource) -> (Resource, Resource) = move pair => {\n",
             "  let mut copy = pair\n",
@@ -2608,11 +2608,11 @@ mod tests {
     const FINALIZER_FIXTURE: &str = concat!(
         "use std.cinterop.*\n",
         "extern \"c\" { inspect: CString -> I32 }\n",
-        "type Owned = wrap CString\n",
-        "type CellValue = wrap CString\n",
-        "type BorrowedValue = wrap CString\n",
-        "type Wrapped = wrap CString\n",
-        "type DerivedValue = wrap CString\n",
+        "type Owned wrap CString\n",
+        "type CellValue wrap CString\n",
+        "type BorrowedValue wrap CString\n",
+        "type Wrapped wrap CString\n",
+        "type DerivedValue wrap CString\n",
         "def make_owned = (move value: Owned) => { let callback = () => inspect (value.*); callback }\n",
         "def make_mutable = () => {\n",
         "  let mut cell = CellValue (c_string \"a\")\n",
@@ -3131,12 +3131,12 @@ mod tests {
         "use std.buffer.*\n",
         "use std.clone.Clone\n",
         "use std.cinterop.(CString, c_string)\n",
-        "type Owned = wrap I32\n",
+        "type Owned wrap I32\n",
         "impl Drop Owned { cleanup = Owned value => () }\n",
         "impl Clone Owned { clone = Owned value => Owned value }\n",
-        "def clone_copy: (Buffer I32) -> Buffer I32 = buffer => Clone.clone buffer\n",
-        "def clone_owned: (Buffer Owned) -> Buffer Owned = buffer => Clone.clone buffer\n",
-        "def clone_nested: (Buffer (Buffer I32)) -> Buffer (Buffer I32) = buffer => Clone.clone buffer\n",
+        "def clone_copy: (Buffer<I32>) -> Buffer<I32> = buffer => Clone.clone buffer\n",
+        "def clone_owned: (Buffer<Owned>) -> Buffer<Owned> = buffer => Clone.clone buffer\n",
+        "def clone_nested: (Buffer<Buffer<I32>>) -> Buffer<Buffer<I32>> = buffer => Clone.clone buffer\n",
         "let kept = 1\n",
     );
 
@@ -3250,7 +3250,7 @@ mod tests {
         "  () => inspect cell\n",
         "}\n",
         "def closure_env: move CString -> (() -> I32) = move value => () => inspect value\n",
-        "def make_shared: () -> Shared CString = () => Shared (c_string \"x\")\n",
+        "def make_shared: () -> Shared<CString> = () => Shared (c_string \"x\")\n",
         "def convert: move CString -> String = move value => CString.to_string_unchecked value\n",
         "def nested: (I32) -> I32 = value => {\n",
         "  let outer = c_string \"a\"\n",
@@ -3449,8 +3449,8 @@ mod tests {
             "use std.coroutine.*\n",
             "extern \"c\" { inspect: CString -> I32 }\n",
             "def make_c: () -> CString = () => c_string \"x\"\n",
-            "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
-            "def consume: move Coroutine{} I32 -> I32 = move value => 1\n",
+            "def task: () -> Coroutine{}<I32> = () => coro { 1 }\n",
+            "def consume: move Coroutine{}<I32> -> I32 = move value => 1\n",
             "let created = task ()\n",
             "let debugged = \"${(1, 2):?}\"\n",
             "let consumed = consume (task ())\n",

@@ -2718,7 +2718,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("staple-lsp-pipes-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let source = concat!(
-            "type Wrapped = wrap I32\n",
+            "type Wrapped wrap I32\n",
             "companion Wrapped { pub def first: Wrapped -> I32 -> I32 = Wrapped value => n => value + n }\n",
             "trait Last T { last: T -> I32 }\n",
             "impl Last I32 { last = value => value }\n",
@@ -2864,8 +2864,8 @@ mod tests {
         let uri = path_to_uri(&path).unwrap();
         let head = concat!(
             "let value = 1\n",
-            "def f = (value: Result I32 String) => I32 :: {\n",
-            "    let local: List I32 = List.new ()\n",
+            "def f = (value: Result<I32, String>) => I32 :: {\n",
+            "    let local: List<I32> = List.new ()\n",
         );
         let tail = "    0\n}\n";
         for (receiver, expected) in [("value", "unwrap"), ("local", "push")] {

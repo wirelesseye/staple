@@ -1146,7 +1146,7 @@ mod tests {
     #[test]
     fn ordinary_constructor_value_plans_its_flattened_parameters() {
         let (_, lowered) = lower(concat!(
-            "type Point = wrap (I32, I32)\n",
+            "type Point wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
         ));
         let plans = constructor_plans(&lowered);
@@ -1169,10 +1169,10 @@ mod tests {
     fn managed_shared_constructor_plans_a_finalizer_exactly_when_drop_is_needed() {
         let (module, lowered) = lower(concat!(
             "use std.shared.(Shared)\n",
-            "type Resource = wrap I32\n",
+            "type Resource wrap I32\n",
             "impl Drop Resource { cleanup = Resource value => () }\n",
-            "let make: () -> (Resource -> Shared Resource) = () => Shared\n",
-            "let make_copy: () -> (I32 -> Shared I32) = () => Shared\n",
+            "let make: () -> (Resource -> Shared<Resource>) = () => Shared\n",
+            "let make_copy: () -> (I32 -> Shared<I32>) = () => Shared\n",
         ));
         let plans = constructor_plans(&lowered);
         assert_eq!(plans.len(), 2, "one managed-shared adapter per payload type");
@@ -1228,9 +1228,9 @@ mod tests {
     fn generic_constructor_values_produce_one_adapter_per_instantiation() {
         let (_, lowered) = lower(concat!(
             "use std.shared.(Shared)\n",
-            "def shared_maker: <T where Copy T> () -> (T -> Shared T) = <T where Copy T> () => Shared\n",
-            "let maker_i32: I32 -> Shared I32 = shared_maker ()\n",
-            "let maker_u8: U8 -> Shared U8 = shared_maker ()\n",
+            "def shared_maker: <T where Copy T> () -> (T -> Shared<T>) = <T where Copy T> () => Shared\n",
+            "let maker_i32: I32 -> Shared<I32> = shared_maker ()\n",
+            "let maker_u8: U8 -> Shared<U8> = shared_maker ()\n",
         ));
         let plans = constructor_plans(&lowered);
         assert_eq!(plans.len(), 2, "one adapter per concrete callable type");
@@ -1397,7 +1397,7 @@ mod tests {
     #[test]
     fn mutate_index_records_drop_previous_exactly_when_drop_is_needed() {
         let (module, lowered) = lower(concat!(
-            "type Resource = wrap I32\n",
+            "type Resource wrap I32\n",
             "impl Drop Resource { cleanup = Resource value => () }\n",
             "def mutate_copy: (I32, I32) -> (I32, I32) = pair => {\n",
             "  let mut copy = pair\n",
@@ -1663,8 +1663,8 @@ mod tests {
     fn deref_index_loads_copy_products_and_delegates_heterogeneous_ones() {
         let (module, lowered) = lower(concat!(
             "use std.shared.(Shared)\n",
-            "def deref_uniform: (Shared (I32, I32)) -> I32 = reference => reference[0]\n",
-            "def deref_mixed: (Shared (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
+            "def deref_uniform: (Shared<(I32, I32)>) -> I32 = reference => reference[0]\n",
+            "def deref_mixed: (Shared<(U8, I32)>) -> (I32 | U8) = reference => reference[0]\n",
             "let uniform = deref_uniform (Shared (1, 2))\n",
             "let mixed = deref_mixed (Shared ((U8 :: 1), 2))\n",
         ));
@@ -1728,9 +1728,9 @@ mod tests {
     fn deref_index_delegates_to_an_explicit_index_implementation() {
         let (_, lowered) = lower(concat!(
             "use std.shared.(Shared)\n",
-            "type Row = wrap (I32, I32)\n",
+            "type Row wrap (I32, I32)\n",
             "impl Index Row USize { type Output = I32; index = (row, position) => 7 }\n",
-            "def deref_row: (Shared Row, USize) -> I32 = (reference, position) => reference[position]\n",
+            "def deref_row: (Shared<Row>, USize) -> I32 = (reference, position) => reference[position]\n",
             "let value = deref_row (Shared (Row (1, 2)), 0)\n",
         ));
         let plans = structural_plans(&lowered, StructuralTraitMethod::DerefIndex);
@@ -1772,7 +1772,7 @@ mod tests {
     fn deref_mutate_index_delegates_to_the_payloads_mutate_index() {
         let (_, lowered) = lower(concat!(
             "use std.shared.(Shared)\n",
-            "def deref_replace: move (Shared (I32, I32)) -> Shared (I32, I32) = move reference => {\n",
+            "def deref_replace: move (Shared<(I32, I32)>) -> Shared<(I32, I32)> = move reference => {\n",
             "  let mut own = reference\n",
             "  own[0] = 3\n",
             "  own\n",
@@ -1875,9 +1875,9 @@ mod tests {
     #[test]
     fn debug_delegates_to_an_explicit_generic_implementation_instance() {
         let (_, lowered) = lower(concat!(
-            "type Held T = wrap (T)\n",
-            "impl<T where Debug T> Debug (Held T) { fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }\n",
-            "def show_mixed: (Held I32, I32) -> String = pair => \"${pair:?}\"\n",
+            "type Held<T> wrap (T)\n",
+            "impl<T where Debug T> Debug Held<T> { fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }\n",
+            "def show_mixed: (Held<I32>, I32) -> String = pair => \"${pair:?}\"\n",
             "let text = show_mixed (Held 1, 2)\n",
         ));
         let plans = structural_plans(&lowered, StructuralTraitMethod::Debug);
@@ -1928,14 +1928,14 @@ mod tests {
     #[test]
     fn closure_rounds_and_growth_stay_bounded() {
         let (_, lowered) = lower(concat!(
-            "type Resource = wrap I32\n",
+            "type Resource wrap I32\n",
             "impl Drop Resource { cleanup = Resource value => () }\n",
-            "type Held T = wrap (T)\n",
-            "impl<T where Debug T> Debug (Held T) { fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }\n",
+            "type Held<T> wrap (T)\n",
+            "impl<T where Debug T> Debug Held<T> { fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }\n",
             "def index_pair: <T where Copy T> ((T, T), USize) -> T = <T where Copy T> (pair, position) => pair[position]\n",
             "def show_nested: ((I32, I32), (I32, I32)) -> String = nested => \"${nested:?}\"\n",
-            "def show_mixed: (Held I32, I32) -> String = pair => \"${pair:?}\"\n",
-            "def count_held: (Held I32, I32) -> I32 = pair => {\n",
+            "def show_mixed: (Held<I32>, I32) -> String = pair => \"${pair:?}\"\n",
+            "def count_held: (Held<I32>, I32) -> I32 = pair => {\n",
             "  let mut count = 0\n",
             "  for item in pair { count = count + 1 }\n",
             "  count\n",
@@ -2002,7 +2002,7 @@ mod tests {
     #[test]
     fn named_constructor_value_plans_positional_slots() {
         let (_, lowered) = lower(concat!(
-            "type Named = wrap (left: I32, right: I32)\n",
+            "type Named wrap (left: I32, right: I32)\n",
             "let make_named: () -> ((I32, I32) -> Named) = () => Named\n",
         ));
         let plans = constructor_plans(&lowered);

@@ -84,9 +84,9 @@ fn run(source: &str) -> String {
 }
 
 const TAGGED: &str = concat!(
-    "type Tag = wrap I32\n",
-    "type Both = alias Tag | String\n",
-    "type Tagged T = alias Tag | T\n",
+    "type Tag wrap I32\n",
+    "type Both = Tag | String\n",
+    "type Tagged<T> = Tag | T\n",
     "companion<T> (Tag | T) {\n",
     "    pub def describe = value: Tag | T => String :: match value {\n",
     "        Tag _ => \"tag\",\n",
@@ -118,8 +118,8 @@ fn structural_companion_members_apply_to_matching_receivers() {
 #[test]
 fn an_alias_target_is_the_same_companion_as_its_structural_type() {
     let errors = rejected(concat!(
-        "type Tag = wrap I32\n",
-        "type Both = alias Tag | String\n",
+        "type Tag wrap I32\n",
+        "type Both = Tag | String\n",
         "companion Both { pub def size = () => I32 :: 1 }\n",
         "companion (String | Tag) { pub def size = () => I32 :: 2 }\n",
     ));
@@ -129,8 +129,8 @@ fn an_alias_target_is_the_same_companion_as_its_structural_type() {
         "{errors}"
     );
     check(concat!(
-        "type Tag = wrap I32\n",
-        "type Both = alias Tag | String\n",
+        "type Tag wrap I32\n",
+        "type Both = Tag | String\n",
         "companion Both { pub def size = () => I32 :: 1 }\n",
         "companion (String | Tag) { pub def other = () => I32 :: 2 }\n",
         "let a: I32 = Both.size ()\n",
@@ -143,7 +143,7 @@ fn an_alias_target_is_the_same_companion_as_its_structural_type() {
 fn a_structural_companion_matches_its_target_exactly() {
     // A wider sum is a different type.
     let errors = rejected(concat!(
-        "type Tag = wrap I32\n",
+        "type Tag wrap I32\n",
         "companion (Tag | String) { pub def size = value: Tag | String => I32 :: 1 }\n",
         "let wide: Tag | String | Bool = True\n",
         "let size: I32 = wide |> size\n",
@@ -157,7 +157,7 @@ fn a_structural_companion_matches_its_target_exactly() {
 #[test]
 fn a_parameter_alternative_stands_for_at_least_one_alternative() {
     let errors = rejected(concat!(
-        "type Tag = wrap I32\n",
+        "type Tag wrap I32\n",
         "companion<T> (Tag | T) { pub def size = value: Tag | T => I32 :: 1 }\n",
         "let lone: Tag = Tag 1\n",
         "let size: I32 = lone |> size\n",
@@ -171,9 +171,9 @@ fn a_parameter_alternative_stands_for_at_least_one_alternative() {
 #[test]
 fn a_target_matching_a_receiver_two_ways_is_ambiguous() {
     let errors = rejected(concat!(
-        "type Box T = wrap T\n",
-        "companion<T, E> (Box T | E) { pub def size = value: Box T | E => I32 :: 1 }\n",
-        "let boxed: Box I32 | Box U8 = Box 1\n",
+        "type Box<T> wrap T\n",
+        "companion<T, E> (Box<T> | E) { pub def size = value: Box<T> | E => I32 :: 1 }\n",
+        "let boxed: Box<I32> | Box<U8> = Box 1\n",
         "let size: I32 = boxed |> size\n",
     ));
     assert!(
@@ -185,7 +185,7 @@ fn a_target_matching_a_receiver_two_ways_is_ambiguous() {
 #[test]
 fn a_target_sum_has_at_most_one_parameter_alternative() {
     let errors = rejected(concat!(
-        "type Tag = wrap I32\n",
+        "type Tag wrap I32\n",
         "companion<A, B> (Tag | A | B) { pub def size = () => I32 :: 1 }\n",
     ));
     assert!(
@@ -198,7 +198,7 @@ fn a_target_sum_has_at_most_one_parameter_alternative() {
 fn a_structural_member_may_not_overlap_a_blanket_member() {
     let errors = rejected(concat!(
         "trait Measure T { measure: T -> I32 }\n",
-        "type Tag = wrap I32\n",
+        "type Tag wrap I32\n",
         "impl Measure (Tag | String) { measure = value => 1 }\n",
         "companion<T where Measure T> T { pub def size = value: T => I32 :: 1 }\n",
         "companion (Tag | String) { pub def size = value: Tag | String => I32 :: 2 }\n",
@@ -211,12 +211,12 @@ fn a_structural_member_may_not_overlap_a_blanket_member() {
 
 #[test]
 fn a_structural_companion_needs_a_component_of_its_own_package() {
-    // `Result T E` is an alias of `Ok T | E`, so both spellings are the same
+    // `Result<T, E>` is an alias of `Ok<T> | E`, so both spellings are the same
     // companion, and only the standard library declares its components.
     for target in [
-        "<T, E> Result T E",
-        "<T, E> (Ok T | E)",
-        " (Ok I32 | String)",
+        "<T, E> Result<T, E>",
+        "<T, E> (Ok<T> | E)",
+        " (Ok<I32> | String)",
     ] {
         let errors = rejected(&format!(
             "companion{target} {{ pub def size = () => I32 :: 1 }}\n"
@@ -227,8 +227,8 @@ fn a_structural_companion_needs_a_component_of_its_own_package() {
         );
     }
     check(concat!(
-        "type Tag = wrap I32\n",
-        "companion (Ok I32 | Tag) { pub def size = () => I32 :: 1 }\n",
+        "type Tag wrap I32\n",
+        "companion (Ok<I32> | Tag) { pub def size = () => I32 :: 1 }\n",
     ))
     .unwrap_or_else(|errors| panic!("{errors}"));
 }
@@ -237,7 +237,7 @@ fn a_structural_companion_needs_a_component_of_its_own_package() {
 fn a_companion_of_another_package_s_nominal_type_is_rejected() {
     let errors = rejected(concat!(
         "use std.string.String\n",
-        "type Text = alias String\n",
+        "type Text = String\n",
         "companion Text { pub def size = () => I32 :: 1 }\n",
     ));
     assert!(

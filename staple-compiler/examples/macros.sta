@@ -40,7 +40,7 @@ macro choose =
 // Macros may be overloaded. Complete matches that consume more syntax win, so
 // this form is selected when an `else` branch is present.
 macro choose =
-    (condition: Expr; when_true: Expr; _: Ident "else"; when_false: Expr) =>
+    (condition: Expr; when_true: Expr; _: Ident<"else">; when_false: Expr) =>
     quote {
         match $condition {
             True => $when_true,
@@ -52,10 +52,10 @@ macro choose =
 // shape, a Sequence, or a comma-separated shape with an optional trailing comma.
 // Specialized shapes outrank the general SyntaxNode fallback.
 macro describe = _: SyntaxNode => quote { "one syntax node" }
-macro describe = _: Parenthesized (Ident String, Ident String) => quote { "a pair" }
-macro describe = _: Bracketed (Sequence Ident String) => quote { "a name sequence" }
+macro describe = _: Parenthesized<(Ident<String>, Ident<String>)> => quote { "a pair" }
+macro describe = _: Bracketed<Sequence<Ident<String>>> => quote { "a name sequence" }
 macro describe =
-    _: Braced (Separated (Ident String) Comma) =>
+    _: Braced<Separated<Ident<String>, Comma>> =>
     quote { "comma-separated names" }
 
 // Type and Pattern are opaque grammatical syntax values. Compound values use
@@ -94,9 +94,9 @@ def increment: I32 -> I32 = value => value + 1
 let (before, after) = replace_argument (increment 1) 41
 let constructed: I32 = call_increment 41
 
-// A top-level macro can generate several items in source order. Sequence Item
+// A top-level macro can generate several items in source order. Sequence<Item>
 // is also the type used by repeated `$items...` splices inside item lists.
-macro generate_pair: Expr -> Sequence Item = value => parse_quote {
+macro generate_pair: Expr -> Sequence<Item> = value => parse_quote {
     let first_generated: I32 = $value
     let second_generated: I32 = first_generated + 1
 }
@@ -104,12 +104,12 @@ macro generate_pair: Expr -> Sequence Item = value => parse_quote {
 generate_pair 41
 
 // Modifier macros receive one opaque Item from the compiler. An optional
-// explicit Parenthesized Expr, Parenthesized Type, or Parenthesized Pattern
+// explicit Parenthesized<Expr>, Parenthesized<Type>, or Parenthesized<Pattern>
 // argument is always written in parentheses. The outermost modifier runs
 // first; here @identity returns the ModifiedItem it receives, explicitly
 // continuing expansion with @replace.
 macro @identity: Item -> Item = item => item
-macro @replace: (Parenthesized Expr; Item) -> Item = (value; item) => parse_quote {
+macro @replace: (Parenthesized<Expr>; Item) -> Item = (value; item) => parse_quote {
     let replaced: I32 = $value
 }
 
@@ -117,10 +117,10 @@ macro @replace: (Parenthesized Expr; Item) -> Item = (value; item) => parse_quot
 @replace(42)
 def discarded = () => 0
 
-// A modifier declared `Item -> Sequence Item` or `Item -> Syntax` may expand
+// A modifier declared `Item -> Sequence<Item>` or `Item -> Syntax` may expand
 // into zero, one, or many items instead of exactly one. Each returned modified
 // item continues independently with its own outermost modifier.
-macro @duplicate: Item -> Sequence Item = _ => parse_quote {
+macro @duplicate: Item -> Sequence<Item> = _ => parse_quote {
     let duplicated_first: I32 = 1
     let duplicated_second: I32 = 2
 }
@@ -130,11 +130,11 @@ def duplicated_original = () => 0
 
 // MacroCallMetadata receives ordered modifiers and Private, Public, or Package
 // visibility from the call prefix.
-macro define_alias: (MacroCallMetadata; Ident String; Type) -> Item =
+macro define_alias: (MacroCallMetadata; Ident<String>; Type) -> Item =
     (metadata; name; ty) =>
     {
         let visibility = metadata.visibility
-        parse_quote { $visibility type $name = alias $ty }
+        parse_quote { $visibility type $name = $ty }
     }
 
 pub define_alias PublicAnswer I32
@@ -181,18 +181,18 @@ identity println "excess arguments follow the expansion"
 // implementation recurses through Parse.parse, and `?` leaves the function
 // with the ParseError when a step fails. The implementation only exists while
 // macros expand.
-pub type Setting = pub wrap (name: Ident String, value: Expr)
+pub type Setting wrap pub (name: Ident<String>, value: Expr)
 
 impl Parse Setting {
     parse = mut input => {
-        let name = Parse.parse.<Ident String> input?
+        let name = Parse.parse.<Ident<String>> input?
         let equals = Parse.parse.<Equals> input?
         let value = Parse.parse.<Expr> input?
         Ok (Setting (name: name, value: value))
     }
 }
 
-macro setting_value: Braced Syntax -> Expr = body => {
+macro setting_value: Braced<Syntax> -> Expr = body => {
     let Braced (contents) = body
     match (Parse.parse_all.<Setting> contents) {
         Ok Setting (_, value) => parse_quote { $value },

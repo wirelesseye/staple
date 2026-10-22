@@ -10,7 +10,7 @@ use package.syntax.(Expr, Item, Parenthesized)
 /// @doc("Returns the configured port.")
 /// pub def port = () => 8080
 /// ```
-pub macro @doc: (Parenthesized (Expr); Item) -> Item
+pub macro @doc: (Parenthesized<Expr>; Item) -> Item
 
 /// Includes an item only when the named package feature is enabled.
 ///
@@ -20,7 +20,7 @@ pub macro @doc: (Parenthesized (Expr); Item) -> Item
 /// @feature("tracing")
 /// def trace = value => log value
 /// ```
-pub macro @feature: (Parenthesized (Expr); Item) -> Item
+pub macro @feature: (Parenthesized<Expr>; Item) -> Item
 
 /// Disables the implicit standard prelude for the current module.
 ///

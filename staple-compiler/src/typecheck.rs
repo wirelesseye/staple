@@ -152,10 +152,10 @@ pub enum StructuralTraitMethod {
     Debug,
     Display,
     Index,
-    /// `Index` for a `Shared T` target, delegated to `Index T`.
+    /// `Index` for a `Shared<T>` target, delegated to `Index T`.
     DerefIndex,
     MutateIndex,
-    /// `MutateIndex` for a `Shared T` target, delegated to `MutateIndex T`.
+    /// `MutateIndex` for a `Shared<T>` target, delegated to `MutateIndex T`.
     DerefMutateIndex,
     IntoIterator,
     Iterator,
@@ -1452,10 +1452,20 @@ impl fmt::Display for CheckedType {
                 }
                 Ok(())
             }
-            Self::Shared(value) => format_type_application(formatter, "Shared", value),
-            Self::Unique(value) => format_type_application(formatter, "Unique", value),
-            Self::SharedBuffer(value) => format_type_application(formatter, "SharedBuffer", value),
-            Self::Buffer(value) => format_type_application(formatter, "Buffer", value),
+            Self::Shared(value) => {
+                format_type_application(formatter, "Shared", std::slice::from_ref(value.as_ref()))
+            }
+            Self::Unique(value) => {
+                format_type_application(formatter, "Unique", std::slice::from_ref(value.as_ref()))
+            }
+            Self::SharedBuffer(value) => format_type_application(
+                formatter,
+                "SharedBuffer",
+                std::slice::from_ref(value.as_ref()),
+            ),
+            Self::Buffer(value) => {
+                format_type_application(formatter, "Buffer", std::slice::from_ref(value.as_ref()))
+            }
             Self::Array { element, count } => {
                 write!(formatter, "({element} ^ {count})")
             }
@@ -1466,24 +1476,18 @@ impl fmt::Display for CheckedType {
             Self::Parameter { name, .. } => formatter.write_str(name),
             Self::TypeConstructor {
                 name, arguments, ..
-            } => {
-                formatter.write_str(name)?;
-                for argument in arguments {
-                    format_type_argument(formatter, argument)?;
-                }
-                Ok(())
-            }
+            } => format_type_application(formatter, name, arguments),
             Self::Opaque {
                 name, arguments, ..
-            } => {
-                formatter.write_str(name)?;
-                for argument in arguments {
-                    format_type_argument(formatter, argument)?;
-                }
-                Ok(())
+            } => format_type_application(formatter, name, arguments),
+            Self::RawPtr { pointee } => {
+                format_type_application(formatter, "RawPtr", std::slice::from_ref(pointee.as_ref()))
             }
-            Self::RawPtr { pointee } => write!(formatter, "RawPtr {pointee}"),
-            Self::RawMutPtr { pointee } => write!(formatter, "RawMutPtr {pointee}"),
+            Self::RawMutPtr { pointee } => format_type_application(
+                formatter,
+                "RawMutPtr",
+                std::slice::from_ref(pointee.as_ref()),
+            ),
             Self::Product(product) => {
                 formatter.write_str("(")?;
                 for (index, element) in product.elements.iter().enumerate() {
@@ -1543,13 +1547,7 @@ impl fmt::Display for CheckedType {
             }
             Self::Wrapper {
                 name, arguments, ..
-            } => {
-                formatter.write_str(name)?;
-                for argument in arguments {
-                    format_type_argument(formatter, argument)?;
-                }
-                Ok(())
-            }
+            } => format_type_application(formatter, name, arguments),
         }
     }
 }
@@ -1586,26 +1584,33 @@ fn format_juxtaposed_checked_parameter(function: &CheckedFunctionType) -> String
     )
 }
 
-fn format_type_argument(formatter: &mut fmt::Formatter<'_>, argument: &CheckedType) -> fmt::Result {
-    if let Some(effects) = effect_substitution_value(argument) {
-        return write!(formatter, "{effects}");
-    }
-    if matches!(argument, CheckedType::Sum(_) | CheckedType::Function(_))
-        || matches!(argument, CheckedType::StringLiteralSet(values) if values.len() > 1)
-    {
-        write!(formatter, " ({argument})")
-    } else {
-        write!(formatter, " {argument}")
-    }
-}
-
+/// Writes `Name{effects}<A, B>`: the effect-row argument, when present, follows
+/// the name directly, and the ordinary arguments are angle-bracketed.
 fn format_type_application(
     formatter: &mut fmt::Formatter<'_>,
     name: &str,
-    argument: &CheckedType,
+    arguments: &[CheckedType],
 ) -> fmt::Result {
     formatter.write_str(name)?;
-    format_type_argument(formatter, argument)
+    let mut ordinary = Vec::new();
+    for argument in arguments {
+        if let Some(effects) = effect_substitution_value(argument) {
+            write!(formatter, "{effects}")?;
+        } else {
+            ordinary.push(argument);
+        }
+    }
+    if ordinary.is_empty() {
+        return Ok(());
+    }
+    formatter.write_str("<")?;
+    for (index, argument) in ordinary.into_iter().enumerate() {
+        if index > 0 {
+            formatter.write_str(", ")?;
+        }
+        write!(formatter, "{argument}")?;
+    }
+    formatter.write_str(">")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2105,7 +2110,7 @@ impl TypedModule {
         matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.completion_token_type)
     }
 
-    /// The awaited type of a `Wait T` handle.
+    /// The awaited type of a `Wait<T>` handle.
     pub(crate) fn wait_result<'t>(&self, value_type: &'t CheckedType) -> Option<&'t CheckedType> {
         let CheckedType::Opaque { id, arguments, .. } = value_type else {
             return None;
@@ -2113,7 +2118,7 @@ impl TypedModule {
         (Some(*id) == self.wait_type && arguments.len() == 1).then(|| &arguments[0])
     }
 
-    /// The deferred effect row and yielded type of a `Coroutine{E} T` value.
+    /// The deferred effect row and yielded type of a `Coroutine{E}<T>` value.
     pub(crate) fn coroutine_parts<'t>(
         &self,
         value_type: &'t CheckedType,
@@ -2127,7 +2132,7 @@ impl TypedModule {
         Some((effect_substitution_value(&arguments[0])?, &arguments[1]))
     }
 
-    /// The yielded type of a `Task T` handle.
+    /// The yielded type of a `Task<T>` handle.
     pub(crate) fn task_result<'t>(&self, value_type: &'t CheckedType) -> Option<&'t CheckedType> {
         let CheckedType::Opaque { id, arguments, .. } = value_type else {
             return None;
@@ -3029,7 +3034,7 @@ pub struct TypeChecker {
     move_parameter_symbols: HashSet<SymbolId>,
     synthesized_thunks: HashMap<SyntaxId, ResolvedFunction>,
     implicit_function_parents: HashMap<FunctionId, Option<FunctionId>>,
-    /// `coro` body thunks checked against an expected `Coroutine{E} T`: the
+    /// `coro` body thunks checked against an expected `Coroutine{E}<T>`: the
     /// expected row is their declared effect set, an upper bound on the body,
     /// exactly as a function declaration's row bounds its body.
     declared_coroutine_rows: HashMap<FunctionId, CheckedEffectSet>,
@@ -3401,7 +3406,7 @@ impl TypeChecker {
             self.diagnostics.push(Diagnostic::new(
                 span,
                 format!(
-                    "standard library type `String` must be represented by `SharedBuffer U8`, found `{representation}`"
+                    "standard library type `String` must be represented by `SharedBuffer<U8>`, found `{representation}`"
                 ),
             ));
         }
@@ -4536,7 +4541,7 @@ impl TypeChecker {
             .all(|(trait_id, arguments)| self.blanket_bound_could_hold(*trait_id, arguments))
     }
 
-    /// Displays bounds as source would write them, such as `Try (Option T)`.
+    /// Displays bounds as source would write them, such as `Try Option<T>`.
     fn display_bounds(&self, bounds: &[(TraitId, Vec<CheckedType>)]) -> String {
         bounds
             .iter()
@@ -4799,7 +4804,7 @@ impl TypeChecker {
             .type_parameters
             .len()
             .saturating_sub(resolved_trait.declaration.associated_types.len());
-        // Before traits had arity, a unary trait target such as `Box I32` was
+        // Before traits had arity, a unary trait target such as `Box<I32>` was
         // stored as one applied type. Preserve that source form by rejoining
         // the application spine when the resolved trait is unary.
         let normalized_arguments;
@@ -4812,6 +4817,7 @@ impl TypeChecker {
                     syntax: application.syntax().clone(),
                     callee: Box::new(application),
                     argument: Box::new(argument.clone()),
+                    bracketed: true,
                 });
             }
             normalized_arguments = vec![application];
@@ -5143,6 +5149,7 @@ impl TypeChecker {
                     syntax: application.syntax().clone(),
                     callee: Box::new(application),
                     argument: Box::new((*argument).clone()),
+                    bracketed: true,
                 });
             }
             rejoined = application;
@@ -5341,6 +5348,7 @@ impl TypeChecker {
                             syntax: joined.syntax().clone(),
                             callee: Box::new(joined),
                             argument: Box::new((*argument).clone()),
+                            bracketed: true,
                         });
                     }
                     vec![self.resolve_source_type(module, &joined)]
@@ -7426,7 +7434,7 @@ impl TypeChecker {
                 if let Some(function_type) = &called_type {
                     // The callee's effect row may still carry a generic
                     // effect variable (e.g. `reaction`'s `<effect E>` or
-                    // `spawn`'s `Coroutine{E} T`) that was never resolved
+                    // `spawn`'s `Coroutine{E}<T>`) that was never resolved
                     // back onto `function_types` for the generic declaration
                     // itself. Instantiate it here from the actual argument's
                     // type, whatever its shape (a callback's function type or
@@ -13791,7 +13799,7 @@ impl TypeChecker {
         result
     }
 
-    /// The deferred effect row and yielded type of a `Coroutine{E} T` value.
+    /// The deferred effect row and yielded type of a `Coroutine{E}<T>` value.
     fn coroutine_parts<'t>(
         &self,
         value_type: &'t CheckedType,
@@ -13805,7 +13813,7 @@ impl TypeChecker {
         Some((effect_substitution_value(&arguments[0])?, &arguments[1]))
     }
 
-    /// The yielded type of a `Task T` handle.
+    /// The yielded type of a `Task<T>` handle.
     fn task_result<'t>(&self, value_type: &'t CheckedType) -> Option<&'t CheckedType> {
         let CheckedType::Opaque { id, arguments, .. } = value_type else {
             return None;
@@ -13813,7 +13821,7 @@ impl TypeChecker {
         (Some(*id) == self.task_type && arguments.len() == 1).then(|| &arguments[0])
     }
 
-    /// The awaited type of a `Wait T` handle.
+    /// The awaited type of a `Wait<T>` handle.
     fn wait_result<'t>(&self, value_type: &'t CheckedType) -> Option<&'t CheckedType> {
         let CheckedType::Opaque { id, arguments, .. } = value_type else {
             return None;
@@ -13834,7 +13842,7 @@ impl TypeChecker {
             ));
             return CheckedType::Error;
         };
-        // A `Coroutine{E} T` annotation supplies the body's expected yield type
+        // A `Coroutine{E}<T>` annotation supplies the body's expected yield type
         // and its declared effect row.
         let expected_parts = expected.and_then(|ty| {
             self.coroutine_parts(ty)
@@ -13864,7 +13872,7 @@ impl TypeChecker {
         // resource bundle and every awaiter use it), and `infer_effects`
         // re-checks the converged body against it. A body that already
         // exceeds the row keeps its own row, so the mismatch is reported. A
-        // row with an effect variable (a generic callee's `Coroutine{E} T`
+        // row with an effect variable (a generic callee's `Coroutine{E}<T>`
         // parameter, as in `block_on (coro { … })`) is a placeholder to infer,
         // not a declaration, so the body's own row stands.
         if let Some((declared, _)) = &expected_parts
@@ -13913,7 +13921,7 @@ impl TypeChecker {
         }
         if let Some(result) = self.wait_result(&operand) {
             // Awaiting a completion parks the task until its resolver fires;
-            // the outcome is the same `Completed T | Cancelled` sum a task
+            // the outcome is the same `Completed<T> | Cancelled` sum a task
             // await produces.
             let result = result.clone();
             return self.task_outcome_sum(result).unwrap_or(CheckedType::Error);
@@ -13927,7 +13935,7 @@ impl TypeChecker {
         CheckedType::Error
     }
 
-    /// The `Completed T | Cancelled` sum produced by `await`-ing a `Task` or a
+    /// The `Completed<T> | Cancelled` sum produced by `await`-ing a `Task` or a
     /// `Wait`.
     fn task_outcome_sum(&self, result: CheckedType) -> Option<CheckedType> {
         let completed = self.completed_type?;
@@ -16612,7 +16620,7 @@ impl TypeChecker {
     ) -> CheckedType {
         // Pinning a blanket member's parameter to a concrete receiver also
         // fixes the associated types its bounds determine, so a bound such as
-        // `Add (Iterator.Item Iter)` is checked at the item type itself.
+        // `Add Iterator.Item Iter` is checked at the item type itself.
         let substitutions = self.complete_bound_substitutions(&scheme.trait_bounds, &substitutions);
         let mut scheme = scheme.clone();
         scheme.parameters.retain(|scheme_parameter| {
@@ -16646,7 +16654,7 @@ impl TypeChecker {
     }
 
     /// The named type `id` applied to its own declared parameters, which the
-    /// caller quantifies over, so `List` stands for `List A` for every `A`.
+    /// caller quantifies over, so `List` stands for `List<A>` for every `A`.
     /// `None` when a parameter is not a plain type parameter.
     fn type_at_own_parameters(
         &mut self,
@@ -17817,6 +17825,13 @@ impl TypeChecker {
                 })
             }
 
+            Type::Application(application) if !application.bracketed => {
+                self.diagnostics.push(Diagnostic::new(
+                    application.syntax.span.clone(),
+                    "type arguments are written `Name<A, B>`, not by juxtaposition",
+                ));
+                CheckedType::Error
+            }
             Type::Application(application) => {
                 let callee = self.resolve_type_application_callee(module, &application.callee);
                 let guarded = match &callee {
@@ -18156,6 +18171,13 @@ impl TypeChecker {
                     self.resolve_named_type(module, named)
                 }
             }
+            Type::Application(application) if !application.bracketed => {
+                self.diagnostics.push(Diagnostic::new(
+                    application.syntax.span.clone(),
+                    "type arguments are written `Name<A, B>`, not by juxtaposition",
+                ));
+                CheckedType::Error
+            }
             Type::Application(application) => {
                 let callee = self.resolve_type_application_callee(module, &application.callee);
                 let argument = self.resolve_source_type_inner(module, &application.argument);
@@ -18291,7 +18313,7 @@ impl TypeChecker {
     /// Rejects a type expression that resolves to an under-applied
     /// `TypeConstructor`. Staple has no higher-kinded types, so a generic type
     /// name must be given all of its arguments wherever a value type is
-    /// expected; a bare `Node` or a half-applied `Result I32` is an error
+    /// expected; a bare `Node` or a half-applied `Result<I32>` is an error
     /// rather than a partially applied type.
     fn require_applied_type_constructor(
         &mut self,
@@ -18326,7 +18348,7 @@ impl TypeChecker {
     /// representation only behind an out-of-line indirection, as `T` does in
     /// `List T = wrap Buffer T`. An application of such a type then guards a
     /// self-reference in its arguments exactly as a `@recursive_constructor`
-    /// does, so `type Tree = wrap (children: List Tree)` is well-founded.
+    /// does, so `type Tree wrap (children: List<Tree>)` is well-founded.
     /// Answers `false` for a type whose representation is still being
     /// resolved, so mutually recursive wrappers stay conservative.
     fn type_parameters_are_indirect(&mut self, module: &ResolvedModule, id: TypeId) -> bool {
@@ -19822,7 +19844,7 @@ pub(crate) fn select_sum_alternative(
 ///
 /// TODO: warn when an earlier tier shadows a `from` alternative that would
 /// also accept the value. With `Ok T = from T`, a value checked against
-/// `Result String String` (or any `Result T E` where `E` overlaps `T`) is
+/// `Result<String, String>` (or any `Result<T, E>` where `E` overlaps `T`) is
 /// silently injected as the error, so `return "done"` fails instead of
 /// succeeding and success needs an explicit `Ok`. Deferred until the
 /// compiler has a design for warnings and lints.
@@ -20263,7 +20285,7 @@ fn normalize_substituted_sum(alternatives: Vec<CheckedType>) -> CheckedType {
 /// Used to build a literal-defaulting expectation from a still-generic
 /// parameter type: `merge_types` treats `Inferred` as a wildcard, so concrete
 /// substructure (e.g. `USize` in `(list: List T, index: USize)`) still steers
-/// literal defaulting, while parameter-dependent substructure (`List T`) is
+/// literal defaulting, while parameter-dependent substructure (`List<T>`) is
 /// left unconstrained instead of being asserted as a literal `T`, which
 /// `merge_types` would reject. Does not descend into `Function` (its
 /// `resources` are compared for exact equality elsewhere, so erasing inside
@@ -20695,9 +20717,9 @@ fn canonicalize_impl_header(
 /// Every way a structural companion `target` matches `actual` exactly, as
 /// bindings of the target's parameters. Sums are unordered, and a bare
 /// parameter alternative stands for the rest of the receiver's alternatives,
-/// which must be at least one, so `Ok T | E` matches `Ok I32 | String` and
-/// `Ok I32 | String | Bool`, but not `Ok I32`. More than one result means the
-/// target matches ambiguously, as `Ok T | E` does against `Ok I32 | Ok U8`.
+/// which must be at least one, so `Ok<T> | E` matches `Ok<I32> | String` and
+/// `Ok<I32> | String | Bool`, but not `Ok<I32>`. More than one result means the
+/// target matches ambiguously, as `Ok<T> | E` does against `Ok<I32> | Ok<U8>`.
 fn companion_target_matches(
     target: &CheckedType,
     actual: &CheckedType,
@@ -21280,7 +21302,7 @@ fn unify_impl_headers(
 /// Unifies two implementation header types when at least one is a sum.
 /// Sums are unordered sets, and an unbound bare parameter alternative is a
 /// row standing for any further alternatives — none (`Never`), one, or a
-/// sum — so `Ok T | E` covers both `Ok I32` and `Ok I32 | String | Bool`.
+/// sum — so `Ok<T> | E` covers both `Ok<I32>` and `Ok<I32> | String | Bool`.
 /// The two sides unify when every concrete alternative on each side
 /// unifies with some concrete alternative on the other side or is absorbed
 /// by the other side's row. Row bindings are left unrecorded, which can
@@ -21840,7 +21862,7 @@ fn infer_type_parameters_mode(
                 );
             }
             // Substitution can reorder sum alternatives or remove `Never`.
-            // Match concrete shapes before bare parameters so `Ok T | Error`
+            // Match concrete shapes before bare parameters so `Ok<T> | Error`
             // infers T from Ok and Error from the remaining alternatives.
             fn match_one<'a>(
                 allow_schemes: bool,
@@ -21912,8 +21934,8 @@ fn infer_type_parameters_mode(
                 }
             }
             // A single unbound parameter is the sum's row: it stands for every
-            // alternative left over, so `Ok T | E` matches `Ok I32 | A | B`
-            // with `E = A | B` and `Ok I32` with `E = Never`.
+            // alternative left over, so `Ok<T> | E` matches `Ok<I32> | A | B`
+            // with `E = A | B` and `Ok<I32>` with `E = Never`.
             if let [row] = rows.as_slice() {
                 let rest = match remaining.len() {
                     0 => CheckedType::Never,
@@ -23028,9 +23050,9 @@ fn synthesized_thunk_captures(module: &ResolvedModule, expression: &Expression) 
     captures
 }
 
-/// Applies the access-site auto-deref rules: a `Shared T` is transparent for
+/// Applies the access-site auto-deref rules: a `Shared<T>` is transparent for
 /// element access, so `reference.field` means `(*reference).field`, and a
-/// `SharedBuffer T` is indexed directly. Returns the type the accessor applies to
+/// `SharedBuffer<T>` is indexed directly. Returns the type the accessor applies to
 /// along with the `Shared` payloads crossed, outermost first.
 fn peel_access_wrappers(value_type: &CheckedType) -> (CheckedType, Vec<CheckedType>) {
     let mut accessible = value_type.clone();
@@ -23227,7 +23249,7 @@ pub(crate) fn structural_trait_arguments(
     };
 
     if Some(trait_id) == index_trait {
-        // A `Shared T` is transparent for indexing: `reference[position]` means
+        // A `Shared<T>` is transparent for indexing: `reference[position]` means
         // `(*reference)[position]`, so the derivation delegates to `T`'s own
         // `Index` implementation, whether structural or explicit.
         if let CheckedType::Shared(payload) | CheckedType::Unique(payload) = target {
@@ -23267,7 +23289,7 @@ pub(crate) fn structural_trait_arguments(
 
     if Some(trait_id) == mutate_index_trait {
         // The same auto-deref applies to `MutateIndex`, so index assignment
-        // through a `Shared T` writes into the referenced payload.
+        // through a `Shared<T>` writes into the referenced payload.
         if let CheckedType::Shared(payload) | CheckedType::Unique(payload) = target {
             let resolved = resolve_obligation(
                 trait_id,

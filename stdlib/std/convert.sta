@@ -15,7 +15,7 @@ pub trait TryConvert From To {
     type Error
 
     /// Consumes the source value and returns a success or an error.
-    try_convert: move From -> Result To Error
+    try_convert: move From -> Result<To, Error>
 }
 
 impl<T> Convert T T {
@@ -39,7 +39,7 @@ pub typegroup ConversionError {
     InvalidNumber,
 }
 
-pub(package) def checked_conversion = <T> move (status: U8, value: T) => Ok T | ConversionError :: when {
+pub(package) def checked_conversion = <T> move (status: U8, value: T) => Ok<T> | ConversionError :: when {
     status == 0 => Ok value,
     status == 1 => ConversionError.OutOfRange,
     status == 2 => ConversionError.PrecisionLoss,

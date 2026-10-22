@@ -283,7 +283,7 @@ fn macro_generated_calls_report_the_outermost_invocation() {
 }
 
 const MARKER: &str = concat!(
-    "type Marker = wrap I32\n",
+    "type Marker wrap I32\n",
     "companion Marker {\n",
     "    use std.source.(Location, track_caller)\n",
     "    @track_caller\n",
@@ -411,7 +411,7 @@ fn coroutine_bodies_in_a_tracked_function_compile_with_their_own_site() {
             "@track_caller\n",
             "def inner = () => Location :: Location.caller ()\n",
             "@track_caller\n",
-            "def delayed = () => Coroutine Location :: coro { inner () }\n",
+            "def delayed = () => Coroutine<Location> :: coro { inner () }\n",
         )
     );
     try_lower(&source).unwrap_or_else(|error| panic!("{error}"));
@@ -595,9 +595,9 @@ fn a_polymorphic_tracked_trait_member_value_is_rejected() {
 fn try_unwraps_results_options_and_wider_sums() {
     let source = concat!(
         "use std.io.println\n",
-        "let good: Result I32 String = Ok 1\n",
-        "let wide: Ok I32 | String | Bool = Ok 2\n",
-        "let some: Option I32 = Some 3\n",
+        "let good: Result<I32, String> = Ok 1\n",
+        "let wide: Ok<I32> | String | Bool = Ok 2\n",
+        "let some: Option<I32> = Some 3\n",
         "let parts = (good |> unwrap, wide |> unwrap, some |> expect \"needs a value\")\n",
         "println \"${parts.0} ${parts.1} ${parts.2}\"\n",
     );
@@ -609,7 +609,7 @@ fn try_unwraps_results_options_and_wider_sums() {
 fn try_unwrap_and_expect_panic_at_their_caller() {
     let unwrap = execute(
         concat!(
-            "let none: Option I32 = None\n",
+            "let none: Option<I32> = None\n",
             "let _ = none |> unwrap\n",
         ),
         false,
@@ -621,7 +621,7 @@ fn try_unwrap_and_expect_panic_at_their_caller() {
     );
     let expect = execute(
         concat!(
-            "let bad: Result I32 String = \"boom\"\n",
+            "let bad: Result<I32, String> = \"boom\"\n",
             "let _ = Result.expect bad \"loading config\"\n",
         ),
         false,

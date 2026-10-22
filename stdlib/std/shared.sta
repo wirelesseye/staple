@@ -5,17 +5,17 @@ use package.cmp.(Eq)
 
 /// A managed mutable reference to a value.
 @recursive_constructor
-pub type Shared T where ?Sized T = pub wrap T
+pub type Shared<T where ?Sized T> wrap pub T
 
 extern "staple-intrinsic" {
-    __shared_replace: <T> (mut Shared T; move T) -> T
+    __shared_replace: <T> (mut Shared<T>; move T) -> T
 }
 
-companion<T> Shared T {
+companion<T> Shared<T> {
     /// Replaces the referenced value and returns the old value.
-    pub def replace = (mut reference: Shared T; move value: T) => T :: __shared_replace reference value
+    pub def replace = (mut reference: Shared<T>; move value: T) => T :: __shared_replace reference value
 }
 
-impl<T where Eq T> Eq (Shared T) {
+impl<T where Eq T> Eq Shared<T> {
     eq = (Shared left; Shared right) => Eq.eq (left; right)
 }

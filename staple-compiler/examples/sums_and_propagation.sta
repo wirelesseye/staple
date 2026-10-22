@@ -1,11 +1,11 @@
 // Open sums, nominal payloads, propagating bindings, returns, and catch-all arms.
 use std.io.println
 
-pub type Found T = pub wrap T
-pub type Missing = pub wrap String
-pub type Invalid = pub wrap String
+pub type Found<T> wrap pub T
+pub type Missing wrap pub String
+pub type Invalid wrap pub String
 
-def lookup: Bool -> Found I32 | Missing | Invalid = available => match available {
+def lookup: Bool -> Found<I32> | Missing | Invalid = available => match available {
     True => Found(42),
     False => Missing("not found"),
 }
@@ -16,7 +16,7 @@ def doubled = available: Bool => {
     Found(value + value)
 }
 
-def describe = result: Found I32 | Missing | Invalid => match result {
+def describe = result: Found<I32> | Missing | Invalid => match result {
     Found _ => println "found",
     Missing message => println message,
     _ => println "invalid",

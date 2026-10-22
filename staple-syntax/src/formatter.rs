@@ -16,7 +16,8 @@ pub fn format_source(source: &str) -> Result<String, ParseError> {
     parse(source)?;
     let starts = statement_starts(source)?;
     let tokens = lex(source);
-    let output = format_with_statement_starts(&tokens, &starts);
+    let brackets = crate::parser::type_argument_brackets(source)?;
+    let output = format_with_statement_starts(&tokens, &starts, &brackets);
     // These are intentionally runtime invariants: a formatter must never emit
     // source the parser itself rejects, nor move a statement boundary.
     parse(&output)?;
@@ -65,11 +66,51 @@ pub fn format_token_stream(tokens: &[SyntaxToken]) -> String {
                     .all(|(relexed, token)| relexed.kind == token.kind)
         })
         .unwrap_or_else(|| guess_statement_starts(tokens));
-    format_with_statement_starts(tokens, &starts)
+    let brackets = crate::parser::type_argument_brackets(&source)
+        .ok()
+        .filter(|_| lex(&source).len() == tokens.len())
+        .unwrap_or_else(|| guess_type_brackets(tokens));
+    format_with_statement_starts(tokens, &starts, &brackets)
 }
 
-fn format_with_statement_starts(tokens: &[SyntaxToken], starts: &[usize]) -> String {
-    let mut formatter = Formatter::new(tokens, starts);
+/// Guesses which `<` and `>` tokens delimit type arguments when the stream does
+/// not parse: a `<` touching the name before it, with a matching `>` before the
+/// end of its line.
+fn guess_type_brackets(tokens: &[SyntaxToken]) -> Vec<usize> {
+    let mut brackets = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind != TokenKind::Operator
+            || token.text != "<"
+            || index == 0
+            || !matches!(tokens[index - 1].kind, TokenKind::Identifier | TokenKind::RBrace)
+        {
+            continue;
+        }
+        let mut depth = 0usize;
+        for (offset, candidate) in tokens[index..].iter().enumerate() {
+            match (candidate.kind, candidate.text.as_str()) {
+                (TokenKind::Newline, _) => break,
+                (TokenKind::Operator, "<") => depth += 1,
+                (TokenKind::Operator, ">") => {
+                    depth -= 1;
+                    if depth == 0 {
+                        brackets.extend([index, index + offset]);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    brackets
+}
+
+fn format_with_statement_starts(
+    tokens: &[SyntaxToken],
+    starts: &[usize],
+    brackets: &[usize],
+) -> String {
+    let mut formatter = Formatter::new(tokens, starts, brackets);
     formatter.format();
     formatter.finish()
 }
@@ -207,12 +248,24 @@ struct Formatter<'a> {
     separated: bool,
     generic_depth: usize,
     generic_open: bool,
+    /// Tokens that open or close type arguments, written without spaces.
+    type_brackets: Vec<bool>,
+    /// Open type-argument brackets; commas inside them never break the line.
+    type_depth: usize,
 }
 
 impl<'a> Formatter<'a> {
-    fn new(tokens: &'a [SyntaxToken], statement_starts: &[usize]) -> Self {
+    fn new(tokens: &'a [SyntaxToken], statement_starts: &[usize], brackets: &[usize]) -> Self {
         let layout = Layout::new(tokens, statement_starts);
+        let mut type_brackets = vec![false; tokens.len()];
+        for index in brackets {
+            if let Some(flag) = type_brackets.get_mut(*index) {
+                *flag = true;
+            }
+        }
         Self {
+            type_brackets,
+            type_depth: 0,
             tokens,
             groups: groups(tokens, &layout),
             layout,
@@ -288,7 +341,7 @@ impl<'a> Formatter<'a> {
                     let effect_parameter = token.kind == TokenKind::LBrace
                         && index > 0
                         && self.tokens[index - 1].kind == TokenKind::Identifier;
-                    if arrow_effect_set || effect_parameter {
+                    if arrow_effect_set || effect_parameter || self.generic_open {
                         self.trim_line();
                     } else if self.separated || needs_space(self.previous, token.kind) {
                         self.space();
@@ -325,7 +378,10 @@ impl<'a> Formatter<'a> {
                     self.pending_newlines = 0;
                     self.trim_line();
                     self.text(",");
-                    if containing_group(&self.groups, index).is_some_and(|group| group.multiline) {
+                    if self.type_depth == 0
+                        && self.generic_depth == 0
+                        && containing_group(&self.groups, index).is_some_and(|group| group.multiline)
+                    {
                         self.hardline();
                     } else {
                         self.space();
@@ -351,6 +407,19 @@ impl<'a> Formatter<'a> {
                     self.trim_line();
                     self.text(":");
                     self.space();
+                }
+                TokenKind::Operator if self.type_brackets[index] && token.text == "<" => {
+                    self.flush_pending(false);
+                    self.trim_line();
+                    self.text("<");
+                    self.type_depth += 1;
+                    self.generic_open = true;
+                }
+                TokenKind::Operator if self.type_brackets[index] => {
+                    self.pending_newlines = 0;
+                    self.trim_line();
+                    self.text(">");
+                    self.type_depth = self.type_depth.saturating_sub(1);
                 }
                 TokenKind::Operator
                     if token.text == "<"
@@ -720,10 +789,10 @@ mod tests {
 
     #[test]
     fn formats_juxtaposed_macro_parameters() {
-        let source = "macro choose=(condition: Expr;when_true: Expr;_: Ident \"else\";when_false: Expr)=>quote {}\n";
+        let source = "macro choose=(condition: Expr;when_true: Expr;_: Ident<\"else\">;when_false: Expr)=>quote {}\n";
         let formatted = format_source(source).unwrap();
         assert!(formatted.contains(
-            "macro choose = (condition: Expr; when_true: Expr; _: Ident \"else\"; when_false: Expr) => quote {}"
+            "macro choose = (condition: Expr; when_true: Expr; _: Ident<\"else\">; when_false: Expr) => quote {}"
         ));
         assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
@@ -798,7 +867,7 @@ mod tests {
 
     #[test]
     fn token_formatting_does_not_require_standalone_parseable_source() {
-        let source = "type $name = alias $ty\n";
+        let source = "type $name = $ty\n";
         assert!(format_source(source).is_err());
         let before = lex(source)
             .into_iter()
@@ -812,7 +881,7 @@ mod tests {
             .map(|token| (token.kind, token.text))
             .collect::<Vec<_>>();
         assert_eq!(before, after);
-        assert_eq!(formatted, "type $name = alias $ty\n");
+        assert_eq!(formatted, "type $name = $ty\n");
         assert!(before.iter().any(|(kind, _)| *kind == TokenKind::Dollar));
     }
 }
@@ -822,9 +891,9 @@ mod parameter_product_tests {
     use super::format_source;
     #[test]
     fn preserves_slotted_type_arguments_and_tight_indices() {
-        let source = "type Add=alias Callable (I32;I32) I32\ndef add:(I32;I32)->I32=(x;y)=>x+y\nlet value=values[index]\n";
+        let source = "type Add=Callable<(I32;I32), I32>\ndef add:(I32;I32)->I32=(x;y)=>x+y\nlet value=values[index]\n";
         let formatted = format_source(source).expect("slotted products format");
-        assert!(formatted.contains("Callable (I32; I32) I32"), "{formatted}");
+        assert!(formatted.contains("Callable<(I32; I32), I32>"), "{formatted}");
         assert!(formatted.contains("values[index]"), "{formatted}");
         assert_eq!(format_source(&formatted).unwrap(), formatted);
     }

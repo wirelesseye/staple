@@ -3,8 +3,8 @@ trait Visit T {
     visit: <A> (T, move A) -> A
 }
 impl Visit I32 { visit = <A> (_, move value) => value }
-type Box T = wrap T
-impl<T> Visit (Box T) { visit = <A> (_, move value) => value }
+type Box<T> wrap T
+impl<T> Visit Box<T> { visit = <A> (_, move value) => value }
 trait DefaultVisit T {
     visit_default: <A> (T, move A) -> A = <A> (_, move value) => value
 }

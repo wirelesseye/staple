@@ -99,7 +99,7 @@ struct Collector<'a> {
     declarations: HashMap<SymbolId, Declaration>,
     path: &'a Path,
     /// While descending a macro body, the macro's declared result type
-    /// (`Sequence Item` for `@m: Item -> Sequence Item`). Lets a compile-time
+    /// (`Sequence<Item>` for `@m: Item -> Sequence Item`). Lets a compile-time
     /// syntax constructor used in that body (`Sequence (…)`) show what it was
     /// instantiated to, since macro bodies carry no checked types.
     macro_result: Option<Type>,
@@ -1158,14 +1158,17 @@ impl Collector<'_> {
                 }
                 _ => (String::new(), declaration.type_parameters.as_slice()),
             };
-        let (parameters, where_clause) = self.juxtaposed_generic_suffix(
-            ordinary_parameters,
-            &declaration.trait_bounds,
-            &declaration.subtype_bounds,
-            &declaration.equality_bounds,
-        );
+        let parameters = self
+            .bracketed_generic_prefix(
+                ordinary_parameters,
+                &declaration.trait_bounds,
+                &declaration.subtype_bounds,
+                &declaration.equality_bounds,
+            )
+            .trim_end()
+            .to_owned();
         let head = format!(
-            "type {}{effect_parameter}{parameters}{where_clause}",
+            "type {}{effect_parameter}{parameters}",
             declaration.name
         );
         // A singleton type has no representation to reveal.
@@ -1175,12 +1178,12 @@ impl Collector<'_> {
         // An opaque declaration has no representation by construction; the
         // marker itself is the whole body and is visible everywhere.
         if declaration.kind() == TypeDeclarationKind::Opaque {
-            return Some(format!("{head} = opaque"));
+            return Some(format!("{head} opaque"));
         }
         // The representation exists but isn't reachable from the hovering
-        // module, so stand in an elision for it rather than dropping the `=`.
+        // module, so stand in an elision for it rather than dropping the body.
         if !representation_is_visible {
-            return Some(format!("{head} = /* … */"));
+            return Some(format!("{head} wrap /* … */"));
         }
         let representation = declaration
             .underlying()
@@ -1193,20 +1196,20 @@ impl Collector<'_> {
                 | TypeDeclarationKind::From => "...".to_owned(),
             });
         let marker = match declaration.kind() {
-            TypeDeclarationKind::Alias => "alias ",
+            TypeDeclarationKind::Alias => "= ",
             TypeDeclarationKind::Wrapper => match declaration.representation_visibility() {
-                Visibility::Public => "pub wrap ",
-                Visibility::Package => "pub(package) wrap ",
+                Visibility::Public => "wrap pub ",
+                Visibility::Package => "wrap pub(package) ",
                 Visibility::Private => "wrap ",
             },
             TypeDeclarationKind::From => match declaration.representation_visibility() {
-                Visibility::Public => "pub from ",
-                Visibility::Package => "pub(package) from ",
+                Visibility::Public => "from pub ",
+                Visibility::Package => "from pub(package) ",
                 Visibility::Private => "from ",
             },
             TypeDeclarationKind::Opaque | TypeDeclarationKind::Singleton => "",
         };
-        Some(format!("{head} = {marker}{representation}"))
+        Some(format!("{head} {marker}{representation}"))
     }
 
     /// Hovers over the namespace/type segments of a resolved qualified
@@ -1509,7 +1512,7 @@ impl Collector<'_> {
             let symbol = self.typed.symbol_for(expression.syntax().id);
             // A real `let`/`def` declaration, or — for a type constructor used
             // as a value (`Box 32`) — a synthetic one built from the type's
-            // own declaration so the hover reads `Box: <T> T -> Box T`.
+            // own declaration so the hover reads `Box: <T> T -> Box<T>`.
             let declaration = symbol
                 .and_then(|symbol| self.declarations.get(&symbol))
                 .cloned()
@@ -2108,7 +2111,7 @@ impl Collector<'_> {
     }
 
     /// A synthetic `Declaration` for a type constructor used as a value, so a
-    /// use of it (`Box 32`) hovers as `Box: <T> T -> Box T` with the
+    /// use of it (`Box 32`) hovers as `Box: <T> T -> Box<T>` with the
     /// instantiation noted below, mirroring a generic `def`. The constructor
     /// itself has no `let`/`def` keyword, hence no prefix.
     fn constructor_declaration(&self, symbol: SymbolId) -> Option<Declaration> {
@@ -2206,7 +2209,7 @@ impl Collector<'_> {
 }
 
 /// The head name and textual arguments of a (possibly applied) source type:
-/// `Sequence Item` → `("Sequence", ["Item"])`, `Foo` → `("Foo", [])`.
+/// `Sequence<Item>` → `("Sequence", ["Item"])`, `Foo` → `("Foo", [])`.
 fn type_head_and_arguments(ty: &Type) -> (String, Vec<String>) {
     match ty {
         Type::Application(application) => {
@@ -2314,7 +2317,7 @@ mod tests {
 
     #[test]
     fn hovers_function_effect_lower_bound_types() {
-        let source = "type Clock = wrap I32\ndef read = () =>{Clock} ()\n";
+        let source = "type Clock wrap I32\ndef read = () =>{Clock} ()\n";
         let path = std::env::temp_dir().join("staple-hover-effect-lower-bound.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(
@@ -2714,7 +2717,7 @@ mod tests {
     fn qualified_companion_access_hovers_the_owning_type() {
         let source = concat!(
             "///A boxed integer.\n",
-            "type Box = wrap I32\n",
+            "type Box wrap I32\n",
             "companion Box {\n",
             "    pub def create = () => 1\n",
             "}\n",
@@ -2742,7 +2745,7 @@ mod tests {
             .unwrap_or_else(|| {
                 panic!("no hover entry for the qualified `Box` reference: {entries:?}")
             });
-        assert_eq!(entry.signature, "type Box = wrap I32");
+        assert_eq!(entry.signature, "type Box wrap I32");
         assert_eq!(entry.documentation, vec!["A boxed integer.".to_owned()]);
     }
 
@@ -2750,7 +2753,7 @@ mod tests {
     fn companion_header_hovers_the_type_declaration() {
         let source = concat!(
             "///A boxed integer.\n",
-            "type Box = wrap I32\n",
+            "type Box wrap I32\n",
             "companion Box {\n",
             "    pub def create = () => 1\n",
             "}\n",
@@ -2777,7 +2780,7 @@ mod tests {
             .unwrap_or_else(|| {
                 panic!("no hover entry for the `companion Box` header: {entries:?}")
             });
-        assert_eq!(entry.signature, "type Box = wrap I32");
+        assert_eq!(entry.signature, "type Box wrap I32");
         assert_eq!(entry.documentation, vec!["A boxed integer.".to_owned()]);
     }
 
@@ -2785,7 +2788,7 @@ mod tests {
     fn use_glob_path_segment_hovers_the_companion_type() {
         let source = concat!(
             "///A boxed integer.\n",
-            "type Box = wrap I32\n",
+            "type Box wrap I32\n",
             "companion Box {\n",
             "    pub type Inner\n",
             "}\n",
@@ -2811,7 +2814,7 @@ mod tests {
             .iter()
             .find(|entry| entry.range.start == segment && &source[entry.range.clone()] == "Box")
             .unwrap_or_else(|| panic!("no hover entry for `Box` in `use Box.*`: {entries:?}"));
-        assert_eq!(entry.signature, "type Box = wrap I32");
+        assert_eq!(entry.signature, "type Box wrap I32");
         assert_eq!(entry.documentation, vec!["A boxed integer.".to_owned()]);
     }
 
@@ -2847,7 +2850,7 @@ mod tests {
                 panic!("no hover entry for `Switch` in `use Switch.*`: {entries:?}")
             });
         assert!(
-            entry.signature.starts_with("type Switch = from "),
+            entry.signature.starts_with("type Switch from "),
             "unexpected `use Switch.*` segment signature: {entry:?}"
         );
     }
@@ -2884,7 +2887,7 @@ mod tests {
                 panic!("no hover entry for the `companion Switch` header: {entries:?}")
             });
         assert!(
-            entry.signature.starts_with("type Switch = from "),
+            entry.signature.starts_with("type Switch from "),
             "unexpected companion header signature: {entry:?}"
         );
     }
@@ -2930,7 +2933,7 @@ mod tests {
 
     #[test]
     fn generic_def_and_type_signatures_use_the_new_syntax() {
-        let source = "pub type Box T = pub wrap (value: T)\ndef unbox: <T> move Box T -> T = <T> move Box value => value\n";
+        let source = "pub type Box<T> wrap pub (value: T)\ndef unbox: <T> move Box<T> -> T = <T> move Box value => value\n";
         let path = std::env::temp_dir().join("staple-hover-generic-signatures.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(
@@ -2947,8 +2950,8 @@ mod tests {
         let entries = entries(&module, &typed);
 
         for (name, signature) in [
-            ("Box", "type Box T = pub wrap (value: T)"),
-            ("unbox", "def unbox: <T> move Box T -> T"),
+            ("Box", "type Box<T> wrap pub (value: T)"),
+            ("unbox", "def unbox: <T> move Box<T> -> T"),
         ] {
             assert!(
                 entries.iter().any(|entry| {
@@ -2993,7 +2996,7 @@ mod tests {
             "let annotated: <U> move U -> U = identity\n",
             "let mut selected: <V> move V -> V = identity\n",
             "def consume: (<W> move W -> W) -> I32 = f => 42\n",
-            "type Functions = wrap (identity: <X> move X -> X,)\n",
+            "type Functions wrap (identity: <X> move X -> X,)\n",
         );
         let path = std::env::temp_dir().join("staple-hover-first-class-schemes.sta");
         let program = ProgramLoader::new()
@@ -3029,8 +3032,8 @@ mod tests {
     #[test]
     fn generic_function_use_site_leads_with_the_declared_type() {
         let source = concat!(
-            "pub type Box T = pub wrap (value: T)\n",
-            "def unbox: <T> move Box T -> T = <T> move Box value => value\n",
+            "pub type Box<T> wrap pub (value: T)\n",
+            "def unbox: <T> move Box<T> -> T = <T> move Box value => value\n",
             "unbox (Box (value: 1))\n",
         );
         let path = std::env::temp_dir().join("staple-hover-generic-use-site.sta");
@@ -3053,7 +3056,7 @@ mod tests {
         assert!(
             entries.iter().any(|entry| {
                 &source[entry.range.clone()] == "unbox"
-                    && entry.signature == "def unbox: <T> move Box T -> T"
+                    && entry.signature == "def unbox: <T> move Box<T> -> T"
                     && entry.instantiation.is_none()
             }),
             "declaration hover missing: {entries:?}"
@@ -3063,8 +3066,8 @@ mod tests {
         assert!(
             entries.iter().any(|entry| {
                 &source[entry.range.clone()] == "unbox"
-                    && entry.signature == "def unbox: <T> move Box T -> T"
-                    && entry.instantiation.as_deref() == Some("unbox: move Box I32 -> I32")
+                    && entry.signature == "def unbox: <T> move Box<T> -> T"
+                    && entry.instantiation.as_deref() == Some("unbox: move Box<I32> -> I32")
             }),
             "use-site hover missing: {entries:?}"
         );
@@ -3072,7 +3075,7 @@ mod tests {
 
     #[test]
     fn generic_type_constructor_use_site_leads_with_the_declared_type() {
-        let source = concat!("pub type Box T = pub wrap T\n", "let box = Box 32\n",);
+        let source = concat!("pub type Box<T> wrap pub T\n", "let box = Box 32\n",);
         let path = std::env::temp_dir().join("staple-hover-generic-constructor-use-site.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(
@@ -3093,8 +3096,8 @@ mod tests {
         assert!(
             entries.iter().any(|entry| {
                 &source[entry.range.clone()] == "Box"
-                    && entry.signature == "Box: <T> move T -> Box T"
-                    && entry.instantiation.as_deref() == Some("Box: move I32 -> Box I32")
+                    && entry.signature == "Box: <T> move T -> Box<T>"
+                    && entry.instantiation.as_deref() == Some("Box: move I32 -> Box<I32>")
             }),
             "constructor use-site hover missing: {entries:?}"
         );
@@ -3104,7 +3107,7 @@ mod tests {
     fn syntax_node_constructor_in_a_macro_leads_with_the_declared_type() {
         let source = concat!(
             "use std.syntax.Sequence\n",
-            "pub macro @wrap: Item -> Sequence Item = item => Sequence (first: item, rest: Sequence ())\n",
+            "pub macro @wrap: Item -> Sequence<Item> = item => Sequence (first: item, rest: Sequence ())\n",
         );
         let path = std::env::temp_dir().join("staple-hover-sequence-constructor.sta");
         let program = ProgramLoader::new()
@@ -3123,14 +3126,14 @@ mod tests {
 
         // A `Sequence (…)` constructor call in the macro body hovers as the
         // declared generic signature, with the macro's own result type
-        // (`Sequence Item`) substituted into the `instantiated to:` block.
+        // (`Sequence<Item>`) substituted into the `instantiated to:` block.
         assert!(
             entries.iter().any(|entry| {
                 &source[entry.range.clone()] == "Sequence"
                     && entry.signature
-                        == "Sequence: <Element> () | (first: Element, rest: Sequence Element) -> Sequence Element"
+                        == "Sequence: <Element> () | (first: Element, rest: Sequence<Element>) -> Sequence<Element>"
                     && entry.instantiation.as_deref()
-                        == Some("Sequence: () | (first: Item, rest: Sequence Item) -> Sequence Item")
+                        == Some("Sequence: () | (first: Item, rest: Sequence<Item>) -> Sequence<Item>")
             }),
             "sequence constructor hover missing: {entries:?}"
         );
@@ -3225,7 +3228,7 @@ mod tests {
         let source = concat!(
             "@doc(\"Line 1\")\n",
             "///Line 2\n",
-            "pub type MyType = alias I32\n",
+            "pub type MyType = I32\n",
             "/// Value docs\n",
             "def value: MyType = 1\n",
             "value\n",
@@ -3270,7 +3273,7 @@ mod tests {
 
     #[test]
     fn displays_inferred_resource_contracts() {
-        let source = "type Clock = wrap I32\ndef read = () => resource Clock\n";
+        let source = "type Clock wrap I32\ndef read = () => resource Clock\n";
         let path = std::env::temp_dir().join("staple-hover-resources.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(
@@ -3339,12 +3342,12 @@ mod tests {
         assert!(signatures.contains(&("choose", "macro choose: Expr -> Expr")));
         assert!(signatures.contains(&("choose", "macro choose: CallExpr -> Expr")));
         assert!(signatures.contains(&("identity", "macro @identity: Item -> Item")));
-        assert!(signatures.contains(&("doc", "macro @doc: (Parenthesized (Expr); Item) -> Item")));
+        assert!(signatures.contains(&("doc", "macro @doc: (Parenthesized<Expr>; Item) -> Item")));
         assert!(signatures.contains(&("inferred", "macro inferred: SyntaxNode -> Expr")));
         assert!(signatures.contains(&("satisfied", "macro satisfied: Expr -> Expr")));
         assert!(signatures.contains(&("imported", "macro imported: Expr -> Expr")));
         assert!(
-            signatures.contains(&("parse_quote", "macro parse_quote: Braced Syntax -> Syntax"))
+            signatures.contains(&("parse_quote", "macro parse_quote: Braced<Syntax> -> Syntax"))
         );
         assert!(
             signatures
@@ -3417,18 +3420,18 @@ mod tests {
         for expected in [
             (
                 "entries",
-                "entries: Sequence (Sequence Modifier; Ident String; Option (Equals; TypeBody))",
+                "entries: Sequence<(Sequence<Modifier>; Ident<String>; Option<TypeBody>)>",
             ),
             (
                 "first",
-                "first: (Sequence Modifier; Ident String; Option (Equals; TypeBody))",
+                "first: (Sequence<Modifier>; Ident<String>; Option<TypeBody>)",
             ),
             (
                 "rest",
-                "rest: Sequence (Sequence Modifier; Ident String; Option (Equals; TypeBody))",
+                "rest: Sequence<(Sequence<Modifier>; Ident<String>; Option<TypeBody>)>",
             ),
-            ("modifiers", "modifiers: Sequence Modifier"),
-            ("variant", "variant: Ident String"),
+            ("modifiers", "modifiers: Sequence<Modifier>"),
+            ("variant", "variant: Ident<String>"),
             ("body", "body: TypeBody"),
             ("parameters", "parameters: Syntax"),
         ] {
@@ -3491,7 +3494,7 @@ mod tests {
     fn formats_extern_binding_declarations() {
         let source = concat!(
             "use std.cinterop.*\nuse std.ptr.*\n",
-            "extern \"c\" { printf: (RawPtr CChar, ...) -> I32 }\n",
+            "extern \"c\" { printf: (RawPtr<CChar>, ...) -> I32 }\n",
         );
         let path = std::env::temp_dir().join("staple-hover-extern-test.sta");
         let program = ProgramLoader::new()
@@ -3743,7 +3746,7 @@ mod tests {
                 "/// A callable.\n",
                 "pub def callable = () => 1\n",
                 "/// A number alias.\n",
-                "pub type Number = alias I32\n",
+                "pub type Number = I32\n",
                 "/// A printable trait.\n",
                 "pub trait Printable T {}\n",
                 "/// An identity macro.\n",
@@ -3776,7 +3779,7 @@ mod tests {
         for expected in [
             ("dependency", "mod dependency", "Dependency module."),
             ("value", "let value: I32", " A value."),
-            ("Number", "type Number = alias I32", " A number alias."),
+            ("Number", "type Number = I32", " A number alias."),
             ("Printable", "trait Printable T", " A printable trait."),
             (
                 "identity",
@@ -3903,7 +3906,7 @@ mod tests {
             root.join("geometry.sta"),
             concat!(
                 "pub mod\n",
-                "pub type Point = pub wrap (x: I32, y: I32)\n",
+                "pub type Point wrap pub (x: I32, y: I32)\n",
                 "pub def origin = () => Point (x: 0, y: 0)\n",
             ),
         )
@@ -3946,10 +3949,10 @@ mod tests {
     #[test]
     fn formats_local_type_declarations_and_references() {
         let source = concat!(
-            "type Box T = wrap (value: T)\n",
-            "type Pair (A, B) = alias (A, B)\n",
-            "def keep: Box I32 -> Box I32 = value => value\n",
-            "def pair: Pair (I32, I32) -> Pair (I32, I32) = value => value\n",
+            "type Box<T> wrap (value: T)\n",
+            "type Pair<A, B> = (A, B)\n",
+            "def keep: Box<I32> -> Box<I32> = value => value\n",
+            "def pair: Pair<I32, I32> -> Pair<I32, I32> = value => value\n",
         );
         let path = std::env::temp_dir().join("staple-hover-local-types-test.sta");
         let program = ProgramLoader::new()
@@ -3968,11 +3971,11 @@ mod tests {
 
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "Box"
-                && entry.signature == "type Box T = wrap (value: T)"
+                && entry.signature == "type Box<T> wrap (value: T)"
         }));
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "Pair"
-                && entry.signature == "type Pair (A, B) = alias (A, B)"
+                && entry.signature == "type Pair<A, B> = (A, B)"
         }));
     }
 
@@ -4018,11 +4021,11 @@ mod tests {
             root.join("dependency.sta"),
             concat!(
                 "pub mod\n",
-                "pub type Hidden = wrap I32\n",
-                "pub type HiddenGeneric T = wrap T\n",
-                "pub type Visible = pub wrap I32\n",
-                "pub type Secret = opaque\n",
-                "pub type Alias = alias I32\n",
+                "pub type Hidden wrap I32\n",
+                "pub type HiddenGeneric<T> wrap T\n",
+                "pub type Visible wrap pub I32\n",
+                "pub type Secret opaque\n",
+                "pub type Alias = I32\n",
             ),
         )
         .unwrap();
@@ -4030,9 +4033,9 @@ mod tests {
             "use std.shared.(Shared)\n",
             "use dependency.(Hidden, HiddenGeneric, Visible, Secret, Alias)\n",
             "def hidden: Hidden -> Hidden = value => value\n",
-            "def hidden_generic: HiddenGeneric I32 -> HiddenGeneric I32 = value => value\n",
+            "def hidden_generic: HiddenGeneric<I32> -> HiddenGeneric<I32> = value => value\n",
             "def visible: Visible -> Visible = value => value\n",
-            "def secret: Shared Secret -> Shared Secret\n",
+            "def secret: Shared<Secret> -> Shared<Secret>\n",
             "def alias_value: Alias -> Alias = value => value\n",
         );
         let path = root.join("main.sta");
@@ -4051,22 +4054,22 @@ mod tests {
         let entries = entries(&module, &typed);
 
         assert!(entries.iter().any(|entry| {
-            &source[entry.range.clone()] == "Hidden" && entry.signature == "type Hidden = /* … */"
+            &source[entry.range.clone()] == "Hidden" && entry.signature == "type Hidden wrap /* … */"
         }));
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "HiddenGeneric"
-                && entry.signature == "type HiddenGeneric T = /* … */"
+                && entry.signature == "type HiddenGeneric<T> wrap /* … */"
         }));
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "Visible"
-                && entry.signature == "type Visible = pub wrap I32"
+                && entry.signature == "type Visible wrap pub I32"
         }));
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "Visible"
-                && entry.signature == "type Visible = pub wrap I32"
+                && entry.signature == "type Visible wrap pub I32"
         }));
         assert!(entries.iter().any(|entry| {
-            &source[entry.range.clone()] == "Secret" && entry.signature == "type Secret = opaque"
+            &source[entry.range.clone()] == "Secret" && entry.signature == "type Secret opaque"
         }));
 
         std::fs::remove_dir_all(root).unwrap();
@@ -4115,7 +4118,7 @@ mod tests {
             entries.iter().any(|entry| {
                 entry.range.start < 801
                     && &source[entry.range.clone()] == "Expr"
-                    && entry.signature.starts_with("type Expr = alias")
+                    && entry.signature.starts_with("type Expr = ")
             }),
             "{signatures:?}"
         );
@@ -4170,8 +4173,8 @@ mod tests {
     }
     #[test]
     fn forall_companion_parameters_keep_lsp_signatures_and_targets() {
-        let source = r#"pub type Box T = pub wrap T
-companion<T> Box T { pub def choose: <U> (move Box T, move U) -> U = <U> (move Box x, move y) => y }
+        let source = r#"pub type Box<T> wrap pub T
+companion<T> Box<T> { pub def choose: <U> (move Box<T>, move U) -> U = <U> (move Box x, move y) => y }
 let result: String = Box.choose.<I32, String> (Box 1, "yes")
 "#;
         let path = std::env::temp_dir().join("staple-forall-companion-lsp.sta");
@@ -4195,7 +4198,7 @@ let result: String = Box.choose.<I32, String> (Box 1, "yes")
             .unwrap();
         assert_eq!(
             entry.signature,
-            "def choose: <T, U> (move Box T, move U) -> U"
+            "def choose: <T, U> (move Box<T>, move U) -> U"
         );
         let parameter = source.find("<U>").unwrap() + 1;
         assert!(

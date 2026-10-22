@@ -28,7 +28,7 @@ pub trait Eq T {
 /// Provides comparisons that may be unordered.
 pub trait PartialOrd T {
     /// Compares two values, returning `None` when they are unordered.
-    partial_cmp: (T; T) -> Option Ordering
+    partial_cmp: (T; T) -> Option<Ordering>
     /// Returns whether the left value is less than the right value.
     lt: (T; T) -> Bool = (left; right) => match (partial_cmp (left; right)) {
         Some Ordering.Less() => True,

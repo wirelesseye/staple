@@ -18,7 +18,7 @@ use package.iterator.(Iterator, IntoIterator, FromIterator)
 use package.iterator.IterStep.(Done, Yield)
 
 /// A UTF-8 byte sequence used as Staple's string type.
-pub type String = wrap SharedBuffer U8
+pub type String wrap SharedBuffer<U8>
 
 extern "staple-intrinsic" {
     __string_add: (String, String) -> String
@@ -30,10 +30,10 @@ pub trait ToString T {
     to_string: T -> String
 }
 
-def string_to_bytes = value: String => List U8 :: {
+def string_to_bytes = value: String => List<U8> :: {
     let String bytes = value
     let length = SharedBuffer.length bytes
-    let mut result: List U8 = List.with_capacity length
+    let mut result: List<U8> = List.with_capacity length
     let mut index: USize = 0
     loop {
         if (index == length) { break }
@@ -43,10 +43,10 @@ def string_to_bytes = value: String => List U8 :: {
     result
 }
 
-def string_from_utf8_unchecked = move bytes: List U8 => String :: String (List.into_buffer bytes |> Buffer.into_shared_buffer)
+def string_from_utf8_unchecked = move bytes: List<U8> => String :: String (List.into_buffer bytes |> Buffer.into_shared_buffer)
 
 /// A non-copying iterator over the UTF-8 bytes of a string.
-pub type StringBytes = wrap (string: String, index: USize)
+pub type StringBytes wrap (string: String, index: USize)
 
 impl Iterator StringBytes {
     type Item = U8
@@ -69,13 +69,13 @@ impl IntoIterator StringBytes {
 companion String {
 
     /// Copies the UTF-8 bytes of a string into a new list.
-    pub def to_bytes = value: String => List U8 :: string_to_bytes value
+    pub def to_bytes = value: String => List<U8> :: string_to_bytes value
 
     /// Returns an iterator over the UTF-8 bytes of a string without copying them.
     pub def bytes = value: String => StringBytes :: StringBytes (string: value, index: 0)
 
     /// Constructs a String from bytes, returning InvalidUtf8 on validation failure.
-    pub def from_utf8 = move bytes: List U8 => Result String InvalidUtf8 :: {
+    pub def from_utf8 = move bytes: List<U8> => Result<String, InvalidUtf8> :: {
         let shared = List.into_buffer bytes |> Buffer.into_shared_buffer
         if (__valid_utf8 shared == 1) {
             Ok (String shared)
@@ -85,7 +85,7 @@ companion String {
     }
 
     /// Constructs a string from bytes known to contain valid UTF-8.
-    pub def from_utf8_unchecked = move bytes: List U8 => String :: string_from_utf8_unchecked bytes
+    pub def from_utf8_unchecked = move bytes: List<U8> => String :: string_from_utf8_unchecked bytes
 }
 
 impl Add String {
@@ -131,7 +131,7 @@ extern "staple-intrinsic" {
     __parse_usize: String -> (U8, USize)
     __parse_f32: String -> (U8, F32)
     __parse_f64: String -> (U8, F64)
-    __valid_utf8: SharedBuffer U8 -> U8
+    __valid_utf8: SharedBuffer<U8> -> U8
 }
 
 impl TryConvert String I8 {
@@ -241,7 +241,7 @@ impl TryConvert String Bool {
     }
 }
 
-impl TryConvert (List U8) String {
+impl TryConvert List<U8> String {
     type Error = InvalidUtf8
     try_convert = move bytes => String.from_utf8 bytes
 }

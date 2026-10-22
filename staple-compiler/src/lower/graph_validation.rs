@@ -1084,9 +1084,9 @@ pub(crate) mod tests {
     #[test]
     fn result_only_generics_infer_from_the_complete_callable_type() {
         let lowered = lower(concat!(
-            "type Phantom T = wrap ()\n",
-            "def phantom_result: <T> () -> Phantom T = <T> () => Phantom ()\n",
-            "let hidden: Phantom I32 = phantom_result ()\n",
+            "type Phantom<T> wrap ()\n",
+            "def phantom_result: <T> () -> Phantom<T> = <T> () => Phantom ()\n",
+            "let hidden: Phantom<I32> = phantom_result ()\n",
         ));
         let program = &lowered.program;
         let (_, instance) = single_instance(program, "phantom_result");
@@ -1213,7 +1213,7 @@ pub(crate) mod tests {
     fn constructors_and_structural_selections_reserve_typed_artifacts() {
         let lowered = lower(concat!(
             "use std.shared.(Shared)\n",
-            "type Point = wrap (I32, I32)\n",
+            "type Point wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
             "def pick: Bool -> (I32 | U8) = condition => when { condition => 1, else => (U8 :: 1) }\n",
@@ -1224,7 +1224,7 @@ pub(crate) mod tests {
             "  for item in pair { count = count + 1 }\n",
             "  count\n",
             "}\n",
-            "def deref_mixed: (Shared (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
+            "def deref_mixed: (Shared<(U8, I32)>) -> (I32 | U8) = reference => reference[0]\n",
             "let shown = show_pair (1, 2)\n",
             "let sum = show_sum (pick True)\n",
             "let picked = index_mixed ((U8 :: 1), 2)\n",
@@ -1282,7 +1282,7 @@ pub(crate) mod tests {
     #[test]
     fn constructor_and_structural_sites_need_no_structural_scanner() {
         let lowered = lower(concat!(
-            "type Point = wrap (I32, I32)\n",
+            "type Point wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "def debug_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
             "def index_pair: (I32, I32) -> I32 = pair => pair[0]\n",
@@ -1467,8 +1467,8 @@ pub(crate) mod tests {
         // The generic call site lives inside `call_fill` so the default step
         // is part of an emitted instance body.
         let lowered = lower(concat!(
-            "type Fill T = wrap (T, x: I32 = 7)\n",
-            "def fill: <T where Copy T> Fill T -> T = <T where Copy T> Fill (value, x) => value\n",
+            "type Fill<T> wrap (T, x: I32 = 7)\n",
+            "def fill: <T where Copy T> Fill<T> -> T = <T where Copy T> Fill (value, x) => value\n",
             "def call_fill: <T where Copy T> T -> T = <T where Copy T> value => fill (Fill (value))\n",
             "let filled: I32 = call_fill 1\n",
         ));
@@ -1545,8 +1545,8 @@ pub(crate) mod tests {
     fn coroutine_and_reactive_thunks_bind_demand_driven() {
         let lowered = lower(concat!(
             "use std.coroutine.*\n",
-            "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
-            "def unused_task: <T where Copy T> T -> Coroutine{} T = <T where Copy T> value => coro { value }\n",
+            "def task: () -> Coroutine{}<I32> = () => coro { 1 }\n",
+            "def unused_task: <T where Copy T> T -> Coroutine{}<T> = <T where Copy T> value => coro { value }\n",
             "let created = task ()\n",
         ));
         let program = &lowered.program;
@@ -1690,7 +1690,7 @@ pub(crate) mod tests {
             "use std.coroutine.*\n",
             "use std.cinterop.(CString, c_string)\n",
             "extern \"c\" { inspect: CString -> I32 }\n",
-            "def task: () -> Coroutine{} I32 = () => coro {\n",
+            "def task: () -> Coroutine{}<I32> = () => coro {\n",
             "  let frame_value = c_string \"a\"\n",
             "  inspect frame_value\n",
             "}\n",
@@ -1999,7 +1999,7 @@ pub(crate) mod tests {
 
         let coroutine = runtime_requirements(concat!(
             "use std.coroutine.*\n",
-            "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
+            "def task: () -> Coroutine{}<I32> = () => coro { 1 }\n",
             "let handle = task ()\n",
         ));
         assert!(
@@ -2101,16 +2101,16 @@ pub(crate) mod tests {
                 "use std.cinterop.(CString, c_string)\n",
                 "extern \"c\" { inspect: CString -> I32 }\n",
                 "let signal flag = 0\n",
-                "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
-                "def waiting: () -> Coroutine{Reactive} () = () => coro {\n",
+                "def task: () -> Coroutine{}<I32> = () => coro { 1 }\n",
+                "def waiting: () -> Coroutine{Reactive}<()> = () => coro {\n",
                 "  let _ = await (until { flag >= 1 })\n",
                 "  ()\n",
                 "}\n",
-                "def run: () -> Coroutine{} I32 = () => coro {\n",
+                "def run: () -> Coroutine{}<I32> = () => coro {\n",
                 "  let first = await (coro { 2 })\n",
                 "  first\n",
                 "}\n",
-                "def owning: move CString -> Coroutine{} I32 = move value => coro { inspect value; 1 }\n",
+                "def owning: move CString -> Coroutine{}<I32> = move value => coro { inspect value; 1 }\n",
                 "let handle = task ()\n",
                 "let driven = run ()\n",
                 "let subscribed = with Reactive = reactive_scope () { reaction { () } }\n",
@@ -2120,7 +2120,7 @@ pub(crate) mod tests {
             concat!(
                 "use std.buffer.*\n",
                 "use std.clone.Clone\n",
-                "let mut values: Buffer I32 = Buffer.with_capacity (USize :: 4)\n",
+                "let mut values: Buffer<I32> = Buffer.with_capacity (USize :: 4)\n",
                 "Buffer.push values 1\n",
                 "let copied = Clone.clone values\n",
             ),
@@ -2129,17 +2129,17 @@ pub(crate) mod tests {
                 "use std.cinterop.(CString, c_string)\n",
                 "extern \"c\" { inspect: CString -> I32 }\n",
                 "let signal count = 0\n",
-                "def waiter: move Wait I32 -> Coroutine{} I32 = move pending => coro {\n",
+                "def waiter: move Wait<I32> -> Coroutine{}<I32> = move pending => coro {\n",
                 "  let _ = await pending\n",
                 "  0\n",
                 "}\n",
-                "def make_completion: () -> (wait: Wait I32, resolver: Resolver I32) = () => completion (scheduler ())\n",
-                "def drive_wait: () -> Coroutine{} I32 = () => {\n",
+                "def make_completion: () -> (wait: Wait<I32>, resolver: Resolver<I32>) = () => completion (scheduler ())\n",
+                "def drive_wait: () -> Coroutine{}<I32> = () => {\n",
                 "  let (wait, resolver) = make_completion ()\n",
                 "  let _ = resolver\n",
                 "  waiter wait\n",
                 "}\n",
-                "def driver: () -> Coroutine{} I32 = () => coro { let v = await (coro { 7 }); v + 1 }\n",
+                "def driver: () -> Coroutine{}<I32> = () => coro { let v = await (coro { 7 }); v + 1 }\n",
                 "let a = drive_wait ()\n",
                 "let sched = scheduler ()\n",
                 "with Tasks = task_scope (sched) {\n",
@@ -2411,7 +2411,7 @@ pub(crate) mod tests {
         let mut max_growth = 0;
         for source in [
             concat!(
-                "type Resource = wrap I32\n",
+                "type Resource wrap I32\n",
                 "impl Drop Resource { cleanup = Resource value => () }\n",
                 "def mutate_resource: move (Resource, Resource) -> (Resource, Resource) = move pair => {\n",
                 "  let mut copy = pair\n",
@@ -2422,9 +2422,9 @@ pub(crate) mod tests {
             ),
             concat!(
                 "use std.cinterop.(CString, c_string)\n",
-                "type Handle = wrap CString\n",
+                "type Handle wrap CString\n",
                 "impl Drop Handle { cleanup = Handle value => () }\n",
-                "type Wrapped = wrap CString\n",
+                "type Wrapped wrap CString\n",
                 "def mutate_handle: move (Handle, Handle) -> (Handle, Handle) = move pair => {\n",
                 "  let mut copy = pair\n",
                 "  copy[0] = Handle (c_string \"b\")\n",
@@ -2468,9 +2468,9 @@ pub(crate) mod tests {
             ),
             concat!(
                 "use std.cinterop.(CString, c_string)\n",
-                "type Box T = wrap (T)\n",
-                "impl<T where Copy T> Drop (Box T) { cleanup = Box value => () }\n",
-                "def mutate_box: move (Box CString, Box CString) -> (Box CString, Box CString) = move pair => {\n",
+                "type Box<T> wrap (T)\n",
+                "impl<T where Copy T> Drop Box<T> { cleanup = Box value => () }\n",
+                "def mutate_box: move (Box<CString>, Box<CString>) -> (Box<CString>, Box<CString>) = move pair => {\n",
                 "  let mut copy = pair\n",
                 "  copy[0] = Box (c_string \"b\")\n",
                 "  copy\n",
@@ -2727,9 +2727,9 @@ pub(crate) mod tests {
     #[test]
     fn indexed_assignment_cleanup_facts_match_checked_rules() {
         let lowered = lower(concat!(
-            "type Holder = wrap I32\n",
+            "type Holder wrap I32\n",
             "impl Drop Holder { cleanup = Holder value => () }\n",
-            "type Item = wrap I32\n",
+            "type Item wrap I32\n",
             "impl Drop Item { cleanup = Item value => () }\n",
             "impl Index Holder I32 { type Output = Item; index = (holder, key) => Item 0 }\n",
             "impl MutateIndex Holder I32 { type Value = Item; mutate_index = (mut holder, key, move value) => () }\n",

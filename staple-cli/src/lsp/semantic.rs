@@ -1013,8 +1013,8 @@ impl<'a> Classifier<'a> {
         // highlights; see the note in `lexical_kind`.
     }
 
-    /// Marks the contextual `alias`, `wrap`, `from`, or `opaque` marker of a type
-    /// declaration body. These are ordinary identifiers, so they need an
+    /// Marks the contextual `wrap`, `from`, or `opaque` marker of a type
+    /// declaration body; an alias's `=` is an ordinary operator token. These are ordinary identifiers, so they need an
     /// explicit semantic token to match the TextMate grammar's modifier
     /// highlighting.
     fn type_declaration_marker(&mut self, declaration: &TypeDeclaration) {
@@ -1022,7 +1022,7 @@ impl<'a> Classifier<'a> {
             return;
         };
         let text = match body.kind {
-            TypeBodyKind::Alias => "alias",
+            TypeBodyKind::Alias => return,
             TypeBodyKind::Wrapper => "wrap",
             TypeBodyKind::From => "from",
             TypeBodyKind::Opaque => "opaque",
@@ -1515,7 +1515,7 @@ mod tests {
 
     #[test]
     fn highlights_nominal_pattern_annotation_types() {
-        let source = "type Clock = wrap I32\ndef read = ((Clock value): Clock) => value\n";
+        let source = "type Clock wrap I32\ndef read = ((Clock value): Clock) => value\n";
         let module = parse(source).unwrap();
         let labels = labels(source, &tokens(source, Some(&module), None, None));
         assert_eq!(
@@ -1530,7 +1530,7 @@ mod tests {
 
     #[test]
     fn highlights_function_effect_lower_bound_types() {
-        let source = "type Clock = wrap I32\ndef read = () =>{Clock} ()\n";
+        let source = "type Clock wrap I32\ndef read = () =>{Clock} ()\n";
         let module = parse(source).unwrap();
         let labels = labels(source, &tokens(source, Some(&module), None, None));
         assert_eq!(
@@ -1594,12 +1594,12 @@ mod tests {
     fn classifies_core_ast_roles() {
         let source = concat!(
             "use tools\n",
-            "type Item = alias I32\n",
+            "type Item = I32\n",
             "trait Show T { show: T -> String }\n",
             "macro identity = value => parse_quote { $value }\n",
             "def project: <T> T -> T = <T> value => (field: value).field\n",
             "mod child { def nested = () => 1 }\n",
-            "type Clock = wrap I32\n",
+            "type Clock wrap I32\n",
             "def read: () ->{Clock} Clock = () => resource Clock\n",
             "with Clock = Clock 1 { read () }\n",
             "let signal counter = 0\n",
@@ -1637,15 +1637,14 @@ mod tests {
     #[test]
     fn classifies_contextual_type_body_markers_as_modifiers() {
         let source = concat!(
-            "type Alias = alias I32\n",
-            "type Nominal = pub wrap I32\n",
-            "type Hidden = opaque\n",
+            "type Alias = I32\n",
+            "type Nominal wrap pub I32\n",
+            "type Hidden opaque\n",
             "type Marker\n",
         );
         let module = parse(source).unwrap();
         let labels = labels(source, &tokens(source, Some(&module), None, None));
         for expected in [
-            ("alias", MODIFIER),
             ("wrap", MODIFIER),
             ("opaque", MODIFIER),
         ] {
@@ -1985,7 +1984,7 @@ mod tests {
                 "pub mod\n",
                 "pub let value = 1\n",
                 "pub def callable = () => 1\n",
-                "pub type Number = alias I32\n",
+                "pub type Number = I32\n",
                 "pub trait Printable T {}\n",
                 "pub macro identity = value => parse_quote { $value }\n",
             ),
@@ -2230,7 +2229,7 @@ mod tests {
     #[test]
     fn classifies_bare_trait_function() {
         let source = concat!(
-            "type Wrapper = wrap I32\n",
+            "type Wrapper wrap I32\n",
             "impl ToString Wrapper { to_string = value => \"\" }\n",
             "def f: Wrapper -> String = to_string\n",
         );
@@ -2263,7 +2262,7 @@ mod tests {
     #[test]
     fn classifies_companion_qualified_access() {
         let source = concat!(
-            "type Box = wrap I32\n",
+            "type Box wrap I32\n",
             "companion Box {\n",
             "    pub def create = () => 1\n",
             "}\n",

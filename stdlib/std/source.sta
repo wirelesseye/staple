@@ -83,7 +83,7 @@ extern "staple-intrinsic" {
 ///
 /// let here = Location.caller ()
 /// ```
-pub type Location = wrap (file: String, line: U32, column: U32)
+pub type Location wrap (file: String, line: U32, column: U32)
 
 companion Location {
     use package.source.(track_caller)

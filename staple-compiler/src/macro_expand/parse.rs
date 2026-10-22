@@ -77,7 +77,7 @@ impl SyntaxIntrinsic {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum TypeBinding {
     Meta(MetaType),
-    /// The spelling `S` of an `Ident S`; `None` for `Ident String`.
+    /// The spelling `S` of an `Ident<S>`; `None` for `Ident<String>`.
     Spelling(Option<String>),
 }
 
@@ -1308,7 +1308,7 @@ impl MacroExpander {
                     None => {
                         self.diagnostics.push(Diagnostic::new(
                             span,
-                            "`Parse.parse` requires a contextual `Result T ParseError` type or an explicit type argument",
+                            "`Parse.parse` requires a contextual `Result<T, ParseError>` type or an explicit type argument",
                         ));
                         return None;
                     }
@@ -1705,7 +1705,7 @@ impl MacroExpander {
                 _ => {
                     self.diagnostics.push(Diagnostic::new(
                         span.clone(),
-                        "`Parse.parse` requires a contextual `Result T ParseError` type or an explicit type argument",
+                        "`Parse.parse` requires a contextual `Result<T, ParseError>` type or an explicit type argument",
                     ));
                     CompileType::Error
                 }

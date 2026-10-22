@@ -70,7 +70,7 @@ Examples below assume the syntax names they use have been imported.
 text, trivia, spans, and hygiene without requiring its contents to form one
 structural or grammatical node. `SyntaxNode` is the structural sum of `Expr`,
 `Type`, `Pattern`, `Item`, `Visibility`, punctuation nodes such as `Comma`, and
-the three delimited syntax types. `Expr` is currently the sum of `Ident String`,
+the three delimited syntax types. `Expr` is currently the sum of `Ident<String>`,
 `CallExpr`, and `UnstructuredExpr`.
 `CallExpr` exposes `callee: Expr` and
 `argument: Expr`; `UnstructuredExpr` preserves every other expression form
@@ -107,10 +107,10 @@ signature `(Expr; (Expr, Expr); Expr) -> Expr`.
 
 Typed parameters constrain the grammar accepted at an invocation. `Ident` is a
 generic syntax type whose argument constrains its spelling, declared as
-`pub type Ident (Spelling = String) where Spelling <: String = pub wrap Spelling`.
-`Ident` and `Ident String` both accept any identifier — `Spelling` defaults to
+`pub type Ident<Spelling = String where Spelling <: String> wrap pub Spelling`.
+`Ident` and `Ident<String>` both accept any identifier — `Spelling` defaults to
 `String` (see [Default type parameters](#default-type-parameters)) — and
-`Ident "else"` accepts exactly the identifier `else`, because every string
+`Ident<"else">` accepts exactly the identifier `else`, because every string
 literal type is a subtype of `String` (see [Subtype
 bounds](#subtype-bounds)). A literal identifier parameter may use
 a typed wildcard when its syntax is not needed, or a binding when it is:
@@ -119,7 +119,7 @@ a typed wildcard when its syntax is not needed, or a binding when it is:
 macro conditional = (
     condition: Expr;
     then_branch: Expr;
-    _: Ident "else";
+    _: Ident<"else">;
     else_branch: Expr;
 ) =>
     parse_quote {
@@ -132,7 +132,7 @@ macro conditional = (
 
 Delimited syntax parameters match one balanced source argument while exposing
 its contents structurally. Slotted contents are juxtaposed in the source, so
-`Parenthesized (Ident String; Ident String)` accepts `(left right)`. Product
+`Parenthesized<(Ident<String>; Ident<String>)>` accepts `(left right)`. Product
 contents are separated by commas, so `Parenthesized (Ident String, Ident
 String)` accepts `(left, right)`, with an optional trailing comma:
 
@@ -145,16 +145,16 @@ Matched contents destructure the same way, as in `Parenthesized (left; right)`
 or `Parenthesized (left, right)`. A product nested inside slotted contents is
 itself a parenthesized, comma-separated group, so `Parenthesized (Ident String;
 (Expr, Expr))` accepts `(pair (1, 2))`. `Parenthesized`, `Bracketed`, and `Braced` may
-instead contain `Sequence T`, which accepts zero or more consecutive values of
-`T`; for example, `Bracketed (Sequence Ident String)` accepts `[]` and `[one
+instead contain `Sequence<T>`, which accepts zero or more consecutive values of
+`T`; for example, `Bracketed<Sequence<Ident<String>>>` accepts `[]` and `[one
 two]`. A function-style macro may also use one `Sequence T` as a top-level
 parameter:
 
 ```staple
 macro collect = (
-    values: Sequence (Ident String);
+    values: Sequence<Ident<String>>;
     _: Equals;
-    body: Braced Syntax;
+    body: Braced<Syntax>;
 ) => ...
 ```
 
@@ -171,20 +171,20 @@ may not appear more than once in a signature or be used by a modifier macro.
 `Sequence` inside delimiters remains restricted to the entire contents of one
 of the three delimiter types.
 Captured sequences may be passed through compile-time helpers and destructured
-as `Sequence ()` or `Sequence (first: T, rest: Sequence T)`. `Sequence
+as `Sequence<()>` or `Sequence (first: T, rest: Sequence<T>)`. `Sequence
 SyntaxNode` uses shortest structural atoms, treating a nested balanced delimiter
-as one atom. In contrast, `Parenthesized Syntax`, `Bracketed Syntax`, and
-`Braced Syntax` capture their entire contents as one opaque fragment, including
+as one atom. In contrast, `Parenthesized<Syntax>`, `Bracketed<Syntax>`, and
+`Braced<Syntax>` capture their entire contents as one opaque fragment, including
 trivia and syntax that is not yet structurally supported. A single fixed
 content never needs the grouping parens that separate multiple ones, so
-`Parenthesized Expr` and `Parenthesized (Expr)` are read identically; the
+`Parenthesized<Expr>` and `Parenthesized<Expr>` are read identically; the
 parens are required only once there is more than one fixed element, as in
-`Parenthesized (Ident String; Ident String)`.
+`Parenthesized<(Ident<String>; Ident<String>)>`.
 
 `Comma` is singleton syntax and may be matched explicitly, as in
-`Parenthesized (Ident String; Comma; Ident String)`. A homogeneous sequence
-whose elements are separated by commas uses `Separated (T) Comma`, for example
-`Parenthesized (Separated (Ident String) Comma)`. It accepts empty and singleton
+`Parenthesized<(Ident<String>; Comma; Ident<String>)>`. A homogeneous sequence
+whose elements are separated by commas uses `Separated<T, Comma>`, for example
+`Parenthesized<Separated<Ident<String>, Comma>>`. It accepts empty and singleton
 contents, requires one comma between subsequent elements, and permits a
 trailing comma. Its value contains the elements without the commas, together
 with its separator and whether the source had a trailing separator. Fresh
@@ -192,10 +192,10 @@ values use `Separated (separator: Comma, elements: (...), trailing: True)` or
 the corresponding `False` value.
 Like `Sequence`, `Separated` is valid only as the complete contents of a
 delimiter. Its `elements` field is a `Sequence`. A separated element may be a
-slotted product shape. `Option T` (the ordinary `std.option` type) is
+slotted product shape. `Option<T>` (the ordinary `std.option` type) is
 available as a macro parameter shape only inside such slotted products and
 captures `None` or `Some value`, so
-`Braced (Separated (Ident String; Option Type) Comma)` accepts both
+`Braced<Separated<(Ident<String>; Option<Type>), Comma>>` accepts both
 `Literal String` and `Wildcard` entries.
 
 `Type` and `Pattern` parameters accept opaque type and pattern syntax. One
@@ -242,8 +242,8 @@ fragment according to its expected result type. Their compiler-provided
 contracts are:
 
 ```staple
-pub macro quote: Braced Syntax -> Syntax
-pub macro parse_quote: Braced Syntax -> Syntax
+pub macro quote: Braced<Syntax> -> Syntax
+pub macro parse_quote: Braced<Syntax> -> Syntax
 ```
 
 These signatures describe the syntax emitted by the intrinsic macros, not the
@@ -251,14 +251,14 @@ type of the compile-time syntax value that the emitted expression constructs.
 
 `parse_quote` uses its contextual type to choose the kind of syntax value its
 emitted expression constructs. Supported contexts are `SyntaxNode`, `Expr`,
-`Type`, `Pattern`, `Item`, `Sequence Item`, `Comma`, `Equals`, `FatArrow`,
+`Type`, `Pattern`, `Item`, `Sequence<Item>`, `Comma`, `Equals`, `FatArrow`,
 `Visibility`, and the three delimited syntax types (`Parenthesized`,
 `Bracketed`, `Braced`) with any of their supported content shapes — never
 `Syntax`, which is `quote`'s own always-opaque value, not a structured syntax
 node `parse_quote` can construct contextually.
 `SyntaxNode` requires exactly one shortest
 structural node. The grammatical categories parse the complete fragment in
-their respective contexts, while `Sequence Item` parses zero or more complete
+their respective contexts, while `Sequence<Item>` parses zero or more complete
 items in source order. Annotations, type ascriptions, declared helper or macro
 result types, and other typed compile-time boundaries provide `parse_quote`'s
 contextual construction type; requesting `Syntax` through any of them is rejected.
@@ -272,7 +272,7 @@ returns opaque `Syntax`.
 
 A macro's declared or inferred result is also checked against its body: when
 that result is a concrete syntax type — `SyntaxNode`, `Expr`, `Type`,
-`Pattern`, `Item`, `Sequence Item`, `Comma`, `Equals`, `FatArrow`,
+`Pattern`, `Item`, `Sequence<Item>`, `Comma`, `Equals`, `FatArrow`,
 `Visibility`, or a delimited syntax type — but the body's tail expression is
 a bare `quote { ... }`, the mismatch is rejected at the declaration, since
 `quote` can only ever produce opaque `Syntax`. Replacing that `quote` with
@@ -282,18 +282,18 @@ Opaque fragments may contain empty input, punctuation, comments, or temporarily
 malformed grammar and may be spliced into a later `parse_quote` for contextual
 interpretation. A raw `Syntax` result entering ordinary expression or item
 source is reparsed for that placement. `$name` splices a captured value while
-preserving its hygiene. `$items...` splices a `Sequence Item` in an item-list
+preserving its hygiene. `$items...` splices a `Sequence<Item>` in an item-list
 position.
 
 ##### Parsing syntax with `Parse`
 
 A macro or compile-time helper that holds an opaque `Syntax` value, such as the
-contents of a captured `Braced Syntax`, can parse structure out of it with the
+contents of a captured `Braced<Syntax>`, can parse structure out of it with the
 streaming `Parse` trait in `std.syntax`:
 
 ```staple
-pub type ParseError = pub wrap (message: String)
-pub type ParseStream = opaque
+pub type ParseError wrap pub (message: String)
+pub type ParseStream opaque
 
 pub extern "staple-intrinsic" {
     stream: Syntax -> ParseStream          // starts at the beginning
@@ -303,7 +303,7 @@ pub extern "staple-intrinsic" {
 }
 
 pub trait Parse T {
-    parse: mut ParseStream -> Result T ParseError
+    parse: mut ParseStream -> Result<T, ParseError>
     parse_all: Syntax -> Result T ParseError = ... // rejects leftover syntax
 }
 ```
@@ -318,9 +318,9 @@ it was. `Parse.parse_all` parses all of a `Syntax` as one `T` and reports
 the call, as with `parse_quote`, or an explicit type argument:
 
 ```staple
-macro fields = body: Braced Syntax => {
+macro fields = body: Braced<Syntax> => {
     let Braced (contents) = body
-    let parsed: Result (Separated (Ident String; Equals; Expr) Comma) ParseError =
+    let parsed: Result<Separated<(Ident<String>; Equals; Expr), Comma>, ParseError> =
         Parse.parse_all contents
     match parsed {
         Ok fields => ...,
@@ -333,7 +333,7 @@ let name = Parse.parse.<Ident String> input?
 let comma = Parse.parse.<Comma> input?
 ```
 
-A call with neither a contextual `Result T ParseError` type nor a type argument
+A call with neither a contextual `Result<T, ParseError>` type nor a type argument
 is rejected, as is a type with no `Parse` implementation. `Parse.parse`,
 `syntax.Parse.parse`, and (when `Parse` is imported) a bare `parse` all name the
 same member, and the intrinsics import like any other `std.syntax` item.
@@ -343,11 +343,11 @@ different from how macro parameters match. A macro parameter shaped
 `(Expr; Expr)` matches `a b` as one atom each, but `Parse.parse.<(Expr; Expr)>`
 on `a b` fails, because the first `Expr` reads the whole call `a b`. Use
 `SyntaxNode`, which reads one shortest structural atom (a balanced group counts
-as one), or delimiters to get atom semantics. Likewise, `Option Type` reads a
+as one), or delimiters to get atom semantics. Likewise, `Option<Type>` reads a
 `Type` whenever one starts there, and `I32 value` is one applied type. Products
 parse their *bare* contents: `(A; B)` reads `A` then `B`, juxtaposed, and
 `(A, B)` reads `A`, a comma, then `B` with one optional trailing comma;
-`Parenthesized (A, B)` is the delimited form that requires the parentheses.
+`Parenthesized<(A, B)>` is the delimited form that requires the parentheses.
 
 The built-in nodes implement `Parse` with ordinary `impl` items in
 `std/syntax.sta`:
@@ -357,32 +357,32 @@ The built-in nodes implement `Parse` with ordinary `impl` items in
   `TypeDeclarationItem`, `UnstructuredItem`, `Modifier`, and `TypeBody` read the
   longest node the grammar accepts from the cursor and stop where it stops: `Expr`
   reads `a + b` from `a + b, c`.
-- `Ident S` (a spelling or `String`), `Comma`, `Equals`, and `FatArrow` read one
+- `Ident<S>` (a spelling or `String`), `Comma`, `Equals`, and `FatArrow` read one
   token. `Visibility` reads `pub` or `pub(package)`, and yields `Private` without
   consuming anything when neither is written. `SyntaxNode` reads one atom.
 - `Syntax` takes everything that is left, `()` takes nothing, and
-  `Option T` yields `None` without consuming anything when `T` does not parse.
-- `Parenthesized C`, `Bracketed C`, and `Braced C` parse their contents as `C` and
+  `Option<T>` yields `None` without consuming anything when `T` does not parse.
+- `Parenthesized<C>`, `Bracketed<C>`, and `Braced<C>` parse their contents as `C` and
   require them to be used up. The result keeps the group's original syntax.
-- Products `(A; B)` and `(A, B)`, `Sequence T` (until the stream ends or `T`
-  stops parsing), and `Separated T Comma` (an optional trailing comma).
+- Products `(A; B)` and `(A, B)`, `Sequence<T>` (until the stream ends or `T`
+  stops parsing), and `Separated<T, Comma>` (an optional trailing comma).
 
 A program adds its own implementations. They are ordinary Staple code that runs
 at compile time, may be generic, and recurse through `Parse.parse`:
 
 ```staple
-pub type KeyValue = pub wrap (key: Ident String, value: Expr)
+pub type KeyValue wrap pub (key: Ident<String>, value: Expr)
 
 impl Parse KeyValue {
     parse = mut input => {
-        let key = Parse.parse.<Ident String> input?
+        let key = Parse.parse.<Ident<String>> input?
         let equals = Parse.parse.<Equals> input?
         let value = Parse.parse.<Expr> input?
         Ok (KeyValue (key: key, value: value))
     }
 }
 
-impl<T where Parse T> Parse (Pair T) {
+impl<T where Parse T> Parse Pair<T> {
     parse = mut input => {
         let first = Parse.parse.<T> input?
         let comma = Parse.parse.<Comma> input?
@@ -461,7 +461,7 @@ and applied immediately before a resolver-safe definition:
 ```staple
 macro @identity: Item -> Item = item => item
 
-macro @replace: (Parenthesized Expr; Item) -> Item =
+macro @replace: (Parenthesized<Expr>; Item) -> Item =
     (value; item) => parse_quote { let generated = $value }
 
 @identity
@@ -475,7 +475,7 @@ editor hover:
 
 ```staple
 @doc("Returns the number of items.")
-pub def length: List T -> USize = list => ...
+pub def length: List<T> -> USize = list => ...
 ```
 
 Triple-slash comments are shorthand for `@doc`, with the text after `///`
@@ -484,7 +484,7 @@ used verbatim. Consecutive documentation comments preserve their source order:
 ```staple
 /// Returns the number of items.
 /// This operation does not mutate the list.
-pub def length: List T -> USize = list => ...
+pub def length: List<T> -> USize = list => ...
 ```
 
 Documentation may be attached to types, bindings, modules, macros, traits,
@@ -492,9 +492,9 @@ trait members, implementation members, and extern bindings. It has no runtime
 effect. `@doc` is compiler-reserved; qualified user modifiers named `doc`
 remain ordinary modifiers.
 
-A modifier has signature `Item -> Item`, `Item -> Sequence Item`, or
+A modifier has signature `Item -> Item`, `Item -> Sequence<Item>`, or
 `Item -> Syntax`, optionally preceded by one optional explicit
-`Parenthesized Expr`, `Parenthesized Type`, or `Parenthesized Pattern`
+`Parenthesized<Expr>`, `Parenthesized<Type>`, or `Parenthesized<Pattern>`
 argument before the compiler-supplied item. `Parenthesized` is required
 because the explicit argument is always delimited by parentheses, including
 an expression argument, matching how every other delimited macro argument is
@@ -519,7 +519,7 @@ the modifier's position. Every result must itself be valid in a block, so public
 items and `extern`, `macro`, `trait`, or `impl` declarations are rejected.
 
 A modifier declared `Item -> Item` must return exactly one `Item`.
-A modifier declared `Item -> Sequence Item` or `Item -> Syntax` may instead
+A modifier declared `Item -> Sequence<Item>` or `Item -> Syntax` may instead
 expand to zero, one, or many items, reusing the same reparse and splice
 machinery as an item-producing function-style macro. Every returned item is
 expanded independently; a returned `ModifiedItem` continues with its own
@@ -543,8 +543,8 @@ helpers accepting `Visibility`, but cannot survive expansion as runtime values.
 parameter of a function-style macro:
 
 ```staple
-pub type MacroCallMetadata = wrap (
-    modifiers: Sequence Modifier,
+pub type MacroCallMetadata wrap (
+    modifiers: Sequence<Modifier>,
     visibility: Visibility,
 )
 ```
@@ -552,13 +552,13 @@ pub type MacroCallMetadata = wrap (
 ```staple
 macro define_alias = (metadata: MacroCallMetadata; ty: Type) => {
     let visibility = metadata.visibility
-    parse_quote { $visibility type Generated = alias $ty }
+    parse_quote { $visibility type Generated = $ty }
 }
 
 pub define_alias I32
 ```
 
-The metadata contains the ordered `Sequence Modifier` prefix and the supplied
+The metadata contains the ordered `Sequence<Modifier>` prefix and the supplied
 visibility. `pub` and `pub(package)` before the macro name supply the
 corresponding visibility; an unprefixed call supplies `Private`, and no-prefix
 calls receive an empty modifier sequence. A prefixed call is parsed in
@@ -596,12 +596,12 @@ Inside an item quotation, a visibility value may be spliced immediately before
 a declaration. `Private` emits no prefix, `Package` emits `pub(package)`, and
 `Public` emits `pub`. Existing declaration rules are checked after
 substitution. Representation visibility is written in the type body itself:
-`= pub wrap T` exposes the constructor to importers, and
-`= pub(package) wrap T` keeps it package-scoped.
+`wrap pub T` exposes the constructor to importers, and
+`wrap pub(package) T` keeps it package-scoped.
 Modifiers surrounding a metadata-aware call belong to the metadata value and
 are not automatically applied after the call has produced its result.
 
-Quotations may contain multiple items and return `Sequence Item`. Such a
+Quotations may contain multiple items and return `Sequence<Item>`. Such a
 sequence can replace a top-level macro invocation or be inserted into an inline
 module with `$items...`. Identifier syntax may be spliced into generated module
 and type names. `parse_quote` type quotations are selected contextually by an
@@ -627,7 +627,7 @@ Macro signatures with multiple parameters must spell the slotted product literal
 Macros may be overloaded by declaring the same name more than once in one
 module. An invocation selects the complete matching overload that consumes the
 most syntax atoms. Same-length matches use pattern specificity: a literal
-identifier is narrower than `Ident String`, `Ident String` is narrower than
+identifier is narrower than `Ident<String>`, `Ident<String>` is narrower than
 `Expr`, specialized categories are narrower than `SyntaxNode`, and `SyntaxNode`
 is narrower than opaque `Syntax`. Specificity must hold at every consumed
 source atom; incomparable matches are ambiguous. A fixed parameter is more
@@ -654,8 +654,8 @@ function-style item input, item inspection, and structured access to other
 expression forms remain future work.
 
 Compiler-provided macros use typed bodyless contracts. `std.syntax` declares
-`pub macro quote: Braced Syntax -> Syntax` and
-`pub macro parse_quote: Braced Syntax -> Syntax`, and
+`pub macro quote: Braced<Syntax> -> Syntax` and
+`pub macro parse_quote: Braced<Syntax> -> Syntax`, and
 `std.cinterop` declares `pub macro c_string: Expr -> Expr`. `std.source`
 declares `pub macro line: () -> Expr`, `pub macro column: () -> Expr`, and
 `pub macro file: () -> Expr`. None of these modules is re-exported by
@@ -1034,7 +1034,7 @@ declared with `pub mod`:
 
 ```staple
 pub mod api {
-    pub type Number = alias I32
+    pub type Number = I32
     pub let answer: Number = 42
 }
 ```
@@ -1045,7 +1045,7 @@ Named types may have companion items. A companion behaves as the type's
 namespace, so its public members are selected through the type name:
 
 ```staple
-type Animal = wrap ...
+type Animal wrap ...
 
 companion Animal {
     pub def teleport = (animal: Animal; x: F32; y: F32) => Animal :: animal
@@ -1091,7 +1091,7 @@ receiver-applied value, which here is a function still awaiting `position`.
 
 Companion lookup uses the receiver's static named type. A companion belongs
 to its target's identity rather than its name. Type aliases are transparent,
-so `companion A` for `type A = alias B` is the same as `companion B`: its
+so `companion A` for `type A = B` is the same as `companion B`: its
 members belong to `B` and are reachable as `B.member`, as `A.member` or
 through any other alias of `B`, and by method syntax on any `B` value. An
 alias of a structural type gives a structural companion, described below.
@@ -1104,7 +1104,7 @@ dependency's types cannot gain competing members from several packages.
 
 ```staple
 // units.sta
-pub type Meters = pub wrap I32
+pub type Meters wrap pub I32
 
 // conversions.sta, in the same package
 use package.units.Meters
@@ -1197,7 +1197,7 @@ module. A `use` inside a block applies to that block only: it reaches neither
 the module the block is written in nor the type's other blocks, and it may
 import a name that module already imports.
 Generic and constrained targets use the same bracketed parameter syntax as
-trait implementations, for example `companion<T where Bound T> Box T`.
+trait implementations, for example `companion<T where Bound T> Box<T>`.
 Ordinary `mod` declarations may not share a name with a type; use `companion`
 when defining a type-qualified namespace.
 
@@ -1213,7 +1213,7 @@ companion<T where Measure T> T {
     pub def double_size = value: T => USize :: Measure.measure value * 2
 }
 
-type Meters = wrap I32
+type Meters wrap I32
 impl Measure Meters { measure = value => 4 }
 
 let piped = Meters 1 |> double_size          // 8
@@ -1227,7 +1227,7 @@ overlap rule below keeps from existing, so it has the same priority over
 trait functions. `Type.member` selects it for a named type that satisfies
 its bounds. The blanket parameter is then that type, so `Meters.double_size 3`
 is an error rather than a use at `I32`. For a generic type, `Box.member`
-stands for `Box A` at every `A`. A blanket member is not reachable as
+stands for `Box<A>` at every `A`. A blanket member is not reachable as
 `T.member`, because the block declares no namespace.
 
 Like trait implementations, blanket companions apply throughout the loaded
@@ -1261,12 +1261,12 @@ reachable only from the module that declares the block.
 
 A companion's target may be a structural type, such as a sum or product,
 written directly or through an alias. The standard library could give every
-`Result` a member this way; `companion<T, E> Result T E` is the same block,
-since `Result T E` is an alias of `Ok T | E`:
+`Result` a member this way; `companion<T, E> Result<T, E>` is the same block,
+since `Result<T, E>` is an alias of `Ok<T> | E`:
 
 ```staple
-companion<T, E> (Ok T | E) {
-    pub def succeeded = value: Ok T | E => Bool :: match value {
+companion<T, E> (Ok<T> | E) {
+    pub def succeeded = value: Ok<T> | E => Bool :: match value {
         Ok _ => True,
         _ => False,
     }
@@ -1277,27 +1277,27 @@ A structural companion belongs to its target's identity. Its members apply,
 by method syntax, to a receiver whose static type is the target, comparing
 sum alternatives as an unordered set after aliases are expanded, and taking
 priority over trait functions as a type's own members do. A wider sum is a
-different type: a companion of `Ok I32 | String` does not apply to
-`Ok I32 | String | Bool`. The target has no namespace of its own, so outside
+different type: a companion of `Ok<I32> | String` does not apply to
+`Ok<I32> | String | Bool`. The target has no namespace of its own, so outside
 method syntax its members are reached through an alias of a matching type,
-from any package: after `type Answer = alias Ok I32 | String`,
-`Answer.succeeded` is the member at `Ok I32 | String`.
+from any package: after `type Answer = Ok<I32> | String`,
+`Answer.succeeded` is the member at `Ok<I32> | String`.
 
 The companion's own parameters match any type. A bare parameter alternative
 of a sum stands for the rest of the receiver's alternatives, of which there
-must be at least one: `Ok T | E` matches `Ok I32 | String` with `E` as
-`String`, and `Ok I32 | String | Bool` with `E` as `String | Bool`, but not
-`Ok I32` alone. A sum in a target may have at most one bare parameter
+must be at least one: `Ok<T> | E` matches `Ok<I32> | String` with `E` as
+`String`, and `Ok<I32> | String | Bool` with `E` as `String | Bool`, but not
+`Ok<I32>` alone. A sum in a target may have at most one bare parameter
 alternative. A target that matches a receiver in more than one way, as
-`Ok T | E` does `Ok I32 | Ok U8`, makes its members ambiguous for that
+`Ok<T> | E` does `Ok<I32> | Ok<U8>`, makes its members ambiguous for that
 receiver.
 
 These rules keep structural companions coherent:
 
 - The orphan rule: one of the nominal types named in the target, looking
   through aliases, must be declared in the companion's package. Thus only the
-  standard library may write `companion (Ok I32 | String)`, while a package
-  may write `companion (Ok I32 | Meters)` for its own `Meters`.
+  standard library may write `companion (Ok<I32> | String)`, while a package
+  may write `companion (Ok<I32> | Meters)` for its own `Meters`.
 - Two structural members may share a name only when no type could match both
   targets, and a structural member may not share a name with a blanket member
   whose bounds its target could satisfy.
@@ -1312,7 +1312,7 @@ A parent can re-export public items from a child, including a private child:
 ```staple
 mod implementation {
     pub def format = value => value
-    pub type Number = alias I32
+    pub type Number = I32
 }
 
 pub use implementation.format
@@ -1327,7 +1327,7 @@ Top-level declarations are private by default. `pub` exports a binding or type:
 
 ```staple
 pub def format = (value: I32) => value
-pub type Number = alias I32
+pub type Number = I32
 ```
 
 `pub extern` exports every binding declared by that external block. A binding
@@ -1400,10 +1400,10 @@ counter = counter + 1
 let mut point = (x: 3, y: 4)
 point.x = 5
 
-let mut cell: Shared I32 = Shared 1
+let mut cell: Shared<I32> = Shared 1
 cell.0 = 2
 
-let borrowed: Shared I32 = Shared 3
+let borrowed: Shared<I32> = Shared 3
 borrowed.0 = 4 // error: `borrowed` is not declared `mut`
 ```
 
@@ -1643,7 +1643,7 @@ both sides are defined. `Divide.divide` and `Remainder.remainder` are
 `MIN / -1`, [panic](#track_caller-and-location) at the operator, while
 `MIN % -1` is `0`. `..`/`..=` are not
 trait-based: they call the prelude's `range`/`range_inclusive` functions
-directly, which construct `Range T`/`RangeInclusive T` values.
+directly, which construct `Range<T>`/`RangeInclusive<T>` values.
 
 The prefix operators `-` and `!` bind tighter than every binary operator but
 looser than application and access, so `-a.b` negates `a.b` and `-a * b` is
@@ -1790,16 +1790,16 @@ overrides.
 #### Default field values
 
 A named field may provide a default expression with `=`, but only in the
-product that is the representation of a named [`wrap`](#type) or
+product that is the representation of a named [`wrap`](#wrap) or
 [`from`](#from) type declaration, or in a product nested in that
 representation's fields:
 
 ```staple
-type Point = from (x: I32 = 0, y: I32 = 0)
-type TextArgs = from (String, x: I32 = 0, y: I32 = 0)
-type Options = wrap (verbose: Bool = False, depth: I32 = 1)
+type Point from (x: I32 = 0, y: I32 = 0)
+type TextArgs from (String, x: I32 = 0, y: I32 = 0)
+type Options wrap (verbose: Bool = False, depth: I32 = 1)
 
-type Config = from (window: (width: I32 = 800, height: I32 = 600), title: String = "app")
+type Config from (window: (width: I32 = 800, height: I32 = 600), title: String = "app")
 
 let origin: Point = ()
 let config: Config = (window: (.height: 900))
@@ -1813,7 +1813,7 @@ let options = Options (.depth: 3)
 Defaults are rejected everywhere else: on anonymous product types such as
 `let point: (x: I32 = 0, y: I32 = 0) = ()`, on function parameter types, on
 aliases, and on products inside a representation's function types or type
-arguments, such as `(x: I32 = 0, y: I32) -> I32` or `List (x: I32 = 0)`. A
+arguments, such as `(x: I32 = 0, y: I32) -> I32` or `List<(x: I32 = 0)>`. A
 nested product field without a default of its own must still be written, as
 `window: ()` when every nested field defaults. To give a function optional
 arguments, accept a `from` type whose representation declares them, as `text`
@@ -1875,7 +1875,7 @@ The length is a compile-time type. Non-negative integer type literals such as
 `0`, `3`, and `42` are singleton subtypes of `USize` and automatically satisfy
 the sealed prelude trait `Natural`. An alias or a parameter constrained by that
 trait may be used as a length, for example
-`type Vector T N where Natural N = alias (T ^ N)`. The length must resolve to one
+`type Vector<T, N where Natural N> = (T ^ N)`. The length must resolve to one
 singleton literal before code generation. Number literal types use the `USize`
 runtime representation, so an exact value annotation such as `let three: 3 = 3`
 is valid and widens to `USize`; an unconstrained `let three = 3` still infers
@@ -1896,7 +1896,7 @@ integer type literal, a type alias, or a compile-time parameter constrained by
 `Natural` may be used, for example:
 
 ```staple
-type Count = alias 3
+type Count = 3
 let cells: (I32 ^ Count) = (0 ^ Count)
 
 def repeat = <T, N where Copy T, Natural N> value: T => (T ^ N) :: (value ^ N)
@@ -1977,13 +1977,13 @@ position type. The compiler derives `Index P USize Output` for every non-empty
 fixed product whose elements are all `Copy`; `Output` is the duplicate-free sum
 of its element types. Thus indexing `(I32, String, I32)` produces
 `I32 | String`, while indexing `(I32 ^ N)` produces `I32`. The standard library
-implements `Index (SharedBuffer T) USize` with `type Output = T` when `T` is `Copy`, backed by
-`SharedBuffer.get_unchecked`, so a `SharedBuffer T` is indexed like a fixed product of `T`. Known
+implements `Index SharedBuffer<T> USize` with `type Output = T` when `T` is `Copy`, backed by
+`SharedBuffer.get_unchecked`, so a `SharedBuffer<T>` is indexed like a fixed product of `T`. Known
 bad fixed-product indices are rejected and dynamic out-of-bounds indices trap.
 
-A `Shared T` is transparent for indexing, the same way it is for field access:
-`reference[index]` is `(*reference)[index]`, so `Index (Shared T)` and
-`MutateIndex (Shared T)` are derived whenever `T` itself has the corresponding
+A `Shared<T>` is transparent for indexing, the same way it is for field access:
+`reference[index]` is `(*reference)[index]`, so `Index Shared<T>` and
+`MutateIndex Shared<T>` are derived whenever `T` itself has the corresponding
 implementation, whether structural or explicit. This composes through nested
 references and lets a user-defined `Index`/`MutateIndex` implementation on a
 nominal type be used through a handle without an explicit dereference.
@@ -1997,7 +1997,7 @@ target[index] = replacement
 ```
 
 The compiler derives `MutateIndex` for non-empty arrays, by
-value. The standard library implements `MutateIndex (SharedBuffer T) USize T` for
+value. The standard library implements `MutateIndex SharedBuffer<T> USize T` for
 every `T`, backed by `SharedBuffer.set_unchecked`, which replaces the element through `Shared.replace`. The mutable `Target`
 parameter passes by address either way (see the "Mutable parameters" subsection
 under "Functions"), so a by-value target's root binding must be declared
@@ -2024,7 +2024,7 @@ let pair: (I32, Bool) = product_default ()
 This applies to heterogeneous, named, nested, and empty products. In
 particular, `()` is not default-constructible unless a legal implementation is
 provided by the package that owns `Default`. Because `(T ^ 1)` is normalized to
-`T`, it continues to use the `Default` implementation of `T`. `Shared T` does not
+`T`, it continues to use the `Default` implementation of `T`. `Shared<T>` does not
 implement `Default` merely because `T` does.
 
 ## Functions
@@ -2145,7 +2145,7 @@ Nominal patterns use the generated constructor name followed by a nested
 pattern. They are irrefutable and add no runtime check or wrapper:
 
 ```staple
-type UserId = wrap I32
+type UserId wrap I32
 def unwrap = (UserId value): UserId => I32 :: value
 
 let user: UserId = UserId 42
@@ -2159,13 +2159,13 @@ a surrounding function annotation, or its own annotation.
 A parenthesized nominal pattern followed by `: Type` annotates the whole
 pattern. Without the parentheses the annotation belongs to the inner pattern:
 `Box value: I32` destructures a `Box` whose representation is `I32`, while
-`(Box value): Box I32` declares that the destructured value is a `Box I32`.
+`(Box value): Box<I32>` declares that the destructured value is a `Box<I32>`.
 This is how a function value names the type of a destructured parameter:
 
 ```staple
-type Box T = wrap T
-def first = ((Box value): Box I32; index: USize) => I32 :: value
-def unbox = <T> move (Box value): Box T => T :: value
+type Box<T> wrap T
+def first = ((Box value): Box<I32>; index: USize) => I32 :: value
+def unbox = <T> move (Box value): Box<T> => T :: value
 ```
 
 Only a single nominal pattern may be annotated this way; a product or binding
@@ -2213,9 +2213,9 @@ that works for every `T`.
 def identity = <T> move value: T => T :: value
 let duplicate = <T where Copy T> value: T => (T, T) :: (value, value)
 
-type Box T = wrap T
-companion<T> Box T {
-    pub def map = <U> (move box: Box T, move f: (move T -> U)) => Box U :: {
+type Box<T> wrap T
+companion<T> Box<T> {
+    pub def map = <U> (move box: Box<T>, move f: (move T -> U)) => Box<U> :: {
         let Box value = box
         Box (f value)
     }
@@ -2228,7 +2228,7 @@ impl Visit I32 { visit = <B> (_, move value: B) => value }
 Companion, implementation, and trait parameters remain in scope in their
 members. An implementation of a generic trait member, and a generic trait
 default method, must declare the member's own parameters on its function value.
-Constructors of generic types (`Box` has scheme `<T> move T -> Box T`) and generic
+Constructors of generic types (`Box` has scheme `<T> move T -> Box<T>`) and generic
 intrinsics are also generic.
 
 #### Declaring parameters
@@ -2238,7 +2238,7 @@ optional `where` clause:
 
 ```staple
 def first = <A, B> (move a: A, b: B) => A :: a
-def show_all = <T where Display T> items: List T =>{IO} () :: {
+def show_all = <T where Display T> items: List<T> =>{IO} () :: {
     // ...
 }
 def twice = <effect E> f: (() ->{E} ()) =>{E} () :: { f (); f () }
@@ -2256,7 +2256,7 @@ Every type parameter has an implicit `Sized` bound. A function that forwards a
 type behind a constructor accepting unsized arguments can relax that default:
 
 ```staple
-def preserve_shared = <T where ?Sized T> value: Shared T => value
+def preserve_shared = <T where ?Sized T> value: Shared<T> => value
 ```
 
 `?Sized T` must name a parameter of the same list and may appear once per
@@ -2268,8 +2268,8 @@ Compile-time parameters declared by a value are visible in its pattern, effects,
 and body, including local type annotations:
 
 ```staple
-def singleton = <T> move value: T => List T :: {
-    let mut items: List T = List.new ()
+def singleton = <T> move value: T => List<T> :: {
+    let mut items: List<T> = List.new ()
     List.push items value
     items
 }
@@ -2329,7 +2329,7 @@ let int_identity: I32 -> I32 = identity
 
 Type arguments can also be supplied explicitly with `.<…>`, which binds like
 member access, before function application. `_` leaves one to inference; a
-`_` nested inside an argument (`RawPtr _`) is completed from the expected type,
+`_` nested inside an argument (`RawPtr<_>`) is completed from the expected type,
 as in an ascription. Without a value argument, the result is the instantiated
 function:
 
@@ -2371,7 +2371,7 @@ annotation spells it out:
 ```staple
 def consume = f: (<T> move T -> T) => (I32, String) :: (f 42, f "hello")
 
-type Functions = wrap (identity: <T> move T -> T,)
+type Functions wrap (identity: <T> move T -> T,)
 
 let mut selected: <T> move T -> T = identity
 let functions = Functions (identity: selected)
@@ -2428,7 +2428,7 @@ called directly:
   must come from a bound in scope or match exactly one implementation;
 * a `Natural` bound or an array length that depends on a type parameter;
 * a scheme that names an associated type of its parameters, such as
-  `<Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter)`;
+  `<Iter where Iterator Iter> move Iter -> IterStep<Iter, Iterator.Item Iter>`;
 * a coroutine, async, or reactive body;
 * a function value behind `Shared`, `SharedBuffer`, `Buffer`, or a shared cell that
   crosses into the implementation.
@@ -2443,11 +2443,11 @@ There is no separate resource declaration: any fully concrete, sized nominal
 type may be used. For example:
 
 ```staple
-type Clock = wrap (
+type Clock wrap (
     now: () -> I32,
 )
 
-type Logger = wrap (
+type Logger wrap (
     write: String -> (),
 )
 ```
@@ -2480,8 +2480,7 @@ unordered and duplicate-free, and each arrow in a curried type has its own set:
 
 ```staple
 def timestamp = () =>{Clock} I32 :: {
-    let clock = resource Clock
-    clock.now ()
+    let clock = resource Clock<clock.now, ()>
 }
 ```
 
@@ -2802,12 +2801,12 @@ parameter value itself. A mutable argument is passed by address, so either
 kind of change is visible in the caller:
 
 ```staple
-def clear = mut cell: Shared (I32, I32) => () :: { cell.0 = 0 }
+def clear = mut cell: Shared<(I32, I32)> => () :: { cell.0 = 0 }
 
-let mut counter: Shared (I32, I32) = Shared (1, 2)
+let mut counter: Shared<(I32, I32)> = Shared (1, 2)
 clear counter
 
-let fixed: Shared (I32, I32) = Shared (1, 2)
+let fixed: Shared<(I32, I32)> = Shared (1, 2)
 clear fixed // error: `fixed` is not declared `mut`
 
 def replace = mut value: I32 => () :: { value = 42 }
@@ -2846,7 +2845,7 @@ write through it, and the caller keeps ownership and its value remains usable
 after the call:
 
 ```staple
-type File = wrap I32
+type File wrap I32
 impl Drop File {
     cleanup = File descriptor => close descriptor
 }
@@ -2897,7 +2896,7 @@ repeat and match the annotation's `move` targets exactly, the same as for
 trait's method declaration, even when the parameter's type is `Copy`. A
 parameter cannot be marked both `mut` and `move`: a mutable borrow and an
 ownership transfer are different effects. `move` and `mut` never change the
-parameter's exposed type — it stays `T`, never `Shared T` — only its ownership
+parameter's exposed type — it stays `T`, never `Shared<T>` — only its ownership
 and calling convention.
 
 Like `mut`, `move` may prefix a destructuring pattern to own the whole
@@ -2906,13 +2905,13 @@ nominal destructure:
 
 ```staple
 def f4 = <A, B> move (a: A, _: B) => A :: a
-def unbox = <T> move box: Box T => T :: { let Box value = box; value }
+def unbox = <T> move box: Box<T> => T :: { let Box value = box; value }
 ```
 
 Every destructured binding is owned, exactly as if the whole parameter were
 bound and destructured in the body. Prefixing a parenthesized product pattern
 is the way to own a parameter whose type is an alias of a product — for
-example, an aliased pair `type Pair (A, B) = alias (A, B)` — since `move`/`mut`
+example, an aliased pair `type Pair<A, B> = (A, B)` — since `move`/`mut`
 on the aliased type is necessarily a whole-parameter marker rather than one
 over individual elements.
 
@@ -2984,7 +2983,7 @@ trait Convert (From, To) {
 }
 
 trait PartialOrd T where Copy T {
-    partial_cmp: (T; T) -> Option Ordering
+    partial_cmp: (T; T) -> Option<Ordering>
     lt: (T; T) -> Bool = (left; right) => match (partial_cmp left right) {
         Some Ordering.Less() => True,
         _ => False,
@@ -3008,7 +3007,7 @@ by the trait's parameters:
 ```staple
 trait Iterator Iter {
     type Item
-    next: Iter -> IterStep (Iter, Item)
+    next: Iter -> IterStep<Iter, Item>
 }
 
 trait Add Left Right {
@@ -3026,12 +3025,12 @@ only, so `Iterator Iter` is the complete bound for an iterator type.
 An associated type is named from outside the trait with the projection
 `Trait.Name arguments`, where the arguments are the trait's explicit
 parameters. A projection of concrete types normalizes through the matching
-implementation, so `Iterator.Item (Range I32)` is `I32`. A projection of generic
+implementation, so `Iterator.Item Range<I32>` is `I32`. A projection of generic
 types requires a matching bound in the same `where` clause:
 
 ```staple
 def next_item = <Iter where Iterator Iter> move iter: Iter =>
-    IterStep (Iter, Iterator.Item Iter) :: Iterator.next iter
+    IterStep<Iter, Iterator.Item Iter> :: Iterator.next iter
 ```
 
 A `where` clause may require exact equality of associated types with `==`:
@@ -3039,10 +3038,10 @@ A `where` clause may require exact equality of associated types with `==`:
 ```staple
 def chain = <L, R where Iterator L, Iterator R,
     Iterator.Item L == Iterator.Item R>
-    (move left: L; move right: R) => Chain L R (Iterator.Item L) :: ...
+    (move left: L; move right: R) => Chain<L, R, Iterator.Item L> :: ...
 
 def integer_item = <Iter where Iterator Iter, Iterator.Item Iter == I32>
-    move iter: Iter => Option I32 :: iter |> find (x => True)
+    move iter: Iter => Option<I32> :: iter |> find (x => True)
 ```
 
 At least one side must be an associated-type projection; the other may be
@@ -3277,15 +3276,15 @@ implementations for the same arguments. A concrete implementation and a
 generic one whose bound the concrete type satisfies therefore cannot both be
 declared. Two implementations whose headers unify may coexist only when a bound
 rules the overlap out: `impl<T where Copy T> Clone T` and
-`impl<T where Clone T> Clone (List T)` coexist because `List T` is never
+`impl<T where Clone T> Clone List<T>` coexist because `List<T>` is never
 `Copy`.
 
 Sum headers unify as unordered sets. A sum alternative that is a bare
 compile-time parameter of the implementation acts as a row: it stands for
 every alternative the rest of the header leaves unmatched, which may be none
-(`Never`), one, or several. For a trait `Try`, `impl<T, E> Try (Result T E)`
+(`Never`), one, or several. For a trait `Try`, `impl<T, E> Try Result<T, E>`
 therefore applies to
-`Ok I32` (`E = Never`), to `Ok I32 | String`, and to `Ok I32 | String | Bool`
+`Ok<I32>` (`E = Never`), to `Ok<I32> | String`, and to `Ok<I32> | String | Bool`
 (`E = String | Bool`), and it overlaps a concrete implementation for any of
 those types, whatever order their alternatives are written in. It does not
 overlap `impl Try (Bool | String)`, which has no `Ok` alternative.
@@ -3319,31 +3318,30 @@ calling `string_identity "foo"` infers `T` as the literal type `"foo"`, not
 enforced — `string_identity 1` is rejected, since `I32` is not a subtype of
 `String`. `Ident`'s spelling parameter (see [Metaprogramming](#metaprogramming))
 is bounded this way, combined with a default (see [Default type
-parameters](#default-type-parameters)): `pub type Ident (Spelling = String)
-where Spelling <: String = pub wrap Spelling`.
+parameters](#default-type-parameters)): `pub type Ident<Spelling = String
+where Spelling <: String> wrap pub Spelling`.
 
 ### Default type parameters
 
 A `type` or `trait` may give one or more of its trailing compile-time
-parameters a default with `=`, written inline with the parameter. Because a
-juxtaposed parameter list has no other delimiter, a defaulted parameter must
-be parenthesized to disambiguate the `=` from the trailing `=` that precedes
-a type's body or the `{` that opens a trait's member block:
+parameters a default with `=`, written inline with the parameter. In a `type`
+the default sits inside the angle brackets; a `trait`, whose parameters are
+juxtaposed, parenthesizes the defaulted parameter to disambiguate the `=` from
+the `{` that opens its member block:
 
 ```staple
-type Box (T = String) = wrap (value: T)
-type Pair A (B = A) = alias (A, B)
+type Box<T = String> wrap (value: T)
+type Pair<A, B = A> = (A, B)
 trait Increment (T = I32) { increment: T -> T }
 ```
 
-The default is part of that one parameter's own parentheses; it is not a
-separate clause. It may be combined with a subtype or trait bound in the
-`where` clause, as in `Ident`'s spelling parameter (see
+The default belongs to that one parameter; it is not a separate clause. It may
+be combined with a subtype or trait bound in the `where` clause, which closes
+the bracketed list, as in `Ident`'s spelling parameter (see
 [Metaprogramming](#metaprogramming)), which declares a default together with a
-subtype bound: `pub type Ident (Spelling = String) where Spelling <:
-String = pub wrap Spelling`. Only a plain named parameter can carry a default — a
-product or splice pattern in the parameter position is a parse error if
-followed by `=`.
+subtype bound: `pub type Ident<Spelling = String where Spelling <: String>
+wrap pub Spelling`. Only a plain named parameter can carry a default — a
+splice pattern in the parameter position is a parse error if followed by `=`.
 
 At a use site, trailing arguments may be omitted as long as every parameter
 from that point on has a default; the omitted arguments are filled in from
@@ -3351,11 +3349,11 @@ their defaults instead of leaving the type partially applied:
 
 ```staple
 let boxed: Box = Box (value: "hi")       // T defaults to String
-let explicit: Box I32 = Box (value: 42)  // an explicit argument overrides the default
+let explicit: Box<I32> = Box (value: 42)  // an explicit argument overrides the default
 ```
 
 A default expression may refer to an earlier parameter in the same list —
-`Pair I32` above supplies only `A`, and `B`'s default resolves it to `I32` too
+`Pair<I32>` above supplies only `A`, and `B`'s default resolves it to `I32` too
 — but not to a later one. If any parameter from the first omitted one onward
 lacks a default, none of the trailing arguments are filled in and the type is
 left partially applied as before. A filled-in default is still checked
@@ -3475,7 +3473,7 @@ after the final expression does not discard that value.
 `match` exhaustively selects a pattern and produces a value:
 
 ```staple
-def unwrap = result: Ok I32 | IOError => match result {
+def unwrap = result: Ok<I32> | IOError => match result {
     Ok value => value,
     IOError _ => 0,
 }
@@ -3633,7 +3631,7 @@ use std.io.(IO, println)
 let signal jumps = 0
 let signal coins = 0
 
-def tutorial = () => Coroutine{Reactive, IO} () :: coro {
+def tutorial = () => Coroutine{Reactive, IO}<()> :: coro {
     println "Press the jump button."
     await (until { jumps > 0 })
     println "Nice! Now collect a coin."
@@ -3663,13 +3661,13 @@ it. `std.coroutine` declares the two compiler-known types; import them (or
 `std.coroutine.*`) to use them:
 
 ```staple
-pub type Coroutine{E} T = opaque
-pub type Task T = opaque
+pub type Coroutine{E}<T> opaque
+pub type Task<T> opaque
 ```
 
 ### Building and awaiting coroutines
 
-`coro { block }` builds a `Coroutine{E} T`. The braces delimit a block whose
+`coro { block }` builds a `Coroutine{E}<T>`. The braces delimit a block whose
 tail expression is the coroutine's result `T`, and `E` records the effects the
 body will perform (see [Deferred effects](#deferred-effects)). Building a
 coroutine **does not run it**: a coroutine value is a description of work, much
@@ -3683,13 +3681,13 @@ Coroutines therefore compose the way functions do:
 use std.coroutine.(Coroutine, block_on)
 use std.io.(IO, println)
 
-def greet = name: String => Coroutine{IO} () :: coro {
+def greet = name: String => Coroutine{IO}<()> :: coro {
     println "hello, ${name}"
 }
 
-def add_later = (a: I32, b: I32) => Coroutine I32 :: coro { a + b }
+def add_later = (a: I32, b: I32) => Coroutine<I32> :: coro { a + b }
 
-def main_flow = () => Coroutine{IO} I32 :: coro {
+def main_flow = () => Coroutine{IO}<I32> :: coro {
     await (greet "Ada")
     let x = await (add_later (1, 2))
     let y = await (add_later (x, 10))
@@ -3717,13 +3715,13 @@ does not apply.
 
 `Coroutine` and `Task` are the two halves of running concurrent work:
 
-| | `Coroutine{E} T` | `Task T` |
+| | `Coroutine{E}<T>` | `Task<T>` |
 | --- | --- | --- |
 | What it is | A description of work that has not started | A handle to work that is already scheduled |
 | Created by | `coro { … }` (or a function returning one) | `spawn coroutine` |
 | Runs | Only when something `await`s or `spawn`s it | Independently, whenever its scheduler is pumped |
 | `await` it | Runs it *inline*: the awaiter continues only once it finishes | Waits for the already-running task to finish |
-| `await` yields | `T` | `Completed T \| Cancelled` |
+| `await` yields | `T` | `Completed<T> \| Cancelled` |
 | Can be cancelled | No — drop it instead and it never runs | Yes, with `Task.cancel` |
 
 The difference shows up as soon as two pieces of work pause. Here `count`
@@ -3733,7 +3731,7 @@ prints a line, then gives other tasks a turn with `yield_now`:
 use std.coroutine.*
 use std.io.(IO, println)
 
-def count = (name: String, n: I32) => Coroutine{Tasks, IO} () :: coro {
+def count = (name: String, n: I32) => Coroutine{Tasks, IO}<()> :: coro {
     for i in (1 ..= n) {
         println "${name} ${i:?}"
         await (yield_now ())
@@ -3741,7 +3739,7 @@ def count = (name: String, n: I32) => Coroutine{Tasks, IO} () :: coro {
 }
 
 // Awaiting coroutines runs them one after another, inside one task.
-def one_after_another = () => Coroutine{Tasks, IO} () :: coro {
+def one_after_another = () => Coroutine{Tasks, IO}<()> :: coro {
     await (count ("a", 2))
     await (count ("b", 2))
 }
@@ -3767,8 +3765,8 @@ immediately and both make progress. Reach for `await (some_coroutine ())` to
 split a behaviour into helpers, and for `spawn` when work should proceed on its
 own, be observed, or be cancelled.
 
-Because a task can be cancelled before it produces a value, awaiting a `Task T`
-yields `Completed T | Cancelled` rather than a bare `T`. Awaiting a
+Because a task can be cancelled before it produces a value, awaiting a `Task<T>`
+yields `Completed<T> | Cancelled` rather than a bare `T`. Awaiting a
 `Coroutine` cannot be interrupted that way, so it yields `T` directly.
 
 ### Schedulers and pumping
@@ -3801,7 +3799,7 @@ with Tasks = task_scope (sched) {
   Closing a scope cancels its unfinished tasks (see
   [Cancellation](#cancellation)).
 - `spawn coroutine` consumes the coroutine, schedules it on the current scope's
-  scheduler, and returns a `Task T` handle. It also requires the coroutine's own
+  scheduler, and returns a `Task<T>` handle. It also requires the coroutine's own
   effects `E` at the spawn site, so its resources are captured then. Dropping
   the handle does not cancel the task.
 - `pump (sched, limit)` runs a bounded snapshot of the ready tasks and returns
@@ -3834,14 +3832,14 @@ results later:
 use std.coroutine.*
 use std.io.(IO, println)
 
-def slow_square = n: I32 => Coroutine{Tasks, IO} I32 :: coro {
+def slow_square = n: I32 => Coroutine{Tasks, IO}<I32> :: coro {
     for _ in (0 .. 3) {
         await (yield_now ())
     }
     n * n
 }
 
-def supervisor = () => Coroutine{Tasks, IO} () :: coro {
+def supervisor = () => Coroutine{Tasks, IO}<()> :: coro {
     let kept = spawn (slow_square 3)
     let dropped = spawn (slow_square 4)
     println "both spawned; supervisor keeps going"
@@ -3901,7 +3899,7 @@ Some cases are only partly handled today:
 ### Completions
 
 A `completion` connects a task to something outside the scheduler. It is a
-one-shot pair: a `Wait T` that a task awaits, and a `Resolver T` that anyone —
+one-shot pair: a `Wait<T>` that a task awaits, and a `Resolver<T>` that anyone —
 the host, a timer, an event handler — uses to deliver the value later.
 
 ```staple
@@ -3909,10 +3907,10 @@ use std.coroutine.*
 use std.io.(IO, println)
 
 // `completion`'s `T` is not inferred from the scheduler alone; give it a typed home.
-def name_request: Scheduler -> (wait: Wait String, resolver: Resolver String) =
+def name_request: Scheduler -> (wait: Wait<String>, resolver: Resolver<String>) =
     s => completion s
 
-def greet_user = move wait: Wait String => Coroutine{IO} () :: coro {
+def greet_user = move wait: Wait<String> => Coroutine{IO}<()> :: coro {
     println "waiting for the name..."
     let outcome = await wait
     match outcome {
@@ -3932,10 +3930,10 @@ with Tasks = task_scope (sched) {
 }
 ```
 
-- `completion sched` returns an affine `Wait T` and `Resolver T`, both bound to
+- `completion sched` returns an affine `Wait<T>` and `Resolver<T>`, both bound to
   `sched`. Inference needs `T` from context: annotate the binding or wrap the
   call in a typed helper, as `name_request` does.
-- `await wait` consumes the `Wait` and yields `Completed T | Cancelled`,
+- `await wait` consumes the `Wait` and yields `Completed<T> | Cancelled`,
   exactly like `await` on a `Task`. It may only be awaited from a task **on the
   same scheduler**; doing otherwise traps.
 - `Resolver.complete resolver value` consumes the resolver, stores the value,
@@ -3954,7 +3952,7 @@ with Tasks = task_scope (sched) {
   task parked on it is cancelled. A successful `complete` / `cancel` releases
   the callback without running it. Libraries use it to unregister a timer or
   an external subscription when nobody is waiting any more.
-- `completion_token sched` returns `(Wait (), CompletionToken)` for host
+- `completion_token sched` returns `(Wait<()>, CompletionToken)` for host
   integration. The `CompletionToken` is an opaque, C-compatible handle a host
   holds across the FFI boundary and wakes with the C entry points
   `__staple_completion_token_resolve` / `_cancel` / `_release` (unit-valued;
@@ -3972,7 +3970,7 @@ example at the top of this section is built from it:
 ```staple
 let signal health = 3
 
-def death_watch = () => Coroutine{Reactive, IO} () :: coro {
+def death_watch = () => Coroutine{Reactive, IO}<()> :: coro {
     await (until { health <= 0 })
     println "game over"
 }
@@ -4007,13 +4005,13 @@ coroutine runs:
 use std.io.(IO, println)
 
 // Building the coroutine is pure; the `IO` effect rides on the type.
-def build = () => Coroutine{IO} () :: coro { println "hi" }
+def build = () => Coroutine{IO}<()> :: coro { println "hi" }
 ```
 
 Omitting the row is the empty set, exactly as for an effect-parameterized type
-declaration: `Coroutine T` is `Coroutine{} T`.
+declaration: `Coroutine<T>` is `Coroutine{}<T>`.
 
-When a `coro` is checked against an expected `Coroutine{E} T`, such as a
+When a `coro` is checked against an expected `Coroutine{E}<T>`, such as a
 declared result type, `E` is an upper bound on the body's effects, exactly as a
 function declaration's effect row bounds its body. The coroutine takes the
 declared row, so starting or awaiting it supplies every effect in `E` even if
@@ -4021,10 +4019,10 @@ the body uses fewer. A body that needs an effect outside `E` is an error:
 
 ```staple
 // Accepted: the body is pure, but the declared row may be larger.
-def quiet = () => Coroutine{IO} I32 :: coro { 5 }
+def quiet = () => Coroutine{IO}<I32> :: coro { 5 }
 
 // Rejected: the body prints, but the declared row is empty.
-def loud = () => Coroutine I32 :: coro {
+def loud = () => Coroutine<I32> :: coro {
     println "x"
     5
 }
@@ -4036,7 +4034,7 @@ the body's inferred effects.
 
 The row comes due wherever the coroutine is started:
 
-- `await` on a `Coroutine{E} T` folds `E` into the awaiting body's own row, so
+- `await` on a `Coroutine{E}<T>` folds `E` into the awaiting body's own row, so
   `def run = () => Coroutine{IO} () :: coro { await (build ()) }` needs `IO`.
 - `spawn` requires `E` at the spawn site, alongside `Tasks`.
 - `block_on` requires `E` from its caller.
@@ -4071,7 +4069,7 @@ body ends normally. `break` and `continue` cannot leave a `coro` body, though a
 loop written entirely inside it may use them:
 
 ```staple
-def first_positive = n: I32 => Coroutine{} I32 :: coro {
+def first_positive = n: I32 => Coroutine{}<I32> :: coro {
     if (n > 0) { return n }
     let fallback = await (default_value ())
     fallback
@@ -4117,17 +4115,17 @@ with every step. `Iter` determines its associated `Item`:
 
 ```staple
 pub mod IterStep {
-    pub type Done Iter = pub wrap Iter
-    pub type Yield (Item, Iter) = pub wrap (Item, Iter)
+    pub type Done<Iter> wrap pub Iter
+    pub type Yield<Item, Iter> wrap pub (Item, Iter)
 }
 
-pub type IterStep (Iter, Item) = alias
-    IterStep.Done Iter |
-    IterStep.Yield (Item, Iter)
+pub type IterStep<Iter, Item> =
+    IterStep.Done<Iter> |
+    IterStep.Yield<Item, Iter>
 
 pub trait Iterator Iter {
     type Item
-    next: move Iter -> IterStep (Iter, Item)
+    next: move Iter -> IterStep<Iter, Item>
 }
 
 pub trait IntoIterator Source {
@@ -4143,7 +4141,7 @@ state inside the step. `Done` and `Yield` remain inside the `IterStep`
 namespace. An `IntoIterator` implementation consumes its source and selects
 one default iterator type; wrapper types can provide alternative iteration
 modes. The `move` marker makes that consumption explicit: a non-`Copy` source
-such as a `List T` is moved into the iterator, so the binding cannot be used
+such as a `List<T>` is moved into the iterator, so the binding cannot be used
 again, while a `Copy` source such as a range is copied and remains usable.
 Clone a non-`Copy` source before iterating to keep the original.
 
@@ -4182,7 +4180,7 @@ once. Standard iteration is available for every signed, unsigned, and
 pointer-sized integer
 type. Ranges advance by one, and a range whose start is greater than its end is
 empty. Inclusive iteration yields a maximum integer endpoint without computing
-an overflowing successor. `Range T` and `RangeInclusive T` expose their
+an overflowing successor. `Range<T>` and `RangeInclusive<T>` expose their
 representations so custom concrete iterator implementations can use them.
 
 ### Iterator operations
@@ -4213,7 +4211,7 @@ and does its work only when advanced.
 |---|---|---|
 | `map` | `f: move Item -> B` | `f` of each item |
 | `filter` | `keep: Item -> Bool` | the items `keep` accepts |
-| `filter_map` | `f: move Item -> Option B` | the values `f` returns as `Some` |
+| `filter_map` | `f: move Item -> Option<B>` | the values `f` returns as `Some` |
 | `take` | `count: USize` | at most the first `count` items |
 | `skip` | `count: USize` | the items after the first `count` |
 | `take_while` | `keep: Item -> Bool` | items up to the first one `keep` rejects |
@@ -4228,16 +4226,16 @@ and return a value.
 |---|---|---|
 | `fold` | `move init: A; f: (move A, move Item) ->{E} A` | the final accumulator |
 | `for_each` | `f: move Item ->{E} ()` | `()` |
-| `reduce` | `f: (move Item, move Item) ->{E} Item` | `Option Item`, `None` when empty |
+| `reduce` | `f: (move Item, move Item) ->{E} Item` | `Option<Item>`, `None` when empty |
 | `count` | — | `USize` |
 | `any` / `all` | `test: Item ->{E} Bool` | `Bool`; an empty iterator satisfies `all` |
 | `find` | `test: Item ->{E} Bool` | the first matching item, or `None` |
-| `last` | — | `Option Item` |
+| `last` | — | `Option<Item>` |
 | `collect` | — (target from the expected type; `where Default C, FromIterator C Item`) | the collected target |
-| `to_list` | — | a new `List Item` |
+| `to_list` | — | a new `List<Item>` |
 | `extend` | `move target: C` (`where FromIterator C Item`) | `target` with every item added |
 | `sum` | — (`where Add Item, Default Item`) | the total, starting from `Default.default ()` |
-| `min` / `max` | — (`where Ord Item`) | `Option Item`; the first smallest, the last largest |
+| `min` / `max` | — (`where Ord Item`) | `Option<Item>`; the first smallest, the last largest |
 
 **Collecting.** `collect` is generic in its target: the expected type chooses
 it. It starts from `Default.default ()` and adds the items with
@@ -4252,16 +4250,16 @@ pub trait FromIterator Target Item {
         (move Target; move Iter) -> Target = ...
 }
 
-let numbers: List I32 = (1 .. 4) |> map (x => x * 10) |> collect
+let numbers: List<I32> = (1 .. 4) |> map (x => x * 10) |> collect
 let words: String = (1 .. 4) |> map (x => "w${x}") |> collect
 ```
 
-`List T` collects its items in order, and `String` concatenates string pieces.
+`List<T>` collects its items in order, and `String` concatenates string pieces.
 `String` overrides `insert_all` to build its bytes in one pass, since each
 `insert` copies the text built so far. Override it for any target whose
 `insert` is expensive. In generic code, state the bound the target needs,
 such as `FromIterator C (Iterator.Item Iter)` or `Iterator.Item Iter == I32`
-for a `List I32`.
+for a `List<I32>`.
 
 With no expected type to choose a target, use `to_list`; `extend` adds the items
 to an existing value instead of starting from a default:
@@ -4274,7 +4272,7 @@ let extended = (1 .. 4) |> extend values
 A new target implements the trait, starting from whatever `Default` provides:
 
 ```staple
-type Count = wrap USize
+type Count wrap USize
 
 impl Default Count { default = () => Count 0 }
 
@@ -4305,11 +4303,11 @@ this works for non-`Copy` items. `take_while` drops the first item it rejects.
 run out. Consumers that stop early (`any`, `all`, `find`) drop the rest of the
 iterator.
 
-**Adapter types.** Each adapter has its own result type (`Map Iter B`,
-`Filter Iter Item`, `Take Iter Item`, and so on). Its closure is not part of
+**Adapter types.** Each adapter has its own result type (`Map<Iter, B>`,
+`Filter<Iter, Item>`, `Take<Iter, Item>`, and so on). Its closure is not part of
 that type, so two `map` pipelines over the same kind of source have the same
 type. `chain` accepts different iterator types with equal item types, and returns
-`Chain L R Item`:
+`Chain<L, R, Item>`:
 
 ```staple
 (0 .. 3) |> chain ((3 .. 6) |> filter (x => x > 3)) |> to_list
@@ -4356,18 +4354,18 @@ import can shadow a prelude name. Integer literals use an expected integer type
 when one is available and otherwise default to `I32`. Mixed-type arithmetic is
 not implicit.
 
-`Option T` is declared in `std.option` as the sum `None | Some T`, where
-`None` is a singleton type and `Some T` is a `from` type; `std.core` re-exports
+`Option<T>` is declared in `std.option` as the sum `None | Some<T>`, where
+`None` is a singleton type and `Some<T>` is a `from` type; `std.core` re-exports
 all three. Because `Some` is a [`from`](#from) type, a value converts implicitly
 wherever an `Option` is expected:
 
 ```staple
-def head = (values: List I32) => Option I32 :: List.get values 0
-let port: Option I32 = 8080   // implicitly `Some 8080`
+def head = (values: List<I32>) => Option<I32> :: List.get values 0
+let port: Option<I32> = 8080   // implicitly `Some 8080`
 ```
 
 As with `Ok`, an exact alternative wins over the `from` conversion, so a bare
-`None` selects the `None` alternative rather than `Some None`.
+`None` selects the `None` alternative rather than `Some<None>`.
 
 `Never` is the uninhabited bottom type. No expression can normally produce a
 `Never` value, and `Never` is a subtype of every value type, so a divergent
@@ -4387,14 +4385,14 @@ These formatting types and traits are declared in `std.fmt`; `Display` and `Debu
 by `std.core` into the prelude.
 `Formatter.display value` and `Formatter.debug value` create a formatter,
 dispatch the corresponding trait, and return the finished `String`. A
-`Formatter` is a nominal type with the private representation `List U8`; the
+`Formatter` is a nominal type with the private representation `List<U8>`; the
 finished string holds a copy of the accumulated bytes, without spare capacity.
 
 Manual implementations append text with `Formatter.write` and may delegate
 nested values directly to either formatting trait:
 
 ```staple
-type Point = wrap (x: I32, y: I32)
+type Point wrap (x: I32, y: I32)
 
 impl Debug Point {
     fmt = (Point (x, y), formatter) => {
@@ -4414,7 +4412,7 @@ Scalar `ToString` implementations delegate to `Display`.
 
 `String` is an immutable garbage-collected UTF-8 byte sequence. The standard
 library declares it as a nominal type with the private representation
-`SharedBuffer U8`. At runtime it is one pointer to a managed header holding
+`SharedBuffer<U8>`. At runtime it is one pointer to a managed header holding
 the byte length, a capacity (always equal to the length), and the bytes; there
 is no separate descriptor allocation. Copying a `String` copies the pointer and
 shares the bytes.
@@ -4423,7 +4421,7 @@ Two strings can be concatenated with `+`; this dispatches through the standard
 standard library implements `Eq String`, comparing the two UTF-8 byte
 sequences.
 
-`String.to_bytes: String => List U8` copies the UTF-8 bytes into a new list, so
+`String.to_bytes: String => List<U8>` copies the UTF-8 bytes into a new list, so
 mutating the list never affects the string. `String.bytes: String => StringBytes`
 returns a non-copying iterator over the bytes: `StringBytes` implements
 `Iterator` with `Item = U8` and an identity `IntoIterator`, so
@@ -4431,13 +4429,13 @@ returns a non-copying iterator over the bytes: `StringBytes` implements
 Result String std.string.InvalidUtf8` consumes the list, copies its bytes
 into the string's managed storage with `Buffer.into_shared_buffer`, and
 validates them; because the list is moved in, nothing can mutate the bytes
-after validation. `String.from_utf8_unchecked: move List U8 => String` skips the
+after validation. `String.from_utf8_unchecked: move List<U8> => String` skips the
 validation when the caller knows the bytes are valid UTF-8. The underlying
-`SharedBuffer U8` is private to the standard library.
+`SharedBuffer<U8>` is private to the standard library.
 
-`Shared T` is a garbage-collected reference to a value of type `T`, declared in
+`Shared<T>` is a garbage-collected reference to a value of type `T`, declared in
 `std.shared` and imported with `use std.shared.(Shared)`. Its standard
-declaration is `pub type Shared T where ?Sized T = pub wrap T`, so its payload may be
+declaration is `pub type Shared<T where ?Sized T> wrap pub T`, so its payload may be
 sized or unsized while the reference value itself always has a known
 representation.
 Constructing `Shared value` copies or moves `value` into a managed allocation;
@@ -4446,19 +4444,19 @@ including bracket indexing and index assignment, can be accessed and assigned
 directly through the handle when the binding holding the handle is declared
 `mut`; a `Shared` is transparent for field access and indexing, so these compose
 through nested references as well. The standard library implements
-`Eq (Shared T)` whenever `T` implements `Eq`, comparing the referenced values
+`Eq Shared<T>` whenever `T` implements `Eq`, comparing the referenced values
 rather than the handles. Every alias, not only the binding that performed
 the write, observes the resulting payload mutation, since they all share the
 same managed allocation:
 
 ```staple
-let mut point: Shared (x: I32, y: I32) = Shared (x: 10, y: 20)
+let mut point: Shared<(x: I32, y: I32)> = Shared (x: 10, y: 20)
 let x = point.x
 point.x = 30
 let Shared (captured_x, captured_y) = point
 ```
 
-The companion method `Shared.replace: <T> (mut Shared T; move T) -> T` replaces a whole
+The companion method `Shared.replace: <T> (mut Shared<T>; move T) -> T` replaces a whole
 fixed payload and returns the previous value:
 
 ```staple
@@ -4470,7 +4468,7 @@ let previous = Shared.replace value 20
 nominal type. For example, this declaration retains both constructor layers:
 
 ```staple
-type SharedPoint = wrap Shared (x: I32, y: I32)
+type SharedPoint wrap Shared<(x: I32, y: I32)>
 let point = SharedPoint (Shared (x: 10, y: 20))
 let SharedPoint (Shared (x, y)) = point
 ```
@@ -4478,50 +4476,50 @@ let SharedPoint (Shared (x, y)) = point
 An array can be moved into a `SharedBuffer`:
 
 ```staple
-let values: SharedBuffer I32 = SharedBuffer.from_array (10, 20, 30)
+let values: SharedBuffer<I32> = SharedBuffer.from_array (10, 20, 30)
 let count: USize = SharedBuffer.length values
 let index: USize = 2
 let third = values[index]
 let second = SharedBuffer.get values 1
 ```
 
-`SharedBuffer T` is a garbage-collected, fixed-length sequence of `T`,
+`SharedBuffer<T>` is a garbage-collected, fixed-length sequence of `T`,
 declared as a sized opaque type with no constructor. It is
 not a dynamic array and is not equal to any `T ^ N`, and an array never
 converts to a `SharedBuffer` implicitly: the companion function
-`SharedBuffer.from_array: <N where Natural N> move (T ^ N) -> SharedBuffer T`
+`SharedBuffer.from_array: <N where Natural N> move (T ^ N) -> SharedBuffer<T>`
 performs the conversion explicitly by moving the array's elements into a new
 allocation, so `T` need not be `Copy`. An empty `()` becomes a length-0
 buffer, requiring an expected `SharedBuffer` type to infer its element type.
 The buffer owns its elements and drops each exactly once when it becomes
 unreachable.
 
-At runtime a `SharedBuffer T` is one pointer to a managed header holding the
+At runtime a `SharedBuffer<T>` is one pointer to a managed header holding the
 element count, a capacity equal to that count, and the elements. A
-`SharedBuffer T` is a copyable handle whose copies share that allocation, so
+`SharedBuffer<T>` is a copyable handle whose copies share that allocation, so
 it is shared-mutable: a write through one copy is visible through every other
 copy. `SharedBuffer.length` reports the number of elements. Where `Copy T`,
-`SharedBuffer.get: (SharedBuffer T; USize) -> Option T` returns a copy of an
+`SharedBuffer.get: (SharedBuffer<T>; USize) -> Option<T>` returns a copy of an
 element, or `None` when out of bounds, and `SharedBuffer.get_unchecked` returns
 it directly, trapping when out of bounds. `SharedBuffer.set` replaces an
 element through a `mut` handle binding, dropping the old value, and returns
 `Some ()`, or `None` (dropping the new value) for an out-of-bounds position;
 `SharedBuffer.set_unchecked` traps instead.
-`SharedBuffer.get_shared: <T> (SharedBuffer T; USize) -> Option (Shared T)` returns a
+`SharedBuffer.get_shared: <T> (SharedBuffer<T>; USize) -> Option<Shared<T>>` returns a
 reference to an element, or `None` when out of bounds, and
-`SharedBuffer.get_shared_unchecked: <T> (SharedBuffer T; USize) -> Shared T` borrows
+`SharedBuffer.get_shared_unchecked: <T> (SharedBuffer<T>; USize) -> Shared<T>` borrows
 an element by position, trapping when out of bounds; these give access to
 non-`Copy` elements. Literal and variable indexing perform runtime bounds
 checks through the standard library's `Index`/`MutateIndex` implementations.
 Where `Copy T`, the standard library also implements `IntoIterator`/`Iterator`
-for `SharedBuffer T` through `SharedBufferIter T`, so `for item in values`
+for `SharedBuffer<T>` through `SharedBufferIter<T>`, so `for item in values`
 yields owned copies and the handle stays usable, and iterable again, after a
-loop. Where `Eq T`, the standard library also implements `Eq (SharedBuffer T)`:
+loop. Where `Eq T`, the standard library also implements `Eq SharedBuffer<T>`:
 buffers of different lengths are unequal, and equal-length buffers are compared
-element by element. A `SharedBuffer T` is not a product: it cannot be spread
+element by element. A `SharedBuffer<T>` is not a product: it cannot be spread
 or destructured, and it cannot cross a foreign ABI.
 
-`Buffer T` is low-level, fixed-capacity contiguous storage with an initialized
+`Buffer<T>` is low-level, fixed-capacity contiguous storage with an initialized
 prefix. `Buffer.with_capacity` allocates space without constructing any `T`
 values, so it does not require `Default T`. Buffers are move-only owners of
 their allocation, which they release eagerly rather than leaving to the garbage
@@ -4534,20 +4532,20 @@ buffer clones every initialized element into an independent allocation while
 preserving the original capacity.
 
 `Buffer.push` appends while spare capacity remains, and `Buffer.pop` moves the
-last initialized element into an `Option T`. Both require a mutable buffer
+last initialized element into an `Option<T>`. Both require a mutable buffer
 argument. Pushing to a full buffer traps; growth belongs in higher-level
 containers such as `List`. Where `Copy T`, `Buffer.get` returns a copy of an
-initialized element as an `Option T`, or `None` for an out-of-bounds index, and
+initialized element as an `Option<T>`, or `None` for an out-of-bounds index, and
 `Buffer.get_unchecked` returns it directly and traps for an out-of-bounds
 index. `Buffer.set` replaces an element, dropping the old value, and returns
 `Some ()`, or `None` (dropping the new value) for an out-of-bounds index;
 `Buffer.set_unchecked` traps instead. Buffers hand out no references to their
 elements.
 
-`Buffer.from_array: <N where Natural N> move (T ^ N) -> Buffer T` moves the
+`Buffer.from_array: <N where Natural N> move (T ^ N) -> Buffer<T>` moves the
 elements of a fixed array into a new buffer whose capacity and length are both
 `N`; the buffer owns the moved elements. `Buffer.into_shared_buffer` consumes the
-buffer and returns a `SharedBuffer T` over a managed copy of its initialized
+buffer and returns a `SharedBuffer<T>` over a managed copy of its initialized
 prefix; the original allocation is released without dropping the moved
 elements. The consumed buffer cannot subsequently be used or shared again.
 The managed copy drops exactly its initialized elements when unreachable; a
@@ -4562,7 +4560,7 @@ are moved by one bulk copy. This is the primitive higher-level growable
 containers such as `List` use to move an initialized prefix into a larger
 allocation.
 
-`List T` is a growable array built on top of `Buffer T`. `List.new` and
+`List<T>` is a growable array built on top of `Buffer<T>`. `List.new` and
 `List.with_capacity` construct an empty list with no or a chosen initial
 capacity, and `List.length`/`List.capacity` report its current element count
 and storage size, exactly like the matching `Buffer` operations. `List.push`
@@ -4570,7 +4568,7 @@ appends an element and, unlike `Buffer.push`, never traps for lack of space:
 once the current capacity is exhausted it allocates a larger `Buffer`
 (doubling, with a minimum of four elements) and moves every existing element
 across with `Buffer.transfer` before appending. `List.pop` removes and
-returns the last element as an `Option T`, exactly like `Buffer.pop`.
+returns the last element as an `Option<T>`, exactly like `Buffer.pop`.
 
 `List.of` is a macro that builds a list from a fixed, comma-separated set of
 values in one expression — `List.of (1, 2, 3)` — inferring the element type
@@ -4580,7 +4578,7 @@ from the values the same way `List.new` followed by a sequence of
 namespace the same way ordinary `Type.method(...)` calls already resolve a
 function through it.
 
-Where `Copy T`, `List.get` returns an element by copy, wrapped in `Option T`
+Where `Copy T`, `List.get` returns an element by copy, wrapped in `Option<T>`
 so that an out-of-bounds index produces `None` instead of trapping, and
 `List.get_unchecked` is the trapping counterpart. `List.set` replaces an
 element, dropping the old value, and returns `Some ()` or `None` for an
@@ -4592,8 +4590,8 @@ source — and yields owned copies. Iteration requires `Copy T`, the same as
 `List.get`; clone the list with `Clone.clone` first when it must remain
 usable.
 
-`List.into_buffer: move List T => Buffer T` consumes the list and returns its
-backing buffer; move that buffer's elements into a `SharedBuffer T` with
+`List.into_buffer: move List<T> => Buffer<T>` consumes the list and returns its
+backing buffer; move that buffer's elements into a `SharedBuffer<T>` with
 `Buffer.into_shared_buffer`, as in
 `list |> List.into_buffer |> Buffer.into_shared_buffer`.
 
@@ -4619,7 +4617,7 @@ whole-value destructuring, and closure capture move a non-`Copy` value; using
 it afterward is an error. Argument passing moves a non-`Copy` value only into
 a `move` parameter; an ordinary parameter borrows it instead (see "Move and
 borrow parameters" above). Integers, `Bool`, `String`,
-`Shared T`, C pointers, functions, and products/sums/wrapper values made entirely
+`Shared<T>`, C pointers, functions, and products/sums/wrapper values made entirely
 from `Copy` fields are copied implicitly. The public prelude trait `Copy` can be
 used as a generic bound, but implementations are compiler-inferred and an
 explicit `impl Copy` is rejected. A custom `Drop` implementation makes its
@@ -4636,12 +4634,12 @@ trait Drop T {
     cleanup: T -> ()
 }
 
-type File = wrap I32
+type File wrap I32
 impl Drop File {
     cleanup = File descriptor => close descriptor
 }
 
-type Handle = wrap I32
+type Handle wrap I32
 impl !Copy Handle {}
 ```
 
@@ -4650,15 +4648,15 @@ unifies with that type and its conditional bounds hold under the unification,
 the same rule every other trait uses. Coherence rejects overlapping
 implementations, bound-aware, so at most one implementation applies to any
 type and selection needs no precedence. A `Drop` implementation's bounds may
-constrain only its own type parameters (`impl<T where Copy T> Drop (Box T)`);
-a bound on the target type itself (for example `where Copy (Box T)`) is
+constrain only its own type parameters (`impl<T where Copy T> Drop Box<T>`);
+a bound on the target type itself (for example `where Copy Box<T>`) is
 rejected. A type that still mentions type parameters and may have an
 applicable implementation is treated as not `Copy`, so a template that copies
 such a value is a move error even if some instantiation would qualify.
 
 ```staple
-type Box T = wrap (T)
-impl<T where Copy T> Drop (Box T) {
+type Box<T> wrap (T)
+impl<T where Copy T> Drop Box<T> {
     cleanup = Box value => ()
 }
 
@@ -4686,7 +4684,7 @@ A non-`Copy` type has no implicit `Clone`; implement it manually to allow
 explicit duplication:
 
 ```staple
-type Handle = wrap I32
+type Handle wrap I32
 impl !Copy Handle {}
 impl Clone Handle {
     clone = Handle descriptor => Handle descriptor
@@ -4723,23 +4721,23 @@ elements, until no such pointer remains.
 `CChar` and `CString` are public opaque types in `std.cinterop`.
 `RawPtr`, `RawMutPtr`, `RawOpaquePtr`, and `RawOpaqueMutPtr` are public opaque
 types in `std.ptr`. Source code must import them explicitly, for example with
-`use std.cinterop.*` and `use std.ptr.*`. `RawPtr T` is a non-owning, low-level
+`use std.cinterop.*` and `use std.ptr.*`. `RawPtr<T>` is a non-owning, low-level
 pointer type; the pointee is a compile-time argument with no runtime field.
 Raw pointers are `Copy` and do not manage allocation lifetime or validate their
 targets. They can also be used for C interop. There are no `*T` or `*const T`
-type forms. `RawMutPtr T` permits raw reads and writes, while `RawPtr T`
+type forms. `RawMutPtr<T>` permits raw reads and writes, while `RawPtr<T>`
 permits raw reads. Their opaque counterparts have no pointee type and must be
 converted to typed pointers before accessing memory.
 
 `CString` is an owned, move-only pointer to NUL-terminated bytes and drops with
-`free`. It is compatible with `RawPtr CChar`, but an arbitrary
-`RawPtr CChar` is not assumed to be NUL terminated. Passing a `CString` to a
+`free`. It is compatible with `RawPtr<CChar>`, but an arbitrary
+`RawPtr<CChar>` is not assumed to be NUL terminated. Passing a `CString` to a
 C function creates a call-scoped view rather than transferring ownership, and
 C declarations may not return `CString`. `CString.to_string` takes its argument
 as `move CString`: it validates and copies UTF-8 into a `String`, returning
-`Result String InvalidUtf8`. It frees the C string on success and failure, so
+`Result<String, InvalidUtf8>`. It frees the C string on success and failure, so
 the argument cannot be used afterward. `CString.from_string` returns
-`Result CString InteriorNul`, rejecting embedded NUL bytes before allocating an
+`Result<CString, InteriorNul>`, rejecting embedded NUL bytes before allocating an
 owned, terminated copy. `CString.to_string_unchecked` and
 `CString.from_string_unchecked` perform the same copies without validation;
 their callers must ensure valid UTF-8 and absence of embedded NULs, respectively.
@@ -4755,9 +4753,9 @@ The currently supported type syntax also includes type application, product
 types, variadic markers in external function signatures, and function types:
 
 ```staple
-RawPtr CChar
+RawPtr<CChar>
 (I32, String)
-(RawPtr CChar, ...) -> I32
+(RawPtr<CChar>, ...) -> I32
 ```
 
 `...` denotes the variadic portion of an external function parameter product. Its
@@ -4769,7 +4767,7 @@ Arithmetic is homogeneous: both operands and the result have the same type.
 Signed integer division uses signed semantics, while unsigned integer division
 uses unsigned semantics. All integer types implement `Eq` for `==` and `!=`, and
 `PartialOrd` and `Ord` for ordering. `PartialOrd.partial_cmp` returns
-`Option Ordering`; its default `lt`, `le`, `gt`, and `ge` methods back `<`, `<=`,
+`Option<Ordering>`; its default `lt`, `le`, `gt`, and `ge` methods back `<`, `<=`,
 `>`, and `>=`. `Ord.cmp` returns `Ordering.Less`, `Ordering.Equal`, or
 `Ordering.Greater` and requires both `Eq` and `PartialOrd`. Integer ordering uses signed semantics for signed types
 and unsigned semantics for unsigned types.
@@ -4790,7 +4788,7 @@ Staple does not provide implicit numeric conversions.
 
 Explicit conversions use `Convert From To` and `TryConvert From To` from
 `std.convert`, also available through the prelude. `Convert.convert` consumes
-its input and returns `To`. `TryConvert.try_convert` returns `Result To Error`,
+its input and returns `To`. `TryConvert.try_convert` returns `Result<To, Error>`,
 where `Error` is an associated type. Every type converts to itself, and every
 `Convert` implementation also implements `TryConvert` with `Error = Never`.
 
@@ -4816,18 +4814,18 @@ and underflow reported by the parser return `OutOfRange`. Boolean parsing
 accepts `True`, `true`, `False`, and `false`, otherwise returning `std.boolean.InvalidBool`.
 
 `String` has no `Convert` implementation to a byte sequence; `String.to_bytes`
-is the explicit copy into a `List U8`. Arrays and buffers have no
+is the explicit copy into a `List<U8>`. Arrays and buffers have no
 `Convert` implementations; use `SharedBuffer.from_array`, `Buffer.from_array`,
 and `Buffer.into_shared_buffer` explicitly. Checked byte
-list-to-string conversion is `TryConvert (List U8) String` (or
+list-to-string conversion is `TryConvert List<U8> String` (or
 `String.from_utf8`), which consumes the list and returns
-`Result String std.string.InvalidUtf8`. `String.from_utf8_unchecked` constructs
+`Result<String, std.string.InvalidUtf8>`. `String.from_utf8_unchecked` constructs
 a string without validation when the caller knows the bytes are valid UTF-8.
 Checked `String` to `CString` conversion rejects embedded NULs with
 `std.cinterop.InteriorNul`; checked `CString` to `String` validates UTF-8 and frees the
 consumed C string on both success and failure.
 
-`RawPtr T` and `USize` convert in both directions. An unchanged round trip
+`RawPtr<T>` and `USize` convert in both directions. An unchanged round trip
 preserves the pointer. Integer-to-pointer conversion does not validate the
 address, alignment, allocation lifetime, or whether dereferencing is permitted.
 Address arithmetic follows the existing `USize` arithmetic rules.
@@ -4841,7 +4839,7 @@ transfer ownership.
 
 `RawOpaquePtr` is a non-owning, `Copy` low-level pointer with no pointee type,
 compatible with C `void *` in parameters and returns. It implements `Convert`
-to and from every `RawPtr T`, and to and from `USize`. These explicit
+to and from every `RawPtr<T>`, and to and from `USize`. These explicit
 conversions preserve the pointer, including null, without allocation,
 validation, or ownership transfer. A typed result does not establish that the
 pointer is valid or aligned for its pointee. The blanket `TryConvert`
@@ -4849,19 +4847,19 @@ implementation supplies `Error = Never` for all these conversions.
 
 ```staple
 let opaque = pointer as RawOpaquePtr
-let restored = opaque as RawPtr I32
-let inferred: RawPtr I32 = opaque as _
+let restored = opaque as RawPtr<I32>
+let inferred: RawPtr<I32> = opaque as _
 let address = opaque as USize
 ```
 
 
-`RawMutPtr T` and `RawOpaqueMutPtr` also convert to and from `USize`.
+`RawMutPtr<T>` and `RawOpaqueMutPtr` also convert to and from `USize`.
 All four pointer families explicitly convert to one another, including conversions
-that recover mutability. Direct conversions between `RawPtr T` and `RawMutPtr T`
+that recover mutability. Direct conversions between `RawPtr<T>` and `RawMutPtr<T>`
 preserve `T`; reinterpret a pointee through an opaque pointer. These conversions
 do not validate memory or grant ownership, and there are no implicit pointer
 conversions. The existing call-scoped `CString` view remains limited to
-`RawPtr CChar`.
+`RawPtr<CChar>`.
 
 All four pointer types provide `null ()` and implement `Eq` by address, without
 requiring `Eq` or `Copy` on the pointee. Comparing different pointer types requires
@@ -4876,11 +4874,11 @@ memory with a live allocation; loads require an initialized valid value and
 stores require writable memory. Opaque pointers provide neither operation.
 
 ```staple
-let null: RawMutPtr I32 = RawMutPtr.null ()
-let writable: RawMutPtr I32 = pointer as RawMutPtr I32
+let null: RawMutPtr<I32> = RawMutPtr.null ()
+let writable: RawMutPtr<I32> = pointer as RawMutPtr<I32>
 RawMutPtr.store writable 42
-let value = RawPtr.load (writable as RawPtr I32)
-let same = writable == (pointer as RawMutPtr I32)
+let value = RawPtr.load (writable as RawPtr<I32>)
+let same = writable == (pointer as RawMutPtr<I32>)
 ```
 
 
@@ -4899,20 +4897,43 @@ let total = (wide + 1) as F64
 ### Type declarations
 
 staple distinguishes transparent aliases, wrapper type definitions, and
-opaque type declarations.
+opaque type declarations. A declaration is the `type` keyword, a name,
+optional angle-bracketed compile-time parameters, and an optional body whose
+marker (`opaque`, `wrap`, `from`, or `=`) says what kind of type it declares:
+
+```staple
+// Singleton
+pub type Foo
+
+// Opaque
+pub type Foo opaque
+
+// Implicitly introduced nominal type
+pub type Foo<T> from pub T
+
+// Explicitly constructed nominal type
+pub type Foo<T> wrap pub T
+
+// Transparent alias
+pub type Foo<T> = T
+```
+
+The representation visibility of `wrap` and `from` bodies is written after the
+marker, immediately before the underlying type. Type arguments are written the
+same way they are declared: `Foo<A, B>`.
 
 An opaque type has no source-level representation and uses the explicit
 `opaque` marker:
 
 ```staple
-pub type Handle = opaque
+pub type Handle opaque
 ```
 
 An opaque type may also accept compile-time arguments when its body is the
 `opaque` marker:
 
 ```staple
-pub type RawPtr Pointee = opaque
+pub type RawPtr<Pointee> opaque
 ```
 
 Arguments are part of nominal identity, so two applications with different
@@ -4927,7 +4948,7 @@ compiler-supplied sized representations. Compiler-known sized opaque types such 
 sized opaque types are `Copy` by default. The stdlib explicitly declares
 `impl !Copy` for opaque types that own resources or must be consumed once.
 Negative implementations may quantify effect parameters, for example
-`impl<T, effect E> !Copy (Coroutine{E} T) {}` covers every deferred effect row.
+`impl<T, effect E> !Copy Coroutine{E}<T> {}` covers every deferred effect row.
 
 #### Singleton types
 
@@ -4979,19 +5000,19 @@ pub use Bool.*
 ```
 
 This declares the singletons `Bool.True` and `Bool.False` and
-`pub type Bool = pub from Bool.True | Bool.False`. `True` and `False` are the
+`pub type Bool from pub Bool.True | Bool.False`. `True` and `False` are the
 two values of `Bool`: each is introduced implicitly wherever a `Bool` is
 expected, and patterns such as `True` see through `Bool` to its
 representation. `Bool` has no compiler-specific type identity.
 
-#### `type`
+#### `wrap`
 
-`type` creates a nominal wrapper type
+A body beginning with `wrap` creates a nominal wrapper type
 with the same runtime representation as its underlying type:
 
 ```staple
-type UserId = wrap I32
-type OrderId = wrap I32
+type UserId wrap I32
+type OrderId wrap I32
 ```
 
 `UserId` and `OrderId` are wrapper types over `I32`. The three types are not
@@ -5012,7 +5033,7 @@ A represented nominal value can expose one layer of its inner representation
 with `.*` when that representation is visible in the current scope:
 
 ```staple
-type User = wrap (name: String, age: I32)
+type User wrap (name: String, age: I32)
 let user = User (name: "Ada", age: 42)
 let inner = user.*
 inner.name
@@ -5030,11 +5051,11 @@ its own `Index` and `MutateIndex` implementations, so `value[index]` on a
 wrapper without one is an error. Index the representation explicitly with
 `value.*[index]`, or implement the traits to make the wrapper indexable.
 
-`= pub wrap T` exposes the representation and generated constructor as part of
+`wrap pub T` exposes the representation and generated constructor as part of
 the module interface:
 
 ```staple
-pub type Box T = pub wrap (value: T)
+pub type Box<T> wrap pub (value: T)
 ```
 
 Importers may construct `Box` values and use `Box pattern` to destructure them,
@@ -5047,11 +5068,11 @@ Packages add a middle visibility level between private and public:
 
 ```staple
 pub(package) def internal_helper = 42
-pub type Shared = pub(package) wrap (value: I32)
+pub type Shared wrap pub(package) (value: I32)
 ```
 
 `pub(package)` names are available from any module with the same canonical
-package identity. `= pub(package) wrap T` keeps representation access inside
+package identity. `wrap pub(package) T` keeps representation access inside
 that package while the type name stays public. A package-visible
 re-export uses `pub(package) use`; ordinary `pub use` cannot promote a
 package-visible declaration into an external interface. A `pub use module.*`
@@ -5064,13 +5085,16 @@ only public types, while package representations may also reference
 package-visible types.
 
 Represented types, aliases, and explicitly opaque declarations may introduce
-compile-time parameters directly after the type name, juxtaposed rather than
-bracketed as with generic functions:
+compile-time parameters in angle brackets directly after the type name, as
+generic functions do. Each parameter is a plain name, optionally with a default
+(see [Default type parameters](#default-type-parameters)); product parameters
+such as `(A, B)` are not allowed, so declare each parameter separately. A
+`where` clause goes inside the brackets, after the parameters:
 
 ```staple
-type Box T = wrap (value: T)
-type HashMap (K, V) = wrap (key: K, value: V)
-type Pair (A, B) = alias (A, B)
+type Box<T> wrap (value: T)
+type HashMap<K, V> wrap (key: K, value: V)
+type Pair<A, B> = (A, B)
 ```
 
 They may also bind one effect-row parameter in braces immediately after the
@@ -5078,8 +5102,8 @@ type name. The effect parameter precedes any ordinary compile-time parameters
 and may be used in effect sets within the representation:
 
 ```staple
-type Callback{E} = alias () ->{E} ()
-type Handler{E} T = alias T ->{E} ()
+type Callback{E} = () ->{E} ()
+type Handler{E}<T> = T ->{E} ()
 ```
 
 Declaration braces must contain exactly one new effect-variable name. They are
@@ -5095,51 +5119,55 @@ arrow's effect set:
 
 ```staple
 Callback{IO}
-Handler{state, IO} I32
+Handler{state, IO}<I32>
 
-def adapt: <effect F> Callback{F} -> Handler{F, IO} I32
+def adapt: <effect F> Callback{F} -> Handler{F, IO}<I32>
 ```
 
 Omitting a type's effect argument is always equivalent to supplying `{}`.
 This default is applied before ordinary type arguments, so `Callback` means
-`Callback{}` and `Handler I32` means `Handler{} I32`.
+`Callback{}` and `Handler<I32>` means `Handler{}<I32>`.
 
-Type application uses juxtaposition. Each juxtaposed binder consumes one
-successive argument, while a product binder consumes one product type argument:
+Type application uses angle brackets, with the arguments separated by commas
+and each one consuming one parameter in order. A product type is an ordinary
+argument, written with its own parentheses:
 
 ```staple
-// Given: type Entry K V = wrap (key: K, value: V)
-Entry String I32
+// Given: type Entry<K, V> wrap (key: K, value: V)
+Entry<String, I32>
 
-// Given: type HashMap (K, V) = wrap (key: K, value: V)
-HashMap (String, I32)
+// Given: type Cell<T> wrap (value: T)
+Cell<(String, I32)>
 ```
 
-Juxtaposed binders are not curried. `Entry String` is not a type constructor
+Type constructors are not curried. `Entry<String>` is not a type constructor
 awaiting `V`; every argument must be supplied in the same application.
+Traits keep their juxtaposed argument lists (`Add Left Right`), so a generic
+type used as a trait argument is written without surrounding parentheses, as in
+`Iterator Map<S, Out>`.
 
 A type annotation must apply every ordinary compile-time parameter, unless the
 omitted trailing parameters all have defaults (see [Default type
 parameters](#default-type-parameters)). An omitted effect-row parameter uses
 the empty set as described above. Applying a non-parameterized type, supplying
 the wrong product shape, or leaving a type partially applied is an error. This
-applies to a self-reference too: a recursive `type Node T` must still write its
-own ordinary arguments, as `Node T` or `Node I32`, never a bare `Node`.
+applies to a self-reference too: a recursive `type Node<T>` must still write its
+own ordinary arguments, as `Node<T>` or `Node<I32>`, never a bare `Node`.
 
 A represented type may refer to itself, directly or mutually, only where the
 reference passes through an out-of-line indirection — `Shared`, `Unique`,
 `SharedBuffer`, `Buffer`, or a `Syntax` value — so that every instance has a
 finite layout. A representation that would contain itself by value
-(`type Loop = wrap (head: I32, tail: Loop)`) is rejected as a cyclic
+(`type Loop wrap (head: I32, tail: Loop)`) is rejected as a cyclic
 definition; routing the back-edge through `Shared`
-(`type Loop = wrap (head: I32, tail: Option (Shared Loop))`) or a buffer
-(`type Tree = wrap (value: I32, children: Buffer Tree)`) is well-founded and
+(`type Loop wrap (head: I32, tail: Option<Shared<Loop>>)`) or a buffer
+(`type Tree wrap (value: I32, children: Buffer<Tree>)`) is well-founded and
 accepted. A represented type whose parameters all occur in its
 representation only behind such an indirection guards a back-edge the same
-way, so `type Tree = wrap (value: I32, children: List Tree)` is accepted
-because `List T` wraps `Buffer T`. A type that stores a parameter inline,
-such as `type Pair T = wrap (first: T, second: I32)`, does not:
-`type Loop = wrap (pair: Pair Loop)` is rejected as cyclic.
+way, so `type Tree wrap (value: I32, children: List<Tree>)` is accepted
+because `List<T>` wraps `Buffer<T>`. A type that stores a parameter inline,
+such as `type Pair<T> wrap (first: T, second: I32)`, does not:
+`type Loop wrap (pair: Pair<Loop>)` is rejected as cyclic.
 
 Product types and values may have a trailing comma.
 
@@ -5150,7 +5178,7 @@ A body beginning with `from` declares a represented nominal type, exactly as
 representation:
 
 ```staple
-type Meters = from F64
+type Meters from F64
 
 let distance: Meters = 1.5  // implicitly `Meters 1.5`
 let raw = 1.5               // still `F64`
@@ -5173,15 +5201,15 @@ and only then a `from` alternative. If more than one `from` alternative accepts
 the value, the expression is ambiguous and rejected:
 
 ```staple
-type A = from B
+type A from B
 
 let exact: A | B = b    // selects `B`, not `A`
 ```
 
 At most one `from` conversion is inserted for a mismatch. Given
-`type A = from B` and `type C = from A`, both `B -> A` and `A -> C` are
+`type A from B` and `type C from A`, both `B -> A` and `A -> C` are
 implicit, but `B -> C` is not. Conversions also do not lift through other
-types: `Shared B`, `(B, B)`, `List B`, and `() -> B` do not convert to the
+types: `Shared<B>`, `(B, B)`, `List<B>`, and `() -> B` do not convert to the
 corresponding `A` forms. A literal written directly in such a position is
 still checked element by element, so `let pair: (A, A) = (b1, b2)` converts
 each element.
@@ -5199,10 +5227,10 @@ representation visibility:
 
 | Declaration | External `Bar -> Foo` | External representation access |
 | --- | :---: | :---: |
-| `type Foo = from Bar` | no, `Foo` is private | no |
-| `pub type Foo = from Bar` | yes | no |
-| `pub type Foo = pub(package) from Bar` | yes | package only |
-| `pub type Foo = pub from Bar` | yes | yes |
+| `type Foo from Bar` | no, `Foo` is private | no |
+| `pub type Foo from Bar` | yes | no |
+| `pub type Foo from pub(package) Bar` | yes | package only |
+| `pub type Foo from pub Bar` | yes | yes |
 
 Because a public conversion names its source, every named type directly
 referenced by the source of a public (or package-visible) `from` type must be
@@ -5219,13 +5247,13 @@ and propagating bindings (`let ?Some(value) = option`) see through the same
 way. Exhaustiveness is checked against the representation, and the
 representation must be visible where the pattern is written.
 
-#### `alias`
+#### Aliases
 
-A body beginning with `alias` gives another name to an existing type without
+A body beginning with `=` gives another name to an existing type without
 creating a new type. The alias and its underlying type are interchangeable:
 
 ```staple
-type Person = alias (
+type Person = (
     name: String,
     age: I32,
 )
@@ -5243,7 +5271,7 @@ A sum type lists the variants which a value may contain:
 Staple’s sum types are open: their alternatives are ordinary types rather than cases owned by the sum.
 
 ```staple
-Ok Tree | IOError | ParseError
+Ok<Tree> | IOError | ParseError
 ```
 
 Variants do not share a declaration. Modules may define represented nominal
@@ -5251,26 +5279,26 @@ types independently and combine them wherever a type is accepted. `Ok` and
 `Result` are public types from `std.result`, also available through the prelude:
 
 ```staple
-pub type Ok T = pub from T
-pub type Result T E = alias Ok T | E
+pub type Ok<T> from pub T
+pub type Result<T, E> = Ok<T> | E
 ```
 
-`Result T E` is therefore exactly the sum `Ok T | E`, with the error case
+`Result<T, E>` is therefore exactly the sum `Ok<T> | E`, with the error case
 unwrapped. Because `Ok` is a [`from`](#from) type, a success value converts
 implicitly wherever a `Result` is expected:
 
 ```staple
-def parse = (flag: Bool) => Result I32 String :: when {
+def parse = (flag: Bool) => Result<I32, String> :: when {
     flag => 42,       // implicitly `Ok 42`
     else => "bad",    // the `String` error
 }
 ```
 
 An exact alternative still wins over the `from` conversion, so when the error
-type overlaps the success type, as in `Result String String`, a bare `String`
+type overlaps the success type, as in `Result<String, String>`, a bare `String`
 is the error and success must be written `Ok value`. Inside a generic body
 the alternative is chosen once against the type parameters: in
-`<T, E> value: T => Result T E :: value`, `value` is always `Ok`, even when
+`<T, E> value: T => Result<T, E> :: value`, `value` is always `Ok`, even when
 `E` is instantiated to `T`.
 
 Every alternative must be a sized value type. Primitive, product,
@@ -5289,12 +5317,12 @@ Sums are unordered, flattened, and duplicate-free. Consequently `A | B` and
 Because `Never` has no values, it is removed when normalizing a sum with another
 alternative, so `Never | A` is `A`.
 Variant identity is the complete type, so different applications of one
-constructor, such as `Ok I32 | Ok String`, are distinct alternatives. A nominal
+constructor, such as `Ok<I32> | Ok<String>`, are distinct alternatives. A nominal
 pattern must select exactly one alternative; use a typed binding to disambiguate
 repeated nominal constructors.
 
 Type application binds more tightly than `|`, and `|` binds more tightly than
-the function arrow. Thus `String -> Ok Tree | IOError` is a function returning
+the function arrow. Thus `String -> Ok<Tree> | IOError` is a function returning
 the sum.
 
 Values of any alternative type are injected implicitly when a sum is expected.
@@ -5319,7 +5347,7 @@ binding it. An untyped binding or `_` matches the whole sum.
 When a generic signature is matched against a sum, a bare compile-time
 parameter alternative stands for every alternative the rest of the sum leaves
 unmatched: none (`Never`), one, or a sum of several. Passing an
-`Ok I32 | String | Bool` to `<T, E> Result T E -> T` infers `T = I32` and
+`Ok<I32> | String | Bool` to `<T, E> Result<T, E> -> T` infers `T = I32` and
 `E = String | Bool`. With two or more bare parameter alternatives, each must
 match a single alternative or `Never`.
 
@@ -5348,7 +5376,7 @@ representation-visibility rules.
 
 When the function result is omitted, the compiler joins its trailing value,
 reachable explicit returns, and every propagated alternative. The example
-therefore infers `Ok Tree | IOError | ParseError`. With an explicit binding
+therefore infers `Ok<Tree> | IOError | ParseError`. With an explicit binding
 annotation or type-ascription constraint on the body, every normal and propagated
 result must be contained in that type.
 
@@ -5360,38 +5388,39 @@ nominal type over a sum of variants:
 
 ```staple
 pub typegroup Pattern {
-    Literal = pub wrap String,
+    Literal wrap pub String,
     Wildcard,
 }
 ```
 
-Generic parameters are written between the group name and its body, using the
-same juxtaposed syntax as generic type declarations. Product parameter patterns
-and multiple parameter atoms may be mixed freely:
+Generic parameters are macro arguments written between the group name and its
+body, each one a type parameter name; the macro declares the group and its
+variants with them as ordinary `<...>` type parameters. A product such as
+`(B, C)` is not a type parameter pattern, so each parameter is named separately:
 
 ```staple
 pub typegroup Exchange T E {
-    Request = pub wrap T,
-    Response = pub wrap E,
+    Request wrap pub T,
+    Response wrap pub E,
 }
 
-pub typegroup Mixed A (B, C) D {
+pub typegroup Mixed A B C D {
     Empty,
-    Value = pub wrap (A, B, C, D),
+    Value wrap pub (A, B, C, D),
 }
 ```
 
 Each entry becomes a public declaration in the group's companion module. A bare
-name is a singleton variant, and `= wrap T`, `= pub wrap T`,
-`= pub(package) wrap T`, `= from T` (with the same visibility forms), and
-`= alias T` follow the ordinary type declaration body grammar. `= opaque`
+name is a singleton variant, and `wrap T`, `wrap pub T`,
+`wrap pub(package) T`, `from T` (with the same visibility forms), and
+`= T` follow the ordinary type declaration body grammar. `opaque`
 entries are rejected, because an opaque type cannot be a sum alternative.
 Representation visibility is written explicitly on each constructor variant.
 
 The group itself is a [`from`](#from) type over the sum of its variants, whose
 representation is as visible as the group:
 `pub typegroup Pattern { ... }` declares
-`pub type Pattern = pub from Pattern.Literal | Pattern.Wildcard`. A variant
+`pub type Pattern from pub Pattern.Literal | Pattern.Wildcard`. A variant
 value is therefore introduced implicitly wherever the group is expected, and
 patterns on a group value see through to its variants:
 
@@ -5413,7 +5442,7 @@ whatever remains of a failure:
 pub trait Try T {
     type Output
     type Residual
-    branch: move T -> Ok Output | Residual
+    branch: move T -> Ok<Output> | Residual
 }
 
 companion<T where Try T> T {
@@ -5425,7 +5454,7 @@ companion<T where Try T> T {
 ```
 
 `branch` returns the success as `Ok` and the failure as its residual, so its
-result is a `Result Output Residual` that `match`, `let ?` and the postfix
+result is a `Result<Output, Residual>` that `match`, `let ?` and the postfix
 [`?` operator](#propagating-with-) take apart. `unwrap` and `expect` are
 [blanket companion](#blanket-companions) members defined from `branch`, so an
 implementation cannot replace them. They return the success value and otherwise
@@ -5436,11 +5465,11 @@ let port = read_port () |> expect "reading the port"
 let config = Result.expect (load ()) "loading config"
 ```
 
-The standard library implements `Try (Result T E)`, with `Output = T` and
-`Residual = E`, and `Try (Option T)`, with `Output = T` and `Residual = None`.
-Because `Result T E` is the sum `Ok T | E`, the first implementation covers
-every sum with exactly one `Ok` alternative: `Ok I32` (`E = Never`),
-`Ok I32 | String`, and `Ok I32 | String | Bool` (`E = String | Bool`) all
+The standard library implements `Try Result<T, E>`, with `Output = T` and
+`Residual = E`, and `Try Option<T>`, with `Output = T` and `Residual = None`.
+Because `Result<T, E>` is the sum `Ok<T> | E`, the first implementation covers
+every sum with exactly one `Ok` alternative: `Ok<I32>` (`E = Never`),
+`Ok<I32> | String`, and `Ok<I32> | String | Bool` (`E = String | Bool`) all
 implement `Try`. A sum with two `Ok` alternatives does not, because its
 success type would be ambiguous.
 
@@ -5467,14 +5496,14 @@ def load = (path: String) => {
 }
 ```
 
-Because `Result T E` is the sum `Ok T | E` and `Option T` is `None | Some T`, a
+Because `Result<T, E>` is the sum `Ok<T> | E` and `Option<T>` is `None | Some<T>`, a
 residual is returned unchanged and widens into the function's result type like
 a [`let ?` propagation](#propagating-bindings) does. With no declared result,
 the compiler joins the trailing value with every residual; `load` above infers
-`Ok Tree | IOError | ParseError`. `Option` and `Result` can share a function,
-which then returns `Ok T | None | E`. With a declared result, every residual
+`Ok<Tree> | IOError | ParseError`. `Option` and `Result` can share a function,
+which then returns `Ok<T> | None | E`. With a declared result, every residual
 must be contained in it. A `Try` type whose `Residual` is `Never`, such as
-`Ok I32`, adds nothing. `?` is only allowed inside a function and is not
+`Ok<I32>`, adds nothing. `?` is only allowed inside a function and is not
 available during compile-time macro evaluation.
 
 `?` ends the application on its left: `f a b ?` is `(f a b) ?`, and so is a
@@ -5496,7 +5525,7 @@ use std.cinterop.*
 use std.ptr.*
 
 extern "c" {
-    printf: (RawPtr CChar, ...) -> I32
+    printf: (RawPtr<CChar>, ...) -> I32
 }
 ```
 

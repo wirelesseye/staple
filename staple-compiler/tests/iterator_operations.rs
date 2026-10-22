@@ -232,14 +232,14 @@ fn collect_rejects_targets_that_cannot_hold_the_items() {
         concat!(
             "use std.list.List\n",
             "def run = () => {\n",
-            "    let wrong = (1 .. 4) |> collect.<_, List String, _>\n",
+            "    let wrong = (1 .. 4) |> collect.<_, List<String>, _>\n",
             "    ()\n",
             "}\n",
         ),
         "a target for a different item type is rejected",
     );
     assert!(
-        errors.iter().any(|error| error.contains("(List String, I32)")),
+        errors.iter().any(|error| error.contains("(List<String>, I32)")),
         "{errors:?}"
     );
 }
@@ -267,14 +267,14 @@ fn generic_code_must_state_the_item_bounds_an_operation_needs() {
     let errors = errors_of(
         concat!(
             "use std.list.List\n",
-            "def gather = <Iter where Iterator Iter> move iter: Iter => List I32 :: iter |> collect\n",
+            "def gather = <Iter where Iterator Iter> move iter: Iter => List<I32> :: iter |> collect\n",
         ),
         "the item type is unknown, so `List I32` cannot be proven",
     );
     assert!(
         errors
             .iter()
-            .any(|error| error.contains("(List I32, Iterator.Item)")),
+            .any(|error| error.contains("(List<I32>, Iterator.Item)")),
         "{errors:?}"
     );
     let errors = errors_of(
@@ -297,7 +297,7 @@ fn generic_and_multi_item_targets_collect() {
         "use std.list.List\n",
         "use std.ops.(Add)\n",
         "use std.default.(Default)\n",
-        "type Word = wrap String\n",
+        "type Word wrap String\n",
         "impl FromIterator String Word {\n",
         "    insert = (move text; move word) => {\n",
         "        let Word inner = word\n",
@@ -305,7 +305,7 @@ fn generic_and_multi_item_targets_collect() {
         "    }\n",
         "}\n",
         "def integers = <Iter where Iterator Iter, Iterator.Item Iter == I32>\n",
-        "    move iter: Iter => List I32 :: iter |> collect\n",
+        "    move iter: Iter => List<I32> :: iter |> collect\n",
         "def total = <Iter where Iterator Iter, Add (Iterator.Item Iter), Default (Iterator.Item Iter)>\n",
         "    move iter: Iter => Iterator.Item Iter :: iter |> sum\n",
         "def gather = <Iter, C where Iterator Iter, Default C, FromIterator C (Iterator.Item Iter)>\n",

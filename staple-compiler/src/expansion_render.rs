@@ -210,57 +210,59 @@ fn render_type_declaration(declaration: &staple_syntax::TypeDeclaration) -> Stri
     } else {
         parameters = declaration.type_parameters.iter();
     }
-    for parameter in parameters {
-        out.push(' ');
-        if let Some(default) = declaration
-            .default_bounds
-            .iter()
-            .find(|bound| bound.parameter.name == *parameter.names().first().unwrap_or(&""))
-        {
-            out.push('(');
-            out.push_str(&render_type_parameter(parameter));
-            out.push_str(" = ");
-            out.push_str(&default.default.to_string());
-            out.push(')');
-        } else {
-            out.push_str(&render_type_parameter(parameter));
-        }
-    }
+    let parameters = parameters.collect::<Vec<_>>();
     let constraints = render_constraints(
         &declaration.sized_relaxations,
         &declaration.trait_bounds,
         &declaration.subtype_bounds,
         &declaration.equality_bounds,
     );
-    if !constraints.is_empty() {
-        out.push_str(" where ");
-        out.push_str(&constraints);
+    if !parameters.is_empty() {
+        out.push('<');
+        for (index, parameter) in parameters.into_iter().enumerate() {
+            if index > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&render_type_parameter(parameter));
+            if let Some(default) = declaration
+                .default_bounds
+                .iter()
+                .find(|bound| bound.parameter.name == *parameter.names().first().unwrap_or(&""))
+            {
+                out.push_str(" = ");
+                out.push_str(&default.default.to_string());
+            }
+        }
+        if !constraints.is_empty() {
+            out.push_str(" where ");
+            out.push_str(&constraints);
+        }
+        out.push('>');
     }
     match declaration.kind() {
         staple_syntax::TypeDeclarationKind::Alias => {
             if let Some(underlying) = declaration.underlying() {
-                out.push_str(" = alias ");
+                out.push_str(" = ");
                 out.push_str(&underlying.to_string());
             }
         }
         kind @ (staple_syntax::TypeDeclarationKind::Wrapper
         | staple_syntax::TypeDeclarationKind::From) => {
             if let Some(underlying) = declaration.underlying() {
-                out.push_str(" = ");
+                out.push_str(if kind == staple_syntax::TypeDeclarationKind::From {
+                    " from "
+                } else {
+                    " wrap "
+                });
                 out.push_str(match declaration.representation_visibility() {
                     Visibility::Public => "pub ",
                     Visibility::Package => "pub(package) ",
                     Visibility::Private => "",
                 });
-                out.push_str(if kind == staple_syntax::TypeDeclarationKind::From {
-                    "from "
-                } else {
-                    "wrap "
-                });
                 out.push_str(&underlying.to_string());
             }
         }
-        staple_syntax::TypeDeclarationKind::Opaque => out.push_str(" = opaque"),
+        staple_syntax::TypeDeclarationKind::Opaque => out.push_str(" opaque"),
         staple_syntax::TypeDeclarationKind::Singleton => {}
     }
     out

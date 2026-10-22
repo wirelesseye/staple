@@ -289,7 +289,7 @@ pub enum TypeDeclarationKind {
     Alias,
     Wrapper,
     /// A wrapper whose representation converts implicitly into the type
-    /// wherever the type is expected: `type A = from B`.
+    /// wherever the type is expected: `type A from B`.
     From,
     Singleton,
     Opaque,

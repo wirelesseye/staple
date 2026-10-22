@@ -3481,7 +3481,7 @@ mod tests {
     #[test]
     fn artifact_requests_carry_family_matching_plans() {
         let (_, program) = lower(concat!(
-            "type Point = wrap (I32, I32)\n",
+            "type Point wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "let p = (1, 2)\n",
             "let text = \"${p:?}\"\n",
@@ -3521,7 +3521,7 @@ mod tests {
     #[test]
     fn plan_identity_and_edge_kind_corruption_is_diagnosed() {
         let (_, mut program) = lower(concat!(
-            "type Point = wrap (I32, I32)\n",
+            "type Point wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "let p = (1, 2)\n",
             "let text = \"${p:?}\"\n",
@@ -3599,7 +3599,7 @@ mod tests {
     #[test]
     fn structural_methods_and_constructor_adapters_are_recorded() {
         let (_, program) = lower(concat!(
-            "type Point = wrap (I32, I32)\n",
+            "type Point wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "let p = (1, 2)\n",
             "let text = \"${p:?}\"\n",
@@ -3625,8 +3625,8 @@ mod tests {
     fn coroutine_body_thunks_stay_demand_driven() {
         let (_, program) = lower(concat!(
             "use std.coroutine.*\n",
-            "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
-            "def unused_task: <T where Copy T> T -> Coroutine{} T = <T where Copy T> value => coro { value }\n",
+            "def task: () -> Coroutine{}<I32> = () => coro { 1 }\n",
+            "def unused_task: <T where Copy T> T -> Coroutine{}<T> = <T where Copy T> value => coro { value }\n",
             "let created = task ()\n",
         ));
         let coroutine_instances = program
@@ -3715,7 +3715,7 @@ mod tests {
             "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "def forward: <T where Copy T> T -> T = <T where Copy T> value => identity value\n",
             "let first: I32 = forward 1\n",
-            "type Point = wrap (I32, I32)\n",
+            "type Point wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "let p = (1, 2)\n",
             "let text = \"${p:?}\"\n",
@@ -3924,8 +3924,8 @@ mod tests {
     fn dynamic_boundaries_reabstract_function_results() {
         let (text, name) = dynamic_test_module_with_boundary(
             concat!(
-                "type Range T = wrap (current: T, end: T)\n",
-                "def range: <T where Copy T> T -> T -> Range T = <T where Copy T> start => end => Range (current: start, end: end)\n",
+                "type Range<T> wrap (current: T, end: T)\n",
+                "def range: <T where Copy T> T -> T -> Range<T> = <T where Copy T> start => end => Range (current: start, end: end)\n",
                 "def concrete: I32 -> I32 = x => (range x 3).end\n",
                 "let result = concrete 42\n",
             ),
@@ -4602,7 +4602,7 @@ mod tests {
     #[test]
     fn dynamic_shared_values_preserve_payload_and_own_their_descriptor() {
         let (text, name) = dynamic_test_module(
-            "use std.shared.(Shared)\ndef make: <T where Sized T> move T -> Shared T = <T where Sized T> move value => Shared value\nlet reference = make 42\n",
+            "use std.shared.(Shared)\ndef make: <T where Sized T> move T -> Shared<T> = <T where Sized T> move value => Shared value\nlet reference = make 42\n",
             "make",
         );
         let context = inkwell::context::Context::create();
@@ -4753,7 +4753,7 @@ mod tests {
             let source = if captured {
                 "def make: <T where Copy T> T -> (() -> T) = <T where Copy T> value => { let mut held = value; () => held }\nlet result = make 42\n"
             } else {
-                "use std.buffer.Buffer\nuse std.shared_buffer.SharedBuffer\ndef make: <T where Copy T> USize -> SharedBuffer T = <T where Copy T> capacity => { let mut buffer: Buffer T = Buffer.with_capacity.<T> capacity; Buffer.into_shared_buffer buffer }\nlet result: SharedBuffer I32 = make 3\n"
+                "use std.buffer.Buffer\nuse std.shared_buffer.SharedBuffer\ndef make: <T where Copy T> USize -> SharedBuffer<T> = <T where Copy T> capacity => { let mut buffer: Buffer<T> = Buffer.with_capacity.<T> capacity; Buffer.into_shared_buffer buffer }\nlet result: SharedBuffer<I32> = make 3\n"
             };
             let (text, name) = dynamic_test_module(source, "make");
             let context = inkwell::context::Context::create();
@@ -5457,8 +5457,8 @@ mod tests {
             concat!(
                 "use std.shared.(Shared)\n",
                 "use std.shared_buffer.SharedBuffer\n",
-                "def head: <T where Copy T> Shared (SharedBuffer T) -> T = <T where Copy T> values => values.0\n",
-                "def unused: Shared (SharedBuffer I32) -> I32 = values => head values\n",
+                "def head: <T where Copy T> Shared<SharedBuffer<T>> -> T = <T where Copy T> values => values.0\n",
+                "def unused: Shared<SharedBuffer<I32>> -> I32 = values => head values\n",
                 "let result = 0\n",
             ),
             "head",
@@ -5628,8 +5628,8 @@ mod tests {
     fn dynamic_wrappers_share_their_representation_layout() {
         let (text, name) = dynamic_test_module(
             concat!(
-                "type Box T = wrap (T)\n",
-                "def pack: <T where Copy T> T -> Box T = <T where Copy T> value => Box value\n",
+                "type Box<T> wrap (T)\n",
+                "def pack: <T where Copy T> T -> Box<T> = <T where Copy T> value => Box value\n",
                 "let result = pack 42\n",
             ),
             "pack",

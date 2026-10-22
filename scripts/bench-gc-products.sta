@@ -2,7 +2,7 @@
 // then check every retained string, so a collector that frees live data fails
 // the benchmark instead of timing it.
 use std.io.println
-let mut values: List (I8, String) = List.new ()
+let mut values: List<(I8, String)> = List.new ()
 let mut i: USize = 0
 while (i < 100000) {
     List.push values (1, "value=$i")

@@ -6,7 +6,7 @@ use std.coroutine.*
 
 // Resume once a monotonic counter signal (read reactively by `read`) passes
 // `mark`. Used for the per-frame and per-fixed-tick counters.
-pub def after_count: (read: () ->{state.read} I32, mark: I32) ->{Reactive} Coroutine{Reactive} () =
+pub def after_count: (read: () ->{state.read} I32, mark: I32) ->{Reactive} Coroutine{Reactive}<()> =
     (read, mark) => until { read () > mark }
 
 // Absolute-deadline wait on a clock. `clock` reads the clock's millisecond
@@ -14,7 +14,7 @@ pub def after_count: (read: () ->{state.read} I32, mark: I32) ->{Reactive} Corou
 // tick (so a zero-duration sleep still defers), then the deadline.
 pub def wait_deadline:
     (clock: () ->{state.read} I32, frames: () ->{state.read} I32, deadline: I32, at_frame: I32)
-        ->{Reactive} Coroutine{Reactive} () =
+        ->{Reactive} Coroutine{Reactive}<()> =
     (clock, frames, deadline, at_frame) => coro {
         let _ = await (until { frames () > at_frame })
         let _ = await (until { clock () >= deadline })

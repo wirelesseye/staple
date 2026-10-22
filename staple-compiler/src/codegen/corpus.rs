@@ -155,14 +155,14 @@ static CORPUS: [CorpusProgram; 161] = [
                 "implicit_ok_parametric",
                 concat!(
                     "use std.io.println\n",
-                    "def success = <T, E> move value: T => Result T E :: value\n",
-                    "def success_body = <T, E> move value: T => Result T E :: { value }\n",
-                    "def failure = <T, E> move error: E => Result T E :: error\n",
-                    "def show = (result: Result I32 I32) => match result {\n",
+                    "def success = <T, E> move value: T => Result<T, E> :: value\n",
+                    "def success_body = <T, E> move value: T => Result<T, E> :: { value }\n",
+                    "def failure = <T, E> move error: E => Result<T, E> :: error\n",
+                    "def show = (result: Result<I32, I32>) => match result {\n",
                     "    Ok n => println \"ok ${n}\",\n",
                     "    n: I32 => println \"error ${n}\",\n",
                     "}\n",
-                    "def parse = (flag: Bool) => Result I32 String :: when {\n",
+                    "def parse = (flag: Bool) => Result<I32, String> :: when {\n",
                     "    flag => 42,\n",
                     "    else => \"bad\",\n",
                     "}\n",
@@ -185,11 +185,11 @@ static CORPUS: [CorpusProgram; 161] = [
                     "use std.io.println\n",
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
-                    "type Resource = wrap CString\n",
+                    "type Resource wrap CString\n",
                     "impl Drop Resource { cleanup = Resource value => { puts value; () } }\n",
-                    "def discard = <T> move values: List T => () :: ()\n",
+                    "def discard = <T> move values: List<T> => () :: ()\n",
                     "def run = () => {\n",
-                    "  let mut list: List Resource = List.new ()\n",
+                    "  let mut list: List<Resource> = List.new ()\n",
                     "  List.push list (Resource (c_string \"a\"))\n",
                     "  List.push list (Resource (c_string \"b\"))\n",
                     "  List.push list (Resource (c_string \"c\"))\n",
@@ -224,13 +224,13 @@ static CORPUS: [CorpusProgram; 161] = [
                     "use std.ptr.(RawMutPtr)\n",
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
-                    "type Resource = wrap CString\n",
-                    "type Chain = wrap (value: Resource, next: Option (Unique Chain))\n",
+                    "type Resource wrap CString\n",
+                    "type Chain wrap (value: Resource, next: Option<Unique<Chain>>)\n",
                     "impl Drop Resource { cleanup = Resource value => { puts value; () } }\n",
-                    "def make = <T> move value: T => Unique T :: Unique value\n",
-                    "def take = <T> move owner: Unique T => T :: owner.*\n",
-                    "def unpack: <T> move Unique T -> T = <T> move Unique value => value\n",
-                    "def inspect: <T> Unique T -> () = <T> Unique _ => ()\n",
+                    "def make = <T> move value: T => Unique<T> :: Unique value\n",
+                    "def take = <T> move owner: Unique<T> => T :: owner.*\n",
+                    "def unpack: <T> move Unique<T> -> T = <T> move Unique value => value\n",
+                    "def inspect: <T> Unique<T> -> () = <T> Unique _ => ()\n",
                     "def run = () => {\n",
                     "  let mut value = Unique (x: 1, y: 2)\n",
                     "  value.x = 3\n",
@@ -346,8 +346,8 @@ let made = make 100
 made 7
 let label: String = "x"
 made label
-type Wrapped T = wrap T
-impl<T where Display T> Display (Wrapped T) { fmt = (Wrapped inner, mut formatter) => Display.fmt (inner, formatter) }
+type Wrapped<T> wrap T
+impl<T where Display T> Display Wrapped<T> { fmt = (Wrapped inner, mut formatter) => Display.fmt (inner, formatter) }
 def call_with_wrapped: <A where Display A> move A ->{IO} () = <A where Display A> move a => {
     let poly: <T where Display T> move T ->{IO} () = lam
     poly (Wrapped a)
@@ -369,14 +369,14 @@ wrapped_made 3
             "trait_dictionary_subsumption",
             r#"use std.io.(IO, println)
 use std.fmt.Display
-type Wrapped T = wrap T
-impl<T where Display T> Display (Wrapped T) { fmt = (Wrapped inner, mut formatter) => Display.fmt (inner, formatter) }
+type Wrapped<T> wrap T
+impl<T where Display T> Display Wrapped<T> { fmt = (Wrapped inner, mut formatter) => Display.fmt (inner, formatter) }
 def show: <T where Display T> move T ->{IO} () = <T where Display T> move value => println "${value}"
 let stored: <T where Display T> move T ->{IO} () = show
-let wrapped_show: <U where Display U> move Wrapped U ->{IO} () = stored
+let wrapped_show: <U where Display U> move Wrapped<U> ->{IO} () = stored
 wrapped_show (Wrapped 5)
 def local: () ->{IO} () = () => {
-    let inner: <U where Display U> move Wrapped U ->{IO} () = stored
+    let inner: <U where Display U> move Wrapped<U> ->{IO} () = stored
     inner (Wrapped 6)
 }
 local ()
@@ -406,12 +406,12 @@ def total: <T where Copy T, Display T> (T, T, T) ->{IO} () = <T where Copy T, Di
 }
 let stored_total: <T where Copy T, Display T> (T, T, T) ->{IO} () = total
 stored_total (7, 8, 9)
-def get_shared: <T where Copy T> Shared (T, T) -> T = <T where Copy T> r => r[USize :: 0]
-let stored_get_shared: <T where Copy T> Shared (T, T) -> T = get_shared
+def get_shared: <T where Copy T> Shared<(T, T)> -> T = <T where Copy T> r => r[USize :: 0]
+let stored_get_shared: <T where Copy T> Shared<(T, T)> -> T = get_shared
 println "${stored_get_shared (Shared (5, 6))}"
-def put_shared: <T where Copy T> (mut Shared (T, T), T) -> () = <T where Copy T> (mut r, value) => { r[USize :: 1] = value }
-let stored_put_shared: <T where Copy T> (mut Shared (T, T), T) -> () = put_shared
-let mut cell: Shared (I32, I32) = Shared (1, 2)
+def put_shared: <T where Copy T> (mut Shared<(T, T)>, T) -> () = <T where Copy T> (mut r, value) => { r[USize :: 1] = value }
+let stored_put_shared: <T where Copy T> (mut Shared<(T, T)>, T) -> () = put_shared
+let mut cell: Shared<(I32, I32)> = Shared (1, 2)
 stored_put_shared (cell, 11)
 println "${cell[USize :: 1]}"
 "#,
@@ -427,7 +427,7 @@ use std.fmt.Display
 use std.ops.Add
 trait Speak T { speak: T ->{IO} () }
 impl Speak I32 { speak = value => println "int ${value}" }
-type Cat = wrap I32
+type Cat wrap I32
 impl Speak Cat { speak = Cat value => println "cat ${value}" }
 def twice: <T where Speak T, Copy T> T ->{IO} () = <T where Speak T, Copy T> value => { Speak.speak value; Speak.speak value }
 let speak_twice: <T where Speak T, Copy T> T ->{IO} () = twice
@@ -438,7 +438,7 @@ trait Describe T {
     describe: T -> String = value => "<${name value}>"
 }
 impl Describe I32 { name = value => "int" }
-type Dog = wrap I32
+type Dog wrap I32
 impl Describe Dog { name = Dog value => "dog"
     describe = Dog value => "DOG!" }
 def describe_value: <T where Describe T> move T ->{IO} () = <T where Describe T> move value => println (Describe.describe value)
@@ -448,9 +448,9 @@ describe_stored (Dog 2)
 def sum: <T where Add T, Copy T> (T, T) -> T = <T where Add T, Copy T> (a, b) => a + b
 let sum_stored: <T where Add T, Copy T> (T, T) -> T = sum
 println "${sum_stored (1, 2)} ${sum_stored (1.5, 2.25)}"
-type Wrapped T = wrap T
-impl<T where Display T> Display (Wrapped T) { fmt = (Wrapped inner, mut formatter) => Display.fmt (inner, formatter) }
-let wrap_value: <T where Display T> move T -> Wrapped T = Wrapped
+type Wrapped<T> wrap T
+impl<T where Display T> Display Wrapped<T> { fmt = (Wrapped inner, mut formatter) => Display.fmt (inner, formatter) }
+let wrap_value: <T where Display T> move T -> Wrapped<T> = Wrapped
 let wrapped = wrap_value 5
 println "${wrapped}"
 def id: <T> move T -> T = <T> move x => x
@@ -492,9 +492,9 @@ use std.string.ToString
 use std.clone.Clone
 use std.cmp.Eq
 trait Measure T { measure: T -> I32 }
-type MeasuredBox T = wrap T
+type MeasuredBox<T> wrap T
 impl Measure I32 { measure = value => value }
-impl<T where Measure T> Measure (MeasuredBox T) { measure = MeasuredBox value => Measure.measure value + 1 }
+impl<T where Measure T> Measure MeasuredBox<T> { measure = MeasuredBox value => Measure.measure value + 1 }
 def measured: <T where Measure T> T -> I32 = <T where Measure T> value => Measure.measure value
 def nested: <T where Measure T> move T -> I32 = <T where Measure T> move value => measured (MeasuredBox value)
 def twice: <T where Measure T> move T -> I32 = <T where Measure T> move value => measured (MeasuredBox (MeasuredBox value))
@@ -512,7 +512,7 @@ println "${nested 4} ${twice 4} ${describe 42} ${describe 7}"
 use std.cmp.(Eq, Ord)
 trait Measure T { measure: T -> I32 }
 impl Measure I32 { measure = value => value }
-type Boxed = wrap I32
+type Boxed wrap I32
 impl Measure Boxed { measure = Boxed value => value + 100 }
 def measured: <T where Measure T> T -> I32 = <T where Measure T> value => Measure.measure value
 def forward: <T where Measure T> T -> I32 = <T where Measure T> value => measured value
@@ -533,10 +533,10 @@ use std.fmt.(Display, Debug)
 use std.cmp.Eq
 use std.index.(Index, MutateIndex)
 trait Measure T { measure: T -> I32 }
-type MeasuredBox T = wrap T
-impl<T where Measure T> Measure (MeasuredBox T) { measure = MeasuredBox value => Measure.measure value }
+type MeasuredBox<T> wrap T
+impl<T where Measure T> Measure MeasuredBox<T> { measure = MeasuredBox value => Measure.measure value }
 impl Measure I32 { measure = value => value }
-type MeasuredNumber = wrap I32
+type MeasuredNumber wrap I32
 impl Eq MeasuredNumber {
     eq = (MeasuredNumber a; MeasuredNumber b) => a == b
     ne = (a; b) => False
@@ -550,8 +550,8 @@ def debug_sum: <T where Debug T> move T ->{IO} () = <T where Debug T> move value
     let sum: T | String = value
     println "${sum:?}"
 }
-def clone_list: <T where Clone T> List T -> List T = <T where Clone T> value => Clone.clone value
-def walk: <T where Display T> move List T ->{IO} () = <T where Display T> move values => {
+def clone_list: <T where Clone T> List<T> -> List<T> = <T where Clone T> value => Clone.clone value
+def walk: <T where Display T> move List<T> ->{IO} () = <T where Display T> move values => {
     for value in values { println "${value}" }
 }
 def capture: <T where Copy T, Measure T> T -> (() -> I32) = <T where Copy T, Measure T> value => () => Measure.measure value
@@ -560,9 +560,9 @@ def run: () ->{IO} () = () => {
 println "${nested 4} ${equal (MeasuredNumber 1, MeasuredNumber 2):?}"
 let values = List.singleton 8
 let mut copied = clone_list values
-let first: I32 = index.<List I32> copied
+let first: I32 = index.<List<I32>> copied
 println "${first}"
-replace.<List I32> (copied, 11)
+replace.<List<I32>> (copied, 11)
 walk copied
 debug_sum 12
 let held = capture 9
@@ -605,9 +605,9 @@ debug_pair 5
             "from_types",
             concat!(
                 "use std.io.println\n",
-                "type Meters = from F64\n",
-                "type Label = from String\n",
-                "type Triple = from (I32, I32, I32)\n",
+                "type Meters from F64\n",
+                "type Label from String\n",
+                "type Triple from (I32, I32, I32)\n",
                 "type Other\n",
                 "def show: Meters -> F64 = meters => meters.*\n",
                 "def kind: Meters | Other -> String = value => match value {\n",
@@ -619,11 +619,11 @@ debug_pair 5
                 "    False => \"no\",\n",
                 "    number: I32 => \"${number}\",\n",
                 "}\n",
-                "def bump: Option I32 -> Option I32 = value => {\n",
+                "def bump: Option<I32> -> Option<I32> = value => {\n",
                 "    let ?Some(number) = value\n",
                 "    Some (number + 1)\n",
                 "}\n",
-                "def unwrap: Option I32 -> I32 = value => match value {\n",
+                "def unwrap: Option<I32> -> I32 = value => match value {\n",
                 "    Some number => number,\n",
                 "    None => 0,\n",
                 "}\n",
@@ -647,14 +647,14 @@ debug_pair 5
             "parameter_products",
             concat!(
                 "use std.io.println\n",
-                "type Inputs = alias (I32; I32)\n",
-                "type Callable Args Result = alias Args -> Result\n",
-                "type Add = alias Callable Inputs I32\n",
-                "type Handler Args = wrap (callback: Args -> I32, label: String)\n",
+                "type Inputs = (I32; I32)\n",
+                "type Callable<Args, Result> = Args -> Result\n",
+                "type Add = Callable<Inputs, I32>\n",
+                "type Handler<Args> wrap (callback: Args -> I32, label: String)\n",
                 "def add: Add = (a; b) => a + b\n",
-                "def keep: <A> (Handler A; A -> I32) -> Handler A = <A> (handler; callback) => Handler (callback: callback, label: handler.label)\n",
+                "def keep: <A> (Handler<A>; A -> I32) -> Handler<A> = <A> (handler; callback) => Handler (callback: callback, label: handler.label)\n",
                 "def forward: <A> (A -> I32) -> A -> I32 = <A> f => f\n",
-                "let handler: Handler Inputs = Handler (callback: add, label: \"sum\")\n",
+                "let handler: Handler<Inputs> = Handler (callback: add, label: \"sum\")\n",
                 "let kept = keep handler add\n",
                 "let callback: Inputs -> I32 = forward add\n",
                 "println \"${add 1 2}\"\n",
@@ -701,14 +701,14 @@ debug_pair 5
             "census_constructor_adapters",
             concat!(
                 "use std.shared.(Shared)\n",
-                "type Point = wrap (I32, I32)\n",
+                "type Point wrap (I32, I32)\n",
                 "let make: () -> ((I32, I32) -> Point) = () => Point\n",
-                "type Resource = wrap I32\n",
+                "type Resource wrap I32\n",
                 "impl Drop Resource { cleanup = Resource value => () }\n",
-                "let make_resource: () -> (Resource -> Shared Resource) = () => Shared\n",
-                "def shared_maker: <T where Copy T> () -> (T -> Shared T) = <T where Copy T> () => Shared\n",
-                "let maker_i32: I32 -> Shared I32 = shared_maker ()\n",
-                "let maker_u8: U8 -> Shared U8 = shared_maker ()\n",
+                "let make_resource: () -> (Resource -> Shared<Resource>) = () => Shared\n",
+                "def shared_maker: <T where Copy T> () -> (T -> Shared<T>) = <T where Copy T> () => Shared\n",
+                "let maker_i32: I32 -> Shared<I32> = shared_maker ()\n",
+                "let maker_u8: U8 -> Shared<U8> = shared_maker ()\n",
             ),
             "core",
         )),
@@ -728,7 +728,7 @@ debug_pair 5
                 "  for item in pair { count = count + 1 }\n",
                 "  count\n",
                 "}\n",
-                "def deref_mixed: (Shared (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
+                "def deref_mixed: (Shared<(U8, I32)>) -> (I32 | U8) = reference => reference[0]\n",
                 "let a = show_pair (1, 2)\n",
                 "let b = show_sum (pick True)\n",
                 "let c = index_mixed ((U8 :: 1), 2)\n",
@@ -752,7 +752,7 @@ debug_pair 5
             "  let bump = () => { total = total + 1 }\n",
             "  total\n",
             "}\n",
-            "let mut strings: Buffer CString = Buffer.with_capacity (USize :: 2)\n",
+            "let mut strings: Buffer<CString> = Buffer.with_capacity (USize :: 2)\n",
             "let run = capture (c_string \"x\")\n",
             "let absolute = abs\n",
             "let counted = counter ()\n",
@@ -766,18 +766,18 @@ debug_pair 5
             "use std.cinterop.(CString, c_string)\n",
             "extern \"c\" { inspect: CString -> I32 }\n",
             "let signal flag = 0\n",
-            "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
-            "def owning: move CString -> Coroutine{} I32 = move value => coro { inspect value; 1 }\n",
+            "def task: () -> Coroutine{}<I32> = () => coro { 1 }\n",
+            "def owning: move CString -> Coroutine{}<I32> = move value => coro { inspect value; 1 }\n",
             "def peek: <T> T -> I32 = <T> _ => 1\n",
-            "def generic: <T where Copy T> T -> Coroutine{} I32 = <T where Copy T> value => coro { peek value; 1 }\n",
-            "def waiting: () -> Coroutine{Reactive} () = () => coro {\n",
+            "def generic: <T where Copy T> T -> Coroutine{}<I32> = <T where Copy T> value => coro { peek value; 1 }\n",
+            "def waiting: () -> Coroutine{Reactive}<()> = () => coro {\n",
             "  let _ = await (until { flag >= 1 })\n",
             "  ()\n",
             "}\n",
             "let a = task ()\n",
             "let b = owning (c_string \"x\")\n",
-            "let c: Coroutine{} I32 = generic 1\n",
-            "let d: Coroutine{} I32 = generic (U8 :: 1)\n",
+            "let c: Coroutine{}<I32> = generic 1\n",
+            "let d: Coroutine{}<I32> = generic (U8 :: 1)\n",
             "let e = with Reactive = reactive_scope () { waiting () }\n",
             "let f = with Reactive = reactive_scope () { reaction { () } }\n",
             "let doubled = flag + flag\n",
@@ -793,26 +793,26 @@ debug_pair 5
             "use std.buffer.*\n",
             "extern \"c\" { inspect: CString -> I32 }\n",
             "extern \"c\" { abs: I32 -> I32 }\n",
-            "type Point = wrap (I32, I32)\n",
+            "type Point wrap (I32, I32)\n",
             "let make_point: () -> ((I32, I32) -> Point) = () => Point\n",
             "let pair = (1, 2)\n",
             "let shown = \"${pair:?}\"\n",
-            "type Resource = wrap I32\n",
+            "type Resource wrap I32\n",
             "impl Drop Resource { cleanup = Resource value => () }\n",
-            "let reference: Shared Resource = Shared (Resource 1)\n",
+            "let reference: Shared<Resource> = Shared (Resource 1)\n",
             "def capture: move CString -> (() -> I32) = move value => () => inspect value\n",
             "def counter: () -> I32 = () => {\n",
             "  let mut total = 0\n",
             "  let bump = () => { total = total + 1 }\n",
             "  total\n",
             "}\n",
-            "let mut strings: Buffer CString = Buffer.with_capacity (USize :: 1)\n",
+            "let mut strings: Buffer<CString> = Buffer.with_capacity (USize :: 1)\n",
             "let run = capture (c_string \"x\")\n",
             "let counted = counter ()\n",
             "let absolute = abs\n",
             "let signal flag = 0\n",
-            "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
-            "def waiting: () -> Coroutine{Reactive} () = () => coro {\n",
+            "def task: () -> Coroutine{}<I32> = () => coro { 1 }\n",
+            "def waiting: () -> Coroutine{Reactive}<()> = () => coro {\n",
             "  let _ = await (until { flag >= 1 })\n",
             "  ()\n",
             "}\n",
@@ -940,7 +940,7 @@ debug_pair 5
             inline(
                 "calls_curried_defaults",
                 concat!(
-                    "type Sum3 = from (I32, b: I32 = 2, c: I32 = 3)\n",
+                    "type Sum3 from (I32, b: I32 = 2, c: I32 = 3)\n",
                     "def sum3: Sum3 -> I32 = args => {\n",
                     "    let (a, b, c) = args\n",
                     "    a + b + c\n",
@@ -968,7 +968,7 @@ debug_pair 5
             inline(
                 "calls_mutation",
                 concat!(
-                    "type MoveOnly = wrap I32\n",
+                    "type MoveOnly wrap I32\n",
                     "impl !Copy MoveOnly {}\n",
                     "def bump: mut I32 -> () = mut target => { target = target + 1 }\n",
                     "def borrow: MoveOnly -> I32 = value => 1\n",
@@ -992,7 +992,7 @@ debug_pair 5
             inline(
                 "closures_captures",
                 concat!(
-                    "type MoveOnly = wrap I32\n",
+                    "type MoveOnly wrap I32\n",
                     "impl !Copy MoveOnly {}\n",
                     // A `move T` parameter cannot be moved into a nested closure
                     // (the checker rejects moving out of the borrowed parameter
@@ -1054,18 +1054,18 @@ debug_pair 5
                 "constructors",
                 concat!(
                     "use std.shared.(Shared)\n",
-                    "type Point = wrap (I32, I32)\n",
-                    "type Resource = wrap I32\n",
+                    "type Point wrap (I32, I32)\n",
+                    "type Resource wrap I32\n",
                     "impl Drop Resource { cleanup = Resource value => () }\n",
                     "def make: I32 -> Point = x => Point (x, x)\n",
                     "def call_make: I32 -> Point = x => make x\n",
                     // A managed `Shared` construction inside a function, so the
                     // payload-finalizer path is a focus body, not only an
                     // initializer.
-                    "def make_shared: I32 -> Shared Resource = x => Shared (Resource x)\n",
+                    "def make_shared: I32 -> Shared<Resource> = x => Shared (Resource x)\n",
                     "let made = make_shared 5\n",
                     "let point = Point (1, 2)\n",
-                    "let reference: Shared Resource = Shared (Resource 1)\n",
+                    "let reference: Shared<Resource> = Shared (Resource 1)\n",
                     "let make_point: () -> ((I32, I32) -> Point) = () => Point\n",
                     "let point_value = make_point ()\n",
                     "let second = point_value (3, 4)\n",
@@ -1081,7 +1081,7 @@ debug_pair 5
             inline(
                 "resources_with",
                 concat!(
-                    "pub type Counter = pub wrap (value: I32)\n",
+                    "pub type Counter wrap pub (value: I32)\n",
                     "def get: () ->{Counter} I32 = () => 1\n",
                     "def forward: () ->{Counter} I32 = () => get ()\n",
                     "def value_of: Counter -> I32 = counter => counter.value\n",
@@ -1190,12 +1190,12 @@ debug_pair 5
             inline(
                 "match_sums_products",
                 concat!(
-                    "type Ok T = wrap T\n",
-                    "type IOError = wrap String\n",
-                    "type Inner = wrap (I32, I32)\n",
-                    "type Sign = wrap I32\n",
+                    "type Ok<T> wrap T\n",
+                    "type IOError wrap String\n",
+                    "type Inner wrap (I32, I32)\n",
+                    "type Sign wrap I32\n",
                     "\n",
-                    "def nested: Ok (Inner | IOError) | IOError -> I32 = result => match result {\n",
+                    "def nested: Ok<Inner | IOError> | IOError -> I32 = result => match result {\n",
                     "    Ok inner => match inner {\n",
                     "        Inner pair@(left, right) => left + right,\n",
                     "        IOError _ => 0,\n",
@@ -1220,7 +1220,7 @@ debug_pair 5
                     "}\n",
                     "\n",
                     "let inner: Inner | IOError = Inner (1, 2)\n",
-                    "let result: Ok (Inner | IOError) | IOError = Ok inner\n",
+                    "let result: Ok<Inner | IOError> | IOError = Ok inner\n",
                     "let first = nested result\n",
                     "let second = nominal (Sign 7)\n",
                     "let third = wildcard False\n",
@@ -1260,8 +1260,8 @@ debug_pair 5
             inline(
                 "destructuring",
                 concat!(
-                    "pub type Pair = pub wrap (I32, I32)\n",
-                    "type Outer = wrap (Pair, String)\n",
+                    "pub type Pair wrap pub (I32, I32)\n",
+                    "type Outer wrap (Pair, String)\n",
                     "\n",
                     "def sum_pair: Pair -> I32 = Pair (left, right) => left + right\n",
                     "def destructure: (Pair, I32) -> I32 = (Pair (left, right), extra) => left + right + extra\n",
@@ -1288,8 +1288,8 @@ debug_pair 5
                 "places_assignment",
                 concat!(
                     "use std.shared.(Shared)\n",
-                    "type Counter = wrap I32\n",
-                    "type Wrapper = wrap (value: I32)\n",
+                    "type Counter wrap I32\n",
+                    "type Wrapper wrap (value: I32)\n",
                     "impl Index Counter String { type Output = I32; index = (counter, key) => 0 }\n",
                     "impl MutateIndex Counter String { type Value = I32; mutate_index = (mut counter, key, move value) => () }\n",
                     "def make_counter = () => Counter 0\n",
@@ -1303,7 +1303,7 @@ debug_pair 5
                     "    (make_counter())[\"key\"] = 6\n",
                     "}\n",
                     "\n",
-                    "def shared_place: mut Shared (I32, I32) -> () = mut reference => {\n",
+                    "def shared_place: mut Shared<(I32, I32)> -> () = mut reference => {\n",
                     "    reference.0 = 1\n",
                     "}\n",
                     "\n",
@@ -1327,15 +1327,15 @@ debug_pair 5
                 concat!(
                     "use std.shared_buffer.SharedBuffer\n",
                     "\n",
-                    "type Ok T = wrap T\n",
-                    "type IOError = wrap String\n",
-                    "type Other = wrap String\n",
+                    "type Ok<T> wrap T\n",
+                    "type IOError wrap String\n",
+                    "type Other wrap String\n",
                     "\n",
-                    "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
-                    "def widen: () -> Ok I32 | IOError | Other = () => read ()\n",
-                    "def inject: Ok I32 -> Ok I32 | IOError = value => value\n",
-                    "def shared_from_array: (I32 ^ 2) -> SharedBuffer I32 = value => SharedBuffer.from_array value\n",
-                    "def take: Ok I32 | IOError -> I32 = value => 1\n",
+                    "def read: () -> Ok<I32> | IOError = () => Ok (42)\n",
+                    "def widen: () -> Ok<I32> | IOError | Other = () => read ()\n",
+                    "def inject: Ok<I32> -> Ok<I32> | IOError = value => value\n",
+                    "def shared_from_array: (I32 ^ 2) -> SharedBuffer<I32> = value => SharedBuffer.from_array value\n",
+                    "def take: Ok<I32> | IOError -> I32 = value => 1\n",
                     "\n",
                     "def consume: () -> I32 = () => {\n",
                     "    let injected = inject (Ok (1))\n",
@@ -1403,10 +1403,10 @@ debug_pair 5
             inline(
                 "propagation",
                 concat!(
-                    "type Found T = wrap T\n",
-                    "type Missing = wrap String\n",
+                    "type Found<T> wrap T\n",
+                    "type Missing wrap String\n",
                     "\n",
-                    "def lookup: Bool -> Found I32 | Missing = available => if available { Found (42) } else { Missing \"absent\" }\n",
+                    "def lookup: Bool -> Found<I32> | Missing = available => if available { Found (42) } else { Missing \"absent\" }\n",
                     "\n",
                     "def doubled = available: Bool => {\n",
                     "    let ?Found(value) = lookup available\n",
@@ -1449,7 +1449,7 @@ debug_pair 5
                 concat!(
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
-                    "type Tag = wrap CString\n",
+                    "type Tag wrap CString\n",
                     "impl Drop Tag { cleanup = Tag text => { puts text; () } }\n",
                     "\n",
                     "def scoped: () -> () = () => {\n",
@@ -1462,8 +1462,8 @@ debug_pair 5
                     "    return 1\n",
                     "}\n",
                     "\n",
-                    "type Ok = wrap I32\n",
-                    "type Bad = wrap CString\n",
+                    "type Ok wrap I32\n",
+                    "type Bad wrap CString\n",
                     "impl Drop Bad { cleanup = Bad text => { puts text; () } }\n",
                     "def fails: () -> Ok | Bad = () => Bad (c_string \"failure\")\n",
                     "def propagated: () -> Ok | Bad = () => {\n",
@@ -1553,13 +1553,13 @@ debug_pair 5
                     "use std.shared.(Shared)\n",
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
-                    "type Handle = wrap CString\n",
+                    "type Handle wrap CString\n",
                     "impl Drop Handle { cleanup = Handle text => { puts text; () } }\n",
-                    "type Wrapper = wrap Handle\n",
-                    "type Left = wrap (CString, I32)\n",
-                    "type Right = wrap (I32, I32)\n",
-                    "type Empty = wrap ()\n",
-                    "type Chain = wrap (I32, Shared (Empty | Chain))\n",
+                    "type Wrapper wrap Handle\n",
+                    "type Left wrap (CString, I32)\n",
+                    "type Right wrap (I32, I32)\n",
+                    "type Empty wrap ()\n",
+                    "type Chain wrap (I32, Shared<Empty | Chain>)\n",
                     "\n",
                     "def nested_product: () -> () = () => {\n",
                     "    let value: ((CString, I32), (I32, CString)) = ((c_string \"nested left\\n\", 1), (2, c_string \"nested right\\n\"))\n",
@@ -1601,10 +1601,10 @@ debug_pair 5
                     "use std.shared.(Shared)\n",
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
-                    "type Payload = wrap CString\n",
+                    "type Payload wrap CString\n",
                     "impl Drop Payload { cleanup = Payload value => () }\n",
                     "\n",
-                    "def make_shared: () -> Shared Payload = () => Shared (Payload (c_string \"shared\"))\n",
+                    "def make_shared: () -> Shared<Payload> = () => Shared (Payload (c_string \"shared\"))\n",
                     "\n",
                     "def cell_finalizer: () -> (() -> I32) = () => {\n",
                     "    let mut cell = c_string \"cell\"\n",
@@ -1632,46 +1632,46 @@ debug_pair 5
                     "use std.buffer.Buffer\n",
                     "use std.shared_buffer.SharedBuffer\n",
                     "use std.cinterop.(CString, c_string)\n",
-                    "type Tag = wrap CString\n",
+                    "type Tag wrap CString\n",
                     "impl Drop Tag { cleanup = Tag text => () }\n",
                     "impl Clone Tag { clone = Tag text => Tag (c_string \"clone\") }\n",
                     "\n",
                     "def basics: () -> USize = () => {\n",
-                    "    let mut values: Buffer I32 = Buffer.with_capacity (USize :: 2)\n",
+                    "    let mut values: Buffer<I32> = Buffer.with_capacity (USize :: 2)\n",
                     "    Buffer.push values 1\n",
                     "    Buffer.push values 2\n",
                     "    let length: USize = Buffer.length values\n",
                     "    let capacity: USize = Buffer.capacity values\n",
                     "    let first: I32 = Buffer.get_unchecked values (USize :: 0)\n",
-                    "    let popped: Option I32 = Buffer.pop values\n",
+                    "    let popped: Option<I32> = Buffer.pop values\n",
                     "    length + capacity\n",
                     "}\n",
                     "\n",
                     "def transfer: () -> USize = () => {\n",
-                    "    let mut source: Buffer I32 = Buffer.with_capacity (USize :: 2)\n",
+                    "    let mut source: Buffer<I32> = Buffer.with_capacity (USize :: 2)\n",
                     "    Buffer.push source 1\n",
                     "    Buffer.push source 2\n",
-                    "    let mut destination: Buffer I32 = Buffer.with_capacity (USize :: 4)\n",
+                    "    let mut destination: Buffer<I32> = Buffer.with_capacity (USize :: 4)\n",
                     "    Buffer.transfer source destination\n",
                     "    Buffer.length destination\n",
                     "}\n",
                     "\n",
                     "def clone_tags: () -> USize = () => {\n",
-                    "    let mut tags: Buffer Tag = Buffer.with_capacity (USize :: 2)\n",
+                    "    let mut tags: Buffer<Tag> = Buffer.with_capacity (USize :: 2)\n",
                     "    Buffer.push tags (Tag (c_string \"tag one\\n\"))\n",
-                    "    let cloned: Buffer Tag = Clone.clone tags\n",
+                    "    let cloned: Buffer<Tag> = Clone.clone tags\n",
                     "    Buffer.length cloned\n",
                     "}\n",
                     "\n",
                     "def into_shared: () -> USize = () => {\n",
-                    "    let mut values: Buffer I32 = Buffer.with_capacity (USize :: 2)\n",
+                    "    let mut values: Buffer<I32> = Buffer.with_capacity (USize :: 2)\n",
                     "    Buffer.push values 1\n",
-                    "    let frozen: SharedBuffer I32 = Buffer.into_shared_buffer values\n",
+                    "    let frozen: SharedBuffer<I32> = Buffer.into_shared_buffer values\n",
                     "    SharedBuffer.length frozen\n",
                     "}\n",
                     "\n",
                     "def trapped: () -> USize = () => {\n",
-                    "    let values: Buffer I32 = Buffer.with_capacity (USize :: 1)\n",
+                    "    let values: Buffer<I32> = Buffer.with_capacity (USize :: 1)\n",
                     "    let out: I32 = Buffer.get_unchecked values (USize :: 4)\n",
                     "    0\n",
                     "}\n",
@@ -1731,10 +1731,10 @@ debug_pair 5
                 concat!(
                     "use std.shared.(Shared)\n",
                     "use std.cinterop.(CString, c_string)\n",
-                    "type Payload = wrap CString\n",
+                    "type Payload wrap CString\n",
                     "\n",
                     "def replace: () -> () = () => {\n",
-                    "    let mut reference: Shared Payload = Shared (Payload (c_string \"original\"))\n",
+                    "    let mut reference: Shared<Payload> = Shared (Payload (c_string \"original\"))\n",
                     "    let replaced: Payload = Shared.replace reference (Payload (c_string \"replacement\"))\n",
                     "    ()\n",
                     "}\n",
@@ -1755,12 +1755,12 @@ debug_pair 5
             concat!(
                 "use std.io.println\n",
                 "\n",
-                "trait Step T {step: T -> Ok I32 | String}\n",
+                "trait Step T {step: T -> Ok<I32> | String}\n",
                 "\n",
                 "impl Step I32 {step = n => if (n > 0) { Ok (n - 1) } else { \"bad input\" }}\n",
                 "\n",
-                "def parse: I32 -> Ok I32 | String = n => n |> step\n",
-                "def first_positive: I32 -> Option I32 = n => if (n > 0) { Some n } else { None }\n",
+                "def parse: I32 -> Ok<I32> | String = n => n |> step\n",
+                "def first_positive: I32 -> Option<I32> = n => if (n > 0) { Some n } else { None }\n",
                 "\n",
                 "def chain = n: I32 => {\n",
                 "    let a = n |> step ? |> step ?\n",
@@ -1783,7 +1783,7 @@ debug_pair 5
                 "\n",
                 "def arithmetic = n: I32 => Ok (1 + parse n ? * 2)\n",
                 "\n",
-                "def show = result: Ok I32 | String | None => match result {\n",
+                "def show = result: Ok<I32> | String | None => match result {\n",
                 "    Ok value => println \"ok ${value}\",\n",
                 "    None => println \"none\",\n",
                 "    _ => println \"err\",\n",
@@ -1817,20 +1817,20 @@ debug_pair 5
                 "def native_cell: <T where Copy T> T ->{state} I32 = <T where Copy T> value => { let mut count = 0; let increment = () => { count = count + 1; count }; let first = increment (); let second = increment (); first + second }\n",
                 "let native_captured = native_capture 0; let native_mutated = native_cell 0; println \"${native_captured} ${native_mutated}\"\n",
                 "use std.buffer.Buffer\n",
-                "def packed_buffer: <T where Copy T> T -> USize = <T where Copy T> value => { let fields: (tag: I8, values: Buffer T) = (tag: I8 :: 1, values: Buffer.with_capacity.<T> 1); Buffer.capacity fields.values }\n",
+                "def packed_buffer: <T where Copy T> T -> USize = <T where Copy T> value => { let fields: (tag: I8, values: Buffer<T>) = (tag: I8 :: 1, values: Buffer.with_capacity.<T> 1); Buffer.capacity fields.values }\n",
                 "let packed_length = packed_buffer 7; println \"${packed_length}\"\n",
                 "def indexed: <T where Copy T> T -> I32 = <T where Copy T> value => { let values = (8, 9); values[1] }\n",
                 "def named: <T where Copy T> T ->{state} (T, I32, I32) = <T where Copy T> value => { let mut count = 0; let make = () => { count = count + 1; (a: value, b: count) }; let expanded: (a: T, b: I32) = (...=make (), b: 7); (expanded.a, expanded.b, count) }\n",
-                "type Defaulted = from (a: I32, b: I32 = 5)\n",
+                "type Defaulted from (a: I32, b: I32 = 5)\n",
                 "def defaults: <T where Copy T> T -> I32 = <T where Copy T> value => { let inputs: Defaulted = (a: 3); let (a, b) = inputs; a + b }\n",
                 "def spreads: <T where Copy T> T -> (T, T, I32) = <T where Copy T> value => { let pair = (value, value); (...pair, 9) }\n",
                 "def literals: <T where Copy T> (T, String) -> I32 = <T where Copy T> (value, text) => match text { \"yes\" => 1, _ => 2 }\n",
-                "type Held T = wrap T\n",
-                "type TextOrHeld T = alias String | Held T\n",
-                "def summed_literal: <T where Copy T> (T, TextOrHeld T) -> I32 = <T where Copy T> (value, text) => match text { \"yes\" => 3, Held item => 4, _ => 5 }\n",
-                "type Found T = wrap T\n",
-                "type Absent = wrap String\n",
-                "def propagate: <T where Copy T> (T, Bool) -> Found T | Absent = <T where Copy T> (value, flag) => { let maybe: Found T | Absent = if flag { Found value } else { Absent \"missing\" }; let ?Found(next) = maybe; Found next }\n",
+                "type Held<T> wrap T\n",
+                "type TextOrHeld<T> = String | Held<T>\n",
+                "def summed_literal: <T where Copy T> (T, TextOrHeld<T>) -> I32 = <T where Copy T> (value, text) => match text { \"yes\" => 3, Held item => 4, _ => 5 }\n",
+                "type Found<T> wrap T\n",
+                "type Absent wrap String\n",
+                "def propagate: <T where Copy T> (T, Bool) -> Found<T> | Absent = <T where Copy T> (value, flag) => { let maybe: Found<T> | Absent = if flag { Found value } else { Absent \"missing\" }; let ?Found(next) = maybe; Found next }\n",
                 "let (named_value, named_tag, evaluations) = named 6\n",
                 "let default_value = defaults 0\n",
                 "println \"${named_value} ${named_tag} ${evaluations} ${default_value}\"\n",
@@ -1888,12 +1888,12 @@ debug_pair 5
                 "def transform: (I32 -> I32) -> (I32 -> I32) = callback => callback\n",
                 "def nested: <T where Copy T> (((T -> T) -> (T -> T)), (T -> T), T) -> T = <T where Copy T> (transform, callback, value) => { let next = transform callback; next value }\n",
                 "def product: <T where Copy T> (((T -> T), I32), T) -> ((T -> T), I32) = <T where Copy T> (pair, value) => { let (callback, tag) = pair; let checked = callback value; pair }\n",
-                "pub type Box T = pub wrap (callback: T -> T, tag: I32)\n",
-                "def wrapper: <T where Copy T> Box T -> Box T = <T where Copy T> value => value\n",
-                "type Missing = wrap ()\n",
-                "type Chosen T = wrap ((T -> T), I32)\n",
-                "type Choice T = alias Missing | Chosen T\n",
-                "def summed: <T where Copy T> Choice T -> Choice T = <T where Copy T> value => value\n",
+                "pub type Box<T> wrap pub (callback: T -> T, tag: I32)\n",
+                "def wrapper: <T where Copy T> Box<T> -> Box<T> = <T where Copy T> value => value\n",
+                "type Missing wrap ()\n",
+                "type Chosen<T> wrap ((T -> T), I32)\n",
+                "type Choice<T> = Missing | Chosen<T>\n",
+                "def summed: <T where Copy T> Choice<T> -> Choice<T> = <T where Copy T> value => value\n",
                 "def array: <T where Copy T> ((T -> T) ^ 2) -> ((T -> T) ^ 2) = <T where Copy T> value => value\n",
                 "let first: I32 = nested.<I32> (transform, increment, 41)\n",
                 "println \"${first}\"\n",
@@ -1903,10 +1903,10 @@ debug_pair 5
                 "let mut boxed = wrapper.<I32> (Box.<I32> (callback: increment, tag: 6))\n",
                 "let third = boxed.callback 60\n",
                 "println \"${third} ${boxed.tag}\"\n",
-                "let chosen: Choice I32 = summed.<I32> (Chosen.<I32> (increment, 9))\n",
+                "let chosen: Choice<I32> = summed.<I32> (Chosen.<I32> (increment, 9))\n",
                 "let fourth = match chosen { Chosen (callback, tag) => callback 70, Missing () => 0 }\n",
                 "println \"${fourth}\"\n",
-                "let empty: Choice I32 = summed.<I32> (Missing ())\n",
+                "let empty: Choice<I32> = summed.<I32> (Missing ())\n",
                 "let empty_result = match empty { Chosen (callback, tag) => callback 70, Missing () => 7 }\n",
                 "println \"${empty_result}\"\n",
                 "let callbacks: ((I32 -> I32) ^ 2) = array.<I32> (increment, increment)\n",
@@ -1920,19 +1920,19 @@ debug_pair 5
                 "println \"${seventh} ${eighth}\"\n",
                 "def bump: mut I32 -> () = mut value => { value = value + 1 }\n",
                 "let mut ninth = 102\n",
-                "type Mutator T = alias mut T -> ()\n",
-                "def mutator: <T where Copy T> Mutator T -> Mutator T = <T where Copy T> callback => callback\n",
+                "type Mutator<T> = mut T -> ()\n",
+                "def mutator: <T where Copy T> Mutator<T> -> Mutator<T> = <T where Copy T> callback => callback\n",
                 "let mutate_again = mutator.<I32> bump\n",
                 "mutate_again ninth\n",
                 "mutate_again ninth\n",
                 "println \"${ninth}\"\n",
-                "def reset: <T where Copy T> (mut Mutator T, Mutator T) -> () = <T where Copy T> (mut target, replacement) => { target = replacement }\n",
-                "let mut callback: Mutator I32 = bump\n",
-                "let no_change: Mutator I32 = mut value => ()\n",
+                "def reset: <T where Copy T> (mut Mutator<T>, Mutator<T>) -> () = <T where Copy T> (mut target, replacement) => { target = replacement }\n",
+                "let mut callback: Mutator<I32> = bump\n",
+                "let no_change: Mutator<I32> = mut value => ()\n",
                 "reset.<I32> (callback, no_change)\n",
                 "callback ninth\n",
                 "println \"${ninth}\"\n",
-                "def reset_box: <T where Copy T> mut Box T -> () = <T where Copy T> mut target => { target.tag = 7 }\n",
+                "def reset_box: <T where Copy T> mut Box<T> -> () = <T where Copy T> mut target => { target.tag = 7 }\n",
                 "reset_box.<I32> boxed\n",
                 "let tenth = boxed.callback 100\n",
                 "println \"${tenth} ${boxed.tag}\"\n",
@@ -1947,23 +1947,23 @@ debug_pair 5
             concat!(
                 "use std.shared.(Shared)\n",
                 "use std.io.println\n",
-                "type Pair T = wrap (T, I32)\n",
+                "type Pair<T> wrap (T, I32)\n",
                 "def wrapped: <T where Copy T> T -> T = <T where Copy T> value => {\n",
-                "    let make: (T, I32) -> Pair T = Pair\n",
+                "    let make: (T, I32) -> Pair<T> = Pair\n",
                 "    let Pair (first, second) = make (value, 5)\n",
                 "    first\n",
                 "}\n",
-                "def maker: <T where Copy T> () -> (T -> Shared T) = <T where Copy T> () => Shared\n",
-                "def pair_maker: <T where Copy T> () -> ((T, I32) -> Pair T) = <T where Copy T> () => Pair\n",
-                "let make_pair: (I32, I32) -> Pair I32 = pair_maker ()\n",
+                "def maker: <T where Copy T> () -> (T -> Shared<T>) = <T where Copy T> () => Shared\n",
+                "def pair_maker: <T where Copy T> () -> ((T, I32) -> Pair<T>) = <T where Copy T> () => Pair\n",
+                "let make_pair: (I32, I32) -> Pair<I32> = pair_maker ()\n",
                 "let Pair (pair_first, pair_second) = make_pair (11, 12)\n",
                 "println \"${pair_first} ${pair_second}\"\n",
                 "let first = wrapped 42\n",
                 "println \"${first}\"\n",
-                "let make_i32: I32 -> Shared I32 = maker ()\n",
+                "let make_i32: I32 -> Shared<I32> = maker ()\n",
                 "let Shared second = make_i32 17\n",
                 "println \"${second}\"\n",
-                "let make_u8: U8 -> Shared U8 = maker ()\n",
+                "let make_u8: U8 -> Shared<U8> = maker ()\n",
                 "let Shared third = make_u8 (U8 :: 9)\n",
                 "println \"${third}\"\n",
             ),
@@ -1977,8 +1977,8 @@ debug_pair 5
             concat!(
                 "use std.shared.(Shared)\n",
                 "use std.io.println\n",
-                "def make: <T where Sized T> move T -> Shared T = <T where Sized T> move value => Shared value\n",
-                "def replace: <T where Sized T> (mut Shared T; move T) -> T = <T where Sized T> (mut reference; move value) => Shared.replace reference value\n",
+                "def make: <T where Sized T> move T -> Shared<T> = <T where Sized T> move value => Shared value\n",
+                "def replace: <T where Sized T> (mut Shared<T>; move T) -> T = <T where Sized T> (mut reference; move value) => Shared.replace reference value\n",
                 "let mut reference = make 21\n",
                 "let Shared first = reference\n",
                 "println \"${first}\"\n",
@@ -2018,7 +2018,7 @@ debug_pair 5
                 "use std.io.println\n",
                 "use std.shared_buffer.SharedBuffer\n",
                 "def indexed: <T where Copy T> T -> I32 = <T where Copy T> value => { let mut values = (1, 2); values[0] = 7; values.0 }\n",
-                "def make_slice: () -> SharedBuffer I32 = () => SharedBuffer.from_array (1, 2)\n",
+                "def make_slice: () -> SharedBuffer<I32> = () => SharedBuffer.from_array (1, 2)\n",
                 "def sliced: <T where Copy T> T -> I32 = <T where Copy T> value => { let mut values = make_slice (); values.0 = 8; values.0 }\n",
                 "def structural: <T where Copy T> T -> I32 = <T where Copy T> value => { let mut total = 0; for element in (4, 5) { total = total + element }; total }\n",
                 "let first = indexed 1\n",
@@ -2039,12 +2039,12 @@ debug_pair 5
                 "structural_debug",
                 r#"use std.cinterop.(CString, c_string)
 extern "c" { puts: CString -> I32 }
-type Held T = wrap (T)
-impl<T where Debug T> Debug (Held T) { fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }
+type Held<T> wrap (T)
+impl<T where Debug T> Debug Held<T> { fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }
 def nested: ((I32, I32), (I32, I32)) -> String = pair => "${pair:?}"
 def named: (left: I32, right: I32) -> String = pair => "${pair:?}"
 def sum: (I32 | U8) -> String = value => "${value:?}"
-def generic: (Held I32, I32) -> String = pair => "${pair:?}"
+def generic: (Held<I32>, I32) -> String = pair => "${pair:?}"
 def template: I32 -> String = value => "display=${value} debug=${value:?}"
 puts (CString.from_string_unchecked (nested ((1, 2), (3, 4))))
 puts (CString.from_string_unchecked (named (5, 6)))
@@ -2076,15 +2076,15 @@ puts (CString.from_string_unchecked (nested_sum (((I32, I32) | U8) :: (U8 :: 14)
                 r#"use std.shared.(Shared)
 use std.cinterop.CString
 extern "c" { puts: CString -> I32 }
-type Row = wrap (I32, I32)
+type Row wrap (I32, I32)
 impl Index Row USize { type Output = I32; index = (row, position) => 7 }
 def mixed: (U8, I32) -> (I32 | U8) = pair => pair[1]
 def uniform: (I32, I32) -> I32 = pair => pair[0]
 def replace: (I32, I32) -> (I32, I32) = pair => { let mut own = pair; own[0] = 3; own }
-def shared_uniform: Shared (I32, I32) -> I32 = reference => reference[1]
-def shared_mixed: Shared (U8, I32) -> (I32 | U8) = reference => reference[0]
-def shared_row: Shared Row -> I32 = reference => reference[0]
-def shared_replace: move (Shared (I32, I32)) -> Shared (I32, I32) = move reference => { let mut own = reference; own[0] = 8; own }
+def shared_uniform: Shared<(I32, I32)> -> I32 = reference => reference[1]
+def shared_mixed: Shared<(U8, I32)> -> (I32 | U8) = reference => reference[0]
+def shared_row: Shared<Row> -> I32 = reference => reference[0]
+def shared_replace: move (Shared<(I32, I32)>) -> Shared<(I32, I32)> = move reference => { let mut own = reference; own[0] = 8; own }
 puts (CString.from_string_unchecked "mixed=${mixed ((U8 :: 1), 2):?} uniform=${uniform (4, 5)}")
 puts (CString.from_string_unchecked "replace=${replace (1, 2):?}")
 puts (CString.from_string_unchecked "shared=${shared_uniform (Shared (5, 6))} ${shared_mixed (Shared ((U8 :: 9), 10)):?} ${shared_row (Shared (Row (1, 2)))}")
@@ -2128,7 +2128,7 @@ walk_uniform (3, 4)
                 "structural_mutation_drop",
                 r#"use std.cinterop.(CString, c_string)
 extern "c" { puts: CString -> I32 }
-type Tag = wrap CString
+type Tag wrap CString
 impl Drop Tag { cleanup = Tag text => { puts text; () } }
 def replace_owned: move (Tag, Tag) -> () = move pair => {
     let mut own = pair
@@ -2152,9 +2152,9 @@ replace_owned (Tag (c_string "old"), Tag (c_string "second"))
                 r#"use std.shared.(Shared)
 use std.cinterop.(CString, c_string)
 extern "c" { puts: CString -> I32 }
-type Tag = wrap CString
+type Tag wrap CString
 impl Drop Tag { cleanup = Tag text => { puts text; () } }
-def shared_mutate: move (Shared (Tag, Tag)) -> () = move reference => {
+def shared_mutate: move (Shared<(Tag, Tag)>) -> () = move reference => {
     let mut own = reference
     own[0] = Tag (c_string "shared replacement")
     ()
@@ -2185,7 +2185,7 @@ let value = at (((U8 :: 1), 2), (USize :: 5))
             inline(
                 "structural_deref_trap",
                 r#"use std.shared.(Shared)
-def at: (Shared (I32, I32), USize) -> I32 = (reference, position) => reference[position]
+def at: (Shared<(I32, I32)>, USize) -> I32 = (reference, position) => reference[position]
 let value = at (Shared (1, 2), (USize :: 5))
 "#,
                 "structural",
@@ -2203,9 +2203,9 @@ let value = at (Shared (1, 2), (USize :: 5))
                 concat!(
                     "use std.coroutine.*\n",
                     "use std.io.(IO, println)\n",
-                    "def generic: <T where Copy T> T -> Coroutine{} T = <T where Copy T> value => coro { value }\n",
-                    "let a: Coroutine{} I32 = generic 7\n",
-                    "let b: Coroutine{} U8 = generic (U8 :: 1)\n",
+                    "def generic: <T where Copy T> T -> Coroutine{}<T> = <T where Copy T> value => coro { value }\n",
+                    "let a: Coroutine{}<I32> = generic 7\n",
+                    "let b: Coroutine{}<U8> = generic (U8 :: 1)\n",
                     "let x = block_on a\n",
                     "let y = block_on b\n",
                     "println \"a=${x:?} b=${y:?}\"\n",
@@ -2226,7 +2226,7 @@ let value = at (Shared (1, 2), (USize :: 5))
                 concat!(
                     "use std.coroutine.*\n",
                     "use std.io.(IO, println)\n",
-                    "def generic: <T where Copy T, Debug T> T -> Coroutine{IO} I32 = <T where Copy T, Debug T> value => coro {\n",
+                    "def generic: <T where Copy T, Debug T> T -> Coroutine{IO}<I32> = <T where Copy T, Debug T> value => coro {\n",
                     "    println \"${value:?}\"\n",
                     "    0\n",
                     "}\n",
@@ -2270,15 +2270,15 @@ let value = at (Shared (1, 2), (USize :: 5))
                     "use std.io.(IO, println)\n",
                     "let signal count = 0\n",
                     "def peek: <T> T -> I32 = <T> _ => 0\n",
-                    "def generic_until: <T where Copy T, Debug T> T -> Coroutine{Reactive, IO} () =\n",
+                    "def generic_until: <T where Copy T, Debug T> T -> Coroutine{Reactive, IO}<()> =\n",
                     "  <T where Copy T, Debug T> value => coro {\n",
                     "    let _ = await (until { count + peek value > 0 })\n",
                     "    println \"until ${value:?}\"\n",
                     "  }\n",
                     "count = 1\n",
                     "with Reactive = reactive_scope () {\n",
-                    "  let a: Coroutine{Reactive, IO} () = generic_until 7\n",
-                    "  let b: Coroutine{Reactive, IO} () = generic_until (U8 :: 1)\n",
+                    "  let a: Coroutine{Reactive, IO}<()> = generic_until 7\n",
+                    "  let b: Coroutine{Reactive, IO}<()> = generic_until (U8 :: 1)\n",
                     "  let _ = block_on a\n",
                     "  let _ = block_on b\n",
                     "}\n",
@@ -2323,8 +2323,8 @@ let value = at (Shared (1, 2), (USize :: 5))
                 concat!(
                     "use std.coroutine.*\n",
                     "use std.io.(IO, println)\n",
-                    "def leaf: () -> Coroutine{IO} I32 = () => coro { println \"leaf\"; 1 }\n",
-                    "def middle: () -> Coroutine{IO} I32 = () => coro {\n",
+                    "def leaf: () -> Coroutine{IO}<I32> = () => coro { println \"leaf\"; 1 }\n",
+                    "def middle: () -> Coroutine{IO}<I32> = () => coro {\n",
                     "  let a = await (leaf ())\n",
                     "  let b = await (coro { println \"inner\"; 2 })\n",
                     "  a + b\n",
@@ -2345,7 +2345,7 @@ let value = at (Shared (1, 2), (USize :: 5))
                 concat!(
                     "use std.coroutine.*\n",
                     "use std.io.(IO, println)\n",
-                    "def worker: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "def worker: () -> Coroutine{Tasks, IO}<()> = () => coro {\n",
                     "  println \"worker start\"\n",
                     "  let _ = await (yield_now ())\n",
                     "  println \"worker end\"\n",
@@ -2376,18 +2376,18 @@ let value = at (Shared (1, 2), (USize :: 5))
                     "use std.coroutine.*\n",
                     "use std.io.(IO, println)\n",
                     "let signal flag = 0\n",
-                    "def waiter: move Wait I32 ->{IO} Coroutine{IO} () = move pending => coro {\n",
+                    "def waiter: move Wait<I32> ->{IO} Coroutine{IO}<()> = move pending => coro {\n",
                     "  let outcome = await pending\n",
                     "  match outcome {\n",
                     "    Completed value => println \"wait ${value:?}\",\n",
                     "    Cancelled() => println \"wait cancelled\",\n",
                     "  }\n",
                     "}\n",
-                    "def waiting: () -> Coroutine{Reactive, IO} () = () => coro {\n",
+                    "def waiting: () -> Coroutine{Reactive, IO}<()> = () => coro {\n",
                     "  let _ = await (until { flag >= 1 })\n",
                     "  println \"until done\"\n",
                     "}\n",
-                    "def make_completion: Scheduler -> (wait: Wait I32, resolver: Resolver I32) = s => completion s\n",
+                    "def make_completion: Scheduler -> (wait: Wait<I32>, resolver: Resolver<I32>) = s => completion s\n",
                     "let sched = scheduler ()\n",
                     "with Reactive = reactive_scope () {\n",
                     "  with Tasks = task_scope (sched) {\n",
@@ -2419,18 +2419,18 @@ let value = at (Shared (1, 2), (USize :: 5))
                     "use std.coroutine.*\n",
                     "use std.io.(IO, println)\n",
                     "let signal flag = 0\n",
-                    "def waiter: move Wait I32 ->{IO} Coroutine{IO} () = move pending => coro {\n",
+                    "def waiter: move Wait<I32> ->{IO} Coroutine{IO}<()> = move pending => coro {\n",
                     "  let outcome = await pending\n",
                     "  match outcome {\n",
                     "    Completed value => println \"wait ${value:?}\",\n",
                     "    Cancelled() => println \"wait cancelled\",\n",
                     "  }\n",
                     "}\n",
-                    "def waiting: () -> Coroutine{Reactive, IO} () = () => coro {\n",
+                    "def waiting: () -> Coroutine{Reactive, IO}<()> = () => coro {\n",
                     "  let _ = await (until { flag >= 1 })\n",
                     "  println \"until done\"\n",
                     "}\n",
-                    "def make_completion: Scheduler -> (wait: Wait I32, resolver: Resolver I32) = s => completion s\n",
+                    "def make_completion: Scheduler -> (wait: Wait<I32>, resolver: Resolver<I32>) = s => completion s\n",
                     "let sched = scheduler ()\n",
                     "with Reactive = reactive_scope () {\n",
                     "  with Tasks = task_scope (sched) {\n",
@@ -2458,7 +2458,7 @@ let value = at (Shared (1, 2), (USize :: 5))
                 concat!(
                     "use std.coroutine.*\n",
                     "use std.io.(IO, println)\n",
-                    "type Counter = wrap (n: I32)\n",
+                    "type Counter wrap (n: I32)\n",
                     "def read: () ->{Counter} I32 = () => (resource Counter).n\n",
                     "def subscribe: () ->{Reactive, Counter, IO} () = () => reaction { println \"count ${read ():?}\"; () }\n",
                     "with Counter = Counter (n: 5) {\n",
@@ -2534,17 +2534,17 @@ let value = at (Shared (1, 2), (USize :: 5))
                     "use std.cinterop.(CString, c_string)\n",
                     "use std.io.(IO, println)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
-                    "type Tag = wrap CString\n",
+                    "type Tag wrap CString\n",
                     "impl Drop Tag { cleanup = Tag text => { puts text; () } }\n",
                     "def tag: move CString -> Tag = move text => Tag text\n",
-                    "def with_tags: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "def with_tags: () -> Coroutine{Tasks, IO}<()> = () => coro {\n",
                     "  let first = tag (c_string \"first\")\n",
                     "  let second = tag (c_string \"second\")\n",
                     "  println \"tags ready\"\n",
                     "  let _ = await (yield_now ())\n",
                     "  ()\n",
                     "}\n",
-                    "def completing: () -> Coroutine{IO} () = () => coro {\n",
+                    "def completing: () -> Coroutine{IO}<()> = () => coro {\n",
                     "  let kept = tag (c_string \"leaked\")\n",
                     "  println \"completing\"\n",
                     "}\n",
@@ -2568,7 +2568,7 @@ let value = at (Shared (1, 2), (USize :: 5))
     must_run(expect_stdout(
         inline(
             "shared_buffer_from_array",
-            "use std.shared_buffer.SharedBuffer\nlet fixed: (I32 ^ 3) = (1, 2, 3)\nlet values: SharedBuffer I32 = SharedBuffer.from_array fixed\n",
+            "use std.shared_buffer.SharedBuffer\nlet fixed: (I32 ^ 3) = (1, 2, 3)\nlet values: SharedBuffer<I32> = SharedBuffer.from_array fixed\n",
             "emission",
         ),
         "",
@@ -2602,7 +2602,7 @@ let value = at (Shared (1, 2), (USize :: 5))
     must_run(expect_stdout(
         inline(
             "await_task_effect_pair",
-            "use std.coroutine.*\nuse std.io.(IO, println)\ndef leaf: () -> Coroutine{} I32 = () => coro { 9 }\ndef waiter: () -> Coroutine{Tasks, IO} I32 = () => coro {\n    let t = spawn (leaf ())\n    let r = await t\n    match r {\n        Completed v => v,\n        Cancelled() => 0,\n    }\n}\nlet sched = scheduler ()\nwith Tasks = task_scope (sched) {\n    let _ = spawn (waiter ())\n    let _ = pump (sched, 8)\n}\n",
+            "use std.coroutine.*\nuse std.io.(IO, println)\ndef leaf: () -> Coroutine{}<I32> = () => coro { 9 }\ndef waiter: () -> Coroutine{Tasks, IO}<I32> = () => coro {\n    let t = spawn (leaf ())\n    let r = await t\n    match r {\n        Completed v => v,\n        Cancelled() => 0,\n    }\n}\nlet sched = scheduler ()\nwith Tasks = task_scope (sched) {\n    let _ = spawn (waiter ())\n    let _ = pump (sched, 8)\n}\n",
             "emission",
         ),
         "",
@@ -2642,8 +2642,8 @@ let value = at (Shared (1, 2), (USize :: 5))
             concat!(
                 "use std.io.(IO, println)\n",
                 "\n",
-                "type Counter = wrap (value: I32)\n",
-                "type Label = wrap (text: String)\n",
+                "type Counter wrap (value: I32)\n",
+                "type Label wrap (text: String)\n",
                 "\n",
                 "def apply: <T, effect E> (T, T ->{E} ()) ->{E} () = <T, effect E> (x, f) => f x\n",
                 "def twice: <effect E> (() ->{E} ()) ->{E} () = <effect E> f => { f (); f () }\n",
@@ -2689,10 +2689,10 @@ let value = at (Shared (1, 2), (USize :: 5))
             "effect_generic_alias_types",
             concat!(
                 "use std.io.(IO, println)\n",
-                "type Task{E} = alias () ->{E} ()\n",
-                "type Handler{E} T = alias T ->{E} ()\n",
+                "type Task{E} = () ->{E} ()\n",
+                "type Handler{E}<T> = T ->{E} ()\n",
                 "def launch: <effect E> Task{E} ->{E} () = <effect E> task => task ()\n",
-                "def feed: <T, effect E> (T, Handler{E} T) ->{E} () = <T, effect E> (x, h) => h x\n",
+                "def feed: <T, effect E> (T, Handler{E}<T>) ->{E} () = <T, effect E> (x, h) => h x\n",
                 "def show: I32 ->{IO} () = x => println \"${x}\"\n",
                 "launch (() => println \"task\")\n",
                 "feed (5, show)\n",
@@ -2733,8 +2733,8 @@ let value = at (Shared (1, 2), (USize :: 5))
             concat!(
                 "use std.io.(IO, println)\n",
                 "\n",
-                "type Counter = wrap (value: I32)\n",
-                "type Label = wrap (text: String)\n",
+                "type Counter wrap (value: I32)\n",
+                "type Label wrap (text: String)\n",
                 "\n",
                 "def twice: <effect E> (() ->{E} ()) ->{E} () = <effect E> f => { f (); f () }\n",
                 "def bump: () ->{mut Counter} () = () => {\n",
@@ -2771,7 +2771,7 @@ let value = at (Shared (1, 2), (USize :: 5))
             concat!(
                 "use std.io.(IO, println)\n",
                 "\n",
-                "type Label = wrap (text: String)\n",
+                "type Label wrap (text: String)\n",
                 "\n",
                 "def apply: <T, effect E> (T, T ->{E} ()) ->{E} () = <T, effect E> (x, f) => f x\n",
                 "def both: <T, effect E> (T, T ->{E, IO} ()) ->{E, IO} () = <T, effect E> (x, f) => { f x; f x }\n",
@@ -2805,7 +2805,7 @@ let value = at (Shared (1, 2), (USize :: 5))
             concat!(
                 "use std.io.(IO, println)\n",
                 "\n",
-                "type Label = wrap (text: String)\n",
+                "type Label wrap (text: String)\n",
                 "\n",
                 "def twice: <effect E> (() ->{E} ()) ->{E} () = <effect E> f => { f (); f () }\n",
                 "def four: <effect E> (() ->{E} ()) ->{E} () = <effect E> f => { twice f; twice f }\n",
@@ -2832,7 +2832,7 @@ let value = at (Shared (1, 2), (USize :: 5))
             "effect_polymorphic_nested",
             concat!(
                 "use std.io.(IO, println)\n",
-                "type Label = wrap (text: String)\n",
+                "type Label wrap (text: String)\n",
                 "def twice: <effect E> (() ->{E} ()) ->{E} () = <effect E> f => { f (); f () }\n",
                 "def two: <effect E> (() ->{E} ()) ->{E} () = <effect E> f => { twice f; twice f; () }\n",
                 "def hello: () ->{IO} () = () => println \"hello\"\n",
@@ -2854,7 +2854,7 @@ let value = at (Shared (1, 2), (USize :: 5))
             concat!(
                 "use std.io.(IO, println)\n",
                 "\n",
-                "type Label = wrap (text: String)\n",
+                "type Label wrap (text: String)\n",
                 "\n",
                 "def twice: <effect E> (() ->{E} ()) ->{E} () = <effect E> f => { f (); f () }\n",
                 "def outer: <effect E> ((<effect F> (() ->{F} ()) ->{F} ()), () ->{E} ()) ->{E} () = <effect E> (rep, g) => rep g\n",
@@ -2940,8 +2940,8 @@ let value = at (Shared (1, 2), (USize :: 5))
             concat!(
                 "use std.io.(IO, println)\n",
                 "\n",
-                "type Label = wrap (text: String)\n",
-                "type Counter = wrap (value: I32)\n",
+                "type Label wrap (text: String)\n",
+                "type Counter wrap (value: I32)\n",
                 "\n",
                 "def twice: <effect E> (() ->{E} ()) ->{E} () = <effect E> f => { f (); f () }\n",
                 "def apply: <T, effect E> (T, T ->{E} ()) ->{E} () = <T, effect E> (x, f) => f x\n",
@@ -2998,8 +2998,8 @@ let value = at (Shared (1, 2), (USize :: 5))
             concat!(
                 "use std.io.(IO, println)\n",
                 "\n",
-                "type Label = wrap (text: String)\n",
-                "type Counter = wrap (value: I32)\n",
+                "type Label wrap (text: String)\n",
+                "type Counter wrap (value: I32)\n",
                 "\n",
                 "def labelled: <effect F> (() ->{F, Label} ()) ->{F, Label} () = <effect F> f => f ()\n",
                 "def plain: <effect F> (() ->{F} ()) ->{F} () = <effect F> f => f ()\n",
@@ -3139,33 +3139,33 @@ let value = at (Shared (1, 2), (USize :: 5))
             concat!(
                 "use std.io.(IO, println)\n",
                 "use std.list.List\n",
-                "def copy_one: <T where Clone T> List T -> List T = <T where Clone T> items => Clone.clone items\n",
-                "let stored: <T where Clone T> List T -> List T = copy_one\n",
-                "def first: <A where Copy A> List A -> A = <A where Copy A> items => items[USize :: 0]\n",
-                "let poly_first: <A where Copy A> List A -> A = first\n",
-                "def print_all: <A where Display A, Copy A> move List A ->{IO} () = <A where Display A, Copy A> move items => {\n",
+                "def copy_one: <T where Clone T> List<T> -> List<T> = <T where Clone T> items => Clone.clone items\n",
+                "let stored: <T where Clone T> List<T> -> List<T> = copy_one\n",
+                "def first: <A where Copy A> List<A> -> A = <A where Copy A> items => items[USize :: 0]\n",
+                "let poly_first: <A where Copy A> List<A> -> A = first\n",
+                "def print_all: <A where Display A, Copy A> move List<A> ->{IO} () = <A where Display A, Copy A> move items => {\n",
                 "    for item in items { println (ToString.to_string item) }\n",
                 "}\n",
-                "def copied_then_printed: <A where Clone A, Copy A, Display A> List A ->{IO} () = <A where Clone A, Copy A, Display A> items => {\n",
+                "def copied_then_printed: <A where Clone A, Copy A, Display A> List<A> ->{IO} () = <A where Clone A, Copy A, Display A> items => {\n",
                 "    let copied = copy_one items\n",
                 "    println (ToString.to_string copied[USize :: 1])\n",
                 "    print_all copied\n",
                 "}\n",
-                "let poly: <A where Clone A, Copy A, Display A> List A ->{IO} () = copied_then_printed\n",
+                "let poly: <A where Clone A, Copy A, Display A> List<A> ->{IO} () = copied_then_printed\n",
                 "def describe: <T where Display T> T -> String = <T where Display T> value => ToString.to_string value\n",
                 "def apply: <A where Copy A> (A -> String, A) -> String = <A where Copy A> (f, a) => f a\n",
                 "def run: <B where Display B, Copy B> B -> String = <B where Display B, Copy B> b => apply (describe.<B>, b)\n",
                 "let poly_run: <B where Display B, Copy B> B -> String = run\n",
                 "def main_like: () ->{IO} () = () => {\n",
-                "    let items: List I32 = List.of (4, 5)\n",
+                "    let items: List<I32> = List.of (4, 5)\n",
                 "    let copied = stored items\n",
                 "    for x in copied { println \"${x}\" }\n",
                 "    println \"${poly_first items}\"\n",
-                "    let more: List F64 = List.of (1.5, 2.5)\n",
+                "    let more: List<F64> = List.of (1.5, 2.5)\n",
                 "    poly more\n",
-                "    let first_row: List I32 = List.of (1, 2)\n",
-                "    let second_row: List I32 = List.of (3,)\n",
-                "    let nested: List (List I32) = List.of (first_row, second_row)\n",
+                "    let first_row: List<I32> = List.of (1, 2)\n",
+                "    let second_row: List<I32> = List.of (3,)\n",
+                "    let nested: List<List<I32>> = List.of (first_row, second_row)\n",
                 "    let deep = stored nested\n",
                 "    println \"nested clone\"\n",
                 "    println (poly_run 4)\n",
@@ -3199,8 +3199,8 @@ let value = at (Shared (1, 2), (USize :: 5))
                 "    }\n",
                 "    \"${count}/${total}\"\n",
                 "}\n",
-                "def invalid: () -> List U8 = () => {\n",
-                "    let mut bytes: List U8 = List.new ()\n",
+                "def invalid: () -> List<U8> = () => {\n",
+                "    let mut bytes: List<U8> = List.new ()\n",
                 "    List.push bytes 195\n",
                 "    List.push bytes 40\n",
                 "    bytes\n",
@@ -3215,7 +3215,7 @@ let value = at (Shared (1, 2), (USize :: 5))
                 "    println (sum \"日€\")\n",
                 "    match (String.from_utf8 copy) { Ok s => println s, InvalidUtf8 => println \"invalid\", }\n",
                 "    match (String.from_utf8 (invalid ())) { Ok s => println s, InvalidUtf8 => println \"invalid\", }\n",
-                "    let converted: Ok String | InvalidUtf8 = TryConvert.try_convert (String.to_bytes \"abc\")\n",
+                "    let converted: Ok<String> | InvalidUtf8 = TryConvert.try_convert (String.to_bytes \"abc\")\n",
                 "    match converted { Ok s => println s, InvalidUtf8 => println \"invalid\", }\n",
                 "    let c = c_string \"cstr\"\n",
                 "    match (CString.to_string c) { Ok s => println s, InvalidUtf8 => println \"invalid\", }\n",
@@ -3245,10 +3245,10 @@ let value = at (Shared (1, 2), (USize :: 5))
                 "use std.io.(IO, println)\n",
                 "use std.list.List\n",
                 "def run: () ->{IO} () = () => {\n",
-                "    let a: List I32 = List.of (4, 5, 6)\n",
+                "    let a: List<I32> = List.of (4, 5, 6)\n",
                 "    let v = a[USize :: 1]\n",
                 "    println \"${v} ${a[USize :: 2]}\"\n",
-                "    let nested: List I32 = List.of (a[USize :: 0], 9)\n",
+                "    let nested: List<I32> = List.of (a[USize :: 0], 9)\n",
                 "    println \"${nested[USize :: 0]} ${nested[USize :: 1]}\"\n",
                 "}\n",
                 "run ()\n",
@@ -3265,7 +3265,7 @@ let value = at (Shared (1, 2), (USize :: 5))
             "with_mut_inside_functions",
             concat!(
                 "use std.io.(IO, println)\n",
-                "type Counter = wrap (value: I32)\n",
+                "type Counter wrap (value: I32)\n",
                 "trait Speak T { speak: T ->{IO, mut Counter} () }\n",
                 "impl Speak I32 { speak = value => { (resource Counter).value = (resource Counter).value + value; println \"i32 ${value}\" } }\n",
                 "def bump: () ->{mut Counter} () = () => { (resource Counter).value = (resource Counter).value + 1 }\n",
@@ -3296,29 +3296,29 @@ let value = at (Shared (1, 2), (USize :: 5))
                 "use std.io.(IO, println)\n",
                 "use std.list.(List, ListIter)\n",
                 "use std.iterator.(Iterator, IntoIterator, IterStep)\n",
-                "def step: <Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter) = <Iter where Iterator Iter> move iter => Iterator.next iter\n",
-                "def first: <A where Display A, Copy A> move List A ->{IO} () = <A where Display A, Copy A> move items => {\n",
+                "def step: <Iter where Iterator Iter> move Iter -> IterStep<Iter, Iterator.Item Iter> = <Iter where Iterator Iter> move iter => Iterator.next iter\n",
+                "def first: <A where Display A, Copy A> move List<A> ->{IO} () = <A where Display A, Copy A> move items => {\n",
                 "    match step (IntoIterator.into_iterator items) {\n",
                 "        IterStep.Yield (item, rest) => println (ToString.to_string item),\n",
                 "        _ => println \"empty\",\n",
                 "    }\n",
                 "}\n",
-                "def explicit: <A where Display A, Copy A> move List A ->{IO} () = <A where Display A, Copy A> move items => {\n",
-                "    match step.<ListIter A> (IntoIterator.into_iterator items) {\n",
+                "def explicit: <A where Display A, Copy A> move List<A> ->{IO} () = <A where Display A, Copy A> move items => {\n",
+                "    match step.<ListIter<A>> (IntoIterator.into_iterator items) {\n",
                 "        IterStep.Yield (item, rest) => println (ToString.to_string item),\n",
                 "        _ => println \"empty\",\n",
                 "    }\n",
                 "}\n",
-                "let poly: <A where Display A, Copy A> move List A ->{IO} () = first\n",
+                "let poly: <A where Display A, Copy A> move List<A> ->{IO} () = first\n",
                 "def main_like: () ->{IO} () = () => {\n",
-                "    let numbers: List I32 = List.of (4, 5)\n",
+                "    let numbers: List<I32> = List.of (4, 5)\n",
                 "    match step (IntoIterator.into_iterator numbers) {\n",
                 "        IterStep.Yield (item, rest) => println \"${item + 1}\",\n",
                 "        _ => println \"empty\",\n",
                 "    }\n",
-                "    let more: List F64 = List.of (1.5, 2.5)\n",
+                "    let more: List<F64> = List.of (1.5, 2.5)\n",
                 "    poly more\n",
-                "    let again: List I32 = List.of (7, 8)\n",
+                "    let again: List<I32> = List.of (7, 8)\n",
                 "    explicit again\n",
                 "}\n",
                 "main_like ()\n",
@@ -3354,7 +3354,7 @@ let value = at (Shared (1, 2), (USize :: 5))
     expect_stdout(
         inline(
             "block_tail_coroutine",
-            "use std.coroutine.*\ndef f: () -> Coroutine{} I32 = () => { coro { 42 } }\nlet held = f ()\n",
+            "use std.coroutine.*\ndef f: () -> Coroutine{}<I32> = () => { coro { 42 } }\nlet held = f ()\n",
             "emission",
         ),
         "",
@@ -3478,12 +3478,12 @@ let value = at (Shared (1, 2), (USize :: 5))
                 concat!(
                     "use std.coroutine.*\n",
                     "use std.io.(IO, println)\n",
-                    "def worker: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "def worker: () -> Coroutine{Tasks, IO}<()> = () => coro {\n",
                     "    println \"task start\"\n",
                     "    let _ = await (yield_now ())\n",
                     "    println \"task end\"\n",
                     "}\n",
-                    "def abandoning: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "def abandoning: () -> Coroutine{Tasks, IO}<()> = () => coro {\n",
                     "    let sched = scheduler ()\n",
                     "    let handle = loop {\n",
                     "        with Tasks = task_scope (sched) {\n",
@@ -3517,12 +3517,12 @@ let value = at (Shared (1, 2), (USize :: 5))
                 concat!(
                     "use std.coroutine.*\n",
                     "use std.io.(IO, println)\n",
-                    "def worker: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "def worker: () -> Coroutine{Tasks, IO}<()> = () => coro {\n",
                     "    println \"task start\"\n",
                     "    let _ = await (yield_now ())\n",
                     "    println \"task end\"\n",
                     "}\n",
-                    "def continuing: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "def continuing: () -> Coroutine{Tasks, IO}<()> = () => coro {\n",
                     "    let sched = scheduler ()\n",
                     "    let mut index = 0\n",
                     "    loop {\n",
@@ -3560,7 +3560,7 @@ let value = at (Shared (1, 2), (USize :: 5))
             concat!(
                 "use std.coroutine.*\n",
                 "use std.io.(IO, println)\n",
-                "def worker: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                "def worker: () -> Coroutine{Tasks, IO}<()> = () => coro {\n",
                 "    println \"task start\"\n",
                 "    let _ = await (yield_now ())\n",
                 "    println \"task end\"\n",
@@ -3596,34 +3596,34 @@ let value = at (Shared (1, 2), (USize :: 5))
                     "use std.cinterop.(CString, c_string)\n",
                     "use std.io.(IO, println)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
-                    "type Tag = wrap CString\n",
+                    "type Tag wrap CString\n",
                     "impl Drop Tag { cleanup = Tag text => { puts text; () } }\n",
                     "def tag: move CString -> Tag = move text => Tag text\n",
-                    "def completes: () -> Coroutine{} () = () => coro {\n",
+                    "def completes: () -> Coroutine{}<()> = () => coro {\n",
                     "    let kept = tag (c_string \"complete\")\n",
                     "    ()\n",
                     "}\n",
-                    "def moved_out: () -> Coroutine{} () = () => coro {\n",
+                    "def moved_out: () -> Coroutine{}<()> = () => coro {\n",
                     "    let first = tag (c_string \"moved\")\n",
                     "    let second = first\n",
                     "    ()\n",
                     "}\n",
-                    "def never_ran: Bool -> Coroutine{} () = condition => coro {\n",
+                    "def never_ran: Bool -> Coroutine{}<()> = condition => coro {\n",
                     "    if (condition) {\n",
                     "        let never = tag (c_string \"never\")\n",
                     "        ()\n",
                     "    }\n",
                     "}\n",
-                    "def cancelled: () -> Coroutine{Tasks} () = () => coro {\n",
+                    "def cancelled: () -> Coroutine{Tasks}<()> = () => coro {\n",
                     "    let doomed = tag (c_string \"cancel\")\n",
                     "    let _ = await (yield_now ())\n",
                     "    ()\n",
                     "}\n",
-                    "def child: () -> Coroutine{} Tag = () => coro {\n",
+                    "def child: () -> Coroutine{}<Tag> = () => coro {\n",
                     "    let held = tag (c_string \"child\")\n",
                     "    held\n",
                     "}\n",
-                    "def parent: () -> Coroutine{} () = () => coro {\n",
+                    "def parent: () -> Coroutine{}<()> = () => coro {\n",
                     "    let outer = tag (c_string \"parent\")\n",
                     "    let result = await (child ())\n",
                     "    ()\n",
@@ -3657,7 +3657,7 @@ let value = at (Shared (1, 2), (USize :: 5))
         "complete\nmoved\ncancel\nparent\nchild\ndone\n",
     )),
     // A generic `Drop` implementation applies by header unification plus bound
-    // discharge. The conditional `Copy T` bound holds for `Box I32`/`Box (I32,
+    // discharge. The conditional `Copy T` bound holds for `Box<I32>`/`Box (I32,
     // I32)` (user drop runs) and fails for `Box CString` (no user drop; the
     // `CString` is still freed), including nested products and sums.
     must_run(expect_stdout(
@@ -3668,17 +3668,17 @@ let value = at (Shared (1, 2), (USize :: 5))
                     "use std.cinterop.(CString, c_string)\n",
                     "use std.io.(IO, println)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
-                    "type Box T = wrap (T)\n",
-                    "impl<T where Copy T> Drop (Box T) { cleanup = Box value => { puts (c_string \"copy box\"); () } }\n",
+                    "type Box<T> wrap (T)\n",
+                    "impl<T where Copy T> Drop Box<T> { cleanup = Box value => { puts (c_string \"copy box\"); () } }\n",
                     "def run_i32: () -> () = () => { let b = Box 2; () }\n",
                     "def run_product: () -> () = () => { let b = Box (1, 2); () }\n",
                     "def run_cstring: () -> () = () => { let b = Box (c_string \"free me\"); () }\n",
                     "def run_nested: () -> () = () => {\n",
-                    "    let b: (Box I32, Box CString) = (Box 3, Box (c_string \"x\"))\n",
+                    "    let b: (Box<I32>, Box<CString>) = (Box 3, Box (c_string \"x\"))\n",
                     "    ()\n",
                     "}\n",
                     "def run_sum: Bool -> () = condition => {\n",
-                    "    let value: (Box I32 | Box CString) = when { condition => Box 4, else => Box (c_string \"y\") }\n",
+                    "    let value: (Box<I32> | Box<CString>) = when { condition => Box 4, else => Box (c_string \"y\") }\n",
                     "    ()\n",
                     "}\n",
                     "run_i32 ()\n",
@@ -3714,9 +3714,9 @@ let value = at (Shared (1, 2), (USize :: 5))
                     "use std.cinterop.(CString, c_string)\n",
                     "use std.io.(IO, println)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
-                    "type Wrapper T = wrap (T)\n",
-                    "impl<T> Drop (Wrapper T) { cleanup = Wrapper value => { puts (c_string \"wrapper\"); () } }\n",
-                    "def wrap: <T> move T -> Wrapper T = <T> move value => Wrapper value\n",
+                    "type Wrapper<T> wrap (T)\n",
+                    "impl<T> Drop Wrapper<T> { cleanup = Wrapper value => { puts (c_string \"wrapper\"); () } }\n",
+                    "def wrap: <T> move T -> Wrapper<T> = <T> move value => Wrapper value\n",
                     "def run_i32: () -> () = () => { let w = wrap 1; () }\n",
                     "def run_cstring: () -> () = () => { let w = wrap (c_string \"x\"); () }\n",
                     "def moved_out: () -> () = () => {\n",
@@ -3724,7 +3724,7 @@ let value = at (Shared (1, 2), (USize :: 5))
                     "    let second = first\n",
                     "    ()\n",
                     "}\n",
-                    "def returns: () -> Wrapper (CString) = () => {\n",
+                    "def returns: () -> Wrapper<CString> = () => {\n",
                     "    let held = wrap (c_string \"returned\")\n",
                     "    held\n",
                     "}\n",
@@ -3732,22 +3732,22 @@ let value = at (Shared (1, 2), (USize :: 5))
                     "    let value = returns ()\n",
                     "    ()\n",
                     "}\n",
-                    "def keeper: move (Wrapper I32) -> (() -> I32) = move value => () => 1\n",
+                    "def keeper: move (Wrapper<I32>) -> (() -> I32) = move value => () => 1\n",
                     "def closure: () -> () = () => {\n",
                     "    let held = wrap 5\n",
                     "    let peek = keeper held\n",
                     "    peek ()\n",
                     "    ()\n",
                     "}\n",
-                    "def coroutine: () -> Coroutine{} () = () => coro {\n",
+                    "def coroutine: () -> Coroutine{}<()> = () => coro {\n",
                     "    let held = wrap 6\n",
                     "    ()\n",
                     "}\n",
-                    "type Inner = wrap CString\n",
+                    "type Inner wrap CString\n",
                     "impl Drop Inner { cleanup = Inner text => { puts text; () } }\n",
-                    "type Outer T = wrap (T)\n",
-                    "impl<T> Drop (Outer T) { cleanup = Outer value => { puts (c_string \"outer\"); () } }\n",
-                    "def outer: <T> move T -> Outer T = <T> move value => Outer value\n",
+                    "type Outer<T> wrap (T)\n",
+                    "impl<T> Drop Outer<T> { cleanup = Outer value => { puts (c_string \"outer\"); () } }\n",
+                    "def outer: <T> move T -> Outer<T> = <T> move value => Outer value\n",
                     "def owned_parameter: () -> () = () => {\n",
                     "    let value = outer (Inner (c_string \"inner\"))\n",
                     "    ()\n",
@@ -3789,12 +3789,12 @@ let value = at (Shared (1, 2), (USize :: 5))
                 concat!(
                     "use std.coroutine.*\n",
                     "use std.io.(IO, println)\n",
-                    "def quiet: () -> Coroutine{Tasks, IO} I32 = () => coro { 5 }\n",
-                    "def outer: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "def quiet: () -> Coroutine{Tasks, IO}<I32> = () => coro { 5 }\n",
+                    "def outer: () -> Coroutine{Tasks, IO}<()> = () => coro {\n",
                     "    let v = await (quiet ())\n",
                     "    println \"awaited ${v:?}\"\n",
                     "}\n",
-                    "def wide: () -> Coroutine{IO} I32 = () => coro { 3 }\n",
+                    "def wide: () -> Coroutine{IO}<I32> = () => coro { 3 }\n",
                     "let sched = scheduler ()\n",
                     "with Tasks = task_scope (sched) {\n",
                     "    let _ = spawn (outer ())\n",
@@ -3821,7 +3821,7 @@ let value = at (Shared (1, 2), (USize :: 5))
                 concat!(
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
-                    "type Tag = wrap CString\n",
+                    "type Tag wrap CString\n",
                     "impl Drop Tag { cleanup = Tag text => { puts text; () } }\n",
                     "trait Measure T { measure: T -> I32 }\n",
                     "impl Measure Tag { measure = tag => 1 }\n",
@@ -3894,14 +3894,14 @@ let value = at (Shared (1, 2), (USize :: 5))
                     "use std.shared_buffer.SharedBuffer\n",
                     "use std.buffer.Buffer\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
-                    "type Tag = wrap CString\n",
+                    "type Tag wrap CString\n",
                     "impl Drop Tag { cleanup = Tag text => { puts text; () } }\n",
-                    "def from_array: () -> Shared Tag = () => {\n",
-                    "    let values: SharedBuffer Tag = SharedBuffer.from_array (Tag (c_string \"drop array first\"), Tag (c_string \"drop array second\"), Tag (c_string \"drop array third\"))\n",
+                    "def from_array: () -> Shared<Tag> = () => {\n",
+                    "    let values: SharedBuffer<Tag> = SharedBuffer.from_array (Tag (c_string \"drop array first\"), Tag (c_string \"drop array second\"), Tag (c_string \"drop array third\"))\n",
                     "    SharedBuffer.get_shared_unchecked values 2\n",
                     "}\n",
-                    "def from_frozen: () -> Shared Tag = () => {\n",
-                    "    let mut buffer: Buffer Tag = Buffer.with_capacity 4\n",
+                    "def from_frozen: () -> Shared<Tag> = () => {\n",
+                    "    let mut buffer: Buffer<Tag> = Buffer.with_capacity 4\n",
                     "    Buffer.push buffer (Tag (c_string \"drop frozen first\"))\n",
                     "    Buffer.push buffer (Tag (c_string \"drop frozen second\"))\n",
                     "    let frozen = Buffer.into_shared_buffer buffer\n",
@@ -3940,7 +3940,7 @@ let value = at (Shared (1, 2), (USize :: 5))
                     "use std.io.println\n",
                     "use std.buffer.Buffer\n",
                     "def run: USize -> USize = n => {\n",
-                    "    let mut buffer: Buffer U8 = Buffer.with_capacity 16\n",
+                    "    let mut buffer: Buffer<U8> = Buffer.with_capacity 16\n",
                     "    Buffer.push buffer 7;\n",
                     "    let mut index: USize = 0\n",
                     "    let mut total: USize = 0\n",
@@ -4043,7 +4043,7 @@ let value = at (Shared (1, 2), (USize :: 5))
                 "def identity: <T> move T -> T = <T> move value => value\n",
                 "def consume: (<T> move T -> T) -> (I32, String) =\n",
                 "    f => (f 42, f \"hello\")\n",
-                "type Functions = wrap (identity: <T> move T -> T,)\n",
+                "type Functions wrap (identity: <T> move T -> T,)\n",
                 "let mut selected: <T> move T -> T = identity\n",
                 "let fs = Functions (identity: selected)\n",
                 "let pair = consume fs.identity\n",
@@ -4090,7 +4090,7 @@ let value = at (Shared (1, 2), (USize :: 5))
             concat!(
                 "use std.io.println\n",
                 "def identity: <T> move T -> T = <T> move value => value\n",
-                "type Functions = wrap (identity: <T> move T -> T,)\n",
+                "type Functions wrap (identity: <T> move T -> T,)\n",
                 "let fs = Functions (identity: identity)\n",
                 "let a = fs.identity 5\n",
                 "let b: String = fs.identity \"five\"\n",
@@ -4198,7 +4198,7 @@ let value = at (Shared (1, 2), (USize :: 5))
                 "    let c: move I32 -> I32 = f\n",
                 "    c 6\n",
                 "}\n",
-                "type Functions = wrap (identity: <T> move T -> T,)\n",
+                "type Functions wrap (identity: <T> move T -> T,)\n",
                 "let fs = Functions (identity: identity)\n",
                 "let s: move String -> String = fs.identity\n",
                 "let r = consume identity\n",
@@ -4357,10 +4357,10 @@ let value = at (Shared (1, 2), (USize :: 5))
             concat!(
                 "use std.io.println\n",
                 "let poly: <T where Copy T> T -> T = <T where Copy T> value => value\n",
-                "type Op = from (I32 -> I32)\n",
+                "type Op from (I32 -> I32)\n",
                 "let op: Op = poly\n",
                 "let Op(f) = op\n",
-                "type Missing = wrap ()\n",
+                "type Missing wrap ()\n",
                 "let maybe: (I32 -> I32) | Missing = poly\n",
                 "let tag = match maybe { Missing () => 0, _ => 1 }\n",
                 "println \"${f 3} ${tag}\"\n",
@@ -4379,21 +4379,21 @@ let value = at (Shared (1, 2), (USize :: 5))
             "polymorphic_mixed_layout_calls",
             concat!(
                 "use std.io.println\n",
-                "type Call T = wrap (T -> T)\n",
-                "type Keep U = wrap (U)\n",
+                "type Call<T> wrap (T -> T)\n",
+                "type Keep<U> wrap (U)\n",
                 "def run_handler: <T, U where Copy T, Copy U> ((callback: T -> T, state: U), T) -> T = <T, U where Copy T, Copy U> (handler, value) => handler.callback value\n",
                 "def run_flipped: <T, U where Copy T, Copy U> ((tag: I8, state: U, callback: T -> T), T) -> T = <T, U where Copy T, Copy U> (handler, value) => handler.callback value\n",
                 "def run_nested: <T, U where Copy T, Copy U> ((n: U, inner: (s: U, f: T -> T)), T) -> T = <T, U where Copy T, Copy U> (outer, value) => outer.inner.f value\n",
                 "def swap_callback: <T, U where Copy T, Copy U> (mut (callback: T -> T, state: U), T) -> T = <T, U where Copy T, Copy U> (mut handler, value) => { let before = handler.callback value; handler.callback = y => y; before }\n",
                 "def make_handler: <T, U where Copy T, Copy U> (U, T -> T) -> (state: U, callback: T -> T) = <T, U where Copy T, Copy U> (u, f) => (state: u, callback: x => f (f x))\n",
-                "def apply_maybe: <T, U where Copy T, Copy U> (Call T | Keep U, T) -> T = <T, U where Copy T, Copy U> (maybe, value) => match maybe { Call f => f value, Keep _ => value }\n",
+                "def apply_maybe: <T, U where Copy T, Copy U> (Call<T> | Keep<U>, T) -> T = <T, U where Copy T, Copy U> (maybe, value) => match maybe { Call f => f value, Keep _ => value }\n",
                 "def calls: <A where Copy A> (\n",
                 "    <T, U where Copy T, Copy U> ((callback: T -> T, state: U), T) -> T,\n",
                 "    <T, U where Copy T, Copy U> ((tag: I8, state: U, callback: T -> T), T) -> T,\n",
                 "    <T, U where Copy T, Copy U> ((n: U, inner: (s: U, f: T -> T)), T) -> T,\n",
                 "    <T, U where Copy T, Copy U> (mut (callback: T -> T, state: U), T) -> T,\n",
                 "    <T, U where Copy T, Copy U> (U, T -> T) -> (state: U, callback: T -> T),\n",
-                "    <T, U where Copy T, Copy U> (Call T | Keep U, T) -> T,\n",
+                "    <T, U where Copy T, Copy U> (Call<T> | Keep<U>, T) -> T,\n",
                 "    A,\n",
                 ") -> (I32, I32, I32, I32, I32, A, I32, I32) = <A where Copy A> (run, flipped, nested, swap, make, maybe, a) => {\n",
                 "    let offset = 1000\n",
@@ -4405,8 +4405,8 @@ let value = at (Shared (1, 2), (USize :: 5))
                 "    let after = handler.callback 5\n",
                 "    let made = make.<I32, A> (a, x => x + 10)\n",
                 "    let add: I32 -> I32 = x => x + 100\n",
-                "    let call: Call I32 | Keep A = Call add\n",
-                "    let keep: Call I32 | Keep A = Keep a\n",
+                "    let call: Call<I32> | Keep<A> = Call add\n",
+                "    let keep: Call<I32> | Keep<A> = Keep a\n",
                 "    (first, second, third, swapped * 100 + after, made.callback 1, made.state, maybe.<I32, A> (call, 5), maybe.<I32, A> (keep, 5))\n",
                 "}\n",
                 "let poly_calls: <A where Copy A> (\n",
@@ -4415,7 +4415,7 @@ let value = at (Shared (1, 2), (USize :: 5))
                 "    <T, U where Copy T, Copy U> ((n: U, inner: (s: U, f: T -> T)), T) -> T,\n",
                 "    <T, U where Copy T, Copy U> (mut (callback: T -> T, state: U), T) -> T,\n",
                 "    <T, U where Copy T, Copy U> (U, T -> T) -> (state: U, callback: T -> T),\n",
-                "    <T, U where Copy T, Copy U> (Call T | Keep U, T) -> T,\n",
+                "    <T, U where Copy T, Copy U> (Call<T> | Keep<U>, T) -> T,\n",
                 "    A,\n",
                 ") -> (I32, I32, I32, I32, I32, A, I32, I32) = calls\n",
                 "let wide: F64 = 2.5\n",
@@ -4437,12 +4437,12 @@ let value = at (Shared (1, 2), (USize :: 5))
             "polymorphic_mixed_layout_instantiation",
             concat!(
                 "use std.io.println\n",
-                "type Call T = wrap (T -> T)\n",
-                "type Keep U = wrap (U)\n",
+                "type Call<T> wrap (T -> T)\n",
+                "type Keep<U> wrap (U)\n",
                 "let run_handler: <T, U where Copy T, Copy U> ((callback: T -> T, state: U), T) -> T = <T, U where Copy T, Copy U> (handler, value) => handler.callback value\n",
                 "let swap_callback: <T, U where Copy T, Copy U> (mut (callback: T -> T, state: U), T) -> T = <T, U where Copy T, Copy U> (mut handler, value) => { let before = handler.callback value; handler.callback = y => y; before }\n",
                 "let make_handler: <T, U where Copy T, Copy U> (U, T -> T) -> (state: U, callback: T -> T) = <T, U where Copy T, Copy U> (u, f) => (state: u, callback: x => f (f x))\n",
-                "let apply_maybe: <T, U where Copy T, Copy U> (Call T | Keep U, T) -> T = <T, U where Copy T, Copy U> (maybe, value) => match maybe { Call f => f value, Keep _ => value }\n",
+                "let apply_maybe: <T, U where Copy T, Copy U> (Call<T> | Keep<U>, T) -> T = <T, U where Copy T, Copy U> (maybe, value) => match maybe { Call f => f value, Keep _ => value }\n",
                 "def user: <A where Copy A> (A, Bool) -> (I32, I32, I32, I32, A) = <A where Copy A> (a, pick) => {\n",
                 "    let run: ((callback: I32 -> I32, state: A), I32) -> I32 = run_handler\n",
                 "    let offset = 1000\n",
@@ -4453,9 +4453,9 @@ let value = at (Shared (1, 2), (USize :: 5))
                 "    let after = handler.callback 5\n",
                 "    let make: (A, I32 -> I32) -> (state: A, callback: I32 -> I32) = make_handler\n",
                 "    let made = make (a, x => x + 10)\n",
-                "    let apply: (Call I32 | Keep A, I32) -> I32 = apply_maybe\n",
+                "    let apply: (Call<I32> | Keep<A>, I32) -> I32 = apply_maybe\n",
                 "    let add: I32 -> I32 = x => x + 100\n",
-                "    let chosen: Call I32 | Keep A = if pick { Call add } else { Keep a }\n",
+                "    let chosen: Call<I32> | Keep<A> = if pick { Call add } else { Keep a }\n",
                 "    (first, swapped * 100 + after, made.callback 1, apply (chosen, 5), made.state)\n",
                 "}\n",
                 "let poly_user: <A where Copy A> (A, Bool) -> (I32, I32, I32, I32, A) = user\n",

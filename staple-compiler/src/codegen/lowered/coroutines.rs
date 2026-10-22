@@ -475,7 +475,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// A child coroutine parks `RESUME_CHILD` after stashing the child frame
     /// and its deferred-resource bundle; on resume it loads the pending
     /// result. An external `Task`/`Wait` handle parks `WAIT_EXTERNAL` and
-    /// returns the `Completed T | Cancelled` outcome sum.
+    /// returns the `Completed<T> | Cancelled` outcome sum.
     pub(super) fn emit_await(
         &mut self,
         owner: EmissionOwner,

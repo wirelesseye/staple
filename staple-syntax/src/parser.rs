@@ -156,6 +156,19 @@ pub(crate) fn statement_starts(source: &str) -> Result<Vec<usize>, ParseError> {
     Ok(starts)
 }
 
+/// Parses `source` and returns the indices, within `lex(source)`, of the `<`
+/// and `>` tokens that delimit type arguments or type declaration parameters.
+pub(crate) fn type_argument_brackets(source: &str) -> Result<Vec<usize>, ParseError> {
+    let tokens = Arc::from(lex(source));
+    let mut grammar = Grammar::new(tokens, Arc::from(source), 0, None);
+    let module = grammar.parse_module_items();
+    module?;
+    let mut brackets = grammar.type_brackets.take();
+    brackets.sort_unstable();
+    brackets.dedup();
+    Ok(brackets)
+}
+
 /// Parses a complete Staple source file, assigning `SyntaxId`s from
 /// `first_syntax_id` upwards instead of from zero.
 ///
@@ -213,7 +226,7 @@ pub fn parse_type_template_fragment(
 }
 
 /// Reinterprets one macro argument's original tokens as exactly one type
-/// declaration body (`alias T`, `wrap T`, `from T`, `pub wrap T`, or `opaque`).
+/// declaration body (`= T`, `wrap T`, `from T`, `wrap pub T`, or `opaque`).
 pub fn parse_type_body_fragment(
     syntax: &Syntax,
     next_syntax_id: &mut usize,
@@ -502,6 +515,10 @@ struct Grammar {
     macro_punctuation_arguments: bool,
     quote_depth: usize,
     source_name: Option<Arc<str>>,
+    /// Token indices of every `<` and `>` that delimit type arguments or type
+    /// declaration parameters, shared with speculative clones like
+    /// `statement_starts`.
+    type_brackets: Rc<RefCell<Vec<usize>>>,
 }
 
 const NOMINAL_PATTERN_ANNOTATION_ERROR: &str =
@@ -548,6 +565,7 @@ impl Grammar {
             macro_punctuation_arguments: false,
             quote_depth: 0,
             source_name,
+            type_brackets: Rc::default(),
         }
     }
 
@@ -819,7 +837,15 @@ impl Grammar {
     /// Parses the `pub` visibility modifier after its keyword: either a bare
     /// `pub` or a package-scoped `pub(package)`.
     fn parse_visibility_after_pub(&mut self) -> Result<(Visibility, VisibilityKind), ParseError> {
-        if !self.eat(TokenKind::LParen) {
+        // A `(` that does not start `(package)` begins the next syntax, such as
+        // the product type in `wrap pub (value: T)`.
+        let restricts = self.at(TokenKind::LParen) && {
+            let inner = self.next_non_trivia(self.next_non_trivia(self.position) + 1);
+            self.tokens.get(inner).is_some_and(|token| {
+                token.kind == TokenKind::Package || token.text == "repr"
+            })
+        };
+        if !restricts || !self.eat(TokenKind::LParen) {
             return Ok((Visibility::Public, VisibilityKind::Public));
         }
         if self.eat(TokenKind::Package) {
@@ -828,7 +854,7 @@ impl Grammar {
         }
         if self.peek_text("repr") {
             return Err(self.error(
-                "`pub(repr)` was removed; write representation visibility in the type body, as `type Name = pub wrap Type`",
+                "`pub(repr)` was removed; write representation visibility in the type body, as `type Name wrap pub Type`",
             ));
         }
         Err(self.error("expected `package` or `)` in visibility modifier"))
@@ -1786,8 +1812,9 @@ impl Grammar {
 
     /// Parses a wrapper, alias, singleton, or opaque type declaration.
     ///
-    /// The contextual markers `alias`, `wrap`, `from`, and `opaque` are recognized
-    /// only directly after `=`; elsewhere they are ordinary identifiers.
+    /// The contextual markers `wrap`, `from`, and `opaque` are recognized
+    /// only directly after the type name and its parameters, on the same line;
+    /// elsewhere they are ordinary identifiers.
     fn parse_type_declaration(
         &mut self,
         visibility: Visibility,
@@ -1815,7 +1842,13 @@ impl Grammar {
         } else {
             None
         };
-        let (mut type_parameters, default_bounds) = self.parse_juxtaposed_type_parameters()?;
+        if self.at_operator("<") && self.has_trivia_before_next_token() {
+            return Err(self.error(
+                "type parameters must immediately follow the type name, as in `type Name<T>`",
+            ));
+        }
+        let (mut type_parameters, clause, default_bounds) =
+            self.parse_bracketed_generics_with(true)?;
         if let Some(effect_parameter) = effect_parameter {
             type_parameters.insert(0, effect_parameter);
         }
@@ -1827,10 +1860,31 @@ impl Grammar {
             subtype_bounds,
             equality_bounds,
             sized_relaxations,
-        } = self.parse_where_clause()?;
-        let has_body = self.eat(TokenKind::Equals);
+        } = clause;
+        let has_body = !self.has_newline_before_next_token()
+            && (self.at(TokenKind::Equals)
+                || self.peek_text("opaque")
+                || self.peek_text("wrap")
+                || self.peek_text("from"));
         if !has_body && !type_parameters.is_empty() {
             return Err(self.error("singleton types cannot have compile-time parameters"));
+        }
+        if !has_body
+            && !self.has_newline_before_next_token()
+            && !matches!(
+                self.peek(),
+                None | Some(
+                    TokenKind::RBrace
+                        | TokenKind::RParen
+                        | TokenKind::RBracket
+                        | TokenKind::Semicolon
+                        | TokenKind::Comma
+                )
+            )
+        {
+            return Err(self.error(
+                "expected `<` for type parameters, or `=`, `wrap`, `from`, or `opaque` for a type body",
+            ));
         }
         let body = if has_body {
             Some(self.parse_type_body()?)
@@ -1855,23 +1909,57 @@ impl Grammar {
         })
     }
 
-    /// Parses a type declaration body after `=`: `alias T`, `wrap T`,
-    /// `from T`, `pub wrap T`, `pub(package) from T`, and so on, or `opaque`.
+    /// Parses a type declaration body: `opaque`, `= T` for a transparent alias,
+    /// or `wrap T` / `from T` with an optional representation visibility written
+    /// before the underlying type (`wrap pub T`, `from pub(package) T`).
     fn parse_type_body(&mut self) -> Result<TypeBody, ParseError> {
         let start = self.position;
+        let private_representation = || VisibilitySyntax {
+            syntax: Syntax::compiler(),
+            kind: VisibilityKind::Private,
+        };
         if self.peek_text("opaque") {
             let marker_syntax = self.parse_contextual_marker();
             return Ok(TypeBody {
                 syntax: self.syntax(start),
                 marker_syntax,
                 kind: TypeBodyKind::Opaque,
-                representation: VisibilitySyntax {
-                    syntax: Syntax::compiler(),
-                    kind: VisibilityKind::Private,
-                },
+                representation: private_representation(),
                 underlying: None,
             });
         }
+        if self.at(TokenKind::Equals) {
+            let marker_syntax = self.parse_contextual_marker();
+            if self.peek_text("alias") {
+                return Err(self.error(
+                    "`alias` was removed; a transparent alias is written `type Name<T> = Type`",
+                ));
+            }
+            if self.at(TokenKind::Pub) || self.peek_text("wrap") || self.peek_text("from") {
+                return Err(self.error(
+                    "`wrap` and `from` follow the type name without `=`, as in `type Name<T> wrap pub Type`",
+                ));
+            }
+            if self.peek_text("opaque") {
+                return Err(self.error("an opaque type is written `type Name opaque`, without `=`"));
+            }
+            let underlying = self.parse_type_declaration_body()?;
+            return Ok(TypeBody {
+                syntax: self.syntax(start),
+                marker_syntax,
+                kind: TypeBodyKind::Alias,
+                representation: private_representation(),
+                underlying: Some(underlying),
+            });
+        }
+        let kind = if self.peek_text("wrap") {
+            TypeBodyKind::Wrapper
+        } else if self.peek_text("from") {
+            TypeBodyKind::From
+        } else {
+            return Err(self.error("expected `=`, `wrap`, `from`, or `opaque`"));
+        };
+        let marker_syntax = self.parse_contextual_marker();
         let representation_start = self.position;
         let representation = if self.eat(TokenKind::Pub) {
             let (_, kind) = self.parse_visibility_after_pub()?;
@@ -1880,28 +1968,8 @@ impl Grammar {
                 kind,
             }
         } else {
-            VisibilitySyntax {
-                syntax: Syntax::compiler(),
-                kind: VisibilityKind::Private,
-            }
+            private_representation()
         };
-        let kind = if self.peek_text("wrap") {
-            TypeBodyKind::Wrapper
-        } else if self.peek_text("from") {
-            TypeBodyKind::From
-        } else if self.peek_text("alias") {
-            if representation.kind != VisibilityKind::Private {
-                return Err(self.error(
-                    "representation visibility requires `wrap` or `from`; a type alias cannot expose a representation",
-                ));
-            }
-            TypeBodyKind::Alias
-        } else if representation.kind != VisibilityKind::Private {
-            return Err(self.error("expected `wrap` or `from` after representation visibility"));
-        } else {
-            return Err(self.error("expected `alias`, `wrap`, `from`, or `opaque` after `=`"));
-        };
-        let marker_syntax = self.parse_contextual_marker();
         let underlying = self.parse_type_declaration_body()?;
         Ok(TypeBody {
             syntax: self.syntax(start),
@@ -1925,7 +1993,7 @@ impl Grammar {
         underlying
     }
 
-    /// Consumes a contextual `alias`, `wrap`, `from`, or `opaque` marker and returns
+    /// Consumes a contextual `=`, `wrap`, `from`, or `opaque` marker and returns
     /// its syntax.
     fn parse_contextual_marker(&mut self) -> Syntax {
         let start = self.position;
@@ -2042,10 +2110,30 @@ impl Grammar {
     fn parse_bracketed_generics(
         &mut self,
     ) -> Result<(Vec<TypeParameterPattern>, WhereClause), ParseError> {
+        let (parameters, clause, _) = self.parse_bracketed_generics_with(false)?;
+        Ok((parameters, clause))
+    }
+
+    /// Parses the bracketed generic-parameter list, optionally allowing an
+    /// inline default (`<Name = Default>`) on a parameter, as `type`
+    /// declarations do. Returns the defaults alongside the parameters.
+    fn parse_bracketed_generics_with(
+        &mut self,
+        allow_defaults: bool,
+    ) -> Result<
+        (
+            Vec<TypeParameterPattern>,
+            WhereClause,
+            Vec<DefaultTypeBound>,
+        ),
+        ParseError,
+    > {
+        let open = self.next_non_trivia(self.position);
         if !self.eat_operator("<") {
-            return Ok((Vec::new(), WhereClause::default()));
+            return Ok((Vec::new(), WhereClause::default(), Vec::new()));
         }
         let mut parameters = Vec::new();
+        let mut defaults = Vec::new();
         loop {
             let param_start = self.position;
             let pattern = self.parse_type_parameter_pattern()?;
@@ -2055,16 +2143,37 @@ impl Grammar {
                     "product type parameters aren't allowed inside `<...>`; declare each parameter separately",
                 ));
             }
+            if allow_defaults && self.at(TokenKind::Equals) {
+                let TypeParameterPattern::Binding(binding) = &pattern else {
+                    return Err(self.error("only a plain type parameter may have a default"));
+                };
+                self.bump_token();
+                let default = self.parse_type_union()?;
+                let syntax = self.syntax(param_start);
+                defaults.push(DefaultTypeBound {
+                    syntax: syntax.clone(),
+                    parameter: NamedType {
+                        syntax,
+                        namespace: None,
+                        name: binding.name.clone(),
+                    },
+                    default,
+                });
+            }
             parameters.push(pattern);
             if !self.eat(TokenKind::Comma) {
                 break;
             }
         }
         let clause = self.parse_where_clause()?;
+        let close = self.next_non_trivia(self.position);
         if !self.eat_operator(">") {
             return Err(self.error("expected `>` to close generic parameter list"));
         }
-        Ok((parameters, clause))
+        if allow_defaults {
+            self.type_brackets.borrow_mut().extend([open, close]);
+        }
+        Ok((parameters, clause, defaults))
     }
 
     fn reject_effect_parameters(
@@ -2083,12 +2192,13 @@ impl Grammar {
         Ok(())
     }
 
-    /// Parses the juxtaposed generic-parameter form used by `type` and
-    /// `trait` declarations: bare parameters written directly after the
-    /// declared name, Haskell-style, with no enclosing brackets — `Box T`,
-    /// `Add Left Right Output`. Unlike the bracketed form, product patterns
-    /// (`(A, B)`) and inline defaults (`(Name = Default)`) are both allowed,
-    /// since there's no comma separator here to confuse them with.
+    /// Parses the juxtaposed generic-parameter form used by `trait`
+    /// declarations: bare parameters written directly after the declared name,
+    /// Haskell-style, with no enclosing brackets — `Add Left Right Output`.
+    /// Unlike the bracketed form, product patterns (`(A, B)`) and inline
+    /// defaults (`(Name = Default)`) are both allowed, since there's no comma
+    /// separator here to confuse them with. `type` declarations use the
+    /// bracketed form instead.
     fn parse_juxtaposed_type_parameters(
         &mut self,
     ) -> Result<(Vec<TypeParameterPattern>, Vec<DefaultTypeBound>), ParseError> {
@@ -2242,7 +2352,15 @@ impl Grammar {
         if starts_generic {
             return Err(function_error);
         }
-        let expression = self.parse_pipe_expression()?;
+        let expression = match self.parse_pipe_expression() {
+            Ok(expression) => expression,
+            // The function reading got further before failing, so its error
+            // names the real problem (for example, in the body). An annotation
+            // such as `Result<I32, String>` can also fail as a comparison
+            // chain much earlier than the actual mistake.
+            Err(error) if function_error.offset > error.offset => return Err(function_error),
+            Err(error) => return Err(error),
+        };
         if matches!(self.peek(), Some(TokenKind::Arrow | TokenKind::FatArrow))
             || (self.at(TokenKind::Colon)
                 && function_error.message == NOMINAL_PATTERN_ANNOTATION_ERROR)
@@ -2823,6 +2941,7 @@ impl Grammar {
                 syntax: self.syntax(start),
                 callee: Box::new(ty),
                 argument: Box::new(argument),
+                bracketed: false,
             });
         }
         Ok(ty)
@@ -2838,6 +2957,30 @@ impl Grammar {
                 callee: Box::new(ty),
                 effects,
             });
+        }
+        while self.at_operator("<") && !self.has_trivia_before_next_token() {
+            let open = self.next_non_trivia(self.position);
+            self.bump_token();
+            let mut arguments = Vec::new();
+            loop {
+                arguments.push(self.parse_type()?);
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            let close = self.next_non_trivia(self.position);
+            if !self.eat_operator(">") {
+                return Err(self.error("expected `>` to close type arguments"));
+            }
+            self.type_brackets.borrow_mut().extend([open, close]);
+            for argument in arguments {
+                ty = Type::Application(TypeApplication {
+                    syntax: self.syntax(start),
+                    callee: Box::new(ty),
+                    argument: Box::new(argument),
+                    bracketed: true,
+                });
+            }
         }
         if self.at(TokenKind::LBracket) && !self.has_trivia_before_next_token() {
             return Err(self.error("array types are written `(T ^ N)`, not `T[N]`"));
@@ -4758,6 +4901,10 @@ fn line_starts(source: &str) -> Vec<usize> {
 fn split_trait_arguments(mut ty: Type) -> Vec<Type> {
     let mut arguments = Vec::new();
     while let Type::Application(application) = ty {
+        if application.bracketed {
+            ty = Type::Application(application);
+            break;
+        }
         arguments.push(*application.argument);
         ty = *application.callee;
     }

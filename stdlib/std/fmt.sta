@@ -7,7 +7,7 @@ use package.syntax.*
 use package.process.(panic)
 
 /// A growable UTF-8 output buffer used by formatting traits.
-pub type Formatter = wrap List U8
+pub type Formatter wrap List<U8>
 
 /// Formats a value for human-facing output.
 pub trait Display T {
@@ -20,10 +20,10 @@ pub trait Debug T {
 }
 
 def derived_debug_implementation = (
-    name_syntax: Ident String,
+    name_syntax: Ident<String>,
     name: String,
     target: Type,
-    parameters: Sequence (Ident String),
+    parameters: Sequence<Ident<String>>,
     representation: Type,
 ) => Item :: {
     let name_expression = StringExpr name
@@ -77,12 +77,12 @@ def derived_singleton_debug_implementation = (name: String, target: Type) => Ite
 ///
 /// ```staple
 /// @derive_debug
-/// pub type UserId = pub wrap I32
+/// pub type UserId wrap pub I32
 ///
 /// @derive_debug
 /// type Enabled
 /// ```
-pub macro @derive_debug: Item -> Sequence Item = item => match item {
+pub macro @derive_debug: Item -> Sequence<Item> = item => match item {
     TypeDeclarationItem (
         WrapperDeclaration(), name_syntax, name, target, parameters, Some representation,
     ) => Sequence (

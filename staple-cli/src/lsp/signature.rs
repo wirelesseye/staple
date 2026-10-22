@@ -61,7 +61,7 @@ pub(super) fn help(text: &str, entries: &[HoverEntry], offset: usize) -> Option<
 
 fn parameter_information(label: &str) -> Option<Vec<ParameterInformation>> {
     let start = label.find(": ")? + 2;
-    let prefix = "type Signature = alias ";
+    let prefix = "type Signature = ";
     let module = staple_syntax::parse(&format!("{prefix}{}\n", &label[start..])).ok()?;
     let staple_syntax::Item::TypeDeclaration(declaration) = module.items.first()? else {
         return None;
@@ -125,7 +125,7 @@ fn checked_active_slot(
                 entry.signature.find(": ")? + 2
             };
             let module =
-                staple_syntax::parse(&format!("type Shape = alias {}", &entry.signature[start..]))
+                staple_syntax::parse(&format!("type Shape = {}", &entry.signature[start..]))
                     .ok()?;
             let staple_syntax::Item::TypeDeclaration(declaration) = module.items.first()? else {
                 return None;

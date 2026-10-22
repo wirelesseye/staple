@@ -1079,7 +1079,7 @@ mod tests {
             .load_source(
                 concat!(
                     "use std.cinterop.(CString, c_string)\n",
-                    "type Payload = wrap (I32, CString)\n",
+                    "type Payload wrap (I32, CString)\n",
                     "let value = Payload (1, c_string \"value\")\n",
                 ),
                 &root,

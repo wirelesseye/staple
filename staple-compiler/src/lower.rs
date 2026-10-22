@@ -770,7 +770,7 @@ impl LoweredCoercionPlan {
     /// every sum alternative and `from` introduction the template chose. The
     /// choice was made once against the generic types, so an instantiation
     /// must not reselect it: in `<T, E> value: T => Result T E :: value`, `T`
-    /// selects `Ok T` even when `E` is instantiated to `T`. Only the leaves
+    /// selects `Ok<T>` even when `E` is instantiated to `T`. Only the leaves
     /// are planned afresh; a template whose shape no longer fits the
     /// substituted types falls back to planning from scratch.
     pub(crate) fn plan_guided(
@@ -1812,7 +1812,7 @@ pub(crate) struct LoweredAwait {
     pub origin: Origin,
     pub operand: ExpressionId,
     /// The await expression's checked result type: the child result, or the
-    /// `Completed T | Cancelled` outcome sum for external awaits.
+    /// `Completed<T> | Cancelled` outcome sum for external awaits.
     pub result_type: CheckedType,
     pub owning_plan: LoweredCoroutinePlanId,
     /// One-based resume state.
@@ -3842,7 +3842,7 @@ impl LoweredProgram {
             ));
             return;
         };
-        // The checked thunk result is `Coroutine{E} T`; the plan's result and
+        // The checked thunk result is `Coroutine{E}<T>`; the plan's result and
         // deferred effects must be exactly its parts.
         if let Some((effects, result)) = module.coroutine_parts(&catalog.signature.result)
             && (effects != &plan.deferred_effects || result != &plan.result_type)
@@ -13750,7 +13750,7 @@ pub(crate) fn mark_call_temporary_drops(
 }
 
 /// The type a call temporary is dropped as: its parameter type, except that a
-/// `CString` passed where `RawPtr CChar` is expected is the same pointer seen
+/// `CString` passed where `RawPtr<CChar>` is expected is the same pointer seen
 /// without ownership, so the temporary is still dropped as the owned
 /// `CString`.
 pub(crate) fn call_temporary_drop_type(
@@ -15931,7 +15931,7 @@ mod tests {
     fn structural_product_equality_short_circuits_and_negates_at_runtime() {
         let module = checked_program(concat!(
             "use std.cmp.Eq\n",
-            "type Guard = wrap USize\n",
+            "type Guard wrap USize\n",
             "impl Eq Guard { eq = (Guard left; Guard right) => (1, 2)[left] == (1, 2)[right] }\n",
             "def run: () -> I32 = () => {\n",
             "    let plain: (I32, I32) = (1, 2)\n",
@@ -16053,14 +16053,14 @@ mod tests {
     #[test]
     fn slotted_generic_abi_matches_direct_functions_at_runtime() {
         let module = checked_program(concat!(
-            "type Slots = alias (I32; I32)\n",
+            "type Slots = (I32; I32)\n",
             "def direct: Slots -> Slots = (a; b) => (a; b)\n",
             "def identity: <A where Copy A> A -> A = <A where Copy A> value => value\n",
             "def combine: Slots -> I32 = (a; b) => a * 10 + b\n",
             "def increment: I32 -> I32 = value => value + 1\n",
             "def apply: <A, R> (A -> R; A) -> R = <A, R> (f; value) => f value\n",
             "def compose: <A, B, C> (B -> C; A -> B) -> A -> C = <A, B, C> (f; g) => value => f (g value)\n",
-            "type Callback = wrap (call: Slots -> I32)\n",
+            "type Callback wrap (call: Slots -> I32)\n",
             "def run: () -> I32 = () => {\n",
             "    let specialized: Slots -> Slots = identity.<Slots>\n",
             "    let pair: Slots = direct ...(specialized 3 4)\n",
@@ -16072,7 +16072,7 @@ mod tests {
             "    let third: I32 = composed 5 6\n",
             "    let wrapped = Callback combine\n",
             "    let fourth: I32 = wrapped.call 7 8\n",
-            "    let mut callbacks: List (Slots -> I32) = List.new ()\n",
+            "    let mut callbacks: List<Slots -> I32> = List.new ()\n",
             "    callbacks |> push combine\n",
             "    let fifth: I32 = (callbacks[0]) 9 10\n",
             "    first + second + explicit + third + fourth + fifth\n",
@@ -16135,7 +16135,7 @@ mod tests {
         }
         let module = checked_program(concat!(
             "extern \"c\" { record: I32 -> () }\n",
-            "type Resource = wrap I32\n",
+            "type Resource wrap I32\n",
             "impl Drop Resource { cleanup = Resource value => { record value } }\n",
             "def consume: (move Resource; Resource) -> () = (move owned; borrowed) => ()\n",
             "def borrow: (Resource; Resource) -> () = (first; second) => ()\n",
@@ -16530,7 +16530,7 @@ mod tests {
 
     #[test]
     fn declaration_only_modules_have_empty_initializer_roots() {
-        let program = snapshot("type Wrapper = alias I32\n");
+        let program = snapshot("type Wrapper = I32\n");
         let (entry_id, _) = entry_module(&program);
         assert!(runtime_categories(&program, entry_id).is_empty());
     }
@@ -16548,7 +16548,7 @@ mod tests {
     #[test]
     fn companion_modules_keep_parent_and_companion_metadata() {
         let program =
-            snapshot("pub type User = from I32\ncompanion User { pub let id: I32 = 42 }\n");
+            snapshot("pub type User from I32\ncompanion User { pub let id: I32 = 42 }\n");
         let (entry_id, _) = entry_module(&program);
         // The block, not the type's namespace module, holds the member.
         let companion = program
@@ -16888,7 +16888,7 @@ mod tests {
     fn symbols_record_global_names_and_roots() {
         let program = snapshot(concat!(
             "use std.shared.(Shared)\n",
-            "let managed: Shared I32 = Shared 0\n",
+            "let managed: Shared<I32> = Shared 0\n",
             "let plain = 1\n",
             "def pick: () -> I32 = () => 1\n",
         ));
@@ -16951,7 +16951,7 @@ mod tests {
 
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
-            "def f: () -> Coroutine{} I32 = () => coro { 42 }\n",
+            "def f: () -> Coroutine{}<I32> = () => coro { 42 }\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -17184,7 +17184,7 @@ mod tests {
         );
 
         let module = checked_program(concat!(
-            "type MyString = wrap String\n",
+            "type MyString wrap String\n",
             "impl !Copy MyString {}\n",
             "companion MyString {\n",
             "  pub def concat = a: MyString => b: MyString => MyString (a.* + b.*)\n",
@@ -17227,7 +17227,7 @@ mod tests {
             "let signal count: I32 = 1\n",
             "let doubled: I32 = count + count\n",
             "def double: I32 -> I32 = value => value + value\n",
-            "type Wrapper = wrap I32\n",
+            "type Wrapper wrap I32\n",
             "type Enabled\n",
             "let enabled: Enabled = Enabled\n",
         ));
@@ -17289,7 +17289,7 @@ mod tests {
         let module = checked_program(concat!(
             "use std.cinterop.*\nuse std.ptr.*\n",
             "extern \"c\" {\n",
-            "  my_puts: (RawPtr CChar) -> I32\n",
+            "  my_puts: (RawPtr<CChar>) -> I32\n",
             "}\n",
         ));
         let mut program = LoweredProgram::default();
@@ -17361,12 +17361,12 @@ mod tests {
     #[test]
     fn type_catalog_matches_resolver_order_and_keeps_compact_templates() {
         let module = checked_program(concat!(
-            "type TestPair T = wrap (T, T)\n",
-            "type TestInner = wrap I32\n",
-            "type TestOuter = wrap (TestInner, TestInner)\n",
-            "type TestAlias = alias TestOuter\n",
-            "type TestCallback{E} = alias () ->{E} ()\n",
-            "type TestHidden = opaque\n",
+            "type TestPair<T> wrap (T, T)\n",
+            "type TestInner wrap I32\n",
+            "type TestOuter wrap (TestInner, TestInner)\n",
+            "type TestAlias = TestOuter\n",
+            "type TestCallback{E} = () ->{E} ()\n",
+            "type TestHidden opaque\n",
             "type TestEnabled\n",
         ));
         let mut program = LoweredProgram::default();
@@ -17817,7 +17817,7 @@ mod tests {
     fn dictionary_environment_recipes_follow_transitive_and_associated_prefixes() {
         let module = checked_program(concat!(
             "trait RecipeBase T { base: T -> Bool }\n",
-            "trait RecipeMiddle T where RecipeBase (List T) { middle: T -> Bool }\n",
+            "trait RecipeMiddle T where RecipeBase List<T> { middle: T -> Bool }\n",
             "trait RecipeRoot T where RecipeMiddle T {\n",
             "  type Item where RecipeBase Item\n",
             "  root: (T, Item) -> Bool\n",
@@ -17952,7 +17952,7 @@ mod tests {
         let module = checked_program(concat!(
             "trait TestEq T { test_eq: (T, T) -> Bool }\n",
             "impl TestEq I32 { test_eq = (left, right) => left == right }\n",
-            "type TestHandle = wrap I32\n",
+            "type TestHandle wrap I32\n",
             "impl !Copy TestHandle {}\n",
         ));
         let mut program = LoweredProgram::default();
@@ -18300,11 +18300,11 @@ mod tests {
             "def add: (I32, I32) -> I32 = (left, right) => left + right\n",
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
-            "type TestBox T = wrap (value: T)\n",
-            "type TestHidden = opaque\n",
+            "type TestBox<T> wrap (value: T)\n",
+            "type TestHidden opaque\n",
             "type TestEnabled\n",
             "let enabled: TestEnabled = TestEnabled\n",
-            "let boxed: TestBox I32 = TestBox 3\n",
+            "let boxed: TestBox<I32> = TestBox 3\n",
             "def captured: () ->{state} I32 = () => { let mut local = 0; local = local + 1; local }\n",
         ));
         let mut first = LoweredProgram::default();
@@ -18327,11 +18327,11 @@ mod tests {
             "def identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "def forward: <T where Copy T> T -> T = <T where Copy T> value => identity value\n",
             "let first: I32 = forward 1\n",
-            "type Point = wrap (I32, I32)\n",
+            "type Point wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "let p = (1, 2)\n",
             "let text = \"${p:?}\"\n",
-            "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
+            "def task: () -> Coroutine{}<I32> = () => coro { 1 }\n",
             "let created = task ()\n",
         );
         let module = checked_program(source);
@@ -18420,17 +18420,17 @@ mod tests {
     fn records_agree_with_checked_metadata_and_are_stable() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
-            "type Counter = wrap (value: I32)\n",
+            "type Counter wrap (value: I32)\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = (resource Counter).value + 1\n",
             "}\n",
             "let signal count = 0\n",
             "let doubled = count + count\n",
-            "def task: () -> Coroutine{mut Counter} I32 = () => coro {\n",
+            "def task: () -> Coroutine{mut Counter}<I32> = () => coro {\n",
             "  increment ()\n",
             "  0\n",
             "}\n",
-            "def driver: () -> Coroutine{mut Counter} I32 = () => coro {\n",
+            "def driver: () -> Coroutine{mut Counter}<I32> = () => coro {\n",
             "  let child = task ()\n",
             "  await child\n",
             "}\n",
@@ -19081,12 +19081,12 @@ mod tests {
     fn dispatcher_lowers_every_expression_family_without_deferrals() {
         let module = checked_program(concat!(
             "use std.coroutine.(Coroutine)\n",
-            "type Counter = wrap (value: I32)\n",
+            "type Counter wrap (value: I32)\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = (resource Counter).value + 1\n",
             "}\n",
-            "def task: () -> Coroutine{} I32 = () => coro { 42 }\n",
-            "def driver: () -> Coroutine{} I32 = () => coro {\n",
+            "def task: () -> Coroutine{}<I32> = () => coro { 42 }\n",
+            "def driver: () -> Coroutine{}<I32> = () => coro {\n",
             "  let value = await (task ()); value\n",
             "}\n",
             "let closure = (value: I32) => value\n",
@@ -19109,16 +19109,16 @@ mod tests {
     fn resource_coroutine_route_table_covers_every_route() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
-            "type Counter = wrap (value: I32)\n",
+            "type Counter wrap (value: I32)\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = (resource Counter).value + 1\n",
             "}\n",
-            "def child: () -> Coroutine{} I32 = () => coro { 1 }\n",
-            "def spawned: I32 -> Coroutine{} I32 = base => coro { base + 1 }\n",
-            "def wait_observer: move Wait I32 -> Coroutine{} () = move w => coro {\n",
+            "def child: () -> Coroutine{}<I32> = () => coro { 1 }\n",
+            "def spawned: I32 -> Coroutine{}<I32> = base => coro { base + 1 }\n",
+            "def wait_observer: move Wait<I32> -> Coroutine{}<()> = move w => coro {\n",
             "  let _ = await w; ()\n",
             "}\n",
-            "def driver: () -> Coroutine{Tasks} I32 = () => coro {\n",
+            "def driver: () -> Coroutine{Tasks}<I32> = () => coro {\n",
             "  let c = await (child ())\n",
             "  let task = spawn (spawned c)\n",
             "  let outcome = await task\n",
@@ -19300,7 +19300,7 @@ mod tests {
             "impl TestShow I32 { test_show = _ => True }\n",
             "def generic_identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "let juxtaposed: (x: I32; y: I32) -> I32 = (x; y) => x + y\n",
-            "type TestBox = wrap (value: I32)\n",
+            "type TestBox wrap (value: I32)\n",
             "def sum_product: (I32, I32) -> I32 = pair => {\n",
             "  let mut total: I32 = 0\n",
             "  for value in pair { total = total + value }\n",
@@ -19518,9 +19518,9 @@ mod tests {
             "impl TestShow I32 { test_show = _ => True }\n",
             "def generic_identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "def declared: I32 -> I32 = value => value\n",
-            "type TestBox = wrap (value: I32)\n",
-            "def make_borrower: String -> () -> List U8 = value => () => String.to_bytes value\n",
-            "type MyString = wrap String\n",
+            "type TestBox wrap (value: I32)\n",
+            "def make_borrower: String -> () -> List<U8> = value => () => String.to_bytes value\n",
+            "type MyString wrap String\n",
             "impl !Copy MyString {}\n",
             "companion MyString {\n",
             "  pub def concat = a: MyString => b: MyString => MyString (a.* + b.*)\n",
@@ -19834,7 +19834,7 @@ mod tests {
             "  external_identity: I32 -> I32\n",
             "  external_cstr: CString -> I32\n",
             "}\n",
-            "type MoveOnly = wrap String\n",
+            "type MoveOnly wrap String\n",
             "impl !Copy MoveOnly {}\n",
             "def generic_identity: <T where Copy T> T -> T = <T where Copy T> value => value\n",
             "def declared: I32 -> I32 = value => value\n",
@@ -20021,8 +20021,8 @@ mod tests {
     #[test]
     fn call_resource_bindings_follow_effect_row_order_and_scope() {
         let module = checked_program(concat!(
-            "type A = wrap (value: I32)\n",
-            "type B = wrap (value: I32)\n",
+            "type A wrap (value: I32)\n",
+            "type B wrap (value: I32)\n",
             "def consume: () ->{A, B} I32 = () => (resource A).value + (resource B).value\n",
             "def driver: () -> I32 = () => {\n",
             "  let a = A (value: 1)\n",
@@ -20080,7 +20080,7 @@ mod tests {
     #[test]
     fn mutable_call_resource_bindings_borrow_the_provider_place() {
         let module = checked_program(concat!(
-            "type Counter = wrap (value: I32)\n",
+            "type Counter wrap (value: I32)\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = (resource Counter).value + 1\n",
             "}\n",
@@ -20209,7 +20209,7 @@ mod tests {
         let module = checked_program(concat!(
             "use std.cinterop.(CString, CChar, c_string)\nuse std.ptr.(RawPtr)\n",
             "extern \"c\" { strlen: CString -> USize }\n",
-            "extern \"c\" { printf: (RawPtr CChar, ...) -> I32 }\n",
+            "extern \"c\" { printf: (RawPtr<CChar>, ...) -> I32 }\n",
             "def borrow: CString -> USize = value => strlen value\n",
             "def consume: move CString -> USize = move value => strlen value\n",
             "def apply: (CString -> USize) -> USize = f => f (c_string \"borrowed\")\n",
@@ -20254,7 +20254,7 @@ mod tests {
         }
 
         // Native externs borrow every argument, including variadic slots and
-        // a `CString` viewed as `RawPtr CChar` (`print`'s `printf`).
+        // a `CString` viewed as `RawPtr<CChar>` (`print`'s `printf`).
         let externs = program
             .calls
             .iter()
@@ -20340,10 +20340,10 @@ mod tests {
         concat!(
             "use std.shared.(Shared)\n",
             "let pair_add: (x: I32; y: I32) -> I32 = (x; y) => x + y\n",
-            "type Defaulted = wrap (String, x: I32 = 0, y: I32 = 0)\n",
+            "type Defaulted wrap (String, x: I32 = 0, y: I32 = 0)\n",
             "def juxtaposed_samples: () -> I32 = () => {\n",
             "  let chained: I32 = pair_add 1 2\n",
-            "  let mut reference: Shared I32 = Shared 0\n",
+            "  let mut reference: Shared<I32> = Shared 0\n",
             "  let replaced: I32 = Shared.replace reference 1\n",
             "  chained\n",
             "}\n",
@@ -20619,12 +20619,12 @@ mod tests {
     fn constructor_calls_and_values_record_explicit_targets() {
         let module = checked_program(concat!(
             "use std.shared.(Shared)\n",
-            "type TestBox = wrap (value: I32)\n",
+            "type TestBox wrap (value: I32)\n",
             "type TestEnabled\n",
             "let enabled: TestEnabled = TestEnabled\n",
             "let maker = TestBox\n",
             "let boxed: TestBox = TestBox (value: 1)\n",
-            "let single_shared: Shared I32 = Shared 0\n",
+            "let single_shared: Shared<I32> = Shared 0\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -20847,7 +20847,7 @@ mod tests {
             "  let direct: I32 = generic_identity 1\n",
             "  let external_result: I32 = external_identity (1)\n",
             "  let chained: I32 = pair_add 1 2\n",
-            "  let mut reference: Shared I32 = Shared 0\n",
+            "  let mut reference: Shared<I32> = Shared 0\n",
             "  let replaced: I32 = Shared.replace reference 1\n",
             "  let arithmetic: I32 = 1 + 2\n",
             "  indirect\n",
@@ -21237,8 +21237,8 @@ mod tests {
             "let current: I32 = counter\n",
             "let truth: Bool = yes\n",
             "def identity = (value: I32) => value\n",
-            "type Wrapper = wrap (value: I32)\n",
-            "type MyString = wrap String\n",
+            "type Wrapper wrap (value: I32)\n",
+            "type MyString wrap String\n",
             "companion MyString { pub def make = value: String => MyString (value) }\n",
             "let built = Wrapper (value: 1)\n",
             "let callable = identity\n",
@@ -21313,9 +21313,9 @@ mod tests {
         let module = checked_program(concat!(
             "use std.shared.(Shared)\n",
             "use std.shared_buffer.SharedBuffer\n",
-            "type MyString = wrap String\n",
-            "type Pair = wrap (left: I32, right: I32)\n",
-            "type Scalar = wrap (value: I32)\n",
+            "type MyString wrap String\n",
+            "type Pair wrap (left: I32, right: I32)\n",
+            "type Scalar wrap (value: I32)\n",
             "let pair = Pair (left: 1, right: 2)\n",
             "let named = pair.left\n",
             "let other = pair.right\n",
@@ -21324,8 +21324,8 @@ mod tests {
             "let inner = text.*\n",
             "let scalar = Scalar (value: 5)\n",
             "let shortcut = scalar.value\n",
-            "def slice_field: Shared (SharedBuffer I32) -> I32 = values => values.0\n",
-            "def through_shared: Shared Pair -> I32 = reference => reference.left\n",
+            "def slice_field: Shared<SharedBuffer<I32>> -> I32 = values => values.0\n",
+            "def through_shared: Shared<Pair> -> I32 = reference => reference.left\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -21468,7 +21468,7 @@ mod tests {
         let module = checked_program(concat!(
             "let pair = (left: 2, right: 3)\n",
             "let expanded = (prefix: \"value\", ...pair, suffix: False)\n",
-            "type Point = from (x: I32 = 1, y: I32 = 2)\n",
+            "type Point from (x: I32 = 1, y: I32 = 2)\n",
             "let point: Point = ()\n",
         ));
         let mut program = LoweredProgram::default();
@@ -21715,7 +21715,7 @@ mod tests {
     #[test]
     fn repeated_products_record_count_and_collapse() {
         let module = checked_program(concat!(
-            "type Count = alias 3\n",
+            "type Count = 3\n",
             "let repeated: (I32 ^ 3) = (9 ^ Count)\n",
             "let single: (I32 ^ 1) = (9 ^ 1)\n",
         ));
@@ -21801,11 +21801,11 @@ mod tests {
             "use std.shared_buffer.SharedBuffer\n",
             "let widened = I8 :: 42\n",
             "let text: String = \"literal\"\n",
-            "type Ok T = wrap T\n",
-            "type IOError = wrap String\n",
-            "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
-            "let sum: Ok I32 | IOError = Ok (41)\n",
-            "let slice: SharedBuffer I32 = SharedBuffer.from_array 8\n",
+            "type Ok<T> wrap T\n",
+            "type IOError wrap String\n",
+            "def read: () -> Ok<I32> | IOError = () => Ok (42)\n",
+            "let sum: Ok<I32> | IOError = Ok (41)\n",
+            "let slice: SharedBuffer<I32> = SharedBuffer.from_array 8\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -21854,7 +21854,7 @@ mod tests {
     #[test]
     fn blocks_preserve_nested_results_divergence_and_drop_facts() {
         let module = checked_program(concat!(
-            "type Handle = wrap I32\n",
+            "type Handle wrap I32\n",
             "impl Drop Handle { cleanup = Handle value => () }\n",
             "def nested = () => {\n",
             "  let outer: I32 = { let inner: I32 = 1; inner + 2 }\n",
@@ -21865,9 +21865,9 @@ mod tests {
             "  Handle 1\n",
             "  ()\n",
             "}\n",
-            "type Ok T = wrap T\n",
-            "type IOError = wrap String\n",
-            "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
+            "type Ok<T> wrap T\n",
+            "type IOError wrap String\n",
+            "def read: () -> Ok<I32> | IOError = () => Ok (42)\n",
             "def propagates = () => {\n",
             "  let ?Ok(value) = read()\n",
             "  value\n",
@@ -22007,7 +22007,7 @@ mod tests {
     #[test]
     fn loops_record_drop_facts_depth_and_owned_exits() {
         let module = checked_program(concat!(
-            "type Handle = wrap I32\n",
+            "type Handle wrap I32\n",
             "impl Drop Handle { cleanup = Handle value => () }\n",
             "def select: Bool -> I32 = condition => loop {\n",
             "  match condition { True() => { break 9 }, False() => { continue } }\n",
@@ -22091,9 +22091,9 @@ mod tests {
     #[test]
     fn matches_lower_subject_arms_patterns_and_bound_symbols() {
         let module = checked_program(concat!(
-            "type Ok T = wrap T\n",
-            "type IOError = wrap String\n",
-            "def pick = (value: Ok I32 | IOError) => match value {\n",
+            "type Ok<T> wrap T\n",
+            "type IOError wrap String\n",
+            "def pick = (value: Ok<I32> | IOError) => match value {\n",
             "  Ok payload => payload,\n",
             "  other => 0,\n",
             "}\n",
@@ -22132,18 +22132,18 @@ mod tests {
         let module = checked_program(concat!(
             "use std.shared.(Shared)\n",
             "use std.shared_buffer.SharedBuffer\n",
-            "type Ok T = wrap T\n",
-            "type IOError = wrap String\n",
-            "type Other = wrap String\n",
-            "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
-            "def widen: () -> Ok I32 | IOError | Other = () => read()\n",
-            "let injected: Ok I32 | IOError = Ok (41)\n",
-            "let slice: SharedBuffer I32 = SharedBuffer.from_array 8\n",
+            "type Ok<T> wrap T\n",
+            "type IOError wrap String\n",
+            "type Other wrap String\n",
+            "def read: () -> Ok<I32> | IOError = () => Ok (42)\n",
+            "def widen: () -> Ok<I32> | IOError | Other = () => read()\n",
+            "let injected: Ok<I32> | IOError = Ok (41)\n",
+            "let slice: SharedBuffer<I32> = SharedBuffer.from_array 8\n",
             "def describe = (value: String) => match value {\n",
             "  \"literal\" => 1,\n",
             "  text => 2,\n",
             "}\n",
-            "def pick = (value: Ok I32 | IOError) => match value {\n",
+            "def pick = (value: Ok<I32> | IOError) => match value {\n",
             "  Ok payload => payload,\n",
             "  other => 0,\n",
             "}\n",
@@ -22152,7 +22152,7 @@ mod tests {
             "  False => 0,\n",
             "}\n",
             "def singleton: True -> I32 = True => 0\n",
-            "def borrowed: Shared I32 -> I32 = (Shared inner) => inner\n",
+            "def borrowed: Shared<I32> -> I32 = (Shared inner) => inner\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -22390,7 +22390,7 @@ mod tests {
         let module = checked_program(concat!(
             "use std.shared.(Shared)\n",
             "use std.shared_buffer.SharedBuffer\n",
-            "type Counter = wrap I32\n",
+            "type Counter wrap I32\n",
             "impl Index Counter String { type Output = I32; index = (counter, key) => 0 }\n",
             "impl MutateIndex Counter String { type Value = I32; mutate_index = (mut counter, key, move value) => () }\n",
             "def make_counter = () => Counter 0\n",
@@ -22401,8 +22401,8 @@ mod tests {
             "(make_counter())[\"key\"] = 1\n",
             "let values: (I32 ^ 2) = (10, 20)\n",
             "let element = values[0]\n",
-            "def slice_read: (SharedBuffer I32, USize) -> I32 = (values, position) => values[position]\n",
-            "def shared_read: (Shared (I32 ^ 2), USize) -> I32 = (values, position) => values[position]\n",
+            "def slice_read: (SharedBuffer<I32>, USize) -> I32 = (values, position) => values[position]\n",
+            "def shared_read: (Shared<(I32 ^ 2)>, USize) -> I32 = (values, position) => values[position]\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -22532,7 +22532,7 @@ mod tests {
     fn string_templates_record_parts_and_formatting_selections() {
         let module = checked_program(concat!(
             "use std.fmt.Formatter\n",
-            "type Label = wrap String\n",
+            "type Label wrap String\n",
             "impl Display Label {\n",
             "  fmt = (Label value, mut formatter) => Formatter.write formatter value\n",
             "}\n",
@@ -22720,9 +22720,9 @@ mod tests {
             "use std.cinterop.*\n",
             "use std.coroutine.(Coroutine)\n",
             "use std.fmt.Formatter\n",
-            "type Counter = wrap (value: I32)\n",
-            "type Ok T = wrap T\n",
-            "type IOError = wrap String\n",
+            "type Counter wrap (value: I32)\n",
+            "type Ok<T> wrap T\n",
+            "type IOError wrap String\n",
             "let integer: I32 = 42\n",
             "let float: F64 = 1.5\n",
             "let string: String = \"text\"\n",
@@ -22734,7 +22734,7 @@ mod tests {
             "let element = values[0]\n",
             "def logical = (flag: Bool) => flag && flag\n",
             "def looping = () => loop { break 1 }\n",
-            "def matching = (value: Ok I32 | IOError) => match value {\n",
+            "def matching = (value: Ok<I32> | IOError) => match value {\n",
             "  Ok inner => inner,\n",
             "  other => 0,\n",
             "}\n",
@@ -22745,8 +22745,8 @@ mod tests {
             "def callable = (value: I32) => value\n",
             "let applied = callable 1\n",
             "let closure = callable\n",
-            "def task: () -> Coroutine{} I32 = () => coro { 7 }\n",
-            "def driver: () -> Coroutine{} I32 = () => coro { await (task ()) }\n",
+            "def task: () -> Coroutine{}<I32> = () => coro { 7 }\n",
+            "def driver: () -> Coroutine{}<I32> = () => coro { await (task ()) }\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = (resource Counter).value + 1\n",
             "}\n",
@@ -23393,13 +23393,13 @@ mod tests {
     fn function_parameter_patterns_lower_every_source_form() {
         let module = checked_program(concat!(
             "use std.shared.(Shared)\n",
-            "type TestOwned = wrap String\n",
+            "type TestOwned wrap String\n",
             "def pair = (left: I32, right: I32) => left + right\n",
             "def wildcard = (_: I32) => 0\n",
             "def moved: move String -> String = move value => value\n",
             "def moved_nominal: move TestOwned -> String = move TestOwned value => value\n",
             "def singleton: True -> I32 = True => 0\n",
-            "def borrowed: Shared I32 -> I32 = (Shared inner) => inner\n",
+            "def borrowed: Shared<I32> -> I32 = (Shared inner) => inner\n",
             "def literal: \"literal\" -> I32 = \"literal\" => 0\n",
         ));
         let mut program = LoweredProgram::default();
@@ -23534,10 +23534,10 @@ mod tests {
     fn pattern_binding_items_lower_patterns_and_propagation_metadata() {
         let module = checked_program(concat!(
             "use std.shared.(Shared)\n",
-            "pub type Wrapper = pub wrap (value: I32)\n",
-            "pub type Ok T = pub wrap T\n",
-            "pub type IOError = pub wrap String\n",
-            "def read: () -> Ok I32 | IOError = () => Ok(42)\n",
+            "pub type Wrapper wrap pub (value: I32)\n",
+            "pub type Ok<T> wrap pub T\n",
+            "pub type IOError wrap pub String\n",
+            "def read: () -> Ok<I32> | IOError = () => Ok(42)\n",
             "def patterns = () => {\n",
             "  let (first, second) = (1, 2)\n",
             "  let whole@(third, fourth) = (3, 4)\n",
@@ -23631,8 +23631,8 @@ mod tests {
     #[test]
     fn assignment_targets_lower_to_explicit_places() {
         let module = checked_program(concat!(
-            "type Wrapper = wrap (value: I32)\n",
-            "type Counter = wrap I32\n",
+            "type Wrapper wrap (value: I32)\n",
+            "type Counter wrap I32\n",
             "def places = (mut direct: I32, mut pair: (I32, I32), mut wrapper: Wrapper, mut counter: Counter, mut values: (I32 ^ 2)) => {\n",
             "  direct = 1\n",
             "  pair.0 = 2\n",
@@ -23725,8 +23725,8 @@ mod tests {
     fn assignment_places_cross_references_and_materialize_temporaries() {
         let module = checked_program(concat!(
             "use std.shared.(Shared)\n",
-            "def make_shared: () -> Shared (I32, I32) = () => Shared (1, 2)\n",
-            "def through_shared = (mut reference: Shared (I32, I32)) => { reference.0 = 9 }\n",
+            "def make_shared: () -> Shared<(I32, I32)> = () => Shared (1, 2)\n",
+            "def through_shared = (mut reference: Shared<(I32, I32)>) => { reference.0 = 9 }\n",
             "def through_call = () => { (make_shared())[0] = 9 }\n",
         ));
         let mut program = LoweredProgram::default();
@@ -23800,7 +23800,7 @@ mod tests {
         assert!(lowered_symbol(&program, *symbol).captured_cell);
 
         let module = checked_program(concat!(
-            "type Counter = wrap (value: I32)\n",
+            "type Counter wrap (value: I32)\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = (resource Counter).value + 1\n",
             "}\n",
@@ -23873,8 +23873,8 @@ mod tests {
     #[test]
     fn resource_uses_bind_the_nearest_matching_provider() {
         let module = checked_program(concat!(
-            "type A = wrap (value: I32)\n",
-            "type B = wrap (value: I32)\n",
+            "type A wrap (value: I32)\n",
+            "type B wrap (value: I32)\n",
             "def read_a: () ->{A} I32 = () => (resource A).value\n",
             "def read_b: () ->{B} I32 = () => (resource B).value\n",
             "def nested: () -> I32 = () => with A = A (value: 1) {\n",
@@ -23939,8 +23939,8 @@ mod tests {
     #[test]
     fn with_records_provider_storage_scope_exit_and_borrow_facts() {
         let module = checked_program(concat!(
-            "type A = wrap (value: I32)\n",
-            "type Handle = wrap I32\n",
+            "type A wrap (value: I32)\n",
+            "type Handle wrap I32\n",
             "impl Drop Handle { cleanup = Handle value => () }\n",
             "def mutable_provider: () -> () = () => {\n",
             "  let mut value = A (value: 1)\n",
@@ -24063,7 +24063,7 @@ mod tests {
     #[test]
     fn validator_rejects_inconsistent_resource_records() {
         let module = checked_program(concat!(
-            "type A = wrap (value: I32)\n",
+            "type A wrap (value: I32)\n",
             "def bump: () ->{mut A} () = () => {\n",
             "  (resource A).value = (resource A).value + 1\n",
             "}\n",
@@ -24166,8 +24166,8 @@ mod tests {
     fn coroutine_plans_copy_scanner_classifications() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
-            "def child: () -> Coroutine{} I32 = () => coro { 7 }\n",
-            "def driver: () -> Coroutine{} I32 = () => coro {\n",
+            "def child: () -> Coroutine{}<I32> = () => coro { 7 }\n",
+            "def driver: () -> Coroutine{}<I32> = () => coro {\n",
             "  let first = await (child ())\n",
             "  let second = await (child ())\n",
             "  first + second\n",
@@ -24220,7 +24220,7 @@ mod tests {
     fn nested_coroutines_own_separate_plans() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
-            "def outer: () -> Coroutine{} I32 = () => coro {\n",
+            "def outer: () -> Coroutine{}<I32> = () => coro {\n",
             "  let inner = coro { 1 }\n",
             "  let value = await inner\n",
             "  value\n",
@@ -24266,11 +24266,11 @@ mod tests {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
             "let signal n = 0\n",
-            "def waiter: () -> Coroutine{Reactive} () = () => coro {\n",
+            "def waiter: () -> Coroutine{Reactive}<()> = () => coro {\n",
             "  let _ = await (until { n >= 5 })\n",
             "  ()\n",
             "}\n",
-            "def observer: move Wait I32 -> Coroutine{} () = move w => coro {\n",
+            "def observer: move Wait<I32> -> Coroutine{}<()> = move w => coro {\n",
             "  let _ = await w; ()\n",
             "}\n",
         ));
@@ -24300,8 +24300,8 @@ mod tests {
     fn non_statement_position_await_stays_a_source_diagnostic() {
         let diagnostics = checked_program_diagnostics(concat!(
             "use std.coroutine.*\n",
-            "def child: () -> Coroutine{} I32 = () => coro { 1 }\n",
-            "def driver: () -> Coroutine{} I32 = () => coro {\n",
+            "def child: () -> Coroutine{}<I32> = () => coro { 1 }\n",
+            "def driver: () -> Coroutine{}<I32> = () => coro {\n",
             "  let value = await (child ()) + 1\n",
             "  value\n",
             "}\n",
@@ -24323,11 +24323,11 @@ mod tests {
     fn coro_creation_links_plan_and_capture_environment() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
-            "def capturing: () -> Coroutine{} I32 = () => {\n",
+            "def capturing: () -> Coroutine{}<I32> = () => {\n",
             "  let base = 40\n",
             "  coro { base + 2 }\n",
             "}\n",
-            "def bare: () -> Coroutine{} I32 = () => coro { 1 }\n",
+            "def bare: () -> Coroutine{}<I32> = () => coro { 1 }\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -24370,8 +24370,8 @@ mod tests {
     fn await_sites_populate_plans_in_order_with_kinds() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
-            "def child: () -> Coroutine{} I32 = () => coro { 1 }\n",
-            "def driver: () -> Coroutine{Tasks} I32 = () => coro {\n",
+            "def child: () -> Coroutine{}<I32> = () => coro { 1 }\n",
+            "def driver: () -> Coroutine{Tasks}<I32> = () => coro {\n",
             "  let first = await (child ())\n",
             "  let task = spawn (child ())\n",
             "  let outcome = await task\n",
@@ -24379,11 +24379,11 @@ mod tests {
             "  first\n",
             "}\n",
             "let signal flag = 0\n",
-            "def waiter: () -> Coroutine{Reactive} () = () => coro {\n",
+            "def waiter: () -> Coroutine{Reactive}<()> = () => coro {\n",
             "  let _ = await (until { flag >= 0 })\n",
             "  ()\n",
             "}\n",
-            "def observer: move Wait I32 -> Coroutine{} () = move w => coro {\n",
+            "def observer: move Wait<I32> -> Coroutine{}<()> = move w => coro {\n",
             "  let _ = await w; ()\n",
             "}\n",
         ));
@@ -24442,15 +24442,15 @@ mod tests {
     fn child_deferred_resources_bind_at_the_await_not_at_creation() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
-            "type Counter = wrap (value: I32)\n",
+            "type Counter wrap (value: I32)\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = (resource Counter).value + 1\n",
             "}\n",
-            "def task: () -> Coroutine{mut Counter} I32 = () => coro {\n",
+            "def task: () -> Coroutine{mut Counter}<I32> = () => coro {\n",
             "  increment ()\n",
             "  0\n",
             "}\n",
-            "def driver: () -> Coroutine{mut Counter} I32 = () => coro {\n",
+            "def driver: () -> Coroutine{mut Counter}<I32> = () => coro {\n",
             "  let child = task ()\n",
             "  await child\n",
             "}\n",
@@ -24891,7 +24891,7 @@ mod tests {
     fn polymorphic_values_survive_storage_positions() {
         for dictionary in [false, true] {
             let module = checked_program(concat!(
-                "type Holder = wrap (<T> move T -> T)\n",
+                "type Holder wrap (<T> move T -> T)\n",
                 "def identity: <T> move T -> T = <T> move value => value\n",
                 "def forward: (<T> move T -> T) -> (<U> move U -> U) = value => value\n",
                 "def store: <A where Copy A> A -> (<T> move T -> T) = <A where Copy A> ignored => {\n",
@@ -24937,9 +24937,9 @@ mod tests {
     fn polymorphic_constructors_accept_callers_descriptors() {
         for dictionary in [false, true] {
             let module = checked_program(concat!(
-                "type Box T = wrap T\n",
-                "def make: <A> move A -> (<T> move T -> Box T) = <A> move ignored => Box\n",
-                "def build: () -> (<T> move T -> Box T) = () => make 42\n",
+                "type Box<T> wrap T\n",
+                "def make: <A> move A -> (<T> move T -> Box<T>) = <A> move ignored => Box\n",
+                "def build: () -> (<T> move T -> Box<T>) = () => make 42\n",
                 "let stored = build ()\n",
             ));
             let mut program = LoweredProgram::default();
@@ -25427,9 +25427,9 @@ mod tests {
     fn bounded_generics_build_dictionaries_from_generic_implementations() {
         let module = checked_program(concat!(
             "trait Measure T { measure: T -> I32 }\n",
-            "type MeasuredBox T = wrap T\n",
+            "type MeasuredBox<T> wrap T\n",
             "impl Measure I32 { measure = value => value + 1 }\n",
-            "impl<T where Measure T> Measure (MeasuredBox T) { measure = MeasuredBox value => Measure.measure value * 2 }\n",
+            "impl<T where Measure T> Measure MeasuredBox<T> { measure = MeasuredBox value => Measure.measure value * 2 }\n",
             "def measured: <T where Measure T> T -> I32 = <T where Measure T> value => Measure.measure value\n",
             "def boxed: <T where Measure T> move T -> I32 = <T where Measure T> move value => measured (MeasuredBox value)\n",
             "def twice: <T where Measure T> move T -> I32 = <T where Measure T> move value => measured (MeasuredBox (MeasuredBox value))\n",
@@ -25560,8 +25560,8 @@ mod tests {
             "trait Pick T { pick: T -> I32 }\n",
             "impl Pick I32 { pick = value => 1 }\n",
             "impl Pick Bool { pick = value => 2 }\n",
-            "type Holder T = wrap T\n",
-            "impl<T where Pick T> Pick (Holder T) { pick = Holder value => Pick.pick value }\n",
+            "type Holder<T> wrap T\n",
+            "impl<T where Pick T> Pick Holder<T> { pick = Holder value => Pick.pick value }\n",
             "let answer = Pick.pick 1\n",
         ));
         let mut program = LoweredProgram::default();
@@ -26070,8 +26070,8 @@ mod tests {
     fn validator_rejects_misclassified_awaits() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
-            "def child: () -> Coroutine{} I32 = () => coro { 1 }\n",
-            "def driver: () -> Coroutine{} I32 = () => coro {\n",
+            "def child: () -> Coroutine{}<I32> = () => coro { 1 }\n",
+            "def driver: () -> Coroutine{}<I32> = () => coro {\n",
             "  await (child ())\n",
             "}\n",
         ));
@@ -26417,7 +26417,7 @@ mod tests {
             "let mut mutable: I32 = 1\n",
             "mutable = 2\n",
             "count = 1\n",
-            "type Handle = wrap I32\n",
+            "type Handle wrap I32\n",
             "impl Drop Handle { cleanup = Handle value => () }\n",
             "def discard = () => {\n",
             "  let owned: Handle = Handle 1\n",
@@ -26680,10 +26680,10 @@ mod tests {
     #[test]
     fn arenas_are_stable_across_repeated_lowering() {
         let module = checked_program(concat!(
-            "pub type Wrapper = pub wrap (value: I32)\n",
-            "pub type Ok T = pub wrap T\n",
-            "pub type IOError = pub wrap String\n",
-            "def read: () -> Ok I32 | IOError = () => Ok(42)\n",
+            "pub type Wrapper wrap pub (value: I32)\n",
+            "pub type Ok<T> wrap pub T\n",
+            "pub type IOError wrap pub String\n",
+            "def read: () -> Ok<I32> | IOError = () => Ok(42)\n",
             "let signal count: I32 = 0\n",
             "let doubled: I32 = count + count\n",
             "count = 1\n",
@@ -26759,9 +26759,9 @@ mod tests {
             (
                 concat!(
                     "trait Visit T { visit: <A> (T, move A) -> A }\n",
-                    "type Box T = wrap T\n",
-                    "impl <T where ToString T> Visit (Box T) { visit = <A> (_, move value) => value }\n",
-                    "def relay: <T, A where ToString T> (Box T, move A) -> A = <T, A where ToString T> (item, move value) => Visit.visit (item, value)\n",
+                    "type Box<T> wrap T\n",
+                    "impl <T where ToString T> Visit Box<T> { visit = <A> (_, move value) => value }\n",
+                    "def relay: <T, A where ToString T> (Box<T>, move A) -> A = <T, A where ToString T> (item, move value) => Visit.visit (item, value)\n",
                     "let stored = relay\nlet result = stored (Box 1, 42)\n",
                 ),
                 true,

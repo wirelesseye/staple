@@ -85,11 +85,11 @@ fn run(source: &str) -> String {
 
 const MEASURE: &str = concat!(
     "trait Measure T { measure: T -> USize }\n",
-    "type Meters = wrap I32\n",
-    "type Box A = wrap A\n",
+    "type Meters wrap I32\n",
+    "type Box<A> wrap A\n",
     "impl Measure Meters { measure = value => 4 }\n",
     "impl Measure I32 { measure = value => 2 }\n",
-    "impl<A> Measure (Box A) { measure = value => 8 }\n",
+    "impl<A> Measure Box<A> { measure = value => 8 }\n",
     "companion<T where Measure T> T {\n",
     "    pub def double_size = value: T => USize :: Measure.measure value * 2\n",
     "    pub def plus = (value: T; extra: USize) => USize :: Measure.measure value + extra\n",
@@ -197,8 +197,8 @@ fn a_blanket_companion_obeys_the_orphan_rule() {
 const AMOUNTS: &str = concat!(
     "trait Measure T { measure: T -> USize }\n",
     "trait Weigh T { weigh: T -> USize }\n",
-    "type Meters = wrap I32\n",
-    "type Grams = wrap I32\n",
+    "type Meters wrap I32\n",
+    "type Grams wrap I32\n",
     "impl Measure Meters { measure = value => 4 }\n",
     "impl Weigh Grams { weigh = value => 9 }\n",
     "companion<T where Measure T> T {\n",
@@ -251,7 +251,7 @@ fn a_receiver_satisfying_two_blanket_members_is_ambiguous() {
     ));
     assert!(errors.contains("ambiguous pipe stage `amount`"), "{errors}");
     let errors = rejected(&format!(
-        "{AMOUNTS}type Plain = wrap I32\nlet plain: USize = Plain.amount (Plain 1)\n"
+        "{AMOUNTS}type Plain wrap I32\nlet plain: USize = Plain.amount (Plain 1)\n"
     ));
     assert!(
         errors.contains("no blanket companion member `amount` applies to `"),
@@ -263,7 +263,7 @@ fn a_receiver_satisfying_two_blanket_members_is_ambiguous() {
 fn try_helpers_are_blanket_members_another_package_trait_can_share() {
     // `unwrap` is no longer a `Try` member an implementation could replace.
     let errors = rejected(concat!(
-        "type Flag = wrap Bool\n",
+        "type Flag wrap Bool\n",
         "impl Try Flag {\n",
         "    type Output = Bool\n",
         "    type Residual = None\n",
@@ -275,13 +275,13 @@ fn try_helpers_are_blanket_members_another_package_trait_can_share() {
     // A trait of its own may offer `unwrap` for types that are not `Try`.
     check(concat!(
         "trait Lazy T { force: move T -> I32 }\n",
-        "type Thunk = wrap I32\n",
+        "type Thunk wrap I32\n",
         "impl Lazy Thunk { force = move Thunk value => value }\n",
         "companion<T where Lazy T> T {\n",
         "    pub def unwrap = move value: T => I32 :: Lazy.force value\n",
         "}\n",
         "let forced: I32 = Thunk 1 |> unwrap\n",
-        "let some: Option I32 = Some 2\n",
+        "let some: Option<I32> = Some 2\n",
         "let tried: I32 = some |> unwrap\n",
     ))
     .unwrap_or_else(|errors| panic!("{errors}"));
@@ -298,7 +298,7 @@ fn a_companion_member_may_not_overlap_an_applicable_blanket_member() {
     );
     // A generic type overlaps when an implementation could cover it.
     let errors = rejected(&format!(
-        "{MEASURE}companion<A> Box A {{ pub def double_size = value: Box A => USize :: 1 }}\n"
+        "{MEASURE}companion<A> Box<A> {{ pub def double_size = value: Box<A> => USize :: 1 }}\n"
     ));
     assert!(
         errors.contains("overlaps the blanket companion member"),
@@ -309,7 +309,7 @@ fn a_companion_member_may_not_overlap_an_applicable_blanket_member() {
         "{MEASURE}{}",
         concat!(
             "companion Later { pub def double_size = value: Later => USize :: 1 }\n",
-            "type Later = wrap I32\n",
+            "type Later wrap I32\n",
             "impl Measure Later { measure = value => 1 }\n",
         )
     ));
@@ -324,10 +324,10 @@ fn a_companion_member_may_share_a_name_with_an_inapplicable_blanket_member() {
     check(&format!(
         "{MEASURE}{}",
         concat!(
-            "type Feet = wrap I32\n",
-            "type Bag A = wrap A\n",
+            "type Feet wrap I32\n",
+            "type Bag<A> wrap A\n",
             "companion Feet { pub def double_size = value: Feet => USize :: 1 }\n",
-            "companion<A> Bag A { pub def double_size = value: Bag A => USize :: 1 }\n",
+            "companion<A> Bag<A> { pub def double_size = value: Bag<A> => USize :: 1 }\n",
             "let feet: USize = Feet 1 |> double_size\n",
             "let bag: USize = Bag.double_size (Bag 1)\n",
         )
@@ -359,9 +359,9 @@ fn a_private_blanket_member_is_reachable_only_from_its_module() {
 
 const BAG: &str = concat!(
     "trait Bag T { type Item; first: T -> Item }\n",
-    "type Pair = wrap (left: I32, right: I32)\n",
+    "type Pair wrap (left: I32, right: I32)\n",
     "impl Bag Pair { type Item = I32; first = Pair (left, right) => left }\n",
-    "type Box T = wrap T\n",
+    "type Box<T> wrap T\n",
 );
 
 #[test]
@@ -378,8 +378,8 @@ fn companion_members_may_declare_their_own_bounded_parameters() {
             "    pub def with_other = <R where Bag R> (value: T; other: R) => (Bag.Item T, Bag.Item R) ::\n",
             "        (Bag.first value, Bag.first other)\n",
             "}\n",
-            "companion<T where Bag T> Box T {\n",
-            "    pub def boxed_with = <R where Bag R> (move value: Box T; other: R) => Bag.Item R ::\n",
+            "companion<T where Bag T> Box<T> {\n",
+            "    pub def boxed_with = <R where Bag R> (move value: Box<T>; other: R) => Bag.Item R ::\n",
             "        Bag.first other\n",
             "}\n",
             "def run = () => {\n",
@@ -396,7 +396,7 @@ fn companion_members_may_declare_their_own_bounded_parameters() {
 #[test]
 fn blanket_bounds_on_an_associated_type_hold_at_the_receiver() {
     // Regression test: pinning a blanket member to its receiver substituted
-    // the blanket parameter into `Add (Bag.Item T)` but left `Bag.Item T` a
+    // the blanket parameter into `Add Bag.Item T` but left `Bag.Item T` a
     // projection, so the bound was reported unsatisfied for `Pair`.
     let source = format!(
         "{BAG}{}",

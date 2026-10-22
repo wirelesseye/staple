@@ -77,7 +77,7 @@ fn strict_emission_of_a_mixed_program_has_no_placeholder_bodies() {
         "use std.coroutine.*\n",
         "def first: () -> () = () => with Reactive = reactive_scope () { reaction { () } }\n",
         "def second: () -> () = () => with Reactive = reactive_scope () { reaction { () } }\n",
-        "type Point = wrap (I32, I32)\n",
+        "type Point wrap (I32, I32)\n",
         "let point: Point = Point (1, 2)\n",
         "let make: () -> ((I32, I32) -> Point) = () => Point\n",
         "let pair = (1, 2)\n",
@@ -96,10 +96,10 @@ fn wrapped_intrinsic_apis_are_first_class_values() {
     compile(concat!(
         "use std.shared.(Shared)\n",
         "use std.shared_buffer.SharedBuffer\n",
-        "let length: SharedBuffer I32 -> USize = SharedBuffer.length\n",
+        "let length: SharedBuffer<I32> -> USize = SharedBuffer.length\n",
         "let release: move I32 -> () = drop\n",
         "let released = release 1\n",
-        "let replace: (mut Shared I32; move I32) -> I32 = Shared.replace\n",
+        "let replace: (mut Shared<I32>; move I32) -> I32 = Shared.replace\n",
         "let mut reference = Shared 1\n",
         "let previous = replace reference 2\n",
     ))

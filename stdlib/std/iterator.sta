@@ -6,16 +6,16 @@ use package.list.(List)
 use package.ops.(Add)
 
 companion IterStep {
-    pub type Done Iter = pub wrap Iter
-    pub type Yield (Item, Iter) = pub wrap (Item, Iter)
+    pub type Done<Iter> wrap pub Iter
+    pub type Yield<Item, Iter> wrap pub (Item, Iter)
 }
 
 use IterStep.(Done, Yield)
 
 /// One step of an iterator: either completion or an item and next iterator.
-pub type IterStep (Iter, Item) = pub from
-    IterStep.Done Iter |
-    IterStep.Yield (Item, Iter)
+pub type IterStep<Iter, Item> from pub
+    IterStep.Done<Iter> |
+    IterStep.Yield<Item, Iter>
 
 /// A type that yields values one step at a time.
 pub trait Iterator Iter {
@@ -23,7 +23,7 @@ pub trait Iterator Iter {
     type Item
 
     /// Advances the iterator by one step.
-    next: move Iter -> IterStep (Iter, Item)
+    next: move Iter -> IterStep<Iter, Item>
 }
 
 /// A source that can be converted into an iterator.
@@ -71,9 +71,9 @@ pub trait FromIterator Target Item {
 // adapter's own `Iterator` implementation then needs no bound on `S`.
 
 /// The iterator returned by `map`.
-pub type Map S Out = wrap (iter: S, step: move S -> IterStep (S, Out))
+pub type Map<S, Out> wrap (iter: S, step: move S -> IterStep<S, Out>)
 
-impl<S, Out> Iterator (Map S Out) {
+impl<S, Out> Iterator Map<S, Out> {
     type Item = Out
     next = move Map (iter, step) => match step iter {
         Done rest => Done (Map.<S, Out> (iter: rest, step: step)),
@@ -81,15 +81,15 @@ impl<S, Out> Iterator (Map S Out) {
     }
 }
 
-impl<S, Out> IntoIterator (Map S Out) {
-    type Iter = Map S Out
+impl<S, Out> IntoIterator Map<S, Out> {
+    type Iter = Map<S, Out>
     into_iterator = move iterator => iterator
 }
 
 /// The iterator returned by `filter`.
-pub type Filter S Out = wrap (iter: S, step: move S -> IterStep (S, Out))
+pub type Filter<S, Out> wrap (iter: S, step: move S -> IterStep<S, Out>)
 
-impl<S, Out> Iterator (Filter S Out) {
+impl<S, Out> Iterator Filter<S, Out> {
     type Item = Out
     next = move Filter (iter, step) => match step iter {
         Done rest => Done (Filter.<S, Out> (iter: rest, step: step)),
@@ -97,15 +97,15 @@ impl<S, Out> Iterator (Filter S Out) {
     }
 }
 
-impl<S, Out> IntoIterator (Filter S Out) {
-    type Iter = Filter S Out
+impl<S, Out> IntoIterator Filter<S, Out> {
+    type Iter = Filter<S, Out>
     into_iterator = move iterator => iterator
 }
 
 /// The iterator returned by `filter_map`.
-pub type FilterMap S Out = wrap (iter: S, step: move S -> IterStep (S, Out))
+pub type FilterMap<S, Out> wrap (iter: S, step: move S -> IterStep<S, Out>)
 
-impl<S, Out> Iterator (FilterMap S Out) {
+impl<S, Out> Iterator FilterMap<S, Out> {
     type Item = Out
     next = move FilterMap (iter, step) => match step iter {
         Done rest => Done (FilterMap.<S, Out> (iter: rest, step: step)),
@@ -113,15 +113,15 @@ impl<S, Out> Iterator (FilterMap S Out) {
     }
 }
 
-impl<S, Out> IntoIterator (FilterMap S Out) {
-    type Iter = FilterMap S Out
+impl<S, Out> IntoIterator FilterMap<S, Out> {
+    type Iter = FilterMap<S, Out>
     into_iterator = move iterator => iterator
 }
 
 /// The iterator returned by `take`.
-pub type Take S Out = wrap (iter: S, left: USize, step: move S -> IterStep (S, Out))
+pub type Take<S, Out> wrap (iter: S, left: USize, step: move S -> IterStep<S, Out>)
 
-impl<S, Out> Iterator (Take S Out) {
+impl<S, Out> Iterator Take<S, Out> {
     type Item = Out
     next = move Take (iter, left, step) => if (left == 0) {
         Done (Take.<S, Out> (iter: iter, left: 0, step: step))
@@ -136,15 +136,15 @@ impl<S, Out> Iterator (Take S Out) {
     }
 }
 
-impl<S, Out> IntoIterator (Take S Out) {
-    type Iter = Take S Out
+impl<S, Out> IntoIterator Take<S, Out> {
+    type Iter = Take<S, Out>
     into_iterator = move iterator => iterator
 }
 
 /// The iterator returned by `skip`.
-pub type Skip S Out = wrap (iter: S, pending: USize, step: move S -> IterStep (S, Out))
+pub type Skip<S, Out> wrap (iter: S, pending: USize, step: move S -> IterStep<S, Out>)
 
-impl<S, Out> Iterator (Skip S Out) {
+impl<S, Out> Iterator Skip<S, Out> {
     type Item = Out
     next = move Skip (iter, pending, step) => {
         let mut remaining = iter
@@ -164,15 +164,15 @@ impl<S, Out> Iterator (Skip S Out) {
     }
 }
 
-impl<S, Out> IntoIterator (Skip S Out) {
-    type Iter = Skip S Out
+impl<S, Out> IntoIterator Skip<S, Out> {
+    type Iter = Skip<S, Out>
     into_iterator = move iterator => iterator
 }
 
 /// The iterator returned by `take_while`.
-pub type TakeWhile S Out = wrap (iter: S, finished: Bool, step: move S -> IterStep (S, Out))
+pub type TakeWhile<S, Out> wrap (iter: S, finished: Bool, step: move S -> IterStep<S, Out>)
 
-impl<S, Out> Iterator (TakeWhile S Out) {
+impl<S, Out> Iterator TakeWhile<S, Out> {
     type Item = Out
     next = move TakeWhile (iter, finished, step) => if finished {
         Done (TakeWhile.<S, Out> (iter: iter, finished: True, step: step))
@@ -187,15 +187,15 @@ impl<S, Out> Iterator (TakeWhile S Out) {
     }
 }
 
-impl<S, Out> IntoIterator (TakeWhile S Out) {
-    type Iter = TakeWhile S Out
+impl<S, Out> IntoIterator TakeWhile<S, Out> {
+    type Iter = TakeWhile<S, Out>
     into_iterator = move iterator => iterator
 }
 
 /// The iterator returned by `enumerate`.
-pub type Enumerate S Out = wrap (iter: S, index: USize, step: move S -> IterStep (S, Out))
+pub type Enumerate<S, Out> wrap (iter: S, index: USize, step: move S -> IterStep<S, Out>)
 
-impl<S, Out> Iterator (Enumerate S Out) {
+impl<S, Out> Iterator Enumerate<S, Out> {
     type Item = (USize, Out)
     next = move Enumerate (iter, index, step) => match step iter {
         Done rest => Done (Enumerate.<S, Out> (iter: rest, index: index, step: step)),
@@ -206,20 +206,20 @@ impl<S, Out> Iterator (Enumerate S Out) {
     }
 }
 
-impl<S, Out> IntoIterator (Enumerate S Out) {
-    type Iter = Enumerate S Out
+impl<S, Out> IntoIterator Enumerate<S, Out> {
+    type Iter = Enumerate<S, Out>
     into_iterator = move iterator => iterator
 }
 
 /// The iterator returned by `zip`.
-pub type Zip L R A B = wrap (
+pub type Zip<L, R, A, B> wrap (
     left: L,
     right: R,
-    left_step: move L -> IterStep (L, A),
-    right_step: move R -> IterStep (R, B),
+    left_step: move L -> IterStep<L, A>,
+    right_step: move R -> IterStep<R, B>,
 )
 
-impl<L, R, A, B> Iterator (Zip L R A B) {
+impl<L, R, A, B> Iterator Zip<L, R, A, B> {
     type Item = (A, B)
     next = move Zip (left, right, left_step, right_step) => match left_step left {
         Done left_rest => Done (Zip.<L, R, A, B> (
@@ -248,21 +248,21 @@ impl<L, R, A, B> Iterator (Zip L R A B) {
     }
 }
 
-impl<L, R, A, B> IntoIterator (Zip L R A B) {
-    type Iter = Zip L R A B
+impl<L, R, A, B> IntoIterator Zip<L, R, A, B> {
+    type Iter = Zip<L, R, A, B>
     into_iterator = move iterator => iterator
 }
 
 /// The iterator returned by `chain`.
-pub type Chain L R Out = wrap (
+pub type Chain<L, R, Out> wrap (
     first: L,
     second: R,
     on_second: Bool,
-    first_step: move L -> IterStep (L, Out),
-    second_step: move R -> IterStep (R, Out),
+    first_step: move L -> IterStep<L, Out>,
+    second_step: move R -> IterStep<R, Out>,
 )
 
-impl<L, R, Out> Iterator (Chain L R Out) {
+impl<L, R, Out> Iterator Chain<L, R, Out> {
     type Item = Out
     next = move Chain (first, second, on_second, first_step, second_step) => if on_second {
         match second_step second {
@@ -289,8 +289,8 @@ impl<L, R, Out> Iterator (Chain L R Out) {
     }
 }
 
-impl<L, R, Out> IntoIterator (Chain L R Out) {
-    type Iter = Chain L R Out
+impl<L, R, Out> IntoIterator Chain<L, R, Out> {
+    type Iter = Chain<L, R, Out>
     into_iterator = move iterator => iterator
 }
 
@@ -309,8 +309,8 @@ companion<Iter where Iterator Iter> Iter {
     /// (1 .. 4) |> map (x => x * 10)   // 10, 20, 30
     /// ```
     pub def map = <B>
-        (move iter: Iter; f: move Iterator.Item Iter -> B) => Map Iter B :: {
-        let step = move current: Iter => IterStep (Iter, B) :: match Iterator.next current {
+        (move iter: Iter; f: move Iterator.Item Iter -> B) => Map<Iter, B> :: {
+        let step = move current: Iter => IterStep<Iter, B> :: match Iterator.next current {
             Done rest => Done rest,
             Yield (item, rest) => Yield (f item, rest),
         }
@@ -323,8 +323,8 @@ companion<Iter where Iterator Iter> Iter {
     /// (1 .. 7) |> filter (x => x > 3)   // 4, 5, 6
     /// ```
     pub def filter =
-        (move iter: Iter; keep: Iterator.Item Iter -> Bool) => Filter Iter (Iterator.Item Iter) :: {
-        let step = move current: Iter => IterStep (Iter, Iterator.Item Iter) :: {
+        (move iter: Iter; keep: Iterator.Item Iter -> Bool) => Filter<Iter, Iterator.Item Iter> :: {
+        let step = move current: Iter => IterStep<Iter, Iterator.Item Iter> :: {
             let mut remaining = current
             loop {
                 match Iterator.next remaining {
@@ -341,8 +341,8 @@ companion<Iter where Iterator Iter> Iter {
 
     /// Lazily applies `f` to each item and keeps the values it returns as `Some`.
     pub def filter_map = <B>
-        (move iter: Iter; f: move Iterator.Item Iter -> Option B) => FilterMap Iter B :: {
-        let step = move current: Iter => IterStep (Iter, B) :: {
+        (move iter: Iter; f: move Iterator.Item Iter -> Option<B>) => FilterMap<Iter, B> :: {
+        let step = move current: Iter => IterStep<Iter, B> :: {
             let mut remaining = current
             loop {
                 match Iterator.next remaining {
@@ -361,16 +361,16 @@ companion<Iter where Iterator Iter> Iter {
 
     /// Lazily yields at most the first `count` items.
     pub def take =
-        (move iter: Iter; count: USize) => Take Iter (Iterator.Item Iter) :: {
-        let step = move current: Iter => IterStep (Iter, Iterator.Item Iter) ::
+        (move iter: Iter; count: USize) => Take<Iter, Iterator.Item Iter> :: {
+        let step = move current: Iter => IterStep<Iter, Iterator.Item Iter> ::
             Iterator.next current
         Take.<Iter, Iterator.Item Iter> (iter: iter, left: count, step: step)
     }
 
     /// Lazily drops the first `count` items and yields the rest.
     pub def skip =
-        (move iter: Iter; count: USize) => Skip Iter (Iterator.Item Iter) :: {
-        let step = move current: Iter => IterStep (Iter, Iterator.Item Iter) ::
+        (move iter: Iter; count: USize) => Skip<Iter, Iterator.Item Iter> :: {
+        let step = move current: Iter => IterStep<Iter, Iterator.Item Iter> ::
             Iterator.next current
         Skip.<Iter, Iterator.Item Iter> (iter: iter, pending: count, step: step)
     }
@@ -378,10 +378,10 @@ companion<Iter where Iterator Iter> Iter {
     /// Lazily yields items while `keep` returns `True`, and stops at the first
     /// item for which it returns `False`. That item is dropped.
     pub def take_while =
-        (move iter: Iter; keep: Iterator.Item Iter -> Bool) => TakeWhile Iter (Iterator.Item Iter) :: {
+        (move iter: Iter; keep: Iterator.Item Iter -> Bool) => TakeWhile<Iter, Iterator.Item Iter> :: {
         // `Done` from the step means "stop here", whether the inner iterator ran
         // out or `keep` rejected an item.
-        let step = move current: Iter => IterStep (Iter, Iterator.Item Iter) :: match Iterator.next current {
+        let step = move current: Iter => IterStep<Iter, Iterator.Item Iter> :: match Iterator.next current {
             Done rest => Done rest,
             Yield (item, rest) => if (keep item) { Yield (item, rest) } else { Done rest },
         }
@@ -389,8 +389,8 @@ companion<Iter where Iterator Iter> Iter {
     }
 
     /// Lazily pairs each item with its position, starting at `0`.
-    pub def enumerate = move iter: Iter => Enumerate Iter (Iterator.Item Iter) :: {
-        let step = move current: Iter => IterStep (Iter, Iterator.Item Iter) ::
+    pub def enumerate = move iter: Iter => Enumerate<Iter, Iterator.Item Iter> :: {
+        let step = move current: Iter => IterStep<Iter, Iterator.Item Iter> ::
             Iterator.next current
         Enumerate.<Iter, Iterator.Item Iter> (iter: iter, index: 0, step: step)
     }
@@ -398,10 +398,10 @@ companion<Iter where Iterator Iter> Iter {
     /// Lazily pairs the items of two iterators, stopping when either runs out.
     /// When `right` runs out first, the item already taken from `iter` is dropped.
     pub def zip = <R where Iterator R>
-        (move iter: Iter; move right: R) => Zip Iter R (Iterator.Item Iter) (Iterator.Item R) :: {
-        let left_step = move current: Iter => IterStep (Iter, Iterator.Item Iter) ::
+        (move iter: Iter; move right: R) => Zip<Iter, R, Iterator.Item Iter, Iterator.Item R> :: {
+        let left_step = move current: Iter => IterStep<Iter, Iterator.Item Iter> ::
             Iterator.next current
-        let right_step = move current: R => IterStep (R, Iterator.Item R) :: Iterator.next current
+        let right_step = move current: R => IterStep<R, Iterator.Item R> :: Iterator.next current
         Zip.<Iter, R, Iterator.Item Iter, Iterator.Item R> (
             left: iter,
             right: right,
@@ -413,10 +413,10 @@ companion<Iter where Iterator Iter> Iter {
     /// Lazily yields every item of `iter`, then every item of `second`.
     /// Both iterators must yield the same item type; their iterator types may differ.
     pub def chain = <R where Iterator R, Iterator.Item Iter == Iterator.Item R>
-        (move iter: Iter; move second: R) => Chain Iter R (Iterator.Item Iter) :: {
-        let first_step = move current: Iter => IterStep (Iter, Iterator.Item Iter) ::
+        (move iter: Iter; move second: R) => Chain<Iter, R, Iterator.Item Iter> :: {
+        let first_step = move current: Iter => IterStep<Iter, Iterator.Item Iter> ::
             Iterator.next current
-        let second_step = move current: R => IterStep (R, Iterator.Item Iter) ::
+        let second_step = move current: R => IterStep<R, Iterator.Item Iter> ::
             Iterator.next current
         Chain.<Iter, R, Iterator.Item Iter> (
             first: iter,
@@ -467,7 +467,7 @@ companion<Iter where Iterator Iter> Iter {
     /// starting value. Returns `None` for an empty iterator.
     pub def reduce = <effect E>
         (move iter: Iter; f: (move Iterator.Item Iter, move Iterator.Item Iter) ->{E} Iterator.Item Iter)
-        =>{E} Option (Iterator.Item Iter) :: match Iterator.next iter {
+        =>{E} Option<Iterator.Item Iter> :: match Iterator.next iter {
         Done _ => None,
         Yield (first, rest) => {
             let mut remaining = rest
@@ -533,7 +533,7 @@ companion<Iter where Iterator Iter> Iter {
 
     /// Returns the first item for which `test` returns `True`.
     pub def find = <effect E>
-        (move iter: Iter; test: Iterator.Item Iter ->{E} Bool) =>{E} Option (Iterator.Item Iter) :: {
+        (move iter: Iter; test: Iterator.Item Iter ->{E} Bool) =>{E} Option<Iterator.Item Iter> :: {
         let mut remaining = iter
         loop {
             match Iterator.next remaining {
@@ -547,9 +547,9 @@ companion<Iter where Iterator Iter> Iter {
     }
 
     /// Returns the last item, or `None` for an empty iterator.
-    pub def last = move iter: Iter => Option (Iterator.Item Iter) :: {
+    pub def last = move iter: Iter => Option<Iterator.Item Iter> :: {
         let mut remaining = iter
-        let mut latest: Option (Iterator.Item Iter) = None
+        let mut latest: Option<Iterator.Item Iter> = None
         loop {
             match Iterator.next remaining {
                 Done _ => { break },
@@ -573,7 +573,7 @@ companion<Iter where Iterator Iter> Iter {
         move iter: Iter => C :: FromIterator.insert_all (C :: Default.default ()) iter
 
     /// Collects the items into a new `List`, in order.
-    pub def to_list = move iter: Iter => List (Iterator.Item Iter) :: iter |> collect
+    pub def to_list = move iter: Iter => List<Iterator.Item Iter> :: iter |> collect
 
     /// Adds every item to an existing value, returning the extended value.
     pub def extend = <C, A where Iterator.Item Iter == A, FromIterator C A>
@@ -601,7 +601,7 @@ companion<Iter where Iterator Iter, Add (Iterator.Item Iter), Default (Iterator.
 companion<Iter where Iterator Iter, Ord (Iterator.Item Iter)> Iter {
     /// Returns the smallest item, or `None` for an empty iterator. Of several
     /// equal smallest items, the first is returned.
-    pub def min = move iter: Iter => Option (Iterator.Item Iter) :: match Iterator.next iter {
+    pub def min = move iter: Iter => Option<Iterator.Item Iter> :: match Iterator.next iter {
         Done _ => None,
         Yield (first, rest) => Some (
             rest |> fold first ((move best, move item) => if (item < best) { item } else { best }),
@@ -610,7 +610,7 @@ companion<Iter where Iterator Iter, Ord (Iterator.Item Iter)> Iter {
 
     /// Returns the largest item, or `None` for an empty iterator. Of several
     /// equal largest items, the last is returned.
-    pub def max = move iter: Iter => Option (Iterator.Item Iter) :: match Iterator.next iter {
+    pub def max = move iter: Iter => Option<Iterator.Item Iter> :: match Iterator.next iter {
         Done _ => None,
         Yield (first, rest) => Some (
             rest |> fold first ((move best, move item) => if (item < best) { best } else { item }),

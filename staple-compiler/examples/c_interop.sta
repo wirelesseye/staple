@@ -2,7 +2,7 @@ use std.cinterop.*
 use std.ptr.*
 
 extern "c" {
-    printf: (RawPtr CChar, ...) -> I32
+    printf: (RawPtr<CChar>, ...) -> I32
 }
 
 printf (c_string "hello, world!\n")

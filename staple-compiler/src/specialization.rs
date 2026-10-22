@@ -379,7 +379,7 @@ impl CanonicalType {
                 // `effect_substitution_type`), and coroutine/task type
                 // arguments carry that encoding. Canonicalize it as a
                 // never-parameter marker that keeps the canonical effect row,
-                // so a `Coroutine{E} T` argument list stays part of the key
+                // so a `Coroutine{E}<T>` argument list stays part of the key
                 // instead of rejecting the whole type as an error.
                 if function.parameter.as_ref() == &CheckedType::Error
                     && function.result.as_ref() == &CheckedType::Error

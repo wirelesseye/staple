@@ -67,20 +67,31 @@
           }
         },
         {
+          "name": "meta.type.body.staple",
+          "match": "\\b(type)\\s+((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)(?:\\{[^}\\n]*\\})?(?:<[^\\n]*?>)?\\s+(wrap|from)\\b(?:\\s+(pub)(?:\\((package)\\))?(?=\\s))?",
+          "captures": {
+            "1": { "name": "storage.type.staple" },
+            "2": { "name": "entity.name.type.staple" },
+            "3": { "name": "storage.modifier.staple" },
+            "4": { "name": "storage.modifier.staple" },
+            "5": { "name": "storage.modifier.staple" }
+          }
+        },
+        {
+          "name": "meta.type.opaque.staple",
+          "match": "\\b(type)\\s+((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)\\s+(opaque)\\b",
+          "captures": {
+            "1": { "name": "storage.type.staple" },
+            "2": { "name": "entity.name.type.staple" },
+            "3": { "name": "storage.modifier.staple" }
+          }
+        },
+        {
           "name": "meta.type.definition.staple",
           "match": "\\b(type)\\s+((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)",
           "captures": {
             "1": { "name": "storage.type.staple" },
             "2": { "name": "entity.name.type.staple" }
-          }
-        },
-        {
-          "name": "meta.type.body.staple",
-          "match": "=\\s*(?:(pub)(?:\\((package)\\))?\\s+)?(alias|wrap|from|opaque)\\b",
-          "captures": {
-            "1": { "name": "storage.modifier.staple" },
-            "2": { "name": "storage.modifier.staple" },
-            "3": { "name": "storage.modifier.staple" }
           }
         },
         {

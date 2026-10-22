@@ -6330,7 +6330,7 @@ mod tests {
     #[test]
     fn resource_uses_recompute_pass_mode_and_provider_indirectness() {
         let (_, mut program) = lower_with_worklist(concat!(
-            "type A = wrap (value: I32)\n",
+            "type A wrap (value: I32)\n",
             "def read_a: () ->{A} I32 = () => (resource A).value\n",
             "def forward: () ->{A} I32 = () => read_a ()\n",
             "let result = with A = A (value: 1) { forward () }\n",
@@ -6368,8 +6368,8 @@ mod tests {
     #[test]
     fn hidden_resource_bindings_recover_order_without_a_count_change() {
         let (_, mut program) = lower_with_worklist(concat!(
-            "type A = wrap (value: I32)\n",
-            "type B = wrap (value: I32)\n",
+            "type A wrap (value: I32)\n",
+            "type B wrap (value: I32)\n",
             "def sum: () ->{A, B} I32 = () => (resource A).value + (resource B).value\n",
             "def forward: () ->{A, B} I32 = () => sum ()\n",
             "let result = with A = A (value: 1) { with B = B (value: 2) { forward () } }\n",
@@ -6537,7 +6537,7 @@ mod tests {
     #[test]
     fn constructor_and_structural_sites_bind_to_artifacts() {
         let (_, mut program) = lower_with_worklist(concat!(
-            "type Point = wrap (I32, I32)\n",
+            "type Point wrap (I32, I32)\n",
             "def make: () -> ((I32, I32) -> Point) = () => Point\n",
             "def describe: (I32, I32) -> String = value => \"${value:?}\"\n",
             "let text: String = describe (1, 2)\n",
@@ -6859,8 +6859,8 @@ mod tests {
         let (_, mut program) = lower_with_worklist(concat!(
             "use std.coroutine.*\n",
             "use std.io.(IO, println)\n",
-            "def worker: () -> Coroutine{IO} I32 = () => coro { println \"work\"; 7 }\n",
-            "def driver: () -> Coroutine{} I32 = () => coro { let v = await (coro { 7 }); v + 1 }\n",
+            "def worker: () -> Coroutine{IO}<I32> = () => coro { println \"work\"; 7 }\n",
+            "def driver: () -> Coroutine{}<I32> = () => coro { let v = await (coro { 7 }); v + 1 }\n",
             "let sched = scheduler ()\n",
             "with Tasks = task_scope (sched) {\n",
             "  let _ = spawn (driver ())\n",
@@ -7126,8 +7126,8 @@ mod tests {
     fn buffer_pop_alternatives_are_recorded_and_revalidated() {
         let (_, mut program) = lower_with_worklist(concat!(
             "use std.buffer.Buffer\n",
-            "def take: <T> mut Buffer T -> Option T = <T> mut values => Buffer.pop values\n",
-            "let mut values: Buffer I32 = Buffer.with_capacity (USize :: 1)\n",
+            "def take: <T> mut Buffer<T> -> Option<T> = <T> mut values => Buffer.pop values\n",
+            "let mut values: Buffer<I32> = Buffer.with_capacity (USize :: 1)\n",
             "let popped = take values\n",
         ));
         materialize(&mut program);
@@ -7160,11 +7160,11 @@ mod tests {
         let (_, mut program) = lower_with_worklist(concat!(
             "use std.coroutine.*\n",
             "use std.io.(IO, println)\n",
-            "def make: <T> Scheduler -> (Wait T, Resolver T) = <T> sched => completion sched\n",
-            "def finish: <T> (Resolver T; T) -> () = <T> (resolver; value) => resolver |> complete value\n",
-            "def worker_io: () -> Coroutine{IO} I32 = () => coro { println \"work\"; 7 }\n",
-            "def worker_pure: () -> Coroutine{} U8 = () => coro { U8 :: 8 }\n",
-            "def launch: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+            "def make: <T> Scheduler -> (Wait<T>, Resolver<T>) = <T> sched => completion sched\n",
+            "def finish: <T> (Resolver<T>; T) -> () = <T> (resolver; value) => resolver |> complete value\n",
+            "def worker_io: () -> Coroutine{IO}<I32> = () => coro { println \"work\"; 7 }\n",
+            "def worker_pure: () -> Coroutine{}<U8> = () => coro { U8 :: 8 }\n",
+            "def launch: () -> Coroutine{Tasks, IO}<()> = () => coro {\n",
             "  println \"launch\"\n",
             "  let _ = spawn (worker_io ())\n",
             "  let _ = spawn (worker_pure ())\n",
@@ -7172,9 +7172,9 @@ mod tests {
             "}\n",
             "let sched = scheduler ()\n",
             "let settled = {\n",
-            "let pair32: (Wait I32, Resolver I32) = make sched\n",
+            "let pair32: (Wait<I32>, Resolver<I32>) = make sched\n",
             "let (wait32, resolver32) = pair32\n",
-            "let pair8: (Wait U8, Resolver U8) = make sched\n",
+            "let pair8: (Wait<U8>, Resolver<U8>) = make sched\n",
             "let (wait8, resolver8) = pair8\n",
             "finish resolver32 7\n",
             "finish resolver8 (U8 :: 8)\n",
@@ -7335,7 +7335,7 @@ mod tests {
     fn child_await_without_plan_keeps_runtime_facts() {
         let (_, mut program) = lower_with_worklist(concat!(
             "use std.coroutine.*\n",
-            "def parent: move Coroutine{} I32 -> Coroutine{} I32 = move child => coro { await child }\n",
+            "def parent: move Coroutine{}<I32> -> Coroutine{}<I32> = move child => coro { await child }\n",
             "let _ = parent (coro { 9 })\n",
         ));
         materialize(&mut program);
@@ -7372,12 +7372,12 @@ mod tests {
     fn external_await_outcomes_are_recorded_and_revalidated() {
         let (_, mut program) = lower_with_worklist(concat!(
             "use std.coroutine.*\n",
-            "def waiter: <T> move Wait T -> Coroutine{} () = <T> move pending => coro {\n",
+            "def waiter: <T> move Wait<T> -> Coroutine{}<()> = <T> move pending => coro {\n",
             "  let _ = await pending\n",
             "  ()\n",
             "}\n",
-            "def make_completion: Scheduler -> (wait: Wait I32, resolver: Resolver I32) = s => completion s\n",
-            "def start: Scheduler -> Coroutine{} () = s => {\n",
+            "def make_completion: Scheduler -> (wait: Wait<I32>, resolver: Resolver<I32>) = s => completion s\n",
+            "def start: Scheduler -> Coroutine{}<()> = s => {\n",
             "  let (wait, resolver) = make_completion s\n",
             "  waiter wait\n",
             "}\n",

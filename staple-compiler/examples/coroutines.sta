@@ -5,7 +5,7 @@ use std.coroutine.*
 use std.io.(IO, println)
 
 // A worker task: yields once so the scheduler can interleave it, then returns.
-def worker: I32 -> Coroutine{Tasks, IO} I32 = seed => coro {
+def worker: I32 -> Coroutine{Tasks, IO}<I32> = seed => coro {
     println "worker ${seed:?}: start"
     let _ = await (yield_now ())
     println "worker ${seed:?}: done"
@@ -13,7 +13,7 @@ def worker: I32 -> Coroutine{Tasks, IO} I32 = seed => coro {
 }
 
 // A consumer task that awaits another task's result.
-def consumer: move Task I32 ->{IO} Coroutine{IO} () = move handle => coro {
+def consumer: move Task<I32> ->{IO} Coroutine{IO}<()> = move handle => coro {
     let outcome = await handle
     match outcome {
         Completed value => println "consumer: worker produced ${value:?}",
@@ -22,7 +22,7 @@ def consumer: move Task I32 ->{IO} Coroutine{IO} () = move handle => coro {
 }
 
 // A behaviour that waits on a host-supplied completion.
-def greeter: move Wait I32 ->{IO} Coroutine{IO} () = move wait => coro {
+def greeter: move Wait<I32> ->{IO} Coroutine{IO}<()> = move wait => coro {
     let outcome = await wait
     match outcome {
         Completed code => println "greeter: host sent ${code:?}",
@@ -30,7 +30,7 @@ def greeter: move Wait I32 ->{IO} Coroutine{IO} () = move wait => coro {
     }
 }
 
-def make_signal: Scheduler -> (wait: Wait I32, resolver: Resolver I32) =
+def make_signal: Scheduler -> (wait: Wait<I32>, resolver: Resolver<I32>) =
     s => completion s
 
 let sched = scheduler ()

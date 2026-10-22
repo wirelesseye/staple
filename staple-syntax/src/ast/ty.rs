@@ -107,9 +107,40 @@ impl fmt::Display for Type {
                     )
                 }
             }
-            Self::Application(application) => {
-                write!(formatter, "{}", application.callee)?;
-                format_type_argument(formatter, &application.argument)
+            Self::Application(outer) => {
+                // Source-written `Name<A, B>` renders with angle brackets; an
+                // application written by juxtaposition (a trait projection such
+                // as `Iterator.Item Iter`) renders as written.
+                let bracketed = outer.bracketed;
+                let mut arguments = Vec::new();
+                let mut head = self;
+                while let Self::Application(application) = head {
+                    if application.bracketed != bracketed {
+                        break;
+                    }
+                    arguments.push(application.argument.as_ref());
+                    head = application.callee.as_ref();
+                }
+                arguments.reverse();
+                if !bracketed {
+                    write!(formatter, "{head}")?;
+                    for argument in arguments {
+                        if matches!(argument, Type::Sum(_) | Type::Function(_) | Type::Forall(_)) {
+                            write!(formatter, " ({argument})")?;
+                        } else {
+                            write!(formatter, " {argument}")?;
+                        }
+                    }
+                    return Ok(());
+                }
+                write!(formatter, "{head}<")?;
+                for (index, argument) in arguments.into_iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(", ")?;
+                    }
+                    write!(formatter, "{argument}")?;
+                }
+                formatter.write_str(">")
             }
             Self::EffectApplication(application) => {
                 write!(
@@ -189,14 +220,6 @@ fn format_mutable_parameter(
     }
     result.push(')');
     result
-}
-
-fn format_type_argument(formatter: &mut fmt::Formatter<'_>, argument: &Type) -> fmt::Result {
-    if matches!(argument, Type::Sum(_) | Type::Function(_) | Type::Forall(_)) {
-        write!(formatter, " ({argument})")
-    } else {
-        write!(formatter, " {argument}")
-    }
 }
 
 fn format_effect_set(effects: &EffectSet) -> String {
@@ -491,6 +514,10 @@ pub struct TypeApplication {
     pub syntax: Syntax,
     pub callee: Box<Type>,
     pub argument: Box<Type>,
+    /// Whether this application was written with angle brackets
+    /// (`Name<A, B>`). A bracketed application is a single operand of a
+    /// juxtaposed trait argument list, which never splits it.
+    pub bracketed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

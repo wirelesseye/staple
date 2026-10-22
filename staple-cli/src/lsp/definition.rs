@@ -1262,7 +1262,7 @@ mod tests {
 
     #[test]
     fn resolves_nominal_pattern_annotation_types() {
-        let source = "type Clock = wrap I32\ndef read = ((Clock value): Clock) => value\n";
+        let source = "type Clock wrap I32\ndef read = ((Clock value): Clock) => value\n";
         let path = std::env::temp_dir().join("staple-definition-nominal-annotation.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(
@@ -1289,7 +1289,7 @@ mod tests {
 
     #[test]
     fn resolves_function_effect_lower_bound_types() {
-        let source = "type Clock = wrap I32\ndef read = () =>{Clock} ()\n";
+        let source = "type Clock wrap I32\ndef read = () =>{Clock} ()\n";
         let path = std::env::temp_dir().join("staple-definition-effect-lower-bound.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(
@@ -1317,10 +1317,10 @@ mod tests {
     #[test]
     fn indexes_local_values_types_and_trait_members() {
         let source = concat!(
-            "type Wrapper T = wrap (value: T)\n",
+            "type Wrapper<T> wrap (value: T)\n",
             "trait Identity T { identity: T -> T }\n",
             "impl Identity I32 { identity = value => value }\n",
-            "def wrap: <T> move T -> Wrapper T = <T> move value => Wrapper (value: value)\n",
+            "def wrap: <T> move T -> Wrapper<T> = <T> move value => Wrapper (value: value)\n",
             "def apply = () => identity 1\n",
             "let (first, second) = (1, 2)\n",
             "first\n",
@@ -1352,7 +1352,7 @@ mod tests {
     #[test]
     fn qualified_companion_access_targets_the_type_declaration() {
         let source = concat!(
-            "type Box = wrap I32\n",
+            "type Box wrap I32\n",
             "companion Box {\n",
             "    pub def create = () => 1\n",
             "}\n",
@@ -1402,7 +1402,7 @@ mod tests {
     #[test]
     fn use_glob_path_segment_targets_the_companion_type() {
         let source = concat!(
-            "type Box = wrap I32\n",
+            "type Box wrap I32\n",
             "companion Box {\n",
             "    pub type Inner\n",
             "}\n",
@@ -1451,7 +1451,7 @@ mod tests {
     #[test]
     fn companion_header_targets_the_type_declaration() {
         let source = concat!(
-            "type Box = wrap I32\n",
+            "type Box wrap I32\n",
             "companion Box {\n",
             "    pub def create = () => 1\n",
             "}\n",
@@ -1652,7 +1652,7 @@ mod tests {
             &dependency,
             concat!(
                 "pub mod\n",
-                "pub type Point = pub wrap (x: I32, y: I32)\n",
+                "pub type Point wrap pub (x: I32, y: I32)\n",
                 "pub def origin = () => Point (x: 0, y: 0)\n",
             ),
         )
@@ -2081,7 +2081,7 @@ mod tests {
             "use std.io.println\n",
             "use package.utils.add\n",
             "\n",
-            "pub type Foo = wrap ()\n",
+            "pub type Foo wrap ()\n",
             "\n",
             "companion Foo {\n",
             "    def a = x: I32 => {}\n",
@@ -2152,8 +2152,8 @@ mod tests {
     }
     #[test]
     fn forall_companion_parameters_keep_lsp_signatures_and_targets() {
-        let source = r#"pub type Box T = pub wrap T
-companion<T> Box T { pub def choose: <U> (move Box T, move U) -> U = <U> (move Box x, move y) => y }
+        let source = r#"pub type Box<T> wrap pub T
+companion<T> Box<T> { pub def choose: <U> (move Box<T>, move U) -> U = <U> (move Box x, move y) => y }
 let result: String = Box.choose.<I32, String> (Box 1, "yes")
 "#;
         let path = std::env::temp_dir().join("staple-forall-companion-lsp.sta");
@@ -2172,10 +2172,10 @@ let result: String = Box.choose.<I32, String> (Box 1, "yes")
         let entries = entries(&module, typed.resolved(), Some(&typed));
         let header = source.find("companion<T>").unwrap() + "companion<".len();
         let own = source.find("<U>").unwrap() + 1;
-        let start = source.find("(move Box T, move U)").unwrap();
+        let start = source.find("(move Box<T>, move U)").unwrap();
         for (offset, target) in [
-            (start + "(move Box ".len(), header),
-            (start + "(move Box T, move ".len(), own),
+            (start + "(move Box<".len(), header),
+            (start + "(move Box<T>, move ".len(), own),
         ] {
             let entry = entries
                 .iter()

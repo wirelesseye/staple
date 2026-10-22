@@ -11,8 +11,8 @@ let text = ToString.to_string
 println "${text (Bool :: True)}"
 def consume: (<T where ToString T> T -> String) -> String = f => f 7
 println "${consume ToString.to_string}"
-type Box T = wrap T
-impl <T> Visit (Box T) { visit = <A> (_, move value) => value }
+type Box<T> wrap T
+impl <T> Visit Box<T> { visit = <A> (_, move value) => value }
 def capture_member = <T where Visit T, Copy T> item: T => (() -> I32) :: {
     let f: (T, move I32) -> I32 = Visit.visit
     () => f (item, 13)
@@ -27,6 +27,6 @@ println "${action (1, () => 14)}"
 println "${action (1, () => { println "member effect"; 15 })}"
 let equals: <T where Ord T> (T; T) -> Bool = Eq.eq
 println "${equals 1 1}"
-impl <T> Action (Box T) { act = <effect E> (_, f) => f () }
-let boxed_action: <T, effect E> (Box T, (() ->{E} I32)) ->{E} I32 = Action.act
+impl <T> Action Box<T> { act = <effect E> (_, f) => f () }
+let boxed_action: <T, effect E> (Box<T>, (() ->{E} I32)) ->{E} I32 = Action.act
 println "${boxed_action (Box 1, () => 16)}"

@@ -9,39 +9,39 @@ use package.index.(Index, MutateIndex)
 use package.syntax.*
 
 /// A growable sequence backed by a mutable buffer.
-pub type List T = wrap Buffer T
+pub type List<T> wrap Buffer<T>
 
-impl<T> Default (List T) {
+impl<T> Default (List<T>) {
     default = () => List.new ()
 }
 
-impl<T> FromIterator (List T) T {
-    insert = (move list: List T; move item: T) => List T :: List.push_and_return list item
+impl<T> FromIterator List<T> T {
+    insert = (move list: List<T>; move item: T) => List<T> :: List.push_and_return list item
 }
 
-impl<T where Clone T> Clone (List T) {
+impl<T where Clone T> Clone (List<T>) {
     clone = List buffer => List (Clone.clone buffer)
 }
 
 // Doubles capacity (minimum 4 on first growth) and moves every element
 // across in one Buffer.transfer call.
-def grow = <T> mut list: List T => () :: {
+def grow = <T> mut list: List<T> => () :: {
     let old_capacity = Buffer.capacity list.*
     let new_capacity: USize = if (old_capacity == 0) { 4 } else { old_capacity * 2 }
-    let mut destination: Buffer T = Buffer.with_capacity new_capacity
+    let mut destination: Buffer<T> = Buffer.with_capacity new_capacity
     Buffer.transfer list.* destination
     list = List destination
 }
 
-companion<T> List T {
+companion<T> List<T> {
     /// Returns the number of elements in the list.
-    pub def length = list: List T => USize :: list.* |> length
+    pub def length = list: List<T> => USize :: list.* |> length
 
     /// Returns the number of elements the list can hold without growing.
-    pub def capacity = list: List T => USize :: list.* |> capacity
+    pub def capacity = list: List<T> => USize :: list.* |> capacity
 
     /// Appends a value, growing the list when necessary.
-    pub def push = (mut list: List T; move value: T) => () :: {
+    pub def push = (mut list: List<T>; move value: T) => () :: {
         if ((list.* |> length) < (list.* |> capacity)) {
             list.* |> push value
         } else {
@@ -51,45 +51,45 @@ companion<T> List T {
     }
 
     /// Removes and returns the final value, or `None` when empty.
-    pub def pop = mut list: List T => Option T :: list.* |> pop
+    pub def pop = mut list: List<T> => Option<T> :: list.* |> pop
 
     /// Replaces the value at an index, or returns `None` when out of bounds.
-    pub def set = (mut list: List T; index: USize; move value: T) => Option () ::
+    pub def set = (mut list: List<T>; index: USize; move value: T) => Option<()> ::
         Buffer.set list.* index value
 
     /// Replaces the value at an index, trapping when out of bounds.
-    pub def set_unchecked = (mut list: List T; index: USize; move value: T) => () ::
+    pub def set_unchecked = (mut list: List<T>; index: USize; move value: T) => () ::
         Buffer.set_unchecked list.* index value
 }
 
-companion<T> List T {
+companion<T> List<T> {
     /// Consumes the list and returns its backing buffer.
-    pub def into_buffer = move list: List T => Buffer T :: {
+    pub def into_buffer = move list: List<T> => Buffer<T> :: {
         let List buffer = list
         buffer
     }
 }
 
-companion<T> List T {
+companion<T> List<T> {
     /// Creates an empty list.
-    pub def new = () => List T :: {
-        let buffer: Buffer T = Buffer.with_capacity 0
+    pub def new = () => List<T> :: {
+        let buffer: Buffer<T> = Buffer.with_capacity 0
         List buffer
     }
 }
 
-companion<T> List T {
+companion<T> List<T> {
     /// Creates an empty list with the requested capacity.
-    pub def with_capacity = capacity: USize => List T :: {
-        let buffer: Buffer T = Buffer.with_capacity capacity
+    pub def with_capacity = capacity: USize => List<T> :: {
+        let buffer: Buffer<T> = Buffer.with_capacity capacity
         List buffer
     }
 }
 
-companion<T> List T {
+companion<T> List<T> {
     /// Creates a list containing one value.
-    pub def singleton = move value: T => List T :: {
-        let mut list: List T = List.with_capacity 1
+    pub def singleton = move value: T => List<T> :: {
+        let mut list: List<T> = List.with_capacity 1
         list |> push value
         list
     }
@@ -105,8 +105,8 @@ companion<T> List T {
     // `List.of` threads the list handle through nested calls to this
     // instead.
     /// Appends a value and returns the list handle.
-    pub def push_and_return = (move list: List T; move value: T) => List T :: {
-        let mut extended: List T = list
+    pub def push_and_return = (move list: List<T>; move value: T) => List<T> :: {
+        let mut extended: List<T> = list
         extended |> push value
         extended
     }
@@ -116,7 +116,7 @@ companion<T> List T {
 // left-to-right, so elements are pushed in the order they were written.
 // `accumulator` is a previously-built `Expr` value, spliced in — not a name
 // — so this never runs into the binder/use hygiene mismatch described above.
-def list_of_pushes = (accumulator: Expr, elements: Sequence Expr) => Expr :: match elements {
+def list_of_pushes = (accumulator: Expr, elements: Sequence<Expr>) => Expr :: match elements {
     Sequence () => accumulator,
     Sequence (first, rest) => {
         let pushed: Expr = parse_quote { List.push_and_return $accumulator $first }
@@ -140,7 +140,7 @@ def list_of_pushes = (accumulator: Expr, elements: Sequence Expr) => Expr :: mat
 // parameter, by contrast, is pinned down immediately by `first`'s own
 // type, so every `push_and_return` layered on top of it infers cleanly
 // from the (now concrete) accumulator beneath it.
-def list_of_expression = elements: Sequence Expr => Expr :: match elements {
+def list_of_expression = elements: Sequence<Expr> => Expr :: match elements {
     Sequence () => parse_quote { List.new () },
     Sequence (first, rest) => {
         let base: Expr = parse_quote { List.singleton $first }
@@ -148,48 +148,48 @@ def list_of_expression = elements: Sequence Expr => Expr :: match elements {
     },
 }
 
-companion<T> List T {
+companion<T> List<T> {
     /// Constructs a list from a comma-separated sequence of expressions.
     ///
     /// # Example
     ///
     /// ```staple
-    /// let values: List I32 = List.of (1, 2, 3)
+    /// let values: List<I32> = List.of (1, 2, 3)
     /// ```
     pub macro of =
-        body: Parenthesized (Separated Expr Comma) => match body {
+        body: Parenthesized<Separated<Expr, Comma>> => match body {
             Parenthesized (Separated (_, elements, _)) => list_of_expression elements,
         }
 }
 
 // Copy-T-gated companion: `get`/`get_unchecked` read a value out by copy.
-companion<T where Copy T> List T {
+companion<T where Copy T> List<T> {
     /// Returns a copied value at an index, or `None` when out of bounds.
-    pub def get = ((List buffer): List T; index: USize) => Option T ::
+    pub def get = ((List buffer): List<T>; index: USize) => Option<T> ::
         Buffer.get buffer index
 
     /// Returns a copied value at an index, trapping when out of bounds.
-    pub def get_unchecked = ((List buffer): List T; index: USize) => T ::
+    pub def get_unchecked = ((List buffer): List<T>; index: USize) => T ::
         Buffer.get_unchecked buffer index
 }
 
-impl<T where Copy T> Index (List T) USize {
+impl<T where Copy T> Index List<T> USize {
     type Output = T
     index = (list, position) => List.get_unchecked list position
 }
 
-impl<T> MutateIndex (List T) USize {
+impl<T> MutateIndex List<T> USize {
     type Value = T
     mutate_index = (mut list, position, move value) => {
         List.set_unchecked list position value
     }
 }
 
-pub type ListIter T = pub wrap (list: List T, index: USize)
+pub type ListIter<T> wrap pub (list: List<T>, index: USize)
 
 // Copy-T-gated, like `get`/`Index` — yields owned copies. A Shared-yielding
 // iterator for non-Copy element types is intentionally left for later.
-impl<T where Copy T> Iterator (ListIter T) {
+impl<T where Copy T> Iterator ListIter<T> {
     type Item = T
     next = move ListIter (list, index) => if (index < List.length list) {
         // The bounds check just above already guarantees `index` is valid,
@@ -203,7 +203,7 @@ impl<T where Copy T> Iterator (ListIter T) {
     }
 }
 
-impl<T where Copy T> IntoIterator (List T) {
-    type Iter = ListIter T
+impl<T where Copy T> IntoIterator List<T> {
+    type Iter = ListIter<T>
     into_iterator = move list => ListIter (list: list, index: 0)
 }
