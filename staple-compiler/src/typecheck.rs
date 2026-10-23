@@ -24816,6 +24816,18 @@ mod first_class_scheme_tests {
 mod slotted_product_tests {
     use super::*;
 
+    fn element(
+        name: Option<&str>,
+        value_type: CheckedType,
+        default: Option<staple_syntax::Expression>,
+    ) -> CheckedTypeElement {
+        CheckedTypeElement {
+            name: name.map(str::to_owned),
+            value_type,
+            default,
+        }
+    }
+
     fn pair(slotted: bool) -> CheckedType {
         normalize_product_type_kind(
             vec![

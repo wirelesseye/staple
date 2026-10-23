@@ -523,7 +523,7 @@ pub(super) fn parse_error_value(message: &str) -> Value {
     Value::Nominal(
         "ParseError".to_owned(),
         Box::new(Value::Product(
-            vec![(Some("message".to_owned()), string_value(message))],
+            vec![(Some("message".to_owned()), string_value(message))].into(),
             false,
         )),
     )
@@ -899,7 +899,8 @@ impl MacroExpander {
                                 cursor: 0,
                             },
                         ),
-                    ],
+                    ]
+                    .into(),
                     true,
                 )))
             }
@@ -930,13 +931,13 @@ impl MacroExpander {
                 };
                 let contents = match (&target, value) {
                     (MetaType::SlottedProduct(_), Value::Product(values, _)) => {
-                        DelimitedValueContents::Slotted(values)
+                        DelimitedValueContents::Slotted(values.to_vec())
                     }
                     (MetaType::Product(_), Value::Product(values, _)) if values.len() >= 2 => {
-                        DelimitedValueContents::Product(values)
+                        DelimitedValueContents::Product(values.to_vec())
                     }
                     (MetaType::Product(_), Value::Product(values, _)) => {
-                        DelimitedValueContents::Slotted(values)
+                        DelimitedValueContents::Slotted(values.to_vec())
                     }
                     (MetaType::Sequence(_), Value::Sequence(values)) => {
                         DelimitedValueContents::Sequence(values)

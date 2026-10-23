@@ -20,6 +20,10 @@ use staple_syntax::{
 
 const MAX_EXPANSION_DEPTH: usize = 128;
 const MAX_EVALUATION_STEPS: usize = 1_000_000;
+/// Compile-time products keep repeated elements compact. Operations that
+/// materialize positions still need a bound, independent of the type-level
+/// product limit.
+const MAX_COMPILE_TIME_PRODUCT_ARITY: usize = 1_000_000;
 /// Bounds `MacroExpander::helper_eval_depth`: nesting of "look up a named
 /// binding and evaluate its raw initializer" or "apply a compile-time
 /// function" calls, which is where a self-referential or mutually
@@ -509,7 +513,7 @@ enum Value {
         syntax: Syntax,
         cursor: usize,
     },
-    Product(Vec<(Option<String>, Value)>, bool),
+    Product(ProductValue, bool),
     Integer(i128),
     /// A float and the float type it is known to have. `None` is an
     /// unannotated literal, or arithmetic over only those, whose type the
@@ -523,6 +527,191 @@ enum Value {
         separator: Box<Value>,
         trailing: bool,
     },
+}
+
+/// Compile-time product storage. A repeated value keeps its element once.
+#[derive(Clone)]
+enum ProductValue {
+    Elements(Vec<(Option<String>, Value)>),
+    Repeated {
+        element: Box<(Option<String>, Value)>,
+        count: usize,
+    },
+}
+
+impl ProductValue {
+    fn repeated(value: Value, count: usize) -> Self {
+        Self::Repeated {
+            element: Box::new((None, value)),
+            count,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Elements(elements) => elements.len(),
+            Self::Repeated { count, .. } => *count,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn iter(&self) -> ProductValueIter<'_> {
+        ProductValueIter {
+            product: self,
+            front: 0,
+            back: self.len(),
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<&(Option<String>, Value)> {
+        match self {
+            Self::Elements(elements) => elements.get(index),
+            Self::Repeated { element, count } if index < *count => Some(element.as_ref()),
+            Self::Repeated { .. } => None,
+        }
+    }
+
+    fn get_mut(&mut self, index: usize) -> Option<&mut (Option<String>, Value)> {
+        self.materialize().get_mut(index)
+    }
+
+    fn first(&self) -> Option<&(Option<String>, Value)> {
+        self.get(0)
+    }
+
+    fn last(&self) -> Option<&(Option<String>, Value)> {
+        self.len().checked_sub(1).and_then(|index| self.get(index))
+    }
+
+    fn iter_mut(&mut self) -> std::slice::IterMut<'_, (Option<String>, Value)> {
+        self.materialize().iter_mut()
+    }
+
+    fn materialize(&mut self) -> &mut Vec<(Option<String>, Value)> {
+        if let Self::Repeated { element, count } = self {
+            let elements = vec![element.as_ref().clone(); *count];
+            *self = Self::Elements(elements);
+        }
+        match self {
+            Self::Elements(elements) => elements,
+            Self::Repeated { .. } => unreachable!("materialized above"),
+        }
+    }
+
+    fn into_vec(self) -> Vec<(Option<String>, Value)> {
+        match self {
+            Self::Elements(elements) => elements,
+            Self::Repeated { element, count } => {
+                vec![element.as_ref().clone(); count]
+            }
+        }
+    }
+
+    fn push(&mut self, element: (Option<String>, Value)) {
+        self.materialize().push(element);
+    }
+
+    fn extend(&mut self, elements: impl IntoIterator<Item = (Option<String>, Value)>) {
+        self.materialize().extend(elements);
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.materialize().truncate(len);
+    }
+
+    fn remove(&mut self, index: usize) -> (Option<String>, Value) {
+        self.materialize().remove(index)
+    }
+
+    fn pop(&mut self) -> Option<(Option<String>, Value)> {
+        self.materialize().pop()
+    }
+
+    fn clear(&mut self) {
+        *self = Self::Elements(Vec::new());
+    }
+
+    fn as_slice(&self) -> Option<&[(Option<String>, Value)]> {
+        match self {
+            Self::Elements(elements) => Some(elements),
+            Self::Repeated { .. } => None,
+        }
+    }
+
+    fn to_vec(&self) -> Vec<(Option<String>, Value)> {
+        self.iter().cloned().collect()
+    }
+}
+
+impl From<Vec<(Option<String>, Value)>> for ProductValue {
+    fn from(elements: Vec<(Option<String>, Value)>) -> Self {
+        Self::Elements(elements)
+    }
+}
+
+impl FromIterator<(Option<String>, Value)> for ProductValue {
+    fn from_iter<T: IntoIterator<Item = (Option<String>, Value)>>(iter: T) -> Self {
+        Self::Elements(iter.into_iter().collect())
+    }
+}
+
+impl<'a> IntoIterator for &'a ProductValue {
+    type Item = &'a (Option<String>, Value);
+    type IntoIter = ProductValueIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl IntoIterator for ProductValue {
+    type Item = (Option<String>, Value);
+    type IntoIter = std::vec::IntoIter<(Option<String>, Value)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_vec().into_iter()
+    }
+}
+
+impl std::ops::Index<usize> for ProductValue {
+    type Output = (Option<String>, Value);
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index).expect("product index in bounds")
+    }
+}
+
+struct ProductValueIter<'a> {
+    product: &'a ProductValue,
+    front: usize,
+    back: usize,
+}
+
+impl<'a> Iterator for ProductValueIter<'a> {
+    type Item = &'a (Option<String>, Value);
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.front >= self.back {
+            return None;
+        }
+        let index = self.front;
+        self.front += 1;
+        self.product.get(index)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.back - self.front;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for ProductValueIter<'_> {}
+impl DoubleEndedIterator for ProductValueIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front >= self.back {
+            return None;
+        }
+        self.back -= 1;
+        self.product.get(self.back)
+    }
 }
 
 /// Shared storage plus a cursor makes consuming a cons tail constant time.
@@ -6134,7 +6323,8 @@ impl MacroExpander {
                                                     metadata.visibility,
                                                 )),
                                             ),
-                                        ],
+                                        ]
+                                        .into(),
                                         false,
                                     ),
                                     call_span.clone(),
@@ -6495,7 +6685,7 @@ impl MacroExpander {
                 if name.name.chars().next().is_some_and(char::is_uppercase) {
                     return Some(Value::Nominal(
                         name.name.clone(),
-                        Box::new(Value::Product(Vec::new(), false)),
+                        Box::new(Value::Product(Vec::new().into(), false)),
                     ));
                 }
                 self.diagnostics.push(Diagnostic::new(
@@ -6588,7 +6778,7 @@ impl MacroExpander {
                         values.push((element.name.clone(), value));
                     }
                 }
-                Some(Value::Product(values, product.slotted))
+                Some(Value::Product(values.into(), product.slotted))
             }
             Expression::RepeatedProduct(repeated) => {
                 let value = self.eval_expression(module, &repeated.value, environment)?;
@@ -6610,21 +6800,16 @@ impl MacroExpander {
                     ));
                     return None;
                 };
-                if count > crate::typecheck::MAX_PRODUCT_ARITY {
+                if count > MAX_COMPILE_TIME_PRODUCT_ARITY {
                     self.diagnostics.push(Diagnostic::new(
                         repeated.syntax.span.clone(),
                         format!(
-                            "product arity exceeds the limit of {}",
-                            crate::typecheck::MAX_PRODUCT_ARITY
+                            "compile-time product arity exceeds the limit of {MAX_COMPILE_TIME_PRODUCT_ARITY}"
                         ),
                     ));
                     return None;
                 }
-                let mut values: Vec<(Option<String>, Value)> = Vec::with_capacity(count);
-                for _ in 0..count {
-                    values.push((None, value.clone()));
-                }
-                Some(Value::Product(values, false))
+                Some(Value::Product(ProductValue::repeated(value, count), false))
             }
             Expression::Call(call) => {
                 let (head, arguments) = flatten_call(expression);
@@ -6894,7 +7079,7 @@ impl MacroExpander {
                     };
                 }
                 if let Value::Syntax(SyntaxValue::Parameters { fields, .. }) = &value {
-                    value = Value::Product(fields.clone(), false);
+                    value = Value::Product(fields.clone().into(), false);
                 }
                 if let Value::Syntax(SyntaxValue::Item(item)) = &value {
                     if let Item::TypeDeclaration(declaration) = item.as_ref() {
@@ -7064,7 +7249,7 @@ impl MacroExpander {
             }
             Expression::Block(block) => {
                 let mut local = environment.clone();
-                let mut result = Value::Product(Vec::new(), false);
+                let mut result = Value::Product(Vec::new().into(), false);
                 for (index, item) in block.items.iter().enumerate() {
                     match item {
                         Item::Binding(binding) => {
@@ -7161,7 +7346,7 @@ impl MacroExpander {
                         Item::Break(break_) => {
                             let value = match &break_.value {
                                 Some(value) => self.eval_expression(module, value, &mut local)?,
-                                None => Value::Product(Vec::new(), false),
+                                None => Value::Product(Vec::new().into(), false),
                             };
                             self.pending_break = Some(value);
                             return None;
@@ -7250,6 +7435,7 @@ impl MacroExpander {
                     ));
                     return None;
                 };
+                let elements = elements.to_vec();
                 let [(callee_name, callee), (argument_name, argument)] = elements.as_slice() else {
                     self.diagnostics.push(Diagnostic::new(
                         span,
@@ -7331,6 +7517,7 @@ impl MacroExpander {
                     ));
                     return None;
                 };
+                let fields = fields.to_vec();
                 let [
                     (_, Value::Syntax(SyntaxValue::Ident(name))),
                     (_, Value::Syntax(SyntaxValue::Pattern(argument))),
@@ -7359,6 +7546,7 @@ impl MacroExpander {
                     ));
                     return None;
                 };
+                let fields = fields.to_vec();
                 let [
                     (Some(modifiers_name), Value::Sequence(modifiers)),
                     (Some(item_name), Value::Syntax(SyntaxValue::Item(item))),
@@ -7419,6 +7607,7 @@ impl MacroExpander {
                     ));
                     return None;
                 };
+                let elements = elements.to_vec();
                 if let [
                     (Some(first), first_value),
                     (Some(rest), Value::Sequence(rest_values)),
@@ -7443,6 +7632,7 @@ impl MacroExpander {
                     ));
                     return None;
                 };
+                let fields = fields.to_vec();
                 let [
                     (separator_name, separator),
                     (elements_name, elements),
@@ -7568,9 +7758,9 @@ impl MacroExpander {
                         // Slotted contents are juxtaposed; product contents
                         // are separated by commas.
                         if slotted || values.len() < 2 {
-                            DelimitedValueContents::Slotted(values)
+                            DelimitedValueContents::Slotted(values.to_vec())
                         } else {
-                            DelimitedValueContents::Product(values)
+                            DelimitedValueContents::Product(values.to_vec())
                         }
                     }
                     Value::Sequence(values) => DelimitedValueContents::Sequence(values),
@@ -9937,7 +10127,7 @@ fn match_slotted_contents(
                     None,
                     Value::Nominal(
                         "None".to_owned(),
-                        Box::new(Value::Product(Vec::new(), false)),
+                        Box::new(Value::Product(Vec::new().into(), false)),
                     ),
                 ),
             );
@@ -10051,7 +10241,7 @@ fn match_syntax_fragment(
         MetaType::SlottedProduct(elements) => {
             let values =
                 match_slotted_contents(syntax, 0, syntax.tokens().len(), elements, next_syntax_id)?;
-            return Some(Value::Product(values, true));
+            return Some(Value::Product(values.into(), true));
         }
         MetaType::Product(elements) => {
             let tokens = syntax.tokens();
@@ -10064,14 +10254,14 @@ fn match_syntax_fragment(
                 return None;
             }
             let values = match_product_contents(syntax, first + 1, last, elements, next_syntax_id)?;
-            return Some(Value::Product(values, false));
+            return Some(Value::Product(values.into(), false));
         }
         MetaType::Optional(element) => {
             let empty = syntax.tokens().iter().all(|token| token.kind.is_trivia());
             return if empty {
                 Some(Value::Nominal(
                     "None".to_owned(),
-                    Box::new(Value::Product(Vec::new(), false)),
+                    Box::new(Value::Product(Vec::new().into(), false)),
                 ))
             } else {
                 match_syntax_fragment(element, syntax, next_syntax_id)
@@ -10427,7 +10617,7 @@ fn match_macro_parameter_suffix(
             }
             matched.push(MacroArgument::Parsed(Value::Nominal(
                 "None".into(),
-                Box::new(Value::Product(vec![], false)),
+                Box::new(Value::Product(vec![].into(), false)),
             )));
             let result =
                 match_macro_parameter_suffix(rest, arguments, argument_index, matched, effective);
@@ -12882,7 +13072,7 @@ fn mutable_parameter_name(pattern: &Pattern) -> Option<&str> {
 fn bool_value(value: bool) -> Value {
     Value::Nominal(
         if value { "True" } else { "False" }.to_owned(),
-        Box::new(Value::Product(Vec::new(), false)),
+        Box::new(Value::Product(Vec::new().into(), false)),
     )
 }
 
@@ -12996,7 +13186,8 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                                 Some("argument".to_owned()),
                                 Value::Syntax(SyntaxValue::from_expression(*call.argument)),
                             ),
-                        ],
+                        ]
+                        .into(),
                         false,
                     ),
                     environment,
@@ -13019,7 +13210,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             {
                 return bind_pattern(
                     &pattern.argument,
-                    Value::Product(fields.clone(), false),
+                    Value::Product(fields.clone().into(), false),
                     environment,
                 );
             }
@@ -13041,7 +13232,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             {
                 return bind_pattern(
                     &pattern.argument,
-                    Value::Product(Vec::new(), false),
+                    Value::Product(Vec::new().into(), false),
                     environment,
                 );
             }
@@ -13059,9 +13250,11 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                     {
                         values[0].1.clone()
                     }
-                    DelimitedValueContents::Slotted(values) => Value::Product(values.clone(), true),
+                    DelimitedValueContents::Slotted(values) => {
+                        Value::Product(values.clone().into(), true)
+                    }
                     DelimitedValueContents::Product(values) => {
-                        Value::Product(values.clone(), false)
+                        Value::Product(values.clone().into(), false)
                     }
                     DelimitedValueContents::Sequence(values) => {
                         Value::Sequence(values.clone().into())
@@ -13109,7 +13302,8 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                             vec![
                                 (Some("first".to_owned()), head.clone()),
                                 (Some("rest".to_owned()), Value::Sequence(values.tail())),
-                            ],
+                            ]
+                            .into(),
                             false,
                         ),
                         environment,
@@ -13142,7 +13336,8 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                                 Value::Sequence(elements.into()),
                             ),
                             (Some("trailing".to_owned()), bool_value(trailing)),
-                        ],
+                        ]
+                        .into(),
                         false,
                     ),
                     environment,
@@ -13155,7 +13350,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             {
                 return bind_pattern(
                     &pattern.argument,
-                    Value::Product(Vec::new(), false),
+                    Value::Product(Vec::new().into(), false),
                     environment,
                 );
             }
@@ -13165,7 +13360,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             {
                 return bind_pattern(
                     &pattern.argument,
-                    Value::Product(Vec::new(), false),
+                    Value::Product(Vec::new().into(), false),
                     environment,
                 );
             }
@@ -13175,7 +13370,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             {
                 return bind_pattern(
                     &pattern.argument,
-                    Value::Product(Vec::new(), false),
+                    Value::Product(Vec::new().into(), false),
                     environment,
                 );
             }
@@ -13185,7 +13380,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             {
                 return bind_pattern(
                     &pattern.argument,
-                    Value::Product(Vec::new(), false),
+                    Value::Product(Vec::new().into(), false),
                     environment,
                 );
             }
@@ -13229,13 +13424,14 @@ fn type_body_value(body: &staple_syntax::TypeBody) -> Value {
                                 .expect("constructor body has an underlying type"),
                         )),
                     ),
-                ],
+                ]
+                .into(),
                 false,
             )),
         ),
         staple_syntax::TypeBodyKind::Opaque => Value::Nominal(
             "OpaqueBody".to_owned(),
-            Box::new(Value::Product(Vec::new(), false)),
+            Box::new(Value::Product(Vec::new().into(), false)),
         ),
     }
 }
@@ -13292,14 +13488,17 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
         ),
         None => Value::Nominal(
             "None".to_owned(),
-            Box::new(Value::Product(Vec::new(), false)),
+            Box::new(Value::Product(Vec::new().into(), false)),
         ),
     };
     Value::Product(
         vec![
             (
                 Some("kind".to_owned()),
-                Value::Nominal(kind.to_owned(), Box::new(Value::Product(Vec::new(), false))),
+                Value::Nominal(
+                    kind.to_owned(),
+                    Box::new(Value::Product(Vec::new().into(), false)),
+                ),
             ),
             (Some("name".to_owned()), identifier(&declaration.name)),
             (
@@ -13315,7 +13514,8 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
                 Value::Sequence(parameters.into()),
             ),
             (Some("underlying".to_owned()), underlying),
-        ],
+        ]
+        .into(),
         false,
     )
 }
@@ -13342,7 +13542,8 @@ fn modified_item_value(modified: &staple_syntax::ModifiedItem) -> Value {
                 Some("item".to_owned()),
                 Value::Syntax(SyntaxValue::Item(modified.item.clone())),
             ),
-        ],
+        ]
+        .into(),
         false,
     )
 }
@@ -13378,7 +13579,10 @@ fn parameter_node(parameter: &staple_syntax::TypeParameter) -> Value {
             "Some".into(),
             Box::new(Value::Syntax(SyntaxValue::Type(ty.clone()))),
         ),
-        None => Value::Nominal("None".into(), Box::new(Value::Product(vec![], false))),
+        None => Value::Nominal(
+            "None".into(),
+            Box::new(Value::Product(vec![].into(), false)),
+        ),
     };
     Value::Syntax(SyntaxValue::Parameters {
         kind: MetaType::TypeParameter,
@@ -13676,6 +13880,7 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
         }
         (MetaType::Visibility, Value::Syntax(SyntaxValue::Visibility(_))) => true,
         (MetaType::MacroCallMetadata, Value::Product(fields, _)) => {
+            let fields = fields.to_vec();
             let [
                 (Some(modifiers), Value::Sequence(modifiers_value)),
                 (Some(visibility), Value::Syntax(SyntaxValue::Visibility(_))),
