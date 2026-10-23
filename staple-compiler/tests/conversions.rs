@@ -74,16 +74,16 @@ fn numeric_conversion_matrix_runs_and_emits_for_32_and_64_bit_targets() {
     let mut source = String::new();
     for to in numbers {
         let one = if to.starts_with('F') { "1.0" } else { "1" };
-        source.push_str(&format!("def check_{to}: (Ok {to} | ConversionError) -> () = result => match result {{\n  Ok value => if (value == ({to} :: {one})) {{ () }} else {{ panic \"incorrect {to} conversion\" }},\n  _ => panic \"unexpected conversion error\",\n}}\n"));
+        source.push_str(&format!("def check_{to}: (Ok<{to}> | ConversionError) -> () = result => match result {{\n  Ok value => if (value == ({to} :: {one})) {{ () }} else {{ panic \"incorrect {to} conversion\" }},\n  _ => panic \"unexpected conversion error\",\n}}\n"));
     }
     for from in numbers {
         let one = if from.starts_with('F') { "1.0" } else { "1" };
         for to in numbers {
-            source.push_str(&format!("let result_{from}_{to}: Ok {to} | TryConvert.Error {from} {to} = TryConvert.try_convert ({from} :: {one})\ncheck_{to} result_{from}_{to}\n"));
+            source.push_str(&format!("let result_{from}_{to}: Ok<{to}> | TryConvert.Error {from} {to} = TryConvert.try_convert ({from} :: {one})\ncheck_{to} result_{from}_{to}\n"));
         }
     }
     for to in numbers {
-        source.push_str(&format!("let parsed_{to}: Ok {to} | ConversionError = TryConvert.try_convert \"1\"\ncheck_{to} parsed_{to}\n"));
+        source.push_str(&format!("let parsed_{to}: Ok<{to}> | ConversionError = TryConvert.try_convert \"1\"\ncheck_{to} parsed_{to}\n"));
         if !to.starts_with('F') {
             source.push_str(&format!("let boolean_{to}: {to} = Convert.convert (Bool :: True)\nlet false_{to}: {to} = Convert.convert (Bool :: False)\nif (boolean_{to} == ({to} :: 1)) {{ () }} else {{ panic \"boolean conversion failed\" }}\nif (false_{to} == ({to} :: 0)) {{ () }} else {{ panic \"false conversion failed\" }}\n"));
         }
