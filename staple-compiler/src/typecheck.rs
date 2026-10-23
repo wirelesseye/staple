@@ -10983,6 +10983,20 @@ impl TypeChecker {
                         for field in &mut completed.elements {
                             field.default = None;
                         }
+                        // The initialized prefix contributes its actual types.
+                        // In particular this replaces inference placeholders in
+                        // a constructor's expected representation with the
+                        // concrete arguments supplied here.
+                        for (index, actual) in elements.iter().enumerate() {
+                            let Some(expected) = completed.elements.get_mut(index) else {
+                                break;
+                            };
+                            if let Some(merged) =
+                                merge_types(actual.value_type.clone(), expected.value_type.clone())
+                            {
+                                expected.value_type = merged;
+                            }
+                        }
                         normalize_product_type_kind(completed.elements, false, product.slotted)
                     }
                 } else {
@@ -16157,6 +16171,20 @@ impl TypeChecker {
                     .map(|argument| substitute_type(argument, &projections))
                     .collect()
             };
+            // An explicit trait parameter still inferred by this call names
+            // no concrete obligation yet. Defer it to the completed
+            // instantiation rather than reporting a bound failure for `_`.
+            // Associated-type placeholders do not defer the bound: a concrete
+            // trait parameter must still implement the trait.
+            let explicit = arguments
+                .iter()
+                .zip(&associated)
+                .filter(|(_, associated)| !**associated)
+                .map(|(argument, _)| argument.clone())
+                .collect::<Vec<_>>();
+            if explicit.iter().any(contains_inferred_type) {
+                continue;
+            }
             // A partially applied callee (the speculative pre-check of
             // `f a` in `f a b`) can leave some compile-time parameters
             // unresolved; their bounds become obligations of the enclosing
@@ -16190,12 +16218,6 @@ impl TypeChecker {
             }
             if !self.trait_obligation_available(bound.trait_id, &arguments) {
                 // Report the trait's own parameters, not its associated types.
-                let explicit = arguments
-                    .iter()
-                    .zip(&associated)
-                    .filter(|(_, associated)| !**associated)
-                    .map(|(argument, _)| argument.clone())
-                    .collect::<Vec<_>>();
                 self.diagnostics.push(Diagnostic::new(
                     span.clone(),
                     if has_equality {
