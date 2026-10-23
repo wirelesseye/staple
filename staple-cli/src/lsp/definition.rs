@@ -2222,8 +2222,14 @@ let result: String = Box.choose.<I32, String> (Box 1, "yes")
         );
         let hovers = super::super::hover::entries(&module, &typed);
         assert!(
-            hovers.iter().any(|entry| entry.range.start == reference
-                && entry.signature == "<type parameter> U where Copy U"),
+            hovers.iter().any(|entry| {
+                entry.range.start == reference
+                    && entry.signature == "U where Copy U"
+                    && entry
+                        .module
+                        .as_deref()
+                        .is_some_and(|module| module.ends_with(".identity"))
+            }),
             "{hovers:?}"
         );
         assert!(

@@ -12,8 +12,9 @@ pub struct HoverEntry {
     pub documentation: Vec<String>,
     /// The `use`-path-style name of the module that defines the hovered thing
     /// (`std.io`, `example.tools.text`), shown as a leading fenced line —
-    /// rust-analyzer style. `None` for locals, parameters, type parameters, and
-    /// anything whose defining module can't be named.
+    /// rust-analyzer style. For a type parameter this is the path to the
+    /// function or type that declares it (`std.io.println`). `None` for
+    /// locals, parameters, and anything whose defining module can't be named.
     pub module: Option<String>,
     /// For a use of a generic binding: the type it was instantiated to here,
     /// rendered as its own `instantiated to:` fenced block below `signature`
@@ -36,6 +37,7 @@ pub fn entries_at_path(path: &Path, module: &Module, typed: &TypedModule) -> Vec
         path,
         macro_result: None,
         parameter_bounds: HashMap::new(),
+        parameter_owners: HashMap::new(),
     };
     for source_module in typed.resolved().program().modules() {
         collector.collect_module_declarations(&source_module.syntax);
@@ -103,7 +105,12 @@ struct Collector<'a> {
     /// syntax constructor used in that body (`Sequence (…)`) show what it was
     /// instantiated to, since macro bodies carry no checked types.
     macro_result: Option<Type>,
+    /// The ` where …` suffix for a type parameter's bounds, keyed by the
+    /// parameter's resolved ID.
     parameter_bounds: HashMap<TypeParameterId, String>,
+    /// The path to the function or type that declares each type parameter,
+    /// shown as its hover's leading line (`std.io.println`, `std.list.List`).
+    parameter_owners: HashMap<TypeParameterId, String>,
 }
 
 #[derive(Clone)]
@@ -174,11 +181,33 @@ impl Collector<'_> {
                 }
             }
             Item::MacroDeclaration(declaration) => {
+                let owner = self.declaration_owner_label(
+                    declaration.syntax.id,
+                    &declaration.name,
+                );
+                self.register_type_parameters(
+                    &declaration.type_parameters,
+                    &declaration.trait_bounds,
+                    &declaration.subtype_bounds,
+                    &declaration.equality_bounds,
+                    owner.as_deref(),
+                );
+                if let Some(annotation) = &declaration.annotation {
+                    self.collect_type_parameter_declarations(annotation, owner.as_deref());
+                }
                 if let Some(value) = &declaration.value {
                     self.collect_expression_declarations(value);
                 }
             }
             Item::TraitDeclaration(declaration) => {
+                let owner = self.trait_declaration_owner_label(declaration);
+                self.register_type_parameters(
+                    declaration.explicit_type_parameters(),
+                    &declaration.prerequisites,
+                    &declaration.subtype_bounds,
+                    &declaration.equality_bounds,
+                    owner.as_deref(),
+                );
                 for member in &declaration.members {
                     if let Some(default) = &member.default {
                         self.collect_expression_declarations(default);
@@ -186,8 +215,29 @@ impl Collector<'_> {
                 }
             }
             Item::TraitImplementation(implementation) => {
+                let owner = self.implementation_owner_label(implementation);
+                self.register_type_parameters(
+                    &implementation.type_parameters,
+                    &implementation.trait_bounds,
+                    &implementation.subtype_bounds,
+                    &implementation.equality_bounds,
+                    owner.as_deref(),
+                );
                 for member in &implementation.members {
                     self.collect_expression_declarations(&member.value);
+                }
+            }
+            Item::TypeDeclaration(declaration) => {
+                let owner = self.type_declaration_owner_label(declaration);
+                self.register_type_parameters(
+                    &declaration.type_parameters,
+                    &declaration.trait_bounds,
+                    &declaration.subtype_bounds,
+                    &declaration.equality_bounds,
+                    owner.as_deref(),
+                );
+                if let Some(underlying) = declaration.underlying() {
+                    self.collect_type_parameter_declarations(underlying, owner.as_deref());
                 }
             }
             item @ (Item::Binding(_)
@@ -197,7 +247,7 @@ impl Collector<'_> {
             | Item::Break(_)
             | Item::Continue(_)
             | Item::Expression(_)) => self.collect_block_item_declarations(item),
-            Item::UseDeclaration(_) | Item::TypeDeclaration(_) => {}
+            Item::UseDeclaration(_) => {}
         }
     }
 
@@ -253,6 +303,26 @@ impl Collector<'_> {
                 },
             );
         }
+        // A companion block's parameters belong to the type it extends, while
+        // the binding's own parameters (on its annotation or function value)
+        // belong to the binding. Register each under the path hover should
+        // show for it.
+        let owner = self.binding_owner_label(binding);
+        if let Some(companion) = &binding.companion_generics {
+            let companion_owner = self
+                .companion_owner_label(binding)
+                .or_else(|| owner.clone());
+            self.register_generic_parameters(companion, companion_owner.as_deref());
+        }
+        if let Some(annotation) = binding.annotation_generics() {
+            self.register_generic_parameters(annotation, owner.as_deref());
+        }
+        if let Some(generics) = binding.generics() {
+            self.register_generic_parameters(generics, owner.as_deref());
+        }
+        if let Some(annotation) = &binding.annotation {
+            self.collect_type_parameter_declarations(annotation, owner.as_deref());
+        }
         if let Some(value) = &binding.value {
             self.collect_expression_declarations(value);
         }
@@ -261,52 +331,11 @@ impl Collector<'_> {
     fn collect_expression_declarations(&mut self, expression: &Expression) {
         match expression {
             Expression::Function(function) => {
+                // A generic binding's parameters were already registered under
+                // the binding's path by `collect_binding_declaration`; an
+                // anonymous generic function has no path to show.
                 if let Some(generics) = &function.generics {
-                    for parameter in &generics.parameters {
-                        if let Some(id) = self
-                            .typed
-                            .resolved()
-                            .type_parameter_for(parameter.syntax().id)
-                        {
-                            let names = parameter.names();
-                            let mut bounds = generics
-                                .trait_bounds
-                                .iter()
-                                .filter(|bound| {
-                                    bound.arguments.iter().any(|ty| {
-                                        ty.to_string()
-                                            .split(|c: char| !c.is_alphanumeric() && c != '_')
-                                            .any(|name| names.contains(&name))
-                                    })
-                                })
-                                .map(|bound| {
-                                    format!(
-                                        "{} {}",
-                                        bound.trait_name.name,
-                                        bound
-                                            .arguments
-                                            .iter()
-                                            .map(ToString::to_string)
-                                            .collect::<Vec<_>>()
-                                            .join(" ")
-                                    )
-                                })
-                                .collect::<Vec<_>>();
-                            bounds.extend(
-                                generics
-                                    .subtype_bounds
-                                    .iter()
-                                    .filter(|bound| names.contains(&bound.parameter.name.as_str()))
-                                    .map(|bound| {
-                                        format!("{} <: {}", bound.parameter.name, bound.supertype)
-                                    }),
-                            );
-                            if !bounds.is_empty() {
-                                self.parameter_bounds
-                                    .insert(id, format!(" where {}", bounds.join(", ")));
-                            }
-                        }
-                    }
+                    self.register_generic_parameters(generics, None);
                 }
                 self.collect_pattern_declarations(&function.pattern, false);
                 self.collect_expression_declarations(&function.body);
@@ -1807,19 +1836,13 @@ impl Collector<'_> {
 
     fn type_parameter(&mut self, parameter: &TypeParameterPattern) {
         match parameter {
-            TypeParameterPattern::Binding(binding) => self.named(
-                &binding.syntax,
-                &binding.name,
-                format!(
-                    "<type parameter> {}{}",
-                    binding.name,
-                    self.typed
-                        .resolved()
-                        .type_parameter_for(binding.syntax.id)
-                        .and_then(|id| self.parameter_bounds.get(&id))
-                        .map_or("", String::as_str)
-                ),
-            ),
+            TypeParameterPattern::Binding(binding) => {
+                let id = self
+                    .typed
+                    .resolved()
+                    .type_parameter_for(binding.syntax.id);
+                self.type_parameter_hover(&binding.syntax, &binding.name, id);
+            }
             TypeParameterPattern::Effect(binding) => self.named(
                 &binding.syntax,
                 &binding.name,
@@ -1832,6 +1855,34 @@ impl Collector<'_> {
             }
             TypeParameterPattern::Splice(_) => {}
         }
+    }
+
+    /// A type parameter hovers as its declaring function or type's path on the
+    /// leading line and as its name (with bounds) in the signature:
+    ///
+    /// ```text
+    /// example.identity
+    /// T where Copy T
+    /// ```
+    fn type_parameter_hover(
+        &mut self,
+        syntax: &Syntax,
+        name: &str,
+        id: Option<TypeParameterId>,
+    ) {
+        let signature = format!(
+            "{name}{}",
+            id.and_then(|id| self.parameter_bounds.get(&id))
+                .map_or("", String::as_str)
+        );
+        let module = id
+            .and_then(|id| self.parameter_owners.get(&id).cloned())
+            .or_else(|| {
+                id.and_then(|id| {
+                    self.definition_module_label(DefinitionId::TypeParameter(id))
+                })
+            });
+        self.named_with_docs(syntax, name, signature, Vec::new(), module);
     }
 
     fn trait_bound(&mut self, bound: &TraitBound) {
@@ -1921,25 +1972,10 @@ impl Collector<'_> {
                         .unwrap_or_default();
                     let module = self.definition_module_label(DefinitionId::Type(id));
                     self.named_with_docs(&named.syntax, &named.name, signature, docs, module);
-                } else if self
-                    .typed
-                    .resolved()
-                    .type_parameter_for(named.syntax.id)
-                    .is_some()
+                } else if let Some(id) =
+                    self.typed.resolved().type_parameter_for(named.syntax.id)
                 {
-                    self.named(
-                        &named.syntax,
-                        &named.name,
-                        format!(
-                            "<type parameter> {}{}",
-                            named.name,
-                            self.typed
-                                .resolved()
-                                .type_parameter_for(named.syntax.id)
-                                .and_then(|id| self.parameter_bounds.get(&id))
-                                .map_or("", String::as_str)
-                        ),
-                    );
+                    self.type_parameter_hover(&named.syntax, &named.name, Some(id));
                 }
             }
             Type::Product(product) => {
@@ -2205,6 +2241,266 @@ impl Collector<'_> {
             .import_definitions(use_syntax, imported_name)
             .iter()
             .find_map(|definition| self.definition_module_label(*definition))
+    }
+
+    fn register_generic_parameters(
+        &mut self,
+        generics: &GenericParameters,
+        owner: Option<&str>,
+    ) {
+        self.register_type_parameters(
+            &generics.parameters,
+            &generics.trait_bounds,
+            &generics.subtype_bounds,
+            &generics.equality_bounds,
+            owner,
+        );
+    }
+
+    fn register_type_parameters(
+        &mut self,
+        parameters: &[TypeParameterPattern],
+        trait_bounds: &[TraitBound],
+        subtype_bounds: &[SubtypeBound],
+        equality_bounds: &[staple_syntax::EqualityBound],
+        owner: Option<&str>,
+    ) {
+        for parameter in parameters {
+            self.register_type_parameter(
+                parameter,
+                trait_bounds,
+                subtype_bounds,
+                equality_bounds,
+                owner,
+            );
+        }
+    }
+
+    fn register_type_parameter(
+        &mut self,
+        parameter: &TypeParameterPattern,
+        trait_bounds: &[TraitBound],
+        subtype_bounds: &[SubtypeBound],
+        equality_bounds: &[staple_syntax::EqualityBound],
+        owner: Option<&str>,
+    ) {
+        match parameter {
+            TypeParameterPattern::Binding(binding) => {
+                let Some(id) = self
+                    .typed
+                    .resolved()
+                    .type_parameter_for(binding.syntax.id)
+                else {
+                    return;
+                };
+                // The resolved declaration is visited before the editor-owned
+                // copy, so the first owner wins; a later, less complete label
+                // must not replace it.
+                if let Some(owner) = owner {
+                    self.parameter_owners
+                        .entry(id)
+                        .or_insert_with(|| owner.to_owned());
+                }
+                let bounds = self.type_parameter_bounds(
+                    &binding.name,
+                    trait_bounds,
+                    subtype_bounds,
+                    equality_bounds,
+                );
+                if !bounds.is_empty() {
+                    self.parameter_bounds
+                        .insert(id, format!(" where {}", bounds.join(", ")));
+                }
+            }
+            TypeParameterPattern::Product(product) => {
+                for element in &product.elements {
+                    self.register_type_parameter(
+                        element,
+                        trait_bounds,
+                        subtype_bounds,
+                        equality_bounds,
+                        owner,
+                    );
+                }
+            }
+            TypeParameterPattern::Effect(_) | TypeParameterPattern::Splice(_) => {}
+        }
+    }
+
+    fn type_parameter_bounds(
+        &self,
+        name: &str,
+        trait_bounds: &[TraitBound],
+        subtype_bounds: &[SubtypeBound],
+        equality_bounds: &[staple_syntax::EqualityBound],
+    ) -> Vec<String> {
+        let mentions = |ty: &Type| {
+            ty.to_string()
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|part| part == name)
+        };
+        let mut bounds = trait_bounds
+            .iter()
+            .filter(|bound| bound.arguments.iter().any(mentions))
+            .map(|bound| {
+                format!(
+                    "{} {}",
+                    bound.trait_name.name,
+                    bound
+                        .arguments
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            })
+            .collect::<Vec<_>>();
+        bounds.extend(
+            subtype_bounds
+                .iter()
+                .filter(|bound| bound.parameter.name == name)
+                .map(|bound| format!("{} <: {}", bound.parameter.name, bound.supertype)),
+        );
+        bounds.extend(
+            equality_bounds
+                .iter()
+                .filter(|bound| mentions(&bound.left) || mentions(&bound.right))
+                .map(|bound| format!("{} = {}", bound.left, bound.right)),
+        );
+        bounds
+    }
+
+    /// Registers the parameters of every `forall` nested in a type, so they
+    /// point at the declaration that introduces them (for example a type
+    /// alias whose body is a generic function type).
+    fn collect_type_parameter_declarations(&mut self, ty: &Type, owner: Option<&str>) {
+        match ty {
+            Type::Forall(forall) => {
+                self.register_generic_parameters(&forall.generics, owner);
+                self.collect_type_parameter_declarations(&forall.body, owner);
+            }
+            Type::Product(product) => {
+                for element in &product.elements {
+                    self.collect_type_parameter_declarations(&element.ty, owner);
+                }
+            }
+            Type::Sum(sum) => {
+                for alternative in &sum.alternatives {
+                    self.collect_type_parameter_declarations(alternative, owner);
+                }
+            }
+            Type::Function(function) => {
+                self.collect_type_parameter_declarations(&function.parameter, owner);
+                for resource in &function.effects.resources {
+                    self.collect_type_parameter_declarations(&resource.value_type, owner);
+                }
+                self.collect_type_parameter_declarations(&function.result, owner);
+            }
+            Type::Application(application) => {
+                self.collect_type_parameter_declarations(&application.callee, owner);
+                self.collect_type_parameter_declarations(&application.argument, owner);
+            }
+            Type::EffectApplication(application) => {
+                self.collect_type_parameter_declarations(&application.callee, owner);
+                for resource in &application.effects.resources {
+                    self.collect_type_parameter_declarations(&resource.value_type, owner);
+                }
+            }
+            Type::Array(array) => {
+                self.collect_type_parameter_declarations(&array.element, owner);
+                self.collect_type_parameter_declarations(&array.count, owner);
+            }
+            Type::Inferred(_)
+            | Type::NumberLiteral(_)
+            | Type::StringLiteral(_)
+            | Type::Named(_)
+            | Type::Splice(_) => {}
+        }
+    }
+
+    /// The path hover shows for a binding: its dotted module and name, or just
+    /// its name for a local binding.
+    fn binding_owner_label(&self, binding: &Binding) -> Option<String> {
+        Some(match self.module_label(binding.syntax.id) {
+            Some(module) => format!("{module}.{}", binding.name),
+            None => binding.name.clone(),
+        })
+    }
+
+    /// The path of the type a companion block extends, whose header declares
+    /// the block's parameters.
+    fn companion_owner_label(&self, binding: &Binding) -> Option<String> {
+        binding
+            .companion_target
+            .as_ref()
+            .and_then(|target| self.type_definition_path(target))
+            .or_else(|| self.module_label(binding.syntax.id))
+    }
+
+    fn type_definition_path(&self, ty: &Type) -> Option<String> {
+        let resolved = self.typed.resolved();
+        match ty {
+            Type::Application(application) => self.type_definition_path(&application.callee),
+            Type::Forall(forall) => self.type_definition_path(&forall.body),
+            Type::Named(named) => {
+                let id = resolved.type_for(named.syntax.id)?;
+                let declaration = resolved.type_declarations().get(&id)?;
+                let module = self.definition_module_label(DefinitionId::Type(id))?;
+                Some(format!("{module}.{}", declaration.name))
+            }
+            _ => None,
+        }
+    }
+
+    fn declaration_owner_label(&self, syntax: SyntaxId, name: &str) -> Option<String> {
+        Some(match self.syntax_module_label(syntax) {
+            Some(module) => format!("{module}.{name}"),
+            None => name.to_owned(),
+        })
+    }
+
+    fn trait_declaration_owner_label(
+        &self,
+        declaration: &TraitDeclaration,
+    ) -> Option<String> {
+        let resolved = self.typed.resolved();
+        let id = resolved
+            .traits()
+            .iter()
+            .find(|(_, candidate)| candidate.declaration.syntax.id == declaration.syntax.id)
+            .map(|(id, _)| *id);
+        match id.and_then(|id| self.definition_module_label(DefinitionId::Trait(id))) {
+            Some(module) => Some(format!("{module}.{}", declaration.name)),
+            None => Some(declaration.name.clone()),
+        }
+    }
+
+    fn type_declaration_owner_label(&self, declaration: &TypeDeclaration) -> Option<String> {
+        let id = self
+            .typed
+            .resolved()
+            .type_declarations()
+            .iter()
+            .find(|(_, candidate)| candidate.syntax.id == declaration.syntax.id)
+            .map(|(id, _)| *id);
+        match id
+            .and_then(|id| self.definition_module_label(DefinitionId::Type(id)))
+        {
+            Some(module) => Some(format!("{module}.{}", declaration.name)),
+            None => Some(declaration.name.clone()),
+        }
+    }
+
+    fn implementation_owner_label(
+        &self,
+        implementation: &TraitImplementation,
+    ) -> Option<String> {
+        let resolved = self.typed.resolved();
+        resolved
+            .trait_for(implementation.trait_name.syntax.id)
+            .and_then(|id| self.definition_module_label(DefinitionId::Trait(id)))
+            .map(|module| format!("{module}.{}", implementation.trait_name.name))
+            .or_else(|| self.syntax_module_label(implementation.syntax.id))
     }
 }
 
@@ -3433,7 +3729,7 @@ mod tests {
             ("modifiers", "modifiers: Sequence<Modifier>"),
             ("variant", "variant: Ident<String>"),
             ("body", "body: TypeBody"),
-            ("parameters", "parameters: Syntax"),
+            ("parameters", "parameters: TypeParameters"),
         ] {
             assert!(
                 entries.iter().any(|entry| {
@@ -3666,7 +3962,12 @@ mod tests {
 
         assert!(
             entries.iter().any(|entry| {
-                &source[entry.range.clone()] == "T" && entry.signature == "<type parameter> T"
+                &source[entry.range.clone()] == "T"
+                    && entry.signature == "T where Bound T"
+                    && entry
+                        .module
+                        .as_deref()
+                        .is_some_and(|module| module.ends_with(".Target"))
             }),
             "entries: {entries:?}"
         );
@@ -4202,10 +4503,66 @@ let result: String = Box.choose.<I32, String> (Box 1, "yes")
         );
         let parameter = source.find("<U>").unwrap() + 1;
         assert!(
-            entries
-                .iter()
-                .any(|entry| entry.range.start == parameter
-                    && entry.signature == "<type parameter> U")
+            entries.iter().any(|entry| {
+                entry.range.start == parameter
+                    && entry.signature == "U"
+                    && entry
+                        .module
+                        .as_deref()
+                        .is_some_and(|module| module.ends_with(".Box.choose"))
+            }),
+            "entries: {entries:?}"
         );
+    }
+
+    #[test]
+    fn type_parameter_hovers_name_the_declaring_function_or_type() {
+        let source =
+            "type Box<T> = T\ndef identity = <T where Copy T> x: T => x\n";
+        let path = std::env::temp_dir().join("staple-hover-type-parameter-owner.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        let type_parameter = source.find("type Box<").unwrap() + "type Box<".len();
+        let type_entry = entries
+            .iter()
+            .find(|entry| entry.range.start == type_parameter)
+            .expect("no type-declaration parameter hover");
+        assert_eq!(type_entry.signature, "T");
+        assert!(
+            type_entry
+                .module
+                .as_deref()
+                .is_some_and(|module| module.ends_with(".Box")),
+            "{type_entry:?}"
+        );
+
+        let declaration = source.rfind("<T").unwrap() + 1;
+        let reference = source.rfind("T").unwrap();
+        for start in [declaration, reference] {
+            let entry = entries
+                .iter()
+                .find(|entry| entry.range.start == start)
+                .unwrap_or_else(|| panic!("no type-parameter hover at {start}: {entries:?}"));
+            assert_eq!(entry.signature, "T where Copy T");
+            assert!(
+                entry
+                    .module
+                    .as_deref()
+                    .is_some_and(|module| module.ends_with(".identity")),
+                "{entry:?}"
+            );
+        }
     }
 }
