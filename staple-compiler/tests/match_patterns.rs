@@ -276,11 +276,17 @@ fn borrowed_matches_protect_their_owner() {
 fn replace_rejects_slotted_application() {
     for ty in ["Shared", "Unique"] {
         let module = ty.to_ascii_lowercase();
-        for call in [format!("{ty}.replace value 2"), "value |> replace 2".to_owned()] {
+        for call in [
+            format!("{ty}.replace value 2"),
+            "value |> replace 2".to_owned(),
+        ] {
             let source = format!(
                 "use std.{module}.({ty})\ndef bad = () => {{ let mut value = {ty} 1; {call} }}\n"
             );
-            assert!(check(&source).is_err(), "{ty}.replace must require a product argument");
+            assert!(
+                check(&source).is_err(),
+                "{ty}.replace must require a product argument"
+            );
         }
     }
 }
@@ -339,32 +345,45 @@ fn handle_projection_composes_with_implicit_wrapper_projection() {
 
 #[test]
 fn shared_payload_borrows_reject_replacement_through_an_alias() {
-    let source = format!("{TAG}{}", concat!(
-        "use std.shared.(Shared)\n",
-        "def inspect = tag: Tag => () :: ()\n",
-        "def bad = () => {\n",
-        "  let initial: Option<Tag> = Some (Tag 1)\n",
-        "  let shared = Shared initial\n",
-        "  let mut alias = shared\n",
-        "  match shared { Some tag => { let replacement: Option<Tag> = None; Shared.replace (alias, replacement); inspect tag }, None() => () }\n",
-        "}\n",
-    ));
-    let errors = check(&source).err().expect("alias replacement must be rejected during a payload borrow");
-    assert!(errors.iter().any(|message| message.contains("match borrows its payload")), "{errors:?}");
+    let source = format!(
+        "{TAG}{}",
+        concat!(
+            "use std.shared.(Shared)\n",
+            "def inspect = tag: Tag => () :: ()\n",
+            "def bad = () => {\n",
+            "  let initial: Option<Tag> = Some (Tag 1)\n",
+            "  let shared = Shared initial\n",
+            "  let mut alias = shared\n",
+            "  match shared { Some tag => { let replacement: Option<Tag> = None; Shared.replace (alias, replacement); inspect tag }, None() => () }\n",
+            "}\n",
+        )
+    );
+    let errors = check(&source)
+        .err()
+        .expect("alias replacement must be rejected during a payload borrow");
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.contains("match borrows its payload")),
+        "{errors:?}"
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn mutable_non_copy_pattern_bindings_require_ownership() {
-    let source = format!("{TAG}{}", concat!(
-        "use std.unique.(Unique)\n",
-        "def scoped = () => () :: {\n",
-        "  let initial: Option<Tag> = Some (Tag 1)\n",
-        "  let owner = Unique initial\n",
-        "  match owner { Some mut tag => { tag = Tag 2; () }, None() => () }\n",
-        "  ()\n",
-        "}\n",
-        "scoped ()\n",
-    ));
+    let source = format!(
+        "{TAG}{}",
+        concat!(
+            "use std.unique.(Unique)\n",
+            "def scoped = () => () :: {\n",
+            "  let initial: Option<Tag> = Some (Tag 1)\n",
+            "  let owner = Unique initial\n",
+            "  match owner { Some mut tag => { tag = Tag 2; () }, None() => () }\n",
+            "  ()\n",
+            "}\n",
+            "scoped ()\n",
+        )
+    );
     assert_eq!(run(&source), "dropped 1\ndropped 2\n");
 }

@@ -123,7 +123,11 @@ struct WhereClause {
 }
 
 impl WhereClause {
-    fn into_generics(self, syntax: Syntax, parameters: Vec<TypeParameterPattern>) -> GenericParameters {
+    fn into_generics(
+        self,
+        syntax: Syntax,
+        parameters: Vec<TypeParameterPattern>,
+    ) -> GenericParameters {
         GenericParameters {
             syntax,
             parameters,
@@ -911,9 +915,9 @@ impl Grammar {
         // the product type in `wrap pub (value: T)`.
         let restricts = self.at(TokenKind::LParen) && {
             let inner = self.next_non_trivia(self.next_non_trivia(self.position) + 1);
-            self.tokens.get(inner).is_some_and(|token| {
-                token.kind == TokenKind::Package || token.text == "repr"
-            })
+            self.tokens
+                .get(inner)
+                .is_some_and(|token| token.kind == TokenKind::Package || token.text == "repr")
         };
         if !restricts || !self.eat(TokenKind::LParen) {
             return Ok((Visibility::Public, VisibilityKind::Public));
@@ -1703,9 +1707,7 @@ impl Grammar {
             return self.parse_binding(visibility, start).map(Item::Binding);
         }
         if self.at(TokenKind::Bang) {
-            return Err(self.error(
-                "`let!` was removed; use `match`, or `Try.unwrap`/`Try.expect`",
-            ));
+            return Err(self.error("`let!` was removed; use `match`, or `Try.unwrap`/`Try.expect`"));
         }
         let refutable_kind = if self.eat_operator("?") {
             Some(PatternBindingKind::Propagating)
@@ -4997,9 +4999,10 @@ fn contains_mutable_type_element(ty: &Type) -> bool {
         // below them.
         Type::Function(function) => {
             let parameter = match function.parameter.as_ref() {
-                Type::Product(product) => {
-                    product.elements.iter().any(|element| contains_mutable_type_element(&element.ty))
-                }
+                Type::Product(product) => product
+                    .elements
+                    .iter()
+                    .any(|element| contains_mutable_type_element(&element.ty)),
                 parameter => contains_mutable_type_element(parameter),
             };
             parameter || contains_mutable_type_element(&function.result)
@@ -5033,9 +5036,10 @@ fn contains_move_type_element(ty: &Type) -> bool {
         // below them.
         Type::Function(function) => {
             let parameter = match function.parameter.as_ref() {
-                Type::Product(product) => {
-                    product.elements.iter().any(|element| contains_move_type_element(&element.ty))
-                }
+                Type::Product(product) => product
+                    .elements
+                    .iter()
+                    .any(|element| contains_move_type_element(&element.ty)),
                 parameter => contains_move_type_element(parameter),
             };
             parameter || contains_move_type_element(&function.result)
@@ -5110,7 +5114,6 @@ fn line_starts(source: &str) -> Vec<usize> {
     starts
 }
 
-
 /// Splits the outer application spine of a trait use into its compile-time
 /// arguments. Parenthesized types remain product nodes, so they continue to
 /// group a complex type into one argument just as they do for type application.
@@ -5140,7 +5143,6 @@ fn attach_parsed_docs(item: &mut Item, docs: Vec<String>) -> bool {
     }
     true
 }
-
 
 fn companion_target_name(ty: &Type) -> Option<String> {
     match ty {

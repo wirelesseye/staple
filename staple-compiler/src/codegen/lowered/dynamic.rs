@@ -1613,8 +1613,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .ok_or_else(|| {
                             Diagnostic::new(span.clone(), "missing spread operand type")
                         })?;
-                    let descriptor =
-                        self.dynamic_descriptor(&value_type, environment, span)?;
+                    let descriptor = self.dynamic_descriptor(&value_type, environment, span)?;
                     for mapping in mappings {
                         let (field, _) =
                             self.dynamic_product_field(descriptor, value, mapping.source as u32)?;
@@ -1634,8 +1633,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .ok_or_else(|| {
                             Diagnostic::new(span.clone(), "missing spread operand type")
                         })?;
-                    let descriptor =
-                        self.dynamic_descriptor(&value_type, environment, span)?;
+                    let descriptor = self.dynamic_descriptor(&value_type, environment, span)?;
                     for mapping in mappings {
                         let (field, _) =
                             self.dynamic_product_field(descriptor, value, mapping.source as u32)?;
@@ -3458,8 +3456,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .ok_or_else(|| {
                             Diagnostic::new(span.clone(), "missing spread operand type")
                         })?;
-                    let descriptor =
-                        self.dynamic_descriptor(&value_type, environment, span)?;
+                    let descriptor = self.dynamic_descriptor(&value_type, environment, span)?;
                     for mapping in mappings {
                         let (field, _) =
                             self.dynamic_product_field(descriptor, value, mapping.source as u32)?;
@@ -3479,8 +3476,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .ok_or_else(|| {
                             Diagnostic::new(span.clone(), "missing spread operand type")
                         })?;
-                    let descriptor =
-                        self.dynamic_descriptor(&value_type, environment, span)?;
+                    let descriptor = self.dynamic_descriptor(&value_type, environment, span)?;
                     for mapping in mappings {
                         let (field, _) =
                             self.dynamic_product_field(descriptor, value, mapping.source as u32)?;
@@ -3915,8 +3911,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .cloned()
                     .ok_or_else(|| Diagnostic::new(span.clone(), "layout intrinsic has no type"))?;
                 let value = if crate::contains_type_parameter(&value_type) {
-                    let descriptor =
-                        self.dynamic_descriptor(&value_type, environment, span)?;
+                    let descriptor = self.dynamic_descriptor(&value_type, environment, span)?;
                     let layout = self.backend.load_descriptor_layout(descriptor)?;
                     if intrinsic == crate::IntrinsicFunction::SizeOf {
                         layout.stride
@@ -3975,9 +3970,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 return Ok(storage);
             }
             crate::IntrinsicFunction::GcAllocate => {
-                let layout_type = self
-                    .backend
-                    .compile_type(&call.arguments[0].expected)?;
+                let layout_type = self.backend.compile_type(&call.arguments[0].expected)?;
                 let layout = self
                     .load_dynamic_storage(layout_type, slot_pointer(0)?, "gc.layout")
                     .map_err(compiler_diagnostic)?
@@ -4045,9 +4038,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
-                let value = self
-                    .backend
-                    .build_checked_mul(left, right, span.clone())?;
+                let value = self.backend.build_checked_mul(left, right, span.clone())?;
                 self.backend
                     .builder
                     .build_store(storage, value)
@@ -8275,11 +8266,31 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     // bypassing the wrapper's Drop implementation. In particular,
                     // a raw pointer extracted from an owner must not inherit the
                     // owner's cleanup descriptor.
-                    let representation = self.view.pattern(owner, *argument)
-                        .ok_or_else(|| Diagnostic::new(pattern.origin.span.clone(), "missing nominal representation pattern"))?
-                        .test.subject.clone();
-                    let descriptor = self.dynamic_descriptor(&representation, environment, &pattern.origin.span)?;
-                    self.bind_dynamic_pattern(owner, *argument, pointer, descriptor, owned, environment)
+                    let representation = self
+                        .view
+                        .pattern(owner, *argument)
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                pattern.origin.span.clone(),
+                                "missing nominal representation pattern",
+                            )
+                        })?
+                        .test
+                        .subject
+                        .clone();
+                    let descriptor = self.dynamic_descriptor(
+                        &representation,
+                        environment,
+                        &pattern.origin.span,
+                    )?;
+                    self.bind_dynamic_pattern(
+                        owner,
+                        *argument,
+                        pointer,
+                        descriptor,
+                        owned,
+                        environment,
+                    )
                 }
             }
             LoweredPatternKind::At {

@@ -4739,7 +4739,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 ty if ty.handle_payload().is_some()
                     && matches!(
                         pattern.test.identity,
-                        crate::LoweredPatternIdentity::Shared | crate::LoweredPatternIdentity::Unique
+                        crate::LoweredPatternIdentity::Shared
+                            | crate::LoweredPatternIdentity::Unique
                     ) =>
                 {
                     let payload = ty.handle_payload().unwrap();
@@ -8179,9 +8180,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "float ternary intrinsic operands must be floats",
                     ));
                 };
-                let value =
-                    self.backend
-                        .build_float_ternary(float, operation, *first, *second, *third)?;
+                let value = self
+                    .backend
+                    .build_float_ternary(float, operation, *first, *second, *third)?;
                 Ok(value.as_any_value_enum())
             }
             IntrinsicFunction::FloatToBits { float } => {

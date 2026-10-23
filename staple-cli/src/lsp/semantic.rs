@@ -1644,10 +1644,7 @@ mod tests {
         );
         let module = parse(source).unwrap();
         let labels = labels(source, &tokens(source, Some(&module), None, None));
-        for expected in [
-            ("wrap", MODIFIER),
-            ("opaque", MODIFIER),
-        ] {
+        for expected in [("wrap", MODIFIER), ("opaque", MODIFIER)] {
             assert!(
                 labels.contains(&expected),
                 "missing {expected:?} in {labels:?}"

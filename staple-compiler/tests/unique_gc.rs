@@ -135,7 +135,10 @@ fn collects_unique_payloads_in_cycles_through_managed_references() {
 #[cfg(unix)]
 fn assert_each_payload_dropped_once(output: &str, count: usize, dynamic: bool) {
     let mut seen = std::collections::HashSet::new();
-    for tag in output.lines().filter_map(|line| line.strip_prefix("dropped ")) {
+    for tag in output
+        .lines()
+        .filter_map(|line| line.strip_prefix("dropped "))
+    {
         assert!(
             seen.insert(tag),
             "payload {tag} was dropped twice (dynamic={dynamic})"

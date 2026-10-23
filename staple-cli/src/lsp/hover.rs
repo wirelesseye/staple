@@ -181,10 +181,7 @@ impl Collector<'_> {
                 }
             }
             Item::MacroDeclaration(declaration) => {
-                let owner = self.declaration_owner_label(
-                    declaration.syntax.id,
-                    &declaration.name,
-                );
+                let owner = self.declaration_owner_label(declaration.syntax.id, &declaration.name);
                 self.register_type_parameters(
                     &declaration.type_parameters,
                     &declaration.trait_bounds,
@@ -1196,10 +1193,7 @@ impl Collector<'_> {
             )
             .trim_end()
             .to_owned();
-        let head = format!(
-            "type {}{effect_parameter}{parameters}",
-            declaration.name
-        );
+        let head = format!("type {}{effect_parameter}{parameters}", declaration.name);
         // A singleton type has no representation to reveal.
         if declaration.kind() == TypeDeclarationKind::Singleton {
             return Some(head);
@@ -1837,10 +1831,7 @@ impl Collector<'_> {
     fn type_parameter(&mut self, parameter: &TypeParameterPattern) {
         match parameter {
             TypeParameterPattern::Binding(binding) => {
-                let id = self
-                    .typed
-                    .resolved()
-                    .type_parameter_for(binding.syntax.id);
+                let id = self.typed.resolved().type_parameter_for(binding.syntax.id);
                 self.type_parameter_hover(&binding.syntax, &binding.name, id);
             }
             TypeParameterPattern::Effect(binding) => self.named(
@@ -1864,12 +1855,7 @@ impl Collector<'_> {
     /// example.identity
     /// T where Copy T
     /// ```
-    fn type_parameter_hover(
-        &mut self,
-        syntax: &Syntax,
-        name: &str,
-        id: Option<TypeParameterId>,
-    ) {
+    fn type_parameter_hover(&mut self, syntax: &Syntax, name: &str, id: Option<TypeParameterId>) {
         let signature = format!(
             "{name}{}",
             id.and_then(|id| self.parameter_bounds.get(&id))
@@ -1878,9 +1864,7 @@ impl Collector<'_> {
         let module = id
             .and_then(|id| self.parameter_owners.get(&id).cloned())
             .or_else(|| {
-                id.and_then(|id| {
-                    self.definition_module_label(DefinitionId::TypeParameter(id))
-                })
+                id.and_then(|id| self.definition_module_label(DefinitionId::TypeParameter(id)))
             });
         self.named_with_docs(syntax, name, signature, Vec::new(), module);
     }
@@ -1972,9 +1956,7 @@ impl Collector<'_> {
                         .unwrap_or_default();
                     let module = self.definition_module_label(DefinitionId::Type(id));
                     self.named_with_docs(&named.syntax, &named.name, signature, docs, module);
-                } else if let Some(id) =
-                    self.typed.resolved().type_parameter_for(named.syntax.id)
-                {
+                } else if let Some(id) = self.typed.resolved().type_parameter_for(named.syntax.id) {
                     self.type_parameter_hover(&named.syntax, &named.name, Some(id));
                 }
             }
@@ -2243,11 +2225,7 @@ impl Collector<'_> {
             .find_map(|definition| self.definition_module_label(*definition))
     }
 
-    fn register_generic_parameters(
-        &mut self,
-        generics: &GenericParameters,
-        owner: Option<&str>,
-    ) {
+    fn register_generic_parameters(&mut self, generics: &GenericParameters, owner: Option<&str>) {
         self.register_type_parameters(
             &generics.parameters,
             &generics.trait_bounds,
@@ -2286,11 +2264,7 @@ impl Collector<'_> {
     ) {
         match parameter {
             TypeParameterPattern::Binding(binding) => {
-                let Some(id) = self
-                    .typed
-                    .resolved()
-                    .type_parameter_for(binding.syntax.id)
-                else {
+                let Some(id) = self.typed.resolved().type_parameter_for(binding.syntax.id) else {
                     return;
                 };
                 // The resolved declaration is visited before the editor-owned
@@ -2459,10 +2433,7 @@ impl Collector<'_> {
         })
     }
 
-    fn trait_declaration_owner_label(
-        &self,
-        declaration: &TraitDeclaration,
-    ) -> Option<String> {
+    fn trait_declaration_owner_label(&self, declaration: &TraitDeclaration) -> Option<String> {
         let resolved = self.typed.resolved();
         let id = resolved
             .traits()
@@ -2483,18 +2454,13 @@ impl Collector<'_> {
             .iter()
             .find(|(_, candidate)| candidate.syntax.id == declaration.syntax.id)
             .map(|(id, _)| *id);
-        match id
-            .and_then(|id| self.definition_module_label(DefinitionId::Type(id)))
-        {
+        match id.and_then(|id| self.definition_module_label(DefinitionId::Type(id))) {
             Some(module) => Some(format!("{module}.{}", declaration.name)),
             None => Some(declaration.name.clone()),
         }
     }
 
-    fn implementation_owner_label(
-        &self,
-        implementation: &TraitImplementation,
-    ) -> Option<String> {
+    fn implementation_owner_label(&self, implementation: &TraitImplementation) -> Option<String> {
         let resolved = self.typed.resolved();
         resolved
             .trait_for(implementation.trait_name.syntax.id)
@@ -4275,8 +4241,7 @@ mod tests {
                 && entry.signature == "type Box<T> wrap (value: T)"
         }));
         assert!(entries.iter().any(|entry| {
-            &source[entry.range.clone()] == "Pair"
-                && entry.signature == "type Pair<A, B> = (A, B)"
+            &source[entry.range.clone()] == "Pair" && entry.signature == "type Pair<A, B> = (A, B)"
         }));
     }
 
@@ -4355,7 +4320,8 @@ mod tests {
         let entries = entries(&module, &typed);
 
         assert!(entries.iter().any(|entry| {
-            &source[entry.range.clone()] == "Hidden" && entry.signature == "type Hidden wrap /* … */"
+            &source[entry.range.clone()] == "Hidden"
+                && entry.signature == "type Hidden wrap /* … */"
         }));
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "HiddenGeneric"
@@ -4517,8 +4483,7 @@ let result: String = Box.choose.<I32, String> (Box 1, "yes")
 
     #[test]
     fn type_parameter_hovers_name_the_declaring_function_or_type() {
-        let source =
-            "type Box<T> = T\ndef identity = <T where Copy T> x: T => x\n";
+        let source = "type Box<T> = T\ndef identity = <T where Copy T> x: T => x\n";
         let path = std::env::temp_dir().join("staple-hover-type-parameter-owner.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(

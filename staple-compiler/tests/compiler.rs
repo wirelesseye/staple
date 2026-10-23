@@ -1956,9 +1956,15 @@ fn rejects_a_bare_generic_type_constructor_used_as_a_value_type() {
 
 #[test]
 fn allows_a_recursive_type_guarded_by_a_recursive_constructor() {
-    type_check("use std.shared.(Shared)\ntype Node<T> wrap (value: T, next: Option<Shared<Node<I32>>>)\n");
-    type_check("use std.shared.(Shared)\ntype List<T> wrap (head: T, tail: Option<Shared<List<T>>>)\n");
-    type_check("use std.shared.(Shared)\ntype Chain wrap (head: I32, tail: Option<Shared<Chain>>)\n");
+    type_check(
+        "use std.shared.(Shared)\ntype Node<T> wrap (value: T, next: Option<Shared<Node<I32>>>)\n",
+    );
+    type_check(
+        "use std.shared.(Shared)\ntype List<T> wrap (head: T, tail: Option<Shared<List<T>>>)\n",
+    );
+    type_check(
+        "use std.shared.(Shared)\ntype Chain wrap (head: I32, tail: Option<Shared<Chain>>)\n",
+    );
 }
 
 #[test]
@@ -2953,7 +2959,9 @@ fn a_parameter_marker_declares_a_positional_mutation() {
 #[test]
 fn rejects_a_declared_empty_effect_set_when_the_body_mutates_a_parameter() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("use std.shared.(Shared)\ndef f: Shared<(I32, I32)> -> () = p => { p.0 = 1 }\n"))
+        .check(resolve(
+            "use std.shared.(Shared)\ndef f: Shared<(I32, I32)> -> () = p => { p.0 = 1 }\n",
+        ))
         .expect_err_diagnostics("an empty declared effect set forbids mutation");
     assert!(
         diagnostics
@@ -2979,10 +2987,12 @@ fn rejects_a_declared_mutation_target_the_body_does_not_write() {
 
 #[test]
 fn resolves_named_and_positional_mutation_targets_to_the_same_type() {
-    let by_index =
-        type_check("use std.shared.(Shared)\ndef f: (mut a: Shared<(I32, I32)>, b: I32) -> () = (mut a, b) => { a.0 = 1 }\n");
-    let by_name =
-        type_check("use std.shared.(Shared)\ndef f: (mut a: Shared<(I32, I32)>, b: I32) -> () = (mut a, b) => { a.0 = 1 }\n");
+    let by_index = type_check(
+        "use std.shared.(Shared)\ndef f: (mut a: Shared<(I32, I32)>, b: I32) -> () = (mut a, b) => { a.0 = 1 }\n",
+    );
+    let by_name = type_check(
+        "use std.shared.(Shared)\ndef f: (mut a: Shared<(I32, I32)>, b: I32) -> () = (mut a, b) => { a.0 = 1 }\n",
+    );
     assert_eq!(
         function_mutations(&by_index, "f"),
         function_mutations(&by_name, "f"),
@@ -2991,7 +3001,9 @@ fn resolves_named_and_positional_mutation_targets_to_the_same_type() {
 
 #[test]
 fn a_whole_parameter_declaration_covers_writing_a_single_element() {
-    type_check("use std.shared.(Shared)\ndef f: mut Shared<(I32, I32)> -> () = mut p => { p.0 = 1 }\n");
+    type_check(
+        "use std.shared.(Shared)\ndef f: mut Shared<(I32, I32)> -> () = mut p => { p.0 = 1 }\n",
+    );
 }
 
 #[test]
@@ -3860,7 +3872,11 @@ fn rejects_slice_shared_destructuring() {
     let diagnostics = resolve_result(
         "use std.shared.(Shared)\nuse std.shared_buffer.SharedBuffer\nlet fixed: (I32 ^ 2) = (1, 2)\nlet values: SharedBuffer<I32> = SharedBuffer.from_array fixed\nlet Shared payload = values\n",
     ).expect_err_diagnostics("Shared keeps its representation private");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("the representation of `Shared` is private")));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("the representation of `Shared` is private")
+    }));
 }
 
 #[test]
@@ -9594,7 +9610,9 @@ fn rejects_incomplete_and_overapplied_shared_types() {
     assert!(!diagnostics.is_empty());
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("use std.shared.(Shared)\ndef value: Shared<I32, I32>\n"))
+        .check(resolve(
+            "use std.shared.(Shared)\ndef value: Shared<I32, I32>\n",
+        ))
         .expect_err_diagnostics("Shared accepts exactly one payload type");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
@@ -11024,8 +11042,14 @@ fn rejects_sum_implementations_that_overlap_through_a_row_parameter() {
         );
     }
     for (first, second) in [
-        ("impl<T> Try (Ok<T> | Bool)", "impl<T, E> Try (Ok<T> | E | Bool)"),
-        ("impl<T, E> Try (Ok<T> | E)", "impl<T, E> Try (Ok<T> | E | Bool)"),
+        (
+            "impl<T> Try (Ok<T> | Bool)",
+            "impl<T, E> Try (Ok<T> | E | Bool)",
+        ),
+        (
+            "impl<T, E> Try (Ok<T> | E)",
+            "impl<T, E> Try (Ok<T> | E | Bool)",
+        ),
         ("impl<T> Try (Ok<T> | String)", "impl<U> Try (Ok<I32> | U)"),
     ] {
         let source = format!(
@@ -11309,11 +11333,8 @@ fn rejects_moving_fields_out_of_a_borrowed_nominal_destructure() {
 
 #[test]
 fn rejects_non_nominal_and_mismatched_nominal_patterns() {
-    let syntax = parse(concat!(
-        "type Number = I32\n",
-        "let Number value = 42\n",
-    ))
-    .expect("source should parse");
+    let syntax = parse(concat!("type Number = I32\n", "let Number value = 42\n",))
+        .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve(&syntax)
         .expect_err_diagnostics("aliases cannot be used as nominal patterns");
@@ -12747,10 +12768,7 @@ fn remainders_compile_with_integer_and_float_lowering() {
         llvm.contains("urem"),
         "unsigned remainder uses urem:\n{llvm}"
     );
-    assert!(
-        llvm.contains("frem"),
-        "float remainder uses frem:\n{llvm}"
-    );
+    assert!(llvm.contains("frem"), "float remainder uses frem:\n{llvm}");
     // The zero-divisor guard lives in the `Remainder` implementations, which
     // panic at the caller rather than reaching the raw intrinsic.
     assert!(
@@ -12807,7 +12825,10 @@ fn folded_float_constants_read_companions_through_renamed_imports() {
 #[test]
 fn folded_float_constants_reject_mixed_float_types() {
     for (source, message) in [
-        ("const narrowed: F32 = F64.Pi\n", "expected `F32`, found `F64`"),
+        (
+            "const narrowed: F32 = F64.Pi\n",
+            "expected `F32`, found `F64`",
+        ),
         (
             "const mixed = F32.Pi + F64.Pi\n",
             "operator `+` cannot combine `F32` and `F64`",
@@ -13559,7 +13580,10 @@ fn option_marks_a_def_compile_time_only_when_it_holds_syntax() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert!(names.contains(&"or_zero"), "runtime `def` was dropped: {names:?}");
+    assert!(
+        names.contains(&"or_zero"),
+        "runtime `def` was dropped: {names:?}"
+    );
     assert!(
         !names.contains(&"or_default"),
         "compile-time helper survived expansion: {names:?}"
@@ -13633,13 +13657,18 @@ fn opaque_types_are_unsized_but_can_be_referenced() {
     };
     assert!(!opaque.is_sized());
     assert!(!module.is_copy_type(&opaque));
-    assert!(CheckedType::Wrapper {
-        id: staple_compiler::TypeId(usize::MAX - 1),
-        name: "std.shared.Shared".to_owned(),
-        arguments: vec![opaque.clone()],
-        representation: Box::new(CheckedType::RawMutPtr { pointee: Box::new(opaque) }),
-        introduction: staple_compiler::WrapperIntroduction::Explicit,
-    }.is_sized());
+    assert!(
+        CheckedType::Wrapper {
+            id: staple_compiler::TypeId(usize::MAX - 1),
+            name: "std.shared.Shared".to_owned(),
+            arguments: vec![opaque.clone()],
+            representation: Box::new(CheckedType::RawMutPtr {
+                pointee: Box::new(opaque)
+            }),
+            introduction: staple_compiler::WrapperIntroduction::Explicit,
+        }
+        .is_sized()
+    );
     assert!(module.is_copy_type(&CheckedType::I32));
 }
 
@@ -14132,9 +14161,8 @@ fn single_slot_slotted_products_collapse_names_and_markers() {
 #[test]
 fn slotted_product_spreads_validate_after_substitution() {
     for argument in ["()", "I32"] {
-        let source = format!(
-            "type Expand<A> = (...A;) -> ()\ndef invalid: Expand<{argument}> = () => ()\n"
-        );
+        let source =
+            format!("type Expand<A> = (...A;) -> ()\ndef invalid: Expand<{argument}> = () => ()\n");
         let diagnostics = TypeChecker::new()
             .check(resolve(&source))
             .expect_err_diagnostics("a spread needs a nonempty product");
@@ -17899,11 +17927,16 @@ fn track_caller_is_accepted_on_module_companion_and_generic_defs() {
         let resolved = resolve_result(source)
             .unwrap_or_else(|diagnostics| panic!("{source:?} should resolve: {diagnostics:?}"));
         assert!(
-            resolved.functions().iter().any(|function| function.track_caller),
+            resolved
+                .functions()
+                .iter()
+                .any(|function| function.track_caller),
             "{source:?} should flag a function"
         );
     }
-    type_check("use std.source.(track_caller)\n@track_caller\ndef identity = <T> move value: T => value\nlet x = identity 1\n");
+    type_check(
+        "use std.source.(track_caller)\n@track_caller\ndef identity = <T> move value: T => value\nlet x = identity 1\n",
+    );
 }
 
 #[test]
@@ -17969,7 +18002,9 @@ fn track_caller_rejects_unsupported_placements() {
 
 #[test]
 fn track_caller_allows_reading_module_level_values() {
-    resolve("use std.source.(track_caller)\nlet captured = 1\n@track_caller\ndef uses_global = () => captured\n");
+    resolve(
+        "use std.source.(track_caller)\nlet captured = 1\n@track_caller\ndef uses_global = () => captured\n",
+    );
 }
 
 #[test]
@@ -18107,7 +18142,11 @@ fn span_position_agrees_with_source_location_macros() {
             _ => None,
         })
         .unwrap();
-    let position = module.resolved().program().span_position(&binding_span).unwrap();
+    let position = module
+        .resolved()
+        .program()
+        .span_position(&binding_span)
+        .unwrap();
     assert_eq!(position.file, "<stdin>.sta");
     assert_eq!(position.line, 2);
 }
@@ -18319,8 +18358,14 @@ fn parse_reads_sequences_options_and_separated_bodies() {
     let compact = expanded_compact(&source);
     assert!(compact.contains("letfirst:(I32,I32)=(a,1)"), "{compact}");
     assert!(compact.contains("letempty:(I32,I32)=(0,0)"), "{compact}");
-    assert!(compact.contains("lettyped:(I32,I32)=(value,0)"), "{compact}");
-    assert!(compact.contains("letannotated:(I32,I32)=(value,1)"), "{compact}");
+    assert!(
+        compact.contains("lettyped:(I32,I32)=(value,0)"),
+        "{compact}"
+    );
+    assert!(
+        compact.contains("letannotated:(I32,I32)=(value,1)"),
+        "{compact}"
+    );
     assert!(compact.contains("letfield:(I32,I32)=(a,2)"), "{compact}");
     type_check(&source);
 }
@@ -18345,7 +18390,10 @@ fn parse_forks_backtrack_and_commit() {
         )
     );
     let compact = expanded_compact(&source);
-    assert!(compact.contains("letflags:(I32,I32,I32)=(1,1,1)"), "{compact}");
+    assert!(
+        compact.contains("letflags:(I32,I32,I32)=(1,1,1)"),
+        "{compact}"
+    );
     type_check(&source);
 }
 
@@ -18367,7 +18415,10 @@ fn a_failed_optional_leaves_the_stream_unmoved() {
         )
     );
     let compact = expanded_compact(&source);
-    assert!(compact.contains("letresult:(I32,I32)=(value,1)"), "{compact}");
+    assert!(
+        compact.contains("letresult:(I32,I32)=(value,1)"),
+        "{compact}"
+    );
     type_check(&source);
 }
 
@@ -18391,7 +18442,10 @@ fn mut_parameters_of_compile_time_helpers_update_the_callers_stream() {
         )
     );
     let compact = expanded_compact(&source);
-    assert!(compact.contains("letresult:(I32,I32)=(beta,2)"), "{compact}");
+    assert!(
+        compact.contains("letresult:(I32,I32)=(beta,2)"),
+        "{compact}"
+    );
     type_check(&source);
 }
 
@@ -18531,7 +18585,10 @@ fn user_impls_parse_custom_nodes_in_macros_and_helpers() {
         )
     );
     let compact = expanded_compact(&source);
-    assert!(compact.contains("letsingle:(I32,I32)=(key,a+1)"), "{compact}");
+    assert!(
+        compact.contains("letsingle:(I32,I32)=(key,a+1)"),
+        "{compact}"
+    );
     assert!(compact.contains("letboth:(I32,I32)=(a,b)"), "{compact}");
     // The implementations and their intrinsics exist only while expanding.
     assert!(!compact.contains("implParse"), "{compact}");
@@ -18581,7 +18638,9 @@ fn parse_diagnostics_name_the_missing_context_target_and_implementation() {
         );
         let diagnostics = resolve_result(&source).expect_err_diagnostics(expected);
         assert!(
-            diagnostics.iter().any(|diagnostic| diagnostic.message.contains(expected)),
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
             "{expected}: {diagnostics:#?}"
         );
     }
@@ -18670,8 +18729,14 @@ fn parse_names_resolve_through_namespaces_globs_and_renames() {
         "let second: (I32, I32) = bare { alpha }\n",
     );
     let compact = expanded_compact(renamed);
-    assert!(compact.contains("letfirst:(I32,I32)=(alpha,1)"), "{compact}");
-    assert!(compact.contains("letsecond:(I32,I32)=(alpha,2)"), "{compact}");
+    assert!(
+        compact.contains("letfirst:(I32,I32)=(alpha,1)"),
+        "{compact}"
+    );
+    assert!(
+        compact.contains("letsecond:(I32,I32)=(alpha,2)"),
+        "{compact}"
+    );
 }
 
 #[test]
@@ -19691,17 +19756,25 @@ fn compile_time_default_bodies_keep_declared_result_and_associated_types() {
 
 #[test]
 fn raw_pointer_store_consumes_non_copy_values() {
-    let messages = type_check_errors(concat!(
-        "use std.ptr.*\n",
-        "type Token wrap I32\n",
-        "impl !Copy Token {}\n",
-        "def bad = pointer: RawMutPtr<Token> => () :: {\n",
-        "  let value = Token 1\n",
-        "  RawMutPtr.store pointer value\n",
-        "  drop value\n",
-        "}\n",
-    ), "storing a non-Copy value must move it");
-    assert!(messages.iter().any(|message| message.contains("use of moved value")), "{messages:?}");
+    let messages = type_check_errors(
+        concat!(
+            "use std.ptr.*\n",
+            "type Token wrap I32\n",
+            "impl !Copy Token {}\n",
+            "def bad = pointer: RawMutPtr<Token> => () :: {\n",
+            "  let value = Token 1\n",
+            "  RawMutPtr.store pointer value\n",
+            "  drop value\n",
+            "}\n",
+        ),
+        "storing a non-Copy value must move it",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("use of moved value")),
+        "{messages:?}"
+    );
 }
 
 #[test]
@@ -19709,16 +19782,31 @@ fn handles_keep_nominal_representations_private() {
     for (module, handle) in [("unique", "Unique"), ("shared", "Shared")] {
         let cases = [
             format!("let owner = {handle} 1\nlet {handle} value = owner\n"),
-            format!("def inspect = owner: {handle}<I32> => I32 :: match owner {{ {handle} value => value }}\n"),
+            format!(
+                "def inspect = owner: {handle}<I32> => I32 :: match owner {{ {handle} value => value }}\n"
+            ),
             format!("def inspect: {handle}<I32> -> I32 = {handle} value => value\n"),
             format!("def extract: move {handle}<I32> -> I32 = move {handle} value => value\n"),
-            format!("type Holder wrap {handle}<I32>\nlet Holder ({handle} value) = Holder ({handle} 1)\n"),
-            format!("type Alias = {handle}<I32>\ndef inspect: Alias -> I32 = Alias value => value\n"),
+            format!(
+                "type Holder wrap {handle}<I32>\nlet Holder ({handle} value) = Holder ({handle} 1)\n"
+            ),
+            format!(
+                "type Alias = {handle}<I32>\ndef inspect: Alias -> I32 = Alias value => value\n"
+            ),
         ];
         for body in cases {
             let diagnostics = resolve_result(&format!("use std.{module}.({handle})\n{body}"))
                 .expect_err_diagnostics("handles must not expose nominal representations");
-            assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains(&format!("the representation of `{handle}` is private")) || (body.contains("type Alias") && diagnostic.message.contains("not a represented nominal type"))), "{body}: {diagnostics:?}");
+            assert!(
+                diagnostics.iter().any(|diagnostic| diagnostic
+                    .message
+                    .contains(&format!("the representation of `{handle}` is private"))
+                    || (body.contains("type Alias")
+                        && diagnostic
+                            .message
+                            .contains("not a represented nominal type"))),
+                "{body}: {diagnostics:?}"
+            );
         }
     }
 }
@@ -19727,11 +19815,26 @@ fn handles_keep_nominal_representations_private() {
 fn unique_into_inner_library_definition_requires_ownership_and_matching_payload() {
     let original = "pub def into_inner = move owner: Unique<T> => T :: {";
     for (replacement, expected) in [
-        ("pub def into_inner = owner: Unique<T> => T :: {", "cannot move out of a borrowed value"),
-        ("pub def into_inner = move owner: Unique<T> => I32 :: {", "expected `I32`"),
+        (
+            "pub def into_inner = owner: Unique<T> => T :: {",
+            "cannot move out of a borrowed value",
+        ),
+        (
+            "pub def into_inner = move owner: Unique<T> => I32 :: {",
+            "expected `I32`",
+        ),
     ] {
-        let diagnostics = stdlib_edit_diagnostics("std/unique.sta", original, replacement,
-            "use std.unique.Unique\n");
-        assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains(expected)), "{diagnostics:?}");
+        let diagnostics = stdlib_edit_diagnostics(
+            "std/unique.sta",
+            original,
+            replacement,
+            "use std.unique.Unique\n",
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "{diagnostics:?}"
+        );
     }
 }

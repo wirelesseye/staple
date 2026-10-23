@@ -239,7 +239,9 @@ fn collect_rejects_targets_that_cannot_hold_the_items() {
         "a target for a different item type is rejected",
     );
     assert!(
-        errors.iter().any(|error| error.contains("(List<String>, I32)")),
+        errors
+            .iter()
+            .any(|error| error.contains("(List<String>, I32)")),
         "{errors:?}"
     );
 }

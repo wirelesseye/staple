@@ -1867,7 +1867,8 @@ impl MacroExpander {
                 let item = traits::plain_item(item);
                 match item {
                     Item::MacroDeclaration(declaration) => {
-                        let declaration = &with_curried_macro_value(declaration, &mut next_syntax_id);
+                        let declaration =
+                            &with_curried_macro_value(declaration, &mut next_syntax_id);
                         let key = MacroKey {
                             module: source_module.id,
                             name: declaration.name.clone(),
@@ -5227,8 +5228,8 @@ impl MacroExpander {
                 {
                     let span = value.syntax().span.clone();
                     let annotation = binding.annotation_body();
-                    let float = annotation
-                        .and_then(|annotation| self.named_float_type(module, annotation));
+                    let float =
+                        annotation.and_then(|annotation| self.named_float_type(module, annotation));
                     let folded = self
                         .eval_expression(module, value, &mut Environment::new())
                         .and_then(|result| self.assign_float_type(result, float, span.clone()))
@@ -8288,11 +8289,7 @@ impl MacroExpander {
             // An untyped NaN or infinity came from literal arithmetic, and
             // reifies as that arithmetic so its type is still inferred.
             Value::Float(float, None) => {
-                let numerator = if float.is_nan() {
-                    0.0
-                } else {
-                    float.signum()
-                };
+                let numerator = if float.is_nan() { 0.0 } else { float.signum() };
                 let numerator = self.float_literal(numerator, span.clone());
                 let zero = self.float_literal(0.0, span.clone());
                 Some(Expression::Binary(staple_syntax::BinaryExpression {
@@ -8351,7 +8348,11 @@ impl MacroExpander {
                     Some(Type::Product(product))
                         if !product.variadic && product.elements.len() == fields.len() =>
                     {
-                        product.elements.iter().map(|element| Some(&element.ty)).collect()
+                        product
+                            .elements
+                            .iter()
+                            .map(|element| Some(&element.ty))
+                            .collect()
                     }
                     _ => vec![None; fields.len()],
                 };

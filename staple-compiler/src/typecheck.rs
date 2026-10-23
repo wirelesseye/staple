@@ -4170,10 +4170,8 @@ impl TypeChecker {
         let mut rejected = HashSet::new();
         for later in 0..self.trait_implementations.len() {
             let candidate = &self.trait_implementations[later];
-            let overlaps = self.trait_implementations[..later]
-                .iter()
-                .enumerate()
-                .any(|(earlier, existing)| {
+            let overlaps = self.trait_implementations[..later].iter().enumerate().any(
+                |(earlier, existing)| {
                     !rejected.contains(&earlier)
                         && existing.trait_id == candidate.trait_id
                         && self.implementation_headers_overlap(
@@ -5975,7 +5973,8 @@ impl TypeChecker {
                         default: None,
                         parameter: Box::new(parameter),
                         mutations: Vec::new(),
-                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(CheckedType::String),
                     })
                 }
@@ -6002,7 +6001,8 @@ impl TypeChecker {
                             variadic: false,
                         })),
                         mutations: Vec::new(),
-                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(integer),
                     })
                 }
@@ -6012,7 +6012,8 @@ impl TypeChecker {
                         default: None,
                         parameter: Box::new(integer.clone()),
                         mutations: Vec::new(),
-                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(integer),
                     })
                 }
@@ -6046,7 +6047,8 @@ impl TypeChecker {
                             variadic: false,
                         })),
                         mutations: Vec::new(),
-                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(result),
                     })
                 }
@@ -6072,7 +6074,8 @@ impl TypeChecker {
                             variadic: false,
                         })),
                         mutations: Vec::new(),
-                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(float),
                     })
                 }
@@ -6162,7 +6165,8 @@ impl TypeChecker {
                             variadic: false,
                         })),
                         mutations: Vec::new(),
-                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(result),
                     })
                 }
@@ -6171,7 +6175,8 @@ impl TypeChecker {
                         default: None,
                         parameter: Box::new(CheckedType::CString),
                         mutations: Vec::new(),
-                        moves: vec![CheckedMutation::Whole],                        effects: CheckedEffectSet::default(),
+                        moves: vec![CheckedMutation::Whole],
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(CheckedType::String),
                     })
                 }
@@ -6180,7 +6185,8 @@ impl TypeChecker {
                         default: None,
                         parameter: Box::new(CheckedType::String),
                         mutations: Vec::new(),
-                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(CheckedType::CString),
                     })
                 }
@@ -6220,7 +6226,8 @@ impl TypeChecker {
                         variadic: false,
                     })),
                     mutations: Vec::new(),
-                    moves: Vec::new(),                    effects: CheckedEffectSet::default(),
+                    moves: Vec::new(),
+                    effects: CheckedEffectSet::default(),
                     result: Box::new(CheckedType::String),
                 }),
                 crate::IntrinsicFunction::BufferWithCapacity
@@ -6232,7 +6239,8 @@ impl TypeChecker {
                 | crate::IntrinsicFunction::BufferIntoShared
                 | crate::IntrinsicFunction::BufferFromArray
                 | crate::IntrinsicFunction::BufferTransfer
-                | crate::IntrinsicFunction::BufferClone => self.symbol_value_type(*symbol)
+                | crate::IntrinsicFunction::BufferClone => self
+                    .symbol_value_type(*symbol)
                     .cloned()
                     .filter(|value_type| valid_buffer_intrinsic_type(value_type, *intrinsic))
                     .unwrap_or(CheckedType::Error),
@@ -6270,7 +6278,8 @@ impl TypeChecker {
                 | crate::IntrinsicFunction::CompletionTokenCancel
                 | crate::IntrinsicFunction::ResolverComplete
                 | crate::IntrinsicFunction::ResolverCancel
-                | crate::IntrinsicFunction::Until => self.symbol_value_type(*symbol)
+                | crate::IntrinsicFunction::Until => self
+                    .symbol_value_type(*symbol)
                     .cloned()
                     .unwrap_or(CheckedType::Error),
             };
@@ -10636,12 +10645,14 @@ impl TypeChecker {
                 // own trait calls try to solve a foreign parameter.
                 let merge_expected = match expected {
                     Some(CheckedType::Function(expected_function))
-                        if type_parameter_ids(&expected_function.result).iter().any(|id| {
-                            !self
-                                .active_generic_parameters
-                                .iter()
-                                .any(|parameters| parameters.contains(id))
-                        }) =>
+                        if type_parameter_ids(&expected_function.result)
+                            .iter()
+                            .any(|id| {
+                                !self
+                                    .active_generic_parameters
+                                    .iter()
+                                    .any(|parameters| parameters.contains(id))
+                            }) =>
                     {
                         let mut relaxed = expected_function.clone();
                         relaxed.result = Box::new(CheckedType::Inferred);
@@ -11369,8 +11380,7 @@ impl TypeChecker {
                                     CheckedType::Product(_)
                                     | CheckedType::Parameter { .. }
                                     | CheckedType::Inferred
-                                    | CheckedType::Array { .. }
-                                    => {
+                                    | CheckedType::Array { .. } => {
                                         self.diagnostics.push(Diagnostic::new(
                                             source.argument.syntax().span.clone(),
                                             "cannot spread a value of unknown shape",
@@ -12474,8 +12484,7 @@ impl TypeChecker {
                             CheckedType::Product(_)
                             | CheckedType::Parameter { .. }
                             | CheckedType::Inferred
-                            | CheckedType::Array { .. }
-                            => {
+                            | CheckedType::Array { .. } => {
                                 "cannot spread a value of unknown shape".to_owned()
                             }
                             CheckedType::Error => return CheckedType::Error,
@@ -12533,8 +12542,7 @@ impl TypeChecker {
                                 CheckedType::Product(_)
                                 | CheckedType::Parameter { .. }
                                 | CheckedType::Inferred
-                                | CheckedType::Array { .. }
-                                => {
+                                | CheckedType::Array { .. } => {
                                     self.diagnostics.push(Diagnostic::new(
                                         call.argument.syntax().span.clone(),
                                         "cannot spread a value of unknown shape",
@@ -17454,8 +17462,7 @@ impl TypeChecker {
         if let Some(expected) = expected {
             infer_type_parameters_for_expected(&function.result, expected, &mut substitutions);
         }
-        let instantiated =
-            substitute_type(CheckedType::Function(function.clone()), &substitutions);
+        let instantiated = substitute_type(CheckedType::Function(function.clone()), &substitutions);
         let instantiated = match &scheme {
             Some(scheme) => self.normalize_instantiated_projections(
                 &scheme.trait_bounds,
@@ -19224,13 +19231,11 @@ pub(crate) fn shared_buffer_element(value_type: &CheckedType) -> Option<&Checked
 pub(crate) fn array_length(source: &CheckedType, target: &CheckedType) -> Option<usize> {
     let actual = source;
     let CheckedType::Wrapper {
-        name,
-        arguments,
-        ..
+        name, arguments, ..
     } = target
-        else {
-            return None;
-        };
+    else {
+        return None;
+    };
     if !wrapper_named(name, "Buffer") {
         return None;
     }
@@ -24029,7 +24034,8 @@ fn valid_conversion_intrinsic_type(
     let CheckedType::Function(function) = value else {
         return false;
     };
-    let expected_moves: &[CheckedMutation] = if intrinsic == crate::IntrinsicFunction::PointerStore {
+    let expected_moves: &[CheckedMutation] = if intrinsic == crate::IntrinsicFunction::PointerStore
+    {
         &[CheckedMutation::Element(1)]
     } else {
         &[]

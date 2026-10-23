@@ -1953,7 +1953,10 @@ mod tests {
             ("let other = missing\n", "unknown"),
             ("let text: String = double 21\n", "String"),
             ("use nowhere.thing\n", "could not resolve module"),
-            ("def broken = (y: I32) => {\n    let z: = y\n    z\n}\n", "expected"),
+            (
+                "def broken = (y: I32) => {\n    let z: = y\n    z\n}\n",
+                "expected",
+            ),
             ("let pair = (double 1,\n", "expected"),
         ] {
             let source = format!("{header}{error}double 4\n");
@@ -1983,7 +1986,12 @@ mod tests {
             };
             let published: PublishDiagnosticsParams =
                 serde_json::from_value(notification.params).unwrap();
-            assert_eq!(published.diagnostics.len(), 1, "{:?}", published.diagnostics);
+            assert_eq!(
+                published.diagnostics.len(),
+                1,
+                "{:?}",
+                published.diagnostics
+            );
             assert!(
                 published.diagnostics[0].message.contains(expected),
                 "{:?}",
@@ -2032,7 +2040,8 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         let path = std::fs::canonicalize(path).unwrap();
         let uri = path_to_uri(&path).unwrap();
-        let header = "def double = (x: I32) => x * 2\ndef f = () => {\n    let a = double 1\n    a\n";
+        let header =
+            "def double = (x: I32) => x * 2\ndef f = () => {\n    let a = double 1\n    a\n";
         let (connection, _client) = Connection::memory();
         let mut server = Server {
             connection,
@@ -2075,9 +2084,11 @@ mod tests {
                 .any(|entry| entry.range.start == reference)
         );
         let analysis = document.last_analysis.as_ref().expect("analysis");
-        assert!(analysis.semantic_entries.iter().any(|entry| {
-            entry.start == reference && entry.token_type == semantic::FUNCTION
-        }));
+        assert!(
+            analysis.semantic_entries.iter().any(|entry| {
+                entry.start == reference && entry.token_type == semantic::FUNCTION
+            })
+        );
     }
 
     #[test]
@@ -2852,10 +2863,8 @@ mod tests {
     /// parameter in the last successful analysis.
     #[test]
     fn pipe_completion_falls_back_to_local_names() {
-        let root = std::env::temp_dir().join(format!(
-            "staple-lsp-local-pipe-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("staple-lsp-local-pipe-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("main.sta");
@@ -2911,9 +2920,15 @@ mod tests {
                 .into_iter()
                 .map(|item| item.label)
                 .collect::<Vec<_>>();
-            assert!(labels.contains(&expected.to_owned()), "{receiver}: {labels:?}");
+            assert!(
+                labels.contains(&expected.to_owned()),
+                "{receiver}: {labels:?}"
+            );
             // The parameter shadows the module-level `value: I32`.
-            assert!(!labels.contains(&"cmp".to_owned()), "{receiver}: {labels:?}");
+            assert!(
+                !labels.contains(&"cmp".to_owned()),
+                "{receiver}: {labels:?}"
+            );
         }
         let _ = std::fs::remove_dir_all(root);
     }

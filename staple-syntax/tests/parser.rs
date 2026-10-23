@@ -29,7 +29,9 @@ fn parses_string_templates_and_preserves_source() {
             if value.format == StringInterpolationFormat::Debug
     ));
     // Literal parts keep their escapes as written.
-    assert!(matches!(&template.parts[6], StringTemplatePart::Literal(value) if value == "; \\$5; "));
+    assert!(
+        matches!(&template.parts[6], StringTemplatePart::Literal(value) if value == "; \\$5; ")
+    );
     assert_eq!(
         staple_syntax::string_literal::decode_template_text("; \\$5; ").unwrap(),
         "; $5; "
@@ -507,8 +509,10 @@ fn parses_nominal_representation_access_losslessly() {
         panic!("expected a pipe after representation access");
     };
     assert!(matches!(pipe.stage.as_ref(), Expression::Name(name) if name.name == "length"));
-    assert!(matches!(pipe.receiver.as_ref(), Expression::Access(representation)
-        if representation.accessor == Accessor::Representation));
+    assert!(
+        matches!(pipe.receiver.as_ref(), Expression::Access(representation)
+        if representation.accessor == Accessor::Representation)
+    );
     assert!(parse("user.+\n").is_err());
 }
 
@@ -3323,7 +3327,10 @@ fn companion_headers_stay_on_the_companion() {
         companion.generics_syntax.as_ref().unwrap().text().trim(),
         "<T where Clone T>"
     );
-    assert_eq!(companion.companion_target.as_ref().unwrap().to_string(), "Box<T>");
+    assert_eq!(
+        companion.companion_target.as_ref().unwrap().to_string(),
+        "Box<T>"
+    );
     let Item::Binding(first) = &companion.module.items[0] else {
         panic!("first")
     };
@@ -3469,7 +3476,9 @@ fn pipe_stages_group_calls_and_bind_below_binary_operators() {
     let Expression::Call(second_stage) = second.stage.as_ref() else {
         panic!()
     };
-    assert!(matches!(second_stage.callee.as_ref(), Expression::Name(name) if name.name == "method_b"));
+    assert!(
+        matches!(second_stage.callee.as_ref(), Expression::Name(name) if name.name == "method_b")
+    );
     let Expression::Pipe(first) = second.receiver.as_ref() else {
         panic!()
     };
@@ -3709,10 +3718,7 @@ fn postfix_try_applies_to_the_whole_call_on_its_left() {
     let Expression::Binary(product) = binary.right.as_ref() else {
         panic!("expected a product");
     };
-    assert_eq!(
-        try_operand_text(&product.left).as_deref(),
-        Some("f x")
-    );
+    assert_eq!(try_operand_text(&product.left).as_deref(), Some("f x"));
     let Expression::Unary(negation) = parsed_expression("-f x ?") else {
         panic!("expected negation");
     };
@@ -3919,12 +3925,17 @@ fn parenthesized_nominal_patterns_take_type_annotations() {
         panic!("annotated parenthesized slot: {:?}", product.elements[0])
     };
     assert_eq!(first.annotation.as_ref().unwrap().to_string(), "Box<I32>");
-    assert!(matches!(first.elements.as_slice(), [Pattern::Nominal(nominal)] if nominal.annotation.is_none()));
+    assert!(
+        matches!(first.elements.as_slice(), [Pattern::Nominal(nominal)] if nominal.annotation.is_none())
+    );
     let Pattern::Product(moved) = function(1) else {
         panic!("annotated parenthesized parameter")
     };
     assert!(moved.moved);
-    assert_eq!(moved.annotation.as_ref().unwrap().to_string(), "Box<String>");
+    assert_eq!(
+        moved.annotation.as_ref().unwrap().to_string(),
+        "Box<String>"
+    );
     // Without parentheses the annotation still belongs to the inner binding.
     let Pattern::Product(grouped) = function(2) else {
         panic!("grouped nominal")
@@ -3984,8 +3995,11 @@ fn marks_parser_supplied_nodes_as_implied() {
     let Pattern::Product(parameters) = &function.pattern else {
         panic!("product")
     };
-    let [Pattern::Binding(x), Pattern::Wildcard(wildcard), Pattern::Binding(y)] =
-        parameters.elements.as_slice()
+    let [
+        Pattern::Binding(x),
+        Pattern::Wildcard(wildcard),
+        Pattern::Binding(y),
+    ] = parameters.elements.as_slice()
     else {
         panic!("parameters")
     };
@@ -4015,7 +4029,9 @@ fn marks_parser_supplied_nodes_as_implied() {
     let Pattern::Nominal(unit) = &binding.pattern else {
         panic!("nominal")
     };
-    assert!(matches!(unit.argument.as_ref(), Pattern::Product(argument) if argument.syntax.implied));
+    assert!(
+        matches!(unit.argument.as_ref(), Pattern::Product(argument) if argument.syntax.implied)
+    );
 }
 
 #[test]
@@ -4086,14 +4102,21 @@ fn indented_lines_continue_the_current_statement() {
         let Expression::Block(body) = function.body.as_ref() else {
             panic!("expected block body {index}")
         };
-        assert_eq!(body.items.len(), 2, "block statements stay separate in {index}");
+        assert_eq!(
+            body.items.len(),
+            2,
+            "block statements stay separate in {index}"
+        );
     }
     let Item::TraitDeclaration(show) = &module.items[6] else {
         panic!("expected trait")
     };
     assert_eq!(show.members.len(), 2);
     assert!(matches!(value(7), Expression::Name(_)));
-    assert!(matches!(&module.items[8], Item::Expression(Expression::Name(_))));
+    assert!(matches!(
+        &module.items[8],
+        Item::Expression(Expression::Name(_))
+    ));
 }
 
 #[test]
@@ -4101,7 +4124,8 @@ fn rejects_tab_indentation_where_it_decides_continuation() {
     let error = parse("let total = 1\n\t+ 2\n").expect_err("a tab-indented continuation");
     assert!(error.message.contains("tabs"), "{}", error.message);
     assert_eq!(error.location.line, 2);
-    let error = parse("def f = () => {\n\tlet a = g\n\ta\n}\n").expect_err("tab-indented statements");
+    let error =
+        parse("def f = () => {\n\tlet a = g\n\ta\n}\n").expect_err("tab-indented statements");
     assert!(error.message.contains("tabs"), "{}", error.message);
     assert!(parse("let a = \"\tquoted\"\n\n").is_ok());
 }
@@ -4299,7 +4323,10 @@ fn rejects_removed_type_declaration_forms() {
         ("type Number = alias I32\n", "`alias` was removed"),
         ("type Hidden = opaque\n", "without `=`"),
         ("type Pair<(A, B)> = (A, B)\n", "product type parameters"),
-        ("type Box<T>\n", "singleton types cannot have compile-time parameters"),
+        (
+            "type Box<T>\n",
+            "singleton types cannot have compile-time parameters",
+        ),
     ] {
         let error = parse(source).expect_err("removed form should be rejected");
         assert!(error.message.contains(hint), "{source}: {error}");

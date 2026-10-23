@@ -98,7 +98,11 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)?;
         let below = self
             .builder
-            .build_int_sub(align, self.size_type.const_int(1, false), "layout.align.decrement")
+            .build_int_sub(
+                align,
+                self.size_type.const_int(1, false),
+                "layout.align.decrement",
+            )
             .map_err(compiler_diagnostic)?;
         let mask = self
             .builder
@@ -482,7 +486,10 @@ impl<'program, 'context> Backend<'program, 'context> {
             &[
                 file_global.as_pointer_value().into(),
                 self.size_type.const_int(file.len() as u64, false).into(),
-                self.context.i32_type().const_int(u64::from(line), false).into(),
+                self.context
+                    .i32_type()
+                    .const_int(u64::from(line), false)
+                    .into(),
                 self.context
                     .i32_type()
                     .const_int(u64::from(column), false)
@@ -667,7 +674,9 @@ impl<'program, 'context> Backend<'program, 'context> {
             IntegerBinaryOperation::Divide if signed => {
                 self.builder.build_int_signed_div(left, right, &name)
             }
-            IntegerBinaryOperation::Divide => self.builder.build_int_unsigned_div(left, right, &name),
+            IntegerBinaryOperation::Divide => {
+                self.builder.build_int_unsigned_div(left, right, &name)
+            }
             IntegerBinaryOperation::Remainder if signed => {
                 self.builder.build_int_signed_rem(left, right, &name)
             }

@@ -2416,8 +2416,7 @@ fn pattern_test_plan(
     };
     let mut children = Vec::new();
     match shape {
-        PatternPlanShape::Structural
-        | PatternPlanShape::Binding { singleton: None } => {
+        PatternPlanShape::Structural | PatternPlanShape::Binding { singleton: None } => {
             // A typed binding or wildcard checked against one alternative of
             // a sum selects that alternative's tag; an untyped one keeps the
             // whole subject as its type and tests nothing.
@@ -6763,13 +6762,12 @@ impl LoweredProgram {
                 .unwrap_or(CheckedType::Never),
         };
         let true_index = match sum_through_implicit_wrapper(&bool_type) {
-            Some(sum) => bool_true_index(module.resolved(), sum)
-                .ok_or_else(|| {
-                    Diagnostic::new(
-                        logical.syntax.span.clone(),
-                        "`Bool` has no `True` alternative",
-                    )
-                })?,
+            Some(sum) => bool_true_index(module.resolved(), sum).ok_or_else(|| {
+                Diagnostic::new(
+                    logical.syntax.span.clone(),
+                    "`Bool` has no `True` alternative",
+                )
+            })?,
             None if bool_type == CheckedType::Never => 0,
             None => {
                 return Err(Diagnostic::new(
@@ -7454,8 +7452,8 @@ impl LoweredProgram {
                 })?;
                 let function_type = checked_function_type.unwrap_or_else(|| template.clone());
                 substitutions = call_substitutions(&template, &function_type);
-                let tracked =
-                    route != CallableValueRoute::AnonymousFunction && resolved.is_track_caller(function);
+                let tracked = route != CallableValueRoute::AnonymousFunction
+                    && resolved.is_track_caller(function);
                 if tracked && scheme.is_some() {
                     return Err(Diagnostic::new(
                         origin.span.clone(),
@@ -13584,7 +13582,8 @@ impl LoweredProgram {
                     format!("symbol {key:?} has a module global without a declared name"),
                 ));
             }
-            let expected_root = symbol.has_global && checked_type_holds_gc_pointer(&symbol.value_type);
+            let expected_root =
+                symbol.has_global && checked_type_holds_gc_pointer(&symbol.value_type);
             if symbol.global_root != expected_root {
                 diagnostics.push(Diagnostic::new(
                     symbol.origin.span.clone(),
@@ -14887,10 +14886,7 @@ fn refine_nested_substitutions(
         return;
     }
     let map = inferred.clone();
-    let expanded = crate::substitute_type(
-        CheckedType::Function(template.clone()),
-        &map,
-    );
+    let expanded = crate::substitute_type(CheckedType::Function(template.clone()), &map);
     let CheckedType::Function(expanded) = expanded else {
         return;
     };
@@ -16679,8 +16675,7 @@ mod tests {
 
     #[test]
     fn companion_modules_keep_parent_and_companion_metadata() {
-        let program =
-            snapshot("pub type User from I32\ncompanion User { pub let id: I32 = 42 }\n");
+        let program = snapshot("pub type User from I32\ncompanion User { pub let id: I32 = 42 }\n");
         let (entry_id, _) = entry_module(&program);
         // The block, not the type's namespace module, holds the member.
         let companion = program
@@ -19801,9 +19796,7 @@ mod tests {
         assert!(program.calls.iter().any(|(_, call)| matches!(
             call.target,
             LoweredCallableTarget::DirectFunction {
-                environment: LoweredCallEnvironment::CallerLocation(
-                    LoweredCallerLocation::Site(_)
-                ),
+                environment: LoweredCallEnvironment::CallerLocation(LoweredCallerLocation::Site(_)),
                 ..
             }
         )));
@@ -22124,8 +22117,8 @@ mod tests {
         let Some(sum) = sum_through_implicit_wrapper(&logical.bool_type) else {
             panic!("`Bool` is a `from` type over a sum");
         };
-        let expected_true = bool_true_index(module.resolved(), sum)
-            .expect("`Bool` has a `True` alternative");
+        let expected_true =
+            bool_true_index(module.resolved(), sum).expect("`Bool` has a `True` alternative");
         assert_eq!(logical.true_index, expected_true);
         for operand in [logical.left, logical.right] {
             assert_eq!(
@@ -23628,10 +23621,17 @@ mod tests {
         );
 
         let (_, borrowed) = lowered_function(&program, "borrowed");
-        assert!(matches!(lowered_pattern(&program, borrowed.parameter_pattern).kind,
-            LoweredPatternKind::Binding { symbol: Some(_), .. }));
+        assert!(matches!(
+            lowered_pattern(&program, borrowed.parameter_pattern).kind,
+            LoweredPatternKind::Binding {
+                symbol: Some(_),
+                ..
+            }
+        ));
         let body = expression_body(&program, "borrowed");
-        let LoweredExpressionKind::Match(match_) = &body.kind else { panic!("expected a payload match"); };
+        let LoweredExpressionKind::Match(match_) = &body.kind else {
+            panic!("expected a payload match");
+        };
         let pattern = lowered_pattern(&program, match_.arms[0].pattern);
         let LoweredPatternKind::Nominal {
             target: Some(target),

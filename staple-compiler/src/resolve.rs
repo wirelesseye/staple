@@ -4412,11 +4412,11 @@ impl NameResolver {
                 .iter()
                 .flat_map(HashMap::keys)
                 .chain(self.declared_types[module].keys())
-            .chain(self.imported_types.iter().flat_map(HashMap::keys))
-            .chain(self.declared_traits[module].keys())
-            .chain(self.imported_traits.iter().flat_map(HashMap::keys))
-            .chain(self.declared_macros[module].keys())
-            .chain(self.imported_macros.iter().flat_map(HashMap::keys))
+                .chain(self.imported_types.iter().flat_map(HashMap::keys))
+                .chain(self.declared_traits[module].keys())
+                .chain(self.imported_traits.iter().flat_map(HashMap::keys))
+                .chain(self.declared_macros[module].keys())
+                .chain(self.imported_macros.iter().flat_map(HashMap::keys))
                 .cloned(),
         );
         self.prelude_values.retain(|name, _| !bound.contains(name));
@@ -4578,7 +4578,9 @@ impl NameResolver {
 
     fn duplicate_import(&mut self, name: &str, span: Span) {
         let message = if self.defined_locally(name) {
-            format!("import of `{name}` conflicts with a definition of the same name in this module")
+            format!(
+                "import of `{name}` conflicts with a definition of the same name in this module"
+            )
         } else {
             format!("duplicate import of `{name}`")
         };
@@ -7276,7 +7278,8 @@ impl NameResolver {
             Pattern::Nominal(pattern) => {
                 if let Some(id) = self.named_types.get(&pattern.syntax.id).copied() {
                     let declaration = &self.type_declarations[&id];
-                    let represented = (declaration.kind().is_wrapper() && declaration.underlying().is_some())
+                    let represented = (declaration.kind().is_wrapper()
+                        && declaration.underlying().is_some())
                         || declaration.kind() == staple_syntax::TypeDeclarationKind::Singleton;
                     if !represented {
                         self.diagnostics.push(Diagnostic::new(

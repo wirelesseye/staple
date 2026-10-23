@@ -4705,19 +4705,14 @@ mod tests {
             // entering through `main`, so run the module initializers that
             // would normally establish library binding states first.
             for line in text.lines() {
-                let Some(rest) = line
-                    .strip_prefix("define internal void @__staple_init_")
-                else {
+                let Some(rest) = line.strip_prefix("define internal void @__staple_init_") else {
                     continue;
                 };
                 let Some((init, _)) = rest.split_once("()") else {
                     continue;
                 };
                 let init = format!("__staple_init_{init}");
-                let init = unsafe {
-                    engine.get_function::<unsafe extern "C" fn()>(&init)
-                }
-                .unwrap();
+                let init = unsafe { engine.get_function::<unsafe extern "C" fn()>(&init) }.unwrap();
                 unsafe { init.call() };
             }
             type Make = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *const u8);

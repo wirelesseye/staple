@@ -277,8 +277,7 @@ fn the_standard_library_unit_has_no_foreign_definitions() {
     let std = symbols(&shared().std_ir);
     assert!(std.get("main").is_none(), "a library unit has no entry");
     for name in std.keys().filter(|name| {
-        name.starts_with("__staple_gc_")
-            && !name.starts_with("__staple_gc_finalizer_thunk.")
+        name.starts_with("__staple_gc_") && !name.starts_with("__staple_gc_finalizer_thunk.")
     }) {
         assert!(!std[name].defined, "`{name}` belongs to the runtime object");
     }

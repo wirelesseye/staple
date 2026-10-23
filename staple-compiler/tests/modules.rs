@@ -3168,10 +3168,7 @@ fn rejects_public_from_types_over_private_sources() {
     let fixture = Fixture::new();
     fixture.write(
         "main.sta",
-        concat!(
-            "type Hidden wrap I32\n",
-            "pub type Exposed from Hidden\n",
-        ),
+        concat!("type Hidden wrap I32\n", "pub type Exposed from Hidden\n",),
     );
     let error = fixture
         .compile()

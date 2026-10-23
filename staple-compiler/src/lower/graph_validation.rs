@@ -854,11 +854,7 @@ pub(crate) mod tests {
             .get_mut(id)
             .and_then(|instance| instance.body.as_mut())
             .expect("body");
-        let (call_id, _) = body
-            .calls
-            .iter()
-            .next()
-            .expect("the body has a call");
+        let (call_id, _) = body.calls.iter().next().expect("the body has a call");
         body.calls
             .get_mut(call_id)
             .expect("call")

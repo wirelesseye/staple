@@ -936,9 +936,7 @@ impl Program {
     /// block of a nominal type, the type's namespace; any other module is
     /// its own namespace.
     pub fn companion_primary(&self, module: ModuleId) -> ModuleId {
-        self.modules[module.0]
-            .companion_namespace
-            .unwrap_or(module)
+        self.modules[module.0].companion_namespace.unwrap_or(module)
     }
 
     /// Every `companion` block contributing to the same type as `module`,
@@ -3189,8 +3187,14 @@ mod tests {
             ["T", "U"]
         );
         let other = second.companion_generics.as_ref().unwrap();
-        assert_ne!(header.parameters[0].syntax().id, other.parameters[0].syntax().id);
-        assert_ne!(header.trait_bounds[0].syntax.id, other.trait_bounds[0].syntax.id);
+        assert_ne!(
+            header.parameters[0].syntax().id,
+            other.parameters[0].syntax().id
+        );
+        assert_ne!(
+            header.trait_bounds[0].syntax.id,
+            other.trait_bounds[0].syntax.id
+        );
         assert_ne!(
             first.companion_target.as_ref().unwrap().syntax().id,
             second.companion_target.as_ref().unwrap().syntax().id
@@ -3208,8 +3212,12 @@ mod tests {
             "}\n",
         ));
         assert_eq!(members.len(), 3);
-        assert!(members.iter().all(|binding| binding.companion_target.is_some()
-            && binding.companion_generics.is_some()));
+        assert!(
+            members
+                .iter()
+                .all(|binding| binding.companion_target.is_some()
+                    && binding.companion_generics.is_some())
+        );
         assert_eq!(members[2].all_type_parameters().len(), 2);
     }
 
@@ -3460,20 +3468,24 @@ impl CompanionGrouping<'_> {
     /// The nominal type companion `block`'s header names.
     fn block_target(&self, block: ModuleId) -> Option<TypeKey> {
         let parent = self.modules[block.0].parent?;
-        let header = self.modules[parent.0].syntax.items.iter().find_map(|item| {
-            let mut item = item;
-            while let Item::Modified(modified) = item {
-                item = &modified.item;
-            }
-            match item {
-                Item::Submodule(submodule)
-                    if self.child_modules.get(&submodule.syntax.id) == Some(&block) =>
-                {
-                    Some(submodule)
+        let header = self.modules[parent.0]
+            .syntax
+            .items
+            .iter()
+            .find_map(|item| {
+                let mut item = item;
+                while let Item::Modified(modified) = item {
+                    item = &modified.item;
                 }
-                _ => None,
-            }
-        })?;
+                match item {
+                    Item::Submodule(submodule)
+                        if self.child_modules.get(&submodule.syntax.id) == Some(&block) =>
+                    {
+                        Some(submodule)
+                    }
+                    _ => None,
+                }
+            })?;
         let named = type_head(header.companion_target.as_ref()?)?;
         let key = self.lookup_qualified(parent, named.namespace.as_deref(), &named.name)?;
         self.follow_aliases(key, &mut HashSet::new())
@@ -3565,11 +3577,12 @@ impl CompanionGrouping<'_> {
                 UseKind::Renamed { item, alias } if alias == name => {
                     imported.and_then(|source| self.lookup(source, item, true, seen))
                 }
-                UseKind::Dotted if declaration.path.last().map(String::as_str) == Some(name) => self
-                    .dotted_imports
-                    .get(&declaration.syntax.id)
-                    .and_then(|import| import.item_module)
-                    .and_then(|source| self.lookup(source, name, true, seen)),
+                UseKind::Dotted if declaration.path.last().map(String::as_str) == Some(name) => {
+                    self.dotted_imports
+                        .get(&declaration.syntax.id)
+                        .and_then(|import| import.item_module)
+                        .and_then(|source| self.lookup(source, name, true, seen))
+                }
                 UseKind::Glob => imported.and_then(|source| self.lookup(source, name, true, seen)),
                 _ => None,
             };

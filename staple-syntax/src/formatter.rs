@@ -26,7 +26,12 @@ pub fn format_source(source: &str) -> Result<String, ParseError> {
     let texts = |tokens: &[SyntaxToken], starts: &[usize]| {
         starts
             .iter()
-            .map(|index| (non_trivia_ordinal(tokens, *index), tokens[*index].text.clone()))
+            .map(|index| {
+                (
+                    non_trivia_ordinal(tokens, *index),
+                    tokens[*index].text.clone(),
+                )
+            })
             .collect::<Vec<_>>()
     };
     if texts(&tokens, &starts) != texts(&output_tokens, &output_starts) {
@@ -82,7 +87,10 @@ fn guess_type_brackets(tokens: &[SyntaxToken]) -> Vec<usize> {
         if token.kind != TokenKind::Operator
             || token.text != "<"
             || index == 0
-            || !matches!(tokens[index - 1].kind, TokenKind::Identifier | TokenKind::RBrace)
+            || !matches!(
+                tokens[index - 1].kind,
+                TokenKind::Identifier | TokenKind::RBrace
+            )
         {
             continue;
         }
@@ -380,7 +388,8 @@ impl<'a> Formatter<'a> {
                     self.text(",");
                     if self.type_depth == 0
                         && self.generic_depth == 0
-                        && containing_group(&self.groups, index).is_some_and(|group| group.multiline)
+                        && containing_group(&self.groups, index)
+                            .is_some_and(|group| group.multiline)
                     {
                         self.hardline();
                     } else {
@@ -549,8 +558,7 @@ impl<'a> Formatter<'a> {
     fn text(&mut self, text: &str) {
         if self.at_line_start {
             let continuing = self.continuing.iter().filter(|level| **level).count();
-            self.line
-                .push_str(&INDENT.repeat(self.indent + continuing));
+            self.line.push_str(&INDENT.repeat(self.indent + continuing));
             self.at_line_start = false;
         }
         self.line.push_str(text);
@@ -893,7 +901,10 @@ mod parameter_product_tests {
     fn preserves_slotted_type_arguments_and_tight_indices() {
         let source = "type Add=Callable<(I32;I32), I32>\ndef add:(I32;I32)->I32=(x;y)=>x+y\nlet value=values[index]\n";
         let formatted = format_source(source).expect("slotted products format");
-        assert!(formatted.contains("Callable<(I32; I32), I32>"), "{formatted}");
+        assert!(
+            formatted.contains("Callable<(I32; I32), I32>"),
+            "{formatted}"
+        );
         assert!(formatted.contains("values[index]"), "{formatted}");
         assert_eq!(format_source(&formatted).unwrap(), formatted);
     }

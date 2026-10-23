@@ -608,10 +608,7 @@ fn try_unwraps_results_options_and_wider_sums() {
 #[test]
 fn try_unwrap_and_expect_panic_at_their_caller() {
     let unwrap = execute(
-        concat!(
-            "let none: Option<I32> = None\n",
-            "let _ = none |> unwrap\n",
-        ),
+        concat!("let none: Option<I32> = None\n", "let _ = none |> unwrap\n",),
         false,
     );
     assert_eq!(unwrap.status.code(), Some(1));

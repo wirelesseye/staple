@@ -44,10 +44,8 @@ fn run_mode(source: &str, dynamic: bool) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let base = std::env::temp_dir().join(format!(
-        "staple-allocation-{}-{nonce}",
-        std::process::id()
-    ));
+    let base =
+        std::env::temp_dir().join(format!("staple-allocation-{}-{nonce}", std::process::id()));
     let object = base.with_extension("o");
     let context = Context::create();
     CodeGenerator::new(&context)
@@ -174,7 +172,10 @@ fn library_handles_move_replace_extract_and_drop_payloads_once() {
         "exercise ()\n",
     );
     for dynamic in [false, true] {
-        assert_eq!(run_mode(source, dynamic), "drop 1\ndrop 2\ndrop 3\ndrop 4\nalias 5\n");
+        assert_eq!(
+            run_mode(source, dynamic),
+            "drop 1\ndrop 2\ndrop 3\ndrop 4\nalias 5\n"
+        );
     }
 }
 
