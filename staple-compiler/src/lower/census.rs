@@ -99,7 +99,13 @@ pub(crate) fn assert_catalog_census(
     allowed.insert("__staple_copy_descriptor".to_owned());
     // Likewise the effect-row bundle lookup (`rows.rs`).
     allowed.insert("__staple_effect_row_lookup".to_owned());
-    let mut unexplained = defined.difference(&allowed).cloned().collect::<Vec<_>>();
+    let mut unexplained = defined
+        .difference(&allowed)
+        // Per-site finalizer thunks are emitted beside the code that installs
+        // them; they are internal backend helpers, not planned artifacts.
+        .filter(|name| !name.starts_with("__staple_gc_finalizer_thunk."))
+        .cloned()
+        .collect::<Vec<_>>();
     unexplained.sort();
     assert!(
         unexplained.is_empty(),

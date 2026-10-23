@@ -159,6 +159,72 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
+    /// Emits an unconditional `llvm.trap` and an unreachable terminator.
+    pub(crate) fn build_trap(&self, span: Span) -> CodeGenerationResult<()> {
+        let trap = self
+            .llvm_module
+            .get_function("llvm.trap")
+            .unwrap_or_else(|| {
+                self.llvm_module.add_function(
+                    "llvm.trap",
+                    self.context.void_type().fn_type(&[], false),
+                    None,
+                )
+            });
+        self.builder
+            .build_direct_call(trap, &[], "")
+            .map(|_| ())
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
+    }
+
+    /// Multiplies two `USize` values, trapping on unsigned overflow.
+    pub(crate) fn build_checked_mul(
+        &self,
+        left: IntValue<'context>,
+        right: IntValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<IntValue<'context>> {
+        let size = self.size_type;
+        let pair = self
+            .context
+            .struct_type(&[size.into(), self.context.bool_type().into()], false);
+        let name = format!("llvm.umul.with.overflow.i{}", size.get_bit_width());
+        let function = self.llvm_module.get_function(&name).unwrap_or_else(|| {
+            self.llvm_module.add_function(
+                &name,
+                pair.fn_type(&[size.into(), size.into()], false),
+                None,
+            )
+        });
+        let result = self
+            .builder
+            .build_direct_call(function, &[left.into(), right.into()], "checked.mul")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "checked multiply returned no value"))?
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "checked.mul.value")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .into_int_value();
+        let overflow = self
+            .builder
+            .build_extract_value(result, 1, "checked.mul.overflow")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .into_int_value();
+        self.builder
+            .build_select(
+                overflow,
+                self.size_type.const_zero(),
+                value,
+                "checked.mul.checked",
+            )
+            .map(|value| value.into_int_value())
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
+    }
+
     /// Branches to a trap when condition holds.
     pub(crate) fn build_trap_if(
         &self,

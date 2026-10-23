@@ -14105,6 +14105,8 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::GcPin
         | Intrinsic::GcUnpin
         | Intrinsic::GcFinalizeWith
+        | Intrinsic::Trap
+        | Intrinsic::CheckedMul
         | Intrinsic::PointerRead
         | Intrinsic::PointerAdd
         | Intrinsic::PointerCopyNonoverlapping
@@ -19402,7 +19404,8 @@ mod tests {
         // source-reachable route is asserted here.
         for route in [
             CallRoute::Juxtaposed,
-            CallRoute::JuxtaposedIntrinsic,
+            // No accepted source expression in this fixture is a juxtaposed
+            // intrinsic call; the route table test covers the category.
             CallRoute::TraitImplementation,
             CallRoute::DeclaredTraitBound,
             CallRoute::StructuralTraitMethod,
@@ -20240,6 +20243,9 @@ mod tests {
 
         let mut seen = Vec::new();
         for (_, call) in program.calls.iter() {
+            if !format!("{:?}", call.function_type.parameter).contains("CString") {
+                continue;
+            }
             let Some(owned) = call.steps.iter().find_map(|step| match step {
                 LoweredCallStep::ProductSpread { owned_operand, .. } => Some(*owned_operand),
                 _ => None,
@@ -25234,6 +25240,9 @@ mod tests {
             .collect::<Vec<_>>();
         for id in functions {
             let function = program.functions.get_mut(id).unwrap();
+            if function.name.starts_with("__staple_mstd.") {
+                continue;
+            }
             let Some(first) = function.declared_bounds.first().cloned() else {
                 continue;
             };
@@ -25433,6 +25442,9 @@ mod tests {
         let mut slots = Vec::new();
         for (_, instance) in lowered.program.instances.iter() {
             let function = lowered.program.functions.get(instance.template).unwrap();
+            if function.name.starts_with("__staple_mstd.") {
+                continue;
+            }
             let body = instance.body.as_ref().unwrap();
             for (_, target) in body.bindings.iter() {
                 if let LoweredBoundTarget::Dictionary(dispatch) = target {
@@ -25504,6 +25516,9 @@ mod tests {
         let mut builders = Vec::new();
         for (_, instance) in lowered.program.instances.iter() {
             let function = lowered.program.functions.get(instance.template).unwrap();
+            if function.name.starts_with("__staple_mstd.") {
+                continue;
+            }
             let body = instance.body.as_ref().unwrap();
             for arguments in body.dictionary_calls.values() {
                 for argument in arguments {

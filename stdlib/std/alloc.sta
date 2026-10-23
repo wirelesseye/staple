@@ -31,6 +31,9 @@ pub(package) extern "staple-intrinsic" {
 
     __gc_finalize_with: <T> (RawMutPtr<T>, (RawMutPtr<T>) -> ()) -> ()
 
+    __trap: () -> Never
+    __checked_mul: (USize, USize) -> USize
+
     __pointer_read: <T> RawMutPtr<T> -> T
     __pointer_add: <T> (RawMutPtr<T>, USize) -> RawMutPtr<T>
     __pointer_copy_nonoverlapping: <T> (RawMutPtr<T>, RawMutPtr<T>, USize) -> ()
@@ -49,11 +52,11 @@ companion MemLayout {
         } else if (element.size == 0) {
             Some (MemLayout (size: 0, align: element.align))
         } else {
-            let size = count * element.size
-            if ((size / count) == element.size) {
-                Some (MemLayout (size: size, align: element.align))
-            } else {
+            let size = __checked_mul (count, element.size)
+            if (size == 0) {
                 None
+            } else {
+                Some (MemLayout (size: size, align: element.align))
             }
         }
     }
@@ -93,6 +96,10 @@ companion MemLayout {
 
 def finalize_of = <T where Finalize T> pointer: RawMutPtr<T> => () ::
     Finalize.finalize pointer
+
+/// Aborts execution. Used by library invariants that would otherwise need a
+/// caller-location aware panic.
+pub def trap = () => Never :: __trap ()
 
 companion Gc {
     /// Allocates an uninitialized block from the managed heap.

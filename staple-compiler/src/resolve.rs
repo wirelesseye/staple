@@ -436,6 +436,8 @@ pub enum IntrinsicFunction {
     GcPin,
     GcUnpin,
     GcFinalizeWith,
+    Trap,
+    CheckedMul,
     PointerRead,
     PointerAdd,
     PointerCopyNonoverlapping,
@@ -2514,6 +2516,8 @@ impl NameResolver {
                 "__gc_finalize_with",
                 IntrinsicFunction::GcFinalizeWith,
             ),
+            ("std.alloc", "__trap", IntrinsicFunction::Trap),
+            ("std.alloc", "__checked_mul", IntrinsicFunction::CheckedMul),
             ("std.alloc", "__pointer_read", IntrinsicFunction::PointerRead),
             ("std.alloc", "__pointer_add", IntrinsicFunction::PointerAdd),
             (

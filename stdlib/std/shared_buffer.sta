@@ -1,12 +1,11 @@
 pub mod
 
-use package.alloc.Gc
+use package.alloc.(Gc, trap)
 use package.buffer.(Buffer, BufferHeader)
 use package.cmp.(Eq)
 use package.index.(Index, MutateIndex)
 use package.iterator.(IntoIterator, Iterator)
 use package.iterator.IterStep.(Done, Yield)
-use package.process.(panic)
 use package.ptr.(RawMutPtr)
 use package.shared.(Shared)
 
@@ -63,7 +62,7 @@ companion<T> SharedBuffer<T> {
     /// Replaces the element at a position and returns the old value, trapping if out of bounds.
     pub def set_unchecked = (mut buffer: SharedBuffer<T>; position: USize; move value: T) => T :: {
         if (position >= SharedBuffer.length buffer) {
-            panic "SharedBuffer.set_unchecked: index out of bounds"
+            trap ()
         }
         let header = buffer.*
         let element = BufferHeader.element header position
@@ -86,7 +85,7 @@ companion<T where Copy T> SharedBuffer<T> {
     /// Copies the element at a position, trapping if out of bounds.
     pub def get_unchecked = (buffer: SharedBuffer<T>; position: USize) => T :: {
         if (position >= SharedBuffer.length buffer) {
-            panic "SharedBuffer.get_unchecked: index out of bounds"
+            trap ()
         }
         let header = buffer.*
         RawMutPtr.unsafe_read (BufferHeader.element header position)

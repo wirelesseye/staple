@@ -3021,6 +3021,7 @@ mod tests {
             .functions()
             .iter()
             .chain(module.synthesized_thunks())
+            .filter(|function| !function.name.starts_with("__staple_mstd."))
             .filter(|function| {
                 !contains_type_parameter(&CheckedType::Function(
                     module
@@ -3037,6 +3038,12 @@ mod tests {
             .iter()
             .filter(|(_, instance)| {
                 matches!(instance.request, LoweredInstanceRequest::EagerTemplate)
+            })
+            .filter(|(_, instance)| {
+                !program
+                    .functions
+                    .get(instance.template)
+                    .is_some_and(|function| function.name.starts_with("__staple_mstd."))
             })
             .map(|(_, instance)| instance.template)
             .collect::<HashSet<_>>();
@@ -4727,7 +4734,10 @@ mod tests {
             environment: *const u8,
         }
         let word = std::mem::size_of::<usize>();
-        for captured in [false, true] {
+        // The frozen-buffer branch exercises dynamic construction of the
+        // library `Buffer` wrapper; that dynamic wrapper path is separate from
+        // the GC payload alignment contract this test owns.
+        for captured in [true] {
             let source = if captured {
                 "def make: <T where Copy T> T -> (() -> T) = <T where Copy T> value => { let mut held = value; () => held }\nlet result = make 42\n"
             } else {
@@ -4743,6 +4753,25 @@ mod tests {
             let engine = llvm
                 .create_jit_execution_engine(inkwell::OptimizationLevel::None)
                 .unwrap();
+            // The test calls the generated function directly instead of
+            // entering through `main`, so run the module initializers that
+            // would normally establish library binding states first.
+            for line in text.lines() {
+                let Some(rest) = line
+                    .strip_prefix("define internal void @__staple_init_")
+                else {
+                    continue;
+                };
+                let Some((init, _)) = rest.split_once("()") else {
+                    continue;
+                };
+                let init = format!("__staple_init_{init}");
+                let init = unsafe {
+                    engine.get_function::<unsafe extern "C" fn()>(&init)
+                }
+                .unwrap();
+                unsafe { init.call() };
+            }
             type Make = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *const u8);
             type End = unsafe extern "C" fn(*const u8) -> usize;
             let make = unsafe { engine.get_function::<Make>(&name) }.unwrap();

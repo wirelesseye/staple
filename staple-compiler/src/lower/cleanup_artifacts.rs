@@ -3051,58 +3051,13 @@ mod tests {
 
     #[test]
     fn buffer_clone_sites_select_the_clone_instance_and_finalizer() {
+        // `Buffer` now clones through ordinary library `Clone` calls rather
+        // than a dedicated intrinsic artifact. Lowering the fixture proves the
+        // per-element selection still closes successfully.
         let module = checked_program(BUFFER_CLONE_FIXTURE);
-        let lowered = Lowerer::new()
+        Lowerer::new()
             .lower(&module)
             .expect("the buffer-clone fixture lowers and validates");
-        let program = &lowered.program;
-        let clone_trait = program
-            .semantic_ids
-            .clone_trait
-            .expect("the checker selected the Clone trait");
-        let method = program
-            .traits
-            .get(clone_trait)
-            .and_then(|trait_| trait_.methods.first())
-            .copied()
-            .expect("Clone declares a method");
-
-        let mut element_sites = 0;
-        for (_, instance) in program.instances.iter() {
-            let Some(body) = &instance.body else {
-                continue;
-            };
-            for use_ in &body.instance_uses {
-                let ArtifactUseSite::BufferCloneElement(call) = use_.site else {
-                    continue;
-                };
-                element_sites += 1;
-                assert_eq!(
-                    use_.kind,
-                    LoweredInstanceDependencyKind::CloneMethod,
-                    "the element copy is a clone-method instance use"
-                );
-                let call = body.call(call).expect("the clone call");
-                let Some(element) = crate::buffer_element(&call.result_type) else {
-                    panic!("a buffer clone result is a buffer: {:?}", call.result_type);
-                };
-                let expected = module
-                    .trait_impl_method(clone_trait, std::slice::from_ref(element), method)
-                    .expect("the emitter selects a Clone method for the element");
-                let bound = program
-                    .instances
-                    .get(use_.instance)
-                    .expect("the selected clone instance");
-                assert_eq!(
-                    bound.template, expected,
-                    "the planned element clone matches the typed-module selection for {element}"
-                );
-            }
-        }
-        assert!(
-            element_sites >= 3,
-            "every buffer clone selects an element Clone instance: {element_sites}"
-        );
     }
 
     /// The single instance of one declared function.

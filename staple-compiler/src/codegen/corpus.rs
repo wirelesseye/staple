@@ -3294,7 +3294,7 @@ let value = at (Shared (1, 2), (USize :: 5))
             "projection_results",
             concat!(
                 "use std.io.(IO, println)\n",
-                "use std.list.(List, ListIter)\n",
+                "use std.list.(List, ListIntoIter)\n",
                 "use std.iterator.(Iterator, IntoIterator, IterStep)\n",
                 "def step: <Iter where Iterator Iter> move Iter -> IterStep<Iter, Iterator.Item Iter> = <Iter where Iterator Iter> move iter => Iterator.next iter\n",
                 "def first: <A where Display A, Copy A> move List<A> ->{IO} () = <A where Display A, Copy A> move items => {\n",
@@ -3304,7 +3304,7 @@ let value = at (Shared (1, 2), (USize :: 5))
                 "    }\n",
                 "}\n",
                 "def explicit: <A where Display A, Copy A> move List<A> ->{IO} () = <A where Display A, Copy A> move items => {\n",
-                "    match step.<ListIter<A>> (IntoIterator.into_iterator items) {\n",
+                "    match step.<ListIntoIter<A>> (IntoIterator.into_iterator items) {\n",
                 "        IterStep.Yield (item, rest) => println (ToString.to_string item),\n",
                 "        _ => println \"empty\",\n",
                 "    }\n",

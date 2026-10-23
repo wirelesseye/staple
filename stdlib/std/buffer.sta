@@ -1,10 +1,9 @@
 pub mod
 
-use package.alloc.(Finalize, Gc, MemLayout)
+use package.alloc.(Finalize, Gc, MemLayout, trap)
 use package.clone.Clone
 use package.ptr.(RawMutPtr, RawOpaqueMutPtr)
 use package.shared_buffer.SharedBuffer
-use package.process.(panic)
 
 /// The prefix of every buffer allocation. Elements follow the header at the
 /// offset `MemLayout.extend` reports, so string literals and `String`'s
@@ -89,11 +88,11 @@ companion<T> Buffer<T> {
         let header = MemLayout.of.<BufferHeader<T>> ()
         let elements = match (MemLayout.array.<T> capacity) {
             Some (layout) => layout,
-            None => panic "Buffer.with_capacity: capacity overflow",
+            None => trap (),
         }
         let layout = match (MemLayout.extend ...(header; elements)) {
             Some (layout, _) => layout,
-            None => panic "Buffer.with_capacity: capacity overflow",
+            None => trap (),
         }
         let pointer: RawMutPtr<BufferHeader<T>> =
             Gc.allocate layout as RawMutPtr<BufferHeader<T>>
@@ -117,7 +116,7 @@ companion<T> Buffer<T> {
     pub def push = (mut buffer: Buffer<T>; move value: T) => () :: {
         let length = Buffer.length buffer
         if (length >= Buffer.capacity buffer) {
-            panic "Buffer.push: buffer is full"
+            trap ()
         }
         let header = buffer.*
         RawMutPtr.store (BufferHeader.element header length) value
@@ -149,7 +148,7 @@ companion<T> Buffer<T> {
     /// Replaces the element at a position and returns the old value, trapping if out of bounds.
     pub def set_unchecked = (mut buffer: Buffer<T>; position: USize; move value: T) => T :: {
         if (position >= Buffer.length buffer) {
-            panic "Buffer.set_unchecked: index out of bounds"
+            trap ()
         }
         let header = buffer.*
         let element = BufferHeader.element header position
@@ -163,7 +162,7 @@ companion<T> Buffer<T> {
 
     /// Consumes the buffer, moving its elements into a garbage-collected shared buffer.
     pub def into_shared_buffer = move buffer: Buffer<T> => SharedBuffer<T> :: {
-        let Buffer pointer = buffer
+        let pointer = unsafe_buffer_into_raw buffer
         if (Gc.needs_drop.<T> ()) {
             Gc.finalize_with pointer
         }
@@ -175,12 +174,12 @@ companion<T> Buffer<T> {
     pub def transfer = (mut source: Buffer<T>; mut destination: Buffer<T>) => () :: {
         let source_length = Buffer.length source
         if (source_length > Buffer.capacity destination - Buffer.length destination) {
-            panic "Buffer.transfer: destination capacity is insufficient"
+            trap ()
         }
         let source_header = source.*
         let destination_header = destination.*
         if (source_header == destination_header) {
-            panic "Buffer.transfer: buffers overlap"
+            trap ()
         }
         let destination_length = BufferHeader.length destination_header
         RawMutPtr.unsafe_copy_nonoverlapping
@@ -213,7 +212,7 @@ companion<T where Copy T> Buffer<T> {
     /// Copies the element at a position, trapping if out of bounds.
     pub def get_unchecked = (buffer: Buffer<T>; position: USize) => T :: {
         if (position >= Buffer.length buffer) {
-            panic "Buffer.get_unchecked: index out of bounds"
+            trap ()
         }
         let header = buffer.*
         RawMutPtr.unsafe_read (BufferHeader.element header position)

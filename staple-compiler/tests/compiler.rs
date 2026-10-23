@@ -11291,8 +11291,9 @@ fn captures_values_bound_by_nominal_patterns() {
 fn rejects_moving_fields_out_of_a_borrowed_nominal_destructure() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "use std.list.(List, ListIter)\n",
-            "def invalid: ListIter<I32> -> List<I32> = ListIter (list, index) => list\n",
+            "use std.list.List\n",
+            "type Pair wrap (list: List<I32>, index: USize)\n",
+            "def invalid: Pair -> List<I32> = Pair (list, index) => list\n",
         )))
         .expect_err_diagnostics("a borrowed nominal destructure cannot move its fields out");
     assert!(diagnostics.iter().any(|diagnostic| {

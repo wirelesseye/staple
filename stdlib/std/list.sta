@@ -188,23 +188,6 @@ impl<T> MutateIndex List<T> USize {
     }
 }
 
-pub type ListIter<T> wrap pub (list: List<T>, index: USize)
-
-// Copy-T-gated, like `get`/`Index` — yields owned copies.
-impl<T where Copy T> Iterator ListIter<T> {
-    type Item = T
-    next = move ListIter (list, index) => if (index < List.length list) {
-        // The bounds check just above already guarantees `index` is valid,
-        // so `get_unchecked` avoids a second, redundant one.
-        Yield (
-            List.get_unchecked list index,
-            ListIter (list: list, index: index + 1),
-        )
-    } else {
-        Done (ListIter (list: list, index: index))
-    }
-}
-
 /// A consuming iterator that moves elements out of a list's allocation. It
 /// takes over the buffer's raw parts, so `Buffer`'s own drop never runs; the
 /// iterator drops only the elements it has not yielded.

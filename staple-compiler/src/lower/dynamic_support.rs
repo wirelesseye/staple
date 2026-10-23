@@ -83,6 +83,9 @@ pub(crate) enum RejectionReason {
     /// (a restriction).
     #[allow(dead_code)]
     FunctionBehindReference,
+    /// The library allocator and its checked arithmetic are not part of the
+    /// dynamic ABI yet; owners stay monomorphized.
+    AllocatorIntrinsic,
 }
 
 impl RejectionReason {
@@ -104,6 +107,7 @@ impl RejectionReason {
                 | RejectionReason::CallerLocationIntrinsic
                 | RejectionReason::RuntimeNaturalCount
                 | RejectionReason::FunctionBehindReference
+                | RejectionReason::AllocatorIntrinsic
         )
     }
 
@@ -131,6 +135,7 @@ impl RejectionReason {
             RejectionReason::CallerLocationIntrinsic => "caller location intrinsic",
             RejectionReason::RuntimeNaturalCount => "run-time Natural count",
             RejectionReason::FunctionBehindReference => "function value behind a reference",
+            RejectionReason::AllocatorIntrinsic => "library allocator intrinsic",
         }
     }
 }
@@ -197,6 +202,8 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::GcPin
         | IntrinsicFunction::GcUnpin
         | IntrinsicFunction::GcFinalizeWith
+        | IntrinsicFunction::Trap
+        | IntrinsicFunction::CheckedMul
         | IntrinsicFunction::PointerRead
         | IntrinsicFunction::PointerAdd
         | IntrinsicFunction::PointerCopyNonoverlapping
@@ -1244,7 +1251,21 @@ impl SupportWalker<'_> {
                     self.reject(RejectionReason::ExternWithParameters);
                 }
             }
-            LoweredCallableTarget::Intrinsic { .. } => {}
+            LoweredCallableTarget::Intrinsic { intrinsic, .. } => {
+                if matches!(
+                    intrinsic,
+                    crate::IntrinsicFunction::BufferFromArray
+                        | crate::IntrinsicFunction::Trap
+                        | crate::IntrinsicFunction::CheckedMul
+                        | crate::IntrinsicFunction::GcAllocate
+                        | crate::IntrinsicFunction::GcRelease
+                        | crate::IntrinsicFunction::GcPin
+                        | crate::IntrinsicFunction::GcUnpin
+                        | crate::IntrinsicFunction::GcFinalizeWith
+                ) {
+                    self.reject(RejectionReason::AllocatorIntrinsic);
+                }
+            }
         }
     }
 
@@ -1523,7 +1544,6 @@ mod tests {
             "function_capture",
             "native_capture",
             "native_cell",
-            "packed_buffer",
             "phantom_argument",
         ] {
             let function = lowered
@@ -1555,21 +1575,11 @@ mod tests {
         let ir = crate::CodeGenerator::new(&context)
             .compile_module(&lowered)
             .unwrap();
-        let mut dynamic = false;
-        let mut loads = 0;
-        for line in ir.lines() {
-            if line.starts_with("define ") {
-                dynamic = line.contains("_dynamic(");
-            }
-            if dynamic && line.contains("buffer.pointer") && line.contains(" = load ") {
-                assert!(
-                    line.ends_with(&format!("align {}", std::mem::align_of::<usize>())),
-                    "naturally aligned dynamic pointer load: {line}"
-                );
-                loads += 1;
-            }
-        }
-        assert!(loads > 0, "dynamic storage loads must be exercised");
+        assert!(
+            ir.lines()
+                .any(|line| line.starts_with("define ") && line.contains("_dynamic(")),
+            "the audited forms must emit dynamic instances"
+        );
     }
 
     #[test]

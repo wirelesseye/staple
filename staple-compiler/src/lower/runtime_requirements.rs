@@ -448,7 +448,12 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
             LoweredCallableTarget::Intrinsic { intrinsic, .. } => match intrinsic {
                 IntrinsicFunction::UniqueIntoInner
                 | IntrinsicFunction::UniqueIntoRaw
-                | IntrinsicFunction::UniqueFromRaw => self.gc(),
+                | IntrinsicFunction::UniqueFromRaw
+                | IntrinsicFunction::GcAllocate
+                | IntrinsicFunction::GcRelease
+                | IntrinsicFunction::GcPin
+                | IntrinsicFunction::GcUnpin
+                | IntrinsicFunction::GcFinalizeWith => self.gc(),
                 IntrinsicFunction::ParseNumber { .. } => {
                     self.requirements.record(RuntimeRequirement::NumericParse);
                     self.gc();

@@ -6266,6 +6266,8 @@ impl TypeChecker {
                 | crate::IntrinsicFunction::GcPin
                 | crate::IntrinsicFunction::GcUnpin
                 | crate::IntrinsicFunction::GcFinalizeWith
+                | crate::IntrinsicFunction::Trap
+                | crate::IntrinsicFunction::CheckedMul
                 | crate::IntrinsicFunction::PointerRead
                 | crate::IntrinsicFunction::PointerAdd
                 | crate::IntrinsicFunction::PointerCopyNonoverlapping

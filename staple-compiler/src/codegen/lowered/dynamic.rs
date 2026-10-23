@@ -1577,6 +1577,54 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let value = self.emit_dynamic_expression(owner, *expression, environment)?;
                     slots[*slot] = Some(value);
                 }
+                LoweredCallStep::ProductSpread {
+                    expression,
+                    mappings,
+                    ..
+                } => {
+                    let value = self.emit_dynamic_expression(owner, *expression, environment)?;
+                    let value_type = self
+                        .view
+                        .expression(owner, *expression)
+                        .map(|expression| expression.value_type.clone())
+                        .ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "missing spread operand type")
+                        })?;
+                    let descriptor =
+                        self.dynamic_descriptor(&value_type, environment, span)?;
+                    for mapping in mappings {
+                        let (field, _) = self.dynamic_product_field(
+                            descriptor,
+                            value,
+                            mapping.source as u32,
+                        )?;
+                        slots[mapping.slot] = Some(field);
+                    }
+                }
+                LoweredCallStep::NamedProductSpread {
+                    expression,
+                    mappings,
+                    ..
+                } => {
+                    let value = self.emit_dynamic_expression(owner, *expression, environment)?;
+                    let value_type = self
+                        .view
+                        .expression(owner, *expression)
+                        .map(|expression| expression.value_type.clone())
+                        .ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "missing spread operand type")
+                        })?;
+                    let descriptor =
+                        self.dynamic_descriptor(&value_type, environment, span)?;
+                    for mapping in mappings {
+                        let (field, _) = self.dynamic_product_field(
+                            descriptor,
+                            value,
+                            mapping.source as u32,
+                        )?;
+                        slots[mapping.slot] = Some(field);
+                    }
+                }
                 LoweredCallStep::Invoke => break,
                 _ => {
                     return Err(Diagnostic::new(
@@ -3355,6 +3403,54 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let value = self.emit_dynamic_expression(owner, *expression, environment)?;
                     slots[*slot] = Some(value);
                 }
+                LoweredCallStep::ProductSpread {
+                    expression,
+                    mappings,
+                    ..
+                } => {
+                    let value = self.emit_dynamic_expression(owner, *expression, environment)?;
+                    let value_type = self
+                        .view
+                        .expression(owner, *expression)
+                        .map(|expression| expression.value_type.clone())
+                        .ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "missing spread operand type")
+                        })?;
+                    let descriptor =
+                        self.dynamic_descriptor(&value_type, environment, span)?;
+                    for mapping in mappings {
+                        let (field, _) = self.dynamic_product_field(
+                            descriptor,
+                            value,
+                            mapping.source as u32,
+                        )?;
+                        slots[mapping.slot] = Some(field);
+                    }
+                }
+                LoweredCallStep::NamedProductSpread {
+                    expression,
+                    mappings,
+                    ..
+                } => {
+                    let value = self.emit_dynamic_expression(owner, *expression, environment)?;
+                    let value_type = self
+                        .view
+                        .expression(owner, *expression)
+                        .map(|expression| expression.value_type.clone())
+                        .ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "missing spread operand type")
+                        })?;
+                    let descriptor =
+                        self.dynamic_descriptor(&value_type, environment, span)?;
+                    for mapping in mappings {
+                        let (field, _) = self.dynamic_product_field(
+                            descriptor,
+                            value,
+                            mapping.source as u32,
+                        )?;
+                        slots[mapping.slot] = Some(field);
+                    }
+                }
                 LoweredCallStep::Invoke => break,
                 _ => {
                     return Err(Diagnostic::new(
@@ -3879,6 +3975,28 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     }
                     _ => unreachable!(),
                 }
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::CheckedMul => {
+                let left = self
+                    .load_dynamic_storage(self.backend.size_type, slot_pointer(0)?, "checked.mul.left")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let right = self
+                    .load_dynamic_storage(self.backend.size_type, slot_pointer(1)?, "checked.mul.right")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let value = self
+                    .backend
+                    .build_checked_mul(left, right, span.clone())?;
+                self.backend
+                    .builder
+                    .build_store(storage, value)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::Trap => {
+                self.backend.build_trap(span.clone())?;
                 return Ok(storage);
             }
             crate::IntrinsicFunction::GcFinalizeWith => {
@@ -9730,6 +9848,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 /// their descriptor comes from the concrete layout rules rather than from
 /// component descriptors.
 fn is_static_layout_type(value_type: &CheckedType) -> bool {
+    if let CheckedType::Wrapper { name, .. } = value_type
+        && (name.ends_with("Buffer") || name.ends_with("Shared") || name.ends_with("Unique"))
+    {
+        return true;
+    }
     matches!(
         value_type,
         CheckedType::Shared(_)

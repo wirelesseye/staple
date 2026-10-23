@@ -8444,6 +8444,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.backend.set_gc_finalizer(*pointer, thunk)?;
                 Ok(self.backend.unit_value())
             }
+            IntrinsicFunction::Trap => {
+                self.backend.build_trap(span)?;
+                self.backend
+                    .compile_type(result_type)
+                    .map(|value_type| value_type.const_zero().as_any_value_enum())
+            }
+            IntrinsicFunction::CheckedMul => {
+                let [
+                    BasicMetadataValueEnum::IntValue(left),
+                    BasicMetadataValueEnum::IntValue(right),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(span, "checked multiply requires integers"));
+                };
+                self.backend
+                    .build_checked_mul(*left, *right, span)
+                    .map(|value| value.as_any_value_enum())
+            }
             IntrinsicFunction::PointerRead => {
                 let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
                     return Err(Diagnostic::new(span, "pointer read requires a pointer"));
