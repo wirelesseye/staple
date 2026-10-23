@@ -4562,9 +4562,9 @@ copy. `SharedBuffer.length` reports the number of elements. Where `Copy T`,
 `SharedBuffer.get: (SharedBuffer<T>; USize) -> Option<T>` returns a copy of an
 element, or `None` when out of bounds, and `SharedBuffer.get_unchecked` returns
 it directly, trapping when out of bounds. `SharedBuffer.set` replaces an
-element through a `mut` handle binding, dropping the old value, and returns
-`Some ()`, or `None` (dropping the new value) for an out-of-bounds position;
-`SharedBuffer.set_unchecked` traps instead.
+element through a `mut` handle binding, returning the old value as `Some<T>`, or
+`None` (dropping the new value) for an out-of-bounds position;
+`SharedBuffer.set_unchecked` traps instead and also returns the old value.
 `SharedBuffer.get_shared: <T> (SharedBuffer<T>; USize) -> Option<Shared<T>>` returns a
 reference to an element, or `None` when out of bounds, and
 `SharedBuffer.get_shared_unchecked: <T> (SharedBuffer<T>; USize) -> Shared<T>` borrows
@@ -4597,10 +4597,10 @@ argument. Pushing to a full buffer traps; growth belongs in higher-level
 containers such as `List`. Where `Copy T`, `Buffer.get` returns a copy of an
 initialized element as an `Option<T>`, or `None` for an out-of-bounds index, and
 `Buffer.get_unchecked` returns it directly and traps for an out-of-bounds
-index. `Buffer.set` replaces an element, dropping the old value, and returns
-`Some ()`, or `None` (dropping the new value) for an out-of-bounds index;
-`Buffer.set_unchecked` traps instead. Buffers hand out no references to their
-elements.
+index. `Buffer.set` replaces an element, returning the old value as `Some<T>`, or
+`None` (dropping the new value) for an out-of-bounds index;
+`Buffer.set_unchecked` traps instead and also returns the old value. Buffers hand
+out no references to their elements.
 
 `Buffer.from_array: <N where Natural N> move (T ^ N) -> Buffer<T>` moves the
 elements of a fixed array into a new buffer whose capacity and length are both
@@ -4641,9 +4641,9 @@ function through it.
 Where `Copy T`, `List.get` returns an element by copy, wrapped in `Option<T>`
 so that an out-of-bounds index produces `None` instead of trapping, and
 `List.get_unchecked` is the trapping counterpart. `List.set` replaces an
-element, dropping the old value, and returns `Some ()` or `None` for an
-out-of-bounds index; `List.set_unchecked` traps instead. `list[index]` and
-`list[index] = value` delegate to `Index`/`MutateIndex`, backed by
+element, returning the old value as `Some<T>`, or `None` for an out-of-bounds
+index; `List.set_unchecked` traps instead and also returns the old value.
+`list[index]` and `list[index] = value` delegate to `Index`/`MutateIndex`, backed by
 `get_unchecked`/`set_unchecked`, so bracket indexing keeps the trapping
 behavior it has elsewhere in the language; `for item in list` consumes the list — `IntoIterator` moves its
 source — and yields owned copies. Iteration requires `Copy T`, the same as

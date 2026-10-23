@@ -253,7 +253,7 @@ fn buffer_from_array_owns_and_drops_non_copy_elements_once() {
 
 #[cfg(unix)]
 #[test]
-fn shared_buffer_set_drops_the_old_value_and_rejects_out_of_bounds() {
+fn shared_buffer_set_returns_the_old_value_and_rejects_out_of_bounds() {
     let source = format!(
         "{TAG}{}",
         concat!(
@@ -274,7 +274,7 @@ fn shared_buffer_set_drops_the_old_value_and_rejects_out_of_bounds() {
         ),
     );
     let output = run(&source);
-    // The replaced element and the rejected value are each dropped
+    // The returned old element and the rejected value are each dropped
     // immediately; the buffer's remaining elements wait for collection.
     assert_eq!(
         output,
@@ -304,13 +304,15 @@ fn shared_buffer_get_and_set_share_writes_between_handles() {
         "        None() => printf (c_string \"get out of bounds\\n\"),\n",
         "    }\n",
         "    match SharedBuffer.set first 1 21 {\n",
-        "        Some _ => printf (c_string \"set\\n\"),\n",
+        "        Some old => printf (c_string \"set %d\\n\", old),\n",
         "        None() => printf (c_string \"set missing\\n\"),\n",
         "    }\n",
         "    match SharedBuffer.set first 3 99 {\n",
         "        Some _ => printf (c_string \"set\\n\"),\n",
         "        None() => printf (c_string \"set out of bounds\\n\"),\n",
         "    }\n",
+        "    let overwritten: I32 = SharedBuffer.set_unchecked first 0 11\n",
+        "    printf (c_string \"unchecked old %d\\n\", overwritten)\n",
         "    first[2] = 31\n",
         "    printf (c_string \"seen %d %d %d\\n\", second[0], second[1], second[2])\n",
         "    ()\n",
@@ -319,7 +321,7 @@ fn shared_buffer_get_and_set_share_writes_between_handles() {
     );
     assert_eq!(
         run(source),
-        "get 20\nget out of bounds\nset\nset out of bounds\nseen 10 21 31\n"
+        "get 20\nget out of bounds\nset 20\nset out of bounds\nunchecked old 10\nseen 11 21 31\n"
     );
 }
 

@@ -40,21 +40,19 @@ companion<T> Buffer<T> {
     /// Removes and returns the last element, or `None` if empty.
     pub def pop = mut buffer: Buffer<T> => Option<T> :: __buffer_pop buffer
 
-    /// Replaces the element at a position and drops the old value; `None` if out of bounds.
-    pub def set = (mut buffer: Buffer<T>; position: USize; move value: T) => Option<()> :: {
+    /// Replaces the element at a position and returns the old value; `None` if out of bounds.
+    pub def set = (mut buffer: Buffer<T>; position: USize; move value: T) => Option<T> :: {
         if (position < Buffer.length buffer) {
-            Buffer.set_unchecked buffer position value
-            Some ()
+            Some (Buffer.set_unchecked buffer position value)
         } else {
             None
         }
     }
 
-    /// Replaces the element at a position and drops the old value, trapping if out of bounds.
-    pub def set_unchecked = (mut buffer: Buffer<T>; position: USize; move value: T) => () :: {
+    /// Replaces the element at a position and returns the old value, trapping if out of bounds.
+    pub def set_unchecked = (mut buffer: Buffer<T>; position: USize; move value: T) => T :: {
         let mut reference = __buffer_get (buffer, position)
         Shared.replace reference value
-        ()
     }
 
     /// Moves the elements of a fixed array into a new buffer whose capacity is the array length.

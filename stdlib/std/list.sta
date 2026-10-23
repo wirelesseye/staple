@@ -53,12 +53,12 @@ companion<T> List<T> {
     /// Removes and returns the final value, or `None` when empty.
     pub def pop = mut list: List<T> => Option<T> :: list.* |> pop
 
-    /// Replaces the value at an index, or returns `None` when out of bounds.
-    pub def set = (mut list: List<T>; index: USize; move value: T) => Option<()> ::
+    /// Replaces the value at an index and returns the old value, or `None` when out of bounds.
+    pub def set = (mut list: List<T>; index: USize; move value: T) => Option<T> ::
         Buffer.set list.* index value
 
-    /// Replaces the value at an index, trapping when out of bounds.
-    pub def set_unchecked = (mut list: List<T>; index: USize; move value: T) => () ::
+    /// Replaces the value at an index and returns the old value, trapping when out of bounds.
+    pub def set_unchecked = (mut list: List<T>; index: USize; move value: T) => T ::
         Buffer.set_unchecked list.* index value
 }
 
@@ -181,7 +181,8 @@ impl<T where Copy T> Index List<T> USize {
 impl<T> MutateIndex List<T> USize {
     type Value = T
     mutate_index = (mut list, position, move value) => {
-        List.set_unchecked list position value
+        let _ = List.set_unchecked list position value
+        ()
     }
 }
 

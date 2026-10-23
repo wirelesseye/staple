@@ -41,21 +41,19 @@ companion<T> SharedBuffer<T> {
     pub def get_shared_unchecked = (buffer: SharedBuffer<T>; position: USize) =>
         Shared<T> :: __shared_buffer_get_shared (buffer, position)
 
-    /// Replaces the element at a position and drops the old value; `None` if out of bounds.
-    pub def set = (mut buffer: SharedBuffer<T>; position: USize; move value: T) => Option<()> :: {
+    /// Replaces the element at a position and returns the old value; `None` if out of bounds.
+    pub def set = (mut buffer: SharedBuffer<T>; position: USize; move value: T) => Option<T> :: {
         if (position < SharedBuffer.length buffer) {
-            SharedBuffer.set_unchecked buffer position value
-            Some ()
+            Some (SharedBuffer.set_unchecked buffer position value)
         } else {
             None
         }
     }
 
-    /// Replaces the element at a position and drops the old value, trapping if out of bounds.
-    pub def set_unchecked = (mut buffer: SharedBuffer<T>; position: USize; move value: T) => () :: {
+    /// Replaces the element at a position and returns the old value, trapping if out of bounds.
+    pub def set_unchecked = (mut buffer: SharedBuffer<T>; position: USize; move value: T) => T :: {
         let mut reference = SharedBuffer.get_shared_unchecked buffer position
         Shared.replace reference value
-        ()
     }
 }
 
@@ -84,7 +82,8 @@ impl<T where Copy T> Index SharedBuffer<T> USize {
 impl<T> MutateIndex SharedBuffer<T> USize {
     type Value = T
     mutate_index = (mut values, position, move value) => {
-        SharedBuffer.set_unchecked values position value
+        let _ = SharedBuffer.set_unchecked values position value
+        ()
     }
 }
 
