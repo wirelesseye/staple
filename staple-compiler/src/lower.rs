@@ -1012,9 +1012,8 @@ fn needs_concrete_function_conversion(actual: &CheckedType, expected: &CheckedTy
                 && contains_type_parameter(&CheckedType::Function(expected.clone()))
         }
         (CheckedType::Product(actual), CheckedType::Product(expected)) => actual
-            .elements
-            .iter()
-            .zip(&expected.elements)
+            .iter_positions()
+            .zip(expected.iter_positions())
             .any(|(actual, expected)| {
                 needs_concrete_function_conversion(&actual.value_type, &expected.value_type)
             }),
@@ -1031,14 +1030,6 @@ fn needs_concrete_function_conversion(actual: &CheckedType, expected: &CheckedTy
             CheckedType::Wrapper {
                 representation: expected,
                 ..
-            },
-        ) => needs_concrete_function_conversion(actual, expected),
-        (
-            CheckedType::Array {
-                element: actual, ..
-            },
-            CheckedType::Array {
-                element: expected, ..
             },
         ) => needs_concrete_function_conversion(actual, expected),
         _ => false,
@@ -2035,8 +2026,7 @@ impl LoweredIndexOperands {
     ) -> Self {
         let types = match method_type.parameter.as_ref() {
             CheckedType::Product(product) => product
-                .elements
-                .iter()
+                .iter_positions()
                 .map(|element| &element.value_type)
                 .collect::<Vec<_>>(),
             other => vec![other],
@@ -2213,10 +2203,13 @@ pub(crate) enum LoweredRepeatCount {
 impl LoweredRepeatCount {
     fn for_type(value_type: &CheckedType) -> Self {
         match value_type {
-            CheckedType::Product(product) if !product.variadic => {
-                Self::Fixed(product.elements.len())
-            }
-            CheckedType::Array { count, .. } => Self::Symbolic(count.as_ref().clone()),
+            CheckedType::Product(product) if !product.variadic => match product.runs.as_slice() {
+                [run] => match &run.count {
+                    crate::RunCount::Fixed(count) => Self::Fixed(*count),
+                    crate::RunCount::Symbolic(count) => Self::Symbolic(count.as_ref().clone()),
+                },
+                _ => Self::Fixed(product.position_count()),
+            },
             _ => Self::Fixed(1),
         }
     }
@@ -2237,7 +2230,12 @@ impl LoweredRepeatedProduct {
         }
         if self.count != LoweredRepeatCount::for_type(value_type) {
             let message = match (&self.count, value_type) {
-                (LoweredRepeatCount::Fixed(_), CheckedType::Array { .. }) => {
+                (LoweredRepeatCount::Fixed(_), CheckedType::Product(product))
+                    if product
+                        .runs
+                        .iter()
+                        .any(|run| matches!(run.count, crate::RunCount::Symbolic(_))) =>
+                {
                     "repeated product fixed count disagrees with its symbolic array result type"
                 }
                 _ => "repeated product count disagrees with its result type",
@@ -2470,15 +2468,14 @@ fn pattern_test_plan(
                 let CheckedType::Product(product) = subject else {
                     return Err("checked product pattern has a non-product value".to_owned());
                 };
-                if product.elements.len() != *elements {
+                if product.position_count() != *elements {
                     return Err(
                         "checked product pattern does not match its value layout".to_owned()
                     );
                 }
                 children.extend(
                     product
-                        .elements
-                        .iter()
+                        .iter_positions()
                         .map(|element| element.value_type.clone()),
                 );
             }
@@ -6336,16 +6333,16 @@ impl LoweredProgram {
                 .map(|expression| expression.value_type.clone())
                 .unwrap_or(CheckedType::Never);
             return Ok(LoweredProduct {
-                final_type: CheckedProductType {
-                    slotted: product.slotted,
-                    spreads: Vec::new(),
-                    elements: vec![crate::CheckedTypeElement {
+                final_type: CheckedProductType::from_elements_raw(
+                    product.slotted,
+                    Vec::new(),
+                    vec![crate::CheckedTypeElement {
                         name: element.name.clone(),
                         value_type,
                         default: None,
                     }],
-                    variadic: false,
-                },
+                    false,
+                ),
                 fields: vec![expression],
                 steps: vec![LoweredProductStep::Positional {
                     expression,
@@ -6393,12 +6390,12 @@ impl LoweredProgram {
                 });
             }
             return Ok(LoweredProduct {
-                final_type: CheckedProductType {
-                    slotted: product.slotted,
-                    spreads: Vec::new(),
+                final_type: CheckedProductType::from_elements_raw(
+                    product.slotted,
+                    Vec::new(),
                     elements,
-                    variadic: false,
-                },
+                    false,
+                ),
                 fields: steps
                     .iter()
                     .map(|step| match step {
@@ -6431,7 +6428,7 @@ impl LoweredProgram {
         final_type: &CheckedProductType,
     ) -> Result<LoweredProduct, Diagnostic> {
         let mut steps = Vec::new();
-        let mut fields = vec![None; final_type.elements.len()];
+        let mut fields = vec![None; final_type.position_count()];
         let mut positioned = 0usize;
         for element in &product.elements {
             let expression = self.lower_expression(module, owner, context, &element.value)?;
@@ -6447,7 +6444,7 @@ impl LoweredProgram {
                     mappings,
                 });
             } else {
-                if positioned >= final_type.elements.len() {
+                if positioned >= final_type.position_count() {
                     return Err(Diagnostic::new(
                         element.syntax.span.clone(),
                         "too many positional elements in product",
@@ -6474,7 +6471,7 @@ impl LoweredProgram {
         final_type: &CheckedProductType,
     ) -> Result<LoweredProduct, Diagnostic> {
         let mut steps = Vec::new();
-        let mut fields = vec![None; final_type.elements.len()];
+        let mut fields = vec![None; final_type.position_count()];
         let mut positioned = 0usize;
         for element in &product.elements {
             let expression = self.lower_expression(module, owner, context, &element.value)?;
@@ -6486,8 +6483,7 @@ impl LoweredProgram {
                     )
                 })?;
                 let Some(slot) = final_type
-                    .elements
-                    .iter()
+                    .iter_positions()
                     .position(|field| field.name.as_deref() == Some(name.as_str()))
                 else {
                     return Err(Diagnostic::new(
@@ -6516,7 +6512,7 @@ impl LoweredProgram {
                 });
                 continue;
             }
-            if positioned >= final_type.elements.len() {
+            if positioned >= final_type.position_count() {
                 return Err(Diagnostic::new(
                     element.syntax.span.clone(),
                     "too many positional elements in designated product initializer",
@@ -6542,7 +6538,7 @@ impl LoweredProgram {
         final_type: &CheckedProductType,
     ) -> Result<LoweredProduct, Diagnostic> {
         let mut steps = Vec::new();
-        let mut fields = vec![None; final_type.elements.len()];
+        let mut fields = vec![None; final_type.position_count()];
         for element in &product.elements {
             let expression = self.lower_expression(module, owner, context, &element.value)?;
             if element.spread {
@@ -6558,7 +6554,7 @@ impl LoweredProgram {
                     ));
                 };
                 let mut mappings = Vec::new();
-                for (source, field) in operand_type.elements.iter().enumerate() {
+                for (source, field) in operand_type.iter_positions().enumerate() {
                     let Some(name) = field.name.clone() else {
                         return Err(Diagnostic::new(
                             element.syntax.span.clone(),
@@ -6566,8 +6562,7 @@ impl LoweredProgram {
                         ));
                     };
                     let Some(slot) = final_type
-                        .elements
-                        .iter()
+                        .iter_positions()
                         .position(|final_field| final_field.name.as_deref() == Some(name.as_str()))
                     else {
                         return Err(Diagnostic::new(
@@ -6591,8 +6586,7 @@ impl LoweredProgram {
                 ));
             };
             let Some(slot) = final_type
-                .elements
-                .iter()
+                .iter_positions()
                 .position(|field| field.name.as_deref() == Some(name.as_str()))
             else {
                 return Err(Diagnostic::new(
@@ -6649,8 +6643,8 @@ impl LoweredProgram {
             ));
         }
         let mut mappings = Vec::new();
-        for source in 0..operand_type.elements.len() {
-            let Some(_) = final_type.elements.get(positioned + source) else {
+        for source in 0..operand_type.position_count() {
+            let Some(_) = final_type.position_element(positioned + source) else {
                 return Err(Diagnostic::new(
                     element.syntax.span.clone(),
                     "too many positional elements in product",
@@ -6676,7 +6670,7 @@ impl LoweredProgram {
         fields: &mut [Option<ExpressionId>],
     ) -> Result<(), Diagnostic> {
         let plan = module.product_default_plan(product.syntax.id).cloned();
-        for slot in 0..final_type.elements.len() {
+        for slot in 0..final_type.position_count() {
             if fields[slot].is_some() {
                 continue;
             }
@@ -6691,7 +6685,11 @@ impl LoweredProgram {
                     &product.syntax.span,
                 ));
             };
-            let expected = final_type.elements[slot].value_type.clone();
+            let expected = final_type
+                .position_element(slot)
+                .unwrap()
+                .value_type
+                .clone();
             let default_context = ExpressionContext::ContextualDefault {
                 consumer: product.syntax.id,
                 slot,
@@ -7123,7 +7121,7 @@ impl LoweredProgram {
         }
         if let Some(plan) = module.juxtaposed_call_plan(call.syntax.id) {
             let expected = match plan.function.parameter.as_ref() {
-                CheckedType::Product(product) => product.elements.len(),
+                CheckedType::Product(product) => product.position_count(),
                 _ => 0,
             };
             if plan.supplied_slots() == expected {
@@ -8771,8 +8769,7 @@ impl LoweredProgram {
             }
             let argument_types = match module.type_of_expression(argument.syntax().id) {
                 Some(CheckedType::Product(product)) => product
-                    .elements
-                    .iter()
+                    .iter_positions()
                     .map(|element| element.value_type.clone())
                     .collect::<Vec<_>>(),
                 _ => Vec::new(),
@@ -8848,7 +8845,7 @@ impl LoweredProgram {
                 return Ok(None);
             };
             let final_type = plan.final_type.clone();
-            let mut placements = vec![None; final_type.elements.len()];
+            let mut placements = vec![None; final_type.position_count()];
             let mut steps = Vec::new();
             let placement = self.lower_argument_value(module, owner, context, argument)?;
             steps.push(call_argument_step(0, 0, placement.expression));
@@ -8876,7 +8873,7 @@ impl LoweredProgram {
                 None => return Ok(None),
             },
         };
-        let mut placements = vec![None; final_type.elements.len()];
+        let mut placements = vec![None; final_type.position_count()];
         let mut steps = Vec::new();
         let mut positional = 0usize;
         for element in &product.elements {
@@ -8888,8 +8885,7 @@ impl LoweredProgram {
                     )
                 })?;
                 let Some(slot) = final_type
-                    .elements
-                    .iter()
+                    .iter_positions()
                     .position(|field| field.name.as_deref() == Some(name.as_str()))
                 else {
                     return Err(Diagnostic::new(
@@ -8917,14 +8913,14 @@ impl LoweredProgram {
                 let operand = operand.clone();
                 if element.named_spread {
                     let mut mappings = Vec::new();
-                    for (source, field) in operand.elements.iter().enumerate() {
+                    for (source, field) in operand.iter_positions().enumerate() {
                         let Some(name) = field.name.clone() else {
                             return Err(Diagnostic::new(
                                 element.syntax.span.clone(),
                                 "a named spread operand must have every element named",
                             ));
                         };
-                        let Some(slot) = final_type.elements.iter().position(|final_field| {
+                        let Some(slot) = final_type.iter_positions().position(|final_field| {
                             final_field.name.as_deref() == Some(name.as_str())
                         }) else {
                             return Err(Diagnostic::new(
@@ -8949,8 +8945,8 @@ impl LoweredProgram {
                     }
                 } else {
                     let mut mappings = Vec::new();
-                    for source in 0..operand.elements.len() {
-                        if positional >= final_type.elements.len() {
+                    for source in 0..operand.position_count() {
+                        if positional >= final_type.position_count() {
                             return Err(Diagnostic::new(
                                 element.syntax.span.clone(),
                                 "too many positional elements in product argument",
@@ -8976,7 +8972,7 @@ impl LoweredProgram {
                 }
                 continue;
             }
-            if positional >= final_type.elements.len() {
+            if positional >= final_type.position_count() {
                 return Err(Diagnostic::new(
                     element.syntax.span.clone(),
                     "too many positional elements in product argument",
@@ -9038,7 +9034,12 @@ impl LoweredProgram {
                     &argument.syntax().span,
                 ));
             };
-            let expected = plan.final_type.elements[slot].value_type.clone();
+            let expected = plan
+                .final_type
+                .position_element(slot)
+                .unwrap()
+                .value_type
+                .clone();
             let expression = self.lower_expression_occurrence(
                 module,
                 owner,
@@ -11046,7 +11047,7 @@ impl LoweredProgram {
                         // The recorded operand facts cover exactly the
                         // method's flattened parameters.
                         let parameters = match method_type.parameter.as_ref() {
-                            CheckedType::Product(product) => product.elements.len(),
+                            CheckedType::Product(product) => product.position_count(),
                             _ => 1,
                         };
                         if index.operands.indirect.len() != parameters
@@ -11765,7 +11766,7 @@ impl LoweredProgram {
             }
             match &expression.kind {
                 LoweredExpressionKind::Product(product) => {
-                    for element in &product.final_type.elements {
+                    for element in product.final_type.iter_positions() {
                         reject(
                             &mut diagnostics,
                             &expression.origin,
@@ -12679,7 +12680,7 @@ impl LoweredProgram {
         product: &LoweredProduct,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
-        let slots = product.final_type.elements.len();
+        let slots = product.final_type.position_count();
         if product.fields.len() != slots {
             diagnostics.push(Diagnostic::new(
                 expression.origin.span.clone(),
@@ -12717,13 +12718,19 @@ impl LoweredProgram {
                     slot,
                 } => {
                     if check_slot(diagnostics, *slot) {
-                        if product.final_type.elements[*slot].name.as_deref() != Some(name.as_str())
+                        if product
+                            .final_type
+                            .position_element(*slot)
+                            .unwrap()
+                            .name
+                            .as_deref()
+                            != Some(name.as_str())
                         {
                             diagnostics.push(Diagnostic::new(
                                 expression.origin.span.clone(),
                                 format!(
                                     "designated product step `{name}` targets a slot named `{:?}`",
-                                    product.final_type.elements[*slot].name
+                                    product.final_type.position_element(*slot).unwrap().name
                                 ),
                             ));
                         }
@@ -12746,7 +12753,12 @@ impl LoweredProgram {
                 } => {
                     for mapping in mappings {
                         if check_slot(diagnostics, mapping.slot) {
-                            if product.final_type.elements[mapping.slot].name.as_deref()
+                            if product
+                                .final_type
+                                .position_element(mapping.slot)
+                                .unwrap()
+                                .name
+                                .as_deref()
                                 != Some(mapping.name.as_str())
                             {
                                 diagnostics.push(Diagnostic::new(
@@ -12754,7 +12766,11 @@ impl LoweredProgram {
                                     format!(
                                         "named product spread `{}` targets a slot named `{:?}`",
                                         mapping.name,
-                                        product.final_type.elements[mapping.slot].name
+                                        product
+                                            .final_type
+                                            .position_element(mapping.slot)
+                                            .unwrap()
+                                            .name
                                     ),
                                 ));
                             }
@@ -12768,7 +12784,11 @@ impl LoweredProgram {
                     expected,
                 } => {
                     if check_slot(diagnostics, *slot) {
-                        let slot_type = &product.final_type.elements[*slot].value_type;
+                        let slot_type = &product
+                            .final_type
+                            .position_element(*slot)
+                            .unwrap()
+                            .value_type;
                         if !types_agree(expected, slot_type) {
                             diagnostics.push(Diagnostic::new(
                                 expression.origin.span.clone(),
@@ -14313,7 +14333,7 @@ fn spread_field_ownership(module: &TypedModule, expression: &Expression) -> Vec<
             .collect();
     }
     let count = match module.type_of_expression(expression.syntax().id) {
-        Some(CheckedType::Product(product)) => product.elements.len(),
+        Some(CheckedType::Product(product)) => product.position_count(),
         _ => 0,
     };
     vec![
@@ -14541,11 +14561,10 @@ fn checked_type_holds_gc_pointer(value_type: &CheckedType) -> bool {
         | CheckedType::Function(_)
         | CheckedType::Forall(_)
         | CheckedType::Opaque { .. } => true,
-        CheckedType::Array { element, .. } => checked_type_holds_gc_pointer(element),
         CheckedType::Product(product) => product
-            .elements
+            .runs
             .iter()
-            .any(|element| checked_type_holds_gc_pointer(&element.value_type)),
+            .any(|run| checked_type_holds_gc_pointer(&run.element.value_type)),
         CheckedType::Sum(sum) => sum.alternatives.iter().any(checked_type_holds_gc_pointer),
         CheckedType::Wrapper {
             arguments,
@@ -14819,7 +14838,7 @@ fn variadic_argument(function_type: &CheckedFunctionType, slots: usize) -> bool 
     matches!(
         function_type.parameter.as_ref(),
         CheckedType::Product(product)
-            if product.variadic && slots >= product.elements.len()
+            if product.variadic && slots >= product.position_count()
     )
 }
 
@@ -14854,9 +14873,21 @@ fn call_argument_step(
 fn flattened_parameter_types(parameter: &CheckedType) -> Vec<CheckedType> {
     match parameter {
         CheckedType::Product(product) => product
-            .elements
+            .runs
             .iter()
-            .map(|element| element.value_type.clone())
+            .flat_map(|run| match run.count {
+                crate::RunCount::Fixed(count) => (0..count)
+                    .map(|_| run.element.value_type.clone())
+                    .collect::<Vec<_>>(),
+                crate::RunCount::Symbolic(_) => {
+                    vec![CheckedType::Product(crate::CheckedProductType {
+                        slotted: false,
+                        spreads: Vec::new(),
+                        runs: vec![run.clone()],
+                        variadic: false,
+                    })]
+                }
+            })
             .collect(),
         other => vec![other.clone()],
     }
@@ -15037,7 +15068,7 @@ fn missing_product_slot_error(
 ) -> Diagnostic {
     Diagnostic::new(
         span.clone(),
-        match final_type.elements.get(slot) {
+        match final_type.position_element(slot) {
             Some(field) => match &field.name {
                 Some(name) => format!("missing product field `{name}`"),
                 None => format!("missing product element at position {slot}"),
@@ -15580,7 +15611,7 @@ impl<'a> SourceCoverage<'a> {
                     return;
                 };
                 let expected = match plan.function.parameter.as_ref() {
-                    CheckedType::Product(product) => product.elements.len(),
+                    CheckedType::Product(product) => product.position_count(),
                     _ => 0,
                 };
                 if plan.supplied_slots() != expected {
@@ -21557,7 +21588,7 @@ mod tests {
     }
 
     fn replay_product_steps(product: &LoweredProduct) -> Vec<ExpressionId> {
-        let mut fields = vec![None; product.final_type.elements.len()];
+        let mut fields = vec![None; product.final_type.position_count()];
         for step in &product.steps {
             match step {
                 LoweredProductStep::Positional { expression, slot } => {
@@ -21623,7 +21654,7 @@ mod tests {
                     .any(|step| matches!(step, LoweredProductStep::PositionalSpread { .. }))
             })
             .expect("the spread product should lower");
-        assert_eq!(spread.final_type.elements.len(), 4);
+        assert_eq!(spread.final_type.position_count(), 4);
         assert_eq!(spread.fields.len(), 4);
         let mut kinds = spread
             .steps
@@ -21664,7 +21695,7 @@ mod tests {
                     .any(|step| matches!(step, LoweredProductStep::Default { .. }))
             })
             .expect("the default product should lower");
-        assert_eq!(defaulted.final_type.elements.len(), 2);
+        assert_eq!(defaulted.final_type.position_count(), 2);
         let defaults = defaulted
             .steps
             .iter()
@@ -21801,7 +21832,7 @@ mod tests {
         assert_eq!(named.len(), 2);
 
         let config = &named[0];
-        assert_eq!(config.final_type.elements.len(), 3);
+        assert_eq!(config.final_type.position_count(), 3);
         let LoweredProductStep::NamedSpread { mappings, .. } = &config.steps[0] else {
             panic!("the named spread is the first step");
         };
@@ -21896,10 +21927,16 @@ mod tests {
                 }
                 _ => None,
             })
-            .find(|(_, expression, _)| matches!(expression.value_type, CheckedType::Array { .. }))
+            .find(|(_, expression, _)| {
+                matches!(&expression.value_type, CheckedType::Product(product)
+                    if product.runs.iter().any(|run| matches!(run.count, crate::RunCount::Symbolic(_))))
+            })
             .map(|(id, expression, repeated)| (id, (expression, repeated)))
             .expect("generic repeated product");
-        let CheckedType::Array { count, .. } = &symbolic.0.value_type else {
+        let CheckedType::Product(product) = &symbolic.0.value_type else {
+            unreachable!()
+        };
+        let crate::RunCount::Symbolic(count) = &product.runs[0].count else {
             unreachable!()
         };
         assert_eq!(
@@ -22636,7 +22673,7 @@ mod tests {
                     .get(index.base)
                     .is_some_and(|base| matches!(
                         &base.value_type,
-                        CheckedType::Product(product) if product.elements.len() == 2
+                        CheckedType::Product(product) if product.position_count() == 2
                     ))
             ),
             "the fixed-product read lowers through the index dispatcher"
@@ -23444,20 +23481,17 @@ mod tests {
                 LoweredExpressionKind::Product(product) => {
                     if let Some(CheckedType::Product(checked)) = module.type_of_expression(syntax) {
                         if !checked.variadic {
-                            assert_eq!(product.final_type.elements.len(), checked.elements.len());
+                            assert_eq!(
+                                product.final_type.position_count(),
+                                checked.position_count()
+                            );
                         }
                     }
                 }
                 LoweredExpressionKind::RepeatedProduct(repeated) => {
-                    let expected = match module.type_of_expression(syntax) {
-                        Some(CheckedType::Product(product)) if !product.variadic => {
-                            LoweredRepeatCount::Fixed(product.elements.len())
-                        }
-                        Some(CheckedType::Array { count, .. }) => {
-                            LoweredRepeatCount::Symbolic(count.as_ref().clone())
-                        }
-                        _ => LoweredRepeatCount::Fixed(1),
-                    };
+                    let expected = module
+                        .type_of_expression(syntax)
+                        .map_or(LoweredRepeatCount::Fixed(1), LoweredRepeatCount::for_type);
                     assert_eq!(repeated.count, expected);
                 }
                 _ => {}
@@ -25008,7 +25042,7 @@ mod tests {
             assert!(program.artifacts.iter().any(|(_, artifact)| matches!(
                 &artifact.plan, Some(LoweredArtifactPlan::TypeDescriptor(plan))
                 if matches!(&plan.value_type, CheckedType::Product(product)
-                    if product.elements.len() == 2 && product.elements.iter().all(|field| field.value_type == CheckedType::I32))
+                    if product.position_count() == 2 && product.iter_positions().all(|field| field.value_type == CheckedType::I32))
             )), "concrete owner needs a compound descriptor");
             if dictionary {
                 assert!(

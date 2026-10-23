@@ -582,16 +582,13 @@ fn contains_polymorphic_function(ty: &CheckedType) -> bool {
         CheckedType::RawPtr { pointee } => contains_polymorphic_function(pointee),
         CheckedType::RawMutPtr { pointee } => contains_polymorphic_function(pointee),
 
-        CheckedType::Array { element, count } => {
-            contains_polymorphic_function(element) || contains_polymorphic_function(count)
-        }
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             arguments.iter().any(contains_polymorphic_function)
         }
         CheckedType::Product(product) => product
-            .elements
+            .runs
             .iter()
-            .any(|field| contains_polymorphic_function(&field.value_type)),
+            .any(|run| contains_polymorphic_function(&run.element.value_type)),
         CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_polymorphic_function),
         CheckedType::Wrapper {
             arguments,
@@ -615,9 +612,9 @@ fn contains_function_behind_reference(ty: &CheckedType) -> bool {
             contains_polymorphic_function(value) || contains_function_behind_reference(value)
         }
         CheckedType::Product(product) => product
-            .elements
+            .runs
             .iter()
-            .any(|field| contains_function_behind_reference(&field.value_type)),
+            .any(|run| contains_function_behind_reference(&run.element.value_type)),
         CheckedType::Sum(sum) => sum
             .alternatives
             .iter()
@@ -630,7 +627,6 @@ fn contains_function_behind_reference(ty: &CheckedType) -> bool {
             arguments.iter().any(contains_function_behind_reference)
                 || contains_function_behind_reference(representation)
         }
-        CheckedType::Array { element, .. } => contains_function_behind_reference(element),
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             arguments.iter().any(contains_function_behind_reference)
         }
@@ -1842,8 +1838,11 @@ fn collect_parameter_ids(ty: &CheckedType, ids: &mut HashSet<crate::TypeParamete
             collect_parameter_ids(&function.result, ids);
         }
         CheckedType::Product(product) => {
-            for element in &product.elements {
-                collect_parameter_ids(&element.value_type, ids);
+            for run in &product.runs {
+                collect_parameter_ids(&run.element.value_type, ids);
+                if let crate::RunCount::Symbolic(count) = &run.count {
+                    collect_parameter_ids(count, ids);
+                }
             }
         }
         CheckedType::Sum(sum) => {
@@ -1858,7 +1857,6 @@ fn collect_parameter_ids(ty: &CheckedType, ids: &mut HashSet<crate::TypeParamete
                 collect_parameter_ids(argument, ids);
             }
         }
-        CheckedType::Array { element, .. } => collect_parameter_ids(element, ids),
         _ => {}
     }
 }

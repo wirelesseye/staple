@@ -163,7 +163,7 @@ pub(super) fn expand(plan: Plan, origin: &Origin) -> ExpansionResult {
                     });
                 }
                 (CheckedType::Product(left), CheckedType::Product(right)) => {
-                    for (left, right) in left.elements.iter().zip(&right.elements) {
+                    for (left, right) in left.iter_positions().zip(right.iter_positions()) {
                         if needs_conversion(&left.value_type, &right.value_type) {
                             requests.push(
                                 request(
@@ -196,18 +196,7 @@ pub(super) fn expand(plan: Plan, origin: &Origin) -> ExpansionResult {
                         representation: right,
                         ..
                     },
-                )
-                | (
-                    CheckedType::Array { element: left, .. },
-                    CheckedType::Array { element: right, .. },
-                ) => {
-                    if needs_conversion(left, right) {
-                        requests.push(
-                            request(left, right, plan.direction, origin)
-                                .map_err(|error| vec![error])?,
-                        );
-                    }
-                }
+                ) => {}
                 _ => {}
             }
             plan.children = requests.iter().map(planned).collect();

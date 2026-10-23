@@ -1412,8 +1412,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if let [Some(symbol)] = symbols.as_slice()
             && let CheckedType::Product(product) = parameter_type
             && product.slotted
-            && product.elements.len() > 1
-            && pointers.len() == product.elements.len()
+            && product.position_count() > 1
+            && pointers.len() == product.position_count()
             && pointers
                 .iter()
                 .enumerate()
@@ -1553,12 +1553,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     if self.capture_is_parameter_pointer(capture) {
                         if let CheckedType::Product(product) = &capture.value_type
                             && product.slotted
-                            && product.elements.len() > 1
+                            && product.position_count() > 1
                         {
                             let pointer_type =
                                 self.backend.context.ptr_type(AddressSpace::default());
                             let list_type = self.backend.context.struct_type(
-                                &vec![pointer_type.into(); product.elements.len()],
+                                &vec![pointer_type.into(); product.position_count()],
                                 false,
                             );
                             let list = self
@@ -1567,7 +1567,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                                 .build_load(list_type, pointer, "capture.slots")
                                 .map_err(compiler_diagnostic)?
                                 .into_struct_value();
-                            let pointers = (0..product.elements.len())
+                            let pointers = (0..product.position_count())
                                 .map(|slot| {
                                     self.backend
                                         .builder
@@ -5573,7 +5573,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     Diagnostic::new(span.clone(), "slotted capture storage is not available")
                 })?;
             let ty = self.backend.compile_type(value_type)?.into_struct_type();
-            (0..product.elements.len())
+            (0..product.position_count())
                 .map(|slot| {
                     self.backend
                         .builder
@@ -5619,7 +5619,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .view
                     .symbol(symbol)
                     .is_some_and(|symbol| symbol.mutated_parameter))
-            && matches!(&capture.value_type, CheckedType::Product(product) if product.slotted && product.elements.len() > 1)
+            && matches!(&capture.value_type, CheckedType::Product(product) if product.slotted && product.position_count() > 1)
         {
             return self.split_capture_pointer(symbol, &capture.value_type, environment, span);
         }
@@ -5999,14 +5999,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             } else if let BasicMetadataValueEnum::PointerValue(pointer) = value
                 && let CheckedType::Product(product) = call.function_type.parameter.as_ref()
-                && product.elements.len() == parameter_count
+                && product.position_count() == parameter_count
             {
                 // The whole product arrived by pointer (a borrowed or
                 // materialized argument, such as a `T` parameter instantiated
                 // at a tuple): pass each element in its own mode.
                 let product_type = self.backend.compile_product_type(product)?;
                 let indirect = self.backend.indirect_parameter_mask(&call.function_type);
-                for (index, element) in product.elements.iter().enumerate() {
+                for (index, element) in product.iter_positions().enumerate() {
                     let field = self
                         .backend
                         .builder
@@ -6452,7 +6452,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let symbol = capture.capture.symbol;
         if self.capture_stores_pointer(capture)
             && self.capture_is_parameter_pointer(capture)
-            && matches!(&capture.value_type, CheckedType::Product(product) if product.slotted && product.elements.len() > 1)
+            && matches!(&capture.value_type, CheckedType::Product(product) if product.slotted && product.position_count() > 1)
         {
             return self.split_capture_pointer(symbol, &capture.value_type, environment, span);
         }
@@ -9485,8 +9485,8 @@ fn intrinsic_buffer_element(
         ));
     };
     let buffer_type = match &record.expected {
-        CheckedType::Product(product) if !product.elements.is_empty() => {
-            &product.elements[0].value_type
+        CheckedType::Product(product) if !product.is_empty() => {
+            &product.position_element(0).unwrap().value_type
         }
         other => other,
     };

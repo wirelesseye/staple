@@ -968,13 +968,16 @@ impl<'a> BodyCloner<'a> {
         CheckedProductType {
             slotted: product.slotted,
             spreads: product.spreads.clone(),
-            elements: product
-                .elements
+            runs: product
+                .runs
                 .iter()
-                .map(|element| crate::CheckedTypeElement {
-                    name: element.name.clone(),
-                    value_type: self.ty(&element.value_type),
-                    default: None,
+                .map(|run| crate::CheckedTypeRun {
+                    element: crate::CheckedTypeElement {
+                        name: run.element.name.clone(),
+                        value_type: self.ty(&run.element.value_type),
+                        default: None,
+                    },
+                    count: run.count.clone(),
                 })
                 .collect(),
             variadic: product.variadic,
@@ -2003,7 +2006,7 @@ impl<'a> BodyCloner<'a> {
             let expanded_whole_mutation = argument.slot.is_none()
                 && argument.pass_mode == super::LoweredArgumentPassMode::MutablePlace
                 && matches!(&expected, CheckedType::Product(product)
-                    if product.slotted && product.elements.iter().enumerate().all(|(slot, _)|
+                    if product.slotted && product.iter_positions().enumerate().all(|(slot, _)|
                         call.function_type.mutations.contains(&CheckedMutation::Element(slot))));
             let mutation = whole_mutation
                 || expanded_whole_mutation
@@ -4728,7 +4731,7 @@ impl<'a> BodyValidator<'a> {
                 }
             }
             LoweredExpressionKind::Product(product) => {
-                for element in &product.final_type.elements {
+                for element in product.final_type.iter_positions() {
                     self.check_concrete_type(&origin, &element.value_type, "product element");
                 }
                 for step in &product.steps {

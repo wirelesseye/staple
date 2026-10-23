@@ -449,7 +449,7 @@ impl<'a> OwnershipChecker<'a> {
                 self.reject_borrowed_argument(&value.argument);
                 if let Some(plan) = self.module.juxtaposed_call_plan(value.syntax.id) {
                     let expected = match plan.function.parameter.as_ref() {
-                        crate::CheckedType::Product(product) => product.elements.len(),
+                        crate::CheckedType::Product(product) => product.position_count(),
                         _ => 0,
                     };
                     if plan.supplied_slots() == expected {
@@ -691,7 +691,7 @@ impl<'a> OwnershipChecker<'a> {
         }
         if let Expression::Product(product) = argument
             && let crate::CheckedType::Product(parameter) = callee.parameter.as_ref()
-            && product.elements.len() == parameter.elements.len()
+            && product.elements.len() == parameter.position_count()
         {
             for (index, element) in product.elements.iter().enumerate() {
                 if callee

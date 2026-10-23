@@ -1061,8 +1061,7 @@ impl<'a> LoweredWalker<'a> {
                     }
                     let types = match method_type.parameter.as_ref() {
                         CheckedType::Product(product) => product
-                            .elements
-                            .iter()
+                            .iter_positions()
                             .map(|element| element.value_type.clone())
                             .collect::<Vec<_>>(),
                         other => vec![other.clone()],
@@ -1822,7 +1821,13 @@ fn drop_glue_body(
             // The emitter iterates and drops fields in reverse element order,
             // skipping every field that does not need drop.
             let mut fields = Vec::new();
-            for (index, element) in product.elements.iter().enumerate().rev() {
+            for (index, element) in product
+                .iter_positions()
+                .enumerate()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+            {
                 if !program.concrete_needs_drop(&element.value_type) {
                     continue;
                 }

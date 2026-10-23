@@ -32,15 +32,20 @@ fn invalid_spread_substitution(
             }),
         CheckedType::Product(product) => {
             let mut count = 0usize;
-            for (index, element) in product.elements.iter().enumerate() {
-                if let Some(message) = visit(&element.value_type) {
+            for (index, run) in product.runs.iter().enumerate() {
+                if let Some(message) = visit(&run.element.value_type) {
+                    return Some(message);
+                }
+                if let RunCount::Symbolic(count) = &run.count
+                    && let Some(message) = visit(count)
+                {
                     return Some(message);
                 }
                 if product.spreads.contains(&index) {
                     count = count.saturating_add(
-                        match substitute_type(element.value_type.clone(), substitutions) {
+                        match substitute_type(run.element.value_type.clone(), substitutions) {
                             CheckedType::Product(spread) if !spread.variadic => {
-                                spread.elements.len()
+                                spread.position_count()
                             }
                             CheckedType::Parameter { .. }
                             | CheckedType::Inferred
@@ -51,7 +56,7 @@ fn invalid_spread_substitution(
                         },
                     );
                 } else {
-                    count = count.saturating_add(1);
+                    count = count.saturating_add(run.positions().unwrap_or(1));
                 }
             }
             if count > MAX_PRODUCT_ARITY || (product.slotted && count == 0) {
@@ -72,7 +77,6 @@ fn invalid_spread_substitution(
             arguments.iter().find_map(visit)
         }
         CheckedType::RawMutPtr { pointee: ty } | CheckedType::RawPtr { pointee: ty } => visit(ty),
-        CheckedType::Array { element, count } => visit(element).or_else(|| visit(count)),
         _ => None,
     }
 }

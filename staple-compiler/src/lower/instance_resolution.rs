@@ -393,18 +393,17 @@ pub(super) fn collect_referenced_parameters(
         CheckedType::RawMutPtr { pointee: payload } | CheckedType::RawPtr { pointee: payload } => {
             collect_referenced_parameters(payload, out)
         }
-        CheckedType::Array { element, count } => {
-            collect_referenced_parameters(element, out);
-            collect_referenced_parameters(count, out);
-        }
         CheckedType::TypeConstructor { arguments, .. } | CheckedType::Opaque { arguments, .. } => {
             for argument in arguments {
                 collect_referenced_parameters(argument, out);
             }
         }
         CheckedType::Product(product) => {
-            for element in &product.elements {
-                collect_referenced_parameters(&element.value_type, out);
+            for run in &product.runs {
+                collect_referenced_parameters(&run.element.value_type, out);
+                if let crate::RunCount::Symbolic(count) = &run.count {
+                    collect_referenced_parameters(count, out);
+                }
             }
         }
         CheckedType::Sum(sum) => {
@@ -977,16 +976,13 @@ fn contains_placeholder(value_type: &CheckedType) -> bool {
         CheckedType::RawMutPtr { pointee: payload } | CheckedType::RawPtr { pointee: payload } => {
             contains_placeholder(payload)
         }
-        CheckedType::Array { element, count } => {
-            contains_placeholder(element) || contains_placeholder(count)
-        }
         CheckedType::TypeConstructor { arguments, .. } | CheckedType::Opaque { arguments, .. } => {
             arguments.iter().any(contains_placeholder)
         }
         CheckedType::Product(product) => product
-            .elements
+            .runs
             .iter()
-            .any(|element| contains_placeholder(&element.value_type)),
+            .any(|run| contains_placeholder(&run.element.value_type)),
         CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_placeholder),
         CheckedType::Function(function) => {
             contains_placeholder(&function.parameter)
@@ -2187,9 +2183,9 @@ impl LoweredProgram {
                 self.contains_recursive_payload(representation)
             }
             CheckedType::Product(product) => product
-                .elements
+                .runs
                 .iter()
-                .any(|field| self.contains_recursive_payload(&field.value_type)),
+                .any(|run| self.contains_recursive_payload(&run.element.value_type)),
             CheckedType::Sum(sum) => sum
                 .alternatives
                 .iter()
@@ -2316,9 +2312,9 @@ fn concrete_type_needs_drop(program: &LoweredProgram, value_type: &CheckedType) 
     match value_type {
         CheckedType::CString => true,
         CheckedType::Product(product) => product
-            .elements
+            .runs
             .iter()
-            .any(|element| concrete_type_needs_drop(program, &element.value_type)),
+            .any(|run| concrete_type_needs_drop(program, &run.element.value_type)),
         CheckedType::Sum(sum) => sum
             .alternatives
             .iter()
@@ -3115,10 +3111,6 @@ impl<'a> ParameterCollector<'a> {
             CheckedType::Parameter { id, name, .. } => self.relevant.notice_type(*id, name),
             CheckedType::RawMutPtr { pointee: payload }
             | CheckedType::RawPtr { pointee: payload } => self.collect_type(payload),
-            CheckedType::Array { element, count } => {
-                self.collect_type(element);
-                self.collect_type(count);
-            }
             CheckedType::TypeConstructor { arguments, .. }
             | CheckedType::Opaque { arguments, .. } => {
                 for argument in arguments {
@@ -3126,8 +3118,11 @@ impl<'a> ParameterCollector<'a> {
                 }
             }
             CheckedType::Product(product) => {
-                for element in &product.elements {
-                    self.collect_type(&element.value_type);
+                for run in &product.runs {
+                    self.collect_type(&run.element.value_type);
+                    if let crate::RunCount::Symbolic(count) = &run.count {
+                        self.collect_type(count);
+                    }
                 }
             }
             CheckedType::Sum(sum) => {
@@ -3285,7 +3280,7 @@ impl<'a> ParameterCollector<'a> {
             }
             LoweredExpressionKind::Product(product) => {
                 self.family("expression.product");
-                for element in &product.final_type.elements {
+                for element in product.final_type.iter_positions() {
                     self.collect_type(&element.value_type);
                 }
                 for step in &product.steps {
@@ -5338,10 +5333,10 @@ mod tests {
             .index_trait
             .expect("Index in the prelude");
         let method = program.traits.get(index).expect("Index trait").methods[0];
-        let product = CheckedType::Product(CheckedProductType {
-            slotted: false,
-            spreads: Vec::new(),
-            elements: vec![
+        let product = CheckedType::Product(CheckedProductType::from_elements(
+            false,
+            Vec::new(),
+            vec![
                 CheckedTypeElement {
                     name: None,
                     value_type: CheckedType::I32,
@@ -5353,8 +5348,8 @@ mod tests {
                     default: None,
                 },
             ],
-            variadic: false,
-        });
+            false,
+        ));
         let evidence = TraitEvidence::DeclaredBound {
             trait_id: index,
             method: Some(method),

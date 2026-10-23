@@ -1159,8 +1159,11 @@ impl ConstructorAdapterPlan {
                     ids.insert(*id);
                 }
                 CheckedType::Product(product) => {
-                    for field in &product.elements {
-                        collect(&field.value_type, ids);
+                    for run in &product.runs {
+                        collect(&run.element.value_type, ids);
+                        if let crate::RunCount::Symbolic(count) = &run.count {
+                            collect(count, ids);
+                        }
                     }
                 }
                 CheckedType::Sum(sum) => {
@@ -1170,10 +1173,6 @@ impl ConstructorAdapterPlan {
                 }
                 CheckedType::Wrapper { representation, .. } => collect(representation, ids),
 
-                CheckedType::Array { element, count } => {
-                    collect(element, ids);
-                    collect(count, ids);
-                }
                 CheckedType::Function(function) => {
                     collect(&function.parameter, ids);
                     collect(&function.result, ids);

@@ -3296,10 +3296,7 @@ mod tests {
     /// A distinct concrete type per growth step: an array whose count is the
     /// step number keeps every key small but fresh.
     fn grow_type(depth: u64) -> CheckedType {
-        CheckedType::Array {
-            element: Box::new(CheckedType::I32),
-            count: Box::new(CheckedType::NumberLiteral(depth + 1)),
-        }
+        crate::typecheck::array_type(CheckedType::I32, CheckedType::NumberLiteral(depth + 1))
     }
 
     #[test]

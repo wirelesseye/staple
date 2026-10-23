@@ -240,10 +240,6 @@ impl<'program, 'context> Backend<'program, 'context> {
             CheckedType::NumberLiteral(_) => {
                 Ok(self.compile_integer_type(IntegerType::USize).into())
             }
-            CheckedType::Array { .. } => Err(Diagnostic::new(
-                Span::Compiler,
-                "cannot generate code for an array with an unspecialized length",
-            )),
             CheckedType::CChar => Ok(self.context.i8_type().into()),
             CheckedType::Parameter { name, .. } => Err(Diagnostic::new(
                 Span::Compiler,
@@ -329,8 +325,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         let layout = match value_type {
             CheckedType::Product(product) => {
                 let fields = product
-                    .elements
-                    .iter()
+                    .iter_positions()
                     .map(|field| self.descriptor_layout(&field.value_type))
                     .collect::<CodeGenerationResult<Vec<_>>>()?;
                 DescriptorLayout::product(&fields)
@@ -729,8 +724,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         product: &CheckedProductType,
     ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
         let fields = product
-            .elements
-            .iter()
+            .iter_positions()
             .map(|element| self.compile_type(&element.value_type))
             .collect::<CodeGenerationResult<Vec<_>>>()?;
         Ok(self.context.struct_type(&fields, false))
@@ -946,7 +940,7 @@ mod tests {
                 types.push(signature.result.as_ref().clone());
                 match signature.parameter.as_ref() {
                     CheckedType::Product(product) => {
-                        types.extend(product.elements.iter().map(|e| e.value_type.clone()))
+                        types.extend(product.iter_positions().map(|e| e.value_type.clone()))
                     }
                     other => types.push(other.clone()),
                 }
@@ -1151,7 +1145,7 @@ mod tests {
         let backend = Backend::new(&context, &target, LayoutContext::new(module.program()));
         let mut signature = module.program().instances().find_map(|(id, _)| {
             let signature = module.program().instance_signature(id)?;
-            matches!(signature.parameter.as_ref(), CheckedType::Product(product) if product.elements.len() == 2)
+            matches!(signature.parameter.as_ref(), CheckedType::Product(product) if product.position_count() == 2)
                 .then(|| signature.clone())
         }).expect("two-argument instance");
         assert_eq!(
@@ -1415,7 +1409,7 @@ mod tests {
                 CheckedType::Product(product) => {
                     let mut offset = 0u64;
                     let llvm = ty.into_struct_type();
-                    for (index, field) in product.elements.iter().enumerate() {
+                    for (index, field) in product.iter_positions().enumerate() {
                         let field_layout = backend.descriptor_layout(&field.value_type).unwrap();
                         offset =
                             offset.div_ceil(field_layout.align as u64) * field_layout.align as u64;

@@ -14,8 +14,8 @@ use staple_syntax::Diagnostic;
 use crate::{
     CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedResource, CheckedStateEffect,
     CheckedType, FunctionId, InitializerId, LoweredCallableAdapter, LoweredReactiveCallbackId,
-    LoweredReactiveOperationId, Origin, StructuralTraitMethod, SymbolId, TraitEvidence, TraitId,
-    TraitMethodId, TypeId, TypeParameterId,
+    LoweredReactiveOperationId, Origin, RunCount, StructuralTraitMethod, SymbolId, TraitEvidence,
+    TraitId, TraitMethodId, TypeId, TypeParameterId,
 };
 
 /// One canonical structural type. Every vector preserves the checked semantic
@@ -51,10 +51,6 @@ pub(crate) enum CanonicalType {
     StringLiteralSet(Vec<String>),
     SharedBuffer(Box<CanonicalType>),
     Buffer(Box<CanonicalType>),
-    Array {
-        element: Box<CanonicalType>,
-        count: Box<CanonicalType>,
-    },
     CString,
     CChar,
     RawOpaquePtr,
@@ -73,7 +69,7 @@ pub(crate) enum CanonicalType {
     Product {
         slotted: bool,
         spreads: Vec<usize>,
-        elements: Vec<CanonicalProductElement>,
+        runs: Vec<CanonicalProductRun>,
         variadic: bool,
     },
     Sum {
@@ -113,6 +109,18 @@ pub(crate) enum CanonicalNominalKind {
 pub(crate) struct CanonicalProductElement {
     pub name: Option<String>,
     pub value_type: CanonicalType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CanonicalProductRun {
+    pub element: CanonicalProductElement,
+    pub count: CanonicalRunCount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum CanonicalRunCount {
+    Fixed(usize),
+    Symbolic(Box<CanonicalType>),
 }
 
 /// A canonical function shape. `CheckedFunctionType::default` is a source
@@ -172,16 +180,17 @@ impl CanonicalType {
             | CanonicalType::Buffer(inner)
             | CanonicalType::RawMutPtr { pointee: inner }
             | CanonicalType::RawPtr { pointee: inner } => inner.nesting_depth(),
-            CanonicalType::Array { element, count } => {
-                deepest(&mut [element.as_ref(), count.as_ref()].into_iter())
-            }
             CanonicalType::Nominal { arguments, .. }
             | CanonicalType::Sum {
                 alternatives: arguments,
             } => deepest(&mut arguments.iter()),
-            CanonicalType::Product { elements, .. } => {
-                deepest(&mut elements.iter().map(|element| &element.value_type))
-            }
+            CanonicalType::Product { runs, .. } => deepest(&mut runs.iter().flat_map(|run| {
+                let mut nested = vec![&run.element.value_type];
+                if let CanonicalRunCount::Symbolic(count) = &run.count {
+                    nested.push(count.as_ref());
+                }
+                nested.into_iter()
+            })),
             CanonicalType::Function(function) => {
                 deepest(&mut [function.parameter.as_ref(), function.result.as_ref()].into_iter())
             }
@@ -290,10 +299,6 @@ impl CanonicalType {
             CheckedType::StringLiteralSet(values) => {
                 CanonicalType::StringLiteralSet(values.clone())
             }
-            CheckedType::Array { element, count } => CanonicalType::Array {
-                element: Box::new(Self::convert(element, origin, runtime, binders)?),
-                count: Box::new(Self::convert(count, origin, runtime, binders)?),
-            },
             CheckedType::CString => CanonicalType::CString,
             CheckedType::CChar => CanonicalType::CChar,
             CheckedType::RawOpaquePtr => CanonicalType::RawOpaquePtr,
@@ -337,18 +342,26 @@ impl CanonicalType {
             CheckedType::Product(product) => CanonicalType::Product {
                 slotted: product.slotted,
                 spreads: product.spreads.clone(),
-                elements: product
-                    .elements
+                runs: product
+                    .runs
                     .iter()
-                    .map(|element| {
-                        Ok(CanonicalProductElement {
-                            name: element.name.clone(),
-                            value_type: Self::convert(
-                                &element.value_type,
-                                origin,
-                                runtime,
-                                binders,
-                            )?,
+                    .map(|run| {
+                        Ok(CanonicalProductRun {
+                            element: CanonicalProductElement {
+                                name: run.element.name.clone(),
+                                value_type: Self::convert(
+                                    &run.element.value_type,
+                                    origin,
+                                    runtime,
+                                    binders,
+                                )?,
+                            },
+                            count: match &run.count {
+                                RunCount::Fixed(count) => CanonicalRunCount::Fixed(*count),
+                                RunCount::Symbolic(count) => CanonicalRunCount::Symbolic(Box::new(
+                                    Self::convert(count, origin, runtime, binders)?,
+                                )),
+                            },
                         })
                     })
                     .collect::<Result<Vec<_>, Diagnostic>>()?,
@@ -1621,12 +1634,12 @@ mod tests {
             match &mut parameter {
                 CheckedType::Product(product) => product.slotted = true,
                 _ => {
-                    parameter = CheckedType::Product(CheckedProductType {
-                        slotted: true,
-                        spreads: Vec::new(),
-                        elements: vec![element(None, parameter, None); 2],
-                        variadic: false,
-                    })
+                    parameter = CheckedType::Product(CheckedProductType::from_elements(
+                        true,
+                        Vec::new(),
+                        vec![element(None, parameter, None); 2],
+                        false,
+                    ))
                 }
             }
         }
@@ -1656,14 +1669,19 @@ mod tests {
             | CanonicalType::Buffer(payload)
             | CanonicalType::RawMutPtr { pointee: payload }
             | CanonicalType::RawPtr { pointee: payload } => 1 + node_count(payload),
-            CanonicalType::Array { element, count } => 1 + node_count(element) + node_count(count),
             CanonicalType::Nominal { arguments, .. } => {
                 1 + arguments.iter().map(node_count).sum::<usize>()
             }
-            CanonicalType::Product { elements, .. } => {
-                1 + elements
+            CanonicalType::Product { runs, .. } => {
+                1 + runs
                     .iter()
-                    .map(|element| node_count(&element.value_type))
+                    .map(|run| {
+                        node_count(&run.element.value_type)
+                            + match &run.count {
+                                CanonicalRunCount::Fixed(_) => 0,
+                                CanonicalRunCount::Symbolic(count) => node_count(count),
+                            }
+                    })
                     .sum::<usize>()
             }
             CanonicalType::Sum { alternatives } => {
@@ -1704,32 +1722,32 @@ mod tests {
                 9,
                 "Second",
                 vec![CheckedType::I32],
-                CheckedType::Product(CheckedProductType {
-                    slotted: false,
-                    spreads: Vec::new(),
-                    elements: vec![element(Some("payload"), CheckedType::I32, None)],
-                    variadic: false,
-                }),
+                CheckedType::Product(CheckedProductType::from_elements(
+                    false,
+                    Vec::new(),
+                    vec![element(Some("payload"), CheckedType::I32, None)],
+                    false,
+                )),
             )),
             "nominal identity ignores display names and expanded representations"
         );
         assert_eq!(
-            concrete(&CheckedType::Product(CheckedProductType {
-                slotted: false,
-                spreads: Vec::new(),
-                elements: vec![element(Some("x"), CheckedType::I32, None)],
-                variadic: false,
-            })),
-            concrete(&CheckedType::Product(CheckedProductType {
-                slotted: false,
-                spreads: Vec::new(),
-                elements: vec![element(
+            concrete(&CheckedType::Product(CheckedProductType::from_elements(
+                false,
+                Vec::new(),
+                vec![element(Some("x"), CheckedType::I32, None)],
+                false,
+            ))),
+            concrete(&CheckedType::Product(CheckedProductType::from_elements(
+                false,
+                Vec::new(),
+                vec![element(
                     Some("x"),
                     CheckedType::I32,
                     Some(integer_default("1")),
                 )],
-                variadic: false,
-            })),
+                false,
+            ))),
             "contextual element defaults never participate in a key"
         );
         let with_default = CheckedFunctionType {
@@ -1782,49 +1800,49 @@ mod tests {
             "nominal arguments are part of identity"
         );
         let named = |name: Option<&str>| {
-            CheckedType::Product(CheckedProductType {
-                slotted: false,
-                spreads: Vec::new(),
-                elements: vec![element(name, CheckedType::I32, None)],
-                variadic: false,
-            })
+            CheckedType::Product(CheckedProductType::from_elements_raw(
+                false,
+                Vec::new(),
+                vec![element(name, CheckedType::I32, None)],
+                false,
+            ))
         };
         assert_ne!(concrete(&named(Some("x"))), concrete(&named(Some("y"))));
         assert_ne!(concrete(&named(Some("x"))), concrete(&named(None)));
         assert_ne!(
-            concrete(&CheckedType::Product(CheckedProductType {
-                slotted: false,
-                spreads: Vec::new(),
-                elements: vec![
+            concrete(&CheckedType::Product(CheckedProductType::from_elements(
+                false,
+                Vec::new(),
+                vec![
                     element(None, CheckedType::I32, None),
                     element(None, CheckedType::I64, None),
                 ],
-                variadic: false,
-            })),
-            concrete(&CheckedType::Product(CheckedProductType {
-                slotted: false,
-                spreads: Vec::new(),
-                elements: vec![
+                false,
+            ))),
+            concrete(&CheckedType::Product(CheckedProductType::from_elements(
+                false,
+                Vec::new(),
+                vec![
                     element(None, CheckedType::I64, None),
                     element(None, CheckedType::I32, None),
                 ],
-                variadic: false,
-            })),
+                false,
+            ))),
             "field order is identity"
         );
         assert_ne!(
-            concrete(&CheckedType::Product(CheckedProductType {
-                slotted: false,
-                spreads: Vec::new(),
-                elements: vec![element(None, CheckedType::I32, None)],
-                variadic: false,
-            })),
-            concrete(&CheckedType::Product(CheckedProductType {
-                slotted: false,
-                spreads: Vec::new(),
-                elements: vec![element(None, CheckedType::I32, None)],
-                variadic: true,
-            })),
+            concrete(&CheckedType::Product(CheckedProductType::from_elements(
+                false,
+                Vec::new(),
+                vec![element(None, CheckedType::I32, None)],
+                false,
+            ))),
+            concrete(&CheckedType::Product(CheckedProductType::from_elements(
+                false,
+                Vec::new(),
+                vec![element(None, CheckedType::I32, None)],
+                true,
+            ))),
             "the variadic flag is identity"
         );
         assert_ne!(
@@ -1837,21 +1855,28 @@ mod tests {
             "alternative order is identity"
         );
         assert!(matches!(
-            concrete(&CheckedType::Array {
-                element: Box::new(CheckedType::I32),
-                count: Box::new(CheckedType::NumberLiteral(2)),
-            }),
-            CanonicalType::Array { .. }
+            concrete(&crate::typecheck::array_type(
+                CheckedType::I32,
+                CheckedType::NumberLiteral(2),
+            )),
+            CanonicalType::Product { runs, .. }
+                if matches!(
+                    runs.as_slice(),
+                    [CanonicalProductRun {
+                        count: CanonicalRunCount::Fixed(2),
+                        ..
+                    }]
+                )
         ));
         assert_ne!(
-            concrete(&CheckedType::Array {
-                element: Box::new(CheckedType::I32),
-                count: Box::new(CheckedType::NumberLiteral(2)),
-            }),
-            concrete(&CheckedType::Array {
-                element: Box::new(CheckedType::I32),
-                count: Box::new(CheckedType::NumberLiteral(3)),
-            }),
+            concrete(&crate::typecheck::array_type(
+                CheckedType::I32,
+                CheckedType::NumberLiteral(2),
+            )),
+            concrete(&crate::typecheck::array_type(
+                CheckedType::I32,
+                CheckedType::NumberLiteral(3),
+            )),
             "repeated counts are identity"
         );
         assert_ne!(
@@ -3086,10 +3111,10 @@ mod tests {
     }
     #[test]
     fn slotted_product_kind_is_part_of_specialization_identity() {
-        let plain = CheckedType::Product(CheckedProductType {
-            slotted: false,
-            spreads: Vec::new(),
-            elements: vec![
+        let plain = CheckedType::Product(CheckedProductType::from_elements(
+            false,
+            Vec::new(),
+            vec![
                 CheckedTypeElement {
                     name: None,
                     value_type: CheckedType::I32,
@@ -3097,8 +3122,8 @@ mod tests {
                 };
                 2
             ],
-            variadic: false,
-        });
+            false,
+        ));
         let mut slots = plain.clone();
         let CheckedType::Product(product) = &mut slots else {
             unreachable!()

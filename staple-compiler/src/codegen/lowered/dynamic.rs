@@ -1666,7 +1666,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let descriptor = self.dynamic_descriptor(&call.result_type, environment, span)?;
         match representation {
             CheckedType::Product(product) => {
-                for (index, _) in product.elements.iter().enumerate() {
+                for (index, _) in product.iter_positions().enumerate() {
                     let value = slots.get(index).and_then(|slot| *slot).ok_or_else(|| {
                         Diagnostic::new(span.clone(), "missing dynamic constructor field")
                     })?;
@@ -1761,7 +1761,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         };
         let descriptor = self.prepare_dynamic_descriptor(product, &mut environment, span)?;
         if let CheckedType::Product(product) = product {
-            for index in 0..product.elements.len() {
+            for index in 0..product.position_count() {
                 let (field, descriptor) =
                     self.dynamic_product_field(descriptor, result, index as u32)?;
                 self.backend.copy_dynamic_value(
@@ -4221,7 +4221,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         ));
                     };
                     let descriptor = self.dynamic_descriptor(
-                        &product.elements[1].value_type,
+                        &product.position_element(1).unwrap().value_type,
                         environment,
                         span,
                     )?;
@@ -5066,8 +5066,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             CheckedType::Product(_) | CheckedType::Sum(_) => {
                 let children: Vec<&CheckedType> = match ty {
                     CheckedType::Product(product) => product
-                        .elements
-                        .iter()
+                        .iter_positions()
                         .map(|field| &field.value_type)
                         .collect(),
                     CheckedType::Sum(sum) => sum.alternatives.iter().collect(),
@@ -6790,8 +6789,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             CheckedType::Product(product) => (
                 CompoundDescriptorShape::Product,
                 product
-                    .elements
-                    .iter()
+                    .iter_positions()
                     .map(|field| &field.value_type)
                     .collect(),
             ),

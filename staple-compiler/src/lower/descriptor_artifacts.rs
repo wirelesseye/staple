@@ -42,8 +42,11 @@ pub(super) fn collect_concrete_types(ty: &CheckedType, types: &mut Vec<CheckedTy
     }
     match ty {
         CheckedType::Product(product) => {
-            for field in &product.elements {
-                collect_concrete_types(&field.value_type, types);
+            for run in &product.runs {
+                collect_concrete_types(&run.element.value_type, types);
+                if let crate::RunCount::Symbolic(count) = &run.count {
+                    collect_concrete_types(count, types);
+                }
             }
         }
         CheckedType::Sum(sum) => {
@@ -174,8 +177,7 @@ pub(super) fn collect_compound_shapes(
         CheckedType::Product(product) => (
             Shape::Product,
             product
-                .elements
-                .iter()
+                .iter_positions()
                 .map(|field| &field.value_type)
                 .collect(),
         ),
@@ -840,8 +842,7 @@ pub(super) fn expand(
         Plan::TypeDescriptor(mut plan) => {
             let components: Vec<&CheckedType> = match &plan.value_type {
                 CheckedType::Product(product) => product
-                    .elements
-                    .iter()
+                    .iter_positions()
                     .map(|field| &field.value_type)
                     .collect(),
                 CheckedType::Sum(sum) => sum.alternatives.iter().collect(),

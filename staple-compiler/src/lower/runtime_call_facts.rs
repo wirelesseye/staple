@@ -56,8 +56,9 @@ impl LoweredRuntimeCallFacts {
                 let CheckedType::Product(product) = function.result.as_ref() else {
                     return Err("completion result is not a wait product".into());
                 };
-                let Some(CheckedType::Opaque { id, arguments, .. }) =
-                    product.elements.first().map(|element| &element.value_type)
+                let Some(CheckedType::Opaque { id, arguments, .. }) = product
+                    .position_element(0)
+                    .map(|element| &element.value_type)
                 else {
                     return Err("completion result is missing its Wait payload".into());
                 };

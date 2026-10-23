@@ -638,8 +638,7 @@ fn select_structural(
     // the element type.
     let injections = |product: &crate::CheckedProductType, output: &CheckedType| {
         product
-            .elements
-            .iter()
+            .iter_positions()
             .map(|element| match output {
                 CheckedType::Sum(sum) if !crate::types_equivalent(output, &element.value_type) => {
                     sum.alternatives
@@ -664,14 +663,12 @@ fn select_structural(
                 CheckedType::Product(product) if !product.variadic => (
                     Shape::DebugProduct {
                         names: product
-                            .elements
-                            .iter()
+                            .iter_positions()
                             .map(|element| element.name.clone())
                             .collect(),
                     },
                     product
-                        .elements
-                        .iter()
+                        .iter_positions()
                         .map(|element| element.value_type.clone())
                         .collect(),
                 ),
@@ -721,7 +718,7 @@ fn select_structural(
                 }
                 CheckedType::Product(product)
                     if !product.variadic
-                        && !product.elements.is_empty()
+                        && !product.is_empty()
                         && matches!(position, CheckedType::USize | CheckedType::Inferred) =>
                 {
                     if mutate {
@@ -736,7 +733,7 @@ fn select_structural(
                         }
                         (
                             Shape::MutateProduct {
-                                length: product.elements.len(),
+                                length: product.position_count(),
                             },
                             vec![target.clone(), CheckedType::USize, element],
                             vec![target.clone()],
@@ -767,7 +764,7 @@ fn select_structural(
             let CheckedType::Product(product) = source else {
                 return Err(unavailable());
             };
-            if product.variadic || product.elements.is_empty() {
+            if product.variadic || product.is_empty() {
                 return Err(unavailable());
             }
             let iterator = pair_with_cursor(source);
@@ -783,15 +780,17 @@ fn select_structural(
             let CheckedType::Product(pair) = iterator else {
                 return Err(unavailable());
             };
-            let [first, second] = pair.elements.as_slice() else {
+            if pair.position_count() != 2 {
                 return Err(unavailable());
-            };
+            }
+            let first = pair.position_element(0).unwrap();
+            let second = pair.position_element(1).unwrap();
             let (CheckedType::Product(product), CheckedType::USize) =
                 (&first.value_type, &second.value_type)
             else {
                 return Err(unavailable());
             };
-            if product.variadic || product.elements.is_empty() {
+            if product.variadic || product.is_empty() {
                 return Err(unavailable());
             }
             let item = crate::product_item(product);
@@ -806,23 +805,24 @@ fn select_structural(
             )?;
             let result = function_type.result.as_ref().clone();
             let sum = crate::sum_through_implicit_wrapper(&result).ok_or_else(unavailable)?;
-            let yield_representation = CheckedType::Product(crate::CheckedProductType {
-                slotted: false,
-                spreads: Vec::new(),
-                elements: vec![
-                    crate::CheckedTypeElement {
-                        name: None,
-                        value_type: item.clone(),
-                        default: None,
-                    },
-                    crate::CheckedTypeElement {
-                        name: None,
-                        value_type: iterator.clone(),
-                        default: None,
-                    },
-                ],
-                variadic: false,
-            });
+            let yield_representation =
+                CheckedType::Product(crate::CheckedProductType::from_elements(
+                    false,
+                    Vec::new(),
+                    vec![
+                        crate::CheckedTypeElement {
+                            name: None,
+                            value_type: item.clone(),
+                            default: None,
+                        },
+                        crate::CheckedTypeElement {
+                            name: None,
+                            value_type: iterator.clone(),
+                            default: None,
+                        },
+                    ],
+                    false,
+                ));
             let mut done = None;
             let mut yield_ = None;
             for (index, alternative) in sum.alternatives.iter().enumerate() {
@@ -897,10 +897,10 @@ fn sum_width(output: &crate::CheckedType) -> usize {
 
 /// The `(source, USize)` iterator a product converts into.
 fn pair_with_cursor(source: &crate::CheckedType) -> crate::CheckedType {
-    crate::CheckedType::Product(crate::CheckedProductType {
-        slotted: false,
-        spreads: Vec::new(),
-        elements: vec![
+    crate::CheckedType::Product(crate::CheckedProductType::from_elements(
+        false,
+        Vec::new(),
+        vec![
             crate::CheckedTypeElement {
                 name: None,
                 value_type: source.clone(),
@@ -912,8 +912,8 @@ fn pair_with_cursor(source: &crate::CheckedType) -> crate::CheckedType {
                 default: None,
             },
         ],
-        variadic: false,
-    })
+        false,
+    ))
 }
 
 /// The obligation a selection completes, when it completes one.

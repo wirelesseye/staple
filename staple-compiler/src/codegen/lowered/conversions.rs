@@ -133,7 +133,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             (CheckedType::Product(left), CheckedType::Product(right)) => {
                 let mut offset = 0u64;
-                for (left, right) in left.elements.iter().zip(&right.elements) {
+                for (left, right) in left.iter_positions().zip(right.iter_positions()) {
                     let layout = self.backend.descriptor_layout(&left.value_type)?;
                     offset = offset.div_ceil(layout.align as u64) * layout.align as u64;
                     if let Some(child) = self.planned_conversion_child(
@@ -305,7 +305,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .copy_dynamic_value(descriptor, source, destination)?;
         match (&plan.concrete, &plan.dynamic) {
             (CheckedType::Product(left), CheckedType::Product(right)) => {
-                for (index, (left, right)) in left.elements.iter().zip(&right.elements).enumerate()
+                for (index, (left, right)) in left
+                    .iter_positions()
+                    .zip(right.iter_positions())
+                    .enumerate()
                 {
                     let Some(child) = self.planned_conversion_child(
                         plan,

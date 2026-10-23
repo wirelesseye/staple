@@ -444,7 +444,7 @@ fn structural_deref_index_body(
         return Ok((
             StructuralBody::DerefIndexLoad {
                 element: element.clone(),
-                length: product.elements.len(),
+                length: product.position_count(),
                 output,
             },
             Vec::new(),
@@ -538,7 +538,7 @@ fn structural_equality_body(
         .is_some_and(|method| method.name == "ne");
     let mut requests = Vec::new();
     let mut elements = Vec::new();
-    for element in &product.elements {
+    for element in product.iter_positions() {
         let selected = select_concrete_trait_method(
             program,
             origin,
@@ -632,7 +632,7 @@ fn structural_debug_body(
                 use_site: None,
             }];
             let mut steps = vec![DebugStep::Write("(".to_string())];
-            for (index, element) in product.elements.iter().enumerate() {
+            for (index, element) in product.iter_positions().enumerate() {
                 if index != 0 {
                     steps.push(DebugStep::Write(
                         if product.slotted { "; " } else { ", " }.to_string(),
@@ -722,8 +722,7 @@ fn structural_index_body(
     };
     if product.homogeneous_element().is_none() {
         let elements = product
-            .elements
-            .iter()
+            .iter_positions()
             .enumerate()
             .map(|(index, element)| indexed_element(index, &element.value_type, &output, origin))
             .collect::<Result<Vec<_>, _>>()?;
@@ -740,7 +739,7 @@ fn structural_index_body(
             .clone();
         Ok(StructuralBody::IndexLoad {
             element,
-            length: product.elements.len(),
+            length: product.position_count(),
             output,
         })
     }
@@ -788,7 +787,7 @@ fn structural_mutate_body(
     Ok((
         StructuralBody::MutateReplace {
             element,
-            length: product.elements.len(),
+            length: product.position_count(),
             drop_previous,
         },
         request,
@@ -801,10 +800,10 @@ fn structural_into_iterator_body(
     origin: &Origin,
 ) -> Result<StructuralBody, Diagnostic> {
     let source = structural_argument(plan, 0, origin)?;
-    let iterator = CheckedType::Product(CheckedProductType {
-        slotted: false,
-        spreads: Vec::new(),
-        elements: vec![
+    let iterator = CheckedType::Product(CheckedProductType::from_elements(
+        false,
+        Vec::new(),
+        vec![
             CheckedTypeElement {
                 name: None,
                 value_type: source.clone(),
@@ -816,8 +815,8 @@ fn structural_into_iterator_body(
                 default: None,
             },
         ],
-        variadic: false,
-    });
+        false,
+    ));
     if let Some(recorded) = plan.arguments.get(1)
         && recorded != &iterator
     {
@@ -845,7 +844,8 @@ fn structural_next_body(
             "structural Iterator target is not a `(product, USize)` pair".to_string(),
         ));
     };
-    let CheckedType::Product(product) = &iter_product.elements[0].value_type else {
+    let CheckedType::Product(product) = &iter_product.position_element(0).unwrap().value_type
+    else {
         return Err(Diagnostic::new(
             origin.span.clone(),
             "structural Iterator target does not contain a product".to_string(),
@@ -858,10 +858,10 @@ fn structural_next_body(
         ));
     };
     let sum = sum.clone();
-    let yield_representation = CheckedType::Product(CheckedProductType {
-        slotted: false,
-        spreads: Vec::new(),
-        elements: vec![
+    let yield_representation = CheckedType::Product(CheckedProductType::from_elements(
+        false,
+        Vec::new(),
+        vec![
             CheckedTypeElement {
                 name: None,
                 value_type: item.clone(),
@@ -873,8 +873,8 @@ fn structural_next_body(
                 default: None,
             },
         ],
-        variadic: false,
-    });
+        false,
+    ));
     let mut done = Vec::new();
     let mut yields = Vec::new();
     for (index, alternative) in sum.alternatives.iter().enumerate() {
@@ -890,8 +890,7 @@ fn structural_next_body(
     let done = resolved_alternative(&done, "`IterStep.Done`", origin)?;
     let yield_ = resolved_alternative(&yields, "`IterStep.Yield`", origin)?;
     let elements = product
-        .elements
-        .iter()
+        .iter_positions()
         .enumerate()
         .map(|(index, element)| indexed_element(index, &element.value_type, &item, origin))
         .collect::<Result<Vec<_>, _>>()?;
@@ -954,8 +953,7 @@ fn flatten_parameters(parameter: &CheckedType) -> (Vec<CheckedType>, bool) {
     match parameter {
         CheckedType::Product(product) => (
             product
-                .elements
-                .iter()
+                .iter_positions()
                 .map(|element| element.value_type.clone())
                 .collect(),
             product.variadic,
@@ -970,10 +968,10 @@ fn flatten_parameters(parameter: &CheckedType) -> (Vec<CheckedType>, bool) {
 fn build_product(parameters: &[CheckedType], variadic: bool) -> CheckedType {
     match parameters {
         [single] => single.clone(),
-        _ => CheckedType::Product(CheckedProductType {
-            slotted: false,
-            spreads: Vec::new(),
-            elements: parameters
+        _ => CheckedType::Product(CheckedProductType::from_elements(
+            false,
+            Vec::new(),
+            parameters
                 .iter()
                 .map(|value_type| CheckedTypeElement {
                     name: None,
@@ -982,7 +980,7 @@ fn build_product(parameters: &[CheckedType], variadic: bool) -> CheckedType {
                 })
                 .collect(),
             variadic,
-        }),
+        )),
     }
 }
 
@@ -1040,10 +1038,10 @@ mod tests {
     }
 
     fn positional_product(elements: &[CheckedType]) -> CheckedType {
-        CheckedType::Product(CheckedProductType {
-            slotted: false,
-            spreads: Vec::new(),
-            elements: elements
+        CheckedType::Product(CheckedProductType::from_elements(
+            false,
+            Vec::new(),
+            elements
                 .iter()
                 .map(|value_type| CheckedTypeElement {
                     name: None,
@@ -1051,8 +1049,8 @@ mod tests {
                     default: None,
                 })
                 .collect(),
-            variadic: false,
-        })
+            false,
+        ))
     }
 
     #[test]
@@ -1714,8 +1712,8 @@ mod tests {
                 matches!(
                     &plan.arguments[0],
                     CheckedType::Product(product)
-                        if product.elements.len() == 2
-                            && product.elements.iter().all(|element| matches!(
+                        if product.position_count() == 2
+                            && product.iter_positions().all(|element| matches!(
                                 element.value_type,
                                 CheckedType::Product(_)
                             ))
@@ -1769,8 +1767,8 @@ mod tests {
                 matches!(
                     &plan.arguments[0],
                     CheckedType::Product(product)
-                        if product.elements.len() == 2
-                            && product.elements.iter().any(|element| matches!(
+                        if product.position_count() == 2
+                            && product.iter_positions().any(|element| matches!(
                                 element.value_type,
                                 CheckedType::Wrapper { .. }
                             ))

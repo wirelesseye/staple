@@ -210,8 +210,7 @@ impl<'program, 'context> Backend<'program, 'context> {
     ) -> CodeGenerationResult<Vec<inkwell::types::BasicMetadataTypeEnum<'context>>> {
         match parameter_type {
             CheckedType::Product(product) => product
-                .elements
-                .iter()
+                .iter_positions()
                 .map(|element| self.compile_type(&element.value_type).map(Into::into))
                 .collect(),
             other => Ok(vec![self.compile_type(other)?.into()]),
@@ -244,8 +243,7 @@ pub(crate) fn mutation_parameter_mask(count: usize, mutations: &[CheckedMutation
 pub(crate) fn flattened_parameter_types(parameter: &CheckedType) -> Vec<&CheckedType> {
     match parameter {
         CheckedType::Product(product) => product
-            .elements
-            .iter()
+            .iter_positions()
             .map(|element| &element.value_type)
             .collect(),
         other => vec![other],
