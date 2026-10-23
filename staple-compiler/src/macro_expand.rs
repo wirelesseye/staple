@@ -2153,8 +2153,8 @@ impl MacroExpander {
             })
             .collect::<HashMap<_, _>>();
         // A companion (or ordinary `pub mod`) submodule is a macro-callable
-        // namespace, e.g. `List.of(...)` for a macro `of` declared inside
-        // `companion<T> List T { ... }`. Seeded here and carried through the
+        // namespace, e.g. `Box.make(...)` for a macro `make` declared inside
+        // `companion<T> Box<T> { ... }`. Seeded here and carried through the
         // same re-export fixed point as `public_macros`/`public_helpers`
         // below, so `pub use Module.(Name)` re-exports the namespace the
         // same way it re-exports a value or type — mirroring how

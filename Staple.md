@@ -4657,13 +4657,12 @@ once the current capacity is exhausted it allocates a larger `Buffer`
 across with `Buffer.transfer` before appending. `List.pop` removes and
 returns the last element as an `Option<T>`, exactly like `Buffer.pop`.
 
-`List.of` is a macro that builds a list from a fixed, comma-separated set of
-values in one expression — `List.of (1, 2, 3)` — inferring the element type
-from the values the same way `List.new` followed by a sequence of
-`List.push` calls would. It is declared inside `List`'s own companion, so
-`Type.macro(...)` call syntax resolves a macro through the type's companion
-namespace the same way ordinary `Type.method(...)` calls already resolve a
-function through it.
+`List.of: <N where Natural N> move (T ^ N) -> List<T>` builds a list from a
+fixed array of values — `List.of (1, 2, 3)` — moving the elements into a
+buffer whose capacity is exactly the array length. Because `(T ^ 0)` is `()`
+and `(T ^ 1)` is `T`, `List.of ()` builds an empty list and `List.of value`
+builds a singleton from a single expression. It is declared inside `List`'s
+own companion, so ordinary `Type.method(...)` call syntax resolves it.
 
 Where `Copy T`, `List.get` returns an element by copy, wrapped in `Option<T>`
 so that an out-of-bounds index produces `None` instead of trapping, and

@@ -5848,21 +5848,24 @@ fn polymorphic_value_naming_an_associated_type_is_a_restriction() {
 }
 
 #[test]
-fn nested_list_of_macros_check() {
-    // A speculative parse of the inner expansion used to compute its error
-    // location from a span in the outer file and panic on the slice.
+fn nested_list_of_calls_check() {
+    // Nested array arguments must infer through the inner list results, and a
+    // trailing comma must remain part of the array syntax.
     type_check(concat!(
         "let rows: List<List<I32>> = List.of (List.of (1, 2), List.of (3,))\n",
     ));
 }
 
 #[test]
-fn list_of_macro_builds_a_list_from_values() {
+fn list_of_builds_a_list_from_values() {
     let module = type_check(concat!(
         "def exercise: () -> () = () => {\n",
         "let empty: List<I32> = List.of ()\n",
         "let one: List<I32> = List.of (42)\n",
+        "let scalar: List<I32> = List.of 42\n",
         "let many: List<I32> = List.of (1, 2, 3, 4, 5)\n",
+        "let fixed: (I32 ^ 2) = (7, 8)\n",
+        "let from_array: List<I32> = List.of fixed\n",
         "()\n}\n",
     ));
     let context = Context::create();

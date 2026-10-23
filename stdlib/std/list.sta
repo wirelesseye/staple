@@ -8,7 +8,6 @@ use package.ptr.(RawMutPtr, RawOpaqueMutPtr)
 use package.clone.Clone
 use package.default.Default
 use package.index.(Index, MutateIndex)
-use package.syntax.*
 
 /// A growable sequence backed by a mutable buffer.
 pub type List<T> wrap Buffer<T>
@@ -18,7 +17,11 @@ impl<T> Default (List<T>) {
 }
 
 impl<T> FromIterator List<T> T {
-    insert = (move list: List<T>; move item: T) => List<T> :: List.push_and_return list item
+    insert = (move list: List<T>; move item: T) => List<T> :: {
+        let mut extended: List<T> = list
+        extended |> push item
+        extended
+    }
 }
 
 impl<T where Clone T> Clone (List<T>) {
@@ -96,72 +99,20 @@ companion<T> List<T> {
         list
     }
 
-    // `List.of` uses this helper to build a list without ever naming
-    // an intermediate. A synthesized name shared between a macro-generated
-    // binder and macro-generated uses of it, built up across more than one
-    // `parse_quote` call, isn't expressible yet — each `parse_quote` call
-    // freshens the identifiers it introduces independently, and
-    // `Pattern`/`Expr` values have no identity-preserving way to convert
-    // between each other to route around that. Splicing an already-built
-    // `Expr` *value* (never rewriting a name) has no such problem, so
-    // `List.of` threads the list handle through nested calls to this
-    // instead.
-    /// Appends a value and returns the list handle.
-    pub def push_and_return = (move list: List<T>; move value: T) => List<T> :: {
-        let mut extended: List<T> = list
-        extended |> push value
-        extended
-    }
-}
-
-// Builds `List.push_and_return (... (List.push_and_return base first) ...) last`,
-// left-to-right, so elements are pushed in the order they were written.
-// `accumulator` is a previously-built `Expr` value, spliced in — not a name
-// — so this never runs into the binder/use hygiene mismatch described above.
-def list_of_pushes = (accumulator: Expr, elements: Sequence<Expr>) => Expr :: match elements {
-    Sequence () => accumulator,
-    Sequence (first, rest) => {
-        let pushed: Expr = parse_quote { List.push_and_return $accumulator $first }
-        list_of_pushes (pushed, rest)
-    },
-}
-
-// An explicit `-> Expr` result lets the trailing `parse_quote` infer its
-// contextual type, the same way `when`'s `when_clauses` helper (in `flow.sta`)
-// does — a `parse_quote` called directly from a macro's own match arm,
-// with no result type in scope, cannot infer what to parse into.
-//
-// The base case seeds the chain with `List.singleton $first` rather than
-// `List.new ()`, and only when there's a first element to do that with:
-// nested generic calls only infer their type parameter from their own
-// arguments or an annotation in the immediate context, not from an
-// annotation several calls further out (`List.new ()` nested inside
-// `List.push_and_return (List.push_and_return (List.new ()) 1) 2`
-// cannot infer its element type this way, even though the whole
-// expression's expected type is known). `List.singleton first`'s type
-// parameter, by contrast, is pinned down immediately by `first`'s own
-// type, so every `push_and_return` layered on top of it infers cleanly
-// from the (now concrete) accumulator beneath it.
-def list_of_expression = elements: Sequence<Expr> => Expr :: match elements {
-    Sequence () => parse_quote { List.new () },
-    Sequence (first, rest) => {
-        let base: Expr = parse_quote { List.singleton $first }
-        list_of_pushes (base, rest)
-    },
-}
-
-companion<T> List<T> {
-    /// Constructs a list from a comma-separated sequence of expressions.
+    /// Constructs a list from a fixed array of values, moving the elements
+    /// into a buffer whose capacity is the array length.
+    ///
+    /// `(T ^ 0)` is `()` and `(T ^ 1)` is `T`, so `List.of ()` builds an
+    /// empty list and `List.of value` builds a singleton without requiring
+    /// parentheses around a single element.
     ///
     /// # Example
     ///
     /// ```staple
     /// let values: List<I32> = List.of (1, 2, 3)
     /// ```
-    pub macro of =
-        body: Parenthesized<Separated<Expr, Comma>> => match body {
-            Parenthesized (Separated (_, elements, _)) => list_of_expression elements,
-        }
+    pub def of = <N where Natural N> move value: (T ^ N) => List<T> ::
+        List (Buffer.from_array value)
 }
 
 // Copy-T-gated companion: `get`/`get_unchecked` read a value out by copy.

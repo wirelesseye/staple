@@ -3584,7 +3584,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn runs_list_of_macro() {
+    fn runs_list_of() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
