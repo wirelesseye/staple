@@ -83,9 +83,6 @@ pub(crate) enum RejectionReason {
     /// (a restriction).
     #[allow(dead_code)]
     FunctionBehindReference,
-    /// The library allocator and its checked arithmetic are not part of the
-    /// dynamic ABI yet; owners stay monomorphized.
-    AllocatorIntrinsic,
 }
 
 impl RejectionReason {
@@ -107,7 +104,6 @@ impl RejectionReason {
                 | RejectionReason::CallerLocationIntrinsic
                 | RejectionReason::RuntimeNaturalCount
                 | RejectionReason::FunctionBehindReference
-                | RejectionReason::AllocatorIntrinsic
         )
     }
 
@@ -135,7 +131,6 @@ impl RejectionReason {
             RejectionReason::CallerLocationIntrinsic => "caller location intrinsic",
             RejectionReason::RuntimeNaturalCount => "run-time Natural count",
             RejectionReason::FunctionBehindReference => "function value behind a reference",
-            RejectionReason::AllocatorIntrinsic => "library allocator intrinsic",
         }
     }
 }
@@ -1251,21 +1246,11 @@ impl SupportWalker<'_> {
                     self.reject(RejectionReason::ExternWithParameters);
                 }
             }
-            LoweredCallableTarget::Intrinsic { intrinsic, .. } => {
-                if matches!(
-                    intrinsic,
-                    crate::IntrinsicFunction::BufferFromArray
-                        | crate::IntrinsicFunction::Trap
-                        | crate::IntrinsicFunction::CheckedMul
-                        | crate::IntrinsicFunction::GcAllocate
-                        | crate::IntrinsicFunction::GcRelease
-                        | crate::IntrinsicFunction::GcPin
-                        | crate::IntrinsicFunction::GcUnpin
-                        | crate::IntrinsicFunction::GcFinalizeWith
-                ) {
-                    self.reject(RejectionReason::AllocatorIntrinsic);
-                }
-            }
+            LoweredCallableTarget::Intrinsic {
+                intrinsic: crate::IntrinsicFunction::BufferFromArray,
+                ..
+            } => self.reject(RejectionReason::RuntimeNaturalCount),
+            LoweredCallableTarget::Intrinsic { .. } => {}
         }
     }
 
