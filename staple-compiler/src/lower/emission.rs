@@ -478,7 +478,6 @@ impl<'a> EmissionView<'a> {
         self.program.concrete_is_copy(value_type)
     }
 
-    #[cfg(test)]
     /// The catalog's concrete needs-drop decision: the shared predicate the
     /// checker also uses.
     pub(crate) fn concrete_needs_drop(&self, value_type: &crate::CheckedType) -> bool {

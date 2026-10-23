@@ -1132,64 +1132,6 @@ impl<'a> LoweredWalker<'a> {
                         )?;
                     }
                 }
-                // Freezing copies the buffer into a GC allocation that owns the
-                // elements, so the element finalizer is installed here.
-                IntrinsicFunction::BufferIntoShared => {
-                    if let CheckedType::SharedBuffer(element) = &result_type
-                        && !crate::contains_type_parameter(element)
-                        && self.program.concrete_needs_drop(element)
-                    {
-                        let canonical = CanonicalType::concrete(element, &origin)
-                            .map_err(|diagnostic| vec![diagnostic])?;
-                        self.visitor.finalizer_site(
-                            ArtifactUseSite::BufferAllocation(id),
-                            GcFinalizerKey::Buffer(canonical),
-                            GcFinalizerPlan::Buffer {
-                                element: element.as_ref().clone(),
-                                glue: None,
-                            },
-                            &origin,
-                        )?;
-                    }
-                }
-                // A run-time element type clones through a dictionary and
-                // allocates its dynamic buffer itself.
-                IntrinsicFunction::BufferClone
-                    if matches!(&result_type, CheckedType::Buffer(element)
-                        if crate::contains_type_parameter(element)) => {}
-                IntrinsicFunction::BufferClone => {
-                    if let CheckedType::Buffer(element) = &result_type {
-                        // The per-element `Clone` call is an instance use of the
-                        // selected method, first in the site order.
-                        if let Some(clone_trait) = self.program.semantic_ids.clone_trait
-                            && let Some(method) = self
-                                .program
-                                .traits
-                                .get(clone_trait)
-                                .and_then(|trait_| trait_.methods.first())
-                                .copied()
-                        {
-                            let selected =
-                                super::structural_artifacts::select_concrete_trait_method_with_kind(
-                                    self.program,
-                                    &origin,
-                                    clone_trait,
-                                    method,
-                                    std::slice::from_ref(element),
-                                    LoweredInstanceDependencyKind::CloneMethod,
-                                )
-                                .map_err(|diagnostic| vec![diagnostic])?;
-                            if let ClosureRequest::Instance { resolved, .. } = selected.request {
-                                self.visitor.instance_use(
-                                    ArtifactUseSite::BufferCloneElement(id),
-                                    resolved,
-                                    LoweredInstanceDependencyKind::CloneMethod,
-                                    &origin,
-                                )?;
-                            }
-                        }
-                    }
-                }
                 _ => {}
             },
             super::LoweredCallableTarget::DirectFunction { .. }
@@ -1842,39 +1784,6 @@ fn drop_glue_body(
             };
             Ok(DropGlueBody::Unique {
                 payload: payload.clone(),
-                glue,
-            })
-        }
-        CheckedType::Buffer(element) => {
-            let recursive = program.resolve_recursive_payload(element);
-            let element: &CheckedType = recursive.as_ref().unwrap_or(element.as_ref());
-            let glue = if program.contains_recursive_payload(element) {
-                // A callable boundary closes the recursive cleanup graph.
-                let key = ArtifactRequestKey::DescriptorDrop(
-                    CanonicalType::concrete(element, origin).map_err(|error| vec![error])?,
-                );
-                requests.push(ClosureRequest::Artifact {
-                    key: key.clone(),
-                    plan: LoweredArtifactPlan::DescriptorDrop(super::DescriptorDropPlan {
-                        value_type: element.clone(),
-                        glue: None,
-                    }),
-                    kind: LoweredArtifactDependencyKind::DescriptorDrop,
-                    origin: origin.clone(),
-                    use_site: None,
-                });
-                Some(PlannedArtifact {
-                    key,
-                    artifact: None,
-                    kind: LoweredArtifactDependencyKind::DescriptorDrop,
-                })
-            } else if program.concrete_needs_drop(element) {
-                Some(request_drop_glue(program, element, origin, requests)?)
-            } else {
-                None
-            };
-            Ok(DropGlueBody::Buffer {
-                element: element.clone(),
                 glue,
             })
         }
@@ -3174,7 +3083,7 @@ mod tests {
                     "the element copy is a clone-method instance use"
                 );
                 let call = body.call(call).expect("the clone call");
-                let CheckedType::Buffer(element) = &call.result_type else {
+                let Some(element) = crate::buffer_element(&call.result_type) else {
                     panic!("a buffer clone result is a buffer: {:?}", call.result_type);
                 };
                 let expected = module

@@ -2,6 +2,7 @@ pub mod
 
 use package.cmp.(Eq)
 use package.convert.(Convert)
+use package.alloc.(__pointer_read, __pointer_add, __pointer_copy_nonoverlapping)
 
 /// A non-owning, low-level pointer that permits reads of a `Pointee`.
 /// Copying or converting the pointer does not validate its address, alignment,
@@ -187,6 +188,27 @@ companion<T> RawMutPtr<T> {
     /// the stored value to be dropped or moved out exactly once. Overwriting
     /// an initialized resource without first releasing it can leak that resource.
     pub def store = (pointer: RawMutPtr<T>; move value: T) => () :: __pointer_store (pointer, value)
+
+    /// Moves the pointee out. The caller must provide valid, aligned,
+    /// initialized memory and must not read the pointee again.
+    pub def unsafe_read = pointer: RawMutPtr<T> => T :: __pointer_read pointer
+
+    /// Drops the pointee in place. The caller must provide valid, aligned,
+    /// initialized memory and must not use the value afterwards.
+    pub def unsafe_drop_in_place = pointer: RawMutPtr<T> => () :: {
+        let value = __pointer_read pointer
+        drop value
+    }
+
+    /// Returns a pointer advanced by `count` elements.
+    /// Does not validate the resulting address, alignment, or allocation lifetime.
+    pub def add = (pointer: RawMutPtr<T>; count: USize) =>
+        RawMutPtr<T> :: __pointer_add (pointer, count)
+
+    /// Copies `count` elements from `source` to `destination`. The regions must
+    /// not overlap, and both must be valid for `count` initialized elements.
+    pub def unsafe_copy_nonoverlapping = (destination: RawMutPtr<T>; source: RawMutPtr<T>; count: USize) =>
+        () :: __pointer_copy_nonoverlapping (destination, source, count)
 }
 
 companion RawOpaquePtr {

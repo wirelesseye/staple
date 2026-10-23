@@ -8223,6 +8223,291 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.build_intrinsic_bool(condition, result_type, span)
             }
 
+            IntrinsicFunction::SizeOf => {
+                let value_type = intrinsic_type_argument(call, 0, &span)?;
+                let ty = self.backend.compile_type(&value_type)?;
+                let size = self.backend.target_data.get_abi_size(&ty);
+                Ok(self
+                    .backend
+                    .size_type
+                    .const_int(size, false)
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::AlignOf => {
+                let value_type = intrinsic_type_argument(call, 0, &span)?;
+                let ty = self.backend.compile_type(&value_type)?;
+                let align = self.backend.target_data.get_abi_alignment(&ty);
+                Ok(self
+                    .backend
+                    .size_type
+                    .const_int(align as u64, false)
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::NeedsDrop => {
+                let value_type = intrinsic_type_argument(call, 0, &span)?;
+                let needs_drop = self.view.concrete_needs_drop(&value_type);
+                self.build_intrinsic_bool(
+                    self.backend
+                        .context
+                        .bool_type()
+                        .const_int(needs_drop as u64, false),
+                    result_type,
+                    span,
+                )
+            }
+            IntrinsicFunction::GcAllocate => {
+                let [BasicMetadataValueEnum::StructValue(layout)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "gc allocation requires a MemLayout",
+                    ));
+                };
+                let size = self
+                    .backend
+                    .builder
+                    .build_extract_value(*layout, 0, "layout.size")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let align = self
+                    .backend
+                    .builder
+                    .build_extract_value(*layout, 1, "layout.align")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+                let pointer_basic: BasicTypeEnum = pointer_type.into();
+                let supported = self.backend.target_data.get_abi_alignment(&pointer_basic);
+                let too_aligned = self
+                    .backend
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::UGT,
+                        align,
+                        self.backend.size_type.const_int(supported as u64, false),
+                        "layout.align.unsupported",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let zero_bits = self
+                    .backend
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        align,
+                        self.backend.size_type.const_zero(),
+                        "layout.align.zero",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let below_one = self
+                    .backend
+                    .builder
+                    .build_int_sub(
+                        align,
+                        self.backend.size_type.const_int(1, false),
+                        "layout.align.decrement",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let not_power_of_two = self
+                    .backend
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        self.backend
+                            .builder
+                            .build_and(below_one, align, "layout.align.mask")
+                            .map_err(compiler_diagnostic)?,
+                        self.backend.size_type.const_zero(),
+                        "layout.align.not_power_of_two",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let invalid = self
+                    .backend
+                    .builder
+                    .build_or(
+                        self.backend
+                            .builder
+                            .build_or(too_aligned, zero_bits, "layout.align.invalid")
+                            .map_err(compiler_diagnostic)?,
+                        not_power_of_two,
+                        "layout.align.invalid",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend.build_trap_if(invalid, span.clone())?;
+                self.backend
+                    .build_gc_allocation(size, "gc.allocate", span)
+                    .map(|pointer| pointer.as_any_value_enum())
+            }
+            IntrinsicFunction::GcRelease
+            | IntrinsicFunction::GcPin
+            | IntrinsicFunction::GcUnpin => {
+                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
+                    return Err(Diagnostic::new(span, "gc operation requires a pointer"));
+                };
+                match intrinsic {
+                    IntrinsicFunction::GcRelease => {
+                        self.backend.build_unique_free(*pointer, span.clone())?
+                    }
+                    IntrinsicFunction::GcPin => {
+                        self.backend.pin_unique_payload(*pointer, span.clone())?
+                    }
+                    IntrinsicFunction::GcUnpin => {
+                        self.backend.unpin_unique_payload(*pointer, span.clone())?
+                    }
+                    _ => unreachable!(),
+                }
+                Ok(self.backend.unit_value())
+            }
+            IntrinsicFunction::GcFinalizeWith => {
+                let [BasicMetadataValueEnum::PointerValue(pointer), closure] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "gc finalizer requires a pointer and finalize function",
+                    ));
+                };
+                let closure = BasicValueEnum::try_from(*closure)
+                    .map_err(|_| Diagnostic::new(span.clone(), "invalid finalize function"))?
+                    .into_struct_value();
+                let code = self
+                    .backend
+                    .builder
+                    .build_extract_value(closure, 0, "finalize.code")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let function_type = match call
+                    .arguments
+                    .get(1)
+                    .map(|argument| &argument.expected)
+                {
+                    Some(CheckedType::Function(function)) => function.clone(),
+                    _ => {
+                        return Err(Diagnostic::new(
+                            span,
+                            "finalize function has an invalid checked type",
+                        ));
+                    }
+                };
+                let signature = self
+                    .backend
+                    .compile_closure_function_type(&function_type)?;
+                let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+                let thunk_name = format!(
+                    "__staple_gc_finalizer_thunk.{}",
+                    self.backend.llvm_module.get_functions().count()
+                );
+                let slot = self.backend.llvm_module.add_global(
+                    pointer_type,
+                    None,
+                    &format!("{thunk_name}.code"),
+                );
+                slot.set_initializer(&pointer_type.const_null());
+                slot.set_linkage(Linkage::Internal);
+                self.backend
+                    .builder
+                    .build_store(slot.as_pointer_value(), code)
+                    .map_err(compiler_diagnostic)?;
+                let thunk = self.backend.llvm_module.add_function(
+                    &thunk_name,
+                    self.backend
+                        .context
+                        .void_type()
+                        .fn_type(&[pointer_type.into()], false),
+                    Some(Linkage::Internal),
+                );
+                let caller_block = self.backend.builder.get_insert_block();
+                let entry = self.backend.context.append_basic_block(thunk, "entry");
+                self.backend.builder.position_at_end(entry);
+                let payload = thunk
+                    .get_first_param()
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "finalizer thunk has no payload"))?
+                    .into_pointer_value();
+                let target = self
+                    .backend
+                    .builder
+                    .build_load(pointer_type, slot.as_pointer_value(), "finalize.code.load")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                self.backend
+                    .builder
+                    .build_indirect_call(
+                        signature,
+                        target,
+                        &[pointer_type.const_null().into(), payload.into()],
+                        "finalize.call",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_return(None)
+                    .map_err(compiler_diagnostic)?;
+                if let Some(block) = caller_block {
+                    self.backend.builder.position_at_end(block);
+                }
+                self.backend.set_gc_finalizer(*pointer, thunk)?;
+                Ok(self.backend.unit_value())
+            }
+            IntrinsicFunction::PointerRead => {
+                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
+                    return Err(Diagnostic::new(span, "pointer read requires a pointer"));
+                };
+                let value_type = self.backend.compile_type(result_type)?;
+                Ok(self
+                    .backend
+                    .builder
+                    .build_load(value_type, *pointer, "pointer.read")
+                    .map_err(compiler_diagnostic)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::PointerAdd => {
+                let [
+                    BasicMetadataValueEnum::PointerValue(pointer),
+                    BasicMetadataValueEnum::IntValue(count),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "pointer addition requires a pointer and an element count",
+                    ));
+                };
+                let pointee = intrinsic_type_argument(call, 0, &span)?;
+                let pointee = self.backend.compile_type(&pointee)?;
+                unsafe {
+                    self.backend
+                        .builder
+                        .build_gep(pointee, *pointer, &[*count], "pointer.add")
+                }
+                .map(|pointer| pointer.as_any_value_enum())
+                .map_err(compiler_diagnostic)
+            }
+            IntrinsicFunction::PointerCopyNonoverlapping => {
+                let [
+                    BasicMetadataValueEnum::PointerValue(destination),
+                    BasicMetadataValueEnum::PointerValue(source),
+                    BasicMetadataValueEnum::IntValue(count),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "pointer copy requires two pointers and an element count",
+                    ));
+                };
+                let element = intrinsic_type_argument(call, 0, &span)?;
+                let element = self.backend.compile_type(&element)?;
+                let stride = self.backend.target_data.get_abi_size(&element);
+                let alignment = self.backend.target_data.get_abi_alignment(&element);
+                let bytes = self
+                    .backend
+                    .builder
+                    .build_int_mul(
+                        *count,
+                        self.backend.size_type.const_int(stride, false),
+                        "pointer.copy.bytes",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_memcpy(*destination, alignment, *source, alignment, bytes)
+                    .map_err(compiler_diagnostic)?;
+                Ok(self.backend.unit_value())
+            }
             IntrinsicFunction::SharedBufferLength => {
                 let [BasicMetadataValueEnum::PointerValue(buffer)] = arguments else {
                     return Err(Diagnostic::new(span, "length requires a SharedBuffer"));
@@ -8234,7 +8519,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map(|value| value.as_any_value_enum())
             }
             IntrinsicFunction::BufferFromArray => {
-                let CheckedType::Buffer(element) = result_type else {
+                let Some(element) = crate::buffer_element(result_type).cloned() else {
                     return Err(Diagnostic::new(span, "invalid Buffer result type"));
                 };
                 // The array parameter is passed spread, one argument per element.
@@ -8250,7 +8535,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "Buffer.from_array operands do not match the array length",
                     ));
                 }
-                let llvm_element = self.backend.compile_type(element)?;
+                let llvm_element = self.backend.compile_type(&element)?;
                 let header = self.backend.buffer_header_type(llvm_element);
                 let capacity = self.backend.size_type.const_int(length as u64, false);
                 self.backend.trap_if_buffer_capacity_overflows(
@@ -8329,10 +8614,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "Buffer.with_capacity requires a USize capacity",
                     ));
                 };
-                let CheckedType::Buffer(element) = result_type else {
+                let Some(element) = crate::buffer_element(result_type).cloned() else {
                     return Err(Diagnostic::new(span, "invalid Buffer result type"));
                 };
-                let llvm_element = self.backend.compile_type(element)?;
+                let llvm_element = self.backend.compile_type(&element)?;
                 let header = self.backend.buffer_header_type(llvm_element);
                 self.backend.trap_if_buffer_capacity_overflows(
                     *capacity,
@@ -9346,11 +9631,25 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
 /// The buffer element type from an intrinsic call's argument: the
 /// first element of a product argument, or the argument type itself.
+/// The concrete value type a generic intrinsic's type parameter was
+/// instantiated with. Substitutions are recorded in declaration order.
+fn intrinsic_type_argument(
+    call: &crate::LoweredCall,
+    index: usize,
+    span: &staple_syntax::Span,
+) -> CodeGenerationResult<CheckedType> {
+    call.substitutions
+        .types
+        .get(index)
+        .map(|substitution| substitution.value_type.clone())
+        .ok_or_else(|| Diagnostic::new(span.clone(), "intrinsic is missing a type argument"))
+}
+
 fn intrinsic_buffer_element(
     call: &crate::LoweredCall,
     argument: usize,
     span: &staple_syntax::Span,
-) -> CodeGenerationResult<Box<CheckedType>> {
+) -> CodeGenerationResult<CheckedType> {
     let Some(record) = call.arguments.get(argument) else {
         return Err(Diagnostic::new(
             span.clone(),
@@ -9363,10 +9662,13 @@ fn intrinsic_buffer_element(
         }
         other => other,
     };
-    match buffer_type {
-        CheckedType::Buffer(element) | CheckedType::SharedBuffer(element) => Ok(element.clone()),
-        _ => Err(Diagnostic::new(span.clone(), "invalid Buffer type")),
+    if let Some(element) = crate::buffer_element(buffer_type) {
+        return Ok(element.clone());
     }
+    if let Some(element) = crate::shared_buffer_element(buffer_type) {
+        return Ok(element.clone());
+    }
+    Err(Diagnostic::new(span.clone(), "invalid Buffer type"))
 }
 
 /// Whether a place-pointer failure is the invariant error for an indexed place:

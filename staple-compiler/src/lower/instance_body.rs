@@ -3299,10 +3299,8 @@ impl<'a> BodyCloner<'a> {
     /// The element type of a `__buffer_clone` whose elements mention run-time
     /// parameters of this instance.
     fn buffer_clone_element(&self, call: &LoweredCall) -> Option<CheckedType> {
-        match self.ty(&call.result_type) {
-            CheckedType::Buffer(element) if contains_type_parameter(&element) => Some(*element),
-            _ => None,
-        }
+        let element = crate::buffer_element(&self.ty(&call.result_type))?.clone();
+        contains_type_parameter(&element).then_some(element)
     }
 
     fn bind_callable_target(

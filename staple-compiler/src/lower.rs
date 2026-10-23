@@ -7932,7 +7932,8 @@ impl LoweredProgram {
                         format!("function {} has no checked type", function.0),
                     )
                 })?;
-                substitutions = call_substitutions(&template, &function_type);
+                substitutions =
+                    polymorphic_call_substitutions(module, callee_syntax, &template, &function_type);
                 if resolved.requires_initialization_check(callee_syntax) {
                     initialization_checks.push(symbol);
                 }
@@ -7995,7 +7996,8 @@ impl LoweredProgram {
                 }
                 let function_type = checked_call_function_type(module, call, &origin)?;
                 if let Some(template) = symbol_function_type(module, symbol) {
-                    substitutions = call_substitutions(&template, &function_type);
+                    substitutions =
+                        polymorphic_call_substitutions(module, callee_syntax, &template, &function_type);
                 }
                 (
                     LoweredCallableTarget::Intrinsic { symbol, intrinsic },
@@ -14095,6 +14097,17 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::CallerFile
         | Intrinsic::CallerLine
         | Intrinsic::CallerColumn
+        | Intrinsic::SizeOf
+        | Intrinsic::AlignOf
+        | Intrinsic::NeedsDrop
+        | Intrinsic::GcAllocate
+        | Intrinsic::GcRelease
+        | Intrinsic::GcPin
+        | Intrinsic::GcUnpin
+        | Intrinsic::GcFinalizeWith
+        | Intrinsic::PointerRead
+        | Intrinsic::PointerAdd
+        | Intrinsic::PointerCopyNonoverlapping
         | Intrinsic::SharedBufferLength
         | Intrinsic::SharedBufferGetShared
         | Intrinsic::BufferWithCapacity
@@ -14488,9 +14501,7 @@ fn checked_type_holds_gc_pointer(value_type: &CheckedType) -> bool {
         CheckedType::String
         | CheckedType::StringLiteralSet(_)
         | CheckedType::Shared(_)
-        | CheckedType::SharedBuffer(_)
         | CheckedType::Unique(_)
-        | CheckedType::Buffer(_)
         | CheckedType::Function(_)
         | CheckedType::Forall(_)
         | CheckedType::Opaque { .. } => true,

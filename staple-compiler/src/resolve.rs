@@ -428,6 +428,17 @@ pub enum IntrinsicFunction {
     CallerLine,
     /// `std.source.__caller_column`: the column of that caller, as `U32`.
     CallerColumn,
+    SizeOf,
+    AlignOf,
+    NeedsDrop,
+    GcAllocate,
+    GcRelease,
+    GcPin,
+    GcUnpin,
+    GcFinalizeWith,
+    PointerRead,
+    PointerAdd,
+    PointerCopyNonoverlapping,
     SharedBufferLength,
     SharedBufferGetShared,
     BufferWithCapacity,
@@ -2234,12 +2245,6 @@ impl NameResolver {
                 "String",
                 BuiltinType::String,
             ),
-            (
-                "std/shared_buffer.sta",
-                "std.shared_buffer",
-                "SharedBuffer",
-                BuiltinType::SharedBuffer,
-            ),
             ("std/ptr.sta", "std.ptr", "RawPtr", BuiltinType::RawPtr),
             (
                 "std/ptr.sta",
@@ -2258,12 +2263,6 @@ impl NameResolver {
                 "std.ptr",
                 "RawOpaquePtr",
                 BuiltinType::RawOpaquePtr,
-            ),
-            (
-                "std/buffer.sta",
-                "std.buffer",
-                "Buffer",
-                BuiltinType::Buffer,
             ),
         ] {
             if let Some(module) = program
@@ -2503,6 +2502,25 @@ impl NameResolver {
             ));
         }
         for (module, name, intrinsic) in [
+            ("std.alloc", "__size_of", IntrinsicFunction::SizeOf),
+            ("std.alloc", "__align_of", IntrinsicFunction::AlignOf),
+            ("std.alloc", "__needs_drop", IntrinsicFunction::NeedsDrop),
+            ("std.alloc", "__gc_allocate", IntrinsicFunction::GcAllocate),
+            ("std.alloc", "__gc_release", IntrinsicFunction::GcRelease),
+            ("std.alloc", "__gc_pin", IntrinsicFunction::GcPin),
+            ("std.alloc", "__gc_unpin", IntrinsicFunction::GcUnpin),
+            (
+                "std.alloc",
+                "__gc_finalize_with",
+                IntrinsicFunction::GcFinalizeWith,
+            ),
+            ("std.alloc", "__pointer_read", IntrinsicFunction::PointerRead),
+            ("std.alloc", "__pointer_add", IntrinsicFunction::PointerAdd),
+            (
+                "std.alloc",
+                "__pointer_copy_nonoverlapping",
+                IntrinsicFunction::PointerCopyNonoverlapping,
+            ),
             (
                 "std.ptr",
                 "__mut_pointer_to_pointer",
@@ -2648,44 +2666,6 @@ impl NameResolver {
                 "std.cinterop",
                 "__c_string_valid_utf8",
                 IntrinsicFunction::CStringValidUtf8,
-            ),
-            (
-                "std.buffer",
-                "__buffer_with_capacity",
-                IntrinsicFunction::BufferWithCapacity,
-            ),
-            (
-                "std.buffer",
-                "__buffer_length",
-                IntrinsicFunction::BufferLength,
-            ),
-            (
-                "std.buffer",
-                "__buffer_capacity",
-                IntrinsicFunction::BufferCapacity,
-            ),
-            ("std.buffer", "__buffer_push", IntrinsicFunction::BufferPush),
-            ("std.buffer", "__buffer_pop", IntrinsicFunction::BufferPop),
-            ("std.buffer", "__buffer_get", IntrinsicFunction::BufferGet),
-            (
-                "std.buffer",
-                "__buffer_into_shared",
-                IntrinsicFunction::BufferIntoShared,
-            ),
-            (
-                "std.buffer",
-                "__buffer_transfer",
-                IntrinsicFunction::BufferTransfer,
-            ),
-            (
-                "std.buffer",
-                "__buffer_clone",
-                IntrinsicFunction::BufferClone,
-            ),
-            (
-                "std.shared_buffer",
-                "__shared_buffer_length",
-                IntrinsicFunction::SharedBufferLength,
             ),
             (
                 "std.shared_buffer",
@@ -3055,6 +3035,12 @@ impl NameResolver {
                 // (`Completed<T>` wraps `T`, `Cancelled` wraps `()`).
                 declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper
                     && declaration.representation_visibility() == Visibility::Public
+            } else if matches!(builtin, BuiltinType::Buffer | BuiltinType::SharedBuffer) {
+                // `Buffer` and `SharedBuffer` are ordinary library wrappers
+                // around their header pointer; only their own modules may
+                // destructure the handle.
+                declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper
+                    && declaration.representation_visibility() == Visibility::Private
             } else {
                 declaration.kind() == staple_syntax::TypeDeclarationKind::Opaque
             };
@@ -3151,8 +3137,6 @@ impl NameResolver {
         let recursive_construction = match builtin {
             BuiltinType::Shared => Some(RecursiveConstruction::ManagedReference),
             BuiltinType::Unique => Some(RecursiveConstruction::Unique),
-            BuiltinType::SharedBuffer => Some(RecursiveConstruction::SharedBuffer),
-            BuiltinType::Buffer => Some(RecursiveConstruction::Buffer),
             BuiltinType::Syntax
                 if declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper =>
             {

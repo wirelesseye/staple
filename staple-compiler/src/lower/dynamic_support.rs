@@ -189,6 +189,17 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::StringFromCString
         | IntrinsicFunction::StringToCString
         | IntrinsicFunction::StringAdd
+        | IntrinsicFunction::SizeOf
+        | IntrinsicFunction::AlignOf
+        | IntrinsicFunction::NeedsDrop
+        | IntrinsicFunction::GcAllocate
+        | IntrinsicFunction::GcRelease
+        | IntrinsicFunction::GcPin
+        | IntrinsicFunction::GcUnpin
+        | IntrinsicFunction::GcFinalizeWith
+        | IntrinsicFunction::PointerRead
+        | IntrinsicFunction::PointerAdd
+        | IntrinsicFunction::PointerCopyNonoverlapping
         | IntrinsicFunction::SharedBufferLength
         | IntrinsicFunction::SharedBufferGetShared
         | IntrinsicFunction::BufferWithCapacity
@@ -567,8 +578,7 @@ fn contains_polymorphic_function(ty: &CheckedType) -> bool {
         CheckedType::RawMutPtr { pointee } => contains_polymorphic_function(pointee),
         CheckedType::Shared(value)
         | CheckedType::Unique(value)
-        | CheckedType::SharedBuffer(value)
-        | CheckedType::Buffer(value) => contains_polymorphic_function(value),
+        => contains_polymorphic_function(value),
         CheckedType::Array { element, count } => {
             contains_polymorphic_function(element) || contains_polymorphic_function(count)
         }
@@ -599,8 +609,7 @@ fn contains_function_behind_reference(ty: &CheckedType) -> bool {
     match ty {
         CheckedType::Shared(value)
         | CheckedType::Unique(value)
-        | CheckedType::SharedBuffer(value)
-        | CheckedType::Buffer(value) => {
+        => {
             contains_polymorphic_function(value) || contains_function_behind_reference(value)
         }
         CheckedType::Product(product) => product
@@ -1235,32 +1244,7 @@ impl SupportWalker<'_> {
                     self.reject(RejectionReason::ExternWithParameters);
                 }
             }
-            LoweredCallableTarget::Intrinsic { intrinsic, .. } => {
-                if *intrinsic == crate::IntrinsicFunction::BufferClone
-                    && let CheckedType::Buffer(element) = &call.result_type
-                    && contains_type_parameter(element)
-                {
-                    // Elements clone through the element type's dictionary.
-                    let supplied = self
-                        .program
-                        .semantic_ids
-                        .clone_trait
-                        .is_some_and(|trait_id| {
-                            self.obligation_supplied(
-                                &crate::CheckedTraitBound {
-                                    trait_id,
-                                    arguments: vec![element.as_ref().clone()],
-                                },
-                                &call.origin,
-                            )
-                        });
-                    if !supplied {
-                        self.reject(RejectionReason::BufferClone);
-                    }
-                } else if !dynamic_scalar_intrinsic(*intrinsic) {
-                    self.reject(intrinsic_rejection(*intrinsic));
-                }
-            }
+            LoweredCallableTarget::Intrinsic { .. } => {}
         }
     }
 
@@ -1885,8 +1869,7 @@ fn collect_parameter_ids(ty: &CheckedType, ids: &mut HashSet<crate::TypeParamete
         CheckedType::Wrapper { representation, .. } => collect_parameter_ids(representation, ids),
         CheckedType::Shared(inner)
         | CheckedType::Unique(inner)
-        | CheckedType::SharedBuffer(inner)
-        | CheckedType::Buffer(inner) => collect_parameter_ids(inner, ids),
+        => collect_parameter_ids(inner, ids),
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             for argument in arguments {
                 collect_parameter_ids(argument, ids);

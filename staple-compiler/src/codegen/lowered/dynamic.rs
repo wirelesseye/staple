@@ -3769,9 +3769,210 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .and_then(|slot| *slot)
                 .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic intrinsic argument"))
         };
+        let intrinsic_type = |index: usize| {
+            call.substitutions
+                .types
+                .get(index)
+                .map(|substitution| &substitution.value_type)
+        };
         // Descriptor-sized intrinsics operate on storage pointers, not on
         // loaded SSA values.
         match intrinsic {
+            crate::IntrinsicFunction::SizeOf | crate::IntrinsicFunction::AlignOf => {
+                let value_type = intrinsic_type(0)
+                    .cloned()
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "layout intrinsic has no type"))?;
+                let value = if crate::contains_type_parameter(&value_type) {
+                    let descriptor =
+                        self.dynamic_descriptor(&value_type, environment, span)?;
+                    let layout = self.backend.load_descriptor_layout(descriptor)?;
+                    if intrinsic == crate::IntrinsicFunction::SizeOf {
+                        layout.stride
+                    } else {
+                        layout.align
+                    }
+                } else {
+                    let llvm_type = self.backend.compile_type(&value_type)?;
+                    let value = if intrinsic == crate::IntrinsicFunction::SizeOf {
+                        self.backend.target_data.get_abi_size(&llvm_type)
+                    } else {
+                        self.backend.target_data.get_abi_alignment(&llvm_type) as u64
+                    };
+                    self.backend.size_type.const_int(value, false)
+                };
+                self.backend
+                    .builder
+                    .build_store(storage, value)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::NeedsDrop => {
+                let value_type = intrinsic_type(0)
+                    .cloned()
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "drop intrinsic has no type"))?;
+                let needs_drop = !crate::contains_type_parameter(&value_type)
+                    && self.view.concrete_needs_drop(&value_type);
+                let Some(sum) = crate::typecheck::sum_through_implicit_wrapper(&call.result_type)
+                else {
+                    return Err(Diagnostic::new(span.clone(), "needs_drop result is not Bool"));
+                };
+                let sum_type = self.backend.compile_sum_type(sum)?;
+                let value = self.backend.build_bool_value(
+                    self.backend
+                        .context
+                        .bool_type()
+                        .const_int(needs_drop as u64, false),
+                    sum_type,
+                    span.clone(),
+                )?;
+                let value = inkwell::values::BasicValueEnum::try_from(value)
+                    .map_err(|_| Diagnostic::new(span.clone(), "invalid Bool value"))?;
+                self.backend
+                    .builder
+                    .build_store(storage, value)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::GcAllocate => {
+                let layout_type = self
+                    .backend
+                    .compile_type(&call.arguments[0].expected)?;
+                let layout = self
+                    .load_dynamic_storage(layout_type, slot_pointer(0)?, "gc.layout")
+                    .map_err(compiler_diagnostic)?
+                    .into_struct_value();
+                let size = self
+                    .backend
+                    .builder
+                    .build_extract_value(layout, 0, "gc.layout.size")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let pointer = self
+                    .backend
+                    .build_gc_allocation(size, "gc.allocate", span.clone())?;
+                self.backend
+                    .builder
+                    .build_store(storage, pointer)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::GcRelease
+            | crate::IntrinsicFunction::GcPin
+            | crate::IntrinsicFunction::GcUnpin => {
+                let pointer = self
+                    .load_dynamic_storage(
+                        self.backend.context.ptr_type(AddressSpace::default()),
+                        slot_pointer(0)?,
+                        "gc.pointer",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                match intrinsic {
+                    crate::IntrinsicFunction::GcRelease => {
+                        self.backend.build_unique_free(pointer, span.clone())?
+                    }
+                    crate::IntrinsicFunction::GcPin => {
+                        self.backend.pin_unique_payload(pointer, span.clone())?
+                    }
+                    crate::IntrinsicFunction::GcUnpin => {
+                        self.backend.unpin_unique_payload(pointer, span.clone())?
+                    }
+                    _ => unreachable!(),
+                }
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::GcFinalizeWith => {
+                // The dynamic ABI's finalize closure carries descriptors, so
+                // it cannot be installed as a plain C finalizer here. The
+                // concrete owner still releases its allocation eagerly; this
+                // path only affects cycles retained by the collector.
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::PointerAdd => {
+                let pointer = self
+                    .load_dynamic_storage(
+                        self.backend.context.ptr_type(AddressSpace::default()),
+                        slot_pointer(0)?,
+                        "pointer.add.base",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let count = self
+                    .load_dynamic_storage(self.backend.size_type, slot_pointer(1)?, "pointer.add.count")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let value_type = intrinsic_type(0)
+                    .cloned()
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "pointer add has no type"))?;
+                let result = if crate::contains_type_parameter(&value_type) {
+                    let descriptor = self.dynamic_descriptor(&value_type, environment, span)?;
+                    let layout = self.backend.load_descriptor_layout(descriptor)?;
+                    let offset = self
+                        .backend
+                        .builder
+                        .build_int_mul(count, layout.stride, "pointer.add.offset")
+                        .map_err(compiler_diagnostic)?;
+                    self.backend.dynamic_byte_offset(pointer, offset)?
+                } else {
+                    let llvm_type = self.backend.compile_type(&value_type)?;
+                    unsafe {
+                        self.backend
+                            .builder
+                            .build_gep(llvm_type, pointer, &[count], "pointer.add")
+                    }
+                    .map_err(compiler_diagnostic)?
+                };
+                self.backend
+                    .builder
+                    .build_store(storage, result)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::PointerCopyNonoverlapping => {
+                let destination = self
+                    .load_dynamic_storage(
+                        self.backend.context.ptr_type(AddressSpace::default()),
+                        slot_pointer(0)?,
+                        "pointer.copy.destination",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let source = self
+                    .load_dynamic_storage(
+                        self.backend.context.ptr_type(AddressSpace::default()),
+                        slot_pointer(1)?,
+                        "pointer.copy.source",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let count = self
+                    .load_dynamic_storage(self.backend.size_type, slot_pointer(2)?, "pointer.copy.count")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let value_type = intrinsic_type(0)
+                    .cloned()
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "pointer copy has no type"))?;
+                let stride = if crate::contains_type_parameter(&value_type) {
+                    let descriptor = self.dynamic_descriptor(&value_type, environment, span)?;
+                    self.backend.load_descriptor_layout(descriptor)?.stride
+                } else {
+                    let llvm_type = self.backend.compile_type(&value_type)?;
+                    self.backend.size_type.const_int(
+                        self.backend.target_data.get_abi_size(&llvm_type),
+                        false,
+                    )
+                };
+                let bytes = self
+                    .backend
+                    .builder
+                    .build_int_mul(count, stride, "pointer.copy.bytes")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_memcpy(destination, 1, source, 1, bytes)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
             crate::IntrinsicFunction::SharedBufferLength => {
                 let buffer = self.load_buffer_pointer(slot_pointer(0)?)?;
                 let length = self.load_buffer_metadata(buffer, 0)?;
@@ -3820,7 +4021,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 return Ok(storage);
             }
-            crate::IntrinsicFunction::PointerLoad | crate::IntrinsicFunction::PointerStore => {
+            crate::IntrinsicFunction::PointerLoad
+            | crate::IntrinsicFunction::PointerRead
+            | crate::IntrinsicFunction::PointerStore => {
                 let pointer = self
                     .load_dynamic_storage(
                         self.backend.context.ptr_type(AddressSpace::default()),
@@ -3829,7 +4032,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )
                     .map_err(compiler_diagnostic)?
                     .into_pointer_value();
-                if intrinsic == crate::IntrinsicFunction::PointerLoad {
+                if intrinsic != crate::IntrinsicFunction::PointerStore {
                     let descriptor =
                         self.dynamic_descriptor(&call.result_type, environment, span)?;
                     self.backend
@@ -6433,7 +6636,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return self.dynamic_descriptor(ty, environment, span);
         }
         if is_static_layout_type(ty)
-            && !matches!(ty, CheckedType::Unique(_) | CheckedType::Buffer(_))
+            && !matches!(ty, CheckedType::Unique(_))
         {
             // A reference's pointee still gets its descriptor: structural
             // dictionaries reached through the reference use it.
@@ -6457,7 +6660,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         let (shape, children): (CompoundDescriptorShape, Vec<&CheckedType>) = match ty {
             CheckedType::Unique(payload) => (CompoundDescriptorShape::Unique, vec![payload]),
-            CheckedType::Buffer(element) => (CompoundDescriptorShape::Buffer, vec![element]),
             CheckedType::Product(product) => (
                 CompoundDescriptorShape::Product,
                 product
@@ -9532,8 +9734,6 @@ fn is_static_layout_type(value_type: &CheckedType) -> bool {
         value_type,
         CheckedType::Shared(_)
             | CheckedType::Unique(_)
-            | CheckedType::SharedBuffer(_)
-            | CheckedType::Buffer(_)
             | CheckedType::RawMutPtr { .. }
             | CheckedType::RawPtr { .. }
             | CheckedType::RawOpaqueMutPtr

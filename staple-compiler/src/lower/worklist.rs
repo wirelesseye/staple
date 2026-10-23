@@ -1665,28 +1665,6 @@ impl<'a> WorklistBuilder<'a> {
                     owner,
                 );
             }
-            LoweredCallableTarget::Intrinsic {
-                intrinsic: crate::IntrinsicFunction::BufferClone,
-                ..
-            } => {
-                // A run-time element type clones through its dictionary.
-                if let Some(enclosing) = enclosing
-                    && let (Some(clone_trait), CheckedType::Buffer(element)) = (
-                        self.program.semantic_ids.clone_trait,
-                        substitute_type(
-                            call.result_type.clone(),
-                            &enclosing.environment.substitution_map(),
-                        ),
-                    )
-                    && contains_type_parameter(&element)
-                {
-                    let obligation = crate::CheckedTraitBound {
-                        trait_id: clone_trait,
-                        arguments: vec![*element],
-                    };
-                    self.request_dictionary_members(&obligation, &call.origin, enclosing, owner);
-                }
-            }
             LoweredCallableTarget::IndirectClosure { .. }
             | LoweredCallableTarget::ExternalFunction { .. }
             | LoweredCallableTarget::Intrinsic { .. }

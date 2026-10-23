@@ -73,8 +73,6 @@ fn invalid_spread_substitution(
         }
         CheckedType::Shared(ty)
         | CheckedType::Unique(ty)
-        | CheckedType::SharedBuffer(ty)
-        | CheckedType::Buffer(ty)
         | CheckedType::RawMutPtr { pointee: ty }
         | CheckedType::RawPtr { pointee: ty } => visit(ty),
         CheckedType::Array { element, count } => visit(element).or_else(|| visit(count)),

@@ -1,0 +1,118 @@
+pub mod
+
+use package.ptr.(RawMutPtr, RawOpaqueMutPtr)
+
+/// The size and alignment of a memory block.
+pub type MemLayout wrap pub (size: USize, align: USize)
+
+/// The managed heap. Its operations are grouped here so allocation is a
+/// deliberate, visible choice.
+pub type Gc wrap pub ()
+
+/// How a managed allocation cleans up its contents once it is unreachable.
+/// The collector calls `finalize` exactly once with the allocation's start.
+pub(package) trait Finalize T {
+    finalize: RawMutPtr<T> -> ()
+}
+
+pub(package) type SizeOf<T> wrap ()
+type AlignOf<T> wrap ()
+type NeedsDrop<T> wrap ()
+
+pub(package) extern "staple-intrinsic" {
+    __size_of: <T> SizeOf<T> -> USize
+    __align_of: <T> AlignOf<T> -> USize
+    __needs_drop: <T> NeedsDrop<T> -> Bool
+
+    __gc_allocate: MemLayout -> RawOpaqueMutPtr
+    __gc_release: RawOpaqueMutPtr -> ()
+    __gc_pin: RawOpaqueMutPtr -> ()
+    __gc_unpin: RawOpaqueMutPtr -> ()
+
+    __gc_finalize_with: <T> (RawMutPtr<T>, (RawMutPtr<T>) -> ()) -> ()
+
+    __pointer_read: <T> RawMutPtr<T> -> T
+    __pointer_add: <T> (RawMutPtr<T>, USize) -> RawMutPtr<T>
+    __pointer_copy_nonoverlapping: <T> (RawMutPtr<T>, RawMutPtr<T>, USize) -> ()
+}
+
+companion MemLayout {
+    /// The layout of one `T`.
+    pub def of = <T> () => MemLayout :: MemLayout (size: (__size_of (SizeOf.<T> ())), align: (__align_of (AlignOf.<T> ())))
+
+    /// The layout of `count` consecutive `T` values, or `None` when the size
+    /// computation would overflow.
+    pub def array = <T> count: USize => Option<MemLayout> :: {
+        let element = MemLayout.of.<T> ()
+        if (count == 0) {
+            Some (MemLayout (size: 0, align: element.align))
+        } else if (element.size == 0) {
+            Some (MemLayout (size: 0, align: element.align))
+        } else {
+            let size = count * element.size
+            if ((size / count) == element.size) {
+                Some (MemLayout (size: size, align: element.align))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// The layout of `header` followed by the array `(element, count)`, with
+    /// the array's offset in the second result, or `None` on overflow.
+    pub def extend = (header: MemLayout; tail: MemLayout) => Option<(MemLayout, USize)> :: {
+        let remainder = header.size % tail.align
+        let padding: USize = if (remainder == 0) { 0 } else { tail.align - remainder }
+        let offset = header.size + padding
+        if (offset < header.size) {
+            None
+        } else {
+            let size = offset + tail.size
+            if (size < offset) {
+                None
+            } else {
+                let align = if (header.align > tail.align) { header.align } else { tail.align }
+                let remainder = size % align
+                let padding: USize = if (remainder == 0) { 0 } else { align - remainder }
+                let size = size + padding
+                if (size < offset) {
+                    None
+                } else {
+                    Some (MemLayout (size: size, align: align), offset)
+                }
+            }
+        }
+    }
+
+    /// The stride of one `T` in an array, including tail padding.
+    pub def stride = <T> () => USize :: __size_of (SizeOf.<T> ())
+
+    /// The required alignment of one `T`.
+    pub def alignment = <T> () => USize :: __align_of (AlignOf.<T> ())
+}
+
+def finalize_of = <T where Finalize T> pointer: RawMutPtr<T> => () ::
+    Finalize.finalize pointer
+
+companion Gc {
+    /// Allocates an uninitialized block from the managed heap.
+    /// Traps on out-of-memory or when the requested alignment is unsupported.
+    pub def allocate = layout: MemLayout => RawOpaqueMutPtr :: __gc_allocate layout
+
+    /// Releases an allocation whose contents have already been cleaned up.
+    pub def unsafe_release = pointer: RawOpaqueMutPtr => () :: __gc_release pointer
+
+    /// Keeps an allocation alive while its only references are raw pointers.
+    pub def unsafe_pin = pointer: RawOpaqueMutPtr => () :: __gc_pin pointer
+
+    /// Undoes `unsafe_pin`.
+    pub def unsafe_unpin = pointer: RawOpaqueMutPtr => () :: __gc_unpin pointer
+
+    /// Whether values of `T` need cleanup before their storage is reused.
+    /// Folds to a constant at each specialization.
+    pub def needs_drop = <T> () => Bool :: __needs_drop (NeedsDrop.<T> ())
+
+    /// Installs `finalize` as `pointer`'s collector finalizer.
+    pub def finalize_with = <T where Finalize T> pointer: RawMutPtr<T> => () ::
+        __gc_finalize_with (pointer, finalize_of.<T>)
+}

@@ -1176,8 +1176,7 @@ impl ConstructorAdapterPlan {
                 CheckedType::Wrapper { representation, .. } => collect(representation, ids),
                 CheckedType::Shared(ty)
                 | CheckedType::Unique(ty)
-                | CheckedType::SharedBuffer(ty)
-                | CheckedType::Buffer(ty) => collect(ty, ids),
+                => collect(ty, ids),
                 CheckedType::Array { element, count } => {
                     collect(element, ids);
                     collect(count, ids);

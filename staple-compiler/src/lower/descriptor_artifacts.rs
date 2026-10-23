@@ -181,7 +181,6 @@ pub(super) fn collect_compound_shapes(
         ),
         CheckedType::Sum(sum) => (Shape::Sum, sum.alternatives.iter().collect()),
         CheckedType::Unique(payload) => (Shape::Unique, vec![payload]),
-        CheckedType::Buffer(element) => (Shape::Buffer, vec![element]),
         CheckedType::Wrapper { representation, .. } => {
             collect_compound_shapes(representation, shapes);
             return;
@@ -336,7 +335,13 @@ pub(super) fn scan_instance(
     if !dynamic && !dynamic_call && !polymorphic_call {
         return Ok(Vec::new());
     }
-    let mut requests = concrete_body_types(body)
+    let mut types = concrete_body_types(body);
+    // Generic constructor uses can leave an uninferred placeholder in a
+    // recorded expression type. It names no runtime layout, so it is not a
+    // descriptor request; concrete instances replace it with their
+    // substituted type when they are scanned.
+    types.retain(|value_type| !crate::contains_inferred_type(value_type));
+    let mut requests = types
         .iter()
         .enumerate()
         .map(|(index, ty)| {

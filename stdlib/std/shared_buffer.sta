@@ -1,32 +1,38 @@
 pub mod
 
-use package.shared.(Shared)
-use package.buffer.Buffer
+use package.alloc.Gc
+use package.buffer.(Buffer, BufferHeader)
 use package.cmp.(Eq)
-
-
 use package.index.(Index, MutateIndex)
 use package.iterator.(IntoIterator, Iterator)
 use package.iterator.IterStep.(Done, Yield)
-
-/// A garbage-collected, fixed-length sequence whose handles share one mutable
-/// allocation. The buffer owns its elements.
-@sized_opaque
-@recursive_constructor
-pub type SharedBuffer<T> opaque
+use package.process.(panic)
+use package.ptr.(RawMutPtr)
+use package.shared.(Shared)
 
 extern "staple-intrinsic" {
-    __shared_buffer_length: <T> SharedBuffer<T> -> USize
     __shared_buffer_get_shared: <T> (SharedBuffer<T>, USize) -> Shared<T>
 }
 
+/// A garbage-collected, fixed-length sequence whose handles share one mutable
+/// allocation. The buffer owns its elements.
+pub type SharedBuffer<T> wrap RawMutPtr<BufferHeader<T>>
+
 companion<T> SharedBuffer<T> {
+    /// Adopts a live buffer allocation. The caller must transfer ownership
+    /// exactly once.
+    pub(package) def unsafe_from_raw = pointer: RawMutPtr<BufferHeader<T>> => SharedBuffer<T> ::
+        SharedBuffer pointer
+
     /// Moves the elements of a fixed array into a new shared buffer.
     pub def from_array = <N where Natural N> move value: (T ^ N) => SharedBuffer<T> ::
         Buffer.into_shared_buffer (Buffer.from_array value)
 
     /// Returns the number of elements in the buffer.
-    pub def length = value: SharedBuffer<T> => USize :: __shared_buffer_length value
+    pub def length = value: SharedBuffer<T> => USize :: {
+        let header = value.*
+        BufferHeader.length header
+    }
 
     /// Returns an owned shared handle to an element, or `None` if out of bounds.
     /// The handle keeps the buffer allocation alive and observes replacements
@@ -56,8 +62,14 @@ companion<T> SharedBuffer<T> {
 
     /// Replaces the element at a position and returns the old value, trapping if out of bounds.
     pub def set_unchecked = (mut buffer: SharedBuffer<T>; position: USize; move value: T) => T :: {
-        let mut reference = SharedBuffer.get_shared_unchecked buffer position
-        Shared.replace (reference, value)
+        if (position >= SharedBuffer.length buffer) {
+            panic "SharedBuffer.set_unchecked: index out of bounds"
+        }
+        let header = buffer.*
+        let element = BufferHeader.element header position
+        let previous = RawMutPtr.unsafe_read element
+        RawMutPtr.store element value
+        previous
     }
 }
 
@@ -73,8 +85,11 @@ companion<T where Copy T> SharedBuffer<T> {
 
     /// Copies the element at a position, trapping if out of bounds.
     pub def get_unchecked = (buffer: SharedBuffer<T>; position: USize) => T :: {
-        let value = Shared.get (SharedBuffer.get_shared_unchecked buffer position)
-        value
+        if (position >= SharedBuffer.length buffer) {
+            panic "SharedBuffer.get_unchecked: index out of bounds"
+        }
+        let header = buffer.*
+        RawMutPtr.unsafe_read (BufferHeader.element header position)
     }
 }
 
@@ -96,7 +111,7 @@ pub type SharedBufferIter<T> wrap pub (buffer: SharedBuffer<T>, index: USize)
 impl<T where Copy T> Iterator SharedBufferIter<T> {
     type Item = T
     next = move SharedBufferIter (buffer, index) => if (index < SharedBuffer.length buffer) {
-        let value = Shared.get (SharedBuffer.get_shared_unchecked buffer index)
+        let value = SharedBuffer.get_unchecked buffer index
         Yield (value, SharedBufferIter (buffer: buffer, index: index + 1))
     } else {
         Done (SharedBufferIter (buffer: buffer, index: index))

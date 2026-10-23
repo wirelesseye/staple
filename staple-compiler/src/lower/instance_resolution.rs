@@ -392,8 +392,6 @@ pub(super) fn collect_referenced_parameters(
         }
         CheckedType::Shared(payload)
         | CheckedType::Unique(payload)
-        | CheckedType::SharedBuffer(payload)
-        | CheckedType::Buffer(payload)
         | CheckedType::RawMutPtr { pointee: payload }
         | CheckedType::RawPtr { pointee: payload } => collect_referenced_parameters(payload, out),
         CheckedType::Array { element, count } => {
@@ -979,8 +977,6 @@ fn contains_placeholder(value_type: &CheckedType) -> bool {
         CheckedType::Inferred | CheckedType::Error => true,
         CheckedType::Shared(payload)
         | CheckedType::Unique(payload)
-        | CheckedType::SharedBuffer(payload)
-        | CheckedType::Buffer(payload)
         | CheckedType::RawMutPtr { pointee: payload }
         | CheckedType::RawPtr { pointee: payload } => contains_placeholder(payload),
         CheckedType::Array { element, count } => {
@@ -2192,7 +2188,7 @@ impl LoweredProgram {
             CheckedType::Wrapper { representation, .. } => {
                 self.contains_recursive_payload(representation)
             }
-            CheckedType::Unique(payload) | CheckedType::Shared(payload) | CheckedType::Buffer(payload) => {
+            CheckedType::Unique(payload) | CheckedType::Shared(payload) => {
                 self.contains_recursive_payload(payload)
             }
             CheckedType::Product(product) => product
@@ -2323,7 +2319,7 @@ fn concrete_type_needs_drop(program: &LoweredProgram, value_type: &CheckedType) 
         return true;
     }
     match value_type {
-        CheckedType::CString | CheckedType::Unique(_) | CheckedType::Buffer(_) => true,
+        CheckedType::CString | CheckedType::Unique(_) => true,
         CheckedType::Product(product) => product
             .elements
             .iter()
@@ -3124,8 +3120,6 @@ impl<'a> ParameterCollector<'a> {
             CheckedType::Parameter { id, name, .. } => self.relevant.notice_type(*id, name),
             CheckedType::Shared(payload)
             | CheckedType::Unique(payload)
-            | CheckedType::SharedBuffer(payload)
-            | CheckedType::Buffer(payload)
             | CheckedType::RawMutPtr { pointee: payload }
             | CheckedType::RawPtr { pointee: payload } => self.collect_type(payload),
             CheckedType::Array { element, count } => {

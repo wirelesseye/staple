@@ -2,7 +2,9 @@ pub mod
 
 use package.iterator.(IntoIterator, Iterator, FromIterator)
 use package.iterator.IterStep.(Done, Yield)
-use package.buffer.(Buffer)
+use package.alloc.Gc
+use package.buffer.(Buffer, BufferHeader, unsafe_buffer_into_raw)
+use package.ptr.(RawMutPtr, RawOpaqueMutPtr)
 use package.clone.Clone
 use package.default.Default
 use package.index.(Index, MutateIndex)
@@ -188,8 +190,7 @@ impl<T> MutateIndex List<T> USize {
 
 pub type ListIter<T> wrap pub (list: List<T>, index: USize)
 
-// Copy-T-gated, like `get`/`Index` — yields owned copies. A Shared-yielding
-// iterator for non-Copy element types is intentionally left for later.
+// Copy-T-gated, like `get`/`Index` — yields owned copies.
 impl<T where Copy T> Iterator ListIter<T> {
     type Item = T
     next = move ListIter (list, index) => if (index < List.length list) {
@@ -204,7 +205,35 @@ impl<T where Copy T> Iterator ListIter<T> {
     }
 }
 
-impl<T where Copy T> IntoIterator List<T> {
-    type Iter = ListIter<T>
-    into_iterator = move list => ListIter (list: list, index: 0)
+/// A consuming iterator that moves elements out of a list's allocation. It
+/// takes over the buffer's raw parts, so `Buffer`'s own drop never runs; the
+/// iterator drops only the elements it has not yielded.
+pub type ListIntoIter<T> wrap (header: RawMutPtr<BufferHeader<T>>, front: USize)
+impl<T> !Copy ListIntoIter<T> {}
+
+impl<T> Drop ListIntoIter<T> {
+    cleanup = ListIntoIter (header, front) => {
+        BufferHeader.unsafe_drop_elements header front
+        Gc.unsafe_release (header as RawOpaqueMutPtr)
+    }
+}
+
+impl<T> Iterator ListIntoIter<T> {
+    type Item = T
+    // The `move` destructure skips `Drop`, so each step hands the allocation
+    // to its successor without freeing it.
+    next = move ListIntoIter (header, front) => if (front < BufferHeader.length header) {
+        let value = RawMutPtr.unsafe_read (BufferHeader.element header front)
+        Yield (value, ListIntoIter (header: header, front: front + 1))
+    } else {
+        Done (ListIntoIter (header: header, front: front))
+    }
+}
+
+impl<T> IntoIterator List<T> {
+    type Iter = ListIntoIter<T>
+    into_iterator = move list => {
+        let List buffer = list
+        ListIntoIter (header: unsafe_buffer_into_raw buffer, front: 0)
+    }
 }

@@ -297,13 +297,9 @@ impl<'program, 'context> Backend<'program, 'context> {
                     )
                 })
                 .and_then(|representation| self.compile_type(representation)),
-            CheckedType::SharedBuffer(_) => {
-                Ok(self.context.ptr_type(AddressSpace::default()).into())
-            }
             CheckedType::Shared(_) | CheckedType::Unique(_) => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
-            CheckedType::Buffer(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             CheckedType::RawOpaquePtr
             | CheckedType::RawOpaqueMutPtr
             | CheckedType::RawPtr { .. }

@@ -300,12 +300,6 @@ impl CanonicalType {
             CheckedType::Unique(payload) => {
                 CanonicalType::Unique(Box::new(Self::convert(payload, origin, runtime, binders)?))
             }
-            CheckedType::SharedBuffer(payload) => CanonicalType::SharedBuffer(Box::new(
-                Self::convert(payload, origin, runtime, binders)?,
-            )),
-            CheckedType::Buffer(payload) => {
-                CanonicalType::Buffer(Box::new(Self::convert(payload, origin, runtime, binders)?))
-            }
             CheckedType::Array { element, count } => CanonicalType::Array {
                 element: Box::new(Self::convert(element, origin, runtime, binders)?),
                 count: Box::new(Self::convert(count, origin, runtime, binders)?),
