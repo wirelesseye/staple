@@ -38,10 +38,12 @@ companion<T> Shared<T> {
 }
 
 impl<T where Eq T> Eq Shared<T> {
-    eq = (Shared left; Shared right) => Eq.eq (left; right)
+    eq = (left; right) => match left { left_value: T => match right {
+        right_value: T => Eq.eq (left_value; right_value)
+    } }
 }
 
 companion<T where Copy T> Shared<T> {
     /// Copies the payload without consuming the handle.
-    pub def get = reference: Shared<T> => T :: match reference { Shared value => value }
+    pub def get = reference: Shared<T> => T :: match reference { value: T => value }
 }

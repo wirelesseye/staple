@@ -8565,6 +8565,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.load_caller_site_field(environment, index, &span)
                     .map(|value| value.as_any_value_enum())
             }
+            IntrinsicFunction::UniqueIntoInner => {
+                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
+                    return Err(unsupported("Unique extraction"));
+                };
+                let payload_type = self.backend.compile_type(result_type)?;
+                let payload = self.backend.builder
+                    .build_load(payload_type, *pointer, "unique.into_inner")
+                    .map_err(compiler_diagnostic)?;
+                self.backend.build_unique_free(*pointer, span.clone())?;
+                Ok(payload.as_any_value_enum())
+            }
             IntrinsicFunction::UniqueIntoRaw | IntrinsicFunction::UniqueFromRaw => {
                 let BasicMetadataValueEnum::PointerValue(pointer) = arguments[0] else {
                     return Err(unsupported("Unique raw conversion"));

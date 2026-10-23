@@ -4508,6 +4508,9 @@ its payload may be sized or unsized while the handle has a compiler-supplied
 representation. `Unique<T>` is likewise opaque and owns its payload affinely.
 `Shared.new` and `Unique.new` allocate payloads; the compiler-provided
 `Shared value` and `Unique value` construction forms remain available.
+Opaque handles have no nominal payload patterns: `Shared pattern` and
+`Unique pattern` are rejected. Use automatic payload matching, `get`, or
+`Unique.into_inner` instead.
 `get` copies a payload when `Copy T`. `Unique.into_inner` consumes an owner,
 returns its payload, and frees its allocation without dropping that payload.
 Constructing `Shared value` copies or moves `value` into a managed allocation;
@@ -4525,7 +4528,7 @@ same managed allocation:
 let mut point: Shared<(x: I32, y: I32)> = Shared (x: 10, y: 20)
 let x = point.x
 point.x = 30
-let Shared (captured_x, captured_y) = point
+let (captured_x, captured_y) = Shared.get point
 ```
 
 The companion method `Shared.replace: <T> (mut Shared<T>, move T) -> T` replaces a whole
@@ -4540,13 +4543,14 @@ let previous = Shared.replace (value, 20)
 semantics for unique owners. Both methods take a non-slotted product argument;
 they cannot be partially applied as `reference |> replace value`.
 
-`Shared` follows the ordinary literal representation rules when nested inside a
-nominal type. For example, this declaration retains both constructor layers:
+A nominal wrapper can contain a `Shared` handle. Construction retains both
+layers, and the wrapper pattern can automatically project through the handle
+to match its payload:
 
 ```staple
 type SharedPoint wrap Shared<(x: I32, y: I32)>
 let point = SharedPoint (Shared (x: 10, y: 20))
-let SharedPoint (Shared (x, y)) = point
+let SharedPoint (x, y) = point
 ```
 
 An array can be moved into a `SharedBuffer`:

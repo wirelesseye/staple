@@ -3852,6 +3852,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 return Ok(storage);
             }
+            crate::IntrinsicFunction::UniqueIntoInner => {
+                let source = slot_pointer(0)?;
+                let pointer = self.load_dynamic_storage(
+                    self.backend.context.ptr_type(AddressSpace::default()), source, "unique.into_inner.pointer")
+                    .map_err(compiler_diagnostic)?.into_pointer_value();
+                let descriptor = self.dynamic_descriptor(&call.result_type, environment, span)?;
+                self.backend.copy_dynamic_value(descriptor, pointer, storage)?;
+                self.backend.build_unique_free(pointer, span.clone())?;
+                return Ok(storage);
+            }
             crate::IntrinsicFunction::UniqueIntoRaw | crate::IntrinsicFunction::UniqueFromRaw => {
                 let source = slot_pointer(0)?;
                 let pointer = self

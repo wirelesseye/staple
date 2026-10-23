@@ -3382,7 +3382,7 @@ fn supports_mutable_parameter_match_and_copy_shared_pattern_binders() {
         "type Empty\n",
         "def parameter = (value: I32) => { let mut value = value; value = value + 1; value }\n",
         "def matched = (value: Box | Empty) => match value { Box (mut inner) => { inner = 3; inner }, Empty() => 0 }\n",
-        "def borrowed = (value: Shared<I32>) => { let Shared (mut inner) = value; inner = 4; inner }\n",
+        "def borrowed = (value: Shared<I32>) => match value { mut inner: I32 => { inner = 4; inner } }\n",
     ));
 
     let diagnostics = TypeChecker::new()
@@ -3390,7 +3390,7 @@ fn supports_mutable_parameter_match_and_copy_shared_pattern_binders() {
             "use std.shared.(Shared)\n",
             "type Resource wrap I32\n",
             "impl Drop Resource { cleanup = Resource value => () }\n",
-            "def invalid = (value: Shared<Resource>) => { let Shared (mut inner) = value; inner }\n",
+            "def invalid = (value: Shared<Resource>) => match value { mut inner: Resource => inner }\n",
         )))
         .expect_err_diagnostics("move-only Shared borrows cannot become mutable locals");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -3856,16 +3856,10 @@ fn rejects_overlapping_structural_iterator_implementations() {
 
 #[test]
 fn rejects_slice_shared_destructuring() {
-    let diagnostics = TypeChecker::new()
-        .check(resolve(
-            "use std.shared.(Shared)\nuse std.shared_buffer.SharedBuffer\nlet fixed: (I32 ^ 2) = (1, 2)\nlet values: SharedBuffer<I32> = SharedBuffer.from_array fixed\nlet Shared payload = values\n",
-        ))
-        .expect_err_diagnostics("a slice cannot be destructured as a Shared");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.message.contains("cannot be destructured") })
-    );
+    let diagnostics = resolve_result(
+        "use std.shared.(Shared)\nuse std.shared_buffer.SharedBuffer\nlet fixed: (I32 ^ 2) = (1, 2)\nlet values: SharedBuffer<I32> = SharedBuffer.from_array fixed\nlet Shared payload = values\n",
+    ).expect_err_diagnostics("opaque Shared has no nominal payload pattern");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("not a represented nominal type")));
 }
 
 #[test]
@@ -9511,9 +9505,9 @@ fn type_checks_and_lowers_managed_shared_values() {
         "let point: Shared<(x: I32, y: I32)> = Shared (x: 1, y: 2)\n",
         "let copy = point\n",
         "let x: I32 = copy.x\n",
-        "let Shared (captured_x, captured_y) = point\n",
+        "let (captured_x, captured_y) = Shared.get (point)\n",
         "def sum_shared: (Shared<(x: I32, y: I32)>) -> I32 = value => match value {\n",
-        "  Shared (x, y) => x + y,\n",
+        "  (x, y) => x + y,\n",
         "}\n",
         "let nested: Shared<Shared<I32>> = Shared (Shared 9)\n",
         "let empty: Shared<()> = Shared ()\n",
@@ -9582,7 +9576,7 @@ fn preserves_literal_nominal_shared_container_semantics() {
         "type SharedPoint wrap Shared<(x: I32, y: I32)>\n",
         "let point: SharedPoint = SharedPoint (Shared (x: 3, y: 4))\n",
         "let x: I32 = point.x\n",
-        "let SharedPoint (Shared (captured_x, captured_y)) = point\n",
+        "let SharedPoint (captured_x, captured_y) = point\n",
         "let y: I32 = captured_y\n",
     ));
     let context = Context::create();
@@ -12125,7 +12119,7 @@ fn moves_resources_into_managed_closures_and_borrows_shared_payloads() {
         concat!(
             "use std.shared.(Shared)\n",
             "use std.cinterop.*\n",
-            "def invalid = (value: Shared<CString>) => { let Shared inner = value; drop inner }\n",
+            "def invalid = (value: Shared<CString>) => match value { inner: CString => drop inner }\n",
         ),
     ] {
         let diagnostics = TypeChecker::new()
@@ -17567,7 +17561,7 @@ fn unique_constructs_dereferences_and_transfers_raw_ownership() {
         "  restored.y\n",
         "}\n",
         "def generic = <T where ?Sized T> move value: Unique<T> => Unique<T> :: Unique.unsafe_from_raw (Unique.unsafe_into_raw value)\n",
-        "def unbox = () => { let Unique value = Unique 42; value }\n",
+        "def unbox = () => Unique.into_inner (Unique 42)\n",
         "def deref = () => { let value = Unique 42; value.*; value.* }\n",
         "def borrowed_copy = value: Unique<I32> => I32 :: value.*\n",
         "def constructor_value = () => { let allocate: I32 -> Unique<I32> = Unique; let owner = allocate 9; owner.* }\n",
@@ -17645,13 +17639,13 @@ fn unique_guards_recursive_types_and_borrows_non_copy_payloads() {
         "type Node<T> wrap (head: T, tail: Option<Unique<Node<T>>>)\n",
         "def make: () -> Node<I32> = () => Node.<I32> (head: 42, tail: None)\n",
         "def nest: () -> Node<I32> = () => { let leaf = make (); Node.<I32> (head: 1, tail: Some (Unique leaf)) }\n",
-        "def read: Unique<I32> -> I32 = Unique value => value\n",
+        "def read: Unique<I32> -> I32 = owner => Unique.get owner\n",
     ));
     let errors = TypeChecker::new()
         .check(resolve(concat!(
             "use std.unique.(Unique)\n",
             "use std.cinterop.*\n",
-            "def invalid: Unique<CString> -> CString = Unique value => value\n",
+            "def invalid: Unique<CString> -> CString = owner => match owner { value: CString => value }\n",
         )))
         .expect_err_diagnostics("borrowed destructuring cannot move a payload");
     assert!(
@@ -19716,4 +19710,36 @@ fn raw_pointer_store_consumes_non_copy_values() {
         "}\n",
     ), "storing a non-Copy value must move it");
     assert!(messages.iter().any(|message| message.contains("use of moved value")), "{messages:?}");
+}
+
+#[test]
+fn opaque_handles_reject_nominal_payload_patterns() {
+    for (module, handle) in [("unique", "Unique"), ("shared", "Shared")] {
+        let cases = [
+            format!("let owner = {handle} 1\nlet {handle} value = owner\n"),
+            format!("def inspect = owner: {handle}<I32> => I32 :: match owner {{ {handle} value => value }}\n"),
+            format!("def inspect: {handle}<I32> -> I32 = {handle} value => value\n"),
+            format!("def extract: move {handle}<I32> -> I32 = move {handle} value => value\n"),
+            format!("type Holder wrap {handle}<I32>\nlet Holder ({handle} value) = Holder ({handle} 1)\n"),
+            format!("type Alias = {handle}<I32>\ndef inspect: Alias -> I32 = Alias value => value\n"),
+        ];
+        for body in cases {
+            let diagnostics = resolve_result(&format!("use std.{module}.({handle})\n{body}"))
+                .expect_err_diagnostics("opaque handles must not expose nominal payload patterns");
+            assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("not a represented nominal type")), "{body}: {diagnostics:?}");
+        }
+    }
+}
+
+#[test]
+fn unique_into_inner_intrinsic_requires_ownership_and_matching_payload() {
+    for replacement in [
+        "__unique_into_inner: <T> Unique<T> -> T",
+        "__unique_into_inner: <T> move Unique<T> -> I32",
+    ] {
+        let diagnostics = stdlib_edit_diagnostics("std/unique.sta",
+            "__unique_into_inner: <T> move Unique<T> -> T", replacement,
+            "use std.unique.(Unique)\n");
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("standard-library intrinsic has an invalid type")), "{diagnostics:?}");
+    }
 }

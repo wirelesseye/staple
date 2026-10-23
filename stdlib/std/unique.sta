@@ -13,6 +13,7 @@ use package.ptr.(RawMutPtr)
 pub type Unique<T where ?Sized T> opaque
 
 extern "staple-intrinsic" {
+    __unique_into_inner: <T> move Unique<T> -> T
     __unique_replace: <T> (mut Unique<T>, move T) -> T
     __unique_into_raw: <T where ?Sized T> (move Unique<T>) -> RawMutPtr<T>
     __unique_from_raw: <T where ?Sized T> RawMutPtr<T> -> Unique<T>
@@ -23,7 +24,7 @@ companion<T> Unique<T> {
     pub def new = move value: T => Unique<T> :: Unique value
 
     /// Consumes the owner, returning its payload and freeing its allocation.
-    pub def into_inner = move owner: Unique<T> => T :: { let Unique value = owner; value }
+    pub def into_inner = move owner: Unique<T> => T :: __unique_into_inner owner
 
     /// Replaces the payload and returns the previous value.
     pub def replace: (mut Unique<T>, move T) -> T = (mut reference, move value) => __unique_replace (reference, value)
@@ -45,5 +46,5 @@ companion<T where ?Sized T> Unique<T> {
 
 companion<T where Copy T> Unique<T> {
     /// Copies the payload without consuming the handle.
-    pub def get = reference: Unique<T> => T :: match reference { Unique value => value }
+    pub def get = reference: Unique<T> => T :: match reference { value: T => value }
 }

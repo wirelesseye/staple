@@ -6229,6 +6229,15 @@ impl TypeChecker {
                     .cloned()
                     .filter(|value_type| valid_buffer_intrinsic_type(value_type, *intrinsic))
                     .unwrap_or(CheckedType::Error),
+                crate::IntrinsicFunction::UniqueIntoInner => self.symbol_value_type(*symbol)
+                    .cloned()
+                    .filter(|value| matches!(value, CheckedType::Function(function)
+                        if matches!(function.parameter.as_ref(), CheckedType::Unique(payload)
+                            if payload.is_sized() && types_equivalent(payload, &function.result))
+                        && function.moves == [CheckedMutation::Whole]
+                        && function.mutations.is_empty()
+                        && function.effects == CheckedEffectSet::default()))
+                    .unwrap_or(CheckedType::Error),
                 crate::IntrinsicFunction::UniqueIntoRaw | crate::IntrinsicFunction::UniqueFromRaw => self.symbol_value_type(*symbol)
                     .cloned()
                     .filter(|ty| match ty {
@@ -9188,24 +9197,6 @@ impl TypeChecker {
                             .clone()
                             .unwrap_or_else(expected_string_representation);
                         self.bind_pattern_types(module, &pattern.argument, &representation);
-                    }
-                    CheckedType::Shared(payload)
-                        if module.builtin_type(expected_id) == Some(BuiltinType::Shared) =>
-                    {
-                        self.bind_pattern_types(module, &pattern.argument, payload);
-                    }
-                    CheckedType::Unique(payload)
-                        if module.builtin_type(expected_id) == Some(BuiltinType::Unique) =>
-                    {
-                        self.bind_pattern_types(module, &pattern.argument, payload);
-                    }
-                    CheckedType::SharedBuffer(_)
-                        if module.builtin_type(expected_id) == Some(BuiltinType::Shared) =>
-                    {
-                        self.diagnostics.push(Diagnostic::new(
-                            pattern.syntax.span.clone(),
-                            "a slice cannot be destructured as a `Shared`",
-                        ));
                     }
                     CheckedType::Wrapper {
                         id, representation, ..
@@ -14317,25 +14308,6 @@ impl TypeChecker {
                         if module.builtin_type(expected_id) == Some(BuiltinType::String) =>
                     {
                         self.string_representation.clone()
-                    }
-                    CheckedType::Shared(payload)
-                        if module.builtin_type(expected_id) == Some(BuiltinType::Shared) =>
-                    {
-                        Some(payload.as_ref().clone())
-                    }
-                    CheckedType::Unique(payload)
-                        if module.builtin_type(expected_id) == Some(BuiltinType::Unique) =>
-                    {
-                        Some(payload.as_ref().clone())
-                    }
-                    CheckedType::SharedBuffer(_)
-                        if module.builtin_type(expected_id) == Some(BuiltinType::Shared) =>
-                    {
-                        self.diagnostics.push(Diagnostic::new(
-                            pattern.syntax.span.clone(),
-                            "a slice cannot be destructured as a `Shared`",
-                        ));
-                        return;
                     }
                     CheckedType::Sum(sum) => {
                         let matches = sum

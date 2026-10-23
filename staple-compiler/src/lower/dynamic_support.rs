@@ -201,6 +201,7 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::BufferTransfer
         | IntrinsicFunction::SharedReplace
         | IntrinsicFunction::UniqueReplace
+        | IntrinsicFunction::UniqueIntoInner
         | IntrinsicFunction::UniqueIntoRaw
         | IntrinsicFunction::UniqueFromRaw => {
             unreachable!("supported intrinsic passed to rejection classifier")
@@ -543,6 +544,7 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::SharedBufferGetShared
             | IntrinsicFunction::SharedReplace
             | IntrinsicFunction::UniqueReplace
+            | IntrinsicFunction::UniqueIntoInner
             | IntrinsicFunction::UniqueIntoRaw
             | IntrinsicFunction::UniqueFromRaw
             | IntrinsicFunction::BufferLength

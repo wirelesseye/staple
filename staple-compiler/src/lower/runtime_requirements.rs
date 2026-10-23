@@ -446,7 +446,9 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
                 recursive: Some(_), ..
             } => self.gc(),
             LoweredCallableTarget::Intrinsic { intrinsic, .. } => match intrinsic {
-                IntrinsicFunction::UniqueIntoRaw | IntrinsicFunction::UniqueFromRaw => self.gc(),
+                IntrinsicFunction::UniqueIntoInner
+                | IntrinsicFunction::UniqueIntoRaw
+                | IntrinsicFunction::UniqueFromRaw => self.gc(),
                 IntrinsicFunction::ParseNumber { .. } => {
                     self.requirements.record(RuntimeRequirement::NumericParse);
                     self.gc();

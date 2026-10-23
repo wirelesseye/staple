@@ -2644,8 +2644,8 @@ pub(crate) enum LoweredPatternKind {
         mutable: bool,
         moved: bool,
     },
-    /// A nominal destructuring pattern (`Shared inner`, `Some value`, ...) with
-    /// the named type it selects and its argument pattern.
+    /// A nominal destructuring pattern (`Some value`, ...) or an implicit
+    /// handle projection, with its selected type and argument pattern.
     Nominal {
         target: Option<TypeId>,
         name: String,
@@ -14109,6 +14109,7 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::BufferClone
         | Intrinsic::SharedReplace
         | Intrinsic::UniqueReplace
+        | Intrinsic::UniqueIntoInner
         | Intrinsic::UniqueIntoRaw
         | Intrinsic::UniqueFromRaw => None,
     }
@@ -22203,7 +22204,7 @@ mod tests {
             "  False => 0,\n",
             "}\n",
             "def singleton: True -> I32 = True => 0\n",
-            "def borrowed: Shared<I32> -> I32 = (Shared inner) => inner\n",
+            "def borrowed: Shared<I32> -> I32 = reference => match reference { inner: I32 => inner }\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -22335,16 +22336,15 @@ mod tests {
             assert_eq!(pattern.test.sum_alternative, Some(expected));
         }
 
-        let (_, borrowed) = lowered_function(&program, "borrowed");
-        let product = lowered_pattern(&program, borrowed.parameter_pattern);
-        let LoweredPatternKind::Product { elements, .. } = &product.kind else {
-            panic!("borrowed parameter should be a product");
+        let borrowed = expression_body(&program, "borrowed");
+        let LoweredExpressionKind::Match(match_) = &borrowed.kind else {
+            panic!("borrowed body should match its payload");
         };
-        let shared_pattern_id = elements[0];
+        let shared_pattern_id = match_.arms[0].pattern;
         let shared_pattern = lowered_pattern(&program, shared_pattern_id);
         assert_eq!(shared_pattern.test.identity, LoweredPatternIdentity::Shared);
         let LoweredPatternKind::Nominal { argument, .. } = &shared_pattern.kind else {
-            panic!("`Shared inner` should be nominal");
+            panic!("automatic shared projection should be nominal");
         };
         assert_eq!(
             lowered_pattern(&program, *argument).test.subject,
@@ -23450,7 +23450,7 @@ mod tests {
             "def moved: move String -> String = move value => value\n",
             "def moved_nominal: move TestOwned -> String = move TestOwned value => value\n",
             "def singleton: True -> I32 = True => 0\n",
-            "def borrowed: Shared<I32> -> I32 = (Shared inner) => inner\n",
+            "def borrowed: Shared<I32> -> I32 = reference => match reference { inner: I32 => inner }\n",
             "def literal: \"literal\" -> I32 = \"literal\" => 0\n",
         ));
         let mut program = LoweredProgram::default();
@@ -23543,12 +23543,11 @@ mod tests {
         );
 
         let (_, borrowed) = lowered_function(&program, "borrowed");
-        let pattern = lowered_pattern(&program, borrowed.parameter_pattern);
-        let LoweredPatternKind::Product { elements, .. } = &pattern.kind else {
-            panic!("`(Shared inner)` should lower to a single-element product");
-        };
-        assert_eq!(elements.len(), 1);
-        let pattern = lowered_pattern(&program, elements[0]);
+        assert!(matches!(lowered_pattern(&program, borrowed.parameter_pattern).kind,
+            LoweredPatternKind::Binding { symbol: Some(_), .. }));
+        let body = expression_body(&program, "borrowed");
+        let LoweredExpressionKind::Match(match_) = &body.kind else { panic!("expected a payload match"); };
+        let pattern = lowered_pattern(&program, match_.arms[0].pattern);
         let LoweredPatternKind::Nominal {
             target: Some(target),
             name,
@@ -23556,7 +23555,7 @@ mod tests {
             argument,
         } = &pattern.kind
         else {
-            panic!("`Shared inner` should lower to a nominal pattern");
+            panic!("automatic shared projection should lower to a nominal pattern");
         };
         assert_eq!(name, "Shared");
         assert_eq!(
@@ -23593,7 +23592,7 @@ mod tests {
             "  let (first, second) = (1, 2)\n",
             "  let whole@(third, fourth) = (3, 4)\n",
             "  let Wrapper inner = Wrapper (value: 5)\n",
-            "  let Shared payload = Shared 6\n",
+            "  let (payload, _) = Shared (6, 0)\n",
             "  let ?Ok(value) = read()\n",
             "  first + second + third + fourth + whole.0 + inner + payload + value\n",
             "}\n",

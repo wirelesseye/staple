@@ -73,7 +73,7 @@ companion<T where Copy T> SharedBuffer<T> {
 
     /// Copies the element at a position, trapping if out of bounds.
     pub def get_unchecked = (buffer: SharedBuffer<T>; position: USize) => T :: {
-        let Shared value = SharedBuffer.get_shared_unchecked buffer position
+        let value = Shared.get (SharedBuffer.get_shared_unchecked buffer position)
         value
     }
 }
@@ -96,7 +96,7 @@ pub type SharedBufferIter<T> wrap pub (buffer: SharedBuffer<T>, index: USize)
 impl<T where Copy T> Iterator SharedBufferIter<T> {
     type Item = T
     next = move SharedBufferIter (buffer, index) => if (index < SharedBuffer.length buffer) {
-        let Shared value = SharedBuffer.get_shared_unchecked buffer index
+        let value = Shared.get (SharedBuffer.get_shared_unchecked buffer index)
         Yield (value, SharedBufferIter (buffer: buffer, index: index + 1))
     } else {
         Done (SharedBufferIter (buffer: buffer, index: index))

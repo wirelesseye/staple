@@ -442,6 +442,7 @@ pub enum IntrinsicFunction {
     BufferClone,
     SharedReplace,
     UniqueReplace,
+    UniqueIntoInner,
     UniqueIntoRaw,
     UniqueFromRaw,
     ReactiveScope,
@@ -2705,6 +2706,11 @@ impl NameResolver {
                 "std.unique",
                 "__unique_replace",
                 IntrinsicFunction::UniqueReplace,
+            ),
+            (
+                "std.unique",
+                "__unique_into_inner",
+                IntrinsicFunction::UniqueIntoInner,
             ),
             (
                 "std.unique",
@@ -7246,19 +7252,14 @@ impl NameResolver {
             Pattern::Nominal(pattern) => {
                 if let Some(id) = self.named_types.get(&pattern.syntax.id).copied() {
                     let declaration = &self.type_declarations[&id];
-                    let handle = matches!(
-                        self.builtin_types.get(&id),
-                        Some(BuiltinType::Shared | BuiltinType::Unique)
-                    );
-                    let represented = handle
-                        || (declaration.kind().is_wrapper() && declaration.underlying().is_some())
+                    let represented = (declaration.kind().is_wrapper() && declaration.underlying().is_some())
                         || declaration.kind() == staple_syntax::TypeDeclarationKind::Singleton;
                     if !represented {
                         self.diagnostics.push(Diagnostic::new(
                             pattern.syntax.span.clone(),
                             format!("`{}` is not a represented nominal type", pattern.name),
                         ));
-                    } else if !handle && !self.representation_visible(id, self.current_module) {
+                    } else if !self.representation_visible(id, self.current_module) {
                         self.diagnostics.push(Diagnostic::new(
                             pattern.syntax.span.clone(),
                             format!("the representation of `{}` is private", pattern.name),

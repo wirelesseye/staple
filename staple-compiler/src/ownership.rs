@@ -1148,21 +1148,7 @@ impl<'a> OwnershipChecker<'a> {
                     self.bind_pattern(element, freeze);
                 }
             }
-            Pattern::Nominal(value) => {
-                if !freeze
-                    && matches!(
-                        self.module.type_of_pattern(value.syntax.id),
-                        Some(crate::CheckedType::Unique(_))
-                    )
-                {
-                    self.info.taken_unique.insert(value.syntax.id);
-                }
-                let dereferences_shared = matches!(
-                    self.module.type_of_pattern(value.syntax.id),
-                    Some(crate::CheckedType::Shared(_))
-                );
-                self.bind_pattern(&value.argument, freeze || dereferences_shared);
-            }
+            Pattern::Nominal(value) => self.bind_pattern(&value.argument, freeze),
             Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
         }
     }

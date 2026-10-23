@@ -79,7 +79,7 @@ companion<T where Copy T> Buffer<T> {
 
     /// Copies the element at a position, trapping if out of bounds.
     pub def get_unchecked = (buffer: Buffer<T>; position: USize) => T :: {
-        let Shared value = __buffer_get (buffer, position)
+        let value = Shared.get (__buffer_get (buffer, position))
         value
     }
 }
