@@ -33,9 +33,7 @@ const KEYWORDS: &[&str] = &[
     "mut",
     "opaque",
     "package",
-    "parse_quote",
     "pub",
-    "quote",
     "resource",
     "return",
     "trait",
@@ -1795,6 +1793,34 @@ mod tests {
         assert!(!outside.iter().any(|item| item.label == "parameter"));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn completes_quote_macros_as_items_without_keyword_duplicates() {
+        let source = "use std.syntax.(quote, parse_quote)\n";
+        let path = std::env::temp_dir().join("staple-completion-quote-macros.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let items = index(&module, &typed).items(source.len());
+
+        for name in ["quote", "parse_quote"] {
+            let matches = items
+                .iter()
+                .filter(|item| item.label == name)
+                .collect::<Vec<_>>();
+            assert_eq!(matches.len(), 1, "duplicate {name} in {items:?}");
+            assert_eq!(matches[0].kind, Some(CompletionItemKind::FUNCTION));
+        }
     }
 
     #[test]
