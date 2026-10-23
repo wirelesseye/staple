@@ -568,6 +568,19 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::BufferGet
             | IntrinsicFunction::BufferIntoShared
             | IntrinsicFunction::BufferTransfer
+            | IntrinsicFunction::SizeOf
+            | IntrinsicFunction::AlignOf
+            | IntrinsicFunction::NeedsDrop
+            | IntrinsicFunction::GcAllocate
+            | IntrinsicFunction::GcRelease
+            | IntrinsicFunction::GcPin
+            | IntrinsicFunction::GcUnpin
+            | IntrinsicFunction::GcFinalizeWith
+            | IntrinsicFunction::Trap
+            | IntrinsicFunction::CheckedMul
+            | IntrinsicFunction::PointerRead
+            | IntrinsicFunction::PointerAdd
+            | IntrinsicFunction::PointerCopyNonoverlapping
     )
 }
 
@@ -1246,11 +1259,13 @@ impl SupportWalker<'_> {
                     self.reject(RejectionReason::ExternWithParameters);
                 }
             }
-            LoweredCallableTarget::Intrinsic {
-                intrinsic: crate::IntrinsicFunction::BufferFromArray,
-                ..
-            } => self.reject(RejectionReason::RuntimeNaturalCount),
-            LoweredCallableTarget::Intrinsic { .. } => {}
+            LoweredCallableTarget::Intrinsic { intrinsic, .. } => {
+                if *intrinsic == crate::IntrinsicFunction::BufferFromArray {
+                    self.reject(RejectionReason::RuntimeNaturalCount);
+                } else if !dynamic_scalar_intrinsic(*intrinsic) {
+                    self.reject(intrinsic_rejection(*intrinsic));
+                }
+            }
         }
     }
 

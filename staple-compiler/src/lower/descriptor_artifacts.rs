@@ -340,7 +340,13 @@ pub(super) fn scan_instance(
     // recorded expression type. It names no runtime layout, so it is not a
     // descriptor request; concrete instances replace it with their
     // substituted type when they are scanned.
-    types.retain(|value_type| !crate::contains_inferred_type(value_type));
+    // The buffer header constructor can record an uninferred element type in a
+    // generic `Buffer.with_capacity` body. It names no runtime layout, so it is
+    // not a descriptor request; other records keep their descriptor indices.
+    types.retain(|value_type| {
+        !(crate::contains_inferred_type(value_type)
+            && matches!(value_type, CheckedType::Wrapper { name, .. } if name.ends_with("BufferHeader")))
+    });
     let mut requests = types
         .iter()
         .enumerate()
