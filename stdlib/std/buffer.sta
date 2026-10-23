@@ -189,14 +189,6 @@ companion<T> Buffer<T> {
         BufferHeader.set_length destination_header (destination_length + source_length)
         BufferHeader.set_length source_header 0
     }
-
-    /// Moves the buffer's allocation to the caller without running its `Drop`.
-    /// The caller must eventually free it with `Gc.unsafe_release` after
-    /// cleaning up the elements.
-    pub(package) def unsafe_into_raw = move buffer: Buffer<T> => RawMutPtr<BufferHeader<T>> :: {
-        let header = buffer.*
-        header
-    }
 }
 
 companion<T where Copy T> Buffer<T> {

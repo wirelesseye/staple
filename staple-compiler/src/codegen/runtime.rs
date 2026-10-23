@@ -402,15 +402,24 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 }
 
+/// The alignment every GC payload is guaranteed: the largest of the pointer,
+/// `i64` and `f64` alignments, from which supported layouts compose.
+pub(crate) fn gc_payload_alignment(
+    context: &inkwell::context::Context,
+    target: &inkwell::targets::TargetData,
+) -> u64 {
+    (target.get_pointer_byte_size(None) as u64)
+        .max(target.get_abi_alignment(&context.i64_type()) as u64)
+        .max(target.get_abi_alignment(&context.f64_type()) as u64)
+}
+
 /// Keep the payload aligned for every scalar from which supported layouts compose.
 fn gc_header_bytes(
     context: &inkwell::context::Context,
     target: &inkwell::targets::TargetData,
 ) -> u64 {
     let pointer_bytes = target.get_pointer_byte_size(None) as u64;
-    let alignment = pointer_bytes
-        .max(target.get_abi_alignment(&context.i64_type()) as u64)
-        .max(target.get_abi_alignment(&context.f64_type()) as u64);
+    let alignment = gc_payload_alignment(context, target);
     (pointer_bytes * 6).div_ceil(alignment) * alignment
 }
 
@@ -527,6 +536,19 @@ mod payload_alignment_tests {
         ] {
             let target = inkwell::targets::TargetData::create(layout);
             assert_eq!(super::gc_header_bytes(&context, &target), expected);
+        }
+    }
+
+    #[test]
+    fn gc_payload_alignment_covers_64_bit_scalars_on_32_bit_targets() {
+        let context = inkwell::context::Context::create();
+        for (layout, expected) in [
+            ("e-p:32:32-i64:64-f64:64", 8),
+            ("e-p:32:32-i64:32-f64:32", 4),
+            ("e-p:64:64-i64:64-f64:64", 8),
+        ] {
+            let target = inkwell::targets::TargetData::create(layout);
+            assert_eq!(super::gc_payload_alignment(&context, &target), expected);
         }
     }
 }

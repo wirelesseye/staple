@@ -8269,66 +8269,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_extract_value(*layout, 1, "layout.align")
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
-                let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
-                let pointer_basic: BasicTypeEnum = pointer_type.into();
-                let supported = self.backend.target_data.get_abi_alignment(&pointer_basic);
-                let too_aligned = self
-                    .backend
-                    .builder
-                    .build_int_compare(
-                        inkwell::IntPredicate::UGT,
-                        align,
-                        self.backend.size_type.const_int(supported as u64, false),
-                        "layout.align.unsupported",
-                    )
-                    .map_err(compiler_diagnostic)?;
-                let zero_bits = self
-                    .backend
-                    .builder
-                    .build_int_compare(
-                        inkwell::IntPredicate::EQ,
-                        align,
-                        self.backend.size_type.const_zero(),
-                        "layout.align.zero",
-                    )
-                    .map_err(compiler_diagnostic)?;
-                let below_one = self
-                    .backend
-                    .builder
-                    .build_int_sub(
-                        align,
-                        self.backend.size_type.const_int(1, false),
-                        "layout.align.decrement",
-                    )
-                    .map_err(compiler_diagnostic)?;
-                let not_power_of_two = self
-                    .backend
-                    .builder
-                    .build_int_compare(
-                        inkwell::IntPredicate::NE,
-                        self.backend
-                            .builder
-                            .build_and(below_one, align, "layout.align.mask")
-                            .map_err(compiler_diagnostic)?,
-                        self.backend.size_type.const_zero(),
-                        "layout.align.not_power_of_two",
-                    )
-                    .map_err(compiler_diagnostic)?;
-                let invalid = self
-                    .backend
-                    .builder
-                    .build_or(
-                        self.backend
-                            .builder
-                            .build_or(too_aligned, zero_bits, "layout.align.invalid")
-                            .map_err(compiler_diagnostic)?,
-                        not_power_of_two,
-                        "layout.align.invalid",
-                    )
-                    .map_err(compiler_diagnostic)?;
-                self.backend.build_trap_if(invalid, span.clone())?;
                 self.backend
-                    .build_gc_allocation(size, "gc.allocate", span)
+                    .build_gc_layout_allocation(size, align, span)
                     .map(|pointer| pointer.as_any_value_enum())
             }
             IntrinsicFunction::GcRelease

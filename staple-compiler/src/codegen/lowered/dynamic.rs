@@ -3988,9 +3988,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_extract_value(layout, 0, "gc.layout.size")
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
+                let align = self
+                    .backend
+                    .builder
+                    .build_extract_value(layout, 1, "gc.layout.align")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
                 let pointer = self
                     .backend
-                    .build_gc_allocation(size, "gc.allocate", span.clone())?;
+                    .build_gc_layout_allocation(size, align, span.clone())?;
                 self.backend
                     .builder
                     .build_store(storage, pointer)

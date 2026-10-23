@@ -1,7 +1,7 @@
 pub mod
 
 use package.ptr.(RawMutPtr, RawOpaqueMutPtr)
-use package.alloc.(Gc, MemLayout, Finalize)
+use package.alloc.(Gc, MemLayout)
 
 /// A unique, affine heap owner. Dropping it cleans up its payload and frees
 /// its allocation immediately. The allocation lives on the managed heap and is
@@ -19,17 +19,14 @@ impl<T where ?Sized T> Drop Unique<T> {
     }
 }
 
-type UniqueCell<T> wrap T
-impl<T> Finalize UniqueCell<T> {
-    finalize = pointer => RawMutPtr.unsafe_drop_in_place ((pointer as RawOpaqueMutPtr) as RawMutPtr<T>)
-}
-
 companion<T> Unique<T> {
+    // No collector finalizer: the owner's own cleanup drops the payload, and an
+    // owner inside an unreachable managed object is dropped by that object's
+    // finalizer. A second finalizer here would drop the payload twice.
     /// Allocates a new payload, transferring ownership into the handle.
     pub def new = move value: T => Unique<T> :: {
         let pointer = Gc.allocate (MemLayout.of.<T> ()) as RawMutPtr<T>
         RawMutPtr.store pointer value
-        if (Gc.needs_drop.<T> ()) { Gc.finalize_with.<UniqueCell<T>> ((pointer as RawOpaqueMutPtr) as RawMutPtr<UniqueCell<T>>) }
         Unique pointer
     }
 

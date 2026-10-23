@@ -4454,7 +4454,8 @@ by `std.core` into the prelude.
 `Formatter.display value` and `Formatter.debug value` create a formatter,
 dispatch the corresponding trait, and return the finished `String`. A
 `Formatter` is a nominal type with the private representation `List<U8>`; the
-finished string holds a copy of the accumulated bytes, without spare capacity.
+finished string takes over the list's storage without copying, including any
+spare capacity.
 
 Manual implementations append text with `Formatter.write` and may delegate
 nested values directly to either formatting trait:
@@ -4481,8 +4482,9 @@ Scalar `ToString` implementations delegate to `Display`.
 `String` is an immutable garbage-collected UTF-8 byte sequence. The standard
 library declares it as a nominal type with the private representation
 `SharedBuffer<U8>`. At runtime it is one pointer to a managed header holding
-the byte length, a capacity (always equal to the length), and the bytes; there
-is no separate descriptor allocation. Copying a `String` copies the pointer and
+the byte length, a capacity, and the bytes; there is no separate descriptor
+allocation. The capacity is at least the length: a string built from a list
+keeps the list's spare capacity, which is never used. Copying a `String` copies the pointer and
 shares the bytes.
 Two strings can be concatenated with `+`; this dispatches through the standard
 `Add String` implementation and returns a newly allocated `String`. The
@@ -4494,9 +4496,9 @@ mutating the list never affects the string. `String.bytes: String => StringBytes
 returns a non-copying iterator over the bytes: `StringBytes` implements
 `Iterator` with `Item = U8` and an identity `IntoIterator`, so
 `for byte in (String.bytes text)` works. `String.from_utf8: move List U8 =>
-Result String std.string.InvalidUtf8` consumes the list, copies its bytes
-into the string's managed storage with `Buffer.into_shared_buffer`, and
-validates them; because the list is moved in, nothing can mutate the bytes
+Result String std.string.InvalidUtf8` consumes the list, takes over its
+storage without copying through `Buffer.into_shared_buffer`, and validates the
+bytes; because the list is moved in, nothing can mutate the bytes
 after validation. `String.from_utf8_unchecked: move List<U8> => String` skips the
 validation when the caller knows the bytes are valid UTF-8. The underlying
 `SharedBuffer<U8>` is private to the standard library.
@@ -4575,7 +4577,9 @@ The buffer owns its elements and drops each exactly once when it becomes
 unreachable.
 
 At runtime a `SharedBuffer<T>` is one pointer to a managed header holding the
-element count, a capacity equal to that count, and the elements. A
+element count, a capacity of at least that count, and the elements. A shared
+buffer made by `Buffer.into_shared_buffer` keeps its source buffer's capacity;
+the spare storage is never used, because the length is fixed. A
 `SharedBuffer<T>` is a copyable handle whose copies share that allocation, so
 it is shared-mutable: a write through one copy is visible through every other
 copy. `SharedBuffer.length` reports the number of elements. Where `Copy T`,
@@ -4627,11 +4631,12 @@ out no references to their elements.
 `Buffer.from_array: <N where Natural N> move (T ^ N) -> Buffer<T>` moves the
 elements of a fixed array into a new buffer whose capacity and length are both
 `N`; the buffer owns the moved elements. `Buffer.into_shared_buffer` consumes the
-buffer and returns a `SharedBuffer<T>` over a managed copy of its initialized
-prefix; the original allocation is released without dropping the moved
-elements. The consumed buffer cannot subsequently be used or shared again.
-The managed copy drops exactly its initialized elements when unreachable; a
-`SharedBuffer` or a `Shared` to one of its elements keeps it alive.
+buffer and returns a `SharedBuffer<T>` over the same allocation, without
+copying. The allocation, including any spare capacity, is then garbage
+collected instead of released eagerly. The consumed buffer cannot subsequently
+be used or shared again. The shared buffer drops exactly its initialized
+elements when unreachable; a `SharedBuffer` or a `Shared` to one of its
+elements keeps it alive.
 
 `Buffer.transfer` moves every initialized element of one buffer onto the end
 of another's initialized prefix, in order, and empties the source. Both
@@ -4673,7 +4678,7 @@ source — and yields owned copies. Iteration requires `Copy T`, the same as
 usable.
 
 `List.into_buffer: move List<T> => Buffer<T>` consumes the list and returns its
-backing buffer; move that buffer's elements into a `SharedBuffer<T>` with
+backing buffer; turn that buffer into a `SharedBuffer<T>` without copying with
 `Buffer.into_shared_buffer`, as in
 `list |> List.into_buffer |> Buffer.into_shared_buffer`.
 

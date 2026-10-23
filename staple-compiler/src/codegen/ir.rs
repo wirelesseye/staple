@@ -69,6 +69,62 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(pointer)
     }
 
+    /// Allocates `size` bytes from the GC heap for a library `MemLayout`,
+    /// trapping unless `align` is a power of two the collector guarantees.
+    pub(crate) fn build_gc_layout_allocation(
+        &self,
+        size: IntValue<'context>,
+        align: IntValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let supported = super::runtime::gc_payload_alignment(self.context, &self.target_data);
+        let too_aligned = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::UGT,
+                align,
+                self.size_type.const_int(supported, false),
+                "layout.align.unsupported",
+            )
+            .map_err(compiler_diagnostic)?;
+        let zero = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                align,
+                self.size_type.const_zero(),
+                "layout.align.zero",
+            )
+            .map_err(compiler_diagnostic)?;
+        let below = self
+            .builder
+            .build_int_sub(align, self.size_type.const_int(1, false), "layout.align.decrement")
+            .map_err(compiler_diagnostic)?;
+        let mask = self
+            .builder
+            .build_and(below, align, "layout.align.mask")
+            .map_err(compiler_diagnostic)?;
+        let not_power_of_two = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                mask,
+                self.size_type.const_zero(),
+                "layout.align.not_power_of_two",
+            )
+            .map_err(compiler_diagnostic)?;
+        let invalid = self
+            .builder
+            .build_or(too_aligned, zero, "layout.align.invalid")
+            .map_err(compiler_diagnostic)?;
+        let invalid = self
+            .builder
+            .build_or(invalid, not_power_of_two, "layout.align.invalid")
+            .map_err(compiler_diagnostic)?;
+        self.build_trap_if(invalid, span.clone())?;
+        self.build_gc_allocation(size, "gc.allocate", span)
+    }
+
     /// Attaches a finalizer to a GC allocation.
     pub(crate) fn set_gc_finalizer(
         &self,

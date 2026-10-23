@@ -106,7 +106,7 @@ fn collects_unique_payloads_in_cycles_through_managed_references() {
             "type Payload wrap (tag: I32, back: Shared<Option<Shared<Holder>>>)\n",
             "impl Drop Payload {\n",
             "    cleanup = Payload (tag, back) => {\n",
-            "        printf (c_string \"dropped\\n\")\n",
+            "        printf (c_string \"dropped %d\\n\", tag)\n",
             "        ()\n",
             "    }\n",
             "}\n",
@@ -124,14 +124,66 @@ fn collects_unique_payloads_in_cycles_through_managed_references() {
         CHURN,
     ) + concat!("make_cycles ()\n", "churn ()\n", "churn ()\n");
     for dynamic in [false, true] {
-        let output = run_mode(&source, dynamic);
-        let dropped = output.lines().filter(|line| *line == "dropped").count();
-        // A conservative stack scan may retain a stray cycle, but a payload
-        // that is its own root retains every one of them.
+        assert_each_payload_dropped_once(&run_mode(&source, dynamic), 100, dynamic);
+    }
+}
+
+/// Checks `dropped <tag>` lines: no payload is dropped twice, and at least 90
+/// of `count` are collected. A conservative stack scan may retain a stray
+/// object, so requiring every one would be flaky, but a payload that is its
+/// own root retains all of them.
+#[cfg(unix)]
+fn assert_each_payload_dropped_once(output: &str, count: usize, dynamic: bool) {
+    let mut seen = std::collections::HashSet::new();
+    for tag in output.lines().filter_map(|line| line.strip_prefix("dropped ")) {
         assert!(
-            dropped >= 90,
-            "only {dropped} of 100 cyclic Unique payloads were collected (dynamic={dynamic})"
+            seen.insert(tag),
+            "payload {tag} was dropped twice (dynamic={dynamic})"
         );
+    }
+    assert!(
+        seen.len() >= count - count / 10 && seen.len() <= count,
+        "{} of {count} payloads were collected (dynamic={dynamic})",
+        seen.len()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn drops_unique_payloads_newer_than_their_managed_owner_once() {
+    // The Unique is allocated after the Shared that owns it, so collection
+    // reaches the Unique's allocation before the owner's finalizer.
+    let source = format!(
+        "{}{}",
+        concat!(
+            "use std.shared.(Shared)\n",
+            "use std.unique.(Unique)\n",
+            "use std.cinterop.*\n",
+            "use std.ptr.*\n",
+            "extern \"c\" {\n",
+            "    printf: (RawPtr<CChar>, ...) -> I32\n",
+            "}\n",
+            "type Payload wrap I32\n",
+            "impl Drop Payload {\n",
+            "    cleanup = Payload tag => {\n",
+            "        printf (c_string \"dropped %d\\n\", tag)\n",
+            "        ()\n",
+            "    }\n",
+            "}\n",
+            "def make_owner = tag: I32 => () :: {\n",
+            "    let empty: Option<Unique<Payload>> = None\n",
+            "    let mut owner: Shared<Option<Unique<Payload>>> = Shared empty\n",
+            "    let previous = Shared.replace (owner, Some (Unique (Payload tag)))\n",
+            "    ()\n",
+            "}\n",
+            "def make_owners = () => () :: {\n",
+            "    for index in (0 .. 100) { make_owner index }\n",
+            "}\n",
+        ),
+        CHURN,
+    ) + concat!("make_owners ()\n", "churn ()\n", "churn ()\n");
+    for dynamic in [false, true] {
+        assert_each_payload_dropped_once(&run_mode(&source, dynamic), 100, dynamic);
     }
 }
 
@@ -193,7 +245,7 @@ fn collects_list_storage_in_cycles_through_managed_references() {
             "type Holder wrap (items: List<Payload>)\n",
             "impl Drop Payload {\n",
             "    cleanup = Payload (tag, back) => {\n",
-            "        printf (c_string \"dropped\\n\")\n",
+            "        printf (c_string \"dropped %d\\n\", tag)\n",
             "        ()\n",
             "    }\n",
             "}\n",
@@ -213,12 +265,7 @@ fn collects_list_storage_in_cycles_through_managed_references() {
         ),
         CHURN,
     ) + concat!("make_cycles ()\n", "churn ()\n", "churn ()\n");
-    let output = run(&source);
-    let dropped = output.lines().filter(|line| *line == "dropped").count();
-    assert!(
-        dropped >= 90,
-        "only {dropped} of 100 cyclic List payloads were collected"
-    );
+    assert_each_payload_dropped_once(&run(&source), 100, false);
 }
 
 /// Declares a `Tag` whose drop prints its identifier.
