@@ -2,7 +2,7 @@ pub mod
 
 use package.cmp.(Eq)
 use package.convert.(Convert)
-use package.alloc.(__pointer_read, __pointer_add, __pointer_copy_nonoverlapping)
+use package.alloc.(__pointer_read, __pointer_drop_in_place, __pointer_add, __pointer_copy_nonoverlapping)
 
 /// A non-owning, low-level pointer that permits reads of a `Pointee`.
 /// Copying or converting the pointer does not validate its address, alignment,
@@ -170,6 +170,10 @@ companion<T where Copy T> RawPtr<T> {
 companion<T where ?Sized T> RawMutPtr<T> {
     use package.convert.Convert
 
+    /// Drops an initialized pointee without releasing its storage.
+    /// Opaque unsized payloads have no drop glue.
+    pub def unsafe_drop_in_place = pointer: RawMutPtr<T> => () :: __pointer_drop_in_place pointer
+
     /// Returns a pointer offset by a signed number of bytes, without validation.
     pub def offset = (pointer: RawMutPtr<T>; bytes: ISize) =>
         RawMutPtr<T> :: __mut_pointer_offset (pointer, bytes)
@@ -192,13 +196,6 @@ companion<T> RawMutPtr<T> {
     /// Moves the pointee out. The caller must provide valid, aligned,
     /// initialized memory and must not read the pointee again.
     pub def unsafe_read = pointer: RawMutPtr<T> => T :: __pointer_read pointer
-
-    /// Drops the pointee in place. The caller must provide valid, aligned,
-    /// initialized memory and must not use the value afterwards.
-    pub def unsafe_drop_in_place = pointer: RawMutPtr<T> => () :: {
-        let value = __pointer_read pointer
-        drop value
-    }
 
     /// Returns a pointer advanced by `count` elements.
     /// Does not validate the resulting address, alignment, or allocation lifetime.

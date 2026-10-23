@@ -276,8 +276,19 @@ fn the_standard_library_unit_exports_what_a_program_declares() {
 fn the_standard_library_unit_has_no_foreign_definitions() {
     let std = symbols(&shared().std_ir);
     assert!(std.get("main").is_none(), "a library unit has no entry");
-    for name in std.keys().filter(|name| name.starts_with("__staple_gc_")) {
+    for name in std.keys().filter(|name| {
+        name.starts_with("__staple_gc_")
+            && !name.starts_with("__staple_gc_finalizer_thunk.")
+    }) {
         assert!(!std[name].defined, "`{name}` belongs to the runtime object");
+    }
+    // Library-owned finalizer thunks are internal helpers emitted beside their
+    // installing code, not runtime definitions.
+    for name in std
+        .keys()
+        .filter(|name| name.starts_with("__staple_gc_finalizer_thunk."))
+    {
+        assert!(!std[name].external, "`{name}` must stay internal");
     }
     // Ordinal-numbered artifacts and instances never cross an object boundary.
     for (name, symbol) in &std {

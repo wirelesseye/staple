@@ -9,10 +9,6 @@ use package.iterator.IterStep.(Done, Yield)
 use package.ptr.(RawMutPtr)
 use package.shared.(Shared)
 
-extern "staple-intrinsic" {
-    __shared_buffer_get_shared: <T> (SharedBuffer<T>, USize) -> Shared<T>
-}
-
 /// A garbage-collected, fixed-length sequence whose handles share one mutable
 /// allocation. The buffer owns its elements.
 pub type SharedBuffer<T> wrap RawMutPtr<BufferHeader<T>>
@@ -48,7 +44,10 @@ companion<T> SharedBuffer<T> {
     /// The handle keeps the buffer allocation alive and observes replacements
     /// of the element; it does not take ownership of the element itself.
     pub def get_shared_unchecked = (buffer: SharedBuffer<T>; position: USize) =>
-        Shared<T> :: __shared_buffer_get_shared (buffer, position)
+        Shared<T> :: {
+        if (position >= SharedBuffer.length buffer) { trap () }
+        Shared.unsafe_from_raw (BufferHeader.element buffer.* position)
+    }
 
     /// Replaces the element at a position and returns the old value; `None` if out of bounds.
     pub def set = (mut buffer: SharedBuffer<T>; position: USize; move value: T) => Option<T> :: {

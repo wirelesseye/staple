@@ -1,14 +1,16 @@
 pub mod
 
 use package.cmp.(Eq)
+use package.ptr.(RawMutPtr, RawOpaqueMutPtr)
+use package.alloc.(Gc, MemLayout, Finalize)
 
 /// An owned, copyable handle to a value in a garbage-collected allocation.
 /// Copying the handle shares the same storage without copying the payload or
 /// requiring `Copy T`. A handle keeps its containing allocation alive, including
 /// when it refers to an element of a `SharedBuffer`.
 ///
-/// `Shared.new value` or `Shared value` moves or copies a value into a new
-/// managed allocation. Dropping a handle does not immediately destroy its
+/// `Shared.new value` moves or copies a value into a new managed allocation.
+/// Dropping a handle does not immediately destroy its
 /// payload; the collector reclaims unreachable allocations and cleans up their
 /// owned contents, including cycles of managed references.
 ///
@@ -21,20 +23,35 @@ use package.cmp.(Eq)
 /// The handle has an opaque, sized representation even when `T` is unsized.
 /// Construction requires a concrete payload layout. Where `Eq T`, equality
 /// compares payload values rather than handle addresses.
-@sized_opaque
-@recursive_constructor
-pub type Shared<T where ?Sized T> opaque
+pub type Shared<T where ?Sized T> wrap RawMutPtr<T>
 
-extern "staple-intrinsic" {
-    __shared_replace: <T> (mut Shared<T>, move T) -> T
+type SharedCell<T> wrap T
+impl<T> Finalize SharedCell<T> {
+    finalize = pointer => RawMutPtr.unsafe_drop_in_place ((pointer as RawOpaqueMutPtr) as RawMutPtr<T>)
+}
+
+companion<T where ?Sized T> Shared<T> {
+    /// Borrows an initialized value in a live managed allocation. Interior
+    /// pointers keep the containing allocation alive; no finalizer is added.
+    pub(package) def unsafe_from_raw = pointer: RawMutPtr<T> => Shared<T> :: Shared pointer
 }
 
 companion<T> Shared<T> {
     /// Allocates a new payload, transferring ownership into the handle.
-    pub def new = move value: T => Shared<T> :: Shared value
+    pub def new = move value: T => Shared<T> :: {
+        let pointer = Gc.allocate (MemLayout.of.<T> ()) as RawMutPtr<T>
+        RawMutPtr.store pointer value
+        if (Gc.needs_drop.<T> ()) { Gc.finalize_with.<SharedCell<T>> ((pointer as RawOpaqueMutPtr) as RawMutPtr<SharedCell<T>>) }
+        Shared pointer
+    }
 
     /// Replaces the referenced value and returns the old value.
-    pub def replace: (mut Shared<T>, move T) -> T = (mut reference, move value) => __shared_replace (reference, value)
+    pub def replace = (mut owner: Shared<T>, move value: T) => T :: {
+        let pointer = owner.*
+        let previous = RawMutPtr.unsafe_read pointer
+        RawMutPtr.store pointer value
+        previous
+    }
 }
 
 impl<T where Eq T> Eq Shared<T> {

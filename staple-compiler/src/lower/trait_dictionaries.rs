@@ -696,14 +696,11 @@ fn select_structural(
                 return Err(unavailable());
             };
             match target {
-                CheckedType::Shared(payload) => {
+                ty if ty.shared_payload().is_some() => {
+                    let payload = ty.shared_payload().unwrap();
                     let delegate = select_component(crate::CheckedTraitBound {
                         trait_id,
-                        arguments: vec![
-                            payload.as_ref().clone(),
-                            position.clone(),
-                            dependent.clone(),
-                        ],
+                        arguments: vec![payload.clone(), position.clone(), dependent.clone()],
                     })?;
                     let output = selection_obligation(&delegate.1)
                         .and_then(|bound| bound.arguments.get(2).cloned())
@@ -2962,7 +2959,7 @@ mod tests {
             ..Default::default()
         };
         let bounds = vec![
-            bound(9, CheckedType::Shared(Box::new(parameter(0)))),
+            bound(9, CheckedType::test_shared(Box::new(parameter(0)))),
             bound(8, parameter(1)),
             bound(7, parameter(2)),
             bound(1, parameter(0)),
@@ -2981,7 +2978,10 @@ mod tests {
         let runtime = BTreeSet::from([projected]);
         assert_eq!(
             runtime_obligations(&ids, &bounds, &substitution, &runtime),
-            vec![bound(9, CheckedType::Shared(Box::new(parameter(projected.0))))]
+            vec![bound(
+                9,
+                CheckedType::test_shared(Box::new(parameter(projected.0)))
+            )]
         );
         assert!(runtime_obligations(&ids, &bounds, &substitution, &BTreeSet::new()).is_empty());
         let runtime = BTreeSet::from([projected, TypeParameterId(2)]);

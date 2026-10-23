@@ -71,10 +71,7 @@ fn invalid_spread_substitution(
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             arguments.iter().find_map(visit)
         }
-        CheckedType::Shared(ty)
-        | CheckedType::Unique(ty)
-        | CheckedType::RawMutPtr { pointee: ty }
-        | CheckedType::RawPtr { pointee: ty } => visit(ty),
+        CheckedType::RawMutPtr { pointee: ty } | CheckedType::RawPtr { pointee: ty } => visit(ty),
         CheckedType::Array { element, count } => visit(element).or_else(|| visit(count)),
         _ => None,
     }

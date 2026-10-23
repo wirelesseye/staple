@@ -12,11 +12,11 @@ use super::ArenaId;
 use super::cleanup_artifacts::{LoweredOwnerVisitor, walk_owner};
 use super::emission::OwnerArenas;
 use super::{
-    ConstructorConstruction, DropGlueBody, IntrinsicFunction, LoweredArtifactPlan,
-    LoweredAwaitKind, LoweredBindingItem, LoweredBindingSite, LoweredBoundTarget, LoweredCall,
-    LoweredCallableTarget, LoweredCallableValue, LoweredCallableValueId, LoweredClosureEnvironment,
-    LoweredPattern, LoweredPatternKind, LoweredProgram, LoweredStringTemplate,
-    LoweredStringTemplatePart, Origin, RuntimeRelease, StructuralBody, SymbolId, SymbolStorage,
+    DropGlueBody, IntrinsicFunction, LoweredArtifactPlan, LoweredAwaitKind, LoweredBindingItem,
+    LoweredBindingSite, LoweredBoundTarget, LoweredCall, LoweredCallableTarget,
+    LoweredCallableValue, LoweredCallableValueId, LoweredClosureEnvironment, LoweredPattern,
+    LoweredPatternKind, LoweredProgram, LoweredStringTemplate, LoweredStringTemplatePart, Origin,
+    RuntimeRelease, StructuralBody, SymbolId, SymbolStorage,
 };
 
 /// One runtime surface a lowered program needs. The declaration order is the
@@ -297,14 +297,7 @@ fn record_plan_requirements(
     requirements: &mut LoweredRuntimeRequirements,
 ) {
     match plan {
-        LoweredArtifactPlan::ConstructorAdapter(plan) => {
-            if matches!(
-                plan.construction,
-                ConstructorConstruction::ManagedShared { .. } | ConstructorConstruction::Unique { .. }
-            ) {
-                requirements.record(RuntimeRequirement::GarbageCollector);
-            }
-        }
+        LoweredArtifactPlan::ConstructorAdapter(_) => {}
         LoweredArtifactPlan::StructuralMethod(plan) => {
             if let StructuralBody::ProductDebug { steps, .. } = &plan.body
                 && steps
@@ -329,7 +322,7 @@ fn record_plan_requirements(
             DropGlueBody::CStringFree => {
                 requirements.record(RuntimeRequirement::CStringFree);
             }
-            DropGlueBody::Unique { .. } | DropGlueBody::Buffer { .. } => {
+            DropGlueBody::Buffer { .. } => {
                 requirements.record(RuntimeRequirement::CStringFree);
                 requirements.record(RuntimeRequirement::GarbageCollector);
             }
@@ -446,10 +439,7 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
                 recursive: Some(_), ..
             } => self.gc(),
             LoweredCallableTarget::Intrinsic { intrinsic, .. } => match intrinsic {
-                IntrinsicFunction::UniqueIntoInner
-                | IntrinsicFunction::UniqueIntoRaw
-                | IntrinsicFunction::UniqueFromRaw
-                | IntrinsicFunction::GcAllocate
+                IntrinsicFunction::GcAllocate
                 | IntrinsicFunction::GcRelease
                 | IntrinsicFunction::GcPin
                 | IntrinsicFunction::GcUnpin

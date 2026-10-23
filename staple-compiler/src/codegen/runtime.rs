@@ -411,7 +411,7 @@ fn gc_header_bytes(
     let alignment = pointer_bytes
         .max(target.get_abi_alignment(&context.i64_type()) as u64)
         .max(target.get_abi_alignment(&context.f64_type()) as u64);
-    (pointer_bytes * 5).div_ceil(alignment) * alignment
+    (pointer_bytes * 6).div_ceil(alignment) * alignment
 }
 
 /// Gives every function the runtime defines external linkage, so a unit that
@@ -523,7 +523,7 @@ mod payload_alignment_tests {
         let context = inkwell::context::Context::create();
         for (layout, expected) in [
             ("e-p:32:32-i64:64-f64:64", 24),
-            ("e-p:64:64-i64:64-f64:64", 40),
+            ("e-p:64:64-i64:64-f64:64", 48),
         ] {
             let target = inkwell::targets::TargetData::create(layout);
             assert_eq!(super::gc_header_bytes(&context, &target), expected);

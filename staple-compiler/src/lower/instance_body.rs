@@ -1633,7 +1633,7 @@ impl<'a> BodyCloner<'a> {
         };
         let concrete_subject = self.ty(subject);
         let value_type = self.ty(&pattern.value_type);
-        let shape = super::pattern_plan_shape_from_kind(&pattern.kind);
+        let shape = super::pattern_plan_shape_from_kind(&pattern.kind, pattern.test.identity);
         let string_representation = self.program.semantic_ids.string_representation.clone();
         let (test, child_subjects) = match super::pattern_test_plan(
             &concrete_subject,
@@ -4880,7 +4880,7 @@ impl<'a> BodyValidator<'a> {
             super::instance_resolution::unresolved_type_problem(value_type).is_some()
         };
         if !unresolved(&pattern.test.subject) && !unresolved(&pattern.value_type) {
-            let shape = super::pattern_plan_shape_from_kind(&pattern.kind);
+            let shape = super::pattern_plan_shape_from_kind(&pattern.kind, pattern.test.identity);
             match super::pattern_test_plan(
                 &pattern.test.subject,
                 &pattern.value_type,

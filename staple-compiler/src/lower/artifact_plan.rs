@@ -34,7 +34,7 @@ pub(crate) enum LoweredArtifactPlan {
     TypeDescriptor(TypeDescriptorPlan),
     TraitDictionary(TraitDictionaryPlan),
     DescriptorDrop(DescriptorDropPlan),
-    CompoundDescriptorDrop(crate::specialization::CompoundDescriptorDropKey),
+    CompoundDescriptorDrop(CompoundDescriptorDropPlan),
     /// A dynamic-shape closure's forwarding entry. The entry loads the
     /// instance's descriptors from its environment and forwards the call.
     DescriptorBoundEntry(DescriptorBoundEntryPlan),
@@ -364,7 +364,7 @@ impl LoweredArtifactPlan {
             (
                 LoweredArtifactPlan::CompoundDescriptorDrop(plan),
                 ArtifactRequestKey::CompoundDescriptorDrop(key),
-            ) => plan == key,
+            ) => plan.shape == key.shape && plan.count == key.count,
             (
                 LoweredArtifactPlan::TraitMemberEntry(plan),
                 ArtifactRequestKey::TraitMemberEntry(key),
@@ -546,7 +546,10 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::InstantiationAdapter(_) => true,
             LoweredArtifactPlan::ReabstractionThunk(_) => true,
             LoweredArtifactPlan::ValueConversion(_) => true,
-            LoweredArtifactPlan::CompoundDescriptorDrop(_) => true,
+            LoweredArtifactPlan::CompoundDescriptorDrop(plan) => {
+                plan.shape != crate::specialization::CompoundDescriptorShape::Unique
+                    || plan.cleanup.is_some()
+            }
             LoweredArtifactPlan::DropGlue(plan) => !matches!(plan.body, DropGlueBody::Unexpanded),
             LoweredArtifactPlan::GcFinalizer(plan) => match plan {
                 GcFinalizerPlan::Payload { glue, .. }
@@ -641,21 +644,6 @@ impl LoweredArtifactPlan {
                     } => {
                         values(parameters, visit);
                         visit(Value(product));
-                    }
-                    ConstructorConstruction::ManagedShared {
-                        parameters,
-                        product,
-                        payload,
-                        finalizer: _,
-                    }
-                    | ConstructorConstruction::Unique {
-                        parameters,
-                        product,
-                        payload,
-                    } => {
-                        values(parameters, visit);
-                        visit(Value(product));
-                        visit(Value(payload));
                     }
                 }
             }
@@ -764,7 +752,6 @@ impl LoweredArtifactPlan {
                     | DropGlueBody::RuntimeRelease(_)
                     | DropGlueBody::CStringFree
                     | DropGlueBody::Wrapper { .. } => {}
-                    DropGlueBody::Unique { payload, .. } => visit(Value(payload)),
                     DropGlueBody::Buffer { element, .. } => visit(Value(element)),
                     DropGlueBody::Product { fields } => {
                         for DroppedElement {
@@ -1004,8 +991,12 @@ impl LoweredArtifactPlan {
                     visit(PlannedCalleeRef::Instance(write));
                 }
             }
-            LoweredArtifactPlan::CompoundDescriptorDrop(_)
-            | LoweredArtifactPlan::DescriptorBoundEntry(_)
+            LoweredArtifactPlan::CompoundDescriptorDrop(plan) => {
+                if let Some(cleanup) = &plan.cleanup {
+                    visit(PlannedCalleeRef::Instance(cleanup));
+                }
+            }
+            LoweredArtifactPlan::DescriptorBoundEntry(_)
             | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)
@@ -1072,12 +1063,34 @@ impl LoweredArtifactPlan {
                     visit(PlannedCalleeRefMut::Instance(write));
                 }
             }
-            LoweredArtifactPlan::CompoundDescriptorDrop(_)
-            | LoweredArtifactPlan::DescriptorBoundEntry(_)
+            LoweredArtifactPlan::CompoundDescriptorDrop(plan) => {
+                if let Some(cleanup) = &mut plan.cleanup {
+                    visit(PlannedCalleeRefMut::Instance(cleanup));
+                }
+            }
+            LoweredArtifactPlan::DescriptorBoundEntry(_)
             | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)
             | LoweredArtifactPlan::ExternAdapter(_) => {}
+        }
+    }
+}
+
+/// Descriptor cleanup for structural aggregates or a library owner.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CompoundDescriptorDropPlan {
+    pub shape: crate::specialization::CompoundDescriptorShape,
+    pub count: u32,
+    pub cleanup: Option<PlannedInstance>,
+}
+
+impl From<crate::specialization::CompoundDescriptorDropKey> for CompoundDescriptorDropPlan {
+    fn from(key: crate::specialization::CompoundDescriptorDropKey) -> Self {
+        Self {
+            shape: key.shape,
+            count: key.count,
+            cleanup: None,
         }
     }
 }
@@ -1114,24 +1127,6 @@ pub(crate) enum ConstructorConstruction {
         parameters: Vec<CheckedType>,
         /// The product rebuilt from `parameters`.
         product: CheckedType,
-    },
-    /// Allocate the product with unique ownership, independently of the GC.
-    Unique {
-        parameters: Vec<CheckedType>,
-        product: CheckedType,
-        payload: CheckedType,
-    },
-    /// GC-allocate the product as a `Shared` payload, optionally with a payload
-    /// finalizer when the payload needs drop.
-    ManagedShared {
-        /// The flattened parameter slot types, in slot order.
-        parameters: Vec<CheckedType>,
-        /// The product rebuilt from `parameters`, which is the `Shared` payload.
-        product: CheckedType,
-        /// The `Shared` payload type (`product`).
-        payload: CheckedType,
-        /// The payload's GC finalizer, requested when the payload needs drop.
-        finalizer: Option<PlannedArtifact>,
     },
 }
 
@@ -1174,9 +1169,7 @@ impl ConstructorAdapterPlan {
                     }
                 }
                 CheckedType::Wrapper { representation, .. } => collect(representation, ids),
-                CheckedType::Shared(ty)
-                | CheckedType::Unique(ty)
-                => collect(ty, ids),
+
                 CheckedType::Array { element, count } => {
                     collect(element, ids);
                     collect(count, ids);
@@ -1197,25 +1190,11 @@ impl ConstructorAdapterPlan {
         for layout in &self.layout {
             visit(PlannedCalleeRef::Artifact(layout));
         }
-        if let ConstructorConstruction::ManagedShared {
-            finalizer: Some(finalizer),
-            ..
-        } = &self.construction
-        {
-            visit(PlannedCalleeRef::Artifact(finalizer));
-        }
     }
 
     fn visit_callees_mut<'a>(&'a mut self, visit: &mut impl FnMut(PlannedCalleeRefMut<'a>)) {
         for layout in &mut self.layout {
             visit(PlannedCalleeRefMut::Artifact(layout));
-        }
-        if let ConstructorConstruction::ManagedShared {
-            finalizer: Some(finalizer),
-            ..
-        } = &mut self.construction
-        {
-            visit(PlannedCalleeRefMut::Artifact(finalizer));
         }
     }
 }
@@ -1521,11 +1500,6 @@ pub(crate) enum DropGlueBody {
     RuntimeRelease(RuntimeRelease),
     /// Call `free` on the C-string pointer.
     CStringFree,
-    /// Clean up an owned payload and release its allocation.
-    Unique {
-        payload: CheckedType,
-        glue: Option<PlannedArtifact>,
-    },
     /// Drop every live element of an owned buffer, then release its allocation.
     Buffer {
         element: CheckedType,
@@ -1587,7 +1561,7 @@ impl DropGluePlan {
                     visit(PlannedCalleeRef::Artifact(representation));
                 }
             }
-            DropGlueBody::Unique { glue, .. } | DropGlueBody::Buffer { glue, .. } => {
+            DropGlueBody::Buffer { glue, .. } => {
                 if let Some(glue) = glue {
                     visit(PlannedCalleeRef::Artifact(glue));
                 }
@@ -1623,7 +1597,7 @@ impl DropGluePlan {
                     visit(PlannedCalleeRefMut::Artifact(representation));
                 }
             }
-            DropGlueBody::Unique { glue, .. } | DropGlueBody::Buffer { glue, .. } => {
+            DropGlueBody::Buffer { glue, .. } => {
                 if let Some(glue) = glue {
                     visit(PlannedCalleeRefMut::Artifact(glue));
                 }

@@ -4587,7 +4587,7 @@ mod tests {
     #[test]
     fn dynamic_shared_values_preserve_payload_and_own_their_descriptor() {
         let (text, name) = dynamic_test_module(
-            "use std.shared.(Shared)\ndef make: <T where Sized T> move T -> Shared<T> = <T where Sized T> move value => Shared value\nlet reference = make 42\n",
+            "use std.shared.Shared\ndef make: <T where Sized T> move T -> Shared<T> = <T where Sized T> move value => Shared value\nlet reference = make 42\n",
             "make",
         );
         let context = inkwell::context::Context::create();
@@ -4596,17 +4596,15 @@ mod tests {
             "dynamic-shared",
         );
         let llvm = context.create_module_from_ir(buffer).unwrap();
-        let finalizer_name = llvm
-            .get_functions()
-            .find_map(|function| {
-                let name = function.get_name().to_str().unwrap();
-                name.starts_with("__staple_gc_finalizer_dynamic_cell")
-                    .then(|| name.to_owned())
-            })
-            .unwrap();
         let engine = llvm
             .create_jit_execution_engine(inkwell::OptimizationLevel::None)
             .unwrap();
+        // Direct JIT entry bypasses the program's library initialization.
+        let initialize =
+            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("main") }.unwrap();
+        unsafe {
+            initialize.call();
+        }
         #[repr(C)]
         struct Descriptor {
             size: usize,
@@ -4616,19 +4614,27 @@ mod tests {
             drop: usize,
             count: u32,
         }
+        #[repr(C)]
+        struct Header {
+            next: *mut u8,
+            size: usize,
+            flags: usize,
+            finalizer: Option<unsafe extern "C" fn(*mut u8, *mut u8)>,
+            previous: *mut u8,
+            context: *mut u8,
+        }
         static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         unsafe extern "C" fn drop_payload(_: *const Descriptor, _: *mut u8) {
             DROPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         type Make = unsafe extern "C" fn(*const u8, *const Descriptor, *mut *mut u8, *const u8);
-        type Finalize = unsafe extern "C" fn(*mut u8);
         let make = unsafe { engine.get_function::<Make>(&name) }.unwrap();
-        let finalize = unsafe { engine.get_function::<Finalize>(&finalizer_name) }.unwrap();
+        let alignment = std::mem::align_of::<usize>();
         for size in [0_usize, 1, 3, 17] {
             let mut descriptor = Descriptor {
                 size,
-                stride: size.div_ceil(16) * 16,
-                align: 16,
+                stride: size.div_ceil(alignment) * alignment,
+                align: alignment,
                 flags: 0,
                 drop: drop_payload as *const () as usize,
                 count: 0,
@@ -4640,81 +4646,23 @@ mod tests {
                 make.call(std::ptr::null(), &descriptor, &mut payload, input.as_ptr());
             }
             assert!(!payload.is_null());
-            let pointer_alignment = std::mem::align_of::<usize>();
-            assert_eq!(payload as usize % pointer_alignment, 0);
-            let descriptor_offset = (size + 1).div_ceil(pointer_alignment) * pointer_alignment;
-            let word = unsafe { payload.add(descriptor_offset) };
-            assert_eq!(word as usize % pointer_alignment, 0);
-            let saved = unsafe { word.cast::<*const Descriptor>().read() };
-            assert!(!saved.is_null());
-            assert_eq!(unsafe { (*saved).size }, size);
+            assert_eq!(payload as usize % alignment, 0);
             assert_eq!(unsafe { std::slice::from_raw_parts(payload, size) }, input);
-            // The allocation must not retain the caller's descriptor pointer.
+            // Descriptor-bound finalizers own their captured descriptors. The
+            // payload itself has exactly the library value's representation.
             descriptor.flags = 1;
             descriptor.drop = 0;
             std::hint::black_box(&descriptor);
+            let header = unsafe { &*payload.sub(std::mem::size_of::<Header>()).cast::<Header>() };
+            assert!(!header.context.is_null());
             unsafe {
-                finalize.call(payload);
+                header.finalizer.expect("library registered its finalizer")(
+                    payload,
+                    header.context,
+                );
             }
             assert_eq!(DROPS.load(std::sync::atomic::Ordering::SeqCst), before + 1);
         }
-        #[repr(C)]
-        struct Compound {
-            header: Descriptor,
-            component: *const Descriptor,
-        }
-        let leaf = Descriptor {
-            size: 3,
-            stride: 3,
-            align: 1,
-            flags: 0,
-            drop: drop_payload as *const () as usize,
-            count: 0,
-        };
-        let child = Compound {
-            header: Descriptor {
-                size: 3,
-                stride: 3,
-                align: 1,
-                flags: 0,
-                drop: 0,
-                count: 1,
-            },
-            component: &leaf,
-        };
-        let root = Compound {
-            header: Descriptor {
-                size: 3,
-                stride: 3,
-                align: 1,
-                flags: 0,
-                drop: drop_payload as *const () as usize,
-                count: 1,
-            },
-            component: &child.header,
-        };
-        let mut payload = std::ptr::null_mut();
-        let input = [21_u8, 42, 63];
-        unsafe {
-            make.call(std::ptr::null(), &root.header, &mut payload, input.as_ptr());
-        }
-        // The owned descriptor follows the payload/state and padding to pointer alignment.
-        assert_eq!(unsafe { payload.add(3).read() }, 0);
-        let offset = 4usize.div_ceil(std::mem::align_of::<usize>()) * std::mem::align_of::<usize>();
-        let word = unsafe { payload.add(offset) };
-        assert_eq!(word as usize % std::mem::align_of::<usize>(), 0);
-        let saved = unsafe { word.cast::<*const Compound>().read() };
-        assert_ne!(saved, &root as *const Compound);
-        let saved_child = unsafe { (*saved).component };
-        assert_ne!(saved_child, &child.header as *const Descriptor);
-        let saved_leaf = unsafe { (*saved_child.cast::<Compound>()).component };
-        assert_ne!(saved_leaf, &leaf as *const Descriptor);
-        assert_eq!(unsafe { (*saved_leaf).size }, 3);
-        let before = DROPS.load(std::sync::atomic::Ordering::SeqCst);
-        unsafe {
-            finalize.call(payload);
-        }
-        assert_eq!(DROPS.load(std::sync::atomic::Ordering::SeqCst), before + 1);
     }
 
     #[test]

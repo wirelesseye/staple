@@ -624,6 +624,7 @@ mod tests {
             "type Resource wrap I32\n",
             "impl Drop Resource { cleanup = Resource value => () }\n",
             "let make_resource: () -> (Resource -> Shared<Resource>) = () => Shared\n",
+            "let wrap_resource: I32 -> Resource = Resource\n",
             "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
             "def pick: Bool -> (CString | I32) = condition => when { condition => c_string \"a\", else => 1 }\n",
             "def capture: move CString -> (() -> I32) = move value => () => inspect value\n",

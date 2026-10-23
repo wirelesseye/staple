@@ -122,10 +122,6 @@ pub enum BuiltinType {
 /// first would be circular.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RecursiveConstruction {
-    ManagedReference,
-    Unique,
-    SharedBuffer,
-    Buffer,
     Syntax,
 }
 
@@ -439,10 +435,10 @@ pub enum IntrinsicFunction {
     Trap,
     CheckedMul,
     PointerRead,
+    PointerDropInPlace,
     PointerAdd,
     PointerCopyNonoverlapping,
     SharedBufferLength,
-    SharedBufferGetShared,
     BufferWithCapacity,
     BufferLength,
     BufferCapacity,
@@ -453,11 +449,6 @@ pub enum IntrinsicFunction {
     BufferFromArray,
     BufferTransfer,
     BufferClone,
-    SharedReplace,
-    UniqueReplace,
-    UniqueIntoInner,
-    UniqueIntoRaw,
-    UniqueFromRaw,
     ReactiveScope,
     Reaction,
     Batch,
@@ -1772,11 +1763,15 @@ impl NameResolver {
         };
         self.standard_library_ops = ops_module.ops;
         self.standard_library_cmp = ops_module.cmp;
-        self.standard_library_operator_modules =
-            [ops_module.ops, ops_module.try_, ops_module.cmp, ops_module.convert]
-                .into_iter()
-                .flatten()
-                .collect();
+        self.standard_library_operator_modules = [
+            ops_module.ops,
+            ops_module.try_,
+            ops_module.cmp,
+            ops_module.convert,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         crate::macro_expand::desugar_program(&mut program, &mut next_syntax_id, ops_module);
         crate::macro_expand::desugar_macro_analysis(
             &mut macro_analysis,
@@ -2068,6 +2063,41 @@ impl NameResolver {
                 );
             }
         }
+        // Outside the defining module, handle construction is a normal call
+        // to the library's allocator. Inside it, `Handle pointer` remains the
+        // private wrap constructor. Pattern resolution uses ordinary privacy.
+        for (syntax, symbol) in &mut self.symbols {
+            let Some(id) = self.constructors.get(symbol) else {
+                continue;
+            };
+            if !matches!(
+                self.builtin_types.get(id),
+                Some(BuiltinType::Unique | BuiltinType::Shared)
+            ) {
+                continue;
+            }
+            let Some(from) = self.syntax_modules.get(syntax) else {
+                continue;
+            };
+            let defining = self.type_modules[id];
+            let mut current = Some(*from);
+            let mut visible = false;
+            while let Some(module) = current {
+                if module == defining {
+                    visible = true;
+                    break;
+                }
+                current = self.module_parents.get(&module).copied();
+            }
+            if !visible {
+                if let Some(new) = companion_members
+                    .get(id)
+                    .and_then(|members| members.get("new"))
+                {
+                    *symbol = new.symbol;
+                }
+            }
+        }
         let exported_module_definitions = self
             .interfaces
             .iter()
@@ -2239,8 +2269,18 @@ impl NameResolver {
             self.register_builtin_type(core, "std.core", float.name(), BuiltinType::Float(float));
         }
         for (path, namespace, name, builtin) in [
-            ("std/shared.sta", "std.shared", "Shared", BuiltinType::Shared),
-            ("std/unique.sta", "std.unique", "Unique", BuiltinType::Unique),
+            (
+                "std/shared.sta",
+                "std.shared",
+                "Shared",
+                BuiltinType::Shared,
+            ),
+            (
+                "std/unique.sta",
+                "std.unique",
+                "Unique",
+                BuiltinType::Unique,
+            ),
             (
                 "std/string.sta",
                 "std.string",
@@ -2334,12 +2374,7 @@ impl NameResolver {
             .find(|module| module.path.ends_with("std/reactive.sta"))
             .map(|module| module.id)
         {
-            self.register_builtin_type(
-                reactive,
-                "std.reactive",
-                "Reactive",
-                BuiltinType::Reactive,
-            );
+            self.register_builtin_type(reactive, "std.reactive", "Reactive", BuiltinType::Reactive);
         }
         if let Some(coroutine) = program
             .modules()
@@ -2518,7 +2553,16 @@ impl NameResolver {
             ),
             ("std.alloc", "__trap", IntrinsicFunction::Trap),
             ("std.alloc", "__checked_mul", IntrinsicFunction::CheckedMul),
-            ("std.alloc", "__pointer_read", IntrinsicFunction::PointerRead),
+            (
+                "std.alloc",
+                "__pointer_read",
+                IntrinsicFunction::PointerRead,
+            ),
+            (
+                "std.alloc",
+                "__pointer_drop_in_place",
+                IntrinsicFunction::PointerDropInPlace,
+            ),
             ("std.alloc", "__pointer_add", IntrinsicFunction::PointerAdd),
             (
                 "std.alloc",
@@ -2672,39 +2716,9 @@ impl NameResolver {
                 IntrinsicFunction::CStringValidUtf8,
             ),
             (
-                "std.shared_buffer",
-                "__shared_buffer_get_shared",
-                IntrinsicFunction::SharedBufferGetShared,
-            ),
-            (
                 "std.buffer",
                 "__buffer_from_array",
                 IntrinsicFunction::BufferFromArray,
-            ),
-            (
-                "std.shared",
-                "__shared_replace",
-                IntrinsicFunction::SharedReplace,
-            ),
-            (
-                "std.unique",
-                "__unique_replace",
-                IntrinsicFunction::UniqueReplace,
-            ),
-            (
-                "std.unique",
-                "__unique_into_inner",
-                IntrinsicFunction::UniqueIntoInner,
-            ),
-            (
-                "std.unique",
-                "__unique_into_raw",
-                IntrinsicFunction::UniqueIntoRaw,
-            ),
-            (
-                "std.unique",
-                "__unique_from_raw",
-                IntrinsicFunction::UniqueFromRaw,
             ),
             (
                 "std.reactive",
@@ -2780,16 +2794,8 @@ impl NameResolver {
                 "__completion_token_cancel",
                 IntrinsicFunction::CompletionTokenCancel,
             ),
-            (
-                "std.source",
-                "__caller_file",
-                IntrinsicFunction::CallerFile,
-            ),
-            (
-                "std.source",
-                "__caller_line",
-                IntrinsicFunction::CallerLine,
-            ),
+            ("std.source", "__caller_file", IntrinsicFunction::CallerFile),
+            ("std.source", "__caller_line", IntrinsicFunction::CallerLine),
             (
                 "std.source",
                 "__caller_column",
@@ -3039,7 +3045,13 @@ impl NameResolver {
                 // (`Completed<T>` wraps `T`, `Cancelled` wraps `()`).
                 declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper
                     && declaration.representation_visibility() == Visibility::Public
-            } else if matches!(builtin, BuiltinType::Buffer | BuiltinType::SharedBuffer) {
+            } else if matches!(
+                builtin,
+                BuiltinType::Buffer
+                    | BuiltinType::SharedBuffer
+                    | BuiltinType::Unique
+                    | BuiltinType::Shared
+            ) {
                 // `Buffer` and `SharedBuffer` are ordinary library wrappers
                 // around their header pointer; only their own modules may
                 // destructure the handle.
@@ -3139,8 +3151,6 @@ impl NameResolver {
             ));
         }
         let recursive_construction = match builtin {
-            BuiltinType::Shared => Some(RecursiveConstruction::ManagedReference),
-            BuiltinType::Unique => Some(RecursiveConstruction::Unique),
             BuiltinType::Syntax
                 if declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper =>
             {
@@ -3162,7 +3172,12 @@ impl NameResolver {
             )),
             (false, None) => {}
         }
-        self.type_names.insert(id, name.to_owned());
+        let path = match builtin {
+            BuiltinType::Shared => "std.shared.Shared",
+            BuiltinType::Unique => "std.unique.Unique",
+            _ => name,
+        };
+        self.type_names.insert(id, path.to_owned());
         self.builtin_types.insert(id, builtin);
     }
 
@@ -3211,7 +3226,18 @@ impl NameResolver {
                         }
                     }
                     Item::TypeDeclaration(declaration) => {
-                        self.register_type_declaration(source_module.id, declaration, true);
+                        self.register_type_declaration(
+                            source_module.id,
+                            declaration,
+                            true,
+                            matches!(
+                                (
+                                    program.module_dotted_name(source_module.id).as_deref(),
+                                    declaration.name.as_str()
+                                ),
+                                (Some("std.unique"), "Unique") | (Some("std.shared"), "Shared")
+                            ),
+                        );
                     }
                     Item::MacroDeclaration(declaration) => {
                         let id = MacroId(self.next_macro_id);
@@ -3374,7 +3400,7 @@ impl NameResolver {
             let mut block_type_declarations = Vec::new();
             find_block_type_declarations(&source_module.syntax.items, &mut block_type_declarations);
             for declaration in block_type_declarations {
-                self.register_type_declaration(source_module.id, declaration, false);
+                self.register_type_declaration(source_module.id, declaration, false, false);
             }
             for item in &source_module.syntax.items {
                 if let Item::Submodule(submodule) = item
@@ -3630,6 +3656,7 @@ impl NameResolver {
         module: ModuleId,
         declaration: &TypeDeclaration,
         top_level: bool,
+        allocating_handle: bool,
     ) -> TypeId {
         let id = TypeId(self.type_declarations.len());
         self.type_ids_by_syntax.insert(declaration.syntax.id, id);
@@ -3650,8 +3677,6 @@ impl NameResolver {
         }
         self.type_declarations.insert(id, declaration.clone());
         self.type_modules.insert(id, module);
-        let allocating_handle = declaration.recursive_constructor
-            && matches!(declaration.name.as_str(), "Unique" | "Shared");
         if (declaration.kind().is_wrapper() && declaration.underlying().is_some())
             || declaration.kind() == staple_syntax::TypeDeclarationKind::Singleton
             || allocating_handle
@@ -6621,8 +6646,17 @@ impl NameResolver {
     /// a public macro can name a trait its own module imports.
     fn lookup_trait(&self, name: &str, definition_module: Option<usize>) -> Option<TraitId> {
         definition_module
-            .and_then(|module| self.definition_context_traits.get(module)?.get(name).copied())
-            .or_else(|| self.declared_traits[self.current_module.0].get(name).copied())
+            .and_then(|module| {
+                self.definition_context_traits
+                    .get(module)?
+                    .get(name)
+                    .copied()
+            })
+            .or_else(|| {
+                self.declared_traits[self.current_module.0]
+                    .get(name)
+                    .copied()
+            })
             .or_else(|| {
                 self.imported_traits
                     .iter()
@@ -6665,7 +6699,9 @@ impl NameResolver {
                     .get(&name.name)
                     .copied()
             }
-            Expression::Name(name) => self.lookup_trait(&name.name, name.syntax.definition_module()),
+            Expression::Name(name) => {
+                self.lookup_trait(&name.name, name.syntax.definition_module())
+            }
             Expression::Access(access) => {
                 let (namespace, name, _, _) = qualified_access_path(access)?;
                 self.lookup_namespace(&namespace)

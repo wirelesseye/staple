@@ -572,10 +572,10 @@ impl<'a> OwnershipChecker<'a> {
                         .is_none_or(|ty| self.module.is_copy_in_function(ty, self.function));
                     let unique_payload =
                         matches!(value.accessor, staple_syntax::Accessor::Representation)
-                            && matches!(
-                                self.module.type_of_expression(value.value.syntax().id),
-                                Some(crate::CheckedType::Unique(_))
-                            );
+                            && self
+                                .module
+                                .type_of_expression(value.value.syntax().id)
+                                .is_some_and(|ty| ty.unique_payload().is_some());
                     if consume && !result_is_copy && unique_payload {
                         self.info.taken_unique.insert(value.syntax.id);
                         self.check_expression(&value.value, true);
@@ -864,15 +864,14 @@ impl<'a> OwnershipChecker<'a> {
 
     fn check_match_borrow(&mut self, symbol: SymbolId, syntax: &Syntax, mutation: bool) {
         let aliases_shared = mutation
-            && matches!(
-                self.module.type_of_symbol(symbol),
-                Some(crate::CheckedType::Shared(_))
-            )
+            && self
+                .module
+                .type_of_symbol(symbol)
+                .is_some_and(|ty| ty.shared_payload().is_some())
             && self.match_borrow_sources.keys().any(|source| {
-                matches!(
-                    self.module.type_of_symbol(*source),
-                    Some(crate::CheckedType::Shared(_))
-                )
+                self.module
+                    .type_of_symbol(*source)
+                    .is_some_and(|ty| ty.shared_payload().is_some())
             });
         if self.match_borrow_sources.contains_key(&symbol) || aliases_shared {
             self.diagnostics.push(Diagnostic::new(
@@ -1104,8 +1103,8 @@ impl<'a> OwnershipChecker<'a> {
         let mut freeze = freeze;
         for handle in self.module.pattern_dereferences(pattern.syntax().id) {
             match handle {
-                crate::CheckedType::Shared(_) => freeze = true,
-                crate::CheckedType::Unique(_) if !freeze => {
+                ty if ty.shared_payload().is_some() => freeze = true,
+                ty if ty.unique_payload().is_some() && !freeze => {
                     self.info.taken_unique.insert(pattern.syntax().id);
                 }
                 _ => {}

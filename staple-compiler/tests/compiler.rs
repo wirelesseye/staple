@@ -1898,10 +1898,9 @@ fn marks_compiler_owned_recursive_constructors() {
             .flatten()
     };
 
-    assert_eq!(
-        construction_for("Shared"),
-        Some(RecursiveConstruction::ManagedReference)
-    );
+    for handle in ["Shared", "Unique", "Buffer", "SharedBuffer"] {
+        assert_eq!(construction_for(handle), None);
+    }
     assert_eq!(
         construction_for("CallExpr"),
         Some(RecursiveConstruction::Syntax)
@@ -2827,7 +2826,8 @@ fn type_checks_and_lowers_mutable_places_and_shared_replace() {
         .expect("mutable places should generate LLVM");
     assert!(llvm.contains("binding.cell"));
     assert!(llvm.contains("place.field"));
-    assert!(llvm.contains("shared.replace.old"));
+    assert!(llvm.contains("pointer.read"));
+    assert!(!llvm.contains("__shared_replace"));
 }
 
 #[test]
@@ -3371,7 +3371,8 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
         .expect("move-only mutable cells should generate LLVM");
     assert!(llvm.contains("cell.drop.is_live"));
     assert_artifact_definition(&llvm, &lowered, PlannedArtifactFamily::GcCellFinalizer);
-    assert!(llvm.contains("shared.replace.old"));
+    assert!(llvm.contains("pointer.read"));
+    assert!(!llvm.contains("__shared_replace"));
 }
 
 #[test]
@@ -3858,8 +3859,8 @@ fn rejects_overlapping_structural_iterator_implementations() {
 fn rejects_slice_shared_destructuring() {
     let diagnostics = resolve_result(
         "use std.shared.(Shared)\nuse std.shared_buffer.SharedBuffer\nlet fixed: (I32 ^ 2) = (1, 2)\nlet values: SharedBuffer<I32> = SharedBuffer.from_array fixed\nlet Shared payload = values\n",
-    ).expect_err_diagnostics("opaque Shared has no nominal payload pattern");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("not a represented nominal type")));
+    ).expect_err_diagnostics("Shared keeps its representation private");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("the representation of `Shared` is private")));
 }
 
 #[test]
@@ -11988,7 +11989,10 @@ fn lowers_custom_drop_and_gc_finalizer_glue() {
 
     assert!(llvm.contains("drop.call"));
     assert!(llvm.contains("__staple_gc_set_finalizer"));
-    assert_artifact_definition(&llvm, &lowered, PlannedArtifactFamily::GcFinalizer);
+    assert!(
+        llvm.contains("__staple_gc_finalizer_thunk"),
+        "library Shared construction installs its own finalizer thunk"
+    );
 }
 
 #[test]
@@ -13626,7 +13630,13 @@ fn opaque_types_are_unsized_but_can_be_referenced() {
     };
     assert!(!opaque.is_sized());
     assert!(!module.is_copy_type(&opaque));
-    assert!(CheckedType::Shared(Box::new(opaque)).is_sized());
+    assert!(CheckedType::Wrapper {
+        id: staple_compiler::TypeId(usize::MAX - 1),
+        name: "std.shared.Shared".to_owned(),
+        arguments: vec![opaque.clone()],
+        representation: Box::new(CheckedType::RawMutPtr { pointee: Box::new(opaque) }),
+        introduction: staple_compiler::WrapperIntroduction::Explicit,
+    }.is_sized());
     assert!(module.is_copy_type(&CheckedType::I32));
 }
 
@@ -14461,39 +14471,24 @@ fn named_types_are_indexed_only_through_their_own_implementations() {
         .expect("explicit representation indexing and user `Index` should compile");
 }
 #[test]
-fn from_types_reject_recursive_constructors() {
-    let diagnostics = stdlib_modifier_diagnostics(
-        "std/shared.sta",
-        "@sized_opaque\n@recursive_constructor\npub type Shared<T where ?Sized T> opaque",
-        "@recursive_constructor\npub type Shared<T where ?Sized T> from pub T",
-    );
-    assert!(
-        diagnostics.iter().any(|diagnostic| diagnostic
-            .message
-            .contains("`@recursive_constructor` types must use `wrap`, not `from`")),
-        "{diagnostics:?}"
-    );
-}
-
-#[test]
 fn recursive_constructor_stdlib_contract_and_validation() {
     for (path, original, replacement, expected) in [
         (
             "std/shared.sta",
-            "@recursive_constructor\npub type Shared",
+            "pub type Shared",
             "@recursive_constructor(1)\npub type Shared",
             "`@recursive_constructor` does not accept an argument",
         ),
         (
             "std/shared.sta",
-            "@recursive_constructor\npub type Shared",
             "pub type Shared",
-            "type `Shared` must be marked `@recursive_constructor`",
+            "@recursive_constructor\npub type Shared",
+            "`@recursive_constructor` may only mark a compiler-owned recursive constructor",
         ),
         (
             "std/shared.sta",
-            "@sized_opaque\n@recursive_constructor\npub type Shared",
-            "@recursive_constructor\nlet value = 1\n@sized_opaque\npub type Shared",
+            "pub type Shared",
+            "@recursive_constructor\nlet value = 1\npub type Shared",
             "`@recursive_constructor` may only modify a type declaration",
         ),
         (
@@ -14509,12 +14504,6 @@ fn recursive_constructor_stdlib_contract_and_validation() {
             "{diagnostics:?}"
         );
     }
-    let diagnostics = stdlib_modifier_diagnostics(
-        "std/shared.sta",
-        "@recursive_constructor\npub type Shared",
-        "@std.annotation.recursive_constructor\npub type Shared",
-    );
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
 
 #[test]
@@ -14575,10 +14564,10 @@ fn intrinsic_registration_checks_names_and_loaded_modules() {
             "unknown Staple intrinsic `__unknown`",
         ),
         (
-            "std/shared.sta",
-            "    __shared_replace: <T> (mut Shared<T>, move T) -> T\n",
+            "std/alloc.sta",
+            "    __trap: () -> Never\n",
             "",
-            "standard library `std.shared` does not declare intrinsic `__shared_replace`",
+            "standard library `std.alloc` does not declare intrinsic `__trap`",
         ),
         (
             "std/coroutine.sta",
@@ -14627,8 +14616,7 @@ fn wrapped_intrinsics_are_registered_once() {
         IntrinsicFunction::SizeOf,
         IntrinsicFunction::GcAllocate,
         IntrinsicFunction::GcFinalizeWith,
-        IntrinsicFunction::SharedBufferGetShared,
-        IntrinsicFunction::SharedReplace,
+        IntrinsicFunction::PointerDropInPlace,
     ] {
         assert_eq!(
             intrinsics
@@ -17658,16 +17646,16 @@ fn unique_guards_recursive_types_and_borrows_non_copy_payloads() {
 }
 
 #[test]
-fn unique_builtin_cleanup_cannot_be_overridden() {
+fn unique_library_cleanup_cannot_be_overridden() {
     let errors = TypeChecker::new()
         .check(resolve(
             "use std.unique.(Unique)\nimpl Drop Unique<I32> { cleanup = owner => () }\n",
         ))
-        .expect_err_diagnostics("Unique owns its built-in cleanup");
+        .expect_err_diagnostics("Unique owns its library cleanup");
     assert!(
         errors.iter().any(|error| error
             .message
-            .contains("Drop` may only be implemented for a represented nominal type")),
+            .contains("cannot implement an external trait for external types")),
         "{errors:?}"
     );
 }
@@ -19714,7 +19702,7 @@ fn raw_pointer_store_consumes_non_copy_values() {
 }
 
 #[test]
-fn opaque_handles_reject_nominal_payload_patterns() {
+fn handles_keep_nominal_representations_private() {
     for (module, handle) in [("unique", "Unique"), ("shared", "Shared")] {
         let cases = [
             format!("let owner = {handle} 1\nlet {handle} value = owner\n"),
@@ -19726,21 +19714,21 @@ fn opaque_handles_reject_nominal_payload_patterns() {
         ];
         for body in cases {
             let diagnostics = resolve_result(&format!("use std.{module}.({handle})\n{body}"))
-                .expect_err_diagnostics("opaque handles must not expose nominal payload patterns");
-            assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("not a represented nominal type")), "{body}: {diagnostics:?}");
+                .expect_err_diagnostics("handles must not expose nominal representations");
+            assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains(&format!("the representation of `{handle}` is private")) || (body.contains("type Alias") && diagnostic.message.contains("not a represented nominal type"))), "{body}: {diagnostics:?}");
         }
     }
 }
 
 #[test]
-fn unique_into_inner_intrinsic_requires_ownership_and_matching_payload() {
-    for replacement in [
-        "__unique_into_inner: <T> Unique<T> -> T",
-        "__unique_into_inner: <T> move Unique<T> -> I32",
+fn unique_into_inner_library_definition_requires_ownership_and_matching_payload() {
+    let original = "pub def into_inner = move owner: Unique<T> => T :: {";
+    for (replacement, expected) in [
+        ("pub def into_inner = owner: Unique<T> => T :: {", "cannot move out of a borrowed value"),
+        ("pub def into_inner = move owner: Unique<T> => I32 :: {", "expected `I32`"),
     ] {
-        let diagnostics = stdlib_edit_diagnostics("std/unique.sta",
-            "__unique_into_inner: <T> move Unique<T> -> T", replacement,
-            "use std.unique.(Unique)\n");
-        assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("standard-library intrinsic has an invalid type")), "{diagnostics:?}");
+        let diagnostics = stdlib_edit_diagnostics("std/unique.sta", original, replacement,
+            "use std.unique.Unique\n");
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains(expected)), "{diagnostics:?}");
     }
 }

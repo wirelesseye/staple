@@ -996,46 +996,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.backend
                     .build_runtime_release(*release, record, span.clone())
             }
-            DropGlueBody::Unique { payload, glue } => {
-                let pointer = value.into_pointer_value();
-                if let Some(glue) = glue {
-                    if glue.kind == crate::LoweredArtifactDependencyKind::DescriptorDrop {
-                        let ordinal = glue.artifact.ok_or_else(|| {
-                            Diagnostic::new(span.clone(), "missing recursive Unique cleanup")
-                        })?;
-                        let function = self
-                            .artifacts
-                            .get(&ordinal)
-                            .and_then(|functions| functions.first())
-                            .copied()
-                            .ok_or_else(|| {
-                                Diagnostic::new(
-                                    span.clone(),
-                                    "missing recursive cleanup declaration",
-                                )
-                            })?;
-                        let null = self
-                            .backend
-                            .context
-                            .ptr_type(AddressSpace::default())
-                            .const_null();
-                        self.backend
-                            .builder
-                            .build_direct_call(function, &[null.into(), pointer.into()], "")
-                            .map_err(compiler_diagnostic)?;
-                        return self.backend.build_unique_free(pointer, span.clone());
-                    }
-                    let ty = self.backend.compile_type(payload)?;
-                    let payload_value = self
-                        .backend
-                        .builder
-                        .build_load(ty, pointer, "unique.drop.payload")
-                        .map_err(compiler_diagnostic)?;
-                    let plan = self.planned_drop_glue(glue, span)?;
-                    self.emit_drop_glue(payload_value, plan, span)?;
-                }
-                self.backend.build_unique_free(pointer, span.clone())
-            }
             DropGlueBody::Buffer { element, glue } => {
                 let BasicValueEnum::PointerValue(buffer) = value else {
                     return Err(Diagnostic::new(
@@ -2146,7 +2106,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.emit_type_descriptor(ordinal, plan, &artifact.origin.span)
             }
             LoweredArtifactPlan::CompoundDescriptorDrop(plan) => {
-                self.emit_compound_descriptor_drop(ordinal, *plan, &artifact.origin.span)
+                self.emit_compound_descriptor_drop(ordinal, plan, &artifact.origin.span)
             }
             LoweredArtifactPlan::TraitMemberEntry(plan) => {
                 self.emit_trait_member_entry(ordinal, plan, &artifact.origin.span)
@@ -2524,48 +2484,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_product_value(&parameters[1..], span.clone())?;
         let result = match &plan.construction {
             crate::ConstructorConstruction::Value { .. } => value,
-            crate::ConstructorConstruction::Unique { payload, .. } => {
-                let ty = self.backend.compile_type(payload)?;
-                let size = self.backend.target_data.get_store_size(&ty);
-                let pointer = self.backend.build_unique_allocation(
-                    self.backend.size_type.const_int(size, false),
-                    span.clone(),
-                )?;
-                self.backend
-                    .builder
-                    .build_store(pointer, value)
-                    .map_err(compiler_diagnostic)?;
-                pointer.into()
-            }
-            crate::ConstructorConstruction::ManagedShared {
-                payload, finalizer, ..
-            } => {
-                let payload_type = self.backend.compile_type(payload)?;
-                let size = self.backend.target_data.get_store_size(&payload_type);
-                let pointer = self.backend.build_gc_allocation(
-                    self.backend.size_type.const_int(size, false),
-                    "shared.allocate",
-                    span.clone(),
-                )?;
-                self.backend
-                    .builder
-                    .build_store(pointer, value)
-                    .map_err(compiler_diagnostic)?;
-                if let Some(planned) = finalizer
-                    && let Some(finalizer_ordinal) = planned.artifact
-                {
-                    let finalizer = self
-                        .artifacts
-                        .get(&finalizer_ordinal)
-                        .and_then(|functions| functions.first())
-                        .copied()
-                        .ok_or_else(|| {
-                            Diagnostic::new(span.clone(), "missing payload finalizer declaration")
-                        })?;
-                    self.backend.set_gc_finalizer(pointer, finalizer)?;
-                }
-                pointer.into()
-            }
             crate::ConstructorConstruction::Unexpanded => {
                 return Err(Diagnostic::new(
                     span.clone(),
@@ -3236,7 +3154,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             },
             LoweredPatternKind::Nominal { argument, .. } => {
-                let original_unique = value;
                 // A nominal pattern loads the payload only for a `Shared` pattern;
                 // every other nominal form binds its argument transparently.
                 let value = if matches!(
@@ -3248,19 +3165,26 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .pattern(owner, *argument)
                         .map(|argument| argument.test.subject.clone())
                         .unwrap_or(CheckedType::Error);
-                    self.backend
-                        .load_shared_payloads(value, std::slice::from_ref(&payload), span.clone())?
-                        .as_any_value_enum()
+                    if pattern.take_unique {
+                        self.emit_unique_take(
+                            owner,
+                            crate::ArtifactUseSite::UniquePattern(id),
+                            value,
+                            &span,
+                        )?
+                    } else {
+                        self.backend
+                            .load_shared_payloads(
+                                value,
+                                std::slice::from_ref(&payload),
+                                span.clone(),
+                            )?
+                            .as_any_value_enum()
+                    }
                 } else {
                     value
                 };
                 self.bind_pattern(owner, *argument, value, environment)?;
-                if pattern.take_unique {
-                    let pointer = value_as_basic(original_unique)
-                        .ok_or_else(|| Diagnostic::new(span.clone(), "invalid Unique pointer"))?
-                        .into_pointer_value();
-                    self.backend.build_unique_free(pointer, span.clone())?;
-                }
                 Ok(())
             }
             LoweredPatternKind::Literal { .. } => Ok(()),
@@ -3759,7 +3683,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_owned_c_string(text, expression.origin.span.clone())
             }
             LoweredExpressionKind::Access(access) => {
-                self.emit_access(owner, expression, access, environment)
+                self.emit_access(owner, id, expression, access, environment)
             }
             LoweredExpressionKind::Product(product) => {
                 self.emit_product(owner, expression, product, environment)
@@ -3806,9 +3730,163 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
     /// Emits a structural access: load any Shared payload chain, then project the
     /// representation, scalar, product element, or bounds-checked slice element.
+    /// Adapt a Staple closure to the collector's (payload, context) callback.
+    /// The context is managed storage, so descriptor-bound environments survive
+    /// collections for as long as their allocation does.
+    fn install_gc_closure_finalizer(
+        &self,
+        payload: PointerValue<'context>,
+        closure: inkwell::values::StructValue<'context>,
+        signature: inkwell::types::FunctionType<'context>,
+        dynamic: bool,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let pointer = self.backend.context.ptr_type(AddressSpace::default());
+        let closure_type = closure.get_type();
+        let size = self.backend.target_data.get_abi_size(&closure_type);
+        let context = self.backend.build_gc_allocation(
+            self.backend.size_type.const_int(size, false),
+            "finalize.context",
+            span.clone(),
+        )?;
+        self.backend
+            .builder
+            .build_store(context, closure)
+            .map_err(compiler_diagnostic)?;
+        let name = format!(
+            "__staple_gc_finalizer_thunk.{}",
+            self.backend.llvm_module.get_functions().count()
+        );
+        let callback_type = self
+            .backend
+            .context
+            .void_type()
+            .fn_type(&[pointer.into(), pointer.into()], false);
+        let thunk =
+            self.backend
+                .llvm_module
+                .add_function(&name, callback_type, Some(Linkage::Internal));
+        let caller = self.backend.builder.get_insert_block();
+        let entry = self.backend.context.append_basic_block(thunk, "entry");
+        self.backend.builder.position_at_end(entry);
+        let value = thunk.get_nth_param(0).unwrap().into_pointer_value();
+        let saved = thunk.get_nth_param(1).unwrap().into_pointer_value();
+        let closure = self
+            .backend
+            .builder
+            .build_load(closure_type, saved, "finalize.closure")
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        let code = self
+            .backend
+            .builder
+            .build_extract_value(closure, 0, "finalize.code")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let environment = self
+            .backend
+            .builder
+            .build_extract_value(closure, 1, "finalize.environment")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let arguments = if dynamic {
+            let argument = self
+                .backend
+                .builder
+                .build_alloca(pointer, "finalize.argument")
+                .map_err(compiler_diagnostic)?;
+            self.backend
+                .builder
+                .build_store(argument, value)
+                .map_err(compiler_diagnostic)?;
+            let unit = self.backend.compile_type(&CheckedType::empty_product())?;
+            let result = self
+                .backend
+                .builder
+                .build_alloca(unit, "finalize.result")
+                .map_err(compiler_diagnostic)?;
+            vec![environment.into(), result.into(), argument.into()]
+        } else {
+            vec![environment.into(), value.into()]
+        };
+        self.backend
+            .builder
+            .build_indirect_call(signature, code, &arguments, "")
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_return(None)
+            .map_err(compiler_diagnostic)?;
+        if let Some(caller) = caller {
+            self.backend.builder.position_at_end(caller);
+        }
+        let setter_type = self
+            .backend
+            .context
+            .void_type()
+            .fn_type(&[pointer.into(), pointer.into(), pointer.into()], false);
+        let setter = self
+            .backend
+            .llvm_module
+            .get_function("__staple_gc_set_finalizer_context")
+            .unwrap_or_else(|| {
+                self.backend.llvm_module.add_function(
+                    "__staple_gc_set_finalizer_context",
+                    setter_type,
+                    None,
+                )
+            });
+        self.backend
+            .builder
+            .build_direct_call(
+                setter,
+                &[
+                    payload.into(),
+                    thunk.as_global_value().as_pointer_value().into(),
+                    context.into(),
+                ],
+                "",
+            )
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    fn emit_unique_take(
+        &self,
+        owner: EmissionOwner,
+        site: crate::ArtifactUseSite,
+        value: AnyValueEnum<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let function = self
+            .instance_use_function(owner, site)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing Unique.into_inner instance"))?;
+        let pointer = value_as_basic(value)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "invalid Unique value"))?;
+        let null = self
+            .backend
+            .context
+            .ptr_type(AddressSpace::default())
+            .const_null();
+        let call = self
+            .backend
+            .builder
+            .build_direct_call(
+                function,
+                &[null.into(), pointer.into()],
+                "unique.into_inner",
+            )
+            .map_err(compiler_diagnostic)?;
+        Ok(call.try_as_basic_value().basic().map_or_else(
+            || self.backend.unit_value(),
+            |value| value.as_any_value_enum(),
+        ))
+    }
+
     fn emit_access(
         &mut self,
         owner: EmissionOwner,
+        id: ExpressionId,
         expression: &crate::LoweredExpression,
         access: &crate::LoweredAccess,
         environment: &mut FunctionEnvironment<'context>,
@@ -3823,15 +3901,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if dereference.is_empty() {
                     Ok(base)
                 } else {
+                    if access.take_unique {
+                        return self.emit_unique_take(
+                            owner,
+                            crate::ArtifactUseSite::UniqueAccess(id),
+                            base,
+                            span,
+                        );
+                    }
                     let payload =
                         self.backend
                             .load_shared_payloads(base, dereference, span.clone())?;
-                    if access.take_unique {
-                        let pointer = value_as_basic(base)
-                            .ok_or_else(|| Diagnostic::new(span.clone(), "invalid Unique pointer"))?
-                            .into_pointer_value();
-                        self.backend.build_unique_free(pointer, span.clone())?;
-                    }
                     Ok(payload.as_any_value_enum())
                 }
             }
@@ -4656,12 +4736,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         environment,
                     )
                 }
-                CheckedType::Shared(payload) | CheckedType::Unique(payload)
-                    if matches!(
+                ty if ty.handle_payload().is_some()
+                    && matches!(
                         pattern.test.identity,
                         crate::LoweredPatternIdentity::Shared | crate::LoweredPatternIdentity::Unique
                     ) =>
                 {
+                    let payload = ty.handle_payload().unwrap();
                     let payload_value = self.backend.load_shared_payloads(
                         value.as_any_value_enum(),
                         std::slice::from_ref(payload),
@@ -5195,8 +5276,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 LoweredClosureEnvironment::Current => environment
                     .closure_environment
                     .ok_or_else(|| unsupported("current closure environment"))?,
-                LoweredClosureEnvironment::CallerLocation(location) => self
-                    .caller_location_pointer(location, environment, &callable.origin.span)?,
+                LoweredClosureEnvironment::CallerLocation(location) => {
+                    self.caller_location_pointer(location, environment, &callable.origin.span)?
+                }
                 LoweredClosureEnvironment::None => self
                     .backend
                     .context
@@ -6058,7 +6140,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     |value| value.as_any_value_enum(),
                 ))
             }
-            LoweredCallableTarget::Constructor { recursive, .. } => {
+            LoweredCallableTarget::Constructor { .. } => {
                 let basic = values
                     .iter()
                     .map(|value| {
@@ -6070,34 +6152,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         })
                     })
                     .collect::<CodeGenerationResult<Vec<_>>>()?;
-                if *recursive == Some(crate::RecursiveConstruction::Unique) {
-                    let CheckedType::Unique(payload) = &call.result_type else {
-                        return Err(Diagnostic::new(
-                            call.origin.span.clone(),
-                            "Unique constructor has an invalid result",
-                        ));
-                    };
-                    let value = self
-                        .backend
-                        .build_product_value(&basic, call.origin.span.clone())?;
-                    let ty = self.backend.compile_type(payload)?;
-                    let size = self.backend.target_data.get_store_size(&ty);
-                    let pointer = self.backend.build_unique_allocation(
-                        self.backend.size_type.const_int(size, false),
-                        call.origin.span.clone(),
-                    )?;
-                    self.backend
-                        .builder
-                        .build_store(pointer, value)
-                        .map_err(compiler_diagnostic)?;
-                    return Ok(pointer.as_any_value_enum());
-                }
-                if matches!(
-                    recursive,
-                    Some(crate::RecursiveConstruction::ManagedReference)
-                ) {
-                    return self.emit_managed_shared(owner, id, &call, &basic);
-                }
                 self.backend
                     .build_product_value(&basic, call.origin.span.clone())
                     .map(|value| value.as_any_value_enum())
@@ -6171,60 +6225,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             || self.backend.unit_value(),
             |value| value.as_any_value_enum(),
         ))
-    }
-
-    /// A `ManagedShared` constructor: GC-allocate the payload, store it, and set
-    /// the declared payload finalizer from the call's `SharedConstruction`
-    /// artifact use.
-    fn emit_managed_shared(
-        &mut self,
-        owner: EmissionOwner,
-        id: LoweredCallId,
-        call: &crate::LoweredCall,
-        values: &[BasicValueEnum<'context>],
-    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let CheckedType::Shared(payload) = &call.result_type else {
-            return Err(Diagnostic::new(
-                call.origin.span.clone(),
-                "Shared constructor has an invalid result type",
-            ));
-        };
-        let value = self
-            .backend
-            .build_product_value(values, call.origin.span.clone())?;
-        let payload_type = self.backend.compile_type(payload)?;
-        let size = self.backend.target_data.get_store_size(&payload_type);
-        let pointer = self.backend.build_gc_allocation(
-            self.backend.size_type.const_int(size, false),
-            "shared.allocate",
-            call.origin.span.clone(),
-        )?;
-        self.backend
-            .builder
-            .build_store(pointer, value)
-            .map_err(compiler_diagnostic)?;
-        if let Some(finalizer) = self.shared_construction_finalizer(owner, id) {
-            self.backend.set_gc_finalizer(pointer, finalizer)?;
-        }
-        Ok(pointer.as_any_value_enum())
-    }
-
-    /// The declared payload finalizer for one `Shared` construction, named by the
-    /// call's `SharedConstruction` artifact use. A payload that needs no
-    /// finalizer has no use.
-    fn shared_construction_finalizer(
-        &self,
-        owner: EmissionOwner,
-        id: LoweredCallId,
-    ) -> Option<FunctionValue<'context>> {
-        let uses = self.view.artifact_uses(owner)?;
-        let ordinal = uses.iter().find_map(|use_| {
-            (use_.site == crate::ArtifactUseSite::SharedConstruction(id)).then_some(use_.artifact)
-        })?;
-        self.artifacts
-            .get(&ordinal)
-            .and_then(|functions| functions.first())
-            .copied()
     }
 
     /// Check the symbol's binding cell state when it has a cell, else the
@@ -6367,9 +6367,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     argument: record_index,
                 },
             )
-            .ok_or_else(|| {
-                Diagnostic::new(span.clone(), "block argument has no binding")
-            })?;
+            .ok_or_else(|| Diagnostic::new(span.clone(), "block argument has no binding"))?;
         let LoweredBoundTarget::Instance(instance) = binding else {
             return Err(Diagnostic::new(
                 span.clone(),
@@ -6953,7 +6951,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let mut current = expression.value_type.clone();
                 for payload in dereference {
                     current = super::layout::strip_place_wrappers(current);
-                    if matches!(current, crate::CheckedType::Unique(_)) {
+                    if current.unique_payload().is_some() {
                         return true;
                     }
                     current = payload.clone();
@@ -8257,10 +8255,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             IntrinsicFunction::GcAllocate => {
                 let [BasicMetadataValueEnum::StructValue(layout)] = arguments else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "gc allocation requires a MemLayout",
-                    ));
+                    return Err(Diagnostic::new(span, "gc allocation requires a MemLayout"));
                 };
                 let size = self
                     .backend
@@ -8366,82 +8361,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let closure = BasicValueEnum::try_from(*closure)
                     .map_err(|_| Diagnostic::new(span.clone(), "invalid finalize function"))?
                     .into_struct_value();
-                let code = self
-                    .backend
-                    .builder
-                    .build_extract_value(closure, 0, "finalize.code")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                let function_type = match call
-                    .arguments
-                    .get(1)
-                    .map(|argument| &argument.expected)
-                {
-                    Some(CheckedType::Function(function)) => function.clone(),
-                    _ => {
-                        return Err(Diagnostic::new(
-                            span,
-                            "finalize function has an invalid checked type",
-                        ));
-                    }
+                let function_type = match call.arguments.get(1).map(|argument| &argument.expected) {
+                    Some(CheckedType::Function(function)) => function,
+                    _ => return Err(Diagnostic::new(span, "invalid finalize function type")),
                 };
-                let signature = self
-                    .backend
-                    .compile_closure_function_type(&function_type)?;
-                let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
-                let thunk_name = format!(
-                    "__staple_gc_finalizer_thunk.{}",
-                    self.backend.llvm_module.get_functions().count()
-                );
-                let slot = self.backend.llvm_module.add_global(
-                    pointer_type,
-                    None,
-                    &format!("{thunk_name}.code"),
-                );
-                slot.set_initializer(&pointer_type.const_null());
-                slot.set_linkage(Linkage::Internal);
-                self.backend
-                    .builder
-                    .build_store(slot.as_pointer_value(), code)
-                    .map_err(compiler_diagnostic)?;
-                let thunk = self.backend.llvm_module.add_function(
-                    &thunk_name,
-                    self.backend
-                        .context
-                        .void_type()
-                        .fn_type(&[pointer_type.into()], false),
-                    Some(Linkage::Internal),
-                );
-                let caller_block = self.backend.builder.get_insert_block();
-                let entry = self.backend.context.append_basic_block(thunk, "entry");
-                self.backend.builder.position_at_end(entry);
-                let payload = thunk
-                    .get_first_param()
-                    .ok_or_else(|| Diagnostic::new(span.clone(), "finalizer thunk has no payload"))?
-                    .into_pointer_value();
-                let target = self
-                    .backend
-                    .builder
-                    .build_load(pointer_type, slot.as_pointer_value(), "finalize.code.load")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                self.backend
-                    .builder
-                    .build_indirect_call(
-                        signature,
-                        target,
-                        &[pointer_type.const_null().into(), payload.into()],
-                        "finalize.call",
-                    )
-                    .map_err(compiler_diagnostic)?;
-                self.backend
-                    .builder
-                    .build_return(None)
-                    .map_err(compiler_diagnostic)?;
-                if let Some(block) = caller_block {
-                    self.backend.builder.position_at_end(block);
-                }
-                self.backend.set_gc_finalizer(*pointer, thunk)?;
+                let signature = self.backend.compile_closure_function_type(function_type)?;
+                self.install_gc_closure_finalizer(*pointer, closure, signature, false, &span)?;
                 Ok(self.backend.unit_value())
             }
             IntrinsicFunction::Trap => {
@@ -8461,6 +8386,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.backend
                     .build_checked_mul(*left, *right, span)
                     .map(|value| value.as_any_value_enum())
+            }
+            IntrinsicFunction::PointerDropInPlace => {
+                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
+                    return Err(Diagnostic::new(span, "pointer drop requires a pointer"));
+                };
+                self.emit_drop_site(
+                    owner,
+                    crate::ArtifactUseSite::PointerDropInPlace(call_id),
+                    DropSource::Place(*pointer),
+                    &span,
+                )?;
+                Ok(self.backend.unit_value())
             }
             IntrinsicFunction::PointerRead => {
                 let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
@@ -8602,29 +8539,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 Ok(buffer.as_any_value_enum())
             }
-            IntrinsicFunction::SharedBufferGetShared => {
-                let [
-                    BasicMetadataValueEnum::PointerValue(buffer),
-                    BasicMetadataValueEnum::IntValue(position),
-                ] = arguments
-                else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "get_shared requires a SharedBuffer and a position",
-                    ));
-                };
-                let CheckedType::Shared(payload) = result_type else {
-                    return Err(Diagnostic::new(span, "unchecked get_shared result"));
-                };
-                let element_type = self.backend.compile_type(payload)?;
-                let pointer = self.backend.build_shared_buffer_get_shared(
-                    *buffer,
-                    *position,
-                    element_type,
-                    span,
-                )?;
-                Ok(pointer.as_any_value_enum())
-            }
             IntrinsicFunction::BufferWithCapacity => {
                 let [BasicMetadataValueEnum::IntValue(capacity)] = arguments else {
                     return Err(Diagnostic::new(
@@ -8740,7 +8654,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "Buffer.get_shared_unchecked requires a buffer and USize index",
                     ));
                 };
-                let CheckedType::Shared(element) = result_type else {
+                let Some(element) = result_type.shared_payload() else {
                     return Err(Diagnostic::new(
                         span,
                         "invalid Buffer.get_shared_unchecked result",
@@ -8867,53 +8781,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 };
                 self.load_caller_site_field(environment, index, &span)
                     .map(|value| value.as_any_value_enum())
-            }
-            IntrinsicFunction::UniqueIntoInner => {
-                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
-                    return Err(unsupported("Unique extraction"));
-                };
-                let payload_type = self.backend.compile_type(result_type)?;
-                let payload = self.backend.builder
-                    .build_load(payload_type, *pointer, "unique.into_inner")
-                    .map_err(compiler_diagnostic)?;
-                self.backend.build_unique_free(*pointer, span.clone())?;
-                Ok(payload.as_any_value_enum())
-            }
-            IntrinsicFunction::UniqueIntoRaw | IntrinsicFunction::UniqueFromRaw => {
-                let BasicMetadataValueEnum::PointerValue(pointer) = arguments[0] else {
-                    return Err(unsupported("Unique raw conversion"));
-                };
-                if intrinsic == IntrinsicFunction::UniqueIntoRaw {
-                    self.backend.pin_unique_payload(pointer, span.clone())?;
-                } else {
-                    self.backend.unpin_unique_payload(pointer, span.clone())?;
-                }
-                Ok(pointer.as_any_value_enum())
-            }
-            IntrinsicFunction::SharedReplace | IntrinsicFunction::UniqueReplace => {
-                // Read the old payload, store the replacement, and return the
-                // old value (its drop is the surrounding site's recorded
-                // cleanup).
-                let [BasicMetadataValueEnum::PointerValue(reference), replacement] = arguments
-                else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "replace requires a fixed Shared and a replacement value",
-                    ));
-                };
-                let payload_type = self.backend.compile_type(result_type)?;
-                let old = self
-                    .backend
-                    .builder
-                    .build_load(payload_type, *reference, "shared.replace.old")
-                    .map_err(compiler_diagnostic)?;
-                let replacement = BasicValueEnum::try_from(*replacement)
-                    .map_err(|_| Diagnostic::new(span.clone(), "replacement is not storable"))?;
-                self.backend
-                    .builder
-                    .build_store(*reference, replacement)
-                    .map_err(compiler_diagnostic)?;
-                Ok(old.as_any_value_enum())
             }
             IntrinsicFunction::ReactiveScope => {
                 // The unit argument is evaluated by the call route; then create

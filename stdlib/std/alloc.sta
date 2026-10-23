@@ -35,6 +35,7 @@ pub(package) extern "staple-intrinsic" {
     __checked_mul: (USize, USize) -> USize
 
     __pointer_read: <T> RawMutPtr<T> -> T
+    __pointer_drop_in_place: <T where ?Sized T> RawMutPtr<T> -> ()
     __pointer_add: <T> (RawMutPtr<T>, USize) -> RawMutPtr<T>
     __pointer_copy_nonoverlapping: <T> (RawMutPtr<T>, RawMutPtr<T>, USize) -> ()
 }

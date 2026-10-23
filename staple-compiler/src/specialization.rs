@@ -49,8 +49,6 @@ pub(crate) enum CanonicalType {
     NumberLiteral(u64),
     String,
     StringLiteralSet(Vec<String>),
-    Shared(Box<CanonicalType>),
-    Unique(Box<CanonicalType>),
     SharedBuffer(Box<CanonicalType>),
     Buffer(Box<CanonicalType>),
     Array {
@@ -170,9 +168,7 @@ impl CanonicalType {
         };
         1 + match self {
             CanonicalType::Forall { body, .. } => body.nesting_depth(),
-            CanonicalType::Shared(inner)
-            | CanonicalType::Unique(inner)
-            | CanonicalType::SharedBuffer(inner)
+            CanonicalType::SharedBuffer(inner)
             | CanonicalType::Buffer(inner)
             | CanonicalType::RawMutPtr { pointee: inner }
             | CanonicalType::RawPtr { pointee: inner } => inner.nesting_depth(),
@@ -293,12 +289,6 @@ impl CanonicalType {
             CheckedType::String => CanonicalType::String,
             CheckedType::StringLiteralSet(values) => {
                 CanonicalType::StringLiteralSet(values.clone())
-            }
-            CheckedType::Shared(payload) => {
-                CanonicalType::Shared(Box::new(Self::convert(payload, origin, runtime, binders)?))
-            }
-            CheckedType::Unique(payload) => {
-                CanonicalType::Unique(Box::new(Self::convert(payload, origin, runtime, binders)?))
             }
             CheckedType::Array { element, count } => CanonicalType::Array {
                 element: Box::new(Self::convert(element, origin, runtime, binders)?),
@@ -1662,9 +1652,7 @@ mod tests {
 
     fn node_count(value_type: &CanonicalType) -> usize {
         match value_type {
-            CanonicalType::Shared(payload)
-            | CanonicalType::Unique(payload)
-            | CanonicalType::SharedBuffer(payload)
+            CanonicalType::SharedBuffer(payload)
             | CanonicalType::Buffer(payload)
             | CanonicalType::RawMutPtr { pointee: payload }
             | CanonicalType::RawPtr { pointee: payload } => 1 + node_count(payload),
@@ -2103,7 +2091,7 @@ mod tests {
 
         assert!(
             CanonicalType::concrete(
-                &CheckedType::Shared(Box::new(CheckedType::Parameter {
+                &CheckedType::test_shared(Box::new(CheckedType::Parameter {
                     id: TypeParameterId(6),
                     name: "Nested".to_owned(),
                     sized: false,

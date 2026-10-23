@@ -16,18 +16,16 @@ use super::instance_resolution::{
 use super::worklist::instantiate_method_type;
 use super::{
     ArenaId, CallSubstitutions, CallTypeSubstitution, CheckedProductType, ConstructorAdapterPlan,
-    ConstructorConstruction, DebugDelegate, DebugStep, DropGlueBody, DropGluePlan, GcFinalizerPlan,
-    IndexedElement, LoweredArtifactDependencyKind, LoweredArtifactPlan, LoweredArtifactRequestId,
+    ConstructorConstruction, DebugDelegate, DebugStep, DropGlueBody, DropGluePlan, IndexedElement,
+    LoweredArtifactDependencyKind, LoweredArtifactPlan, LoweredArtifactRequestId,
     LoweredInstanceDependencyKind, LoweredProgram, LoweredTraitImplementationId, Origin,
     PlannedArtifact, PlannedCallee, PlannedInstance, StructuralBody, StructuralMethodPlan,
     SumAlternative, TraitDelegate, TraitEvidence,
 };
-use crate::specialization::{
-    ArtifactRequestKey, CanonicalType, GcFinalizerKey, StructuralMethodKey,
-};
+use crate::specialization::{ArtifactRequestKey, CanonicalType, StructuralMethodKey};
 use crate::{
-    CheckedFunctionType, CheckedType, CheckedTypeElement, RecursiveConstruction,
-    StructuralTraitMethod, TraitId, TraitMethodId, infer_type_parameters,
+    CheckedFunctionType, CheckedType, CheckedTypeElement, StructuralTraitMethod, TraitId,
+    TraitMethodId, infer_type_parameters,
 };
 
 /// Expands one constructor-adapter artifact: the flattened parameter slots,
@@ -49,10 +47,6 @@ pub(super) fn expand_constructor_adapter(
     };
     let (parameters, variadic) = flatten_parameters(&plan.callable_type.parameter);
     let product = build_product(&parameters, variadic);
-    let declared = program
-        .types
-        .get(plan.type_id)
-        .and_then(|metadata| metadata.recursive_construction);
     let mut requests = Vec::new();
     let mut layout = Vec::new();
     if !plan.runtime_parameters().is_empty() {
@@ -83,98 +77,16 @@ pub(super) fn expand_constructor_adapter(
             });
             requests.push(ClosureRequest::Artifact {
                 key,
-                plan: LoweredArtifactPlan::CompoundDescriptorDrop(shape),
+                plan: LoweredArtifactPlan::CompoundDescriptorDrop(shape.into()),
                 kind,
                 origin: origin.clone(),
                 use_site: None,
             });
         }
     }
-    let construction = match &*plan.callable_type.result {
-        CheckedType::Unique(payload) => {
-            if declared != Some(RecursiveConstruction::Unique) {
-                return Err(vec![Diagnostic::new(
-                    origin.span.clone(),
-                    "Unique constructor has an invalid construction strategy",
-                )]);
-            }
-            ConstructorConstruction::Unique {
-                parameters,
-                product,
-                payload: payload.as_ref().clone(),
-            }
-        }
-        CheckedType::Shared(payload) => {
-            if declared != Some(RecursiveConstruction::ManagedReference) {
-                return Err(vec![Diagnostic::new(
-                    origin.span.clone(),
-                    format!(
-                        "constructor adapter for symbol {} returns a managed reference but its lowered type is not a managed-reference construction",
-                        plan.symbol.0
-                    ),
-                )]);
-            }
-            let payload = payload.as_ref().clone();
-            let finalizer = if !plan.runtime_parameters().is_empty() {
-                let key = ArtifactRequestKey::GcFinalizer(GcFinalizerKey::DynamicCell);
-                requests.push(ClosureRequest::Artifact {
-                    key: key.clone(),
-                    plan: LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::DynamicCell),
-                    kind: LoweredArtifactDependencyKind::GcFinalizer,
-                    origin: origin.clone(),
-                    use_site: None,
-                });
-                Some(PlannedArtifact {
-                    key,
-                    artifact: None,
-                    kind: LoweredArtifactDependencyKind::GcFinalizer,
-                })
-            } else if program.concrete_needs_drop(&payload) {
-                let canonical = match CanonicalType::concrete(&payload, &origin) {
-                    Ok(canonical) => canonical,
-                    Err(diagnostic) => return Err(vec![diagnostic]),
-                };
-                let key = ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(canonical));
-                requests.push(ClosureRequest::Artifact {
-                    key: key.clone(),
-                    plan: LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload {
-                        value_type: payload.clone(),
-                        glue: None,
-                    }),
-                    kind: LoweredArtifactDependencyKind::GcFinalizer,
-                    origin: origin.clone(),
-                    use_site: None,
-                });
-                Some(PlannedArtifact {
-                    key,
-                    artifact: None,
-                    kind: LoweredArtifactDependencyKind::GcFinalizer,
-                })
-            } else {
-                None
-            };
-            ConstructorConstruction::ManagedShared {
-                parameters,
-                product,
-                payload,
-                finalizer,
-            }
-        }
-        _ => {
-            if declared == Some(RecursiveConstruction::ManagedReference) {
-                return Err(vec![Diagnostic::new(
-                    origin.span.clone(),
-                    format!(
-                        "constructor adapter for symbol {} does not return a managed reference but its lowered type is a managed-reference construction",
-                        plan.symbol.0
-                    ),
-                )]);
-            }
-            ConstructorConstruction::Value {
-                parameters,
-                product,
-            }
-        }
+    let construction = ConstructorConstruction::Value {
+        parameters,
+        product,
     };
     Ok((
         LoweredArtifactPlan::ConstructorAdapter(ConstructorAdapterPlan {
@@ -517,13 +429,13 @@ fn structural_deref_index_body(
     let target = structural_argument(plan, 0, origin)?;
     let position = structural_argument(plan, 1, origin)?;
     let output = structural_argument(plan, 2, origin)?;
-    let (CheckedType::Shared(payload) | CheckedType::Unique(payload)) = &target else {
+    let Some(payload) = target.handle_payload() else {
         return Err(Diagnostic::new(
             origin.span.clone(),
             "structural DerefIndex target is not a reference".to_string(),
         ));
     };
-    let payload = payload.as_ref().clone();
+    let payload = payload.clone();
     if let CheckedType::Product(product) = &payload
         && !product.variadic
         && let Some(element) = product.homogeneous_element()
@@ -570,13 +482,13 @@ fn structural_deref_mutate_body(
     let target = structural_argument(plan, 0, origin)?;
     let position = structural_argument(plan, 1, origin)?;
     let element = structural_argument(plan, 2, origin)?;
-    let (CheckedType::Shared(payload) | CheckedType::Unique(payload)) = &target else {
+    let Some(payload) = target.handle_payload() else {
         return Err(Diagnostic::new(
             origin.span.clone(),
             "structural DerefMutateIndex target is not a reference".to_string(),
         ));
     };
-    let payload = payload.as_ref().clone();
+    let payload = payload.clone();
     let (trait_id, method) = standard_trait_method(
         program,
         program.semantic_ids.mutate_index_trait,
@@ -1166,82 +1078,52 @@ mod tests {
     }
 
     #[test]
-    fn managed_shared_constructor_plans_a_finalizer_exactly_when_drop_is_needed() {
-        let (module, lowered) = lower(concat!(
-            "use std.shared.(Shared)\n",
+    fn shared_constructor_values_call_library_new() {
+        let (_, lowered) = lower(concat!(
+            "use std.shared.Shared\n",
             "type Resource wrap I32\n",
             "impl Drop Resource { cleanup = Resource value => () }\n",
             "let make: () -> (Resource -> Shared<Resource>) = () => Shared\n",
             "let make_copy: () -> (I32 -> Shared<I32>) = () => Shared\n",
         ));
-        let plans = constructor_plans(&lowered);
-        assert_eq!(plans.len(), 2, "one managed-shared adapter per payload type");
-        let mut saw_droppable = false;
-        let mut saw_copy = false;
-        for (_, plan) in &plans {
-            let ConstructorConstruction::ManagedShared {
-                parameters,
-                product,
-                payload,
-                finalizer,
-            } = &plan.construction
-            else {
-                panic!("a `Shared` constructor result classifies as ManagedShared");
-            };
-            // The adapter rebuilds the payload from its flattened slots.
-            assert_eq!(product, payload);
-            assert_eq!(parameters.len(), 1);
-            let expected_finalizer = module.type_needs_drop(payload);
-            let checked_is_copy = module.is_copy_type(payload);
-            assert_eq!(
-                finalizer.is_some(),
-                expected_finalizer,
-                "the planned finalizer matches build shared value predicate"
-            );
-            if expected_finalizer {
-                saw_droppable = true;
-                assert!(!checked_is_copy, "a droppable payload is never `Copy`");
-                let finalizer = finalizer.as_ref().expect("the planned finalizer");
-                let artifact = lowered
-                    .program
-                    .artifacts
-                    .get(LoweredArtifactRequestId::from_index(
-                        finalizer.artifact.expect("bound after closure").index(),
-                    ))
-                    .expect("finalizer artifact");
-                match artifact.plan.as_ref() {
-                    Some(LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload {
-                        glue: Some(_),
-                        ..
-                    })) => {}
-                    other => panic!("the payload finalizer is expanded with glue: {other:?}"),
-                }
-            } else {
-                saw_copy = true;
-            }
-        }
-        assert!(saw_droppable, "the fixture exercises a droppable payload");
-        assert!(saw_copy, "the fixture exercises a `Copy` payload");
+        assert!(
+            constructor_plans(&lowered).is_empty(),
+            "handle construction uses source functions"
+        );
+        let payloads = library_shared_payloads(&lowered);
+        assert!(payloads.contains(&CheckedType::I32));
+        assert!(payloads.iter().any(
+            |ty| matches!(ty, CheckedType::Wrapper { name, .. } if name.ends_with("Resource"))
+        ));
+    }
+
+    fn library_shared_payloads(lowered: &LoweredModule) -> Vec<CheckedType> {
+        lowered
+            .program
+            .instances
+            .iter()
+            .filter_map(|(_, instance)| {
+                let body = instance.body.as_ref()?;
+                let function = lowered.program.functions.get(instance.template)?;
+                (function.name == "new" || function.name.ends_with(".new"))
+                    .then(|| body.signature.result.shared_payload().cloned())
+                    .flatten()
+            })
+            .collect()
     }
 
     #[test]
-    fn generic_constructor_values_produce_one_adapter_per_instantiation() {
+    fn generic_handle_constructor_values_specialize_library_new() {
         let (_, lowered) = lower(concat!(
-            "use std.shared.(Shared)\n",
+            "use std.shared.Shared\n",
             "def shared_maker: <T where Copy T> () -> (T -> Shared<T>) = <T where Copy T> () => Shared\n",
             "let maker_i32: I32 -> Shared<I32> = shared_maker ()\n",
             "let maker_u8: U8 -> Shared<U8> = shared_maker ()\n",
         ));
-        let plans = constructor_plans(&lowered);
-        assert_eq!(plans.len(), 2, "one adapter per concrete callable type");
-        let mut payloads = plans
-            .iter()
-            .filter_map(|(_, plan)| match &plan.construction {
-                ConstructorConstruction::ManagedShared { payload, .. } => Some(payload.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        assert!(constructor_plans(&lowered).is_empty());
+        let mut payloads = library_shared_payloads(&lowered);
         payloads.sort_by_key(|payload| format!("{payload:?}"));
+        payloads.dedup();
         assert_eq!(payloads, vec![CheckedType::I32, CheckedType::U8]);
     }
 

@@ -16,7 +16,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-fn lower(source: &str) -> LoweredModule {
+fn lower(source: &str, dynamic: bool) -> LoweredModule {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
@@ -29,6 +29,7 @@ fn lower(source: &str) -> LoweredModule {
         .check(resolved)
         .unwrap_or_else(|errors| panic!("check: {errors:?}"));
     Lowerer::new()
+        .with_dictionary_pass_generic_calls(dynamic)
         .lower(&typed)
         .unwrap_or_else(|errors| panic!("lower: {errors:?}"))
 }
@@ -36,7 +37,12 @@ fn lower(source: &str) -> LoweredModule {
 /// Builds and runs a program, returning its standard output.
 #[cfg(unix)]
 fn run(source: &str) -> String {
-    let lowered = lower(source);
+    run_mode(source, false)
+}
+
+#[cfg(unix)]
+fn run_mode(source: &str, dynamic: bool) -> String {
+    let lowered = lower(source, dynamic);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -117,14 +123,16 @@ fn collects_unique_payloads_in_cycles_through_managed_references() {
         ),
         CHURN,
     ) + concat!("make_cycles ()\n", "churn ()\n", "churn ()\n");
-    let output = run(&source);
-    let dropped = output.lines().filter(|line| *line == "dropped").count();
-    // A conservative stack scan may retain a stray cycle, but a payload that
-    // is its own root retains every one of them.
-    assert!(
-        dropped >= 90,
-        "only {dropped} of 100 cyclic Unique payloads were collected"
-    );
+    for dynamic in [false, true] {
+        let output = run_mode(&source, dynamic);
+        let dropped = output.lines().filter(|line| *line == "dropped").count();
+        // A conservative stack scan may retain a stray cycle, but a payload
+        // that is its own root retains every one of them.
+        assert!(
+            dropped >= 90,
+            "only {dropped} of 100 cyclic Unique payloads were collected (dynamic={dynamic})"
+        );
+    }
 }
 
 #[cfg(unix)]

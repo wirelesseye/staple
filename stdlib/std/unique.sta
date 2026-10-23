@@ -1,6 +1,7 @@
 pub mod
 
-use package.ptr.(RawMutPtr)
+use package.ptr.(RawMutPtr, RawOpaqueMutPtr)
+use package.alloc.(Gc, MemLayout, Finalize)
 
 /// A unique, affine heap owner. Dropping it cleans up its payload and frees
 /// its allocation immediately. The allocation lives on the managed heap and is
@@ -8,26 +9,45 @@ use package.ptr.(RawMutPtr)
 /// cycle of managed references is finalized and freed by collection.
 /// Unsized payload types may be used in handles and generic signatures;
 /// construction requires a concrete payload layout.
-@sized_opaque
-@recursive_constructor
-pub type Unique<T where ?Sized T> opaque
+pub type Unique<T where ?Sized T> wrap RawMutPtr<T>
+impl<T where ?Sized T> !Copy Unique<T> {}
 
-extern "staple-intrinsic" {
-    __unique_into_inner: <T> move Unique<T> -> T
-    __unique_replace: <T> (mut Unique<T>, move T) -> T
-    __unique_into_raw: <T where ?Sized T> (move Unique<T>) -> RawMutPtr<T>
-    __unique_from_raw: <T where ?Sized T> RawMutPtr<T> -> Unique<T>
+impl<T where ?Sized T> Drop Unique<T> {
+    cleanup = Unique pointer => {
+        RawMutPtr.unsafe_drop_in_place pointer
+        Gc.unsafe_release (pointer as RawOpaqueMutPtr)
+    }
+}
+
+type UniqueCell<T> wrap T
+impl<T> Finalize UniqueCell<T> {
+    finalize = pointer => RawMutPtr.unsafe_drop_in_place ((pointer as RawOpaqueMutPtr) as RawMutPtr<T>)
 }
 
 companion<T> Unique<T> {
     /// Allocates a new payload, transferring ownership into the handle.
-    pub def new = move value: T => Unique<T> :: Unique value
+    pub def new = move value: T => Unique<T> :: {
+        let pointer = Gc.allocate (MemLayout.of.<T> ()) as RawMutPtr<T>
+        RawMutPtr.store pointer value
+        if (Gc.needs_drop.<T> ()) { Gc.finalize_with.<UniqueCell<T>> ((pointer as RawOpaqueMutPtr) as RawMutPtr<UniqueCell<T>>) }
+        Unique pointer
+    }
 
     /// Consumes the owner, returning its payload and freeing its allocation.
-    pub def into_inner = move owner: Unique<T> => T :: __unique_into_inner owner
+    pub def into_inner = move owner: Unique<T> => T :: {
+        let Unique pointer = owner
+        let value = RawMutPtr.unsafe_read pointer
+        Gc.unsafe_release (pointer as RawOpaqueMutPtr)
+        value
+    }
 
     /// Replaces the payload and returns the previous value.
-    pub def replace: (mut Unique<T>, move T) -> T = (mut reference, move value) => __unique_replace (reference, value)
+    pub def replace = (mut owner: Unique<T>, move value: T) => T :: {
+        let pointer = owner.*
+        let previous = RawMutPtr.unsafe_read pointer
+        RawMutPtr.store pointer value
+        previous
+    }
 }
 
 companion<T where ?Sized T> Unique<T> {
@@ -35,13 +55,20 @@ companion<T where ?Sized T> Unique<T> {
     /// While raw, the allocation and its payload stay alive as collector roots.
     /// The caller must eventually reconstruct the owner or clean up and free
     /// the allocation using the same allocator and payload layout.
-    pub def unsafe_into_raw = move value: Unique<T> => RawMutPtr<T> :: __unique_into_raw value
+    pub def unsafe_into_raw = move value: Unique<T> => RawMutPtr<T> :: {
+        let Unique pointer = value
+        Gc.unsafe_pin (pointer as RawOpaqueMutPtr)
+        pointer
+    }
 
     /// Adopts exclusive ownership of a live, aligned, initialized allocation
     /// with the correct payload type, allocated using Unique's allocator.
     /// Ownership must be transferred exactly once. Null, dangling, aliased,
     /// or incompatible pointers are invalid.
-    pub def unsafe_from_raw = pointer: RawMutPtr<T> => Unique<T> :: __unique_from_raw pointer
+    pub def unsafe_from_raw = pointer: RawMutPtr<T> => Unique<T> :: {
+        Gc.unsafe_unpin (pointer as RawOpaqueMutPtr)
+        Unique pointer
+    }
 }
 
 companion<T where Copy T> Unique<T> {

@@ -2,11 +2,12 @@
 ; alignment and HEADER_BYTES is rounded to the target scalar alignment, at least
 ; PTR_BYTES, so every GC payload preserves natural alignment. Pointer-holding fields must preserve that alignment.
 ; The header fields are:
-; next allocation, requested payload size, flags, finalizer, previous allocation.
+; next allocation, requested payload size, flags, finalizer, previous allocation,
+; optional finalizer context. Context callbacks receive (payload, context).
 ; The allocation list is doubly linked so an owner can release its allocation
 ; in O(1). Flags hold the mark bit (1), the finalized bit (2) and the pinned
 ; bit (4); a pinned allocation is a root until it is unpinned.
-%GcHeader = type { ptr, {{SIZE}}, {{SIZE}}, ptr, ptr }
+%GcHeader = type { ptr, {{SIZE}}, {{SIZE}}, ptr, ptr, ptr }
 ; Explicit roots form a linked list of byte ranges: start, size, next root.
 %GcRoot = type { ptr, {{SIZE}}, ptr }
 
@@ -427,6 +428,10 @@ mark.object:
   %size.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 1
   %size = load {{SIZE}}, ptr %size.slot
   call void @__staple_gc_scan_region(ptr %payload, {{SIZE}} %size)
+  %context.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 5
+  %context = load ptr, ptr %context.slot
+  %context.address = ptrtoint ptr %context to {{SIZE}}
+  call void @__staple_gc_mark_candidate({{SIZE}} %context.address)
   br label %return
 
 return:
@@ -582,6 +587,16 @@ finalize.call:
   %finalized.flags = or {{SIZE}} %finalize.flags, 2
   store {{SIZE}} %finalized.flags, ptr %finalize.mark.slot
   %finalize.payload = getelementptr i8, ptr %finalize.header, {{SIZE}} {{HEADER_BYTES}}
+  %finalize.context.slot = getelementptr %GcHeader, ptr %finalize.header, i32 0, i32 5
+  %finalize.context = load ptr, ptr %finalize.context.slot
+  %has.context = icmp ne ptr %finalize.context, null
+  br i1 %has.context, label %finalize.with.context, label %finalize.plain
+
+finalize.with.context:
+  call void %finalizer(ptr %finalize.payload, ptr %finalize.context)
+  br label %finalize.continue
+
+finalize.plain:
   call void %finalizer(ptr %finalize.payload)
   br label %finalize.continue
 
@@ -729,6 +744,8 @@ initialize:
   store {{SIZE}} %initial.mark, ptr %mark.slot
   %finalizer.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 3
   store ptr null, ptr %finalizer.slot
+  %context.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 5
+  store ptr null, ptr %context.slot
   %previous.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 4
   store ptr null, ptr %previous.slot
   %has.head = icmp ne ptr %head, null
@@ -759,6 +776,19 @@ entry:
   %header = getelementptr i8, ptr %payload, {{SIZE}} -{{HEADER_BYTES}}
   %slot = getelementptr %GcHeader, ptr %header, i32 0, i32 3
   store ptr %finalizer, ptr %slot
+  %context.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 5
+  store ptr null, ptr %context.slot
+  ret void
+}
+
+ ; Attach a callback with managed context, traced while the payload is live.
+define void @__staple_gc_set_finalizer_context(ptr %payload, ptr %finalizer, ptr %context) {
+entry:
+  %header = getelementptr i8, ptr %payload, {{SIZE}} -{{HEADER_BYTES}}
+  %slot = getelementptr %GcHeader, ptr %header, i32 0, i32 3
+  store ptr %finalizer, ptr %slot
+  %context.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 5
+  store ptr %context, ptr %context.slot
   ret void
 }
 

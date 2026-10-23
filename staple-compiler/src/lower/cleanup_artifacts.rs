@@ -827,6 +827,64 @@ impl<'a> LoweredWalker<'a> {
         Ok(())
     }
 
+    /// Owned payload syntax calls the library's move-out operation. Generic
+    /// payloads share its descriptor-ABI instance, just like an explicit call.
+    fn take_unique(
+        &mut self,
+        site: ArtifactUseSite,
+        handle: &CheckedType,
+        origin: &Origin,
+    ) -> WalkResult {
+        let Some(payload) = handle.unique_payload() else {
+            return Ok(());
+        };
+        let function = self.program.semantic_ids.unique_into_inner.ok_or_else(|| {
+            vec![Diagnostic::new(
+                origin.span.clone(),
+                "missing Unique.into_inner",
+            )]
+        })?;
+        let template = self.program.functions.get(function).ok_or_else(|| {
+            vec![Diagnostic::new(
+                origin.span.clone(),
+                "missing Unique.into_inner template",
+            )]
+        })?;
+        let dynamic = crate::contains_type_parameter(payload);
+        let mut function_type = template.signature.clone();
+        if !dynamic {
+            function_type.parameter = Box::new(handle.clone());
+            function_type.result = Box::new(payload.clone());
+        }
+        let request = InstanceResolutionRequest {
+            function,
+            origin: origin.clone(),
+            function_type,
+            substitutions: super::CallSubstitutions::default(),
+            evidence: None,
+            target: InstanceResolutionTarget::Root,
+        };
+        let resolved = if dynamic {
+            self.program.resolve_instance_request_with_runtime(
+                &request,
+                &self
+                    .program
+                    .relevant_parameters(function)
+                    .type_parameters()
+                    .collect(),
+            )
+        } else {
+            self.program.resolve_instance_request(&request)
+        }
+        .map_err(|error| vec![error])?;
+        self.visitor.instance_use(
+            site,
+            resolved,
+            LoweredInstanceDependencyKind::DirectCall,
+            origin,
+        )
+    }
+
     fn walk_pattern(&mut self, id: PatternId) -> WalkResult {
         self.walk_pattern_with_ownership(id, true)
     }
@@ -841,6 +899,13 @@ impl<'a> LoweredWalker<'a> {
         let pattern = pattern.clone();
         let origin = pattern.origin.clone();
         self.visitor.pattern_site(&pattern, &origin)?;
+        if pattern.take_unique {
+            self.take_unique(
+                ArtifactUseSite::UniquePattern(id),
+                &pattern.test.subject,
+                &origin,
+            )?;
+        }
         let value_type = pattern.value_type.clone();
         let kind = pattern.kind.clone();
         match kind {
@@ -903,7 +968,18 @@ impl<'a> LoweredWalker<'a> {
             super::LoweredExpressionKind::Integer(_)
             | super::LoweredExpressionKind::Float(_)
             | super::LoweredExpressionKind::CString(_) => {}
-            super::LoweredExpressionKind::Access(access) => self.walk_expression(access.base)?,
+            super::LoweredExpressionKind::Access(access) => {
+                self.walk_expression(access.base)?;
+                if access.take_unique {
+                    if let Some(base) = self.owner.expression(self.program, access.base) {
+                        self.take_unique(
+                            ArtifactUseSite::UniqueAccess(id),
+                            &base.value_type.clone(),
+                            &origin,
+                        )?;
+                    }
+                }
+            }
             super::LoweredExpressionKind::Product(product) => {
                 for step in &product.steps {
                     match step {
@@ -1057,7 +1133,6 @@ impl<'a> LoweredWalker<'a> {
         let target = call.target.clone();
         let steps = call.steps.clone();
         let arguments = call.arguments.clone();
-        let result_type = call.result_type.clone();
         if let Some(callee) = call.callee {
             self.walk_expression(callee)?;
         }
@@ -1095,27 +1170,18 @@ impl<'a> LoweredWalker<'a> {
 
         // Call-specific cleanup runs when the invocation executes.
         match &target {
-            super::LoweredCallableTarget::Constructor {
-                recursive: Some(_), ..
-            } => {
-                if let CheckedType::Shared(payload) = &result_type
-                    && !crate::contains_type_parameter(payload)
-                    && self.program.concrete_needs_drop(payload)
-                {
-                    let canonical = CanonicalType::concrete(payload, &origin)
-                        .map_err(|diagnostic| vec![diagnostic])?;
-                    self.visitor.finalizer_site(
-                        ArtifactUseSite::SharedConstruction(id),
-                        GcFinalizerKey::Payload(canonical),
-                        GcFinalizerPlan::Payload {
-                            value_type: payload.as_ref().clone(),
-                            glue: None,
-                        },
-                        &origin,
-                    )?;
-                }
-            }
             super::LoweredCallableTarget::Intrinsic { intrinsic, .. } => match intrinsic {
+                IntrinsicFunction::PointerDropInPlace => {
+                    if let CheckedType::RawMutPtr { pointee } =
+                        call.function_type.parameter.as_ref()
+                    {
+                        self.visitor.drop_site(
+                            ArtifactUseSite::PointerDropInPlace(id),
+                            pointee,
+                            &origin,
+                        )?;
+                    }
+                }
                 IntrinsicFunction::StringFromCString => {
                     self.visitor.drop_site(
                         ArtifactUseSite::CStringConversion(id),
@@ -1137,9 +1203,7 @@ impl<'a> LoweredWalker<'a> {
             super::LoweredCallableTarget::DirectFunction { .. }
             | super::LoweredCallableTarget::IndirectClosure { .. }
             | super::LoweredCallableTarget::ExternalFunction { .. }
-            | super::LoweredCallableTarget::Constructor {
-                recursive: None, ..
-            }
+            | super::LoweredCallableTarget::Constructor { .. }
             | super::LoweredCallableTarget::TraitImplementation { .. }
             | super::LoweredCallableTarget::StructuralTraitMethod { .. } => {}
         }
@@ -1754,39 +1818,6 @@ fn drop_glue_body(
     }
     match value_type {
         CheckedType::CString => Ok(DropGlueBody::CStringFree),
-        CheckedType::Unique(payload) => {
-            let recursive = program.resolve_recursive_payload(payload);
-            let payload = recursive.as_ref().unwrap_or(payload);
-            let glue = if program.contains_recursive_payload(payload) {
-                // A callable boundary closes the recursive cleanup graph.
-                let key = ArtifactRequestKey::DescriptorDrop(
-                    CanonicalType::concrete(payload, origin).map_err(|error| vec![error])?,
-                );
-                requests.push(ClosureRequest::Artifact {
-                    key: key.clone(),
-                    plan: LoweredArtifactPlan::DescriptorDrop(super::DescriptorDropPlan {
-                        value_type: payload.clone(),
-                        glue: None,
-                    }),
-                    kind: LoweredArtifactDependencyKind::DescriptorDrop,
-                    origin: origin.clone(),
-                    use_site: None,
-                });
-                Some(PlannedArtifact {
-                    key,
-                    artifact: None,
-                    kind: LoweredArtifactDependencyKind::DescriptorDrop,
-                })
-            } else if program.concrete_needs_drop(payload) {
-                Some(request_drop_glue(program, payload, origin, requests)?)
-            } else {
-                None
-            };
-            Ok(DropGlueBody::Unique {
-                payload: payload.clone(),
-                glue,
-            })
-        }
         CheckedType::Product(product) => {
             // The emitter iterates and drops fields in reverse element order,
             // skipping every field that does not need drop.
@@ -3187,8 +3218,8 @@ mod tests {
             "a closure environment finalizer site"
         );
         assert!(
-            has(|site| matches!(site, ArtifactUseSite::SharedConstruction(_))),
-            "a managed `Shared` construction finalizer site"
+            has(|site| matches!(site, ArtifactUseSite::PointerDropInPlace(_))),
+            "a library finalizer drops its payload through the pointer primitive"
         );
         assert!(
             has(|site| matches!(site, ArtifactUseSite::CStringConversion(_))),

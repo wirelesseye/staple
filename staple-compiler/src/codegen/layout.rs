@@ -297,9 +297,6 @@ impl<'program, 'context> Backend<'program, 'context> {
                     )
                 })
                 .and_then(|representation| self.compile_type(representation)),
-            CheckedType::Shared(_) | CheckedType::Unique(_) => {
-                Ok(self.context.ptr_type(AddressSpace::default()).into())
-            }
             CheckedType::RawOpaquePtr
             | CheckedType::RawOpaqueMutPtr
             | CheckedType::RawPtr { .. }
@@ -1658,6 +1655,7 @@ mod tests {
 pub(crate) fn strip_place_wrappers(mut value_type: crate::CheckedType) -> crate::CheckedType {
     loop {
         match value_type {
+            ty if ty.handle_kind().is_some() => return ty,
             crate::CheckedType::Wrapper { representation, .. } => value_type = *representation,
             other => return other,
         }

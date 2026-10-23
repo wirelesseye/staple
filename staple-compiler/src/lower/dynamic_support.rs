@@ -200,10 +200,10 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::Trap
         | IntrinsicFunction::CheckedMul
         | IntrinsicFunction::PointerRead
+        | IntrinsicFunction::PointerDropInPlace
         | IntrinsicFunction::PointerAdd
         | IntrinsicFunction::PointerCopyNonoverlapping
         | IntrinsicFunction::SharedBufferLength
-        | IntrinsicFunction::SharedBufferGetShared
         | IntrinsicFunction::BufferWithCapacity
         | IntrinsicFunction::BufferLength
         | IntrinsicFunction::BufferCapacity
@@ -211,12 +211,7 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::BufferPop
         | IntrinsicFunction::BufferGet
         | IntrinsicFunction::BufferIntoShared
-        | IntrinsicFunction::BufferTransfer
-        | IntrinsicFunction::SharedReplace
-        | IntrinsicFunction::UniqueReplace
-        | IntrinsicFunction::UniqueIntoInner
-        | IntrinsicFunction::UniqueIntoRaw
-        | IntrinsicFunction::UniqueFromRaw => {
+        | IntrinsicFunction::BufferTransfer => {
             unreachable!("supported intrinsic passed to rejection classifier")
         }
     }
@@ -554,12 +549,6 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::FloatFromBits { .. }
             | IntrinsicFunction::FloatCompare { .. }
             | IntrinsicFunction::SharedBufferLength
-            | IntrinsicFunction::SharedBufferGetShared
-            | IntrinsicFunction::SharedReplace
-            | IntrinsicFunction::UniqueReplace
-            | IntrinsicFunction::UniqueIntoInner
-            | IntrinsicFunction::UniqueIntoRaw
-            | IntrinsicFunction::UniqueFromRaw
             | IntrinsicFunction::BufferLength
             | IntrinsicFunction::BufferCapacity
             | IntrinsicFunction::BufferWithCapacity
@@ -579,6 +568,7 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::Trap
             | IntrinsicFunction::CheckedMul
             | IntrinsicFunction::PointerRead
+            | IntrinsicFunction::PointerDropInPlace
             | IntrinsicFunction::PointerAdd
             | IntrinsicFunction::PointerCopyNonoverlapping
     )
@@ -591,9 +581,7 @@ fn contains_polymorphic_function(ty: &CheckedType) -> bool {
         CheckedType::Function(_) => contains_type_parameter(ty),
         CheckedType::RawPtr { pointee } => contains_polymorphic_function(pointee),
         CheckedType::RawMutPtr { pointee } => contains_polymorphic_function(pointee),
-        CheckedType::Shared(value)
-        | CheckedType::Unique(value)
-        => contains_polymorphic_function(value),
+
         CheckedType::Array { element, count } => {
             contains_polymorphic_function(element) || contains_polymorphic_function(count)
         }
@@ -622,9 +610,8 @@ fn contains_polymorphic_function(ty: &CheckedType) -> bool {
 /// storage, so it is reported as an allowed restriction instead.
 fn contains_function_behind_reference(ty: &CheckedType) -> bool {
     match ty {
-        CheckedType::Shared(value)
-        | CheckedType::Unique(value)
-        => {
+        ty if ty.handle_payload().is_some() => {
+            let value = ty.handle_payload().unwrap();
             contains_polymorphic_function(value) || contains_function_behind_reference(value)
         }
         CheckedType::Product(product) => product
@@ -964,11 +951,7 @@ impl SupportWalker<'_> {
                     LoweredCallableTarget::DirectFunction { .. }
                         | LoweredCallableTarget::TraitImplementation { .. }
                         | LoweredCallableTarget::Constructor {
-                            recursive: None
-                                | Some(
-                                    crate::RecursiveConstruction::ManagedReference
-                                        | crate::RecursiveConstruction::Unique
-                                ),
+                            recursive: None,
                             ..
                         }
                 );
@@ -1228,15 +1211,7 @@ impl SupportWalker<'_> {
                 }
             }
             LoweredCallableTarget::Constructor { recursive, .. } => {
-                if recursive.is_some()
-                    && !matches!(
-                        recursive,
-                        Some(
-                            crate::RecursiveConstruction::ManagedReference
-                                | crate::RecursiveConstruction::Unique
-                        )
-                    )
-                {
+                if recursive.is_some() {
                     self.reject(RejectionReason::RecursiveConstruction);
                 }
             }
@@ -1877,9 +1852,7 @@ fn collect_parameter_ids(ty: &CheckedType, ids: &mut HashSet<crate::TypeParamete
             }
         }
         CheckedType::Wrapper { representation, .. } => collect_parameter_ids(representation, ids),
-        CheckedType::Shared(inner)
-        | CheckedType::Unique(inner)
-        => collect_parameter_ids(inner, ids),
+
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             for argument in arguments {
                 collect_parameter_ids(argument, ids);

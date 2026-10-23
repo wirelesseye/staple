@@ -154,7 +154,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     pub(super) fn emit_compound_descriptor_drop(
         &self,
         ordinal: crate::specialization::ArtifactOrdinal,
-        plan: crate::specialization::CompoundDescriptorDropKey,
+        plan: &crate::lower::CompoundDescriptorDropPlan,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
         use crate::specialization::CompoundDescriptorShape;
@@ -181,16 +181,39 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .collect::<CodeGenerationResult<Vec<_>>>()?;
         match plan.shape {
             CompoundDescriptorShape::Unique => {
-                let payload = self
-                    .load_dynamic_storage(
-                        self.backend.context.ptr_type(AddressSpace::default()),
-                        value,
-                        "unique.drop.pointer",
+                let cleanup = plan
+                    .cleanup
+                    .as_ref()
+                    .and_then(|cleanup| cleanup.instance)
+                    .and_then(|instance| self.instances.get(&instance))
+                    .copied()
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "missing library Unique cleanup instance")
+                    })?;
+                let unit = self.backend.compile_type(&CheckedType::empty_product())?;
+                let result = self
+                    .backend
+                    .entry_builder()
+                    .build_alloca(unit, "cleanup.result")
+                    .map_err(compiler_diagnostic)?;
+                let null = self
+                    .backend
+                    .context
+                    .ptr_type(AddressSpace::default())
+                    .const_null();
+                self.backend
+                    .builder
+                    .build_direct_call(
+                        cleanup,
+                        &[
+                            null.into(),
+                            components[0].into(),
+                            result.into(),
+                            value.into(),
+                        ],
+                        "",
                     )
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                self.backend.drop_dynamic_value(components[0], payload)?;
-                self.backend.build_unique_free(payload, span.clone())?;
+                    .map_err(compiler_diagnostic)?;
             }
             CompoundDescriptorShape::Buffer => {
                 let buffer = self.load_buffer_pointer(value)?;
@@ -1593,11 +1616,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let descriptor =
                         self.dynamic_descriptor(&value_type, environment, span)?;
                     for mapping in mappings {
-                        let (field, _) = self.dynamic_product_field(
-                            descriptor,
-                            value,
-                            mapping.source as u32,
-                        )?;
+                        let (field, _) =
+                            self.dynamic_product_field(descriptor, value, mapping.source as u32)?;
                         slots[mapping.slot] = Some(field);
                     }
                 }
@@ -1617,11 +1637,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let descriptor =
                         self.dynamic_descriptor(&value_type, environment, span)?;
                     for mapping in mappings {
-                        let (field, _) = self.dynamic_product_field(
-                            descriptor,
-                            value,
-                            mapping.source as u32,
-                        )?;
+                        let (field, _) =
+                            self.dynamic_product_field(descriptor, value, mapping.source as u32)?;
                         slots[mapping.slot] = Some(field);
                     }
                 }
@@ -1735,10 +1752,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             bundle: None,
             returned: false,
         };
-        let (product, managed) = match &plan.construction {
-            crate::ConstructorConstruction::Value { product, .. } => (product, false),
-            crate::ConstructorConstruction::ManagedShared { product, .. } => (product, true),
-            crate::ConstructorConstruction::Unique { product, .. } => (product, false),
+        let product = match &plan.construction {
+            crate::ConstructorConstruction::Value { product, .. } => product,
             _ => {
                 return Err(Diagnostic::new(
                     span.clone(),
@@ -1747,30 +1762,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         };
         let descriptor = self.prepare_dynamic_descriptor(product, &mut environment, span)?;
-        let result = if matches!(
-            plan.construction,
-            crate::ConstructorConstruction::Unique { .. }
-        ) {
-            let layout = self.backend.load_descriptor_layout(descriptor)?;
-            let allocation = self
-                .backend
-                .build_unique_allocation(layout.store_size, span.clone())?;
-            self.backend
-                .builder
-                .build_store(result, allocation)
-                .map_err(compiler_diagnostic)?;
-            allocation
-        } else if managed {
-            let descriptor = self.copy_descriptor_to_gc(descriptor, span)?;
-            let allocation = self.allocate_dynamic_cell(descriptor, true, span)?;
-            self.backend
-                .builder
-                .build_store(result, allocation)
-                .map_err(compiler_diagnostic)?;
-            allocation
-        } else {
-            result
-        };
         if let CheckedType::Product(product) = product {
             for index in 0..product.elements.len() {
                 let (field, descriptor) =
@@ -3197,6 +3188,57 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
+    fn emit_dynamic_unique_take(
+        &self,
+        owner: EmissionOwner,
+        site: crate::ArtifactUseSite,
+        source: PointerValue<'context>,
+        destination: PointerValue<'context>,
+        descriptor: PointerValue<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let function = self
+            .instance_use_function(owner, site)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing Unique.into_inner instance"))?;
+        let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+        let null = pointer_type.const_null();
+        if function.count_params() == 4 {
+            self.backend
+                .builder
+                .build_direct_call(
+                    function,
+                    &[
+                        null.into(),
+                        descriptor.into(),
+                        destination.into(),
+                        source.into(),
+                    ],
+                    "",
+                )
+                .map_err(compiler_diagnostic)?;
+        } else {
+            let pointer = self
+                .load_dynamic_storage(pointer_type, source, "unique.owner")
+                .map_err(compiler_diagnostic)?;
+            let value = self
+                .backend
+                .builder
+                .build_direct_call(
+                    function,
+                    &[null.into(), pointer.into()],
+                    "unique.into_inner",
+                )
+                .map_err(compiler_diagnostic)?;
+            if let Some(value) = value.try_as_basic_value().basic() {
+                self.backend
+                    .builder
+                    .build_store(destination, value)
+                    .map_err(compiler_diagnostic)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Deep-copy one descriptor into a GC block so a closure environment never
     /// points at the building function's stack slots.
     fn copy_descriptor_to_gc(
@@ -3419,11 +3461,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let descriptor =
                         self.dynamic_descriptor(&value_type, environment, span)?;
                     for mapping in mappings {
-                        let (field, _) = self.dynamic_product_field(
-                            descriptor,
-                            value,
-                            mapping.source as u32,
-                        )?;
+                        let (field, _) =
+                            self.dynamic_product_field(descriptor, value, mapping.source as u32)?;
                         slots[mapping.slot] = Some(field);
                     }
                 }
@@ -3443,11 +3482,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let descriptor =
                         self.dynamic_descriptor(&value_type, environment, span)?;
                     for mapping in mappings {
-                        let (field, _) = self.dynamic_product_field(
-                            descriptor,
-                            value,
-                            mapping.source as u32,
-                        )?;
+                        let (field, _) =
+                            self.dynamic_product_field(descriptor, value, mapping.source as u32)?;
                         slots[mapping.slot] = Some(field);
                     }
                 }
@@ -3906,21 +3942,30 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let value_type = intrinsic_type(0)
                     .cloned()
                     .ok_or_else(|| Diagnostic::new(span.clone(), "drop intrinsic has no type"))?;
-                let needs_drop = !crate::contains_type_parameter(&value_type)
-                    && self.view.concrete_needs_drop(&value_type);
-                let Some(sum) = crate::typecheck::sum_through_implicit_wrapper(&call.result_type)
-                else {
-                    return Err(Diagnostic::new(span.clone(), "needs_drop result is not Bool"));
-                };
-                let sum_type = self.backend.compile_sum_type(sum)?;
-                let value = self.backend.build_bool_value(
+                let needs_drop = if crate::contains_type_parameter(&value_type) {
+                    let descriptor = self.dynamic_descriptor(&value_type, environment, span)?;
+                    let cleanup = self.backend.descriptor_drop_pointer(descriptor)?;
+                    self.backend
+                        .builder
+                        .build_is_not_null(cleanup, "needs.drop")
+                        .map_err(compiler_diagnostic)?
+                } else {
                     self.backend
                         .context
                         .bool_type()
-                        .const_int(needs_drop as u64, false),
-                    sum_type,
-                    span.clone(),
-                )?;
+                        .const_int(self.view.concrete_needs_drop(&value_type) as u64, false)
+                };
+                let Some(sum) = crate::typecheck::sum_through_implicit_wrapper(&call.result_type)
+                else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "needs_drop result is not Bool",
+                    ));
+                };
+                let sum_type = self.backend.compile_sum_type(sum)?;
+                let value = self
+                    .backend
+                    .build_bool_value(needs_drop, sum_type, span.clone())?;
                 let value = inkwell::values::BasicValueEnum::try_from(value)
                     .map_err(|_| Diagnostic::new(span.clone(), "invalid Bool value"))?;
                 self.backend
@@ -3979,11 +4024,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             crate::IntrinsicFunction::CheckedMul => {
                 let left = self
-                    .load_dynamic_storage(self.backend.size_type, slot_pointer(0)?, "checked.mul.left")
+                    .load_dynamic_storage(
+                        self.backend.size_type,
+                        slot_pointer(0)?,
+                        "checked.mul.left",
+                    )
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
                 let right = self
-                    .load_dynamic_storage(self.backend.size_type, slot_pointer(1)?, "checked.mul.right")
+                    .load_dynamic_storage(
+                        self.backend.size_type,
+                        slot_pointer(1)?,
+                        "checked.mul.right",
+                    )
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
                 let value = self
@@ -4000,10 +4053,29 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 return Ok(storage);
             }
             crate::IntrinsicFunction::GcFinalizeWith => {
-                // The dynamic ABI's finalize closure carries descriptors, so
-                // it cannot be installed as a plain C finalizer here. The
-                // concrete owner still releases its allocation eagerly; this
-                // path only affects cycles retained by the collector.
+                let pointer = self
+                    .load_dynamic_storage(
+                        self.backend.context.ptr_type(AddressSpace::default()),
+                        slot_pointer(0)?,
+                        "finalize.payload",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let closure_type = self.backend.closure_type();
+                let closure = self
+                    .load_dynamic_storage(closure_type, slot_pointer(1)?, "finalize.function")
+                    .map_err(compiler_diagnostic)?
+                    .into_struct_value();
+                let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+                let signature = self.backend.context.void_type().fn_type(
+                    &[
+                        pointer_type.into(),
+                        pointer_type.into(),
+                        pointer_type.into(),
+                    ],
+                    false,
+                );
+                self.install_gc_closure_finalizer(pointer, closure, signature, true, span)?;
                 return Ok(storage);
             }
             crate::IntrinsicFunction::PointerAdd => {
@@ -4016,7 +4088,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?
                     .into_pointer_value();
                 let count = self
-                    .load_dynamic_storage(self.backend.size_type, slot_pointer(1)?, "pointer.add.count")
+                    .load_dynamic_storage(
+                        self.backend.size_type,
+                        slot_pointer(1)?,
+                        "pointer.add.count",
+                    )
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
                 let value_type = intrinsic_type(0)
@@ -4064,7 +4140,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?
                     .into_pointer_value();
                 let count = self
-                    .load_dynamic_storage(self.backend.size_type, slot_pointer(2)?, "pointer.copy.count")
+                    .load_dynamic_storage(
+                        self.backend.size_type,
+                        slot_pointer(2)?,
+                        "pointer.copy.count",
+                    )
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
                 let value_type = intrinsic_type(0)
@@ -4075,10 +4155,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     self.backend.load_descriptor_layout(descriptor)?.stride
                 } else {
                     let llvm_type = self.backend.compile_type(&value_type)?;
-                    self.backend.size_type.const_int(
-                        self.backend.target_data.get_abi_size(&llvm_type),
-                        false,
-                    )
+                    self.backend
+                        .size_type
+                        .const_int(self.backend.target_data.get_abi_size(&llvm_type), false)
                 };
                 let bytes = self
                     .backend
@@ -4100,43 +4179,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 return Ok(storage);
             }
-            crate::IntrinsicFunction::SharedBufferGetShared => {
-                let buffer = self.load_buffer_pointer(slot_pointer(0)?)?;
-                let position = slot_pointer(1)?;
-                let length = self.load_buffer_metadata(buffer, 0)?;
-                let position = self
-                    .load_dynamic_storage(self.backend.size_type, position, "buffer.position")
-                    .map_err(compiler_diagnostic)?
-                    .into_int_value();
-                let out_of_bounds = self
-                    .backend
-                    .builder
-                    .build_int_compare(
-                        inkwell::IntPredicate::UGE,
-                        position,
-                        length,
-                        "buffer.out_of_bounds",
+            crate::IntrinsicFunction::PointerDropInPlace => {
+                let pointer = self
+                    .load_dynamic_storage(
+                        self.backend.context.ptr_type(AddressSpace::default()),
+                        slot_pointer(0)?,
+                        "raw.pointer",
                     )
-                    .map_err(compiler_diagnostic)?;
-                self.backend.build_trap_if(out_of_bounds, span.clone())?;
-                let crate::CheckedType::Shared(payload) = &call.result_type else {
-                    return Err(Diagnostic::new(span.clone(), "get_shared result is not a Shared"));
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let CheckedType::RawMutPtr { pointee } = call.function_type.parameter.as_ref()
+                else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "pointer drop requires a pointer",
+                    ));
                 };
-                let descriptor = self.dynamic_descriptor(payload, environment, span)?;
-                let layout = self.dynamic_buffer_layout(descriptor)?;
-                let data = self
-                    .backend
-                    .dynamic_byte_offset(buffer, layout.header_offset)?;
-                let offset = self
-                    .backend
-                    .builder
-                    .build_int_mul(position, layout.stride, "buffer.offset")
-                    .map_err(compiler_diagnostic)?;
-                let element = self.backend.dynamic_byte_offset(data, offset)?;
-                self.backend
-                    .builder
-                    .build_store(storage, element)
-                    .map_err(compiler_diagnostic)?;
+                let descriptor = self.dynamic_descriptor(pointee, environment, span)?;
+                self.backend.drop_dynamic_value(descriptor, pointer)?;
                 return Ok(storage);
             }
             crate::IntrinsicFunction::PointerLoad
@@ -4171,55 +4231,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     self.backend
                         .copy_dynamic_value(descriptor, slot_pointer(1)?, pointer)?;
                 }
-                return Ok(storage);
-            }
-            crate::IntrinsicFunction::UniqueIntoInner => {
-                let source = slot_pointer(0)?;
-                let pointer = self.load_dynamic_storage(
-                    self.backend.context.ptr_type(AddressSpace::default()), source, "unique.into_inner.pointer")
-                    .map_err(compiler_diagnostic)?.into_pointer_value();
-                let descriptor = self.dynamic_descriptor(&call.result_type, environment, span)?;
-                self.backend.copy_dynamic_value(descriptor, pointer, storage)?;
-                self.backend.build_unique_free(pointer, span.clone())?;
-                return Ok(storage);
-            }
-            crate::IntrinsicFunction::UniqueIntoRaw | crate::IntrinsicFunction::UniqueFromRaw => {
-                let source = slot_pointer(0)?;
-                let pointer = self
-                    .load_dynamic_storage(
-                        self.backend.context.ptr_type(AddressSpace::default()),
-                        source,
-                        "unique.raw",
-                    )
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                if intrinsic == crate::IntrinsicFunction::UniqueIntoRaw {
-                    self.backend.pin_unique_payload(pointer, span.clone())?;
-                } else {
-                    self.backend.unpin_unique_payload(pointer, span.clone())?;
-                }
-                self.backend
-                    .builder
-                    .build_store(storage, pointer)
-                    .map_err(compiler_diagnostic)?;
-                return Ok(storage);
-            }
-            crate::IntrinsicFunction::SharedReplace | crate::IntrinsicFunction::UniqueReplace => {
-                let reference = slot_pointer(0)?;
-                let replacement = slot_pointer(1)?;
-                let payload = self
-                    .load_dynamic_storage(
-                        self.backend.context.ptr_type(AddressSpace::default()),
-                        reference,
-                        "shared.replace.reference",
-                    )
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                let descriptor = self.dynamic_descriptor(&call.result_type, environment, span)?;
-                self.backend
-                    .copy_dynamic_value(descriptor, payload, storage)?;
-                self.backend
-                    .copy_dynamic_value(descriptor, replacement, payload)?;
                 return Ok(storage);
             }
             crate::IntrinsicFunction::BufferLength | crate::IntrinsicFunction::BufferCapacity => {
@@ -6479,7 +6490,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         for (id, pattern) in body.patterns() {
             if pattern.take_unique {
-                let CheckedType::Unique(payload) = &pattern.test.subject else {
+                let Some(payload) = pattern.test.subject.unique_payload() else {
                     continue;
                 };
                 let descriptor = self.prepare_dynamic_descriptor(
@@ -6753,12 +6764,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if !crate::contains_type_parameter(ty) || matches!(ty, CheckedType::Parameter { .. }) {
             return self.dynamic_descriptor(ty, environment, span);
         }
-        if is_static_layout_type(ty)
-            && !matches!(ty, CheckedType::Unique(_))
-        {
+        if is_static_layout_type(ty) && ty.unique_payload().is_none() {
             // A reference's pointee still gets its descriptor: structural
             // dictionaries reached through the reference use it.
-            if let CheckedType::Shared(pointee) = ty {
+            if let Some(pointee) = ty.shared_payload() {
                 self.prepare_dynamic_descriptor(pointee, environment, span)?;
             }
             let layout = self.backend.descriptor_layout(ty)?;
@@ -6777,7 +6786,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return Ok(descriptor);
         }
         let (shape, children): (CompoundDescriptorShape, Vec<&CheckedType>) = match ty {
-            CheckedType::Unique(payload) => (CompoundDescriptorShape::Unique, vec![payload]),
+            ty if ty.unique_payload().is_some() => (
+                CompoundDescriptorShape::Unique,
+                vec![ty.unique_payload().unwrap()],
+            ),
             CheckedType::Product(product) => (
                 CompoundDescriptorShape::Product,
                 product
@@ -6831,7 +6843,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .view
             .artifacts()
             .find_map(|(_, artifact)| match &artifact.plan {
-                Some(crate::LoweredArtifactPlan::CompoundDescriptorDrop(plan)) if *plan == key => {
+                Some(crate::LoweredArtifactPlan::CompoundDescriptorDrop(plan))
+                    if plan.shape == key.shape && plan.count == key.count =>
+                {
                     Some(artifact.ordinal)
                 }
                 _ => None,
@@ -7576,7 +7590,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )
                 }
 
-                CheckedType::Shared(_) | CheckedType::Unique(_) => {
+                ty if ty.handle_payload().is_some()
+                    && matches!(
+                        pattern.test.identity,
+                        crate::LoweredPatternIdentity::Shared
+                            | crate::LoweredPatternIdentity::Unique
+                    ) =>
+                {
                     let payload = self
                         .load_dynamic_storage(
                             self.backend.context.ptr_type(AddressSpace::default()),
@@ -8221,10 +8241,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                                         "missing Unique pattern storage",
                                     )
                                 })?;
-                        self.backend
-                            .copy_dynamic_value(payload_descriptor, payload, storage)?;
-                        self.backend
-                            .build_unique_free(payload, pattern.origin.span.clone())?;
+                        self.emit_dynamic_unique_take(
+                            owner,
+                            crate::ArtifactUseSite::UniquePattern(pattern_id),
+                            pointer,
+                            storage,
+                            payload_descriptor,
+                            &pattern.origin.span,
+                        )?;
                         storage
                     } else {
                         payload
@@ -8241,14 +8265,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         environment,
                     )
                 } else {
-                    self.bind_dynamic_pattern(
-                        owner,
-                        *argument,
-                        pointer,
-                        descriptor,
-                        owned,
-                        environment,
-                    )
+                    // Destructuring a wrapper transfers its representation,
+                    // bypassing the wrapper's Drop implementation. In particular,
+                    // a raw pointer extracted from an owner must not inherit the
+                    // owner's cleanup descriptor.
+                    let representation = self.view.pattern(owner, *argument)
+                        .ok_or_else(|| Diagnostic::new(pattern.origin.span.clone(), "missing nominal representation pattern"))?
+                        .test.subject.clone();
+                    let descriptor = self.dynamic_descriptor(&representation, environment, &pattern.origin.span)?;
+                    self.bind_dynamic_pattern(owner, *argument, pointer, descriptor, owned, environment)
                 }
             }
             LoweredPatternKind::At {
@@ -9057,9 +9082,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .unwrap_or_else(|| base_type.clone());
                 let descriptor =
                     self.dynamic_descriptor(&container_type, environment, &expression.origin.span)?;
-                let base = self.emit_dynamic_expression(owner, access.base, environment)?;
-                let base =
-                    self.dereference_dynamic_pointer(base, dereference, &expression.origin.span)?;
+                let handle_storage =
+                    self.emit_dynamic_expression(owner, access.base, environment)?;
+                let base = self.dereference_dynamic_pointer(
+                    handle_storage,
+                    dereference,
+                    &expression.origin.span,
+                )?;
                 if access.take_unique {
                     let storage = *environment.temporaries.get(&id).ok_or_else(|| {
                         Diagnostic::new(
@@ -9067,9 +9096,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             "missing Unique access storage",
                         )
                     })?;
-                    self.backend.copy_dynamic_value(descriptor, base, storage)?;
-                    self.backend
-                        .build_unique_free(base, expression.origin.span.clone())?;
+                    self.emit_dynamic_unique_take(
+                        owner,
+                        crate::ArtifactUseSite::UniqueAccess(id),
+                        handle_storage,
+                        storage,
+                        descriptor,
+                        &expression.origin.span,
+                    )?;
                     return Ok(storage);
                 }
                 match &access.kind {
@@ -9253,76 +9287,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     if recursive.is_none() {
                         return self.emit_dynamic_constructor_call(owner, id, call, environment);
                     }
-                    if *recursive == Some(crate::RecursiveConstruction::Unique) {
-                        let argument = call
-                            .arguments
-                            .first()
-                            .and_then(|argument| argument.expression)
-                            .ok_or_else(|| {
-                                Diagnostic::new(call.origin.span.clone(), "missing Unique payload")
-                            })?;
-                        let value = self.emit_dynamic_expression(owner, argument, environment)?;
-                        let CheckedType::Unique(payload) = &call.result_type else {
-                            return Err(Diagnostic::new(
-                                call.origin.span.clone(),
-                                "invalid Unique constructor result",
-                            ));
-                        };
-                        let descriptor =
-                            self.dynamic_descriptor(payload, environment, &call.origin.span)?;
-                        let layout = self.backend.load_descriptor_layout(descriptor)?;
-                        let allocation = self
-                            .backend
-                            .build_unique_allocation(layout.store_size, call.origin.span.clone())?;
-                        self.backend
-                            .copy_dynamic_value(descriptor, value, allocation)?;
-                        let result = *environment.temporaries.get(&id).ok_or_else(|| {
-                            Diagnostic::new(
-                                call.origin.span.clone(),
-                                "missing Unique result storage",
-                            )
-                        })?;
-                        self.backend
-                            .builder
-                            .build_store(result, allocation)
-                            .map_err(compiler_diagnostic)?;
-                        return Ok(result);
-                    }
-                    if matches!(
-                        recursive,
-                        Some(crate::RecursiveConstruction::ManagedReference)
-                    ) {
-                        let argument = call
-                            .arguments
-                            .first()
-                            .and_then(|argument| argument.expression)
-                            .ok_or_else(|| {
-                                Diagnostic::new(call.origin.span.clone(), "missing Shared payload")
-                            })?;
-                        let value = self.emit_dynamic_expression(owner, argument, environment)?;
-                        let CheckedType::Shared(payload) = &call.result_type else {
-                            return Err(Diagnostic::new(
-                                call.origin.span.clone(),
-                                "Shared constructor has non-Shared result",
-                            ));
-                        };
-                        let descriptor =
-                            self.dynamic_descriptor(payload, environment, &call.origin.span)?;
-                        let descriptor =
-                            self.copy_descriptor_to_gc(descriptor, &call.origin.span)?;
-                        let allocation =
-                            self.allocate_dynamic_cell(descriptor, true, &call.origin.span)?;
-                        self.backend
-                            .copy_dynamic_value(descriptor, value, allocation)?;
-                        let result = *environment.temporaries.get(&id).ok_or_else(|| {
-                            Diagnostic::new(call.origin.span.clone(), "missing Shared result storage")
-                        })?;
-                        self.backend
-                            .builder
-                            .build_store(result, allocation)
-                            .map_err(compiler_diagnostic)?;
-                        return Ok(result);
-                    }
+
                     return Err(Diagnostic::new(
                         call.origin.span.clone(),
                         "unsupported recursive constructor",
@@ -9848,16 +9813,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 /// their descriptor comes from the concrete layout rules rather than from
 /// component descriptors.
 fn is_static_layout_type(value_type: &CheckedType) -> bool {
-    if let CheckedType::Wrapper { name, .. } = value_type
-        && (name.ends_with("Buffer") || name.ends_with("Shared") || name.ends_with("Unique"))
-    {
-        return true;
+    if let CheckedType::Wrapper { representation, .. } = value_type {
+        return is_static_layout_type(representation);
     }
     matches!(
         value_type,
-        CheckedType::Shared(_)
-            | CheckedType::Unique(_)
-            | CheckedType::RawMutPtr { .. }
+        CheckedType::RawMutPtr { .. }
             | CheckedType::RawPtr { .. }
             | CheckedType::RawOpaqueMutPtr
             | CheckedType::RawOpaquePtr

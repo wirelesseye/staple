@@ -8,8 +8,8 @@
 
 use super::internal_invariant;
 use std::cell::{Cell, RefCell};
-use std::sync::Arc;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use staple_syntax::Diagnostic;
 
@@ -390,10 +390,9 @@ pub(super) fn collect_referenced_parameters(
         CheckedType::Parameter { id, .. } => {
             out.insert(*id);
         }
-        CheckedType::Shared(payload)
-        | CheckedType::Unique(payload)
-        | CheckedType::RawMutPtr { pointee: payload }
-        | CheckedType::RawPtr { pointee: payload } => collect_referenced_parameters(payload, out),
+        CheckedType::RawMutPtr { pointee: payload } | CheckedType::RawPtr { pointee: payload } => {
+            collect_referenced_parameters(payload, out)
+        }
         CheckedType::Array { element, count } => {
             collect_referenced_parameters(element, out);
             collect_referenced_parameters(count, out);
@@ -975,10 +974,9 @@ pub(super) fn unresolved_type_problem_in_scope(
 fn contains_placeholder(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Inferred | CheckedType::Error => true,
-        CheckedType::Shared(payload)
-        | CheckedType::Unique(payload)
-        | CheckedType::RawMutPtr { pointee: payload }
-        | CheckedType::RawPtr { pointee: payload } => contains_placeholder(payload),
+        CheckedType::RawMutPtr { pointee: payload } | CheckedType::RawPtr { pointee: payload } => {
+            contains_placeholder(payload)
+        }
         CheckedType::Array { element, count } => {
             contains_placeholder(element) || contains_placeholder(count)
         }
@@ -2188,9 +2186,6 @@ impl LoweredProgram {
             CheckedType::Wrapper { representation, .. } => {
                 self.contains_recursive_payload(representation)
             }
-            CheckedType::Unique(payload) | CheckedType::Shared(payload) => {
-                self.contains_recursive_payload(payload)
-            }
             CheckedType::Product(product) => product
                 .elements
                 .iter()
@@ -2319,7 +2314,7 @@ fn concrete_type_needs_drop(program: &LoweredProgram, value_type: &CheckedType) 
         return true;
     }
     match value_type {
-        CheckedType::CString | CheckedType::Unique(_) => true,
+        CheckedType::CString => true,
         CheckedType::Product(product) => product
             .elements
             .iter()
@@ -3118,9 +3113,7 @@ impl<'a> ParameterCollector<'a> {
             | CheckedType::RawOpaquePtr
             | CheckedType::CChar => {}
             CheckedType::Parameter { id, name, .. } => self.relevant.notice_type(*id, name),
-            CheckedType::Shared(payload)
-            | CheckedType::Unique(payload)
-            | CheckedType::RawMutPtr { pointee: payload }
+            CheckedType::RawMutPtr { pointee: payload }
             | CheckedType::RawPtr { pointee: payload } => self.collect_type(payload),
             CheckedType::Array { element, count } => {
                 self.collect_type(element);
@@ -4571,7 +4564,7 @@ mod tests {
     fn self_and_longer_cycles_are_detected_before_substitution() {
         let error = build_environment(vec![(
             10,
-            SubstitutionValue::Type(CheckedType::Shared(Box::new(parameter_type(10, "T")))),
+            SubstitutionValue::Type(CheckedType::test_shared(Box::new(parameter_type(10, "T")))),
             SubstitutionSource::Site,
         )])
         .expect_err("a self-reference diagnoses");
@@ -4792,7 +4785,7 @@ mod tests {
             vec![
                 (
                     0,
-                    SubstitutionValue::Type(CheckedType::Shared(Box::new(CheckedType::I32))),
+                    SubstitutionValue::Type(CheckedType::test_shared(Box::new(CheckedType::I32))),
                     SubstitutionSource::EnclosingInstance,
                 ),
                 (
@@ -4809,7 +4802,7 @@ mod tests {
                 ),
                 (
                     0,
-                    SubstitutionValue::Type(CheckedType::Shared(Box::new(CheckedType::I32))),
+                    SubstitutionValue::Type(CheckedType::test_shared(Box::new(CheckedType::I32))),
                     SubstitutionSource::EnclosingInstance,
                 ),
             ],

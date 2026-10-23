@@ -117,15 +117,16 @@ pub(crate) use artifact_closure::{ArtifactUseSite, LoweredArtifactUse, LoweredIn
 #[allow(unused_imports)]
 // Family-specific plan types are also used within the lowering subtree.
 pub(crate) use artifact_plan::{
-    ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, CoroutineFrameBinding,
-    CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DescriptorBoundEntryPlan,
-    DescriptorDropPlan, DropGlueBody, DropGluePlan, DroppedAlternative, DroppedCapture,
-    DroppedElement, DynamicCapture, DynamicStructuralPlan, ExternAdapterPlan, ExternDeclaration,
-    GcFinalizerPlan, IndexedElement, InstantiationAdapterPlan, LoweredArtifactPlan, PlanType,
-    PlannedArtifact, PlannedCallee, PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance,
-    ReabstractionThunkPlan, ReactiveRunnerBody, ReactiveRunnerPlan, RunnerResourceSlot,
-    RuntimeRelease, StructuralBody, StructuralMethodPlan, SumAlternative, TraitDelegate,
-    TraitDictionaryPlan, TraitMemberEntryPlan, TypeDescriptorPlan, ValueConversionPlan,
+    CompoundDescriptorDropPlan, ConstructorAdapterPlan, ConstructorConstruction,
+    CoroutineCodesPlan, CoroutineFrameBinding, CoroutineFramePlan, CoroutineResourceSlot,
+    DebugDelegate, DebugStep, DescriptorBoundEntryPlan, DescriptorDropPlan, DropGlueBody,
+    DropGluePlan, DroppedAlternative, DroppedCapture, DroppedElement, DynamicCapture,
+    DynamicStructuralPlan, ExternAdapterPlan, ExternDeclaration, GcFinalizerPlan, IndexedElement,
+    InstantiationAdapterPlan, LoweredArtifactPlan, PlanType, PlannedArtifact, PlannedCallee,
+    PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance, ReabstractionThunkPlan,
+    ReactiveRunnerBody, ReactiveRunnerPlan, RunnerResourceSlot, RuntimeRelease, StructuralBody,
+    StructuralMethodPlan, SumAlternative, TraitDelegate, TraitDictionaryPlan, TraitMemberEntryPlan,
+    TypeDescriptorPlan, ValueConversionPlan,
 };
 
 // Runtime requirements. Fixed-named runtime surfaces are not an
@@ -779,8 +780,14 @@ impl LoweredCoercionPlan {
         target: &CheckedType,
         substitutions: &std::collections::BTreeMap<TypeParameterId, CheckedType>,
     ) -> Result<Self, String> {
-        Self::follow_template(template, source, target, FromCoercion::Allowed, substitutions)
-            .map_or_else(|| Self::plan_seeded(source, target, substitutions), Ok)
+        Self::follow_template(
+            template,
+            source,
+            target,
+            FromCoercion::Allowed,
+            substitutions,
+        )
+        .map_or_else(|| Self::plan_seeded(source, target, substitutions), Ok)
     }
 
     fn follow_template(
@@ -875,12 +882,7 @@ impl LoweredCoercionPlan {
             return Ok(LoweredCoercionPlan::Identity);
         }
         let same_nominal = matches!((source, target),
-            (CheckedType::Wrapper { id: source_id, .. }, CheckedType::Wrapper { id: target_id, .. }) if source_id == target_id)
-            || matches!(
-                (source, target),
-                (CheckedType::Unique(_), CheckedType::Unique(_))
-                    | (CheckedType::Shared(_), CheckedType::Shared(_))
-            );
+            (CheckedType::Wrapper { id: source_id, .. }, CheckedType::Wrapper { id: target_id, .. }) if source_id == target_id);
         if source == target
             || (same_nominal && crate::merge_types(source.clone(), target.clone()).is_some())
             || matches!(
@@ -2392,6 +2394,7 @@ enum PatternPlanShape {
     Binding { singleton: Option<TypeId> },
     Product { elements: usize },
     Nominal { target: Option<TypeId> },
+    Payload,
     Literal { literal: String },
 }
 
@@ -2481,6 +2484,17 @@ fn pattern_test_plan(
                 );
             }
         }
+        PatternPlanShape::Payload => {
+            let payload = subject
+                .handle_payload()
+                .ok_or_else(|| "payload pattern needs a handle".to_owned())?;
+            plan.identity = if subject.unique_payload().is_some() {
+                LoweredPatternIdentity::Unique
+            } else {
+                LoweredPatternIdentity::Shared
+            };
+            children.push(payload.clone());
+        }
         PatternPlanShape::Nominal { target } => match subject {
             CheckedType::String
                 if target
@@ -2492,20 +2506,6 @@ fn pattern_test_plan(
                     "standard library String representation was not checked".to_owned()
                 })?;
                 children.push(representation.clone());
-            }
-            CheckedType::Shared(payload)
-                if target
-                    .and_then(|target| builtin_of(target))
-                    .is_some_and(|builtin| builtin == BuiltinType::Shared) =>
-            {
-                plan.identity = LoweredPatternIdentity::Shared;
-                children.push(payload.as_ref().clone());
-            }
-            CheckedType::Unique(payload)
-                if target.and_then(|target| builtin_of(target)) == Some(BuiltinType::Unique) =>
-            {
-                plan.identity = LoweredPatternIdentity::Unique;
-                children.push(payload.as_ref().clone());
             }
             CheckedType::Sum(sum) => {
                 let expected = target.ok_or_else(|| "unresolved match pattern".to_owned())?;
@@ -2576,7 +2576,16 @@ fn projected_wrapper(subject: &CheckedType, id: TypeId) -> Option<&CheckedType> 
 
 /// The plan-relevant shape of a lowered pattern, used when materialization
 /// recomputes a concrete plan from the instance-local kind.
-fn pattern_plan_shape_from_kind(kind: &LoweredPatternKind) -> PatternPlanShape {
+fn pattern_plan_shape_from_kind(
+    kind: &LoweredPatternKind,
+    identity: LoweredPatternIdentity,
+) -> PatternPlanShape {
+    if matches!(
+        identity,
+        LoweredPatternIdentity::Shared | LoweredPatternIdentity::Unique
+    ) {
+        return PatternPlanShape::Payload;
+    }
     match kind {
         LoweredPatternKind::Wildcard => PatternPlanShape::Structural,
         LoweredPatternKind::Binding { singleton, .. } => PatternPlanShape::Binding {
@@ -3137,6 +3146,8 @@ pub(crate) struct LoweredTraitImplementationMetadata {
 /// present ID must resolve to the matching catalog family.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LoweredSemanticIds {
+    pub unique_into_inner: Option<FunctionId>,
+    pub unique_cleanup: Option<FunctionId>,
     pub natural_trait: Option<TraitId>,
     pub sized_trait: Option<TraitId>,
     pub copy_trait: Option<TraitId>,
@@ -3350,7 +3361,31 @@ impl LoweredProgram {
     /// keep whichever IDs the checker selected.
     fn snapshot_semantic_ids(&mut self, module: &TypedModule) -> Vec<Diagnostic> {
         let ids = module.semantic_ids();
+        let unique_into_inner = module
+            .resolved()
+            .type_for_builtin(BuiltinType::Unique)
+            .and_then(|id| {
+                module
+                    .resolved()
+                    .companion_members(id, None)
+                    .into_iter()
+                    .find(|(name, _)| *name == "into_inner")
+                    .map(|(_, symbol)| symbol)
+            })
+            .and_then(|symbol| module.function_for_symbol(symbol));
         self.semantic_ids = LoweredSemanticIds {
+            unique_into_inner,
+            unique_cleanup: module
+                .checked_trait_implementations()
+                .iter()
+                .find(|implementation| {
+                    Some(implementation.trait_id) == ids.drop_trait
+                        && implementation
+                            .arguments
+                            .first()
+                            .is_some_and(|ty| ty.unique_payload().is_some())
+                })
+                .and_then(|implementation| implementation.methods.values().next().copied()),
             natural_trait: ids.natural_trait,
             sized_trait: ids.sized_trait,
             copy_trait: ids.copy_trait,
@@ -5392,13 +5427,12 @@ impl LoweredProgram {
     ) -> Result<PatternId, Diagnostic> {
         let syntax = pattern.syntax();
         if let Some(handle) = module.pattern_dereferences(syntax.id).get(depth) {
-            let (builtin, payload) = match handle {
-                CheckedType::Shared(payload) => (BuiltinType::Shared, payload),
-                CheckedType::Unique(payload) => (BuiltinType::Unique, payload),
-                _ => unreachable!("checked dereference must be a handle"),
-            };
+            let builtin = handle
+                .handle_kind()
+                .expect("checked dereference must be a handle");
+            let payload = handle.handle_payload().unwrap();
             let target = module.resolved().type_for_builtin(builtin);
-            let shape = PatternPlanShape::Nominal { target };
+            let shape = PatternPlanShape::Payload;
             let (test, _) = pattern_test_plan(
                 subject,
                 subject,
@@ -7932,8 +7966,12 @@ impl LoweredProgram {
                         format!("function {} has no checked type", function.0),
                     )
                 })?;
-                substitutions =
-                    polymorphic_call_substitutions(module, callee_syntax, &template, &function_type);
+                substitutions = polymorphic_call_substitutions(
+                    module,
+                    callee_syntax,
+                    &template,
+                    &function_type,
+                );
                 if resolved.requires_initialization_check(callee_syntax) {
                     initialization_checks.push(symbol);
                 }
@@ -7996,8 +8034,12 @@ impl LoweredProgram {
                 }
                 let function_type = checked_call_function_type(module, call, &origin)?;
                 if let Some(template) = symbol_function_type(module, symbol) {
-                    substitutions =
-                        polymorphic_call_substitutions(module, callee_syntax, &template, &function_type);
+                    substitutions = polymorphic_call_substitutions(
+                        module,
+                        callee_syntax,
+                        &template,
+                        &function_type,
+                    );
                 }
                 (
                     LoweredCallableTarget::Intrinsic { symbol, intrinsic },
@@ -12853,7 +12895,7 @@ impl LoweredProgram {
         if unresolved(&pattern.test.subject) || unresolved(&pattern.value_type) {
             return;
         }
-        let shape = pattern_plan_shape_from_kind(&pattern.kind);
+        let shape = pattern_plan_shape_from_kind(&pattern.kind, pattern.test.identity);
         match pattern_test_plan(
             &pattern.test.subject,
             &pattern.value_type,
@@ -14108,10 +14150,10 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::Trap
         | Intrinsic::CheckedMul
         | Intrinsic::PointerRead
+        | Intrinsic::PointerDropInPlace
         | Intrinsic::PointerAdd
         | Intrinsic::PointerCopyNonoverlapping
         | Intrinsic::SharedBufferLength
-        | Intrinsic::SharedBufferGetShared
         | Intrinsic::BufferWithCapacity
         | Intrinsic::BufferLength
         | Intrinsic::BufferCapacity
@@ -14121,12 +14163,7 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::BufferIntoShared
         | Intrinsic::BufferFromArray
         | Intrinsic::BufferTransfer
-        | Intrinsic::BufferClone
-        | Intrinsic::SharedReplace
-        | Intrinsic::UniqueReplace
-        | Intrinsic::UniqueIntoInner
-        | Intrinsic::UniqueIntoRaw
-        | Intrinsic::UniqueFromRaw => None,
+        | Intrinsic::BufferClone => None,
     }
 }
 
@@ -14497,13 +14534,11 @@ fn checked_type_holds_gc_pointer(value_type: &CheckedType) -> bool {
         | CheckedType::NumberLiteral(_)
         | CheckedType::CString
         | CheckedType::CChar
-        | CheckedType::RawOpaquePtr
-        | CheckedType::RawOpaqueMutPtr
         | CheckedType::Parameter { .. } => false,
-        CheckedType::String
+        CheckedType::RawOpaquePtr
+        | CheckedType::RawOpaqueMutPtr
+        | CheckedType::String
         | CheckedType::StringLiteralSet(_)
-        | CheckedType::Shared(_)
-        | CheckedType::Unique(_)
         | CheckedType::Function(_)
         | CheckedType::Forall(_)
         | CheckedType::Opaque { .. } => true,
@@ -14524,9 +14559,7 @@ fn checked_type_holds_gc_pointer(value_type: &CheckedType) -> bool {
         CheckedType::TypeConstructor { arguments, .. } => {
             arguments.iter().any(checked_type_holds_gc_pointer)
         }
-        CheckedType::RawPtr { pointee } | CheckedType::RawMutPtr { pointee } => {
-            checked_type_holds_gc_pointer(pointee)
-        }
+        CheckedType::RawPtr { .. } | CheckedType::RawMutPtr { .. } => true,
     }
 }
 
@@ -14841,6 +14874,40 @@ fn mutation_slot_mask(count: usize, mutations: &[CheckedMutation]) -> Vec<bool> 
 /// Compile-time substitutions from a function template to the concrete type
 /// recorded at a use site. Effect variables are inferred by the checker as
 /// error-shaped function types and are split back into effect substitutions.
+/// Explicit receiver substitutions can contain a declaration's own generic
+/// parameter (`Box<A>` for `Box.double_size`, `Tag | A` for a generic alias).
+/// The call's actual parameter still names the concrete application. Infer the
+/// nested parameters from that pair and rewrite the recorded substitution.
+fn refine_nested_substitutions(
+    template: &CheckedFunctionType,
+    actual: &CheckedFunctionType,
+    inferred: &mut HashMap<TypeParameterId, CheckedType>,
+) {
+    if inferred.is_empty() {
+        return;
+    }
+    let map = inferred.clone();
+    let expanded = crate::substitute_type(
+        CheckedType::Function(template.clone()),
+        &map,
+    );
+    let CheckedType::Function(expanded) = expanded else {
+        return;
+    };
+    let mut nested = HashMap::new();
+    let _ = infer_type_parameters_with_schemes(
+        &CheckedType::Function(expanded),
+        &CheckedType::Function(actual.clone()),
+        &mut nested,
+    );
+    if nested.is_empty() {
+        return;
+    }
+    for value in inferred.values_mut() {
+        *value = crate::substitute_type(value.clone(), &nested);
+    }
+}
+
 fn polymorphic_call_substitutions(
     module: &TypedModule,
     syntax: SyntaxId,
@@ -14851,6 +14918,7 @@ fn polymorphic_call_substitutions(
         .explicit_value_substitutions(syntax)
         .cloned()
         .unwrap_or_default();
+    refine_nested_substitutions(template, actual, &mut inferred);
     let _ = infer_type_parameters_with_schemes(
         &CheckedType::Function(template.clone()),
         &CheckedType::Function(actual.clone()),
@@ -20755,7 +20823,7 @@ mod tests {
         assert!(matches!(
             shared_call.target,
             LoweredCallableTarget::Constructor {
-                recursive: Some(RecursiveConstruction::ManagedReference),
+                recursive: None,
                 ..
             }
         ));

@@ -180,13 +180,13 @@ pub(super) fn collect_compound_shapes(
                 .collect(),
         ),
         CheckedType::Sum(sum) => (Shape::Sum, sum.alternatives.iter().collect()),
-        CheckedType::Unique(payload) => (Shape::Unique, vec![payload]),
-        CheckedType::Wrapper { representation, .. } => {
-            collect_compound_shapes(representation, shapes);
+        ty if ty.unique_payload().is_some() => (Shape::Unique, vec![ty.unique_payload().unwrap()]),
+        ty if ty.shared_payload().is_some() => {
+            collect_compound_shapes(ty.shared_payload().unwrap(), shapes);
             return;
         }
-        CheckedType::Shared(pointee) => {
-            collect_compound_shapes(pointee, shapes);
+        CheckedType::Wrapper { representation, .. } => {
+            collect_compound_shapes(representation, shapes);
             return;
         }
         _ => return,
@@ -364,7 +364,7 @@ pub(super) fn scan_instance(
     for (index, key) in compound_body_shapes(body).into_iter().enumerate() {
         requests.push(ClosureRequest::Artifact {
             key: ArtifactRequestKey::CompoundDescriptorDrop(key),
-            plan: Plan::CompoundDescriptorDrop(key),
+            plan: Plan::CompoundDescriptorDrop(key.into()),
             kind: Kind::CompoundDescriptorDrop,
             origin: body.origin.clone(),
             use_site: Some(super::artifact_closure::ArtifactUseSite::InstanceCompoundDrop(index)),
@@ -645,49 +645,6 @@ pub(super) fn scan_instance(
     }
     // Freezing a dynamic buffer copies it into a GC allocation that
     // installs the shared dynamic buffer finalizer.
-    if let Some((call_id, _)) = body.calls.iter().find(|(_, call)| {
-        matches!(
-            &call.target,
-            super::LoweredCallableTarget::Intrinsic {
-                intrinsic: crate::IntrinsicFunction::BufferIntoShared,
-                ..
-            }
-        )
-    }) {
-        requests.push(ClosureRequest::Artifact {
-            key: ArtifactRequestKey::GcFinalizer(
-                crate::specialization::GcFinalizerKey::DynamicBuffer,
-            ),
-            plan: Plan::GcFinalizer(crate::GcFinalizerPlan::DynamicBuffer),
-            kind: Kind::GcFinalizer,
-            origin: body.origin.clone(),
-            use_site: Some(super::artifact_closure::ArtifactUseSite::BufferAllocation(
-                call_id,
-            )),
-        });
-    }
-    // Managed references use the same descriptor-bearing payload as cells.
-    if let Some((call_id, _)) = body.calls.iter().find(|(_, call)| {
-        matches!(
-            &call.target,
-            super::LoweredCallableTarget::Constructor {
-                recursive: Some(crate::RecursiveConstruction::ManagedReference),
-                ..
-            }
-        )
-    }) {
-        requests.push(ClosureRequest::Artifact {
-            key: ArtifactRequestKey::GcFinalizer(
-                crate::specialization::GcFinalizerKey::DynamicCell,
-            ),
-            plan: Plan::GcFinalizer(crate::GcFinalizerPlan::DynamicCell),
-            kind: Kind::GcFinalizer,
-            origin: body.origin.clone(),
-            use_site: Some(super::artifact_closure::ArtifactUseSite::SharedConstruction(
-                call_id,
-            )),
-        });
-    }
     // A captured mutable local allocates a dynamic shared cell and installs
     // the shared dynamic cell finalizer.
     for (_, item) in body.items() {
@@ -921,7 +878,49 @@ pub(super) fn expand(
             plan.expanded = true;
             Plan::TypeDescriptor(plan)
         }
-        Plan::CompoundDescriptorDrop(plan) => Plan::CompoundDescriptorDrop(plan),
+        Plan::CompoundDescriptorDrop(mut plan) => {
+            if plan.shape == crate::specialization::CompoundDescriptorShape::Unique {
+                let function = program.semantic_ids.unique_cleanup.ok_or_else(|| {
+                    vec![staple_syntax::Diagnostic::new(
+                        origin.span.clone(),
+                        "missing library Unique cleanup",
+                    )]
+                })?;
+                let template = program
+                    .functions
+                    .get(function)
+                    .expect("library cleanup template");
+                let request = super::instance_resolution::InstanceResolutionRequest {
+                    function,
+                    origin: origin.clone(),
+                    function_type: template.signature.clone(),
+                    substitutions: super::CallSubstitutions::default(),
+                    evidence: None,
+                    target: super::instance_resolution::InstanceResolutionTarget::Root,
+                };
+                let resolved = program
+                    .resolve_instance_request_with_runtime(
+                        &request,
+                        &program
+                            .relevant_parameters(function)
+                            .type_parameters()
+                            .collect(),
+                    )
+                    .map_err(|error| vec![error])?;
+                plan.cleanup = Some(super::PlannedInstance {
+                    key: resolved.key.clone(),
+                    instance: None,
+                    kind: super::LoweredInstanceDependencyKind::DropMethod,
+                });
+                requests.push(ClosureRequest::Instance {
+                    resolved,
+                    kind: super::LoweredInstanceDependencyKind::DropMethod,
+                    origin: origin.clone(),
+                    use_site: None,
+                });
+            }
+            Plan::CompoundDescriptorDrop(plan)
+        }
         Plan::DescriptorBoundEntry(plan) => Plan::DescriptorBoundEntry(plan),
         Plan::TraitMemberEntry(plan) => {
             if let Some(callee) = &plan.callee {
@@ -1031,7 +1030,7 @@ pub(super) fn expand(
                 for key in shapes {
                     requests.push(ClosureRequest::Artifact {
                         key: ArtifactRequestKey::CompoundDescriptorDrop(key),
-                        plan: Plan::CompoundDescriptorDrop(key),
+                        plan: Plan::CompoundDescriptorDrop(key.into()),
                         kind: Kind::CompoundDescriptorDrop,
                         origin: origin.clone(),
                         use_site: None,
