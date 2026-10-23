@@ -19325,3 +19325,380 @@ fn typegroup_angle_parameters_reject_invalid_parameter_patterns() {
         );
     }
 }
+
+#[test]
+fn compile_time_loop_break_continue_and_return() {
+    type_check(
+        r#"
+        def answer = () => {
+            let mut n = 0
+            loop {
+                n = n + 1
+                if (n < 3) { continue }
+                break n
+            }
+        }
+        def early = () => { loop { return 7 } }
+        macro emit = () => {
+            let n = answer () + early ()
+            if (n == 10) { parse_quote { 10 } } else { parse_quote { missing } }
+        }
+        let value: I32 = emit ()
+    "#,
+    );
+}
+
+#[test]
+fn compile_time_infinite_loop_exhausts_budget() {
+    let diagnostics = resolve_result(
+        r#"
+        use std.syntax.*
+        macro forever = () => { loop {}; parse_quote { 0 } }
+        let value = forever ()
+    "#,
+    )
+    .expect_err_diagnostics("infinite compile-time loop");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("step") || d.message.contains("budget")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn compile_time_trait_receiver_and_default_dispatch() {
+    type_check(
+        r#"
+        use std.syntax.*
+        type A wrap ()
+        type B wrap ()
+        trait Describe T {
+            describe: T -> I32
+            doubled: T -> I32 = x => describe x * 2
+        }
+        impl Describe A { describe = _ => 3 }
+        impl Describe B { describe = _ => 7 }
+        macro emit = () => {
+            let a = Describe.doubled (A ())
+            let b = Describe.describe (B ())
+            if (a + b == 13) { parse_quote { 13 } } else { parse_quote { missing } }
+        }
+        let value: I32 = emit ()
+    "#,
+    );
+}
+
+#[test]
+fn compile_time_sequence_iterator_operations() {
+    type_check(
+        r#"
+        use std.syntax.*
+        macro emit = xs: Sequence<Ident> => {
+            let count = xs |> map (x => x) |> filter (_ => True) |> skip 1 |> fold 0 ((n, _) => n + 1)
+            if (count == 2) { parse_quote { 2 } } else { parse_quote { missing } }
+        }
+        let value: I32 = emit a b c
+    "#,
+    );
+}
+
+#[test]
+fn compile_time_sequence_collect() {
+    type_check(
+        r#"
+        use std.syntax.*
+        macro emit = xs: Sequence<Ident> => {
+            let names: Sequence<Ident> = xs |> map (x => x) |> collect
+            parse_quote { ($names...,) }
+        }
+        let a = 1
+        let b = 2
+        let value = emit a b
+    "#,
+    );
+}
+
+#[test]
+fn compile_time_parses_long_sequences_and_separated_elements() {
+    // Parsing the stress fixture itself creates a long application syntax tree.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            for target in ["Sequence<Ident<String>>", "Separated<Ident<String>, Comma>"] {
+                let separator = if target.starts_with("Separated") {
+                    ","
+                } else {
+                    " "
+                };
+                let elements = vec!["item"; 1000].join(separator);
+                let sequence = if target.starts_with("Separated") {
+                    "element_sequence xs"
+                } else {
+                    "xs"
+                };
+                type_check(&format!(
+                    r#"
+            use std.syntax.*
+            def element_sequence = <T> separated: Separated<T, Comma> => separated.elements
+            macro emit = () => {{
+                let xs = Parse.parse_all.<{target}> (quote {{ {elements} }})?
+                let count = {sequence} |> count
+                if (count == 1000) {{ parse_quote {{ 42 }} }} else {{ parse_quote {{ missing }} }}
+            }}
+            let result: I32 = emit ()
+        "#
+                ));
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn compile_time_generic_and_expected_result_dispatch() {
+    type_check(
+        r#"
+        use std.syntax.*
+        type Token wrap ()
+        impl Default Token { default = () => Token () }
+        def make = <T where Default T> () => T :: Default.default ()
+        def same = <T where Default T> value: T => T :: Default.default ()
+        macro emit = () => {
+            let a: Token = Default.default ()
+            let b = make.<Token> ()
+            let c: Token = make ()
+            let d = same a
+            match (b, c, d) {
+                (Token (), Token (), Token ()) => parse_quote { 1 },
+            }
+        }
+        let value: I32 = emit ()
+    "#,
+    );
+}
+
+#[test]
+fn compile_time_for_enumerate_zip_and_extend() {
+    type_check(
+        r#"
+        use std.syntax.*
+        macro emit = xs: Sequence<Ident> => {
+            let mut count = 0
+            for item in xs { count = count + 1 }
+            let pairs = xs |> enumerate |> zip xs |> fold 0 ((n, _) => n + 1)
+            let names = xs |> collect.<Sequence<Ident>, _>
+            let extended = xs |> extend names
+            let total = extended |> count
+            if (count == 3 && pairs == 3 && total == 6) { parse_quote { 6 } } else { parse_quote { missing } }
+        }
+        let value: I32 = emit a b c
+    "#,
+    );
+}
+
+#[test]
+fn compile_time_trait_dispatch_reports_missing_and_ambiguous_impls() {
+    for (implementations, expected) in [
+        ("", "does not implement"),
+        (
+            "impl Show I32 { show = _ => 1 }\nimpl Show I64 { show = _ => 2 }",
+            "ambiguous",
+        ),
+    ] {
+        let diagnostics = resolve_result(&format!(
+            r#"
+            use std.syntax.*
+            trait Show T {{ show: T -> I32 }}
+            {implementations}
+            macro emit = () => {{ let n = Show.show 1; parse_quote {{ 1 }} }}
+            let value = emit ()
+        "#
+        ))
+        .expect_err_diagnostics("invalid trait dispatch");
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn compile_time_collect_rejects_runtime_targets_and_unbound_targets() {
+    for (collection, expected) in [
+        ("xs |> collect.<List<Ident>, _>", "runtime-only"),
+        ("xs |> collect", "cannot determine"),
+    ] {
+        let diagnostics = resolve_result(&format!(
+            r#"
+            use std.syntax.*
+            macro emit = xs: Sequence<Ident> => {{
+                let result = {collection}
+                parse_quote {{ 1 }}
+            }}
+            let value = emit a b
+        "#
+        ))
+        .expect_err_diagnostics("invalid collect target");
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn compile_time_bounds_and_trait_members_as_values() {
+    type_check(
+        r#"
+        use std.syntax.*
+        trait Mark T {}
+        type Marked wrap ()
+        impl Mark Marked {}
+        type Box<T> wrap T
+        trait Describe T { describe: T -> I32 }
+        impl<T where Mark T> Describe Box<T> { describe = _ => 5 }
+        companion<T where Mark T> T { pub def marked = value: T => 2 }
+        macro emit = () => {
+            let describe = Describe.describe
+            let n = describe (Box (Marked ()))
+            let m = Marked () |> marked
+            if (n + m == 7) { parse_quote { 7 } } else { parse_quote { missing } }
+        }
+        let value: I32 = emit ()
+    "#,
+    );
+}
+
+#[test]
+fn compile_time_first_class_parse_and_generic_default_member() {
+    type_check(
+        r#"
+        use std.syntax.*
+        macro emit = () => {
+            let parser = Parse.parse.<Ident>
+            let mut input = stream (quote { alpha beta })
+            let a = parser input?
+            let b = parser input?
+            let first = Sequence (a, b)
+            let both = FromIterator.insert_all.<Sequence<Ident>> first first
+            let n = both |> count
+            if (is_empty input && n == 4) { parse_quote { 4 } } else { parse_quote { missing } }
+        }
+        let value: I32 = emit ()
+    "#,
+    );
+}
+
+#[test]
+fn compile_time_question_mark_leaves_a_loop() {
+    type_check(
+        r#"
+        use std.syntax.*
+        def read = mut input: ParseStream => Result<Ident, ParseError> :: {
+            loop {
+                let name = Parse.parse.<Ident> input?
+                break Ok name
+            }
+        }
+        macro emit = () => {
+            let syntax = quote { 123 }
+            let mut input = stream syntax
+            match (read input) {
+                ParseError _ => parse_quote { 1 },
+                Ok _ => parse_quote { missing },
+            }
+        }
+        let value: I32 = emit ()
+    "#,
+    );
+}
+
+#[test]
+fn compile_time_associated_type_dispatch_targets() {
+    type_check(
+        r#"
+        use std.syntax.*
+        type Token wrap ()
+        type Box<T> wrap T
+        trait Project T { type Out }
+        impl<T> Project Box<T> { type Out = T }
+        impl Default Token { default = () => Token () }
+        macro emit = xs: Sequence<Ident> => {
+            let token = Project.Out Box<Token> :: Default.default ()
+            let tokens = xs |> map (_ => token) |> collect.<Sequence<Project.Out Box<Token>>, _>
+            let n = tokens |> count
+            if (n == 2) { parse_quote { 2 } } else { parse_quote { missing } }
+        }
+        let value: I32 = emit a b
+    "#,
+    );
+}
+
+#[test]
+fn compile_time_trait_dispatch_uses_later_slots() {
+    type_check(
+        r#"
+        use std.syntax.*
+        type A wrap ()
+        type B wrap ()
+        trait Choose T { choose: ((); T) -> I32 }
+        impl Choose A { choose = (_; _) => 3 }
+        impl Choose B { choose = (_; _) => 7 }
+        macro emit = () => {
+            let choose = Choose.choose ()
+            let a = choose (A ())
+            let b = Choose.choose ((); B ())
+            if (a + b == 10) { parse_quote { 10 } } else { parse_quote { missing } }
+        }
+        let value: I32 = emit ()
+    "#,
+    );
+}
+
+#[test]
+fn compile_time_trait_receiver_and_result_must_agree() {
+    let diagnostics = resolve_result(
+        r#"
+        use std.syntax.*
+        type A wrap ()
+        type B wrap ()
+        trait Same T { same: T -> T }
+        impl Same A { same = x => x }
+        impl Same B { same = x => x }
+        macro emit = () => {
+            let a: A = Same.same (B ())
+            parse_quote { 1 }
+        }
+        let value = emit ()
+    "#,
+    )
+    .expect_err_diagnostics("receiver and result must agree");
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("disagree")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn compile_time_default_bodies_keep_declared_result_and_associated_types() {
+    type_check(
+        r#"
+        use std.syntax.*
+        type Token wrap ()
+        type Source wrap ()
+        impl Default Token { default = () => Token () }
+        trait Make T {
+            type Output where Default Output
+            make: T -> Output = _ => { Default.default () }
+        }
+        impl Make Source { type Output = Token }
+        macro emit = () => {
+            let token = Make.make (Source ())
+            match token { Token () => parse_quote { 1 } }
+        }
+        let value: I32 = emit ()
+    "#,
+    );
+}

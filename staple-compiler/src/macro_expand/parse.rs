@@ -23,6 +23,7 @@ pub(super) enum SyntaxIntrinsic {
     Delimited(DelimiterKind),
     TakeRest,
     Offset,
+    SequencePush,
     /// A float companion intrinsic (`__f64_floor`, `__f32_from_bits`, ...),
     /// so `const` initializers fold them with the results LLVM produces at
     /// run time.
@@ -47,6 +48,7 @@ impl SyntaxIntrinsic {
             "__braced" => Self::Delimited(DelimiterKind::Braced),
             "__take_rest" => Self::TakeRest,
             "__offset" => Self::Offset,
+            "__sequence_push" => Self::SequencePush,
             _ => return None,
         })
     }
@@ -555,6 +557,9 @@ fn describe_position(syntax: &Syntax, cursor: usize) -> String {
 /// The syntax a value stands for as a whole, for `stream` and `parse_all`.
 fn value_syntax(value: &Value) -> Option<Syntax> {
     match value {
+        Value::Product(fields, false) if fields.len() == 1 && fields[0].0.is_none() => {
+            value_syntax(&fields[0].1)
+        }
         Value::Syntax(value) => value.syntax().cloned(),
         _ => None,
     }
@@ -584,6 +589,7 @@ impl MacroExpander {
         match item {
             Item::TraitImplementation(implementation) => {
                 self.names_parse_trait(module, &implementation.trait_name)
+                    || implementation.arguments.iter().any(type_contains_syntax)
             }
             Item::ExternBlock(block) => {
                 Some(module) == self.syntax_module && block.abi == "\"staple-intrinsic\""
@@ -765,11 +771,27 @@ impl MacroExpander {
                     &syntax, cursor, end,
                 ))))
             }
+            SyntaxIntrinsic::SequencePush => {
+                let Value::Product(mut values, _) = argument else {
+                    return None;
+                };
+                if values.len() != 2 {
+                    return None;
+                }
+                let item = values.pop()?.1;
+                let Value::Sequence(mut sequence) = values.pop()?.1 else {
+                    return None;
+                };
+                sequence.push(item);
+                Some(Value::Sequence(sequence))
+            }
             SyntaxIntrinsic::Offset => {
                 let (_, cursor) = self.stream_argument(argument, span)?;
                 Some(Value::Integer(cursor as i128))
             }
-            SyntaxIntrinsic::Float(intrinsic) => self.eval_float_intrinsic(intrinsic, argument, span),
+            SyntaxIntrinsic::Float(intrinsic) => {
+                self.eval_float_intrinsic(intrinsic, argument, span)
+            }
             SyntaxIntrinsic::ErrorAt => {
                 let Value::Product(mut elements, _) = argument else {
                     self.diagnostics.push(Diagnostic::new(
@@ -1358,11 +1380,26 @@ impl MacroExpander {
         let callee = self.eval_expression(module, &application.value, environment)?;
         let (Value::Intrinsic(intrinsic), [ty]) = (&callee, application.arguments.as_slice())
         else {
-            self.diagnostics.push(Diagnostic::new(
-                application.syntax.span.clone(),
-                "call-site type arguments are only supported for runtime generic values",
-            ));
-            return None;
+            let (argument, place) = self.eval_call_argument(
+                module,
+                &call.argument,
+                environment,
+                self.callable_takes_mut(&callee),
+            )?;
+            self.argument_place = place;
+            let target = self
+                .call_targets
+                .get(&call.syntax.id)
+                .and_then(|ty| compile_type_target(ty, &self.type_env))
+                .or_else(|| self.call_target.clone());
+            let previous = std::mem::replace(&mut self.call_target, target);
+            let result = self.apply_value(
+                Value::TypeApplied(Box::new(callee), application.arguments.clone()),
+                argument,
+                span,
+            );
+            self.call_target = previous;
+            return result;
         };
         if !intrinsic.takes_type_argument() {
             self.diagnostics.push(Diagnostic::new(
@@ -1449,48 +1486,31 @@ pub(super) fn collect_parse_impls(
         return (impls, default, diagnostics);
     };
     let standard_package = expander.module_packages[syntax_module.0];
-    for source_module in program.modules() {
-        let module = source_module.id;
-        for item in &source_module.syntax.items {
-            let item = match item {
-                Item::Modified(modified)
-                    if modified
-                        .modifiers
-                        .iter()
-                        .all(|modifier| modifier.namespace.is_none() && modifier.name == "doc") =>
-                {
-                    modified.item.as_ref()
-                }
-                item => item,
-            };
-            match item {
-                Item::TraitDeclaration(declaration)
-                    if module == syntax_module && declaration.name == "Parse" =>
-                {
-                    default = declaration
-                        .members
-                        .iter()
-                        .find(|member| member.name == "parse_all")
-                        .and_then(|member| member.default.clone())
-                        .map(|default| (module, default));
-                }
-                Item::TraitImplementation(implementation)
-                    if !implementation.negative
-                        && expander.names_parse_trait(module, &implementation.trait_name) =>
-                {
-                    if let Some(parsed) = parse_impl(
-                        program,
-                        expander,
-                        module,
-                        implementation,
-                        standard_package,
-                        &mut diagnostics,
-                    ) {
-                        impls.push(parsed);
-                    }
-                }
-                _ => {}
-            }
+    let key = traits::TraitKey(syntax_module, "Parse".to_owned());
+    if let Some(declaration) = expander.trait_registry.declarations.get(&key) {
+        default = declaration
+            .members
+            .iter()
+            .find(|member| member.name == "parse_all")
+            .and_then(|member| member.default.clone())
+            .map(|body| (syntax_module, body));
+    }
+    for implementation in expander
+        .trait_registry
+        .implementations
+        .get(&key)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(parsed) = parse_impl(
+            program,
+            expander,
+            implementation.module,
+            &implementation.declaration,
+            standard_package,
+            &mut diagnostics,
+        ) {
+            impls.push(parsed);
         }
     }
     (impls, default, diagnostics)
@@ -1771,21 +1791,17 @@ impl MacroExpander {
             _ => None,
         };
         let (Some(intrinsic), [ty]) = (intrinsic, application.arguments.as_slice()) else {
-            self.diagnostics.push(Diagnostic::new(
-                application.syntax.span.clone(),
-                "call-site type arguments are only supported for runtime generic values",
-            ));
-            return CompileType::Error;
+            self.check_compile_expression(module, &application.value, environment, None);
+            self.check_compile_expression(module, &call.argument, environment, None);
+            return CompileType::Unknown;
         };
         if !matches!(
             intrinsic,
             SyntaxIntrinsic::ParsePrimitive | SyntaxIntrinsic::Delimited(_)
         ) {
-            self.diagnostics.push(Diagnostic::new(
-                application.syntax.span.clone(),
-                "call-site type arguments are only supported for runtime generic values",
-            ));
-            return CompileType::Error;
+            self.check_compile_expression(module, &application.value, environment, None);
+            self.check_compile_expression(module, &call.argument, environment, None);
+            return CompileType::Unknown;
         }
         let target = compile_type(ty);
         if intrinsic.takes_mut() {
@@ -2086,10 +2102,9 @@ pub(super) fn apply_float_ternary(
     use crate::FloatTernaryOperation;
     let FloatTernaryOperation::MulAdd = operation;
     let result = match float {
-        crate::FloatType::F32 => widen_f32(narrow_to_f32(first).mul_add(
-            narrow_to_f32(second),
-            narrow_to_f32(third),
-        )),
+        crate::FloatType::F32 => {
+            widen_f32(narrow_to_f32(first).mul_add(narrow_to_f32(second), narrow_to_f32(third)))
+        }
         crate::FloatType::F64 => first.mul_add(second, third),
     };
     determined_nan(result, &[first, second, third])

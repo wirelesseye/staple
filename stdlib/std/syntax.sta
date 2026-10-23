@@ -2,6 +2,9 @@ pub mod
 
 use package.result.(Result, Ok)
 use package.string.(String)
+use package.iterator.(Iterator, IntoIterator, FromIterator, IterStep)
+use package.iterator.IterStep.(Done, Yield)
+use package.default.(Default)
 
 /// Compiler-owned, compile-time-only syntax values. Identifiers and calls expose
 /// their data in the first structured-syntax slice; remaining expressions round-trip
@@ -233,6 +236,7 @@ extern "staple-intrinsic" {
     __braced: <C> (Syntax; C) -> Braced<C>
     __take_rest: mut ParseStream -> Syntax
     __offset: ParseStream -> USize
+    __sequence_push: <T> (Sequence<T>; T) -> Sequence<T>
 }
 
 // Leaf syntax nodes: each consumes the longest node the grammar accepts from
@@ -358,59 +362,64 @@ impl<H, T where Parse H, Parse T> Parse (H, ...T) {
     }
 }
 
+impl<T> Iterator Sequence<T> {
+    type Item = T
+    next = move sequence => match sequence {
+        Sequence () => Done (Sequence ()),
+        Sequence (first, rest) => Yield (first, rest),
+    }
+}
+impl<T> IntoIterator Sequence<T> {
+    type Iter = Sequence<T>
+    into_iterator = move sequence => sequence
+}
+impl<T> Default (Sequence<T>) {
+    default = () => Sequence ()
+}
+impl<T> FromIterator Sequence<T> T {
+    insert = (move sequence: Sequence<T>; move item: T) => Sequence<T> ::
+        __sequence_push (sequence; item)
+}
+
 // Elements until the stream ends or `T` stops parsing.
 impl<T where Parse T> Parse Sequence<T> {
     parse = mut input => {
-        if (is_empty input) {
-            Ok (Sequence ())
-        } else {
+        let mut elements = Sequence ()
+        loop {
+            if (is_empty input) { break }
             let mut fork = input
             let start = __offset fork
             match (Parse.parse.<T> fork) {
-                Ok first => if (__offset fork == start) {
-                    Ok (Sequence ())
-                } else {
+                Ok first => {
+                    if (__offset fork == start) { break }
                     input = fork
-                    let rest = Parse.parse.<Sequence<T>> input?
-                    Ok (Sequence (first: first, rest: rest))
+                    elements = __sequence_push (elements; first)
                 },
-                ParseError _ => Ok (Sequence ()),
+                ParseError _ => { break },
             }
         }
+        Ok elements
     }
 }
 
 // Comma-separated elements with an optional trailing comma.
 impl<T where Parse T> Parse Separated<T, Comma> {
     parse = mut input => {
-        if (is_empty input) {
-            Ok (Separated (separator: Comma, elements: Sequence (), trailing: False))
-        } else {
-            let first = Parse.parse.<T> input?
-            if (is_empty input) {
-                Ok (Separated (
-                    separator: Comma,
-                    elements: Sequence (first: first, rest: Sequence ()),
-                    trailing: False,
-                ))
-            } else {
-                let comma = Parse.parse.<Comma> input?
-                if (is_empty input) {
-                    Ok (Separated (
-                        separator: comma,
-                        elements: Sequence (first: first, rest: Sequence ()),
-                        trailing: True,
-                    ))
-                } else {
-                    let Separated (separator, elements, trailing) =
-                        Parse.parse.<Separated<T, Comma>> input?
-                    Ok (Separated (
-                        separator: separator,
-                        elements: Sequence (first: first, rest: elements),
-                        trailing: trailing,
-                    ))
-                }
-            }
+        let mut elements = Sequence ()
+        let mut trailing = False
+        loop {
+            if (is_empty input) { break }
+            let mut fork = input
+            let start = __offset fork
+            let first = Parse.parse.<T> fork?
+            if (__offset fork == start) { break }
+            input = fork
+            elements = __sequence_push (elements; first)
+            trailing = False
+            if (is_empty input) { break }
+            let _ = Parse.parse.<Comma> input?
+            trailing = True
         }
+        Ok (Separated (separator: Comma, elements: elements, trailing: trailing))
     }
 }

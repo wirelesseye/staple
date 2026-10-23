@@ -668,18 +668,50 @@ result as an ordinary call. Imports, renames, namespaces, and re-exports carry
 the whole overload set, but overload sets from unrelated imports do not merge.
 
 Compile-time evaluation supports pure functions, bindings, reassignable and
-mutable local cells, products, matches, literals, recursion, and pure integer
-operations. It rejects external or runtime-only effects. Expansion is limited
+mutable local cells, products, matches, literals, recursion, pure integer
+operations, and `loop` with `break`, `break value`, and `continue`. `return`
+and `?` inside a loop leave the enclosing function. It rejects external or runtime-only effects. Expansion is limited
 to 128 nested macros and each top-level invocation is limited to 1,000,000
 evaluation steps. Syntax
 values are compile-time-only. This release supports `parse_quote`-driven
 contextual expression, type, pattern, item, and item-sequence quotation;
 `quote`'s opaque fragments; structured identifier and call expressions;
-scalar splices; repeated item splices; and streaming `Parse` of syntax.
+scalar splices; repeated item and product-expression splices; streaming `Parse`
+of syntax; and ordinary trait and companion calls, including iterator pipes.
 It also supports opaque item input through modifier macros and atomic visibility
-syntax. General repeated expression, type, and pattern splices,
+syntax. General repeated type and pattern splices,
 function-style item input, item inspection, and structured access to other
 expression forms remain future work.
+
+Compile-time trait calls select an implementation from the receiver value's
+shape (`Iterator.next iter`), or from an expected result type
+(`let value: T = Default.default ()`). Explicit `.<...>` arguments, generic
+bindings, and type ascriptions also supply dispatch types. Nominal values erase
+their type arguments; unbound arguments do not constrain implementation bounds.
+Integer and float values have no width for dispatch, so implementations for
+multiple widths are ambiguous. Ambiguous calls report the matching headers.
+Compile-time checking remains permissive for these calls: missing implementations
+and undetermined dispatch types are diagnosed when the macro evaluates them.
+
+`Sequence<T>` implements `Iterator`, `IntoIterator`, `Default`, and
+`FromIterator`. Its iterator consumes elements in order. Iterate a `Separated`
+value through its `.elements` sequence. Compile-time code can use `for`, `map`,
+`filter`, `fold`, `enumerate`, `zip`, `skip`, `extend`, and the other ordinary
+iterator companion operations. Pipes select nominal companions first, then
+applicable blanket companions, lexical helpers, and trait members.
+
+```staple
+let names: Sequence<Ident> = fields |> map ((field: Field) => field.name) |> collect
+let count = names |> fold 0 ((total, _) => total + 1)
+for name in names { /* use name */ }
+```
+
+At compile time, `collect` needs an expected `Sequence<...>` type or explicit
+arguments such as `collect.<Sequence<Expr>, _>`. Sequence and comma-separated
+parsing use loops, so their length is bounded by the evaluation-step budget
+rather than recursive helper depth. Ranges, `to_list`, and collecting into
+`List<T>` or `String` remain runtime-only because their implementations need
+width-specific dispatch or runtime storage intrinsics.
 
 Compiler-provided macros use typed bodyless contracts. `std.syntax` declares
 `pub macro quote: Braced<Syntax> -> Syntax` and

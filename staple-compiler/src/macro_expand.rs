@@ -6,6 +6,7 @@ use std::{
 };
 
 mod parse;
+mod traits;
 
 use crate::program::source_location_at;
 use crate::{FloatType, ModuleId, Program, ResolvedMacro};
@@ -302,7 +303,7 @@ struct DelimitedSyntaxValue {
 enum DelimitedValueContents {
     Slotted(Vec<(Option<String>, Value)>),
     Product(Vec<(Option<String>, Value)>),
-    Sequence(Vec<Value>),
+    Sequence(SequenceValue),
     Separated {
         elements: Vec<Value>,
         separator: Box<Value>,
@@ -428,7 +429,7 @@ impl DelimitedSyntaxValue {
                         .into_iter()
                         .map(|(_, value)| value)
                         .collect::<Vec<_>>(),
-                    DelimitedValueContents::Sequence(values) => values,
+                    DelimitedValueContents::Sequence(values) => values.to_vec(),
                     DelimitedValueContents::Separated { .. }
                     | DelimitedValueContents::Product(_) => {
                         return None;
@@ -490,11 +491,16 @@ enum Value {
         function: staple_syntax::FunctionExpression,
         environment: Environment,
         quote_result: Option<MetaType>,
+        result_target: Option<MetaType>,
         /// The `Parse` implementation parameters in scope where the function
         /// was written, so closures and default members keep their bindings.
         type_env: TypeEnv,
     },
     Helper(ModuleId, Binding),
+    /// Trait identity, member name, explicit types, and supplied curried slots.
+    TraitMember(traits::TraitKey, String, Vec<Type>, Vec<Value>),
+    Method(ModuleId, String),
+    TypeApplied(Box<Value>, Vec<Type>),
     /// A compiler-implemented `std.syntax` function.
     Intrinsic(SyntaxIntrinsic),
     /// A copyable cursor over a syntax fragment: the stream's tokens and the
@@ -511,12 +517,78 @@ enum Value {
     Float(f64, Option<FloatType>),
     String(String),
     Nominal(String, Box<Value>),
-    Sequence(Vec<Value>),
+    Sequence(SequenceValue),
     Separated {
         elements: Vec<Value>,
         separator: Box<Value>,
         trailing: bool,
     },
+}
+
+/// Shared storage plus a cursor makes consuming a cons tail constant time.
+#[derive(Clone, Default)]
+struct SequenceValue {
+    values: Rc<Vec<Value>>,
+    start: usize,
+}
+impl From<Vec<Value>> for SequenceValue {
+    fn from(values: Vec<Value>) -> Self {
+        Self {
+            values: Rc::new(values),
+            start: 0,
+        }
+    }
+}
+impl FromIterator<Value> for SequenceValue {
+    fn from_iter<T: IntoIterator<Item = Value>>(iter: T) -> Self {
+        Vec::from_iter(iter).into()
+    }
+}
+impl std::ops::Deref for SequenceValue {
+    type Target = [Value];
+    fn deref(&self) -> &[Value] {
+        &self.values[self.start..]
+    }
+}
+impl IntoIterator for SequenceValue {
+    type Item = Value;
+    type IntoIter = std::vec::IntoIter<Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        match Rc::try_unwrap(self.values) {
+            Ok(mut values) => {
+                values.drain(..self.start);
+                values.into_iter()
+            }
+            Err(values) => values[self.start..].to_vec().into_iter(),
+        }
+    }
+}
+impl<'a> IntoIterator for &'a SequenceValue {
+    type Item = &'a Value;
+    type IntoIter = std::slice::Iter<'a, Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+impl SequenceValue {
+    fn tail(&self) -> Self {
+        Self {
+            values: self.values.clone(),
+            start: self.start + 1,
+        }
+    }
+    fn storage(&mut self) -> &mut Vec<Value> {
+        if self.start != 0 {
+            *self = self.to_vec().into();
+        }
+        Rc::make_mut(&mut self.values)
+    }
+    fn push(&mut self, value: Value) {
+        self.storage().push(value);
+    }
+    fn insert(&mut self, index: usize, value: Value) {
+        self.storage().insert(index, value);
+    }
 }
 
 /// Sets a named field within a compile-time product value, overriding an
@@ -1685,6 +1757,9 @@ struct MacroExpander {
     float_namespaces: [Option<ModuleId>; 2],
     /// Every implementation of `Parse`, standard and user-written.
     parse_impls: Vec<ParseImpl>,
+    trait_registry: traits::Registry,
+    call_targets: HashMap<SyntaxId, CompileType>,
+    call_target: Option<MetaType>,
     /// The default body of `Parse.parse_all`, with the module it was written in.
     parse_all_default: Option<(ModuleId, Expression)>,
     /// What the type parameters of the `Parse` implementation being evaluated
@@ -1694,6 +1769,9 @@ struct MacroExpander {
     /// function with. Evaluation unwinds as a failure until the function call
     /// that owns it takes the value.
     pending_return: Option<Value>,
+    pending_break: Option<Value>,
+    pending_continue: bool,
+    loop_types: Vec<Vec<CompileType>>,
     /// The caller's storage for the next call's `mut` argument, so the callee
     /// updates it in place.
     argument_place: Option<EnvironmentBinding>,
@@ -1745,7 +1823,11 @@ impl MacroExpander {
         let number_types = program
             .modules()
             .iter()
-            .find(|module| module.path.ends_with(std::path::Path::new("std/number/types.sta")))
+            .find(|module| {
+                module
+                    .path
+                    .ends_with(std::path::Path::new("std/number/types.sta"))
+            })
             .map(|module| module.id);
         // The companion block written beside each float type declares its
         // intrinsics.
@@ -1782,6 +1864,7 @@ impl MacroExpander {
             .unwrap_or(0);
         for source_module in program.modules() {
             for item in &source_module.syntax.items {
+                let item = traits::plain_item(item);
                 match item {
                     Item::MacroDeclaration(declaration) => {
                         let declaration = &with_curried_macro_value(declaration, &mut next_syntax_id);
@@ -1929,9 +2012,7 @@ impl MacroExpander {
                     }
                     // `Parse` and the `std.syntax` intrinsics are scope entries
                     // so they import, re-export, and rename like helpers do.
-                    Item::TraitDeclaration(declaration)
-                        if Some(source_module.id) == syntax && declaration.name == "Parse" =>
-                    {
+                    Item::TraitDeclaration(declaration) => {
                         scopes[source_module.id.0].helpers.insert(
                             declaration.name.clone(),
                             HelperDefinition {
@@ -1954,20 +2035,14 @@ impl MacroExpander {
                             },
                         );
                     }
-                    Item::ExternBlock(block)
-                        if block.abi == "\"staple-intrinsic\""
-                            && (Some(source_module.id) == syntax
-                                || float_companion_modules
-                                    .iter()
-                                    .any(|module| *module == Some(source_module.id))) =>
-                    {
+                    Item::ExternBlock(block) if block.abi == "\"staple-intrinsic\"" => {
                         for binding in &block.bindings {
                             let intrinsic = if Some(source_module.id) == syntax {
                                 SyntaxIntrinsic::from_name(&binding.name)
                             } else {
                                 SyntaxIntrinsic::from_float_name(&binding.name)
                             };
-                            if intrinsic.is_some() {
+                            if intrinsic.is_some() || binding.kind == BindingKind::Extern {
                                 let mut binding = binding.clone();
                                 if block.visibility == Visibility::Public {
                                     binding.visibility = Visibility::Public;
@@ -2606,14 +2681,21 @@ impl MacroExpander {
             float_companion_modules,
             float_namespaces,
             parse_impls: Vec::new(),
+            trait_registry: traits::Registry::default(),
+            call_targets: HashMap::new(),
+            call_target: None,
             parse_all_default: None,
             type_env: TypeEnv::default(),
             pending_return: None,
+            pending_break: None,
+            pending_continue: false,
+            loop_types: Vec::new(),
             argument_place: None,
             parse_targets: HashMap::new(),
             static_parameters: HashSet::new(),
             static_parse_bounds: HashSet::new(),
         };
+        expander.trait_registry = traits::Registry::collect(program, &expander);
         let (impls, default, diagnostics) = parse::collect_parse_impls(program, &expander);
         expander.parse_impls = impls;
         expander.parse_all_default = default;
@@ -2765,6 +2847,16 @@ impl MacroExpander {
         environment: &mut CompileEnvironment,
         expected: Option<&CompileType>,
     ) -> CompileType {
+        if let Some(expected) = expected {
+            self.call_targets
+                .insert(expression.syntax().id, expected.clone());
+        }
+        if self
+            .trait_member(module, expression, |name| environment.contains_key(name))
+            .is_some()
+        {
+            return CompileType::Unknown;
+        }
         let actual = match expression {
             Expression::Function(function) => {
                 let (parameter, result) = match expected {
@@ -2779,16 +2871,14 @@ impl MacroExpander {
                 };
                 let mut nested = environment.clone();
                 self.bind_compile_pattern(module, &function.pattern, &parameter, &mut nested);
+                let outer_loops = std::mem::take(&mut self.loop_types);
                 let body =
                     self.check_compile_expression(module, &function.body, &mut nested, result);
+                self.loop_types = outer_loops;
                 CompileType::Function(Box::new(parameter), Box::new(body))
             }
             Expression::TypeApplication(application) => {
-                self.diagnostics.push(Diagnostic::new(
-                    application.syntax.span.clone(),
-                    "call-site type arguments are only supported for runtime generic values",
-                ));
-                CompileType::Error
+                self.check_compile_expression(module, &application.value, environment, expected)
             }
             Expression::TypeAscription(value) => {
                 let annotation = self.checked_compile_type(&value.ty);
@@ -2821,6 +2911,7 @@ impl MacroExpander {
                     result = join_compile_types(result, arm_type);
                 }
                 if !matches!(subject, CompileType::Unknown | CompileType::Error)
+                    && !compile_type_contains_unknown(&subject)
                     && !compile_patterns_are_exhaustive(&subject, &previous_patterns)
                 {
                     self.diagnostics.push(Diagnostic::new(
@@ -2881,6 +2972,16 @@ impl MacroExpander {
                 self.check_compile_call(module, expression, environment, expected)
             }
             Expression::Access(access) => {
+                if matches!(access.accessor, Accessor::Method(_)) {
+                    return CompileType::Unknown;
+                }
+                if let (Expression::Name(ty), Accessor::Name(member)) =
+                    (access.value.as_ref(), &access.accessor)
+                    && ty.name.chars().next().is_some_and(char::is_uppercase)
+                    && self.trait_registry.companion_member_exists(member)
+                {
+                    return CompileType::Unknown;
+                }
                 if let Some(helper) = self.qualified_compile_helper(module, access) {
                     self.check_compile_helper(&helper);
                     helper_compile_type(&helper.binding)
@@ -3081,11 +3182,24 @@ impl MacroExpander {
                 CompileType::Error
             }
             Expression::Loop(value) => {
-                self.diagnostics.push(Diagnostic::new(
-                    value.syntax.span.clone(),
-                    "loops are not supported during compile-time evaluation",
-                ));
-                CompileType::Error
+                self.loop_types.push(Vec::new());
+                self.check_compile_expression(
+                    module,
+                    &Expression::Block(value.body.clone()),
+                    environment,
+                    None,
+                );
+                let breaks = self.loop_types.pop().unwrap();
+                breaks
+                    .into_iter()
+                    .reduce(|left, right| {
+                        if left == right {
+                            left
+                        } else {
+                            CompileType::Unknown
+                        }
+                    })
+                    .unwrap_or(CompileType::Product(Vec::new()))
             }
             Expression::Coro(value) => {
                 self.diagnostics.push(Diagnostic::new(
@@ -3117,11 +3231,8 @@ impl MacroExpander {
                 CompileType::Error
             }
             Expression::Pipe(value) => {
-                self.diagnostics.push(Diagnostic::new(
-                    value.syntax.span.clone(),
-                    "`|>` is not available during compile-time macro evaluation",
-                ));
-                CompileType::Error
+                let lowered = lower_pipe_expression(value.clone(), &mut self.next_syntax_id);
+                self.check_compile_expression(module, &lowered, environment, expected)
             }
             Expression::CString(_) => CompileType::Named("CString".to_owned()),
         };
@@ -3192,18 +3303,31 @@ impl MacroExpander {
                 self.check_compile_expression(module, &value.value, environment, expected)
             }
             Item::Break(value) => {
-                self.diagnostics.push(Diagnostic::new(
-                    value.syntax.span.clone(),
-                    "`break` is not supported during compile-time evaluation",
-                ));
-                CompileType::Error
+                let ty = value
+                    .value
+                    .as_ref()
+                    .map(|value| {
+                        self.check_compile_expression(module, value, environment, expected)
+                    })
+                    .unwrap_or(CompileType::Product(Vec::new()));
+                if let Some(breaks) = self.loop_types.last_mut() {
+                    breaks.push(ty);
+                } else {
+                    self.diagnostics.push(Diagnostic::new(
+                        value.syntax.span.clone(),
+                        "`break` requires a loop",
+                    ));
+                }
+                CompileType::Unknown
             }
             Item::Continue(value) => {
-                self.diagnostics.push(Diagnostic::new(
-                    value.syntax.span.clone(),
-                    "`continue` is not supported during compile-time evaluation",
-                ));
-                CompileType::Error
+                if self.loop_types.is_empty() {
+                    self.diagnostics.push(Diagnostic::new(
+                        value.syntax.span.clone(),
+                        "`continue` requires a loop",
+                    ));
+                }
+                CompileType::Unknown
             }
             other => {
                 self.diagnostics.push(Diagnostic::new(
@@ -3235,11 +3359,40 @@ impl MacroExpander {
                     expected,
                 );
             }
+            if self
+                .trait_member(module, &call.callee, |name| environment.contains_key(name))
+                .is_some()
+            {
+                self.check_compile_expression(module, &call.argument, environment, None);
+                return CompileType::Unknown;
+            }
             if let Expression::TypeApplication(application) = call.callee.as_ref() {
                 return self.check_type_applied_call(module, call, application, environment);
             }
         }
         let (head, arguments) = flatten_call(expression);
+        if let Expression::Name(name) = head {
+            if !environment.contains_key(&name.name)
+                && let Some(helper) = self.lookup_helper(module, &name.name)
+                && matches!(&helper.binding.value, Some(Expression::Function(function)) if function.generics.is_some())
+            {
+                self.check_compile_helper(&helper);
+                for argument in &arguments {
+                    self.check_compile_expression(module, argument, environment, None);
+                }
+                return CompileType::Unknown;
+            }
+            if self
+                .lookup_helper(module, &name.name)
+                .and_then(|helper| self.helper_intrinsic(&helper))
+                == Some(SyntaxIntrinsic::SequencePush)
+            {
+                for argument in &arguments {
+                    self.check_compile_expression(module, argument, environment, None);
+                }
+                return CompileType::Unknown;
+            }
+        }
         if let Some(keys) = self.resolve_macro(module, head) {
             // Match overloads the same way real call sites and compile-time
             // evaluation do, so function-style macros with greedy `Expr *`
@@ -3305,6 +3458,12 @@ impl MacroExpander {
         let mut index = 0;
         while index < arguments.len() {
             let argument = arguments[index];
+            if callee == CompileType::Unknown {
+                for argument in &arguments[index..] {
+                    self.check_compile_expression(module, argument, environment, None);
+                }
+                return CompileType::Unknown;
+            }
             let CompileType::Function(parameter, result) = callee else {
                 if callee != CompileType::Error && callee != CompileType::Unknown {
                     self.diagnostics.push(Diagnostic::new(
@@ -3388,9 +3547,16 @@ impl MacroExpander {
         access: &staple_syntax::AccessExpression,
     ) -> Option<HelperDefinition> {
         let (namespace, item, definition_module) = qualified_macro_access_path(access)?;
-        let context = definition_module.map(ModuleId).unwrap_or(module);
-        let target = self.scopes[context.0].namespaces.get(&namespace)?;
-        self.scopes[target.0].helpers.get(&item).cloned()
+        let mut context = definition_module.map(ModuleId).unwrap_or(module);
+        loop {
+            if let Some(target) = self.scopes[context.0].namespaces.get(&namespace) {
+                return self.scopes[target.0].helpers.get(&item).cloned();
+            }
+            if !self.companion_modules[context.0] {
+                return None;
+            }
+            context = self.parent_modules[context.0]?;
+        }
     }
 
     fn bind_compile_pattern(
@@ -4032,7 +4198,8 @@ impl MacroExpander {
             // `Parse` implementations are compile-time code, like macro bodies:
             // they run in the interpreter and are dropped after expansion.
             Item::TraitImplementation(implementation)
-                if self.names_parse_trait(module, &implementation.trait_name) => {}
+                if self.names_parse_trait(module, &implementation.trait_name)
+                    || implementation.arguments.iter().any(type_contains_syntax) => {}
             Item::TraitImplementation(implementation) => {
                 for associated in &mut implementation.associated_types {
                     self.apply_member_modifiers(
@@ -5490,7 +5657,10 @@ impl MacroExpander {
                 for argument in pipe.stage_arguments_mut() {
                     let expanded = self.expand_expression(
                         module,
-                        std::mem::replace(argument, Expression::Product(staple_syntax::ProductExpression::empty())),
+                        std::mem::replace(
+                            argument,
+                            Expression::Product(staple_syntax::ProductExpression::empty()),
+                        ),
                         depth,
                     );
                     *argument = expanded;
@@ -5983,7 +6153,7 @@ impl MacroExpander {
                                     .collect::<Option<Vec<_>>>()?;
                                 value = self.apply_value(
                                     value,
-                                    Value::Sequence(values),
+                                    Value::Sequence(values.into()),
                                     call_span.clone(),
                                 )?;
                                 continue;
@@ -6165,8 +6335,41 @@ impl MacroExpander {
         expression: &Expression,
         environment: &mut Environment,
     ) -> Option<Value> {
+        let target = self
+            .call_targets
+            .get(&expression.syntax().id)
+            .and_then(|ty| parse::compile_type_target(ty, &self.type_env));
+        self.eval_expression_target(module, expression, environment, target)
+    }
+
+    /// An expected result belongs to this expression, not to its arguments or
+    /// unrelated statements evaluated inside it.
+    fn eval_expression_target(
+        &mut self,
+        module: ModuleId,
+        expression: &Expression,
+        environment: &mut Environment,
+        target: Option<MetaType>,
+    ) -> Option<Value> {
+        let previous = std::mem::replace(&mut self.call_target, target);
+        let result = self.eval_expression_inner(module, expression, environment);
+        self.call_target = previous;
+        result
+    }
+
+    fn eval_expression_inner(
+        &mut self,
+        module: ModuleId,
+        expression: &Expression,
+        environment: &mut Environment,
+    ) -> Option<Value> {
         if !self.tick(expression.syntax().span.clone()) {
             return None;
+        }
+        if let Some((key, member)) =
+            self.trait_member(module, expression, |name| environment.contains_key(name))
+        {
+            return Some(Value::TraitMember(key, member, Vec::new(), Vec::new()));
         }
         match expression {
             Expression::StringTemplate(_) => {
@@ -6188,9 +6391,16 @@ impl MacroExpander {
                 function: function.as_ref().clone(),
                 environment: environment.clone(),
                 quote_result: self.quote_context.clone(),
+                result_target: None,
                 type_env: self.type_env.clone(),
             }),
-            Expression::TypeApplication(_) => None,
+            Expression::TypeApplication(application) => {
+                let value = self.eval_expression(module, &application.value, environment)?;
+                Some(Value::TypeApplied(
+                    Box::new(value),
+                    application.arguments.clone(),
+                ))
+            }
             Expression::TypeAscription(ascription) => {
                 if let Some(expected) = meta_type(&ascription.ty)
                     && let Expression::Quote(quote) = ascription.value.as_ref()
@@ -6213,7 +6423,9 @@ impl MacroExpander {
                         &expected,
                     );
                 }
-                let value = self.eval_expression(module, &ascription.value, environment)?;
+                let target = self.resolve_type(&ascription.ty);
+                let value =
+                    self.eval_expression_target(module, &ascription.value, environment, target)?;
                 let float = self.named_float_type(module, &ascription.ty);
                 self.assign_float_type(value, float, ascription.syntax.span.clone())
             }
@@ -6327,6 +6539,16 @@ impl MacroExpander {
                         && let Some(expected) = sequence_element
                     {
                         self.instantiate_contextual_quote(module, quote, environment, &expected)?
+                    } else if product.elements.len() == 1
+                        && element.name.is_none()
+                        && !element.spread
+                    {
+                        self.eval_expression_target(
+                            module,
+                            &element.value,
+                            environment,
+                            self.call_target.clone(),
+                        )?
                     } else {
                         self.eval_expression(module, &element.value, environment)?
                     };
@@ -6524,7 +6746,10 @@ impl MacroExpander {
                         && let Some(expanded) = result.as_ref().and_then(SyntaxValue::to_expression)
                         && matches!(
                             expanded,
-                            Expression::Match(_) | Expression::TypeAscription(_)
+                            Expression::Match(_)
+                                | Expression::TypeAscription(_)
+                                | Expression::Block(_)
+                                | Expression::Loop(_)
                         )
                     {
                         let expanded = expanded.clone();
@@ -6575,7 +6800,7 @@ impl MacroExpander {
                     return Some(Value::Nominal(name.name.clone(), Box::new(argument)));
                 }
                 let callee = self.eval_expression(module, &call.callee, environment)?;
-                let wants_place = callee_takes_mut(&callee);
+                let wants_place = self.callable_takes_mut(&callee);
                 let (argument, place) =
                     self.eval_call_argument(module, &call.argument, environment, wants_place)?;
                 self.argument_place = place;
@@ -6583,20 +6808,36 @@ impl MacroExpander {
                     .slotted_argument_fills
                     .get(&call.argument.syntax().id)
                     .copied();
-                self.apply_value_with_slots(callee, argument, call.syntax.span.clone(), fills_slots)
+                let target = self
+                    .call_targets
+                    .get(&call.syntax.id)
+                    .and_then(|ty| parse::compile_type_target(ty, &self.type_env))
+                    .or_else(|| self.call_target.clone());
+                let previous = std::mem::replace(&mut self.call_target, target);
+                let result = self.apply_value_with_slots(
+                    callee,
+                    argument,
+                    call.syntax.span.clone(),
+                    fills_slots,
+                );
+                self.call_target = previous;
+                result
             }
             Expression::Access(access) => {
-                if let Some((namespace, item, definition_module)) =
-                    qualified_macro_access_path(access)
-                    && let context = definition_module.map(ModuleId).unwrap_or(module)
-                    && let Some(target) = self.scopes[context.0].namespaces.get(&namespace).copied()
-                    && let Some(helper) = self.scopes[target.0].helpers.get(&item).cloned()
+                if let Accessor::Method(name) = &access.accessor {
+                    return Some(Value::Method(module, name.clone()));
+                }
+                if let Some(helper) = self.qualified_compile_helper(module, access)
                     && helper.binding.visibility == Visibility::Public
                 {
-                    // `F64.Pi` or `Real.floor` (with `F64 as Real`) reaches a
-                    // companion's members through the namespace its type
-                    // name maps to, like any other qualified helper.
                     return self.eval_helper_binding(helper, access.syntax.span.clone());
+                }
+                if let (Expression::Name(ty), Accessor::Name(member)) =
+                    (access.value.as_ref(), &access.accessor)
+                    && ty.name.chars().next().is_some_and(char::is_uppercase)
+                    && !environment.contains_key(&ty.name)
+                {
+                    return Some(Value::Method(module, member.clone()));
                 }
                 let mut value = self.eval_expression(module, &access.value, environment)?;
                 if let Value::Syntax(SyntaxValue::Call(call)) = value {
@@ -6626,6 +6867,26 @@ impl MacroExpander {
                             self.diagnostics.push(Diagnostic::new(
                                 access.syntax.span.clone(),
                                 "call syntax has no nominal representation",
+                            ));
+                            None
+                        }
+                    };
+                }
+                if let Value::Separated {
+                    elements,
+                    separator,
+                    trailing,
+                } = &value
+                    && let Accessor::Name(name) = &access.accessor
+                {
+                    return match name.as_str() {
+                        "elements" => Some(Value::Sequence(elements.clone().into())),
+                        "separator" => Some(separator.as_ref().clone()),
+                        "trailing" => Some(bool_value(*trailing)),
+                        _ => {
+                            self.diagnostics.push(Diagnostic::new(
+                                access.syntax.span.clone(),
+                                format!("separated syntax has no field `{name}`"),
                             ));
                             None
                         }
@@ -6749,11 +7010,20 @@ impl MacroExpander {
                 }
             }
             Expression::Loop(loop_) => {
-                self.diagnostics.push(Diagnostic::new(
-                    loop_.syntax.span.clone(),
-                    "loops are not supported during compile-time evaluation",
-                ));
-                None
+                let body = Expression::Block(loop_.body.clone());
+                loop {
+                    let result = self.eval_expression(module, &body, environment);
+                    if self.pending_return.is_some() {
+                        return None;
+                    }
+                    if let Some(value) = self.pending_break.take() {
+                        return Some(value);
+                    }
+                    if std::mem::take(&mut self.pending_continue) {
+                        continue;
+                    }
+                    result?;
+                }
             }
             Expression::Coro(coro) => {
                 self.diagnostics.push(Diagnostic::new(
@@ -6788,16 +7058,13 @@ impl MacroExpander {
                 None
             }
             Expression::Pipe(pipe) => {
-                self.diagnostics.push(Diagnostic::new(
-                    pipe.syntax.span.clone(),
-                    "`|>` is not available during compile-time macro evaluation",
-                ));
-                None
+                let lowered = lower_pipe_expression(pipe.clone(), &mut self.next_syntax_id);
+                self.eval_expression_target(module, &lowered, environment, self.call_target.clone())
             }
             Expression::Block(block) => {
                 let mut local = environment.clone();
                 let mut result = Value::Product(Vec::new(), false);
-                for item in &block.items {
+                for (index, item) in block.items.iter().enumerate() {
                     match item {
                         Item::Binding(binding) => {
                             let Some(value) = &binding.value else {
@@ -6824,7 +7091,10 @@ impl MacroExpander {
                                 }
                                 self.instantiate_contextual_quote(module, quote, &local, &expected)?
                             } else {
-                                self.eval_expression(module, value, &mut local)?
+                                let target = binding_signature(binding)
+                                    .as_ref()
+                                    .and_then(|ty| self.resolve_type(ty));
+                                self.eval_expression_target(module, value, &mut local, target)?
                             };
                             local.insert(
                                 binding.name.clone(),
@@ -6869,7 +7139,16 @@ impl MacroExpander {
                             }
                         }
                         Item::Expression(value) => {
-                            result = self.eval_expression(module, value, &mut local)?
+                            result = if index + 1 == block.items.len() {
+                                self.eval_expression_target(
+                                    module,
+                                    value,
+                                    &mut local,
+                                    self.call_target.clone(),
+                                )?
+                            } else {
+                                self.eval_expression(module, value, &mut local)?
+                            };
                         }
                         Item::Return(return_) => {
                             // `return` leaves the whole function, not just
@@ -6879,17 +7158,15 @@ impl MacroExpander {
                             return None;
                         }
                         Item::Break(break_) => {
-                            self.diagnostics.push(Diagnostic::new(
-                                break_.syntax.span.clone(),
-                                "`break` is not supported during compile-time evaluation",
-                            ));
+                            let value = match &break_.value {
+                                Some(value) => self.eval_expression(module, value, &mut local)?,
+                                None => Value::Product(Vec::new(), false),
+                            };
+                            self.pending_break = Some(value);
                             return None;
                         }
-                        Item::Continue(continue_) => {
-                            self.diagnostics.push(Diagnostic::new(
-                                continue_.syntax.span.clone(),
-                                "`continue` is not supported during compile-time evaluation",
-                            ));
+                        Item::Continue(_) => {
+                            self.pending_continue = true;
                             return None;
                         }
                         Item::Submodule(submodule) => {
@@ -7151,7 +7428,7 @@ impl MacroExpander {
                     let mut values = Vec::with_capacity(rest_values.len() + 1);
                     values.push(first_value.clone());
                     values.extend(rest_values.clone());
-                    return Some(Value::Sequence(values));
+                    return Some(Value::Sequence(values.into()));
                 }
                 Some(Value::Sequence(
                     elements.into_iter().map(|(_, value)| value).collect(),
@@ -7198,7 +7475,7 @@ impl MacroExpander {
                     Value::Product(elements, _) => {
                         elements.iter().map(|(_, value)| value.clone()).collect()
                     }
-                    Value::Sequence(elements) => elements.clone(),
+                    Value::Sequence(elements) => elements.to_vec(),
                     _ => {
                         self.diagnostics.push(Diagnostic::new(
                             span,
@@ -7254,7 +7531,7 @@ impl MacroExpander {
                         let (_, Value::Sequence(values)) = values.remove(0) else {
                             unreachable!("guarded sequence contents")
                         };
-                        DelimitedValueContents::Sequence(values)
+                        DelimitedValueContents::Sequence(values.into())
                     }
                     Value::Product(mut values, _)
                         if values.len() == 1 && matches!(values[0].1, Value::Separated { .. }) =>
@@ -7524,6 +7801,16 @@ impl MacroExpander {
         if let Some(intrinsic) = self.helper_intrinsic(&helper) {
             return Some(Value::Intrinsic(intrinsic));
         }
+        if helper.binding.value.is_none() && helper.binding.kind == BindingKind::Extern {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!(
+                    "`{}` is a runtime-only staple-intrinsic with no compile-time implementation",
+                    helper.binding.name
+                ),
+            ));
+            return None;
+        }
         if matches!(helper.binding.value, Some(Expression::Function(_))) {
             return Some(Value::Helper(helper.module, helper.binding));
         }
@@ -7689,13 +7976,80 @@ impl MacroExpander {
     ) -> Option<Value> {
         let place = self.argument_place.take();
         match callee {
+            Value::Method(module, name) => {
+                let callee = self.resolve_method(module, &name, &argument, span.clone())?;
+                self.apply_value_inner(callee, argument, span, fills_slots)
+            }
+            Value::TraitMember(key, member, explicit, pending) => {
+                self.argument_place = place;
+                self.apply_trait_member(
+                    key,
+                    member,
+                    argument,
+                    self.call_target.clone(),
+                    explicit,
+                    pending,
+                    span,
+                )
+            }
+            Value::TypeApplied(callee, arguments) => match *callee {
+                Value::TraitMember(key, member, _, pending) => {
+                    self.argument_place = place;
+                    self.apply_trait_member(
+                        key,
+                        member,
+                        argument,
+                        self.call_target.clone(),
+                        arguments,
+                        pending,
+                        span,
+                    )
+                }
+                Value::Method(module, name) => {
+                    let mut value = self.resolve_method(module, &name, &argument, span.clone())?;
+                    self.bind_type_arguments(&mut value, &arguments);
+                    self.apply_value_inner(value, argument, span, fills_slots)
+                }
+                Value::Helper(module, binding) => {
+                    let mut value =
+                        self.eval_helper_value(module, binding.value.as_ref()?, span.clone())?;
+                    self.bind_type_arguments(&mut value, &arguments);
+                    self.apply_value_inner(value, argument, span, fills_slots)
+                }
+                mut value => {
+                    self.bind_type_arguments(&mut value, &arguments);
+                    if let Value::Nominal(name, _) = value {
+                        if matches!(
+                            name.as_str(),
+                            "Ident"
+                                | "CallExpr"
+                                | "StringExpr"
+                                | "BindingPattern"
+                                | "NominalPattern"
+                                | "ModifiedItem"
+                                | "Sequence"
+                                | "Separated"
+                                | "Parenthesized"
+                                | "Bracketed"
+                                | "Angled"
+                                | "Braced"
+                        ) {
+                            return self.construct_syntax(ModuleId(0), &name, argument, span);
+                        }
+                        return Some(Value::Nominal(name, Box::new(argument)));
+                    }
+                    self.apply_value_inner(value, argument, span, fills_slots)
+                }
+            },
             Value::Function {
                 module,
                 mut function,
                 mut environment,
                 quote_result,
-                type_env,
+                result_target,
+                mut type_env,
             } => {
+                self.bind_function_types(&function, &argument, &mut type_env);
                 // A slotted function is curried by juxtaposed calls: after
                 // `F64.min a`, the remaining `b` is still awaited. When the
                 // static checker saw one argument fill every slot, bind the
@@ -7742,6 +8096,7 @@ impl MacroExpander {
                         },
                         environment,
                         quote_result,
+                        result_target,
                         type_env,
                     });
                 }
@@ -7763,7 +8118,15 @@ impl MacroExpander {
                     None => self.quote_context.take(),
                 };
                 let previous_env = std::mem::replace(&mut self.type_env, type_env);
-                let result = self.eval_expression(module, &function.body, &mut environment);
+                let result = match result_target {
+                    Some(target) => self.eval_expression_target(
+                        module,
+                        &function.body,
+                        &mut environment,
+                        Some(target),
+                    ),
+                    None => self.eval_expression(module, &function.body, &mut environment),
+                };
                 self.type_env = previous_env;
                 self.quote_context = previous_context;
                 // A `?` or `return` leaves this function with its value.
@@ -7823,7 +8186,11 @@ impl MacroExpander {
         binary: &staple_syntax::BinaryExpression,
         environment: &mut Environment,
     ) -> Option<Value> {
-        let lowered = lower_binary_expression(binary.clone(), &mut self.next_syntax_id, StdModules::default());
+        let lowered = lower_binary_expression(
+            binary.clone(),
+            &mut self.next_syntax_id,
+            StdModules::default(),
+        );
         self.eval_expression(module, &lowered, environment)
     }
 
@@ -8015,9 +8382,12 @@ impl MacroExpander {
             }
             other => {
                 let description = match other {
-                    Value::Function { .. } | Value::Helper(..) | Value::Intrinsic(_) => {
-                        "a function value"
-                    }
+                    Value::Function { .. }
+                    | Value::Helper(..)
+                    | Value::Intrinsic(_)
+                    | Value::TraitMember(..)
+                    | Value::Method(..)
+                    | Value::TypeApplied(..) => "a function value",
                     Value::Stream { .. } => "a parse stream",
                     Value::Syntax(_) => "a syntax value",
                     Value::Sequence(_) => "a sequence value",
@@ -8906,16 +9276,20 @@ fn with_curried_macro_value(
     let first = parameters.remove(0);
     let mut body = std::mem::replace(
         &mut function.body,
-        Box::new(Expression::Product(staple_syntax::ProductExpression::empty())),
+        Box::new(Expression::Product(
+            staple_syntax::ProductExpression::empty(),
+        )),
     );
     for pattern in parameters.into_iter().rev() {
-        body = Box::new(Expression::Function(Box::new(staple_syntax::FunctionExpression {
-            syntax: freshened_syntax(&function.syntax, next_syntax_id),
-            generics: None,
-            pattern,
-            effect_lower_bound: None,
-            body,
-        })));
+        body = Box::new(Expression::Function(Box::new(
+            staple_syntax::FunctionExpression {
+                syntax: freshened_syntax(&function.syntax, next_syntax_id),
+                generics: None,
+                pattern,
+                effect_lower_bound: None,
+                body,
+            },
+        )));
     }
     function.pattern = first;
     function.body = body;
@@ -9309,7 +9683,7 @@ fn delimiter_argument_value(
         }
         DelimitedMetaContents::Sequence(element) => {
             match_sequence_contents(syntax, first + 1, last, element, next_syntax_id)
-                .map(DelimitedValueContents::Sequence)
+                .map(|values| DelimitedValueContents::Sequence(values.into()))
         }
         DelimitedMetaContents::Separated { element, separator } => {
             match_separated_contents(syntax, first + 1, last, element, separator, next_syntax_id)
@@ -9533,7 +9907,7 @@ fn match_slotted_contents(
         let checkpoint = *next_syntax_id;
         if let Some(mut values) = match_slotted_contents(parent, cursor, end, rest, next_syntax_id)
         {
-            values.insert(0, (None, Value::Sequence(Vec::new())));
+            values.insert(0, (None, Value::Sequence(SequenceValue::default())));
             return Some(values);
         }
         *next_syntax_id = checkpoint;
@@ -9706,7 +10080,7 @@ fn match_syntax_fragment(
         MetaType::Sequence(element) => {
             let values =
                 match_sequence_contents(syntax, 0, syntax.tokens().len(), element, next_syntax_id)?;
-            return Some(Value::Sequence(values));
+            return Some(Value::Sequence(values.into()));
         }
         MetaType::TypeParameter | MetaType::TypeParameters => {
             let (value, consumed) =
@@ -11082,6 +11456,25 @@ fn compile_field_type(ty: &CompileType, accessor: &Accessor) -> Option<CompileTy
     let Accessor::Name(name) = accessor else {
         return None;
     };
+    if let CompileType::Written(ty) = ty
+        && let Some((element, separator)) = separated_meta_type(ty)
+    {
+        return match name.as_str() {
+            "elements" => Some(CompileType::Meta(MetaType::Sequence(Box::new(element)))),
+            "separator" => Some(CompileType::Meta(separator)),
+            "trailing" => Some(CompileType::Bool),
+            _ => None,
+        };
+    }
+    if let CompileType::Written(ty) = ty
+        && type_contains_named(ty, "Separated")
+    {
+        return match name.as_str() {
+            "elements" | "separator" => Some(CompileType::Unknown),
+            "trailing" => Some(CompileType::Bool),
+            _ => None,
+        };
+    }
     match (ty, name.as_str()) {
         (CompileType::Meta(MetaType::TypeParameters), "parameters") => Some(CompileType::Meta(
             MetaType::Sequence(Box::new(MetaType::TypeParameter)),
@@ -12471,6 +12864,7 @@ fn callee_takes_mut(callee: &Value) -> bool {
         Value::Helper(_, binding) => matches!(&binding.value,
             Some(Expression::Function(function)) if mutable_parameter_name(&function.pattern).is_some()),
         Value::Intrinsic(intrinsic) => intrinsic.takes_mut(),
+        Value::TypeApplied(value, _) => callee_takes_mut(value),
         _ => false,
     }
 }
@@ -12668,7 +13062,9 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                     DelimitedValueContents::Product(values) => {
                         Value::Product(values.clone(), false)
                     }
-                    DelimitedValueContents::Sequence(values) => Value::Sequence(values.clone()),
+                    DelimitedValueContents::Sequence(values) => {
+                        Value::Sequence(values.clone().into())
+                    }
                     DelimitedValueContents::Separated {
                         elements,
                         separator,
@@ -12691,13 +13087,19 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                 && pattern.name == "Sequence"
                 && let Value::Sequence(values) = value
             {
+                // Testing the empty arm must not materialize the entire tail.
+                if let Pattern::Product(product) = pattern.argument.as_ref()
+                    && product.elements.is_empty()
+                {
+                    return values.is_empty();
+                }
                 if let Pattern::Product(product) = pattern.argument.as_ref()
                     && let [Pattern::Binding(first), Pattern::Binding(rest)] =
                         product.elements.as_slice()
                     && first.name == "first"
                     && rest.name == "rest"
                 {
-                    let Some((head, tail)) = values.split_first() else {
+                    let Some((head, _)) = values.split_first() else {
                         return false;
                     };
                     return bind_pattern(
@@ -12705,7 +13107,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                         Value::Product(
                             vec![
                                 (Some("first".to_owned()), head.clone()),
-                                (Some("rest".to_owned()), Value::Sequence(tail.to_vec())),
+                                (Some("rest".to_owned()), Value::Sequence(values.tail())),
                             ],
                             false,
                         ),
@@ -12734,7 +13136,10 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                     Value::Product(
                         vec![
                             (Some("separator".to_owned()), *separator),
-                            (Some("elements".to_owned()), Value::Sequence(elements)),
+                            (
+                                Some("elements".to_owned()),
+                                Value::Sequence(elements.into()),
+                            ),
                             (Some("trailing".to_owned()), bool_value(trailing)),
                         ],
                         false,
@@ -12859,7 +13264,7 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
             name: name.to_owned(),
         }))
     };
-    let parameters = declaration
+    let parameters: Vec<_> = declaration
         .type_parameters
         .iter()
         .flat_map(staple_syntax::TypeParameterPattern::names)
@@ -12906,7 +13311,7 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
             ),
             (
                 Some("type_parameters".to_owned()),
-                Value::Sequence(parameters),
+                Value::Sequence(parameters.into()),
             ),
             (Some("underlying".to_owned()), underlying),
         ],
@@ -12915,7 +13320,7 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
 }
 
 fn modified_item_value(modified: &staple_syntax::ModifiedItem) -> Value {
-    let modifiers = modified
+    let modifiers: Vec<_> = modified
         .modifiers
         .iter()
         .enumerate()
@@ -12928,7 +13333,10 @@ fn modified_item_value(modified: &staple_syntax::ModifiedItem) -> Value {
         .collect();
     Value::Product(
         vec![
-            (Some("modifiers".to_owned()), Value::Sequence(modifiers)),
+            (
+                Some("modifiers".to_owned()),
+                Value::Sequence(modifiers.into()),
+            ),
             (
                 Some("item".to_owned()),
                 Value::Syntax(SyntaxValue::Item(modified.item.clone())),
@@ -13399,9 +13807,31 @@ fn substitute_splices(
             }
         }
         Expression::Product(product) => {
-            for element in &mut product.elements {
-                element.value = substitute_splices(&element.value, environment, diagnostics)?;
+            let mut expanded = Vec::new();
+            for mut element in std::mem::take(&mut product.elements) {
+                if let Expression::Splice(splice) = &element.value
+                    && splice.repeated
+                    && let Some(Value::Sequence(values)) =
+                        environment.get(&splice.name).map(EnvironmentBinding::get)
+                {
+                    for value in values {
+                        let Value::Syntax(syntax) = value else {
+                            diagnostics.push(Diagnostic::new(
+                                splice.syntax.span.clone(),
+                                "a repeated expression splice requires syntax values",
+                            ));
+                            return None;
+                        };
+                        let mut entry = element.clone();
+                        entry.value = syntax.into_expression()?;
+                        expanded.push(entry);
+                    }
+                } else {
+                    element.value = substitute_splices(&element.value, environment, diagnostics)?;
+                    expanded.push(element);
+                }
             }
+            product.elements = expanded;
         }
         Expression::RepeatedProduct(repeated) => {
             *repeated.value = substitute_splices(&repeated.value, environment, diagnostics)?;
@@ -13800,7 +14230,7 @@ fn substitute_type(
                     | DelimitedValueContents::Product(values) => {
                         values.into_iter().map(|(_, value)| value).collect()
                     }
-                    DelimitedValueContents::Sequence(values) => values,
+                    DelimitedValueContents::Sequence(values) => values.to_vec(),
                     DelimitedValueContents::Separated { .. } => {
                         diagnostics.push(Diagnostic::new(
                             splice.syntax.span.clone(),
@@ -14165,7 +14595,11 @@ fn substitute_item(
                 environment,
                 diagnostics,
             )?;
-            substitute_type_parameter_list(&mut submodule.type_parameters, environment, diagnostics)?;
+            substitute_type_parameter_list(
+                &mut submodule.type_parameters,
+                environment,
+                diagnostics,
+            )?;
             for bound in &mut submodule.trait_bounds {
                 substitute_trait_bound(bound, environment, diagnostics)?;
             }
