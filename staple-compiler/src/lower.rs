@@ -5356,7 +5356,7 @@ impl LoweredProgram {
         }
         let syntax = function.body.syntax();
         Ok(self.patterns.push(LoweredPattern {
-            take_unique: module.takes_unique(syntax.id),
+            take_unique: false,
             origin: Origin {
                 syntax: syntax.id,
                 span: syntax.span.clone(),
@@ -5380,7 +5380,55 @@ impl LoweredProgram {
         pattern: &Pattern,
         subject: &CheckedType,
     ) -> Result<PatternId, Diagnostic> {
+        self.lower_dereferenced_pattern(module, pattern, subject, 0)
+    }
+
+    fn lower_dereferenced_pattern(
+        &mut self,
+        module: &TypedModule,
+        pattern: &Pattern,
+        subject: &CheckedType,
+        depth: usize,
+    ) -> Result<PatternId, Diagnostic> {
         let syntax = pattern.syntax();
+        if let Some(handle) = module.pattern_dereferences(syntax.id).get(depth) {
+            let (builtin, payload) = match handle {
+                CheckedType::Shared(payload) => (BuiltinType::Shared, payload),
+                CheckedType::Unique(payload) => (BuiltinType::Unique, payload),
+                _ => unreachable!("checked dereference must be a handle"),
+            };
+            let target = module.resolved().type_for_builtin(builtin);
+            let shape = PatternPlanShape::Nominal { target };
+            let (test, _) = pattern_test_plan(
+                subject,
+                subject,
+                &shape,
+                &|id| module.resolved().builtin_type(id),
+                module.string_representation(),
+            )
+            .map_err(|message| Diagnostic::new(syntax.span.clone(), message))?;
+            let argument = self.lower_dereferenced_pattern(module, pattern, payload, depth + 1)?;
+            return Ok(self.patterns.push(LoweredPattern {
+                take_unique: builtin == BuiltinType::Unique && module.takes_unique(syntax.id),
+                origin: Origin {
+                    syntax: syntax.id,
+                    span: syntax.span.clone(),
+                },
+                value_type: subject.clone(),
+                kind: LoweredPatternKind::Nominal {
+                    target,
+                    name: if builtin == BuiltinType::Unique {
+                        "Unique"
+                    } else {
+                        "Shared"
+                    }
+                    .to_owned(),
+                    moved: false,
+                    argument,
+                },
+                test,
+            }));
+        }
         // A pattern checked against a `from` subject's representation lowers
         // exactly like the subject type's own nominal pattern around it.
         if let Some(id) = module.pattern_projection(syntax.id)
@@ -5401,7 +5449,8 @@ impl LoweredProgram {
             .map_err(|message| Diagnostic::new(syntax.span.clone(), message))?;
             let argument = self.lower_unprojected_pattern(module, pattern, &children[0])?;
             return Ok(self.patterns.push(LoweredPattern {
-                take_unique: module.takes_unique(syntax.id),
+                take_unique: test.identity == LoweredPatternIdentity::Unique
+                    && module.takes_unique(syntax.id),
                 origin: Origin {
                     syntax: syntax.id,
                     span: syntax.span.clone(),
@@ -5519,7 +5568,8 @@ impl LoweredProgram {
             }
         };
         Ok(self.patterns.push(LoweredPattern {
-            take_unique: module.takes_unique(syntax.id),
+            take_unique: test.identity == LoweredPatternIdentity::Unique
+                && module.takes_unique(syntax.id),
             origin: Origin {
                 syntax: syntax.id,
                 span: syntax.span.clone(),
@@ -14058,6 +14108,7 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::BufferTransfer
         | Intrinsic::BufferClone
         | Intrinsic::SharedReplace
+        | Intrinsic::UniqueReplace
         | Intrinsic::UniqueIntoRaw
         | Intrinsic::UniqueFromRaw => None,
     }
@@ -15840,7 +15891,6 @@ fn validate_checked_module(module: &TypedModule) -> Vec<Diagnostic> {
         })
         .collect()
 }
-
 
 /// The position of `Bool`'s `True` alternative in its sum. The alternative is
 /// found by its declaration: a checked wrapper's name is a display name, which
@@ -20340,11 +20390,12 @@ mod tests {
         concat!(
             "use std.shared.(Shared)\n",
             "let pair_add: (x: I32; y: I32) -> I32 = (x; y) => x + y\n",
+            "let replace: (mut Shared<I32>; move I32) -> I32 = (mut reference; move value) => Shared.replace (reference, value)\n",
             "type Defaulted wrap (String, x: I32 = 0, y: I32 = 0)\n",
             "def juxtaposed_samples: () -> I32 = () => {\n",
             "  let chained: I32 = pair_add 1 2\n",
             "  let mut reference: Shared<I32> = Shared 0\n",
-            "  let replaced: I32 = Shared.replace reference 1\n",
+            "  let replaced: I32 = replace reference 1\n",
             "  chained\n",
             "}\n",
             "let via_value = Defaulted\n",
@@ -20383,8 +20434,8 @@ mod tests {
         });
         assert_eq!(chains.len(), 2, "the fixture has two multi-layer chains");
 
-        // Both chains call closures: `Shared.replace` is an ordinary wrapper
-        // over its intrinsic, so it is called like any other `def`.
+        // Both chains call closures. The slotted adapter around the public
+        // non-slotted `Shared.replace` preserves a mutable first argument.
         let mut indirect_chains = Vec::new();
         for chain in &chains {
             let lowered = program
@@ -20431,7 +20482,7 @@ mod tests {
                 .iter()
                 .any(|lowered| lowered.arguments[0].pass_mode
                     == LoweredArgumentPassMode::MutablePlace),
-            "`Shared.replace` mutates its reference in place"
+            "the `Shared.replace` adapter mutates its reference in place"
         );
     }
 
@@ -20848,7 +20899,7 @@ mod tests {
             "  let external_result: I32 = external_identity (1)\n",
             "  let chained: I32 = pair_add 1 2\n",
             "  let mut reference: Shared<I32> = Shared 0\n",
-            "  let replaced: I32 = Shared.replace reference 1\n",
+            "  let replaced: I32 = Shared.replace (reference, 1)\n",
             "  let arithmetic: I32 = 1 + 2\n",
             "  indirect\n",
             "}\n",

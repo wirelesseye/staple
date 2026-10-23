@@ -8576,7 +8576,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 Ok(pointer.as_any_value_enum())
             }
-            IntrinsicFunction::SharedReplace => {
+            IntrinsicFunction::SharedReplace | IntrinsicFunction::UniqueReplace => {
                 // Read the old payload, store the replacement, and return the
                 // old value (its drop is the surrounding site's recorded
                 // cleanup).

@@ -28,7 +28,9 @@ companion<T> SharedBuffer<T> {
     /// Returns the number of elements in the buffer.
     pub def length = value: SharedBuffer<T> => USize :: __shared_buffer_length value
 
-    /// Borrows an element by position, or `None` if out of bounds.
+    /// Returns an owned shared handle to an element, or `None` if out of bounds.
+    /// The handle keeps the buffer allocation alive and observes replacements
+    /// of the element; it does not take ownership of the element itself.
     pub def get_shared = (buffer: SharedBuffer<T>; position: USize) => Option<Shared<T>> :: {
         if (position < SharedBuffer.length buffer) {
             Some (SharedBuffer.get_shared_unchecked buffer position)
@@ -37,7 +39,9 @@ companion<T> SharedBuffer<T> {
         }
     }
 
-    /// Borrows an element by position, trapping if out of bounds.
+    /// Returns an owned shared handle to an element, trapping if out of bounds.
+    /// The handle keeps the buffer allocation alive and observes replacements
+    /// of the element; it does not take ownership of the element itself.
     pub def get_shared_unchecked = (buffer: SharedBuffer<T>; position: USize) =>
         Shared<T> :: __shared_buffer_get_shared (buffer, position)
 
@@ -53,7 +57,7 @@ companion<T> SharedBuffer<T> {
     /// Replaces the element at a position and returns the old value, trapping if out of bounds.
     pub def set_unchecked = (mut buffer: SharedBuffer<T>; position: USize; move value: T) => T :: {
         let mut reference = SharedBuffer.get_shared_unchecked buffer position
-        Shared.replace reference value
+        Shared.replace (reference, value)
     }
 }
 

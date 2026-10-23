@@ -29,7 +29,7 @@ fn check(source: &str) -> Result<staple_compiler::TypedModule, Vec<String>> {
     TypeChecker::new().check(resolved).map_err(|errors| {
         errors
             .into_iter()
-            .map(|diagnostic| diagnostic.message)
+            .map(|diagnostic| format!("{diagnostic:?}"))
             .collect()
     })
 }
@@ -173,4 +173,195 @@ fn matches_binding_a_non_copy_payload_still_require_ownership() {
             .any(|message| message.contains("cannot move out of a borrowed value")),
         "{errors:?}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn automatic_handle_patterns_borrow_or_consume_on_demand() {
+    let source = format!(
+        "{TAG}{}",
+        concat!(
+            "use std.unique.(Unique)\n",
+            "use std.shared.(Shared)\n",
+            "def inspect = value: Tag => I32 :: match value { Tag id => id }\n",
+            "def read = value: Unique<Option<Tag>> => I32 :: match value { Some tag => inspect tag, None() => 0 }\n",
+            "def extract = move value: Unique<Option<Tag>> => Tag :: match value { Some tag => tag, None() => Tag 0 }\n",
+            "def read_shared = value: Shared<Option<Tag>> => I32 :: match value { Some tag => inspect tag, None() => 0 }\n",
+            "def scoped = () => () :: {\n",
+            "  let initial: Option<Tag> = Some (Tag 1)\n",
+            "  let owner = Unique initial\n",
+            "  printf (c_string \"read %d %d\\n\", read owner, read owner)\n",
+            "  let extracted = extract owner\n",
+            "  let initial_shared: Option<Tag> = Some (Tag 2)\n",
+            "  let shared = Shared initial_shared\n",
+            "  printf (c_string \"shared %d\\n\", read_shared shared)\n",
+            "  let mut scalar = Unique 3\n",
+            "  let old = Unique.replace (scalar, 4)\n",
+            "  let mut cell = Shared 5\n",
+            "  let previous = Shared.replace (cell, 6)\n",
+            "  printf (c_string \"replace %d %d %d %d\\n\", old, previous, Unique.get scalar, Shared.get cell)\n",
+            "  ()\n",
+            "}\n",
+            "scoped ()\n",
+        )
+    );
+    assert_eq!(
+        run(&source),
+        "read 1 1\nshared 2\nreplace 3 5 4 6\ndropped 1\n"
+    );
+}
+
+#[test]
+fn shared_payloads_cannot_be_extracted_by_automatic_patterns() {
+    let errors = check(concat!(
+        "use std.shared.(Shared)\n",
+        "type Token wrap I32\n",
+        "impl !Copy Token {}\n",
+        "def extract = value: Shared<Option<Token>> => Token :: match value { Some token => token, None() => Token 0 }\n",
+    )).err().expect("Shared payload extraction must fail");
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.contains("cannot move out of a borrowed value")),
+        "{errors:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn consuming_handle_patterns_drop_unselected_fields_once() {
+    let source = format!(
+        "{TAG}{}",
+        concat!(
+            "use std.unique.(Unique)\n",
+            "def take: move Unique<(Tag, Tag)> -> Tag = move owner => match owner { (first, _) => first }\n",
+            "def scoped = () => () :: {\n",
+            "  let extracted = take (Unique.new (Tag 1, Tag 2))\n",
+            "  printf (c_string \"extracted\\n\")\n",
+            "  let mut owner = Unique.new (Tag 3)\n",
+            "  let previous = Unique.replace (owner, Tag 4)\n",
+            "  let current = Unique.into_inner owner\n",
+            "  printf (c_string \"replaced\\n\")\n",
+            "  ()\n",
+            "}\n",
+            "scoped ()\n",
+        )
+    );
+    assert_eq!(
+        run(&source),
+        "dropped 2\nextracted\nreplaced\ndropped 4\ndropped 3\ndropped 1\n"
+    );
+}
+
+#[test]
+fn borrowed_matches_protect_their_owner() {
+    for body in [
+        "drop owner; inspect tag",
+        "Unique.replace (owner, Some (Tag 2)); inspect tag",
+    ] {
+        let source = format!(
+            "{TAG}\nuse std.unique.(Unique)\ndef inspect = value: Tag => () :: ()\ndef bad = () => {{ let initial: Option<Tag> = Some (Tag 1); let mut owner = Unique initial; match owner {{ Some tag => {{ {body} }}, None() => () }} }}\n"
+        );
+        let errors = check(&source).err().expect("owner must remain borrowed");
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("match borrows its payload")),
+            "{errors:?}"
+        );
+    }
+}
+
+#[test]
+fn replace_rejects_slotted_application() {
+    for ty in ["Shared", "Unique"] {
+        let module = ty.to_ascii_lowercase();
+        for call in [format!("{ty}.replace value 2"), "value |> replace 2".to_owned()] {
+            let source = format!(
+                "use std.{module}.({ty})\ndef bad = () => {{ let mut value = {ty} 1; {call} }}\n"
+            );
+            assert!(check(&source).is_err(), "{ty}.replace must require a product argument");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn nested_handle_patterns_work_with_dynamic_payloads() {
+    let source = format!(
+        "{TAG}{}",
+        concat!(
+            "use std.unique.(Unique)\n",
+            "use std.shared.(Shared)\n",
+            "def extract: <T where Sized T> move Unique<Unique<T>> -> T = <T where Sized T> move owner => match owner { value: T => value }\n",
+            "def swap: <T where Sized T> (mut Unique<T>, move T) -> T = <T where Sized T> (mut owner, move value) => Unique.replace (owner, value)\n",
+            "def read = owner: Unique<Shared<Option<I32>>> => I32 :: match owner { Shared (Some value) => value, Shared None() => 0 }\n",
+            "def scoped = () => () :: {\n",
+            "  let initial: Option<I32> = Some 42\n",
+            "  let nested = Unique (Shared initial)\n",
+            "  printf (c_string \"nested %d %d\\n\", read nested, read nested)\n",
+            "  let extracted = extract (Unique (Unique (Tag 1)))\n",
+            "  let mut owner = Unique (Tag 2)\n",
+            "  let previous = swap (owner, Tag 3)\n",
+            "  ()\n",
+            "}\n",
+            "scoped ()\n",
+        )
+    );
+    assert_eq!(
+        run(&source),
+        "nested 42 42\ndropped 2\ndropped 3\ndropped 1\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn handle_projection_composes_with_implicit_wrapper_projection() {
+    let source = format!(
+        "{TAG}{}",
+        concat!(
+            "use std.unique.(Unique)\n",
+            "type State from Tag | I32\n",
+            "def extract: move Unique<State> -> Tag = move owner => match owner { tag: Tag => tag, _: I32 => Tag 0 }\n",
+            "def scoped = () => () :: {\n",
+            "  let state: State = Tag 1\n",
+            "  let value = extract (Unique state)\n",
+            "  ()\n",
+            "}\n",
+            "scoped ()\n",
+        )
+    );
+    assert_eq!(run(&source), "dropped 1\n");
+}
+
+#[test]
+fn shared_payload_borrows_reject_replacement_through_an_alias() {
+    let source = format!("{TAG}{}", concat!(
+        "use std.shared.(Shared)\n",
+        "def inspect = tag: Tag => () :: ()\n",
+        "def bad = () => {\n",
+        "  let initial: Option<Tag> = Some (Tag 1)\n",
+        "  let shared = Shared initial\n",
+        "  let mut alias = shared\n",
+        "  match shared { Some tag => { let replacement: Option<Tag> = None; Shared.replace (alias, replacement); inspect tag }, None() => () }\n",
+        "}\n",
+    ));
+    let errors = check(&source).err().expect("alias replacement must be rejected during a payload borrow");
+    assert!(errors.iter().any(|message| message.contains("match borrows its payload")), "{errors:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn mutable_non_copy_pattern_bindings_require_ownership() {
+    let source = format!("{TAG}{}", concat!(
+        "use std.unique.(Unique)\n",
+        "def scoped = () => () :: {\n",
+        "  let initial: Option<Tag> = Some (Tag 1)\n",
+        "  let owner = Unique initial\n",
+        "  match owner { Some mut tag => { tag = Tag 2; () }, None() => () }\n",
+        "  ()\n",
+        "}\n",
+        "scoped ()\n",
+    ));
+    assert_eq!(run(&source), "dropped 1\ndropped 2\n");
 }

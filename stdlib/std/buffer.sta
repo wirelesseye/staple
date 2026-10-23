@@ -52,7 +52,7 @@ companion<T> Buffer<T> {
     /// Replaces the element at a position and returns the old value, trapping if out of bounds.
     pub def set_unchecked = (mut buffer: Buffer<T>; position: USize; move value: T) => T :: {
         let mut reference = __buffer_get (buffer, position)
-        Shared.replace reference value
+        Shared.replace (reference, value)
     }
 
     /// Moves the elements of a fixed array into a new buffer whose capacity is the array length.

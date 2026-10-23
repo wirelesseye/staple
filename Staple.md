@@ -2978,8 +2978,8 @@ over individual elements.
 Without the marker, a nominal destructure — `Box value => ...` — is an
 ordinary borrow: its non-`Copy` fields are borrowed too, and moving one out is
 an error. Mark the whole pattern `move` to take ownership of its fields, or
-bind the parameter and destructure it in the body, since a `match` subject is
-consumed.
+bind a moved parameter and destructure it in the body. Match bindings borrow
+unless their uses demand ownership.
 
 `move` is always legal on a `Copy` parameter, where it is a no-op: copying
 and moving a `Copy` value are indistinguishable, so `move T` and plain `T`
@@ -2995,13 +2995,21 @@ def identity = <T> move value: T => T :: value
 
 Constructs that consume a value outright — `drop`, string interpolation,
 indexed assignment's replacement value, and a constructor call's arguments —
-always require ownership. A match expression consumes its subject when the
-subject is not a plain name, or when some arm's pattern takes part of it:
-binding a non-`Copy` value or destructuring a `Unique`. A match whose patterns
-only inspect a named subject — wildcards, typed wildcards, singletons,
-literals, nominal selections, and `Copy` bindings — borrows it instead, so a
-borrowed parameter can be matched with `Ok _ => ...` and an owned local stays
-usable, and is dropped by its binding as usual. Capturing an
+always require ownership. Match bindings borrow non-`Copy` values by default.
+Passing a binding to a `move` parameter, returning it, storing it in owned
+storage, or dropping it requires ownership. If any arm requires ownership,
+the whole match consumes its subject on every path. A borrowed subject cannot
+satisfy that demand. `Copy` bindings copy their values.
+
+Patterns automatically dereference `Unique<T>` and `Shared<T>` when their
+shape selects the payload rather than the handle. Untyped bindings and
+wildcards match the handle itself. Owned `Unique` payloads can be extracted
+when a binding needs ownership; borrowed `Unique` payloads and all `Shared`
+payloads can only be borrowed or copied. Extracting a `Unique` frees its
+allocation and drops unused owned fields. Moving or mutating an owner while
+an arm borrows its payload is rejected. Shared alias checks are conservative:
+while a named shared subject's non-`Copy` payload is borrowed, mutation through
+other shared handles is also rejected. Capturing an
 ordinary non-`Copy` parameter in a curried closure is the exception: the
 closure keeps a shared borrow of that parameter. Capturing a `mut` parameter
 similarly keeps a mutable borrow; `mut` does not transfer ownership.
@@ -4495,9 +4503,13 @@ validation when the caller knows the bytes are valid UTF-8. The underlying
 
 `Shared<T>` is a garbage-collected reference to a value of type `T`, declared in
 `std.shared` and imported with `use std.shared.(Shared)`. Its standard
-declaration is `pub type Shared<T where ?Sized T> wrap pub T`, so its payload may be
-sized or unsized while the reference value itself always has a known
-representation.
+declaration is `@sized_opaque pub type Shared<T where ?Sized T> opaque`:
+its payload may be sized or unsized while the handle has a compiler-supplied
+representation. `Unique<T>` is likewise opaque and owns its payload affinely.
+`Shared.new` and `Unique.new` allocate payloads; the compiler-provided
+`Shared value` and `Unique value` construction forms remain available.
+`get` copies a payload when `Copy T`. `Unique.into_inner` consumes an owner,
+returns its payload, and frees its allocation without dropping that payload.
 Constructing `Shared value` copies or moves `value` into a managed allocation;
 copying a `Shared` copies only its non-null handle. Product fields and indices,
 including bracket indexing and index assignment, can be accessed and assigned
@@ -4516,13 +4528,17 @@ point.x = 30
 let Shared (captured_x, captured_y) = point
 ```
 
-The companion method `Shared.replace: <T> (mut Shared<T>; move T) -> T` replaces a whole
+The companion method `Shared.replace: <T> (mut Shared<T>, move T) -> T` replaces a whole
 fixed payload and returns the previous value:
 
 ```staple
 let mut value = Shared 10
-let previous = Shared.replace value 20
+let previous = Shared.replace (value, 20)
 ```
+
+`Unique.replace: <T> (mut Unique<T>, move T) -> T` has the same replacement
+semantics for unique owners. Both methods take a non-slotted product argument;
+they cannot be partially applied as `reference |> replace value`.
 
 `Shared` follows the ordinary literal representation rules when nested inside a
 nominal type. For example, this declaration retains both constructor layers:
@@ -4565,11 +4581,13 @@ it directly, trapping when out of bounds. `SharedBuffer.set` replaces an
 element through a `mut` handle binding, returning the old value as `Some<T>`, or
 `None` (dropping the new value) for an out-of-bounds position;
 `SharedBuffer.set_unchecked` traps instead and also returns the old value.
-`SharedBuffer.get_shared: <T> (SharedBuffer<T>; USize) -> Option<Shared<T>>` returns a
-reference to an element, or `None` when out of bounds, and
-`SharedBuffer.get_shared_unchecked: <T> (SharedBuffer<T>; USize) -> Shared<T>` borrows
-an element by position, trapping when out of bounds; these give access to
-non-`Copy` elements. Literal and variable indexing perform runtime bounds
+`SharedBuffer.get_shared: <T> (SharedBuffer<T>; USize) -> Option<Shared<T>>` returns an
+owned shared handle to an element, or `None` when out of bounds, and
+`SharedBuffer.get_shared_unchecked: <T> (SharedBuffer<T>; USize) -> Shared<T>` returns
+such a handle by position, trapping when out of bounds. Each handle keeps the
+buffer allocation alive and observes replacements of its element; the buffer
+continues to own the element itself. These handles give access to non-`Copy`
+elements. Literal and variable indexing perform runtime bounds
 checks through the standard library's `Index`/`MutateIndex` implementations.
 Where `Copy T`, the standard library also implements `IntoIterator`/`Iterator`
 for `SharedBuffer<T>` through `SharedBufferIter<T>`, so `for item in values`
@@ -4927,8 +4945,11 @@ an explicit conversion. Typed null pointers infer their pointee from context.
 
 `RawPtr.load pointer` and `RawMutPtr.load pointer` copy a value from memory.
 `RawMutPtr.store pointer value` overwrites memory and returns `()`, without
-requiring a mutable pointer binding or dropping the previous value. Both
-operations require a sized, `Copy` pointee. They perform ordinary, non-atomic
+requiring a mutable pointer binding or dropping the previous value. Loads
+require a sized, `Copy` pointee; stores accept any sized pointee and move the
+incoming value into memory. The caller must arrange for that value to be dropped
+or moved out exactly once. Overwriting an initialized resource without first
+releasing it can leak that resource. Both operations perform ordinary, non-atomic
 memory accesses without runtime validation: callers must provide valid, aligned
 memory with a live allocation; loads require an initialized valid value and
 stores require writable memory. Opaque pointers provide neither operation.

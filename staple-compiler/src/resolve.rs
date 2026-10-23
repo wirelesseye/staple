@@ -441,6 +441,7 @@ pub enum IntrinsicFunction {
     BufferTransfer,
     BufferClone,
     SharedReplace,
+    UniqueReplace,
     UniqueIntoRaw,
     UniqueFromRaw,
     ReactiveScope,
@@ -2702,6 +2703,11 @@ impl NameResolver {
             ),
             (
                 "std.unique",
+                "__unique_replace",
+                IntrinsicFunction::UniqueReplace,
+            ),
+            (
+                "std.unique",
                 "__unique_into_raw",
                 IntrinsicFunction::UniqueIntoRaw,
             ),
@@ -3037,10 +3043,7 @@ impl NameResolver {
                 ));
             }
         } else if builtin != BuiltinType::Syntax {
-            let valid_kind = if matches!(builtin, BuiltinType::Shared | BuiltinType::Unique) {
-                declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper
-                    && declaration.representation_visibility() == Visibility::Public
-            } else if matches!(builtin, BuiltinType::Completed | BuiltinType::Cancelled) {
+            let valid_kind = if matches!(builtin, BuiltinType::Completed | BuiltinType::Cancelled) {
                 // `await Task` yields `Completed<T> | Cancelled`, a sum the body
                 // can `match`; both alternatives are represented wrapper types
                 // (`Completed<T>` wraps `T`, `Cancelled` wraps `()`).
@@ -3653,8 +3656,11 @@ impl NameResolver {
         }
         self.type_declarations.insert(id, declaration.clone());
         self.type_modules.insert(id, module);
+        let allocating_handle = declaration.recursive_constructor
+            && matches!(declaration.name.as_str(), "Unique" | "Shared");
         if (declaration.kind().is_wrapper() && declaration.underlying().is_some())
             || declaration.kind() == staple_syntax::TypeDeclarationKind::Singleton
+            || allocating_handle
         {
             let symbol = SymbolId(self.next_symbol_id);
             self.next_symbol_id += 1;
@@ -3679,6 +3685,7 @@ impl NameResolver {
             let constructor_visibility = match declaration.kind() {
                 staple_syntax::TypeDeclarationKind::Singleton
                 | staple_syntax::TypeDeclarationKind::From => declaration.visibility,
+                _ if allocating_handle => declaration.visibility,
                 _ => declaration.representation_visibility(),
             };
             if constructor_visibility != Visibility::Private {
@@ -7239,15 +7246,19 @@ impl NameResolver {
             Pattern::Nominal(pattern) => {
                 if let Some(id) = self.named_types.get(&pattern.syntax.id).copied() {
                     let declaration = &self.type_declarations[&id];
-                    let represented = (declaration.kind().is_wrapper()
-                        && declaration.underlying().is_some())
+                    let handle = matches!(
+                        self.builtin_types.get(&id),
+                        Some(BuiltinType::Shared | BuiltinType::Unique)
+                    );
+                    let represented = handle
+                        || (declaration.kind().is_wrapper() && declaration.underlying().is_some())
                         || declaration.kind() == staple_syntax::TypeDeclarationKind::Singleton;
                     if !represented {
                         self.diagnostics.push(Diagnostic::new(
                             pattern.syntax.span.clone(),
                             format!("`{}` is not a represented nominal type", pattern.name),
                         ));
-                    } else if !self.representation_visible(id, self.current_module) {
+                    } else if !handle && !self.representation_visible(id, self.current_module) {
                         self.diagnostics.push(Diagnostic::new(
                             pattern.syntax.span.clone(),
                             format!("the representation of `{}` is private", pattern.name),

@@ -3864,7 +3864,7 @@ mod tests {
                 "let mut point = Shared (x: 4, y: 5)\n",
                 "point.x = 6\n",
                 "let mut scalar = Shared 7\n",
-                "let old = Shared.replace scalar 8\n",
+                "let old = Shared.replace (scalar, 8)\n",
                 "let Shared current = scalar\n",
                 "let mut data = 1\n",
                 "update_data data\n",

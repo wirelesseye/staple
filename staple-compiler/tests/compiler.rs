@@ -2817,7 +2817,7 @@ fn type_checks_and_lowers_mutable_places_and_shared_replace() {
         "let index: USize = 1\n",
         "fixed[index] = 7\n",
         "let mut scalar = Shared 8\n",
-        "let old = Shared.replace scalar 9\n",
+        "let old = Shared.replace (scalar, 9)\n",
         "def local = () => { let mut inside = 10; inside = old; inside }\n",
     );
     let module = type_check(source);
@@ -3073,7 +3073,7 @@ fn an_explicit_mut_effect_passes_through_a_shared_crossing_local_alias() {
         "type MyInt wrap Shared<I32>\n",
         "def mutate_my_int: (mut MyInt, I32) -> () = (mut my_int, value) => {\n",
         "  let MyInt mut inner = my_int\n",
-        "  Shared.replace inner value\n",
+        "  Shared.replace (inner, value)\n",
         "  ()\n",
         "}\n",
         "def foo = (mut my_int: MyInt) => { mutate_my_int (my_int, 42) }\n",
@@ -3089,7 +3089,7 @@ fn an_explicit_mut_effect_passes_through_a_shared_crossing_local_alias() {
             "type MyInt wrap Shared<I32>\n",
             "def mutate_my_int: (mut MyInt, I32) -> () = (mut my_int, value) => {\n",
             "  let MyInt mut inner = my_int\n",
-            "  Shared.replace inner value\n",
+            "  Shared.replace (inner, value)\n",
             "  ()\n",
             "}\n",
             "def bad = () => {\n",
@@ -3360,7 +3360,7 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
         "}\n",
         "def managed = (move initial: CString, move next: CString) => {\n",
         "  let mut reference = Shared initial\n",
-        "  let old = Shared.replace reference next\n",
+        "  let old = Shared.replace (reference, next)\n",
         "  drop old\n",
         "}\n",
     ));
@@ -3396,7 +3396,7 @@ fn supports_mutable_parameter_match_and_copy_shared_pattern_binders() {
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("borrowed through `Shared` cannot be bound as `mut`")
+            .contains("borrowed move-only value cannot be bound as `mut`")
     }));
 }
 
@@ -14472,8 +14472,8 @@ fn named_types_are_indexed_only_through_their_own_implementations() {
 fn from_types_reject_recursive_constructors() {
     let diagnostics = stdlib_modifier_diagnostics(
         "std/shared.sta",
-        "pub type Shared<T where ?Sized T> wrap pub T",
-        "pub type Shared<T where ?Sized T> from pub T",
+        "@sized_opaque\n@recursive_constructor\npub type Shared<T where ?Sized T> opaque",
+        "@recursive_constructor\npub type Shared<T where ?Sized T> from pub T",
     );
     assert!(
         diagnostics.iter().any(|diagnostic| diagnostic
@@ -14500,8 +14500,8 @@ fn recursive_constructor_stdlib_contract_and_validation() {
         ),
         (
             "std/shared.sta",
-            "@recursive_constructor\npub type Shared",
-            "@recursive_constructor\nlet value = 1\npub type Shared",
+            "@sized_opaque\n@recursive_constructor\npub type Shared",
+            "@recursive_constructor\nlet value = 1\n@sized_opaque\npub type Shared",
             "`@recursive_constructor` may only modify a type declaration",
         ),
         (
@@ -14584,7 +14584,7 @@ fn intrinsic_registration_checks_names_and_loaded_modules() {
         ),
         (
             "std/shared.sta",
-            "    __shared_replace: <T> (mut Shared<T>; move T) -> T\n",
+            "    __shared_replace: <T> (mut Shared<T>, move T) -> T\n",
             "",
             "standard library `std.shared` does not declare intrinsic `__shared_replace`",
         ),
@@ -17525,7 +17525,7 @@ fn value_defined_companion_members_use_companion_parameters() {
 }
 
 #[test]
-fn raw_pointer_memory_intrinsics_require_copy_and_matching_types() {
+fn raw_pointer_memory_intrinsics_require_copy_loads_moving_stores_and_matching_types() {
     for (original, replacement) in [
         (
             "__pointer_load: <T where Copy T> RawPtr<T> -> T",
@@ -17536,12 +17536,12 @@ fn raw_pointer_memory_intrinsics_require_copy_and_matching_types() {
             "__mut_pointer_load: <T where Copy T> RawMutPtr<T> -> I32",
         ),
         (
-            "__pointer_store: <T where Copy T> (RawMutPtr<T>, T) -> ()",
+            "__pointer_store: <T> (RawMutPtr<T>, move T) -> ()",
             "__pointer_store: <T> (RawMutPtr<T>, T) -> ()",
         ),
         (
-            "__pointer_store: <T where Copy T> (RawMutPtr<T>, T) -> ()",
-            "__pointer_store: <T where Copy T> (RawPtr<T>, T) -> ()",
+            "__pointer_store: <T> (RawMutPtr<T>, move T) -> ()",
+            "__pointer_store: <T> (RawPtr<T>, move T) -> ()",
         ),
     ] {
         let diagnostics = stdlib_modifier_diagnostics("std/ptr.sta", original, replacement);
@@ -19701,4 +19701,19 @@ fn compile_time_default_bodies_keep_declared_result_and_associated_types() {
         let value: I32 = emit ()
     "#,
     );
+}
+
+#[test]
+fn raw_pointer_store_consumes_non_copy_values() {
+    let messages = type_check_errors(concat!(
+        "use std.ptr.*\n",
+        "type Token wrap I32\n",
+        "impl !Copy Token {}\n",
+        "def bad = pointer: RawMutPtr<Token> => () :: {\n",
+        "  let value = Token 1\n",
+        "  RawMutPtr.store pointer value\n",
+        "  drop value\n",
+        "}\n",
+    ), "storing a non-Copy value must move it");
+    assert!(messages.iter().any(|message| message.contains("use of moved value")), "{messages:?}");
 }

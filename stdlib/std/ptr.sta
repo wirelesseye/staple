@@ -26,7 +26,7 @@ pub type RawOpaqueMutPtr opaque
 extern "staple-intrinsic" {
     __pointer_load: <T where Copy T> RawPtr<T> -> T
     __mut_pointer_load: <T where Copy T> RawMutPtr<T> -> T
-    __pointer_store: <T where Copy T> (RawMutPtr<T>, T) -> ()
+    __pointer_store: <T> (RawMutPtr<T>, move T) -> ()
     __mut_pointer_address: <T where ?Sized T> RawMutPtr<T> -> USize
     __address_mut_pointer: <T where ?Sized T> USize -> RawMutPtr<T>
     __mut_opaque_address: RawOpaqueMutPtr -> USize
@@ -179,9 +179,14 @@ companion<T where ?Sized T> RawMutPtr<T> {
 companion<T where Copy T> RawMutPtr<T> {
     /// Copies the pointee. The caller must provide valid, aligned, initialized memory.
     pub def load = pointer: RawMutPtr<T> => T :: __mut_pointer_load pointer
-    /// Overwrites the pointee without dropping its previous value.
-    /// The caller must provide valid, aligned, writable memory.
-    pub def store = (pointer: RawMutPtr<T>; value: T) => () :: __pointer_store (pointer, value)
+}
+
+companion<T> RawMutPtr<T> {
+    /// Moves the value into the pointee without dropping its previous contents.
+    /// The caller must provide valid, aligned, writable memory and arrange for
+    /// the stored value to be dropped or moved out exactly once. Overwriting
+    /// an initialized resource without first releasing it can leak that resource.
+    pub def store = (pointer: RawMutPtr<T>; move value: T) => () :: __pointer_store (pointer, value)
 }
 
 companion RawOpaquePtr {

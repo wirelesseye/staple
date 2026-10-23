@@ -262,16 +262,16 @@ fn raw_pointer_operations_reject_invalid_access_and_implicit_conversions() {
             "bound",
         ),
         (
-            "let p: RawMutPtr<CString> = RawMutPtr.null ()\nlet v = c_string \"bad\"\nRawMutPtr.store p v",
-            "bound",
+            "def bad = (p: RawMutPtr<CString>; v: CString) => RawMutPtr.store p v",
+            "borrowed",
         ),
         (
-            "let store = RawMutPtr.store\nlet p: RawMutPtr<CString> = RawMutPtr.null ()\nlet v = c_string \"bad\"\nstore p v",
-            "bound",
+            "def bad = (p: RawMutPtr<CString>; v: CString) => { let store = RawMutPtr.store; store p v }",
+            "borrowed",
         ),
         (
-            "let p: RawMutPtr<CString> = RawMutPtr.null ()\nlet v = c_string \"bad\"\n(if True { RawMutPtr.store } else { RawMutPtr.store }) p v",
-            "bound",
+            "def bad = (p: RawMutPtr<CString>; v: CString) => (if True { RawMutPtr.store } else { RawMutPtr.store }) p v",
+            "borrowed",
         ),
         (
             "let p: RawPtr<I32> = RawPtr.null ()\nlet q: RawMutPtr<I32> = RawMutPtr.null ()\nlet bad = p == q",

@@ -1677,6 +1677,7 @@ pub struct TypedModule {
     accesses: HashMap<SyntaxId, CheckedAccess>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
     pattern_projections: HashMap<SyntaxId, TypeId>,
+    pattern_dereferences: HashMap<SyntaxId, Vec<CheckedType>>,
     string_formatting: CheckedStringFormatting,
     string_representation: Option<CheckedType>,
     ownership: crate::ownership::OwnershipInfo,
@@ -2000,9 +2001,15 @@ impl TypedModule {
         self.pattern_types.get(&syntax_id)
     }
 
-    /// The `from` type whose representation the pattern matches, as if
-    /// written inside that type's nominal pattern: the subject itself, or
-    /// the subject sum's alternative of that type.
+    /// Handle layers crossed automatically before checking this pattern.
+    pub(crate) fn pattern_dereferences(&self, syntax: SyntaxId) -> &[CheckedType] {
+        self.pattern_dereferences
+            .get(&syntax)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// The `from` type whose representation the pattern matches.
     pub(crate) fn pattern_projection(&self, syntax_id: SyntaxId) -> Option<TypeId> {
         self.pattern_projections.get(&syntax_id).copied()
     }
@@ -2927,6 +2934,7 @@ pub struct TypeChecker {
     /// Patterns matched against the representation of a `from` subject
     /// rather than the subject itself.
     pattern_projections: HashMap<SyntaxId, TypeId>,
+    pattern_dereferences: HashMap<SyntaxId, Vec<CheckedType>>,
     method_symbols: HashMap<SyntaxId, SymbolId>,
     symbol_companion_types: HashMap<SymbolId, TypeId>,
     function_result_companion_types: HashMap<FunctionId, TypeId>,
@@ -3326,6 +3334,7 @@ impl TypeChecker {
             accesses: self.accesses,
             pattern_types: self.pattern_types,
             pattern_projections: self.pattern_projections,
+            pattern_dereferences: self.pattern_dereferences,
             string_formatting: self.string_formatting,
             string_representation: self.string_representation,
             ownership: crate::ownership::OwnershipInfo::default(),
@@ -5706,9 +5715,13 @@ impl TypeChecker {
                 continue;
             }
             let declaration = self.type_declarations[id].clone();
-            let Some(underlying) = declaration.underlying() else {
+            let allocating_handle = matches!(
+                module.builtin_type(*id),
+                Some(BuiltinType::Shared | BuiltinType::Unique)
+            );
+            if declaration.underlying().is_none() && !allocating_handle {
                 continue;
-            };
+            }
             // The constructor's arguments are the declaration's own type
             // parameters (see `checked_type_parameter_pattern` below), so
             // this instantiation is self-referential: it asks whether each
@@ -5738,12 +5751,19 @@ impl TypeChecker {
             self.active_function_bounds
                 .push(self.expand_trait_bounds(declaration_bounds));
             self.active_subtype_bounds.push(declaration_subtype_bounds);
-            let parameter = self.resolve_source_type(module, underlying);
             let arguments = declaration
                 .type_parameters
                 .iter()
                 .map(|pattern| self.checked_type_parameter_pattern(module, pattern))
                 .collect::<Vec<_>>();
+            let parameter = if allocating_handle {
+                arguments[0].clone()
+            } else {
+                self.resolve_source_type(
+                    module,
+                    declaration.underlying().expect("represented constructor"),
+                )
+            };
             let parameters = arguments.clone();
             let result = self.instantiate_type_declaration(module, *id, arguments);
             self.active_function_bounds.pop();
@@ -6224,7 +6244,7 @@ impl TypeChecker {
                         _ => false,
                     })
                     .unwrap_or(CheckedType::Error),
-                crate::IntrinsicFunction::SharedReplace => self.symbol_value_type(*symbol)
+                crate::IntrinsicFunction::SharedReplace | crate::IntrinsicFunction::UniqueReplace => self.symbol_value_type(*symbol)
                     .cloned()
                     .filter(|value_type| match value_type {
                         CheckedType::Function(function) => {
@@ -6234,10 +6254,15 @@ impl TypeChecker {
                             let [reference, replacement] = product.elements.as_slice() else {
                                 return false;
                             };
-                            matches!(&reference.value_type, CheckedType::Shared(payload)
-                                if types_equivalent(payload, &replacement.value_type)
-                                    && types_equivalent(payload, &function.result))
+                            (match (&reference.value_type, intrinsic) {
+                                (CheckedType::Shared(payload), crate::IntrinsicFunction::SharedReplace)
+                                | (CheckedType::Unique(payload), crate::IntrinsicFunction::UniqueReplace) =>
+                                    types_equivalent(payload, &replacement.value_type)
+                                        && types_equivalent(payload, &function.result),
+                                _ => false,
+                            })
                                 && function.mutations == [CheckedMutation::Element(0)]
+                                && function.moves == [CheckedMutation::Element(1)]
                         }
                         _ => false,
                     })
@@ -6265,18 +6290,12 @@ impl TypeChecker {
                     .cloned()
                     .unwrap_or(CheckedType::Error),
             };
-            // Raw memory operations must retain the Copy contract even if a
+            // Raw loads must retain the Copy contract even if a
             // standard-library intrinsic declaration is edited independently
             // of its public companion wrapper.
             let copy_pointee = match (*intrinsic, &expected) {
                 (crate::IntrinsicFunction::PointerLoad, CheckedType::Function(function)) => {
                     Some(function.result.as_ref())
-                }
-                (crate::IntrinsicFunction::PointerStore, CheckedType::Function(function)) => {
-                    let CheckedType::Product(product) = function.parameter.as_ref() else {
-                        unreachable!("validated pointer store parameter");
-                    };
-                    Some(&product.elements[1].value_type)
                 }
                 _ => None,
             };
@@ -13976,6 +13995,33 @@ impl TypeChecker {
         value_type: &CheckedType,
         refutable: bool,
     ) -> Option<CheckedType> {
+        let mut projected = value_type;
+        let mut dereferences = Vec::new();
+        while let CheckedType::Shared(payload) | CheckedType::Unique(payload) = projected {
+            // Untyped bindings and wildcards bind the handle itself. Explicit
+            // handle patterns also select the handle before considering its payload.
+            if matches!(pattern, Pattern::Binding(_) | Pattern::Wildcard(_)) && !refutable
+                || self.pattern_selects_within(module, pattern, projected, refutable)
+                || matches!(pattern, Pattern::Binding(binding)
+                    if module.type_for_pattern(binding.syntax.id).is_none()
+                        && matches!(binding.ty, Type::Inferred(_)))
+                || matches!(pattern, Pattern::Wildcard(wildcard) if matches!(wildcard.ty, Type::Inferred(_)))
+                || matches!(pattern, Pattern::At(_) | Pattern::Splice(_))
+                || matches!(pattern, Pattern::Product(product) if product.elements.len() == 1)
+            {
+                break;
+            }
+            dereferences.push(projected.clone());
+            projected = payload;
+        }
+        if !dereferences.is_empty() {
+            self.pattern_dereferences
+                .insert(pattern.syntax().id, dereferences);
+            // Representation projection may follow a handle projection.
+            return self
+                .pattern_projection(module, pattern, projected, refutable)
+                .or_else(|| Some(projected.clone()));
+        }
         let target = match value_type {
             CheckedType::Wrapper {
                 introduction: WrapperIntroduction::Implicit,
@@ -14090,9 +14136,7 @@ impl TypeChecker {
                                     | (Some(BuiltinType::Unique), CheckedType::Unique(_))
                                     | (
                                         Some(BuiltinType::Shared),
-                                        CheckedType::Shared(_)
-                                            | CheckedType::Unique(_)
-                                            | CheckedType::SharedBuffer(_)
+                                        CheckedType::Shared(_) | CheckedType::SharedBuffer(_)
                                     )
                             )
                     })
@@ -14517,13 +14561,14 @@ impl TypeChecker {
                 )
             }
             CheckedType::Shared(payload) | CheckedType::Unique(payload) => {
-                let Some(specialized_candidate) = Self::specialize_shared_row(module, candidate)
+                let Some(specialized_candidate) =
+                    self.specialize_shared_row(module, candidate, &types[0])
                 else {
                     return false;
                 };
                 let specialized_matrix = matrix
                     .iter()
-                    .filter_map(|row| Self::specialize_shared_row(module, row))
+                    .filter_map(|row| self.specialize_shared_row(module, row, &types[0]))
                     .collect::<Vec<_>>();
                 let mut specialized_types = vec![payload.as_ref().clone()];
                 specialized_types.extend_from_slice(&types[1..]);
@@ -14826,9 +14871,23 @@ impl TypeChecker {
     }
 
     fn specialize_shared_row<'a>(
+        &self,
         module: &ResolvedModule,
         row: &[CoveragePattern<'a>],
+        column: &CheckedType,
     ) -> Option<Vec<CoveragePattern<'a>>> {
+        // Keep typed payload bindings intact until their payload column has
+        // selected a sum alternative; canonicalization would erase that test.
+        if let CoveragePattern::Pattern(pattern) = Self::structural_coverage_pattern(row[0])
+            && self
+                .pattern_dereferences
+                .get(&pattern.syntax().id)
+                .is_some_and(|projections| projections.contains(column))
+        {
+            let mut result = vec![CoveragePattern::Pattern(pattern)];
+            result.extend_from_slice(&row[1..]);
+            return Some(result);
+        }
         let first = Self::canonical_coverage_pattern(row[0]);
         let head = match first {
             CoveragePattern::Any => CoveragePattern::Any,
@@ -17562,6 +17621,44 @@ impl TypeChecker {
                 expected_product,
                 &initialized,
             );
+            return;
+        }
+        // A non-slotted call infers its parameters from the whole product.
+        // Once an earlier element fixes a generic parameter, materialize any
+        // ordinary coercions needed by later elements of that product literal.
+        if let (
+            Expression::Product(product),
+            CheckedType::Product(actual_product),
+            CheckedType::Product(expected_product),
+        ) = (expression, &actual, expected)
+            && !expected_product.variadic
+            && actual_product.slotted == expected_product.slotted
+            && product.elements.len() == actual_product.elements.len()
+            && actual_product.elements.len() == expected_product.elements.len()
+            && product.elements.iter().all(|element| !element.spread)
+            && actual_product
+                .elements
+                .iter()
+                .zip(&expected_product.elements)
+                .all(|(actual, expected)| actual.name == expected.name)
+        {
+            let mut coerced = actual_product.clone();
+            for (((element, actual), expected), result) in product
+                .elements
+                .iter()
+                .zip(&actual_product.elements)
+                .zip(&expected_product.elements)
+                .zip(&mut coerced.elements)
+            {
+                result.value_type = self.coerce_expression_type(
+                    element.value.syntax().id,
+                    actual.value_type.clone(),
+                    &expected.value_type,
+                    element.value.syntax().span.clone(),
+                );
+            }
+            self.expression_types
+                .insert(expression.syntax().id, CheckedType::Product(coerced));
             return;
         }
         self.coerce_expression_type(expression.syntax().id, actual, expected, span);
@@ -20327,6 +20424,9 @@ fn erase_type_parameters_in(
         CheckedType::Shared(value) => {
             CheckedType::Shared(Box::new(erase_type_parameters_in(value, solvable)))
         }
+        CheckedType::Unique(value) => {
+            CheckedType::Unique(Box::new(erase_type_parameters_in(value, solvable)))
+        }
         CheckedType::SharedBuffer(value) => {
             CheckedType::SharedBuffer(Box::new(erase_type_parameters_in(value, solvable)))
         }
@@ -21661,6 +21761,10 @@ fn infer_type_parameters_mode(
             }
             match substitutions.get(id) {
                 Some(existing) if types_equivalent(existing, actual) => true,
+                // Earlier arguments can fix T to a sum; a later argument may
+                // supply one alternative, with its ordinary coercion recorded
+                // after instantiation (e.g. replace (Shared<Option<T>>, Some T)).
+                Some(existing) if can_coerce_type(actual, existing) => true,
                 Some(existing) => match merge_types(existing.clone(), actual.clone()) {
                     Some(merged) => {
                         substitutions.insert(*id, merged);
@@ -24093,9 +24197,14 @@ fn valid_conversion_intrinsic_type(
     let CheckedType::Function(function) = value else {
         return false;
     };
+    let expected_moves: &[CheckedMutation] = if intrinsic == crate::IntrinsicFunction::PointerStore {
+        &[CheckedMutation::Element(1)]
+    } else {
+        &[]
+    };
     if function.is_slotted()
         || !function.mutations.is_empty()
-        || !function.moves.is_empty()
+        || function.moves.as_slice() != expected_moves
         || function.effects != CheckedEffectSet::default()
     {
         return false;

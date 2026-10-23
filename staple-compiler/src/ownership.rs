@@ -59,6 +59,7 @@ enum ValueState {
 
 /// Checks Staple's affine ownership rules after ordinary type checking has
 /// resolved every expression and pattern type.
+#[derive(Clone)]
 pub(crate) struct OwnershipChecker<'a> {
     module: &'a TypedModule,
     function: Option<FunctionId>,
@@ -72,13 +73,15 @@ pub(crate) struct OwnershipChecker<'a> {
     active_borrows: HashMap<SymbolId, (BorrowKind, usize)>,
     borrow_scopes: Vec<Vec<SymbolId>>,
     parameter_symbols: HashSet<SymbolId>,
+    match_borrow_sources: HashMap<SymbolId, usize>,
+    match_demands: HashMap<(SyntaxId, bool), bool>,
     /// Body-block syntax ids of `coro { ... }` expressions. Their implicit
     /// thunks own (rather than borrow) their captures — the coroutine moved
     /// them in at construction.
     coroutine_body_thunks: HashSet<SyntaxId>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct LoopOwnershipContext {
     breaks: Vec<HashMap<SymbolId, ValueState>>,
     back_edges: Vec<HashMap<SymbolId, ValueState>>,
@@ -99,6 +102,8 @@ impl<'a> OwnershipChecker<'a> {
             active_borrows: HashMap::new(),
             borrow_scopes: vec![],
             parameter_symbols: HashSet::new(),
+            match_borrow_sources: HashMap::new(),
+            match_demands: HashMap::new(),
             coroutine_body_thunks: crate::coroutine_lower::coroutine_body_ids(module),
         };
         checker.collect_top_level_symbols();
@@ -181,6 +186,7 @@ impl<'a> OwnershipChecker<'a> {
         self.loops.clear();
         self.borrowed_closures.clear();
         self.active_borrows.clear();
+        self.match_borrow_sources.clear();
         self.borrow_scopes.clear();
         self.parameter_symbols = top_level_parameter_symbols(self.module, &function.pattern)
             .into_iter()
@@ -279,22 +285,63 @@ impl<'a> OwnershipChecker<'a> {
             Expression::TypeApplication(value) => self.check_expression(&value.value, consume),
             Expression::TypeAscription(value) => self.check_expression(&value.value, consume),
             Expression::Match(value) => {
-                // A match only inspecting a named subject (wildcards,
-                // singletons, literals, `Copy` bindings) borrows it; any arm
-                // that takes a non-`Copy` part requires ownership.
-                let consume = !matches!(value.subject.as_ref(), Expression::Name(_))
-                    || value
-                        .arms
-                        .iter()
-                        .any(|arm| self.pattern_takes_ownership(&arm.pattern));
-                self.check_expression(&value.subject, consume);
+                // Cache nested probes: without this, probing each enclosing
+                // match would repeatedly traverse every nested match body.
+                let key = (value.syntax.id, consume);
+                let takes_ownership = if let Some(demand) = self.match_demands.get(&key) {
+                    *demand
+                } else {
+                    let demand = value.arms.iter().any(|arm| {
+                        let mut probe = self.clone();
+                        probe.info.moved_uses.clear();
+                        probe.bind_pattern(&arm.pattern, false);
+                        probe.check_expression(&arm.body, consume);
+                        let mut symbols = HashSet::new();
+                        self.collect_pattern_symbols(&arm.pattern, &mut symbols);
+                        self.match_demands.extend(probe.match_demands);
+                        symbols.iter().any(|symbol| {
+                            self.module.has_mutable_storage(*symbol)
+                                && self.module.type_of_symbol(*symbol).is_some_and(|ty| {
+                                    !self.module.is_copy_in_function(ty, self.function)
+                                })
+                        }) || probe
+                            .info
+                            .moved_uses
+                            .values()
+                            .any(|moved| !moved.is_disjoint(&symbols))
+                    });
+                    self.match_demands.insert(key, demand);
+                    demand
+                };
+                let consumes_subject = takes_ownership;
+                self.check_expression(&value.subject, consumes_subject);
                 let outer = self.states.clone();
                 let mut continuing = vec![];
                 for arm in &value.arms {
                     self.states = outer.clone();
-                    self.bind_pattern(&arm.pattern, false);
+                    self.bind_pattern(&arm.pattern, !consumes_subject);
+                    let mut symbols = HashSet::new();
+                    self.collect_pattern_symbols(&arm.pattern, &mut symbols);
+                    let borrow_source = symbols
+                        .iter()
+                        .any(|symbol| self.info.is_non_owning_symbol(*symbol))
+                        .then(|| self.place_root(&value.subject))
+                        .flatten();
+                    if let Some(source) = borrow_source {
+                        *self.match_borrow_sources.entry(source).or_default() += 1;
+                    }
                     if self.check_expression(&arm.body, consume) {
                         continuing.push(self.states.clone());
+                    }
+                    if let Some(source) = borrow_source {
+                        let count = self
+                            .match_borrow_sources
+                            .get_mut(&source)
+                            .expect("active match borrow");
+                        *count -= 1;
+                        if *count == 0 {
+                            self.match_borrow_sources.remove(&source);
+                        }
                     }
                 }
                 self.states = merge_states(&outer, &continuing);
@@ -487,7 +534,10 @@ impl<'a> OwnershipChecker<'a> {
                         .module
                         .type_of_expression(value.argument.syntax().id)
                         .is_some_and(|ty| matches!(ty, crate::CheckedType::CString));
-                if let Some(thunk) = self.module.synthesized_thunk_for(value.argument.syntax().id) {
+                if let Some(thunk) = self
+                    .module
+                    .synthesized_thunk_for(value.argument.syntax().id)
+                {
                     for capture in &thunk.captures {
                         if !self.module.has_mutable_storage(*capture) {
                             self.use_symbol(*capture, value.argument.syntax(), true);
@@ -584,7 +634,9 @@ impl<'a> OwnershipChecker<'a> {
             Expression::Pipe(_) => unreachable!("pipe expression reached ownership checking"),
             Expression::Unary(_) => unreachable!("unary expression reached ownership checking"),
             Expression::Try(_) => unreachable!("try expression reached ownership checking"),
-            Expression::Conversion(_) => unreachable!("conversion expression reached ownership checking"),
+            Expression::Conversion(_) => {
+                unreachable!("conversion expression reached ownership checking")
+            }
         }
     }
 
@@ -799,7 +851,41 @@ impl<'a> OwnershipChecker<'a> {
             .is_some_and(|function| self.borrow_summaries.contains_key(&function))
     }
 
+    fn place_root(&self, expression: &Expression) -> Option<SymbolId> {
+        self.module
+            .symbol_for(expression.syntax().id)
+            .or_else(|| match expression {
+                Expression::Access(access) => self.place_root(&access.value),
+                Expression::Index(index) => self.place_root(&index.value),
+                Expression::TypeAscription(value) => self.place_root(&value.value),
+                _ => None,
+            })
+    }
+
+    fn check_match_borrow(&mut self, symbol: SymbolId, syntax: &Syntax, mutation: bool) {
+        let aliases_shared = mutation
+            && matches!(
+                self.module.type_of_symbol(symbol),
+                Some(crate::CheckedType::Shared(_))
+            )
+            && self.match_borrow_sources.keys().any(|source| {
+                matches!(
+                    self.module.type_of_symbol(*source),
+                    Some(crate::CheckedType::Shared(_))
+                )
+            });
+        if self.match_borrow_sources.contains_key(&symbol) || aliases_shared {
+            self.diagnostics.push(Diagnostic::new(
+                syntax.span.clone(),
+                "cannot move or mutate storage while a match borrows its payload",
+            ));
+        }
+    }
+
     fn check_borrow_conflict(&mut self, symbol: SymbolId, requested: BorrowKind, syntax: &Syntax) {
+        if requested == BorrowKind::Mutable {
+            self.check_match_borrow(symbol, syntax, true);
+        }
         let Some((active, _)) = self.active_borrows.get(&symbol).copied() else {
             return;
         };
@@ -990,34 +1076,41 @@ impl<'a> OwnershipChecker<'a> {
             && !self.module.is_move_parameter(symbol)
     }
 
-    /// Whether matching `pattern` moves part of its subject: it binds a
-    /// non-`Copy` value or takes a `Unique` payload.
-    fn pattern_takes_ownership(&self, pattern: &Pattern) -> bool {
+    fn collect_pattern_symbols(&self, pattern: &Pattern, symbols: &mut HashSet<SymbolId>) {
         match pattern {
-            Pattern::Binding(value) => self
-                .module
-                .symbol_for(value.syntax.id)
-                .and_then(|symbol| self.module.type_of_symbol(symbol))
-                .is_some_and(|ty| !self.module.is_copy_in_function(ty, self.function)),
+            Pattern::Binding(value) => {
+                if let Some(symbol) = self.module.symbol_for(value.syntax.id) {
+                    symbols.insert(symbol);
+                }
+            }
             Pattern::At(at) => {
-                self.pattern_takes_ownership(&Pattern::Binding(at.binding.as_ref().clone()))
-                    || self.pattern_takes_ownership(&at.pattern)
+                self.collect_pattern_symbols(
+                    &Pattern::Binding(at.binding.as_ref().clone()),
+                    symbols,
+                );
+                self.collect_pattern_symbols(&at.pattern, symbols);
             }
-            Pattern::Product(value) => value
-                .elements
-                .iter()
-                .any(|element| self.pattern_takes_ownership(element)),
-            Pattern::Nominal(value) => {
-                matches!(
-                    self.module.type_of_pattern(value.syntax.id),
-                    Some(crate::CheckedType::Unique(_))
-                ) || self.pattern_takes_ownership(&value.argument)
+            Pattern::Product(product) => {
+                for element in &product.elements {
+                    self.collect_pattern_symbols(element, symbols);
+                }
             }
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
+            Pattern::Nominal(nominal) => self.collect_pattern_symbols(&nominal.argument, symbols),
+            _ => {}
         }
     }
 
     fn bind_pattern(&mut self, pattern: &Pattern, freeze: bool) {
+        let mut freeze = freeze;
+        for handle in self.module.pattern_dereferences(pattern.syntax().id) {
+            match handle {
+                crate::CheckedType::Shared(_) => freeze = true,
+                crate::CheckedType::Unique(_) if !freeze => {
+                    self.info.taken_unique.insert(pattern.syntax().id);
+                }
+                _ => {}
+            }
+        }
         match pattern {
             Pattern::Binding(value) => {
                 let Some(symbol) = self.module.symbol_for(value.syntax.id) else {
@@ -1031,7 +1124,7 @@ impl<'a> OwnershipChecker<'a> {
                 if frozen && value.mutable {
                     self.diagnostics.push(Diagnostic::new(
                         value.syntax.span.clone(),
-                        "a move-only value borrowed through `Shared` cannot be bound as `mut`",
+                        "a borrowed move-only value cannot be bound as `mut`",
                     ));
                 }
                 self.states.insert(
@@ -1097,6 +1190,9 @@ impl<'a> OwnershipChecker<'a> {
     }
 
     fn check_assignment_target(&mut self, expression: &Expression) {
+        if let Some(root) = self.place_root(expression) {
+            self.check_match_borrow(root, expression.syntax(), true);
+        }
         if let Some(symbol) = self.module.symbol_for(expression.syntax().id) {
             self.check_borrow_conflict(symbol, BorrowKind::Mutable, expression.syntax());
             return;
@@ -1117,6 +1213,9 @@ impl<'a> OwnershipChecker<'a> {
     }
 
     fn use_symbol(&mut self, symbol: SymbolId, syntax: &Syntax, consume: bool) {
+        if consume {
+            self.check_match_borrow(symbol, syntax, false);
+        }
         let Some(value_type) = self.module.type_of_symbol(symbol) else {
             return;
         };

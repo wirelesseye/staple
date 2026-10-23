@@ -2645,7 +2645,7 @@ mod tests {
 
     #[test]
     fn wrapped_intrinsic_hover_shows_the_public_def() {
-        let source = "use std.shared.(Shared)\nlet mut reference = Shared 1\nlet previous = Shared.replace reference 2\n";
+        let source = "use std.shared.(Shared)\nlet mut reference = Shared 1\nlet previous = Shared.replace (reference, 2)\n";
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()

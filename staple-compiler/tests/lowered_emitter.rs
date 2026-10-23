@@ -99,9 +99,9 @@ fn wrapped_intrinsic_apis_are_first_class_values() {
         "let length: SharedBuffer<I32> -> USize = SharedBuffer.length\n",
         "let release: move I32 -> () = drop\n",
         "let released = release 1\n",
-        "let replace: (mut Shared<I32>; move I32) -> I32 = Shared.replace\n",
+        "let replace: (mut Shared<I32>, move I32) -> I32 = Shared.replace\n",
         "let mut reference = Shared 1\n",
-        "let previous = replace reference 2\n",
+        "let previous = replace (reference, 2)\n",
     ))
     .unwrap();
 }

@@ -108,7 +108,7 @@ fn collects_unique_payloads_in_cycles_through_managed_references() {
             "    let empty: Option<Shared<Holder>> = None\n",
             "    let mut back: Shared<Option<Shared<Holder>>> = Shared empty\n",
             "    let holder = Shared (Holder (Unique (Payload (tag: tag, back: back))))\n",
-            "    let previous = Shared.replace back (Some holder)\n",
+            "    let previous = Shared.replace (back, Some holder)\n",
             "    ()\n",
             "}\n",
             "def make_cycles = () => () :: {\n",
@@ -192,7 +192,7 @@ fn collects_list_storage_in_cycles_through_managed_references() {
             "    List.push items (Payload (tag: tag, back: back))\n",
             "    let holder: Shared<Holder> = Shared (Holder (items: items))\n",
             "    let closure: () -> I32 = () => { let kept = holder; tag }\n",
-            "    let previous = Shared.replace back (Some closure)\n",
+            "    let previous = Shared.replace (back, Some closure)\n",
             "    ()\n",
             "}\n",
             "def make_cycles = () => () :: {\n",
@@ -510,4 +510,37 @@ fn trees_recursing_through_lists_drop_every_node_once() {
         .collect::<Vec<_>>();
     drops.sort();
     assert_eq!(drops, ["1", "2", "3", "4", "5"], "{output}");
+}
+
+#[cfg(unix)]
+#[test]
+fn raw_pointer_stores_move_non_copy_values_without_dropping_previous_contents() {
+    let source = concat!(
+        "use std.unique.(Unique)\n",
+        "use std.ptr.*\n",
+        "use std.cinterop.*\n",
+        "extern \"c\" { printf: (RawPtr<CChar>, ...) -> I32 }\n",
+        "type Tag wrap I32\n",
+        "impl Drop Tag { cleanup = Tag id => { printf (c_string \"drop %d\\n\", id); () } }\n",
+        "def write: <T where Sized T> (RawMutPtr<T>; move T) -> () = <T where Sized T> (pointer; move value) => RawMutPtr.store pointer value\n",
+        "def scoped = () => () :: {\n",
+        "  let pointer = Unique.unsafe_into_raw (Unique (Tag 1))\n",
+        "  let value = Tag 2\n",
+        "  RawMutPtr.store pointer value\n",
+        "  printf (c_string \"stored\\n\")\n",
+        "  drop (Unique.unsafe_from_raw pointer)\n",
+        "  let pointer = Unique.unsafe_into_raw (Unique (Tag 3))\n",
+        "  let stored_write = write\n",
+        "  stored_write pointer (Tag 4)\n",
+        "  drop (Unique.unsafe_from_raw pointer)\n",
+        "  let pointer = Unique.unsafe_into_raw (Unique (Tag 5))\n",
+        "  (if True { RawMutPtr.store } else { RawMutPtr.store }) pointer (Tag 6)\n",
+        "  drop (Unique.unsafe_from_raw pointer)\n",
+        "  ()\n",
+        "}\n",
+        "scoped ()\n",
+    );
+    // The overwritten tags intentionally receive no cleanup. Each incoming
+    // value drops once, only after ownership of its storage is reconstructed.
+    assert_eq!(run(source), "stored\ndrop 2\ndrop 4\ndrop 6\n");
 }

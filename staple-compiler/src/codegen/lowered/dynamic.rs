@@ -71,7 +71,7 @@ struct DynamicEnvironment<'context> {
     dictionaries: Vec<PointerValue<'context>>,
     bindings: HashMap<SymbolId, DynamicBinding<'context>>,
     binding_order: Vec<SymbolId>,
-    unique_payloads: HashMap<staple_syntax::SyntaxId, PointerValue<'context>>,
+    unique_payloads: HashMap<PatternId, PointerValue<'context>>,
     temporaries: HashMap<ExpressionId, PointerValue<'context>>,
     packed_arguments: HashMap<ExpressionId, PointerValue<'context>>,
     /// Storage for call-boundary conversions whose layout depends on
@@ -3873,7 +3873,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 return Ok(storage);
             }
-            crate::IntrinsicFunction::SharedReplace => {
+            crate::IntrinsicFunction::SharedReplace | crate::IntrinsicFunction::UniqueReplace => {
                 let reference = slot_pointer(0)?;
                 let replacement = slot_pointer(1)?;
                 let payload = self
@@ -6146,7 +6146,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let cell = self.allocate_dynamic_cell(descriptor, captured, &item.origin.span)?;
             environment.cells.insert(symbol, cell);
         }
-        for (_, pattern) in body.patterns() {
+        for (id, pattern) in body.patterns() {
             if pattern.take_unique {
                 let CheckedType::Unique(payload) = &pattern.test.subject else {
                     continue;
@@ -6156,10 +6156,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     &mut environment,
                     &pattern.origin.span,
                 )?;
-                environment.unique_payloads.insert(
-                    pattern.origin.syntax,
-                    self.backend.allocate_dynamic_value(descriptor)?,
-                );
+                environment
+                    .unique_payloads
+                    .insert(id, self.backend.allocate_dynamic_value(descriptor)?);
             }
         }
         // Reserve call results before any body control flow. Descriptor-derived
@@ -7831,6 +7830,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         owned: bool,
         environment: &mut DynamicEnvironment<'context>,
     ) -> CodeGenerationResult<()> {
+        let pattern_id = pattern;
         let pattern = self.view.pattern(owner, pattern).ok_or_else(|| {
             Diagnostic::new(staple_syntax::Span::Compiler, "missing dynamic pattern")
         })?;
@@ -7881,15 +7881,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let payload_descriptor =
                         self.dynamic_descriptor(&payload_type, environment, &pattern.origin.span)?;
                     let storage = if pattern.take_unique {
-                        let storage = *environment
-                            .unique_payloads
-                            .get(&pattern.origin.syntax)
-                            .ok_or_else(|| {
-                                Diagnostic::new(
-                                    pattern.origin.span.clone(),
-                                    "missing Unique pattern storage",
-                                )
-                            })?;
+                        let storage =
+                            *environment
+                                .unique_payloads
+                                .get(&pattern_id)
+                                .ok_or_else(|| {
+                                    Diagnostic::new(
+                                        pattern.origin.span.clone(),
+                                        "missing Unique pattern storage",
+                                    )
+                                })?;
                         self.backend
                             .copy_dynamic_value(payload_descriptor, payload, storage)?;
                         self.backend
