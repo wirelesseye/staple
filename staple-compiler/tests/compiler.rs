@@ -15757,6 +15757,23 @@ fn generic_trait_member_bounds_check_completed_associated_arguments() {
 }
 
 #[test]
+fn grouped_place_elements_of_product_arguments_lower() {
+    // A grouped place element is lowered as its value, without a node for
+    // the group; source coverage must accept that.
+    let module = type_check(concat!(
+        "type Unit\n",
+        "def pick: (I32, Bool, Unit) -> Bool = (_, flag, _) => flag\n",
+        "let flag = True\n",
+        "let direct = pick (1, (True), (Unit))\n",
+        "let named = pick (1, ((flag)), Unit)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("grouped place elements lower as their values");
+}
+
+#[test]
 fn generic_trait_members_preserve_product_trait_parameters() {
     let module = type_check(concat!(
         "trait Pair (Left, Right) { carry: <A> (Left, Right, move A) -> A = <A> (_, _, move value) => value }\n",

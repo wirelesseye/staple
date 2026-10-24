@@ -15620,11 +15620,37 @@ impl<'a> SourceCoverage<'a> {
                 return;
             }
             for element in &product.elements {
-                self.visit_expression(owner, &element.value);
+                if element.spread {
+                    self.visit_expression(owner, &element.value);
+                } else {
+                    self.visit_argument_value(owner, &element.value);
+                }
             }
             return;
         }
         self.visit_expression(owner, argument);
+    }
+
+    /// One element of a decomposed product argument. `lower_argument_value`
+    /// lowers a plain `(value)` as `value` when `value` has a place, so the
+    /// group itself then has no lowered node of its own.
+    fn visit_argument_value(&mut self, owner: ExpressionOwner, value: &Expression) {
+        if let Expression::Product(product) = value
+            && let [element] = product.elements.as_slice()
+            && element.name.is_none()
+            && !element.spread
+            && !element.named_spread
+            && self.module.synthesized_thunk_for(product.syntax.id).is_none()
+            && !self.program.expression_lookup.contains_key(&ExpressionKey {
+                syntax: product.syntax.id,
+                owner,
+                context: ExpressionContext::Primary,
+            })
+        {
+            self.visit_argument_value(owner, &element.value);
+            return;
+        }
+        self.visit_expression(owner, value);
     }
 
     /// Mirrors the call lowering walk. Only indirect callees, juxtaposed chain
