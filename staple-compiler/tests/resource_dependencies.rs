@@ -359,6 +359,59 @@ def invalid: () ->{} () = () => {
 }
 
 #[test]
+#[cfg(unix)]
+fn trait_method_signatures_imply_dependencies() {
+    // Trait signatures are resolved before most other passes, so this fails
+    // if closing ever depends on dependency templates collected later.
+    let output = run(r#"
+use std.io.println
+type Logger wrap (write: String -> ())
+type Database with {Logger} wrap ()
+trait Query T {
+    run: T ->{Database} ()
+}
+type Q wrap ()
+impl Query Q {
+    run = q => (resource Logger).write "trait"
+}
+def go: () ->{Database} () = () => run (Q ())
+with Logger = Logger (write: message => println message) {
+    with Database = Database () {
+        go ()
+    }
+}
+"#);
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "trait\n");
+}
+
+#[test]
+fn rejects_representations_that_close_into_themselves() {
+    // `Handler`'s field set closes into `{Database, Handler, Logger}`, the
+    // same cycle as writing `Handler` in its own field's effect set.
+    for source in [
+        concat!(
+            "type Logger wrap ()\n",
+            "type Handler wrap (call: () ->{Database} ())\n",
+            "type Database with {Handler, Logger} wrap ()\n",
+        ),
+        concat!(
+            "type Logger wrap ()\n",
+            "type Database with {Handler, Logger} wrap ()\n",
+            "type Handler wrap (call: () ->{Database} ())\n",
+        ),
+    ] {
+        let diagnostics = check(source).expect_err("the representation is cyclic");
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("cyclic type definition involving `Handler`")),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
 fn rejects_self_and_transitive_cycles() {
     for source in [
         "type A with {A} wrap ()\n",

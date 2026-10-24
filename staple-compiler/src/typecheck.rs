@@ -3285,9 +3285,18 @@ pub struct TypeChecker {
     checking_modules: Vec<ModuleId>,
     checked_functions: HashSet<FunctionId>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
-    /// Each declaration's `with {…}` entries, resolved with its type
-    /// parameters free. Effect-set closing substitutes the actual arguments.
+    /// Each declaration's `with {…}` entries, resolved on first use with its
+    /// type parameters free. Effect-set closing substitutes the actual
+    /// arguments.
     resource_dependency_templates: HashMap<TypeId, Vec<CheckedResourceDependency>>,
+    /// Declarations whose `with {…}` entries are being resolved. Resolving an
+    /// entry can resolve a representation that closes an effect set naming
+    /// one of these, before its templates exist.
+    resolving_resource_dependencies: HashSet<TypeId>,
+    /// Declarations whose templates were cached while some were still being
+    /// resolved, and whether a closing hit an unfinished one meanwhile.
+    resource_dependency_window: Vec<TypeId>,
+    resource_dependencies_reentered: bool,
     resolved_named_types: HashMap<TypeId, CheckedType>,
     resolving_named_types: HashSet<TypeId>,
     /// Nesting depth of type-argument positions whose enclosing constructor is
@@ -3707,79 +3716,156 @@ impl TypeChecker {
         self.type_declarations = module.type_declarations().clone();
     }
 
-    /// Resolves every `with {…}` entry once, with the declaration's type
+    /// Resolves every declaration's `with {…}` entries, so a clause on a type
+    /// that is never used as a resource is still validated. Closing resolves
+    /// them on demand as well, so no pass depends on running after this one.
+    fn collect_resource_dependencies(&mut self, module: &ResolvedModule) {
+        let mut ids = self.type_declarations.keys().copied().collect::<Vec<_>>();
+        ids.sort_by_key(|id| id.0);
+        for id in ids {
+            self.resource_dependency_templates(module, id);
+        }
+    }
+
+    /// The declaration's `with {…}` entries, resolved once with its type
     /// parameters still free. Entries that mention those parameters are
     /// validated again after substitution when the type is actually used.
-    fn collect_resource_dependencies(&mut self, module: &ResolvedModule) {
-        let ids = self.type_declarations.keys().copied().collect::<Vec<_>>();
-        for id in ids {
-            let declaration = self.type_declarations[&id].clone();
-            let Some(dependencies) = &declaration.resource_dependencies else {
-                continue;
-            };
-            if !dependencies.state.is_empty() {
-                self.diagnostics.push(Diagnostic::new(
-                    dependencies.syntax.span.clone(),
-                    "resource dependencies cannot include state effects",
-                ));
-            }
-            let mut templates = Vec::new();
-            for resource in &dependencies.resources {
-                if resource.binding.is_some() {
-                    self.diagnostics.push(Diagnostic::new(
-                        resource.syntax.span.clone(),
-                        "resource dependencies cannot bind a name",
-                    ));
-                    continue;
-                }
-                let value_type = self.resolve_source_type_inner(module, &resource.value_type);
-                if value_type == CheckedType::Error {
-                    continue;
-                }
-                if let CheckedType::Parameter { id, .. } = &value_type
-                    && module.is_effect_parameter(*id)
-                {
-                    self.diagnostics.push(Diagnostic::new(
-                        resource.syntax.span.clone(),
-                        "an effect variable cannot be a resource dependency",
-                    ));
-                    continue;
-                }
-                // A dependency that names the declaration's type parameters is
-                // validated after substitution, once the concrete resource
-                // application is known.
-                let generic = contains_type_parameter(&value_type);
-                if !generic
-                    && (!valid_resource_type(&value_type)
-                        || !value_type.is_fully_known()
-                        || !value_type.is_sized())
-                {
-                    self.diagnostics.push(Diagnostic::new(
-                        resource.syntax.span.clone(),
-                        format!(
-                            "resource dependency type `{value_type}` must be a concrete, sized nominal type"
-                        ),
-                    ));
-                    continue;
-                }
-                templates.push(CheckedResourceDependency {
-                    resource: CheckedResource {
-                        value_type,
-                        mutable: resource.mutable,
-                    },
-                    span: resource.syntax.span.clone(),
-                });
-            }
-            if !templates.is_empty() {
-                self.resource_dependency_templates.insert(id, templates);
-            }
+    ///
+    /// Resolving an entry can resolve another type's representation, which
+    /// can close an effect set naming a declaration whose entries are still
+    /// being resolved. That closing sees no dependencies, and the named-type
+    /// cache would keep its result. When that happens, the outermost call
+    /// discards the named types cached meanwhile and resolves the affected
+    /// entries again, now that every template exists. Diagnostics repeated by
+    /// the second resolution are identical and deduplicated at the end of
+    /// checking.
+    fn resource_dependency_templates(
+        &mut self,
+        module: &ResolvedModule,
+        id: TypeId,
+    ) -> Vec<CheckedResourceDependency> {
+        if let Some(templates) = self.resource_dependency_templates.get(&id) {
+            return templates.clone();
         }
+        if self.resolving_resource_dependencies.contains(&id) {
+            self.resource_dependencies_reentered = true;
+            return Vec::new();
+        }
+        let outermost = self.resolving_resource_dependencies.is_empty();
+        let cached_named_types = outermost.then(|| {
+            self.resolved_named_types
+                .keys()
+                .copied()
+                .collect::<HashSet<_>>()
+        });
+        self.resolving_resource_dependencies.insert(id);
+        let templates = self.resolve_resource_dependency_templates(module, id);
+        self.resolving_resource_dependencies.remove(&id);
+        self.resource_dependency_templates
+            .insert(id, templates.clone());
+        self.resource_dependency_window.push(id);
+        let Some(cached_named_types) = cached_named_types else {
+            return templates;
+        };
+        let window = std::mem::take(&mut self.resource_dependency_window);
+        if !std::mem::take(&mut self.resource_dependencies_reentered) {
+            return templates;
+        }
+        self.resolved_named_types
+            .retain(|id, _| cached_named_types.contains(id));
+        for id in window {
+            let templates = self.resolve_resource_dependency_templates(module, id);
+            self.resource_dependency_templates.insert(id, templates);
+        }
+        self.resource_dependency_templates[&id].clone()
+    }
+
+    fn resolve_resource_dependency_templates(
+        &mut self,
+        module: &ResolvedModule,
+        id: TypeId,
+    ) -> Vec<CheckedResourceDependency> {
+        let Some(declaration) = self.type_declarations.get(&id) else {
+            return Vec::new();
+        };
+        let Some(dependencies) = declaration.resource_dependencies.clone() else {
+            return Vec::new();
+        };
+        if !dependencies.state.is_empty() {
+            self.diagnostics.push(Diagnostic::new(
+                dependencies.syntax.span.clone(),
+                "resource dependencies cannot include state effects",
+            ));
+        }
+        let mut templates = Vec::new();
+        for resource in &dependencies.resources {
+            if resource.binding.is_some() {
+                self.diagnostics.push(Diagnostic::new(
+                    resource.syntax.span.clone(),
+                    "resource dependencies cannot bind a name",
+                ));
+                continue;
+            }
+            let value_type = self.resolve_source_type_inner(module, &resource.value_type);
+            if value_type == CheckedType::Error {
+                continue;
+            }
+            if let CheckedType::Parameter { id, .. } = &value_type
+                && module.is_effect_parameter(*id)
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    resource.syntax.span.clone(),
+                    "an effect variable cannot be a resource dependency",
+                ));
+                continue;
+            }
+            // A dependency that names the declaration's type parameters is
+            // validated after substitution, once the concrete resource
+            // application is known.
+            let generic = contains_type_parameter(&value_type);
+            if !generic
+                && (!valid_resource_type(&value_type)
+                    || !value_type.is_fully_known()
+                    || !value_type.is_sized())
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    resource.syntax.span.clone(),
+                    format!(
+                        "resource dependency type `{value_type}` must be a concrete, sized nominal type"
+                    ),
+                ));
+                continue;
+            }
+            templates.push(CheckedResourceDependency {
+                resource: CheckedResource {
+                    value_type,
+                    mutable: resource.mutable,
+                },
+                span: resource.syntax.span.clone(),
+            });
+        }
+        templates
     }
 
     /// The declared dependencies of one instantiated resource, with the
     /// declaration's type parameters substituted by the resource's actual
     /// arguments.
     fn resource_dependencies_of(
+        &mut self,
+        module: &ResolvedModule,
+        resource: &CheckedResource,
+    ) -> Vec<(CheckedResource, Span)> {
+        let Some(id) = checked_type_id(&resource.value_type) else {
+            return Vec::new();
+        };
+        self.resource_dependency_templates(module, id);
+        self.cached_resource_dependencies_of(module, resource)
+    }
+
+    /// [`Self::resource_dependencies_of`] for a resource whose declaration's
+    /// templates were already resolved, as they are for every resource in a
+    /// closed set.
+    fn cached_resource_dependencies_of(
         &self,
         module: &ResolvedModule,
         resource: &CheckedResource,
@@ -3845,6 +3931,21 @@ impl TypeChecker {
                     ));
                     continue;
                 }
+                // A representation that closes into its own type mentions
+                // itself in an effect set, which is cyclic even when only a
+                // dependency spells it.
+                if let Some(id) = checked_type_id(&dependency.value_type)
+                    && self.resolving_named_types.contains(&id)
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        self.type_declarations[&id].syntax.span.clone(),
+                        format!(
+                            "cyclic type definition involving `{}`",
+                            dependency.value_type
+                        ),
+                    ));
+                    continue;
+                }
                 resources.push(dependency);
             }
         }
@@ -3879,7 +3980,7 @@ impl TypeChecker {
             value_type: source.clone(),
             mutable: false,
         };
-        for (dependency, span) in self.resource_dependencies_of(module, &resource) {
+        for (dependency, span) in self.cached_resource_dependencies_of(module, &resource) {
             if types_equivalent(&dependency.value_type, target) {
                 return Some(span);
             }
