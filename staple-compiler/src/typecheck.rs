@@ -981,6 +981,22 @@ impl CheckedProductType {
         self.position(index).map(|(run, _)| &run.element)
     }
 
+    /// Whether `index` lies at or after a run of symbolic length, where no
+    /// position has a fixed meaning until the length is known.
+    pub fn position_follows_symbolic_run(&self, index: usize) -> bool {
+        let mut remaining = index;
+        for run in &self.runs {
+            let Some(positions) = run.positions() else {
+                return true;
+            };
+            if remaining < positions {
+                return false;
+            }
+            remaining -= positions;
+        }
+        false
+    }
+
     pub fn iter_positions(&self) -> ProductPositionIter<'_> {
         ProductPositionIter {
             runs: &self.runs,
@@ -11049,7 +11065,28 @@ impl TypeChecker {
                 self.check_expression_expected(module, &element.value, expected)
             }
             Expression::Product(product) => {
-                let mut elements = Vec::new();
+                // An inferred length in the expectation, as in a generic
+                // parameter `(...(T ^ N), String)`, is fixed by how many
+                // elements the literal has, so positions line up below.
+                let resolved_expected;
+                let expected = match expected {
+                    Some(CheckedType::Product(expected_product))
+                        if !product.elements.iter().any(|element| element.spread) =>
+                    {
+                        match resolve_inferred_runs(expected_product, product.elements.len()) {
+                            Some(resolved) => {
+                                resolved_expected = CheckedType::Product(resolved);
+                                Some(&resolved_expected)
+                            }
+                            None => expected,
+                        }
+                    }
+                    _ => expected,
+                };
+                // Runs, so spreading a large array appends one run instead of
+                // one element per position.
+                let mut runs: Vec<CheckedTypeRun> = Vec::new();
+                let mut positions = 0usize;
                 let mut names = HashSet::new();
                 for element in &product.elements {
                     if element.spread {
@@ -11059,12 +11096,16 @@ impl TypeChecker {
                         }
                         match value_type {
                             CheckedType::Product(product) if !product.variadic => {
-                                for (offset, field) in product.iter_positions().enumerate() {
+                                let mut offset = 0;
+                                for run in &product.runs {
+                                    let field = &run.element;
+                                    let at = positions + offset;
+                                    offset += run.positions().unwrap_or(1);
                                     if let Some(name) = &field.name
                                         && let Some(CheckedType::Product(expected_product)) =
                                             expected
-                                        && let Some(expected_element) = expected_product
-                                            .position_element(elements.len() + offset)
+                                        && let Some(expected_element) =
+                                            expected_product.position_element(at)
                                         && expected_element.name.as_deref() != Some(name.as_str())
                                     {
                                         self.diagnostics.push(Diagnostic::new(
@@ -11088,7 +11129,8 @@ impl TypeChecker {
                                         ));
                                     }
                                 }
-                                elements.extend(product.iter_positions().cloned());
+                                positions += offset;
+                                runs.extend(product.runs.iter().cloned());
                             }
                             CheckedType::Error => {}
                             other => self.diagnostics.push(Diagnostic::new(
@@ -11098,7 +11140,7 @@ impl TypeChecker {
                         }
                         continue;
                     }
-                    let index = elements.len();
+                    let index = positions;
                     self.block_argument_context = block_argument && !product.is_grouping();
                     let value_type = self.check_expression_expected(
                         module,
@@ -11140,18 +11182,22 @@ impl TypeChecker {
                                 ));
                             }
                         }
-                        elements.push(CheckedTypeElement {
-                            name: element.name.clone(),
-                            value_type,
-                            default: None,
+                        runs.push(CheckedTypeRun {
+                            element: CheckedTypeElement {
+                                name: element.name.clone(),
+                                value_type,
+                                default: None,
+                            },
+                            count: RunCount::Fixed(1),
                         });
+                        positions += 1;
                     }
                 }
                 if let Some(CheckedType::Product(expected_product)) = expected
                     && !expected_product.variadic
-                    && elements.len() < expected_product.position_count()
+                    && positions < expected_product.position_count()
                 {
-                    let initialized_count = elements.len();
+                    let initialized_count = positions;
                     if let Some((index, field)) = expected_product
                         .iter_positions()
                         .enumerate()
@@ -11187,7 +11233,13 @@ impl TypeChecker {
                         // In particular this replaces inference placeholders in
                         // a constructor's expected representation with the
                         // concrete arguments supplied here.
-                        for (index, actual) in elements.iter().enumerate() {
+                        let initialized = CheckedProductType {
+                            slotted: false,
+                            spreads: Vec::new(),
+                            runs,
+                            variadic: false,
+                        };
+                        for (index, actual) in initialized.iter_positions().enumerate() {
                             let Some(expected) = completed.get_mut(index) else {
                                 break;
                             };
@@ -11200,7 +11252,12 @@ impl TypeChecker {
                         normalize_product_type_kind(completed, false, product.slotted)
                     }
                 } else {
-                    normalize_product_type_kind(elements, false, product.slotted)
+                    normalize_checked_product(CheckedProductType {
+                        slotted: product.slotted,
+                        spreads: Vec::new(),
+                        runs,
+                        variadic: false,
+                    })
                 }
             }
             Expression::RepeatedProduct(repeated) => {
@@ -11221,13 +11278,11 @@ impl TypeChecker {
                 }
                 let (literal_count, symbolic_count) =
                     match self.resolve_source_type_inner(module, &repeated.count) {
-                        CheckedType::NumberLiteral(count) => match usize::try_from(count) {
+                        CheckedType::NumberLiteral(count) => match checked_array_length(count) {
                             Ok(count) => (Some(count), None),
-                            Err(_) => {
-                                self.diagnostics.push(Diagnostic::new(
-                                    repeated.syntax.span.clone(),
-                                    "array length is too large",
-                                ));
+                            Err(message) => {
+                                self.diagnostics
+                                    .push(Diagnostic::new(repeated.syntax.span.clone(), message));
                                 return CheckedType::Error;
                             }
                         },
@@ -13518,6 +13573,15 @@ impl TypeChecker {
                             ));
                             return CheckedType::Error;
                         };
+                        if product.position_follows_symbolic_run(index) {
+                            self.diagnostics.push(Diagnostic::new(
+                                access.syntax.span.clone(),
+                                format!(
+                                    "product position `{index}` depends on a repetition whose length is not known here"
+                                ),
+                            ));
+                            return CheckedType::Error;
+                        }
                         let Some(element) = product.position_element(index) else {
                             self.diagnostics.push(Diagnostic::new(
                                 access.syntax.span.clone(),
@@ -18212,12 +18276,13 @@ impl TypeChecker {
                         CheckedType::Error
                     }
                     CheckedType::NumberLiteral(count) => {
-                        let Ok(count) = usize::try_from(count) else {
-                            self.diagnostics.push(Diagnostic::new(
-                                array.syntax.span.clone(),
-                                "array length is too large",
-                            ));
-                            return CheckedType::Error;
+                        let count = match checked_array_length(count) {
+                            Ok(count) => count,
+                            Err(message) => {
+                                self.diagnostics
+                                    .push(Diagnostic::new(array.syntax.span.clone(), message));
+                                return CheckedType::Error;
+                            }
                         };
                         array_product(element, count)
                     }
@@ -19053,12 +19118,13 @@ impl TypeChecker {
                 if let Type::Array(array) = &element.ty {
                     let count = self.resolve_source_type_inner(module, &array.count);
                     if let CheckedType::NumberLiteral(count) = count {
-                        let Ok(count) = usize::try_from(count) else {
-                            self.diagnostics.push(Diagnostic::new(
-                                array.syntax.span.clone(),
-                                "array length is too large",
-                            ));
-                            continue;
+                        let count = match checked_array_length(count) {
+                            Ok(count) => count,
+                            Err(message) => {
+                                self.diagnostics
+                                    .push(Diagnostic::new(array.syntax.span.clone(), message));
+                                continue;
+                            }
                         };
                         let value_type = self.resolve_source_type_inner(module, &array.element);
                         if count != 0 {
@@ -19444,30 +19510,97 @@ pub(crate) fn array_length(source: &CheckedType, target: &CheckedType) -> Option
     element_matches(homogeneous).then_some(product.len()?)
 }
 
+/// Pairs two run lists piece by piece, splitting fixed runs where the two
+/// sides' boundaries differ. Symbolic runs pair only with each other. Each
+/// piece carries the first side's run, cut to the shared count, and the second
+/// side's element. Returns `None` when the shapes do not line up.
+pub(crate) fn zip_product_runs<'a, 'b>(
+    first: &'a [CheckedTypeRun],
+    second: &'b [CheckedTypeRun],
+) -> Option<Vec<(CheckedTypeRun, &'b CheckedTypeElement)>> {
+    let mut pieces = Vec::with_capacity(first.len().max(second.len()));
+    let (mut a, mut b) = (0, 0);
+    let mut a_left = first.first().and_then(CheckedTypeRun::positions);
+    let mut b_left = second.first().and_then(CheckedTypeRun::positions);
+    loop {
+        match (first.get(a), second.get(b)) {
+            (None, None) => return Some(pieces),
+            (Some(_), None) | (None, Some(_)) => return None,
+            (Some(a_run), Some(b_run)) => {
+                match (a_left, b_left) {
+                    (Some(a_count), Some(b_count)) => {
+                        let take = a_count.min(b_count);
+                        pieces.push((
+                            CheckedTypeRun {
+                                element: a_run.element.clone(),
+                                count: RunCount::Fixed(take),
+                            },
+                            &b_run.element,
+                        ));
+                        a_left = Some(a_count - take);
+                        b_left = Some(b_count - take);
+                    }
+                    (None, None) => {
+                        pieces.push((a_run.clone(), &b_run.element));
+                        a_left = Some(0);
+                        b_left = Some(0);
+                    }
+                    _ => return None,
+                }
+                if a_left == Some(0) {
+                    a += 1;
+                    a_left = first.get(a).and_then(CheckedTypeRun::positions);
+                }
+                if b_left == Some(0) {
+                    b += 1;
+                    b_left = second.get(b).and_then(CheckedTypeRun::positions);
+                }
+            }
+        }
+    }
+}
+
 fn replace_product_default_policy(merged: CheckedType, expected: &CheckedType) -> CheckedType {
     match (merged, expected) {
         (CheckedType::Product(merged), CheckedType::Product(expected))
-            if merged.position_count() == expected.position_count() =>
+            if !merged.spreads.is_empty()
+                && merged.spreads == expected.spreads
+                && merged.runs.len() == expected.runs.len() =>
         {
-            let elements = merged
-                .iter_positions()
-                .cloned()
-                .zip(expected.iter_positions())
-                .map(|(mut merged, expected)| {
-                    merged.default = expected.default.clone();
-                    merged.value_type = replace_product_default_policy(
-                        merged.value_type.clone(),
+            // Unresolved spreads index runs, so keep the run structure as is.
+            let mut merged = merged;
+            for (run, expected) in merged.runs.iter_mut().zip(&expected.runs) {
+                run.element.default = expected.element.default.clone();
+                run.element.value_type = replace_product_default_policy(
+                    run.element.value_type.clone(),
+                    &expected.element.value_type,
+                );
+            }
+            CheckedType::Product(merged)
+        }
+        (CheckedType::Product(merged), CheckedType::Product(expected))
+            if merged.spreads.is_empty() && expected.spreads.is_empty() =>
+        {
+            let Some(pieces) = zip_product_runs(&merged.runs, &expected.runs) else {
+                return CheckedType::Product(merged);
+            };
+            let runs = pieces
+                .into_iter()
+                .map(|(mut run, expected)| {
+                    run.element.default = expected.default.clone();
+                    run.element.value_type = replace_product_default_policy(
+                        run.element.value_type,
                         &expected.value_type,
                     );
-                    merged
+                    run
                 })
                 .collect();
-            CheckedType::Product(CheckedProductType::from_elements(
-                merged.slotted,
-                merged.spreads.clone(),
-                elements,
-                merged.variadic,
-            ))
+            normalize_checked_product(CheckedProductType {
+                slotted: merged.slotted,
+                spreads: Vec::new(),
+                runs,
+                variadic: merged.variadic,
+            })
         }
         (CheckedType::Function(mut merged), CheckedType::Function(expected)) => {
             merged.parameter = Box::new(replace_product_default_policy(
@@ -19740,6 +19873,151 @@ fn schemes_well_formed(ty: &CheckedType) -> bool {
     }
 }
 
+/// Replaces the one inferred-length run of `product` with the fixed length
+/// that gives it `positions` positions in total. `None` when there is no such
+/// run, more than one, or another run is symbolic.
+fn resolve_inferred_runs(
+    product: &CheckedProductType,
+    positions: usize,
+) -> Option<CheckedProductType> {
+    if !product.spreads.is_empty() || product.variadic {
+        return None;
+    }
+    let mut hole = None;
+    let mut known = 0usize;
+    for (index, run) in product.runs.iter().enumerate() {
+        match open_run_count(&run.count)? {
+            Some(count) => known = known.checked_add(count)?,
+            None if hole.is_none() => hole = Some(index),
+            None => return None,
+        }
+    }
+    let hole = hole?;
+    let mut resolved = product.clone();
+    resolved.runs[hole].count = RunCount::Fixed(positions.checked_sub(known)?);
+    resolved.runs.retain(|run| run.count != RunCount::Fixed(0));
+    Some(resolved)
+}
+
+/// A run count that a merge may still choose: an inference hole, or a number
+/// literal that has not been normalized into a fixed count yet.
+fn open_run_count(count: &RunCount) -> Option<Option<usize>> {
+    match count {
+        RunCount::Fixed(count) => Some(Some(*count)),
+        RunCount::Symbolic(count) => match count.as_ref() {
+            CheckedType::Inferred => Some(None),
+            CheckedType::NumberLiteral(count) => usize::try_from(*count).ok().map(Some),
+            _ => None,
+        },
+    }
+}
+
+/// Merges two product run lists position by position without expanding
+/// them. Runs are split where the two sides' boundaries differ, so the work
+/// is proportional to the number of runs. An inferred count absorbs the fixed
+/// positions the other side has left over once both suffixes are accounted
+/// for; a rigid symbolic count only merges with the same count.
+fn merge_product_runs(
+    actual: &[CheckedTypeRun],
+    expected: &[CheckedTypeRun],
+) -> Option<Vec<CheckedTypeRun>> {
+    fn fixed_positions(runs: &[CheckedTypeRun]) -> Option<usize> {
+        runs.iter().try_fold(0usize, |total, run| {
+            total.checked_add(open_run_count(&run.count)??)
+        })
+    }
+    fn merge_element(
+        actual: &CheckedTypeElement,
+        expected: &CheckedTypeElement,
+    ) -> Option<CheckedTypeElement> {
+        Some(CheckedTypeElement {
+            name: expected.name.clone().or(actual.name.clone()),
+            value_type: merge_types(actual.value_type.clone(), expected.value_type.clone())?,
+            default: expected.default.clone().or(actual.default.clone()),
+        })
+    }
+    // Resolves inferred counts on one side against the other side's fixed
+    // positions, returning per-run counts. `None` leaves a rigid symbolic run.
+    fn resolve(runs: &[CheckedTypeRun], other: &[CheckedTypeRun]) -> Option<Vec<Option<usize>>> {
+        let holes = runs
+            .iter()
+            .filter(|run| open_run_count(&run.count) == Some(None))
+            .count();
+        let mut counts = Vec::with_capacity(runs.len());
+        for run in runs {
+            counts.push(match open_run_count(&run.count) {
+                Some(Some(count)) => Some(count),
+                Some(None) => {
+                    // Only one hole can be solved, and only against a fully
+                    // fixed other side.
+                    if holes != 1 {
+                        return None;
+                    }
+                    let known = runs
+                        .iter()
+                        .filter_map(|run| open_run_count(&run.count).flatten())
+                        .try_fold(0usize, |total, count| total.checked_add(count))?;
+                    Some(fixed_positions(other)?.checked_sub(known)?)
+                }
+                None => None,
+            });
+        }
+        Some(counts)
+    }
+    let actual_counts = resolve(actual, expected)?;
+    let expected_counts = resolve(expected, actual)?;
+    let mut merged = Vec::with_capacity(actual.len().max(expected.len()));
+    let (mut a, mut e) = (0, 0);
+    let mut a_left = actual_counts.first().copied().flatten();
+    let mut e_left = expected_counts.first().copied().flatten();
+    loop {
+        // Skip runs that were resolved to zero positions.
+        while a < actual.len() && a_left == Some(0) {
+            a += 1;
+            a_left = actual_counts.get(a).copied().flatten();
+        }
+        while e < expected.len() && e_left == Some(0) {
+            e += 1;
+            e_left = expected_counts.get(e).copied().flatten();
+        }
+        match (actual.get(a), expected.get(e)) {
+            (None, None) => return Some(merged),
+            (Some(_), None) | (None, Some(_)) => return None,
+            (Some(actual_run), Some(expected_run)) => {
+                let element = merge_element(&actual_run.element, &expected_run.element)?;
+                match (a_left, e_left) {
+                    (Some(a_count), Some(e_count)) => {
+                        let take = a_count.min(e_count);
+                        merged.push(CheckedTypeRun {
+                            element,
+                            count: RunCount::Fixed(take),
+                        });
+                        a_left = Some(a_count - take);
+                        e_left = Some(e_count - take);
+                    }
+                    (None, None) => {
+                        let (RunCount::Symbolic(a_count), RunCount::Symbolic(e_count)) =
+                            (&actual_run.count, &expected_run.count)
+                        else {
+                            return None;
+                        };
+                        let count =
+                            merge_types(a_count.as_ref().clone(), e_count.as_ref().clone())?;
+                        merged.push(CheckedTypeRun {
+                            element,
+                            count: RunCount::Symbolic(Box::new(count)),
+                        });
+                        a_left = Some(0);
+                        e_left = Some(0);
+                    }
+                    // A rigid symbolic count never matches a fixed one.
+                    _ => return None,
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType> {
     match (actual, expected) {
         (CheckedType::Forall(actual), CheckedType::Forall(expected)) => {
@@ -19841,83 +20119,13 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
                 && actual.spreads == expected.spreads
                 && actual.variadic == expected.variadic =>
         {
-            let run_wise = (actual.runs.len() == expected.runs.len()).then(|| {
-                actual
-                    .runs
-                    .iter()
-                    .zip(&expected.runs)
-                    .map(|(actual, expected)| {
-                        let count = match (&actual.count, &expected.count) {
-                            (RunCount::Fixed(actual), RunCount::Fixed(expected))
-                                if actual == expected =>
-                            {
-                                Some(RunCount::Fixed(*actual))
-                            }
-                            (RunCount::Symbolic(actual), RunCount::Symbolic(expected)) => {
-                                merge_types(actual.as_ref().clone(), expected.as_ref().clone())
-                                    .map(|count| RunCount::Symbolic(Box::new(count)))
-                            }
-                            _ => None,
-                        }?;
-                        Some(CheckedTypeRun {
-                            element: CheckedTypeElement {
-                                name: expected
-                                    .element
-                                    .name
-                                    .clone()
-                                    .or(actual.element.name.clone()),
-                                value_type: merge_types(
-                                    actual.element.value_type.clone(),
-                                    expected.element.value_type.clone(),
-                                )?,
-                                default: expected
-                                    .element
-                                    .default
-                                    .clone()
-                                    .or(actual.element.default.clone()),
-                            },
-                            count,
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>()
-            });
-            if let Some(Some(runs)) = run_wise {
-                return Some(normalize_checked_product(CheckedProductType {
-                    slotted: actual.slotted,
-                    spreads: actual.spreads,
-                    runs,
-                    variadic: actual.variadic,
-                }));
-            }
-            if !actual.spreads.is_empty() || !expected.spreads.is_empty() {
-                return None;
-            }
-            let length = actual.len()?;
-            if Some(length) != expected.len() {
-                return None;
-            }
-            let elements = actual
-                .iter_positions()
-                .cloned()
-                .zip(expected.iter_positions().cloned())
-                .map(|(actual, expected)| {
-                    merge_types(actual.value_type, expected.value_type).map(|value_type| {
-                        CheckedTypeElement {
-                            name: expected.name.or(actual.name),
-                            value_type,
-                            default: expected.default.or(actual.default),
-                        }
-                    })
-                })
-                .collect::<Option<Vec<_>>>()?;
-            Some(normalize_checked_product(
-                CheckedProductType::from_elements(
-                    actual.slotted,
-                    Vec::new(),
-                    elements,
-                    actual.variadic,
-                ),
-            ))
+            let runs = merge_product_runs(&actual.runs, &expected.runs)?;
+            Some(normalize_checked_product(CheckedProductType {
+                slotted: actual.slotted,
+                spreads: actual.spreads,
+                runs,
+                variadic: actual.variadic,
+            }))
         }
         (CheckedType::Function(mut actual), CheckedType::Function(expected))
             if actual.is_slotted() != expected.is_slotted()
@@ -22627,6 +22835,19 @@ fn normalize_checked_product_inner(
     } else {
         CheckedType::Product(product)
     }
+}
+
+/// The longest array a single repetition may have. Code generation lays a
+/// repetition out as one LLVM array, whose length it stores as a `u32`.
+pub(crate) const MAX_ARRAY_LENGTH: u64 = u32::MAX as u64;
+
+fn checked_array_length(count: u64) -> Result<usize, String> {
+    if count > MAX_ARRAY_LENGTH {
+        return Err(format!(
+            "array length {count} exceeds the limit of {MAX_ARRAY_LENGTH}"
+        ));
+    }
+    usize::try_from(count).map_err(|_| "array length is too large for this target".to_owned())
 }
 
 fn array_product(element: CheckedType, count: usize) -> CheckedType {

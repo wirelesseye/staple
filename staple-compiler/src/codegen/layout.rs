@@ -109,12 +109,31 @@ pub(crate) struct DescriptorLayout {
 }
 
 impl DescriptorLayout {
+    #[cfg(test)]
     fn product(fields: &[Self]) -> Self {
-        let align = fields.iter().map(|field| field.align).max().unwrap_or(1);
+        let runs = fields.iter().map(|field| (*field, 1)).collect::<Vec<_>>();
+        Self::product_runs(&runs)
+    }
+
+    /// A product whose fields repeat: `count` adjacent copies of a field are
+    /// laid out exactly like an LLVM `[count x T]` array, one alloc size
+    /// apart, so the layout is computed without visiting each copy.
+    fn product_runs(runs: &[(Self, u64)]) -> Self {
+        let align = runs
+            .iter()
+            .filter(|(_, count)| *count > 0)
+            .map(|(field, _)| field.align)
+            .max()
+            .unwrap_or(1);
         let mut end = 0u64;
-        for field in fields {
-            end = end.div_ceil(field.align as u64) * field.align as u64;
-            end += field.store_size;
+        for (field, count) in runs {
+            if *count == 0 {
+                continue;
+            }
+            let field_align = field.align as u64;
+            let element_stride = field.store_size.div_ceil(field_align) * field_align;
+            end = end.div_ceil(field_align) * field_align;
+            end += (count - 1) * element_stride + field.store_size;
         }
         let store_size = end.div_ceil(align as u64) * align as u64;
         Self {
@@ -221,6 +240,20 @@ fn opaque_is(value_type: &CheckedType, expected: Option<TypeId>) -> bool {
     )
 }
 
+/// Converts a run length to an LLVM array length, which inkwell limits to
+/// `u32`.
+pub(crate) fn llvm_array_length(count: usize) -> CodeGenerationResult<u32> {
+    u32::try_from(count).map_err(|_| {
+        Diagnostic::new(
+            Span::Compiler,
+            format!(
+                "array length {count} exceeds the code generator's limit of {}",
+                u32::MAX
+            ),
+        )
+    })
+}
+
 impl<'program, 'context> Backend<'program, 'context> {
     pub(crate) fn compile_type(
         &self,
@@ -324,11 +357,15 @@ impl<'program, 'context> Backend<'program, 'context> {
     ) -> CodeGenerationResult<DescriptorLayout> {
         let layout = match value_type {
             CheckedType::Product(product) => {
-                let fields = product
-                    .iter_positions()
-                    .map(|field| self.descriptor_layout(&field.value_type))
+                let runs = product
+                    .runs
+                    .iter()
+                    .map(|run| {
+                        let count = run.positions().unwrap_or(1) as u64;
+                        Ok((self.descriptor_layout(&run.element.value_type)?, count))
+                    })
                     .collect::<CodeGenerationResult<Vec<_>>>()?;
-                DescriptorLayout::product(&fields)
+                DescriptorLayout::product_runs(&runs)
             }
             CheckedType::Sum(sum) => {
                 let alternatives = sum
@@ -723,27 +760,42 @@ impl<'program, 'context> Backend<'program, 'context> {
         &self,
         product: &CheckedProductType,
     ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
-        // A homogeneous product is one `[n x T]` field so a million-element
-        // array stays O(1). Mixed products keep their historical flat layout
-        // (one field per position) to avoid changing unrelated ABIs.
-        if let [run] = product.runs.as_slice()
-            && let Some(count) = run.positions()
-            && count > 1
-        {
-            let element_type = self.compile_type(&run.element.value_type)?;
-            return Ok(self
-                .context
-                .struct_type(&[element_type.array_type(count as u32).into()], false));
-        }
+        // Every repeated run is one `[n x T]` field, so a product's LLVM type
+        // stays proportional to its runs. An array has the same memory layout
+        // as the same number of separate fields, so this matches C structs.
+        // An LLVM array field directly inside a product is therefore always a
+        // run: element types never compile to a bare LLVM array.
+        // LLVM computes sizes with wrapping arithmetic, so bound the size here.
+        // Each element type was bounded when it was compiled, and the padding
+        // between a handful of runs is negligible against the limit.
+        let maximum = (1u64 << (8 * self.target_data.get_pointer_byte_size(None) - 1)) - 1;
+        let mut size = 0u64;
         let field_types = product
             .runs
             .iter()
-            .flat_map(|run| {
+            .map(|run| {
+                let element_type = self.compile_type(&run.element.value_type)?;
                 let count = run.positions().unwrap_or(1);
-                std::iter::repeat_n(&run.element.value_type, count)
+                size = self
+                    .target_data
+                    .get_abi_size(&element_type)
+                    .checked_mul(count as u64)
+                    .and_then(|bytes| bytes.checked_add(size))
+                    .filter(|&end| end <= maximum)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            Span::Compiler,
+                            format!("a product type exceeds this target's maximum object size of {maximum} bytes"),
+                        )
+                    })?;
+                match count {
+                    1 => Ok(element_type),
+                    count => Ok(element_type
+                        .array_type(llvm_array_length(count)?)
+                        .into()),
+                }
             })
-            .map(|value_type| self.compile_type(value_type).map(Into::into))
-            .collect::<CodeGenerationResult<Vec<_>>>()?;
+            .collect::<CodeGenerationResult<Vec<BasicTypeEnum<'context>>>>()?;
         Ok(self.context.struct_type(&field_types, false))
     }
 

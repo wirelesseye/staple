@@ -635,13 +635,6 @@ impl ProductValue {
         *self = Self::Elements(Vec::new());
     }
 
-    fn as_slice(&self) -> Option<&[(Option<String>, Value)]> {
-        match self {
-            Self::Elements(elements) => Some(elements),
-            Self::Repeated { .. } => None,
-        }
-    }
-
     fn to_vec(&self) -> Vec<(Option<String>, Value)> {
         self.iter().cloned().collect()
     }

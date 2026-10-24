@@ -46,6 +46,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 mod abi;
+mod aggregates;
 mod conversions;
 #[doc(hidden)]
 pub mod corpus;

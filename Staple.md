@@ -1928,8 +1928,12 @@ let zeros: (I32 ^ 3) = (0, 0, 0)
 
 `(T ^ N)` is exactly equivalent to a product containing `N` copies of `T`,
 rather than a distinct array type. In particular, `(T ^ 0)` is `()` and `(T ^ 1)`
-is `T`. Products may contain any number of repetitions that fits the target's
-layout. The length is mandatory: there is no unsized array spelling.
+is `T`. One repetition may have at most 4,294,967,295 elements, and a product
+must fit the target's maximum object size. A function's parameter may have at
+most 65,535 positions, since each position is passed as its own argument: a
+function whose whole parameter is `(T ^ N)` takes `N` arguments. Array values
+are stored like any other local value, so a very large array can exhaust the
+stack. The length is mandatory: there is no unsized array spelling.
 
 Repeated products are stored as runs, so `(I32, I32, I32)` and `(I32 ^ 3)` are
 the same normal form. Types print in that normal form: a diagnostic shows

@@ -37,6 +37,10 @@ use crate::{
 };
 
 use super::abi::flattened_parameter_types;
+
+/// Spreads at least this long build their product in memory rather than one
+/// element at a time.
+const MEMORY_SPREAD_LENGTH: usize = 16;
 use super::{
     Backend, CodeGenerationResult, Diagnostic, EmissionUnit, LayoutContext, compiler_diagnostic,
     ir::value_as_basic,
@@ -204,6 +208,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if !diagnostics.is_empty() {
             return Err(diagnostics);
         }
+        self.backend
+            .llvm_module
+            .verify()
+            .map_err(|message| vec![invalid_module_diagnostic(message)])?;
+        let native = self
+            .externs
+            .values()
+            .filter_map(|function| function.get_name().to_str().ok().map(str::to_owned))
+            .collect();
+        super::aggregates::legalize_large_aggregates(&self.backend.llvm_module, &native);
         self.backend
             .llvm_module
             .verify()
@@ -4004,6 +4018,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         environment: &mut FunctionEnvironment<'context>,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let span = &expression.origin.span;
+        let long_spread = product.steps.iter().any(|step| match step {
+            crate::LoweredProductStep::PositionalSpread { mappings, .. } => {
+                mappings.len() >= MEMORY_SPREAD_LENGTH
+            }
+            crate::LoweredProductStep::NamedSpread { mappings, .. } => {
+                mappings.len() >= MEMORY_SPREAD_LENGTH
+            }
+            _ => false,
+        });
+        if long_spread {
+            return self.emit_product_in_memory(owner, expression, product, environment);
+        }
         let mut slots: Vec<Option<BasicValueEnum<'context>>> = vec![None; product.fields.len()];
         for step in &product.steps {
             let (value, slot, spread) = match step {
@@ -4106,6 +4132,179 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .backend
             .build_checked_product_value(&product.final_type, &values, span.clone())?
             .as_any_value_enum())
+    }
+
+    /// Builds a product with a long spread in a stack slot: single elements are
+    /// stored and each contiguous spread range is copied with one `memcpy`
+    /// per run it crosses, so spreading `(T ^ N)` costs no per-element code.
+    fn emit_product_in_memory(
+        &mut self,
+        owner: EmissionOwner,
+        expression: &crate::LoweredExpression,
+        product: &crate::LoweredProduct,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = &expression.origin.span;
+        let final_type = crate::normalize_checked_product_runs(product.final_type.clone());
+        let llvm = self.backend.compile_product_type(&final_type)?;
+        let storage = self
+            .backend
+            .entry_builder()
+            .build_alloca(llvm, "product.storage")
+            .map_err(compiler_diagnostic)?;
+        for step in &product.steps {
+            let (operand, single, mappings) = match step {
+                crate::LoweredProductStep::Positional { expression, slot }
+                | crate::LoweredProductStep::Designated {
+                    expression, slot, ..
+                }
+                | crate::LoweredProductStep::Default {
+                    expression, slot, ..
+                } => (*expression, Some(*slot), Vec::new()),
+                crate::LoweredProductStep::PositionalSpread {
+                    expression,
+                    mappings,
+                } => (
+                    *expression,
+                    None,
+                    mappings
+                        .iter()
+                        .map(|mapping| (mapping.source, mapping.slot))
+                        .collect(),
+                ),
+                crate::LoweredProductStep::NamedSpread {
+                    expression,
+                    mappings,
+                } => (
+                    *expression,
+                    None,
+                    mappings
+                        .iter()
+                        .map(|mapping| (mapping.source, mapping.slot))
+                        .collect(),
+                ),
+            };
+            let value = self.emit_expression(owner, operand, environment)?;
+            if environment.returned {
+                return Ok(self.backend.unit_value());
+            }
+            let value = value_as_basic(value).ok_or_else(|| {
+                Diagnostic::new(span.clone(), "product element is not a first-class value")
+            })?;
+            if let Some(slot) = single {
+                let pointer =
+                    self.backend
+                        .product_element_pointer(llvm, storage, slot, "product.slot")?;
+                self.backend
+                    .builder
+                    .build_store(pointer, value)
+                    .map_err(compiler_diagnostic)?;
+                continue;
+            }
+            if mappings.is_empty() {
+                continue;
+            }
+            let BasicValueEnum::StructValue(source) = value else {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "product spread operand has an invalid representation",
+                ));
+            };
+            let source_type = source.get_type();
+            let source_storage = self
+                .backend
+                .entry_builder()
+                .build_alloca(source_type, "product.spread.storage")
+                .map_err(compiler_diagnostic)?;
+            self.backend
+                .builder
+                .build_store(source_storage, source)
+                .map_err(compiler_diagnostic)?;
+            self.copy_product_ranges(llvm, storage, source_type, source_storage, &mappings, span)?;
+        }
+        self.backend
+            .builder
+            .build_load(llvm, storage, "product.value")
+            .map(|value| value.as_any_value_enum())
+            .map_err(compiler_diagnostic)
+    }
+
+    /// Copies spread positions `(source, destination)` between two products in
+    /// memory. Consecutive positions inside one LLVM field on both sides are
+    /// laid out identically, so each such piece is one copy.
+    fn copy_product_ranges(
+        &self,
+        destination_type: inkwell::types::StructType<'context>,
+        destination: inkwell::values::PointerValue<'context>,
+        source_type: inkwell::types::StructType<'context>,
+        source: inkwell::values::PointerValue<'context>,
+        mappings: &[(usize, usize)],
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        // Positions left in the LLVM field that holds `position`, and that
+        // field's element type.
+        let field_rest = |ty: inkwell::types::StructType<'context>, position: usize| {
+            let (field, index) = self.backend.product_field_position(ty, position)?;
+            let field_type = ty.get_field_type_at_index(field)?;
+            Some(match index {
+                Some(index) => {
+                    let array = field_type.into_array_type();
+                    (array.len() - index, array.get_element_type())
+                }
+                None => (1, field_type),
+            })
+        };
+        let out_of_range = || Diagnostic::new(span.clone(), "product spread is out of range");
+        let mut index = 0;
+        while index < mappings.len() {
+            let (source_position, destination_position) = mappings[index];
+            let mut length = 1;
+            while index + length < mappings.len()
+                && mappings[index + length]
+                    == (source_position + length, destination_position + length)
+            {
+                length += 1;
+            }
+            let (source_rest, element) =
+                field_rest(source_type, source_position).ok_or_else(out_of_range)?;
+            let (destination_rest, destination_element) =
+                field_rest(destination_type, destination_position).ok_or_else(out_of_range)?;
+            if element != destination_element {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "product spread element layouts differ",
+                ));
+            }
+            let piece = length
+                .min(source_rest as usize)
+                .min(destination_rest as usize);
+            let from = self.backend.product_element_pointer(
+                source_type,
+                source,
+                source_position,
+                "product.spread.from",
+            )?;
+            let to = self.backend.product_element_pointer(
+                destination_type,
+                destination,
+                destination_position,
+                "product.spread.to",
+            )?;
+            let align = self.backend.target_data.get_abi_alignment(&element);
+            let bytes = self.backend.target_data.get_abi_size(&element) * piece as u64;
+            self.backend
+                .builder
+                .build_memcpy(
+                    to,
+                    align,
+                    from,
+                    align,
+                    self.backend.size_type.const_int(bytes, false),
+                )
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+            index += piece;
+        }
+        Ok(())
     }
 
     /// `(value ^ count)`. The emitter evaluates the element once

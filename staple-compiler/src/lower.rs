@@ -8596,6 +8596,11 @@ impl LoweredProgram {
         argument: &Expression,
         function_type: &CheckedFunctionType,
     ) -> Result<(Vec<LoweredCallArgument>, Vec<LoweredCallStep>), Diagnostic> {
+        if let Some(diagnostic) =
+            parameter_positions_diagnostic(&argument.syntax().span, function_type)
+        {
+            return Err(diagnostic);
+        }
         let types = flattened_parameter_types(&function_type.parameter);
         self.lower_value_call_arguments(module, owner, context, argument, function_type, &types)
     }
@@ -8612,6 +8617,11 @@ impl LoweredProgram {
         argument: &Expression,
         function_type: &CheckedFunctionType,
     ) -> Result<(Vec<LoweredCallArgument>, Vec<LoweredCallStep>), Diagnostic> {
+        if let Some(diagnostic) =
+            parameter_positions_diagnostic(&argument.syntax().span, function_type)
+        {
+            return Err(diagnostic);
+        }
         let types = flattened_parameter_types(&function_type.parameter);
         let count = types.len();
         let mutation_mask = mutation_slot_mask(count, &function_type.mutations);
@@ -15983,22 +15993,49 @@ impl Lowerer {
     }
 }
 
+/// The most parameter positions a function may have. Calls pass every
+/// position of the parameter product separately, so a function whose whole
+/// parameter is a large array would otherwise take one argument per element.
+pub(crate) const MAX_PARAMETER_POSITIONS: usize = 65_535;
+
+/// Rejects a parameter product with more than [`MAX_PARAMETER_POSITIONS`]
+/// positions.
+pub(crate) fn parameter_positions_diagnostic(
+    span: &Span,
+    function_type: &crate::CheckedFunctionType,
+) -> Option<Diagnostic> {
+    let CheckedType::Product(product) = function_type.parameter.as_ref() else {
+        return None;
+    };
+    let positions = product.len()?;
+    (positions > MAX_PARAMETER_POSITIONS).then(|| {
+        Diagnostic::new(
+            span.clone(),
+            format!(
+                "a function's parameter has {positions} positions, more than the limit of {MAX_PARAMETER_POSITIONS}"
+            ),
+        )
+    })
+}
+
 fn validate_checked_module(module: &TypedModule) -> Vec<Diagnostic> {
-    module
-        .functions()
-        .iter()
-        .chain(module.synthesized_thunks())
-        .filter(|function| module.type_of_function(function.id).is_none())
-        .map(|function| {
-            Diagnostic::new(
+    let mut diagnostics = Vec::new();
+    for function in module.functions().iter().chain(module.synthesized_thunks()) {
+        match module.type_of_function(function.id) {
+            None => diagnostics.push(Diagnostic::new(
                 function.body.syntax().span.clone(),
                 format!(
                     "cannot lower unchecked function `{}` (function id {})",
                     function.name, function.id.0
                 ),
-            )
-        })
-        .collect()
+            )),
+            Some(function_type) => diagnostics.extend(parameter_positions_diagnostic(
+                &function.body.syntax().span,
+                function_type,
+            )),
+        }
+    }
+    diagnostics
 }
 
 /// The position of `Bool`'s `True` alternative in its sum. The alternative is

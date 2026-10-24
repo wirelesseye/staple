@@ -1187,13 +1187,9 @@ impl<'program, 'context> Backend<'program, 'context> {
         if let [value] = values {
             return Ok(*value);
         }
-        let homogeneous_repeat = match product.runs.as_slice() {
-            [run] => run.positions().filter(|count| *count > 1),
-            _ => None,
-        };
-        let Some(_) = homogeneous_repeat else {
+        if product.runs.iter().all(|run| run.positions() == Some(1)) {
             return self.build_product_value(values, span);
-        };
+        }
         let mut field_types = Vec::with_capacity(product.runs.len());
         let mut fields = Vec::with_capacity(product.runs.len());
         let mut values = values.iter().copied();
@@ -1214,7 +1210,7 @@ impl<'program, 'context> Backend<'program, 'context> {
                 field_types.push(element_type);
                 fields.push(group[0]);
             } else {
-                let array_type = element_type.array_type(count as u32);
+                let array_type = element_type.array_type(super::layout::llvm_array_length(count)?);
                 let mut array = array_type.const_zero();
                 for (index, value) in group.into_iter().enumerate() {
                     array = self
