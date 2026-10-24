@@ -201,8 +201,18 @@ impl<T> IntoIterator List<T> {
 
 // The source must not overlap this uniquely owned list's storage.
 companion List<U8> {
-    pub(package) def append_shared_bytes = (mut list: List<U8>; bytes: SharedBuffer<U8>) => () :: {
-        List.reserve list (SharedBuffer.length bytes)
-        Buffer.append_shared_bytes list.* bytes
+    // Copies `count` bytes starting at `start`; the caller checks the bounds.
+    pub(package) def append_shared_range = (mut list: List<U8>; bytes: SharedBuffer<U8>; start: USize; count: USize) => () :: {
+        List.reserve list count
+        Buffer.append_raw_bytes list.* (RawMutPtr.add (SharedBuffer.unsafe_data bytes) start) count
+    }
+
+    pub(package) def append_shared_bytes = (mut list: List<U8>; bytes: SharedBuffer<U8>) => () ::
+        append_shared_range list bytes 0 (SharedBuffer.length bytes)
+
+    pub(package) def append_list_bytes = (mut list: List<U8>; source: List<U8>) => () :: {
+        let count = List.length source
+        List.reserve list count
+        Buffer.append_raw_bytes list.* (Buffer.unsafe_data source.*) count
     }
 }

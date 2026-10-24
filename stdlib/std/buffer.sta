@@ -230,13 +230,16 @@ impl<T where Clone T> Clone Buffer<T> {
 }
 
 companion Buffer<U8> {
-    // Caller reserves enough capacity and guarantees nonoverlapping storage.
-    pub(package) def append_shared_bytes = (mut buffer: Buffer<U8>; bytes: SharedBuffer<U8>) => () :: {
-        let count = SharedBuffer.length bytes
+    /// Borrows the contiguous byte storage. The buffer must remain alive.
+    pub(package) def unsafe_data = buffer: Buffer<U8> => RawMutPtr<U8> :: BufferHeader.element buffer.* 0
+
+    // Caller reserves enough capacity and guarantees nonoverlapping storage
+    // holding `count` initialized bytes.
+    pub(package) def append_raw_bytes = (mut buffer: Buffer<U8>; source: RawMutPtr<U8>; count: USize) => () :: {
         if (count > 0) {
             let header = buffer.*
             let length = Buffer.length buffer
-            RawMutPtr.unsafe_copy_nonoverlapping (BufferHeader.element header length) (SharedBuffer.unsafe_data bytes) count
+            RawMutPtr.unsafe_copy_nonoverlapping (BufferHeader.element header length) source count
             BufferHeader.set_length header (length + count)
         }
     }

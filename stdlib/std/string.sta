@@ -371,12 +371,30 @@ def matches_at = (value: String; needle: String; at: USize) => Bool :: {
 
 def copy_range = (value: String; start: USize; end: USize) => String :: {
     let mut bytes: List<U8> = List.with_capacity (end - start)
-    let mut at = start
-    while (at < end) {
-        List.push bytes (byte_at value at)
-        at = at + 1
-    }
+    List.append_shared_range bytes (string_shared_bytes value) start (end - start)
     String.from_utf8_unchecked bytes
+}
+
+// The byte offset after any leading White_Space.
+def trim_start_offset = value: String => USize :: {
+    let mut start: USize = 0
+    while (start < String.length value) {
+        let (c, width) = decode_at (string_shared_bytes value) start
+        if (Char.is_whitespace c) { start = start + width } else { break }
+    }
+    start
+}
+
+// The byte offset before any trailing White_Space, never below `floor`.
+def trim_end_offset = (value: String; floor: USize) => USize :: {
+    let mut end = String.length value
+    while (end > floor) {
+        let mut start = end - 1
+        while (String.is_char_boundary value start == False) { start = start - 1 }
+        let (c, _) = decode_at (string_shared_bytes value) start
+        if (Char.is_whitespace c) { end = start } else { break }
+    }
+    end
 }
 
 companion String {
@@ -448,25 +466,12 @@ companion String {
     pub def strip_suffix = (value: String; suffix: String) => Option<String> :: {
         if (ends_with value suffix) { Some (copy_range value 0 (length value - length suffix)) } else { None }
     }
-    pub def trim_start = value: String => String :: {
-        let mut start: USize = 0
-        while (start < length value) {
-            let (c, width) = decode_at (string_shared_bytes value) start
-            if (Char.is_whitespace c) { start = start + width } else { break }
-        }
-        copy_range value start (length value)
+    pub def trim_start = value: String => String :: copy_range value (trim_start_offset value) (length value)
+    pub def trim_end = value: String => String :: copy_range value 0 (trim_end_offset value 0)
+    pub def trim = value: String => String :: {
+        let start = trim_start_offset value
+        copy_range value start (trim_end_offset value start)
     }
-    pub def trim_end = value: String => String :: {
-        let mut end = length value
-        while (end > 0) {
-            let mut start = end - 1
-            while (is_char_boundary value start == False) { start = start - 1 }
-            let (c, _) = decode_at (string_shared_bytes value) start
-            if (Char.is_whitespace c) { end = start } else { break }
-        }
-        copy_range value 0 end
-    }
-    pub def trim = value: String => String :: trim_end (trim_start value)
     /// Lazily splits on a nonempty separator. Panics with "String.split: empty separator" otherwise.
     pub def split = (value: String; separator: String) => StringSplit :: {
         if (is_empty separator) { panic "String.split: empty separator" }
@@ -617,8 +622,12 @@ impl Iterator StringLines {
                 if (byte_at source end == 10) { break }
                 end = end + 1
             }
-            let next = if (end < String.length source) { end + 1 } else { end }
-            if (end > position) { if (byte_at source (end - 1) == 13) { end = end - 1 } }
+            // Only a CR directly before an LF belongs to the line ending.
+            let found_newline = end < String.length source
+            let next = if (found_newline) { end + 1 } else { end }
+            if (found_newline) {
+                if (end > position) { if (byte_at source (end - 1) == 13) { end = end - 1 } }
+            }
             Yield (copy_range source position end, StringLines (source: source, position: next))
         }
     }

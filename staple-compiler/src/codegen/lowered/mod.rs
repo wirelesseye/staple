@@ -9,7 +9,7 @@ mod rows;
 mod structural;
 
 use crate::lower::internal_invariant;
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use inkwell::{
     AddressSpace,
@@ -55,6 +55,11 @@ struct FunctionEnvironment<'context> {
     /// A whole binding whose mutable product fields arrive at separate addresses.
     split_parameter_pointers: HashMap<SymbolId, Vec<PointerValue<'context>>>,
     split_call_writebacks: Vec<(SymbolId, PointerValue<'context>, CheckedType)>,
+    /// An `i1` flag per `mut` parameter the body moves out of. The parameter
+    /// points at caller storage with no binding cell, so the flag records
+    /// whether that storage still owns a value. Each flag is allocated and set
+    /// in the entry block, so local-state snapshots share one map.
+    parameter_live: Rc<RefCell<HashMap<SymbolId, PointerValue<'context>>>>,
     closure_environment: Option<PointerValue<'context>>,
     /// The resource value each active provider supplies, keyed by the
     /// provider a `LoweredResourceUse` names. The emitter never selects a
@@ -1212,6 +1217,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_store(live, self.backend.context.bool_type().const_zero())
                     .map_err(compiler_diagnostic)?;
             }
+            self.clear_parameter_live(environment, *symbol)?;
             self.store_local_initialization_state(
                 owner,
                 environment,
@@ -1768,6 +1774,55 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .copied()
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing cell finalizer declaration"))?;
         self.backend.set_gc_finalizer(cell, finalizer)
+    }
+
+    /// The live flag of a `mut` parameter, allocated on first request when
+    /// `create` is set. Other symbols have none: locals keep their state in a
+    /// binding cell or an owned-value flag.
+    fn parameter_live_flag(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        symbol: SymbolId,
+        create: bool,
+    ) -> CodeGenerationResult<Option<PointerValue<'context>>> {
+        if !environment.parameter_pointers.contains_key(&symbol)
+            && !environment.split_parameter_pointers.contains_key(&symbol)
+        {
+            return Ok(None);
+        }
+        if let Some(flag) = environment.parameter_live.borrow().get(&symbol).copied() {
+            return Ok(Some(flag));
+        }
+        if !create {
+            return Ok(None);
+        }
+        // One entry builder places the store after the alloca and before any
+        // body code, so the flag reads true on every path into the body.
+        let bool_type = self.backend.context.bool_type();
+        let entry = self.backend.entry_builder();
+        let flag = entry
+            .build_alloca(bool_type, "parameter.live")
+            .map_err(compiler_diagnostic)?;
+        entry
+            .build_store(flag, bool_type.const_int(1, false))
+            .map_err(compiler_diagnostic)?;
+        environment.parameter_live.borrow_mut().insert(symbol, flag);
+        Ok(Some(flag))
+    }
+
+    /// Records that a `mut` parameter's caller storage no longer owns a value.
+    fn clear_parameter_live(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        symbol: SymbolId,
+    ) -> CodeGenerationResult<()> {
+        if let Some(flag) = self.parameter_live_flag(environment, symbol, true)? {
+            self.backend
+                .builder
+                .build_store(flag, self.backend.context.bool_type().const_zero())
+                .map_err(compiler_diagnostic)?;
+        }
+        Ok(())
     }
 
     /// Write a cell-backed symbol's
@@ -3445,6 +3500,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_store(live, self.backend.context.bool_type().const_zero())
                     .map_err(compiler_diagnostic)?;
             }
+            self.clear_parameter_live(environment, *symbol)?;
             // Clear the binding cell's state for a symbol with mutable storage
             // and for a coroutine frame binding. Completion drops live frame
             // cells, so a moved-out frame binding must read as uninitialized;
@@ -7321,10 +7377,51 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         let value = value_as_basic(value)
             .ok_or_else(|| Diagnostic::new(span.clone(), "assigned value is not storable"))?;
+        // A `mut` parameter that may have been moved drops its old value only
+        // while its live flag is set.
+        let parameter_live = match &place.kind {
+            crate::LoweredPlaceKind::Symbol { symbol } => {
+                self.parameter_live_flag(environment, *symbol, false)?
+            }
+            _ => None,
+        };
         // Assignment conditionally drops a binding cell's old value, or loads
         // `assignment.old` from the place; the owner's `ReplacedValue` use
         // record is the discriminant.
         if assignment.drop_previous {
+            let guard = match parameter_live {
+                Some(flag) => {
+                    let function = self
+                        .backend
+                        .builder
+                        .get_insert_block()
+                        .and_then(|block| block.get_parent())
+                        .ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "assignment is not in a function")
+                        })?;
+                    let drop_block = self
+                        .backend
+                        .context
+                        .append_basic_block(function, "parameter.drop");
+                    let done = self
+                        .backend
+                        .context
+                        .append_basic_block(function, "parameter.drop.done");
+                    let live = self
+                        .backend
+                        .builder
+                        .build_load(self.backend.context.bool_type(), flag, "parameter.live")
+                        .map_err(compiler_diagnostic)?
+                        .into_int_value();
+                    self.backend
+                        .builder
+                        .build_conditional_branch(live, drop_block, done)
+                        .map_err(compiler_diagnostic)?;
+                    self.backend.builder.position_at_end(drop_block);
+                    Some(done)
+                }
+                None => None,
+            };
             let cell = self
                 .place_root_symbol(owner, assignment.target)
                 .and_then(|symbol| environment.binding_cells.get(&symbol).copied());
@@ -7356,6 +7453,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 source,
                 &span,
             )?;
+            if let Some(done) = guard {
+                self.backend
+                    .builder
+                    .build_unconditional_branch(done)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(done);
+            }
+        }
+        if let Some(flag) = parameter_live {
+            self.backend
+                .builder
+                .build_store(flag, self.backend.context.bool_type().const_int(1, false))
+                .map_err(compiler_diagnostic)?;
         }
         if let Some(pointers) = split {
             let product = value.into_struct_value();
