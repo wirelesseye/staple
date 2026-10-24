@@ -2522,7 +2522,7 @@ impl Grammar {
         let effect_lower_bound = if self.at(TokenKind::LBrace)
             && self.tokens[self.next_non_trivia(self.position)].span.start == arrow.span.end
         {
-            Some(self.parse_effect_set()?)
+            Some(self.parse_effect_set(true)?)
         } else {
             None
         };
@@ -2932,7 +2932,7 @@ impl Grammar {
                         self.error("an effect set must immediately follow `->`; write `->{...}`")
                     );
                 }
-                self.parse_effect_set()?
+                self.parse_effect_set(false)?
             } else {
                 EffectSet::empty()
             };
@@ -2956,7 +2956,7 @@ impl Grammar {
         }
     }
 
-    fn parse_effect_set(&mut self) -> Result<EffectSet, ParseError> {
+    fn parse_effect_set(&mut self, allow_bindings: bool) -> Result<EffectSet, ParseError> {
         let start = self.position;
         self.expect(TokenKind::LBrace, "expected `{` before effect set")?;
         let mut resources = Vec::new();
@@ -2990,9 +2990,26 @@ impl Grammar {
                 } else {
                     let resource_start = self.position;
                     let mutable = self.eat(TokenKind::Mut);
+                    let binding = if self.at(TokenKind::Identifier)
+                        && self.peek_n(1) == Some(TokenKind::Colon)
+                    {
+                        if !allow_bindings {
+                            return Err(self.error(
+                                "resource names are only allowed in a function value's effect set",
+                            ));
+                        }
+                        let binding_start = self.position;
+                        let name = self.bump_token().unwrap().text;
+                        let syntax = self.syntax(binding_start);
+                        self.expect(TokenKind::Colon, "expected `:` after resource name")?;
+                        Some(crate::NameExpression { syntax, name })
+                    } else {
+                        None
+                    };
                     let value_type = self.parse_type_union()?;
                     resources.push(ResourceEffect {
                         syntax: self.syntax(resource_start),
+                        binding,
                         value_type,
                         mutable,
                     });
@@ -3074,7 +3091,7 @@ impl Grammar {
         let start = self.position;
         let mut ty = self.parse_type_atom()?;
         while self.at(TokenKind::LBrace) && !self.has_trivia_before_next_token() {
-            let effects = self.parse_effect_set()?;
+            let effects = self.parse_effect_set(false)?;
             ty = Type::EffectApplication(crate::EffectApplication {
                 syntax: self.syntax(start),
                 callee: Box::new(ty),

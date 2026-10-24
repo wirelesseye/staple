@@ -10913,6 +10913,7 @@ impl TypeChecker {
                         variable: None,
                         resources: vec![staple_syntax::ResourceEffect {
                             syntax: resource.resource.syntax().clone(),
+                            binding: None,
                             value_type: resource.resource.clone(),
                             mutable: false,
                         }],
@@ -10934,6 +10935,7 @@ impl TypeChecker {
                         variable: None,
                         resources: vec![staple_syntax::ResourceEffect {
                             syntax: with.resource.syntax().clone(),
+                            binding: None,
                             value_type: with.resource.clone(),
                             mutable: with.mutable,
                         }],
@@ -18316,6 +18318,12 @@ impl TypeChecker {
                 && let Some(id) = module.type_parameter_for(named.syntax.id)
                 && module.is_effect_parameter(id)
             {
+                if resource.binding.is_some() {
+                    self.diagnostics.push(Diagnostic::new(
+                        resource.syntax.span.clone(),
+                        "an effect variable cannot bind a resource value",
+                    ));
+                }
                 if variable.is_some() {
                     self.diagnostics.push(Diagnostic::new(
                         named.syntax.span.clone(),
@@ -18330,19 +18338,23 @@ impl TypeChecker {
                 continue;
             }
             let value_type = self.resolve_source_type_inner(module, &resource.value_type);
-            let builtin_resource = matches!(&value_type, CheckedType::Opaque { id, .. }
-                if Some(*id) == self.io_type
-                    || Some(*id) == self.reactive_type
-                    || Some(*id) == self.tasks_type);
-            let valid_nominal =
-                matches!(&value_type, CheckedType::Wrapper { .. }) || builtin_resource;
+            let valid_nominal = matches!(
+                &value_type,
+                CheckedType::Wrapper { .. }
+                    | CheckedType::Opaque { .. }
+                    | CheckedType::RawPtr { .. }
+                    | CheckedType::RawMutPtr { .. }
+                    | CheckedType::RawOpaquePtr
+                    | CheckedType::RawOpaqueMutPtr
+                    | CheckedType::Never
+            ) || checked_builtin_type(&value_type).is_some();
             let concrete = !contains_type_parameter(&value_type)
                 && !contains_inferred_type(&value_type)
                 && value_type.is_fully_known();
             if value_type == CheckedType::Error {
                 continue;
             }
-            if !valid_nominal || !concrete || (!builtin_resource && !value_type.is_sized()) {
+            if !valid_nominal || !concrete || !value_type.is_sized() {
                 self.diagnostics.push(Diagnostic::new(
                     resource.syntax.span.clone(),
                     format!("resource type `{value_type}` must be a concrete, sized nominal type"),

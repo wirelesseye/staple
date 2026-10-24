@@ -5068,7 +5068,7 @@ impl LoweredProgram {
         let value = self.lower_expression(module, owner, context, &with.value)?;
         let copy = module.is_copy_in_function(&resource.value_type, owner_function(owner));
         let borrow = with.mutable || !copy;
-        let storage = if borrow && self.provider_value_has_place(module, &with.value) {
+        let storage = if borrow && self.expression_has_place(module, &with.value) {
             LoweredProviderStorage::Place
         } else {
             LoweredProviderStorage::Materialized
@@ -5106,23 +5106,30 @@ impl LoweredProgram {
         }))
     }
 
-    /// Whether code generation can reuse an existing pointer for a `with`
-    /// value. This is emission's place-pointer rule, including resource places
-    /// and transparent single-value wrappers, rather than the narrower
-    /// symbol-root test used for call argument mutation.
-    fn provider_value_has_place(&self, module: &TypedModule, value: &Expression) -> bool {
+    /// Whether code generation can reuse an existing pointer for a provider
+    /// or call argument, including resource places and transparent single-value
+    /// wrappers. A symbol-root test alone misses ambient resource storage.
+    fn expression_has_place(&self, module: &TypedModule, value: &Expression) -> bool {
         if module.resolved().symbol_for(value.syntax().id).is_some() {
             return true;
         }
         match value {
-            Expression::Product(product) if product.elements.len() == 1 => {
-                self.provider_value_has_place(module, &product.elements[0].value)
+            Expression::Product(product)
+                if let [element] = product.elements.as_slice()
+                    && element.name.is_none()
+                    && !element.spread
+                    && !element.named_spread
+                    && module.type_of_expression(product.syntax.id).is_some()
+                    && module.type_of_expression(product.syntax.id)
+                        == module.type_of_expression(element.value.syntax().id) =>
+            {
+                self.expression_has_place(module, &element.value)
             }
             Expression::TypeApplication(application) => {
-                self.provider_value_has_place(module, &application.value)
+                self.expression_has_place(module, &application.value)
             }
             Expression::TypeAscription(ascription) => {
-                self.provider_value_has_place(module, &ascription.value)
+                self.expression_has_place(module, &ascription.value)
             }
             Expression::Resource(resource) => module
                 .resource_for_expression(resource.syntax.id)
@@ -5131,14 +5138,14 @@ impl LoweredProgram {
                 .is_some_and(|provider| provider.indirect),
             Expression::Access(access) => match module.access_for(access.syntax.id) {
                 Some(crate::CheckedAccess::Representation { dereference }) => {
-                    !dereference.is_empty() || self.provider_value_has_place(module, &access.value)
+                    !dereference.is_empty() || self.expression_has_place(module, &access.value)
                 }
                 Some(crate::CheckedAccess::Product {
                     dereference, slice, ..
                 }) => {
                     !dereference.is_empty()
                         || *slice
-                        || self.provider_value_has_place(module, &access.value)
+                        || self.expression_has_place(module, &access.value)
                 }
                 None => false,
             },
@@ -8720,10 +8727,11 @@ impl LoweredProgram {
         // A product-valued place passed without literal destructuring: the
         // backend takes addresses of mutated fields and loads the rest.
         if let CheckedType::Product(_) = function_type.parameter.as_ref()
-            && expression_has_place_root(module.resolved(), argument)
+            && self.expression_has_place(module, argument)
         {
             let expression = self.lower_expression(module, owner, context, argument)?;
-            let place = self.lower_place(module, owner, context, argument).ok();
+            let base = self.lower_place(module, owner, context, argument)?;
+            let owned_operand = module.moved_symbols(argument.syntax().id).next().is_some();
             let mut arguments = Vec::new();
             for index in 0..count {
                 let pass_mode = if mutation_mask[index] {
@@ -8733,6 +8741,20 @@ impl LoweredProgram {
                 } else {
                     LoweredArgumentPassMode::Value
                 };
+                let place = indirect[index].then(|| {
+                    self.places.push(LoweredPlace {
+                        origin: Origin {
+                            syntax: argument.syntax().id,
+                            span: argument.syntax().span.clone(),
+                        },
+                        value_type: types[index].clone(),
+                        kind: LoweredPlaceKind::ProductElement {
+                            base,
+                            index,
+                            slice: false,
+                        },
+                    })
+                });
                 arguments.push(LoweredCallArgument {
                     expression: Some(expression),
                     thunk: None,
@@ -8740,12 +8762,23 @@ impl LoweredProgram {
                     pass_mode,
                     expected: types[index].clone(),
                     place,
-                    temporary: false,
-                    borrowed_source: false,
+                    temporary: indirect[index] && place.is_none(),
+                    borrowed_source: !owned_operand,
                     drops_after_call: false,
                 });
             }
-            return Ok((arguments, vec![LoweredCallStep::Argument { argument: 0 }]));
+            let mappings = (0..count)
+                .map(|slot| LoweredSpreadMapping { source: slot, slot })
+                .collect();
+            return Ok((
+                arguments,
+                vec![LoweredCallStep::ProductSpread {
+                    argument: 0,
+                    expression,
+                    mappings,
+                    owned_operand,
+                }],
+            ));
         }
         Err(Diagnostic::new(
             argument.syntax().span.clone(),
@@ -9101,7 +9134,7 @@ impl LoweredProgram {
                     && element.name.is_none()
                     && !element.spread
                     && !element.named_spread
-                    && expression_has_place_root(module.resolved(), &element.value)
+                    && self.expression_has_place(module, &element.value)
                     && module.type_of_expression(product.syntax.id).is_some()
                     && module.type_of_expression(product.syntax.id)
                         == module.type_of_expression(element.value.syntax().id) =>
@@ -9111,7 +9144,7 @@ impl LoweredProgram {
             _ => expression,
         };
         let expression_id = self.lower_expression(module, owner, context, expression)?;
-        let place = if expression_has_place_root(module.resolved(), expression) {
+        let place = if self.expression_has_place(module, expression) {
             self.lower_place(module, owner, context, expression).ok()
         } else {
             None

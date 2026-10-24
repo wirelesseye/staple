@@ -4446,3 +4446,27 @@ fn angle_macro_headers_do_not_change_comparisons() {
             .unwrap_or_else(|error| panic!("formatting {source}: {error}"));
     }
 }
+
+#[test]
+fn parses_named_function_resources() {
+    let module = parse("def f = () =>{mut logger: Logger, clock: Clock, IO} logger\n").unwrap();
+    let Item::Binding(binding) = &module.items[0] else {
+        panic!("binding")
+    };
+    let Some(Expression::Function(function)) = &binding.value else {
+        panic!("function")
+    };
+    let resources = &function.effect_lower_bound.as_ref().unwrap().resources;
+    assert!(resources[0].mutable);
+    assert_eq!(resources[0].binding.as_ref().unwrap().name, "logger");
+    assert_eq!(resources[1].binding.as_ref().unwrap().name, "clock");
+    assert!(resources[2].binding.is_none());
+    assert_eq!(resources[0].to_string(), "mut logger: Logger");
+    for source in [
+        "def f: () ->{logger: Logger} () = () => ()\n",
+        "def f: Coroutine{logger: Logger}<()> = ()\n",
+        "def f = () =>{logger:} ()\n",
+    ] {
+        assert!(parse(source).is_err(), "{source}");
+    }
+}
