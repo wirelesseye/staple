@@ -428,16 +428,38 @@ impl<'program, 'context> Backend<'program, 'context> {
         global.as_pointer_value()
     }
 
-    /// The emitter's String literal: copy a global byte string to a fresh GC
-    /// String allocation. The caller decodes literal text.
-    pub(crate) fn build_string_literal(
-        &self,
-        value: &str,
-        span: Span,
-    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
-        let source = self.constant_bytes(value, "string");
+    /// The emitter's String literal: a constant buffer header with the bytes
+    /// inline, shared by every literal with the same text in this module. The
+    /// caller decodes literal text.
+    ///
+    /// The conservative collector ignores pointers outside its own payloads,
+    /// so the constant is never marked, finalized or swept. This relies on
+    /// String being immutable and never released or pinned as a GC payload.
+    pub(crate) fn build_string_literal(&self, value: &str) -> PointerValue<'context> {
+        if let Some(pointer) = self.string_literals.borrow().get(value) {
+            return *pointer;
+        }
         let length = self.size_type.const_int(value.len() as u64, false);
-        self.build_string_from_bytes(source, length, span)
+        let bytes = self.context.const_string(value.as_bytes(), false);
+        let constant = self
+            .context
+            .const_struct(&[length.into(), length.into(), bytes.into()], false);
+        let global = self
+            .llvm_module
+            .add_global(constant.get_type(), None, "string");
+        global.set_constant(true);
+        global.set_unnamed_addr(true);
+        global.set_linkage(inkwell::module::Linkage::Private);
+        global.set_alignment(
+            self.target_data
+                .get_abi_alignment(&self.buffer_header_type(self.context.i8_type().into())),
+        );
+        global.set_initializer(&constant);
+        let pointer = global.as_pointer_value();
+        self.string_literals
+            .borrow_mut()
+            .insert(value.to_owned(), pointer);
+        pointer
     }
 
     /// Copies `length` bytes at `source` into a fresh GC String.

@@ -9166,9 +9166,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let storage = *environment.temporaries.get(&id).ok_or_else(|| {
                     Diagnostic::new(expression.origin.span.clone(), "missing literal storage")
                 })?;
-                let value = self
-                    .backend
-                    .build_string_literal(&string.value, expression.origin.span.clone())?;
+                let value = self.backend.build_string_literal(&string.value);
                 self.backend
                     .builder
                     .build_store(storage, value)

@@ -219,3 +219,65 @@ fn user_types_with_handle_names_keep_ordinary_wrapper_behavior() {
     );
     assert_eq!(run(source), "0 1\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn string_literals_survive_collections_in_both_emitters() {
+    // Allocates well past the 1 MiB collection threshold while literal
+    // Strings are live in a local and in a GC-owned List.
+    let source = concat!(
+        "use std.alloc.*\n",
+        "use std.io.*\n",
+        "use std.list.List\n",
+        "def main = () => () :: {\n",
+        "  let held = \"held\"\n",
+        "  let mut strings: List<String> = List.new ()\n",
+        "  let mut round: USize = 0\n",
+        "  while (round < 4096) {\n",
+        "    if (round < 3) { List.push strings \"listed\" }\n",
+        "    let _ = Gc.allocate (MemLayout (size: 1024, align: 8))\n",
+        "    round = round + 1\n",
+        "  }\n",
+        "  println held\n",
+        "  let mut index: USize = 0\n",
+        "  while (index < List.length strings) {\n",
+        "    println (List.get_unchecked strings index + \"!\")\n",
+        "    index = index + 1\n",
+        "  }\n",
+        "  println (if (held == \"held\") { \"equal\" } else { \"different\" })\n",
+        "  println \"\"\n",
+        "}\n",
+        "main ()\n",
+    );
+    let expected = "held\nlisted!\nlisted!\nlisted!\nequal\n\n";
+    assert_eq!(run_mode(source, false), expected);
+    assert_eq!(run_mode(source, true), expected);
+}
+
+#[test]
+fn string_literals_are_shared_constants() {
+    let lowered = lower(
+        concat!(
+            "use std.io.*\n",
+            "def main = () => () :: {\n",
+            "  println \"hello\"\n",
+            "  println \"hello\"\n",
+            "}\n",
+            "main ()\n",
+        ),
+        false,
+    );
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&lowered)
+        .unwrap_or_else(|errors| panic!("emit: {errors:?}"));
+    let constants = llvm
+        .lines()
+        .filter(|line| {
+            line.contains(
+                "private unnamed_addr constant { i64, i64, [5 x i8] } { i64 5, i64 5, [5 x i8] c\"hello\" }",
+            )
+        })
+        .count();
+    assert_eq!(constants, 1, "{llvm}");
+}

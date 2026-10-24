@@ -18,6 +18,8 @@ use package.iterator.(Iterator, IntoIterator, FromIterator)
 use package.iterator.IterStep.(Done, Yield)
 
 /// A UTF-8 byte sequence used as Staple's string type.
+// String literals are read-only constants outside the GC heap. The bytes must
+// never be written, and the buffer must never be released or pinned.
 pub type String wrap SharedBuffer<U8>
 
 pub(package) def string_shared_bytes = value: String => SharedBuffer<U8> :: {
