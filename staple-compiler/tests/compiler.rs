@@ -19980,3 +19980,59 @@ fn named_resources_work_in_macro_generated_functions() {
         .compile_root(&lower(&module))
         .unwrap();
 }
+
+#[test]
+fn mutable_resource_arguments_update_the_provider_at_runtime() {
+    use std::sync::atomic::{AtomicI32, Ordering};
+    static RESULT: AtomicI32 = AtomicI32::new(0);
+    extern "C" fn record(value: i32) {
+        RESULT.store(value, Ordering::SeqCst);
+    }
+    for (effects, resource) in [
+        ("mut counter: Counter", "counter"),
+        ("mut Counter", "(resource Counter)"),
+    ] {
+        let source = concat!(
+            "extern \"c\" { record: I32 -> () }\n",
+            "type Counter wrap (value: I32, spare: I32)\n",
+            "def bump: mut I32 -> () = mut value => { value = value + 1 }\n",
+            "def replace: mut Counter -> () = mut value => { value.value = value.value + 1 }\n",
+            "def slot: (mut I32; I32) -> () = (mut value; amount) => { value = value + amount }\n",
+            "def pair: (mut I32, I32) -> () = (mut value, amount) => { value = value + amount }\n",
+            "def update = () =>{EFFECTS} {\n",
+            "  bump RESOURCE.value\n",
+            "  bump (RESOURCE.value)\n",
+            "  replace RESOURCE\n",
+            "  slot RESOURCE.value 1\n",
+            "  pair RESOURCE.*\n",
+            "  RESOURCE.value\n",
+            "}\n",
+            "let mut counter = Counter (value: 39, spare: 1)\n",
+            "with mut Counter = counter { record (update ()) }\n",
+        )
+        .replace("EFFECTS", effects)
+        .replace("RESOURCE", resource);
+        let module = type_check(&source);
+        let context = Context::create();
+        let text = CodeGenerator::new(&context)
+            .compile_module(&lower_whole(&module))
+            .unwrap();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "mutable-resource-arguments",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        engine.add_global_mapping(
+            &llvm.get_function("record").unwrap(),
+            record as *const () as usize,
+        );
+        type Main = unsafe extern "C" fn() -> i32;
+        let main = unsafe { engine.get_function::<Main>("main").unwrap() };
+        assert_eq!(unsafe { main.call() }, 0);
+        assert_eq!(RESULT.load(Ordering::SeqCst), 44, "{effects}");
+    }
+}
