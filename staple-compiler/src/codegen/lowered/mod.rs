@@ -250,6 +250,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if self.unit.includes_runtime() {
             // An executable always needs the collector for its entry harness.
             self.backend.install_gc_runtime()?;
+            self.backend.install_io_runtime()?;
             if requirements.contains(RuntimeRequirement::ReactiveRuntime) {
                 self.backend.install_reactive_runtime()?;
             }

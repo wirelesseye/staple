@@ -1,32 +1,208 @@
+/// Standard byte streams, text input and output, and the IO capability.
 pub mod
 
-
-use package.cinterop.*
 use package.ptr.*
-use package.process.(panic)
-use package.result.(Ok)
-use package.string.(String)
+use package.process.panic
+use package.result.(Ok, Result)
+use package.string.(String, InvalidUtf8, string_shared_bytes)
+use package.shared_buffer.SharedBuffer
+use package.list.List
+use package.convert.(TryConvert, ConversionError)
 
-/// The capability required for standard output operations.
+/// The capability required for external input and output.
 @sized_opaque
 pub type IO opaque
 
+/// An external stream operation failed. Some bytes may already have been written.
+pub type IoError
+/// A line could not be read or was not valid UTF-8.
+pub type ReadLineError = IoError | InvalidUtf8
+
+/// Internal bridge to the target platform's C standard streams.
 pub(package) extern "c" {
-    printf: (RawPtr<CChar>, ...) -> I32
+    /// Borrows standard input (0), output (1), or error (2); never close it.
+    __staple_io_stream: I32 -> RawOpaqueMutPtr
+    /// Writes length bytes from live storage; zero means success, nonzero failure.
+    __staple_io_write: (RawOpaqueMutPtr, RawOpaquePtr, USize) -> I32
+    /// Drains buffered output; zero means success, nonzero failure.
+    __staple_io_flush: RawOpaqueMutPtr -> I32
+    /// Returns a byte as a nonnegative integer, -1 at EOF, or -2 on failure.
+    __staple_io_read_byte: RawOpaqueMutPtr -> I32
+}
+
+/// A source of bytes. EOF is represented by None, separately from errors.
+pub trait Read R {
+    /// Reads the next byte, returning None at EOF or IoError on failure.
+    read_byte: mut R ->{IO} Result<Option<U8>, IoError>
+}
+
+/// A destination for bytes. write_all either accepts every byte or returns an error.
+pub trait Write W {
+    /// Writes every byte, including NUL, or returns IoError.
+    /// A failure may leave a prefix written; retrying may duplicate that prefix.
+    write_all: (mut W; SharedBuffer<U8>) ->{IO} Result<(), IoError>
+    /// Drains buffered output, reporting failures deferred by earlier writes.
+    flush: mut W ->{IO} Result<(), IoError>
+}
+
+/// A handle to the process's buffered standard input.
+pub type Stdin
+/// A handle to the process's buffered standard output.
+pub type Stdout
+/// A handle to the process's standard error.
+pub type Stderr
+
+/// Returns a handle to the process's standard input.
+/// Handles share the same stream; dropping a handle does not close it.
+pub def stdin = () => Stdin :: Stdin
+/// Returns a handle to the process's standard output.
+/// Handles share the same stream; dropping a handle does not close it.
+pub def stdout = () => Stdout :: Stdout
+/// Returns a handle to the process's standard error.
+/// Handles share the same stream; dropping a handle does not close it.
+pub def stderr = () => Stderr :: Stderr
+
+def write_stream = (which: I32; bytes: SharedBuffer<U8>) =>{IO} Result<(), IoError> :: {
+    let length = SharedBuffer.length bytes
+    if (length == 0) { Ok () } else {
+        let pointer = SharedBuffer.unsafe_data bytes
+        if (__staple_io_write (__staple_io_stream which, pointer as RawOpaquePtr, length) == 0) {
+            Ok ()
+        } else { IoError }
+    }
+}
+
+def flush_stream = which: I32 =>{IO} Result<(), IoError> ::
+    if (__staple_io_flush (__staple_io_stream which) == 0) { Ok () } else { IoError }
+
+impl Read Stdin {
+    read_byte = mut stream => {
+        let byte = __staple_io_read_byte (__staple_io_stream 0)
+        if (byte == -1) { Ok (Option<U8> :: None) } else {
+            if (byte == -2) { IoError } else {
+                let converted: Result<U8, ConversionError> = TryConvert.try_convert byte
+                let value: U8 = match converted {
+                    Ok value => value,
+                    _ => { return IoError },
+                }
+                Ok (Option<U8> :: Some value)
+            }
+        }
+    }
+}
+
+impl Write Stdout {
+    write_all = (mut stream; bytes) => write_stream 1 bytes
+    flush = mut stream => flush_stream 1
+}
+
+impl Write Stderr {
+    write_all = (mut stream; bytes) => write_stream 2 bytes
+    flush = mut stream => flush_stream 2
+}
+
+/// Writes text to a writer without making a C string or copying its bytes.
+pub def write_string = <W where Write W> (mut writer: W; text: String) =>{IO} Result<(), IoError> :: {
+    let bytes = string_shared_bytes text
+    Write.write_all writer bytes
+}
+
+/// Reads a UTF-8 line, removing LF and an immediately preceding CR.
+/// None means EOF before any bytes; a final unterminated line is returned.
+/// Consumes a full line before reporting invalid UTF-8.
+pub def read_line_from = <R where Read R> mut reader: R =>{IO} Result<Option<String>, ReadLineError> :: {
+    let mut bytes: List<U8> = List.new ()
+    let mut newline: Bool = False
+    loop {
+        let byte: Option<U8> = match (Read.read_byte reader) {
+            Ok value => value,
+            IoError => { return IoError },
+        }
+        match byte {
+            None => { break },
+            Some value => {
+                if (value == 10) { newline = True; break }
+                List.push bytes value
+            },
+        }
+    }
+    if (List.length bytes == 0 && !newline) { Ok (Option<String> :: None) } else {
+        if (newline) {
+            match (List.pop bytes) {
+                Some last => { if (last != 13) { List.push bytes last } },
+                None => (),
+            }
+        }
+        let text = match (String.from_utf8 bytes) {
+            Ok value => value,
+            InvalidUtf8 => { return InvalidUtf8 },
+        }
+        Ok (Option<String> :: Some text)
+    }
+}
+
+/// Reads a UTF-8 line from standard input, removing LF and a preceding CR.
+/// Returns Some "" for an empty line and None at EOF before any bytes.
+/// Returns a final unterminated line; invalid UTF-8 consumes the full line
+/// and returns InvalidUtf8. Stream failures return IoError.
+/// Call flush_stdout after writing a prompt and before waiting for input.
+pub def read_line = () =>{IO} Result<Option<String>, ReadLineError> :: {
+    let mut input = stdin ()
+    read_line_from input
 }
 
 /// Writes a string to standard output without a trailing newline.
-pub def print = value: String =>{IO} () :: {
-    match (CString.from_string value) {
-        Ok text => { let _ = printf (c_string "%s", text); () },
-        InteriorNul => panic "cannot print a string containing a NUL byte",
-    }
+/// Preserves embedded NUL bytes and returns IoError on write failure.
+/// Buffered failures may be reported only when the stream is flushed.
+pub def try_print = value: String =>{IO} Result<(), IoError> :: {
+    let bytes = string_shared_bytes value
+    write_stream 1 bytes
 }
 
-/// Writes a string followed by a newline to standard output.
-pub def println = value: String =>{IO} () :: {
-    match (CString.from_string value) {
-        Ok text => { let _ = printf (c_string "%s\n", text); () },
-        InteriorNul => panic "cannot print a string containing a NUL byte",
-    }
+/// Writes a string to standard output followed by a newline.
+/// Preserves embedded NUL bytes and returns IoError on write failure.
+/// Buffered failures may be reported only when the stream is flushed.
+pub def try_println = value: String =>{IO} Result<(), IoError> :: try_print (value + "\n")
+/// Writes a string to standard error without a trailing newline.
+/// Preserves embedded NUL bytes and returns IoError on write failure.
+/// Buffered failures may be reported only when the stream is flushed.
+pub def try_eprint = value: String =>{IO} Result<(), IoError> :: {
+    let bytes = string_shared_bytes value
+    write_stream 2 bytes
+}
+/// Writes a string to standard error followed by a newline.
+/// Preserves embedded NUL bytes and returns IoError on write failure.
+/// Buffered failures may be reported only when the stream is flushed.
+pub def try_eprintln = value: String =>{IO} Result<(), IoError> :: try_eprint (value + "\n")
+
+/// Flushes standard output. Errors can surface here after an earlier successful write.
+pub def flush_stdout = () =>{IO} Result<(), IoError> :: flush_stream 1
+/// Flushes standard error, reporting failures deferred by earlier writes.
+pub def flush_stderr = () =>{IO} Result<(), IoError> :: flush_stream 2
+
+/// Writes a string to standard output, panicking on failure. Embedded NUL is supported.
+pub def print = value: String =>{IO} () :: match (try_print value) {
+    Ok _ => (),
+    IoError => panic "standard output write failed",
+}
+
+/// Writes a string to standard output followed by a newline.
+/// Preserves embedded NUL bytes and panics on write failure.
+pub def println = value: String =>{IO} () :: match (try_println value) {
+    Ok _ => (),
+    IoError => panic "standard output write failed",
+}
+
+/// Writes a string to standard error without a trailing newline.
+/// Preserves embedded NUL bytes and panics on write failure.
+pub def eprint = value: String =>{IO} () :: match (try_eprint value) {
+    Ok _ => (),
+    IoError => panic "standard error write failed",
+}
+
+/// Writes a string to standard error followed by a newline.
+/// Preserves embedded NUL bytes and panics on write failure.
+pub def eprintln = value: String =>{IO} () :: match (try_eprintln value) {
+    Ok _ => (),
+    IoError => panic "standard error write failed",
 }

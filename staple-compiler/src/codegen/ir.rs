@@ -417,6 +417,17 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(pointer.as_any_value_enum())
     }
 
+    /// Defines length-delimited bytes without LLVM's C-string builder, which
+    /// truncates input at an embedded NUL before creating the global.
+    fn constant_bytes(&self, value: &str, name: &str) -> PointerValue<'context> {
+        let bytes = self.context.const_string(value.as_bytes(), true);
+        let global = self.llvm_module.add_global(bytes.get_type(), None, name);
+        global.set_initializer(&bytes);
+        global.set_constant(true);
+        global.set_linkage(inkwell::module::Linkage::Private);
+        global.as_pointer_value()
+    }
+
     /// The emitter's String literal: copy a global byte string to a fresh GC
     /// String allocation. The caller decodes literal text.
     pub(crate) fn build_string_literal(
@@ -424,11 +435,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         value: &str,
         span: Span,
     ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
-        let source = self
-            .builder
-            .build_global_string_ptr(value, "string")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-            .as_pointer_value();
+        let source = self.constant_bytes(value, "string");
         let length = self.size_type.const_int(value.len() as u64, false);
         self.build_string_from_bytes(source, length, span)
     }
@@ -1664,11 +1671,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .build_conditional_branch(length_matches, compare, failure)
             .map_err(compiler_diagnostic)?;
         self.builder.position_at_end(compare);
-        let expected = self
-            .builder
-            .build_global_string_ptr(literal, "match.string.literal")
-            .map_err(compiler_diagnostic)?
-            .as_pointer_value();
+        let expected = self.constant_bytes(literal, "match.string.literal");
         let memcmp_type = self.context.i32_type().fn_type(
             &[
                 self.context.ptr_type(AddressSpace::default()).into(),
@@ -1925,11 +1928,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         literal: &str,
         span: Span,
     ) -> CodeGenerationResult<()> {
-        let source = self
-            .builder
-            .build_global_string_ptr(literal, "debug.literal")
-            .map_err(compiler_diagnostic)?
-            .as_pointer_value();
+        let source = self.constant_bytes(literal, "debug.literal");
         let length = self.size_type.const_int(literal.len() as u64, false);
         let (string, data) = self.build_string_allocation(length, span)?;
         self.builder

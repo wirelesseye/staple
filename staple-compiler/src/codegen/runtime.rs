@@ -45,6 +45,10 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(call.try_as_basic_value().basic())
     }
 
+    pub(crate) fn install_io_runtime(&self) -> CodeGenerationResult<()> {
+        link_io_runtime(self.context, &self.target_data, &self.llvm_module)
+    }
+
     pub(crate) fn install_gc_runtime(&self) -> CodeGenerationResult<()> {
         link_gc_runtime(self.context, &self.target_data, &self.llvm_module)
     }
@@ -64,6 +68,7 @@ impl<'program, 'context> Backend<'program, 'context> {
     pub(crate) fn declare_runtime_symbols(&self) -> CodeGenerationResult<()> {
         for link in [
             link_gc_runtime,
+            link_io_runtime,
             link_coroutine_runtime,
             link_reactive_runtime,
         ] {
@@ -618,4 +623,54 @@ mod tests {
             );
         }
     }
+}
+
+/// A narrow stdio shim. Stream macros are resolved for the selected target,
+/// while all public Staple operations use ordinary foreign function calls.
+pub(crate) fn link_io_runtime<'context>(
+    context: &'context inkwell::context::Context,
+    target_data: &inkwell::targets::TargetData,
+    module: &inkwell::module::Module<'context>,
+) -> CodeGenerationResult<()> {
+    let triple = module.get_triple();
+    let triple = triple.as_str().to_string_lossy();
+    let streams = if triple.contains("windows") {
+        r#"
+declare ptr @__acrt_iob_func(i32)
+define ptr @__staple_io_stream(i32 %which) {
+  %p = call ptr @__acrt_iob_func(i32 %which)
+  ret ptr %p
+}
+"#
+        .to_owned()
+    } else {
+        let names = if triple.contains("apple") {
+            ["__stdinp", "__stdoutp", "__stderrp"]
+        } else {
+            ["stdin", "stdout", "stderr"]
+        };
+        format!(
+            r#"
+@{0} = external global ptr
+@{1} = external global ptr
+@{2} = external global ptr
+define ptr @__staple_io_stream(i32 %which) {{
+  %a = icmp eq i32 %which, 0
+  %b = icmp eq i32 %which, 1
+  %out = select i1 %b, ptr @{1}, ptr @{2}
+  %slot = select i1 %a, ptr @{0}, ptr %out
+  %p = load ptr, ptr %slot
+  ret ptr %p
+}}
+"#,
+            names[0], names[1], names[2]
+        )
+    };
+    let source = include_str!("../io.ll")
+        .replace(
+            "{{SIZE}}",
+            &format!("i{}", target_data.get_pointer_byte_size(None) * 8),
+        )
+        .replace("{{STREAMS}}", &streams);
+    link_runtime_source(context, module, &source, "I/O", "staple-io")
 }

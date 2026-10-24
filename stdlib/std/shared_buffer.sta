@@ -14,6 +14,11 @@ use package.shared.(Shared)
 pub type SharedBuffer<T> wrap RawMutPtr<BufferHeader<T>>
 
 companion<T> SharedBuffer<T> {
+    /// Borrows the contiguous element storage. The owner must remain alive;
+    /// only the initialized prefix may be accessed.
+    pub(package) def unsafe_data = buffer: SharedBuffer<T> => RawMutPtr<T> ::
+        BufferHeader.element buffer.* 0
+
     /// Adopts a live buffer allocation. The caller must transfer ownership
     /// exactly once.
     pub(package) def unsafe_from_raw = pointer: RawMutPtr<BufferHeader<T>> => SharedBuffer<T> ::
