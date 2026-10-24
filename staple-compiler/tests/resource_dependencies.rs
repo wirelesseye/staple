@@ -553,11 +553,11 @@ def inferred = () => {
 fn type_declaration_items_expose_the_dependency_clause() {
     check(
         r#"
-use std.syntax.(Item, Sequence, Type, TypeDeclarationItem, WrapperDeclaration)
+use std.syntax.(Item, ResourceDependency, Sequence, TypeDeclarationItem, WrapperDeclaration)
 type Logger wrap ()
 macro @inspect: Item -> Item = item => match item {
     TypeDeclarationItem(WrapperDeclaration(), _, _, _, _, _, dependencies) => {
-        let names: Sequence<Type> = dependencies
+        let entries: Sequence<ResourceDependency> = dependencies
         item
     },
     _ => item,
@@ -569,6 +569,42 @@ def query = () =>{Database} () :: log ()
 "#,
     )
     .expect("modifier macros should see and preserve resource dependencies");
+}
+
+#[test]
+fn type_declaration_items_expose_dependency_mutability() {
+    // The macro panics unless it sees the first entry's mode, and the second
+    // entry's mode, as written.
+    let source = r#"
+use std.syntax.(Item, ResourceDependency, Sequence, TypeDeclarationItem, WrapperDeclaration)
+type Logger wrap ()
+type Clock wrap ()
+macro @inspect: Item -> Item = item => match item {
+    TypeDeclarationItem(
+        WrapperDeclaration(), _, _, _, _, _,
+        Sequence (ResourceDependency (_, first), ResourceDependency (_, second)),
+    ) => {
+        if first {
+            if second { panic "second entry reported as mutable" }
+            item
+        } else {
+            panic "first entry reported as immutable"
+        }
+    },
+    _ => panic "dependencies were not exposed",
+}
+@inspect
+type Database with {mut Logger, Clock} wrap ()
+"#;
+    check(source).expect("each entry keeps its own mode");
+    let diagnostics = check(&source.replace("{mut Logger, Clock}", "{Logger, mut Clock}"))
+        .expect_err("an immutable first entry is reported as immutable");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("first entry reported as immutable")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]
