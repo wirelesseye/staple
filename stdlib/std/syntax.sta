@@ -1,5 +1,7 @@
 pub mod
 
+use package.char.Char
+
 use package.result.(Result, Ok)
 use package.string.(String)
 use package.iterator.(Iterator, IntoIterator, FromIterator, IterStep)
@@ -21,6 +23,9 @@ pub type CallExpr wrap pub (
 /// A string-literal expression constructed from a compile-time string.
 @recursive_constructor
 pub type StringExpr wrap pub String
+/// A character-literal expression constructed from a compile-time Char.
+@recursive_constructor
+pub type CharExpr wrap pub Char
 /// A sequence of syntax values.
 @recursive_constructor
 pub type Sequence<Element> wrap pub
@@ -74,7 +79,7 @@ pub type TypeParameters wrap pub (
 pub type UnstructuredExpr opaque
 impl !Copy UnstructuredExpr {}
 /// The syntax category for expressions.
-pub type Expr = Ident<String> | CallExpr | StringExpr | UnstructuredExpr
+pub type Expr = Ident<String> | CallExpr | StringExpr | CharExpr | UnstructuredExpr
 
 /// The syntax category for types.
 @sized_opaque
@@ -246,6 +251,7 @@ extern "staple-intrinsic" {
 // the cursor and stops where the grammar stops.
 impl Parse Expr { parse = mut input => __parse_primitive.<Expr> input }
 impl Parse CallExpr { parse = mut input => __parse_primitive.<CallExpr> input }
+impl Parse CharExpr { parse = mut input => __parse_primitive.<CharExpr> input }
 impl Parse StringExpr { parse = mut input => __parse_primitive.<StringExpr> input }
 impl Parse UnstructuredExpr { parse = mut input => __parse_primitive.<UnstructuredExpr> input }
 impl Parse Type { parse = mut input => __parse_primitive.<Type> input }

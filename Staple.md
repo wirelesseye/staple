@@ -1618,7 +1618,7 @@ Inferred placeholders may appear wherever a type is expected.
 staple is expression-oriented. Function values, function applications, products,
 and blocks are all expressions.
 
-The syntax currently recognized for literal values includes strings, integers,
+The syntax currently recognized for literal values includes strings, characters, integers,
 and decimal floating-point numbers:
 
 ```staple
@@ -1636,7 +1636,8 @@ remain integer values; Staple does not implicitly convert between numeric types.
 
 String literals use double quotes and produce owned UTF-8 `String` values. A
 backslash protects the following quote from ending the string. Supported
-escapes are `\\n`, `\\r`, `\\t`, `\\0`, `\\\\`, `\\"`, and `\\$`.
+escapes are `\\n`, `\\r`, `\\t`, `\\0`, `\\\\`, `\\"`, `\\'`, `\\$`, and `\\u{…}`.
+Unicode escapes contain 1 to 6 hex digits and must name a Unicode scalar value.
 
 An unescaped dollar sign introduces interpolation. `$name` displays a single
 identifier, while `${expression}` displays any expression. Appending `:?`
@@ -1653,6 +1654,31 @@ interpolation requires the value's type to implement `Display`; `:?` requires
 `Debug`. A literal dollar sign must be written `\$`. Interpolation is an
 expression feature and is rejected where the grammar requires a literal
 string, such as string-literal types and patterns.
+
+### Character literals
+
+Single quotes enclose exactly one Unicode scalar value and produce `Char`:
+
+```staple
+let initial = 'S'
+let tab = '\t'
+let snowman = '\u{2603}'
+```
+
+`Char` represents code points through U+10FFFF, excluding the surrogates
+U+D800 through U+DFFF. It is not a grapheme: `e` followed by U+0301 is two
+Chars, even when displayed as one character. Empty and multi-scalar literals
+are errors. Character literals support `\n`, `\r`, `\t`, `\0`, `\\`,
+`\'`, `\"`, and `\u{…}`; `$` is ordinary text and has no interpolation.
+
+`Char.from_u32` returns `Option<Char>`; `Char.to_u32`, `Char.len_utf8`, and
+`Char.is_ascii` inspect a scalar. `Convert Char U32` and `TryConvert U32 Char`
+provide checked conversion. `Display` writes UTF-8; `Debug` writes a quoted,
+escaped literal.
+
+`String.chars` iterates scalar values without copying the bytes. Collecting
+Chars produces a String; `String.char_count` counts scalars in O(n) time.
+Use `String.bytes` for UTF-8 bytes.
 
 The `c_string` library macro from `std.cinterop` accepts only a string literal
 and produces an owned `CString` backed by allocated NUL-terminated storage:

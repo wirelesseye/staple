@@ -121,6 +121,7 @@ pub(super) fn value_shape(value: &Value) -> MetaType {
         Value::Nominal(name, _) => MetaType::Nominal(name.clone(), vec![]),
         Value::Integer(_) => MetaType::Nominal("{integer}".into(), vec![]),
         Value::Float(_, _) => MetaType::Nominal("{float}".into(), vec![]),
+        Value::Char(_) => MetaType::Nominal("Char".into(), vec![]),
         Value::String(_) => MetaType::Nominal("String".into(), vec![]),
         Value::Product(elements, false) if elements.len() == 1 && elements[0].0.is_none() => {
             value_shape(&elements[0].1)
@@ -146,6 +147,7 @@ pub(super) fn value_shape(value: &Value) -> MetaType {
             SyntaxValue::FatArrow(_) => MetaType::FatArrow,
             SyntaxValue::Call(_) => MetaType::CallExpr,
             SyntaxValue::Raw(_) => MetaType::Syntax,
+            SyntaxValue::Unstructured(Expression::Char(_)) => MetaType::CharExpr,
             SyntaxValue::Unstructured(Expression::String(_)) => MetaType::StringExpr,
             SyntaxValue::Unstructured(_) => MetaType::UnstructuredExpr,
             SyntaxValue::Items(_) => MetaType::Sequence(Box::new(MetaType::Item)),

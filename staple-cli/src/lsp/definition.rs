@@ -368,6 +368,7 @@ impl DeclarationCollector<'_> {
             | Expression::Name(_)
             | Expression::String(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
         }
@@ -998,6 +999,7 @@ impl Collector<'_> {
             Expression::Splice(value) => self.add_resolved(&value.syntax, &value.name, true),
             Expression::String(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
         }
@@ -1791,6 +1793,7 @@ mod tests {
             "def main = () => {\n",
             "    let generated = A.Hello\n",
             "    let x = 3\n",
+            "    let character = 'é'\n",
             "    let y: I32 = x + 30\n",
             "    let condition: Bool = True\n",
             "    when {\n",
@@ -1826,7 +1829,11 @@ mod tests {
         for token in tokens.iter().filter(|token| {
             matches!(
                 token.kind,
-                TokenKind::String | TokenKind::Integer | TokenKind::LBrace | TokenKind::RBrace
+                TokenKind::String
+                    | TokenKind::Char
+                    | TokenKind::Integer
+                    | TokenKind::LBrace
+                    | TokenKind::RBrace
             )
         }) {
             assert!(

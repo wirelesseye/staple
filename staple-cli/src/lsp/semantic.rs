@@ -123,7 +123,7 @@ pub fn entries_at_path(
 fn lexical_kind(kind: TokenKind) -> Option<u32> {
     match kind {
         TokenKind::LineComment | TokenKind::BlockComment => Some(COMMENT),
-        TokenKind::String => Some(STRING),
+        TokenKind::String | TokenKind::Char => Some(STRING),
         TokenKind::Integer | TokenKind::Float => Some(NUMBER),
         // Storage modifiers (`storage.modifier` in the TextMate grammar):
         // classified distinctly from control/declaration keywords so a theme
@@ -1002,6 +1002,7 @@ impl<'a> Classifier<'a> {
             }
             Expression::String(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
         }

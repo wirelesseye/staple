@@ -412,6 +412,9 @@ fn render_pattern(pattern: &Pattern) -> String {
 // --- expressions ------------------------------------------------------------
 
 fn render_expr(program: &Program, expression: &Expression) -> String {
+    if let Expression::Char(value) = expression {
+        return value.literal.clone();
+    }
     if !expr_has_generated(expression) {
         return expression.syntax().text().trim().to_owned();
     }

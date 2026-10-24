@@ -416,6 +416,7 @@ pub(crate) enum OrdinaryExpressionFamily {
     String,
     StringTemplate,
     CString,
+    Char,
     Integer,
     Float,
     Function,
@@ -5860,6 +5861,14 @@ impl LoweredProgram {
             }
             (OrdinaryExpressionFamily::Call, Expression::Call(call)) => {
                 self.lower_call(module, owner, context, call)
+            }
+            (OrdinaryExpressionFamily::Char, Expression::Char(c)) => {
+                let value = staple_syntax::string_literal::decode_char(&c.literal)
+                    .map_err(|e| Diagnostic::new(c.syntax.span.clone(), e.to_string()))?;
+                Ok(LoweredExpressionKind::Integer(LoweredInteger {
+                    value: value as u64,
+                    integer_type: IntegerType::U32,
+                }))
             }
             (OrdinaryExpressionFamily::Integer, Expression::Integer(integer)) => self
                 .lower_integer(module, integer)
@@ -14084,6 +14093,7 @@ fn classify_expression(module: &TypedModule, expression: &Expression) -> Express
         Expression::String(_) => Ordinary(Family::String),
         Expression::StringTemplate(_) => Ordinary(Family::StringTemplate),
         Expression::CString(_) => Ordinary(Family::CString),
+        Expression::Char(_) => Ordinary(Family::Char),
         Expression::Integer(_) => Ordinary(Family::Integer),
         Expression::Float(_) => Ordinary(Family::Float),
     }
@@ -14241,6 +14251,7 @@ fn family_name(family: OrdinaryExpressionFamily) -> &'static str {
         OrdinaryExpressionFamily::String => "String",
         OrdinaryExpressionFamily::StringTemplate => "StringTemplate",
         OrdinaryExpressionFamily::CString => "CString",
+        OrdinaryExpressionFamily::Char => "Char",
         OrdinaryExpressionFamily::Integer => "Integer",
         OrdinaryExpressionFamily::Float => "Float",
         OrdinaryExpressionFamily::Function => "Function",
@@ -14283,6 +14294,7 @@ fn expression_variant_name(expression: &Expression) -> &'static str {
         Expression::String(_) => "String",
         Expression::StringTemplate(_) => "StringTemplate",
         Expression::CString(_) => "CString",
+        Expression::Char(_) => "Char",
         Expression::Integer(_) => "Integer",
         Expression::Float(_) => "Float",
     }
@@ -15579,6 +15591,7 @@ impl<'a> SourceCoverage<'a> {
             | Expression::Name(_)
             | Expression::String(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Unary(_)
@@ -19296,6 +19309,13 @@ mod tests {
             }),
         ));
         expressions.push((
+            "Char",
+            Expression::Char(staple_syntax::CharExpression {
+                syntax: syntax.clone(),
+                literal: "'a'".to_owned(),
+            }),
+        ));
+        expressions.push((
             "CString",
             Expression::CString(CStringExpression {
                 syntax: syntax.clone(),
@@ -19361,6 +19381,7 @@ mod tests {
                 "String" => Ordinary(OrdinaryExpressionFamily::String),
                 "StringTemplate" => Ordinary(OrdinaryExpressionFamily::StringTemplate),
                 "CString" => Ordinary(OrdinaryExpressionFamily::CString),
+                "Char" => Ordinary(OrdinaryExpressionFamily::Char),
                 "Integer" => Ordinary(OrdinaryExpressionFamily::Integer),
                 "Float" => Ordinary(OrdinaryExpressionFamily::Float),
                 other => panic!("unclassified expression variant {other}"),
@@ -19769,6 +19790,7 @@ mod tests {
             | Expression::Name(_)
             | Expression::String(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
         }
@@ -20892,6 +20914,7 @@ mod tests {
             | Expression::Name(_)
             | Expression::String(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
         }

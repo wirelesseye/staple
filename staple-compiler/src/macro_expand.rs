@@ -136,6 +136,7 @@ pub(crate) enum MetaType {
     Ident(Option<String>),
     CallExpr,
     StringExpr,
+    CharExpr,
     UnstructuredExpr,
     Type,
     Pattern,
@@ -245,6 +246,7 @@ impl MetaType {
             Self::Expr
                 | Self::Ident(_)
                 | Self::CallExpr
+                | Self::CharExpr
                 | Self::StringExpr
                 | Self::UnstructuredExpr
                 | Self::Delimited(DelimiterKind::Parenthesized | DelimiterKind::Braced, _)
@@ -518,6 +520,7 @@ enum Value {
     },
     Product(ProductValue, bool),
     Integer(i128),
+    Char(char),
     /// A float and the float type it is known to have. `None` is an
     /// unannotated literal, or arithmetic over only those, whose type the
     /// checker infers from context later.
@@ -1690,6 +1693,7 @@ fn desugar_expression(
         | Expression::Name(_)
         | Expression::String(_)
         | Expression::CString(_)
+        | Expression::Char(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
     }
@@ -3329,6 +3333,7 @@ impl MacroExpander {
                 }
             }
             Expression::Name(name) => self.compile_name_type(module, name, environment),
+            Expression::Char(_) => CompileType::Named("Char".to_owned()),
             Expression::String(_) => CompileType::String,
             Expression::Integer(_) => CompileType::Integer,
             Expression::Float(_) => CompileType::Float,
@@ -6459,6 +6464,7 @@ impl MacroExpander {
                     }
                     MetaType::Ident(None) => "an identifier".to_owned(),
                     MetaType::CallExpr => "a call expression".to_owned(),
+                    MetaType::CharExpr => "a character-literal expression".to_owned(),
                     MetaType::StringExpr => "a string-literal expression".to_owned(),
                     MetaType::UnstructuredExpr => "an unstructured expression".to_owned(),
                     MetaType::Type => "a type".to_owned(),
@@ -6692,6 +6698,14 @@ impl MacroExpander {
                 ));
                 None
             }
+            Expression::Char(c) => match staple_syntax::string_literal::decode_char(&c.literal) {
+                Ok(value) => Some(Value::Char(value)),
+                Err(error) => {
+                    self.diagnostics
+                        .push(Diagnostic::new(c.syntax.span.clone(), error.to_string()));
+                    None
+                }
+            },
             Expression::String(string) => Some(Value::String(string.literal.clone())),
             Expression::Integer(integer) => {
                 integer.literal.parse::<i128>().ok().map(Value::Integer)
@@ -6963,6 +6977,7 @@ impl MacroExpander {
                         name.name.as_str(),
                         "Ident"
                             | "CallExpr"
+                            | "CharExpr"
                             | "StringExpr"
                             | "BindingPattern"
                             | "NominalPattern"
@@ -7473,6 +7488,20 @@ impl MacroExpander {
                         argument: Box::new(argument.to_expression()?),
                     },
                 )))
+            }
+            "CharExpr" => {
+                let Value::Char(value) = argument else {
+                    self.diagnostics
+                        .push(Diagnostic::new(span, "`CharExpr` requires a Char"));
+                    return None;
+                };
+                let syntax = self.generated_syntax(module, span);
+                Some(Value::Syntax(SyntaxValue::Unstructured(Expression::Char(
+                    staple_syntax::CharExpression {
+                        syntax,
+                        literal: staple_syntax::string_literal::encode_char(value),
+                    },
+                ))))
             }
             "StringExpr" => {
                 let Value::String(value) = argument else {
@@ -8212,6 +8241,7 @@ impl MacroExpander {
                             name.as_str(),
                             "Ident"
                                 | "CallExpr"
+                                | "CharExpr"
                                 | "StringExpr"
                                 | "BindingPattern"
                                 | "NominalPattern"
@@ -8522,6 +8552,10 @@ impl MacroExpander {
                     argument: Box::new(argument),
                 }))
             }
+            Value::Char(value) => Some(Expression::Char(staple_syntax::CharExpression {
+                syntax: Syntax::synthetic(self.fresh_id(), span),
+                literal: staple_syntax::string_literal::encode_char(value),
+            })),
             // `Value::String`'s payload is already the raw, quoted source
             // literal (see `Expression::String`'s handling in
             // `eval_expression`, which clones `StringExpression::literal`
@@ -8584,6 +8618,7 @@ impl MacroExpander {
                     Value::Nominal(..) => "a nominal value",
                     Value::Integer(_)
                     | Value::Float(..)
+                    | Value::Char(_)
                     | Value::String(_)
                     | Value::Product(_, _) => {
                         unreachable!()
@@ -8700,6 +8735,8 @@ impl MacroExpander {
             (Value::Integer(left), Value::Integer(right), "<=") => Some(bool_value(left <= right)),
             (Value::Integer(left), Value::Integer(right), ">") => Some(bool_value(left > right)),
             (Value::Integer(left), Value::Integer(right), ">=") => Some(bool_value(left >= right)),
+            (Value::Char(left), Value::Char(right), "==") => Some(bool_value(left == right)),
+            (Value::Char(left), Value::Char(right), "!=") => Some(bool_value(left != right)),
             (Value::String(left), Value::String(right), "==") => Some(bool_value(left == right)),
             (Value::String(left), Value::String(right), "!=") => Some(bool_value(left != right)),
             (Value::Float(left, left_type), Value::Float(right, right_type), _) => self
@@ -9359,6 +9396,7 @@ impl MacroExpander {
             | Expression::Name(_)
             | Expression::String(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
         }
@@ -9523,6 +9561,7 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
             "Expr" => Some(MetaType::Expr),
             "Ident" => Some(MetaType::Ident(None)),
             "CallExpr" => Some(MetaType::CallExpr),
+            "CharExpr" => Some(MetaType::CharExpr),
             "StringExpr" => Some(MetaType::StringExpr),
             "UnstructuredExpr" => Some(MetaType::UnstructuredExpr),
             "Type" => Some(MetaType::Type),
@@ -9792,6 +9831,7 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
             _ => false,
         },
         MetaType::CallExpr => matches!(expression_argument, Expression::Call(_)),
+        MetaType::CharExpr => matches!(expression_argument, Expression::Char(_)),
         MetaType::StringExpr => matches!(expression_argument, Expression::String(_)),
         MetaType::UnstructuredExpr => !matches!(
             expression_argument,
@@ -10333,10 +10373,16 @@ fn match_syntax_fragment(
             }
             SyntaxValue::FatArrow(syntax.clone())
         }
-        MetaType::Expr | MetaType::CallExpr | MetaType::StringExpr | MetaType::UnstructuredExpr => {
+        MetaType::Expr
+        | MetaType::CallExpr
+        | MetaType::CharExpr
+        | MetaType::StringExpr
+        | MetaType::UnstructuredExpr => {
             let (value, ids) = expression()?;
             let value = SyntaxValue::from_expression(value);
             if matches!(expected, MetaType::CallExpr) && !matches!(value, SyntaxValue::Call(_))
+                || matches!(expected, MetaType::CharExpr)
+                    && !matches!(value, SyntaxValue::Unstructured(Expression::Char(_)))
                 || matches!(expected, MetaType::StringExpr)
                     && !matches!(value, SyntaxValue::Unstructured(Expression::String(_)))
                 || matches!(expected, MetaType::UnstructuredExpr)
@@ -10763,6 +10809,7 @@ fn category_argument_syntax(argument: &Expression) -> Option<(&Syntax, bool)> {
         Expression::Product(product) => Some((&product.syntax, true)),
         Expression::Name(name) => Some((&name.syntax, false)),
         Expression::Access(access) => Some((&access.syntax, false)),
+        Expression::Char(c) => Some((&c.syntax, false)),
         Expression::String(string) => Some((&string.syntax, false)),
         _ => None,
     }
@@ -10950,6 +10997,7 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::Ident(None) => "Ident<String>".to_owned(),
             MetaType::Ident(Some(spelling)) => format!("Ident<{spelling:?}>"),
             MetaType::CallExpr => "CallExpr".to_owned(),
+            MetaType::CharExpr => "CharExpr".to_owned(),
             MetaType::StringExpr => "StringExpr".to_owned(),
             MetaType::UnstructuredExpr => "UnstructuredExpr".to_owned(),
             MetaType::Type => "Type".to_owned(),
@@ -11049,6 +11097,7 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
         MetaType::Ident(None) => "Ident<String>".to_owned(),
         MetaType::Ident(Some(spelling)) => format!("Ident<{spelling:?}>"),
         MetaType::CallExpr => "CallExpr".to_owned(),
+        MetaType::CharExpr => "CharExpr".to_owned(),
         MetaType::StringExpr => "StringExpr".to_owned(),
         MetaType::UnstructuredExpr => "UnstructuredExpr".to_owned(),
         MetaType::Type => "Type".to_owned(),
@@ -11293,6 +11342,7 @@ fn compile_constructor_type(name: &str, argument: CompileType) -> CompileType {
     match name {
         "Ident" => CompileType::Meta(MetaType::Ident(None)),
         "CallExpr" => CompileType::Meta(MetaType::CallExpr),
+        "CharExpr" => CompileType::Meta(MetaType::CharExpr),
         "StringExpr" => CompileType::Meta(MetaType::StringExpr),
         "BindingPattern" => CompileType::Meta(MetaType::BindingPattern),
         "NominalPattern" => CompileType::Meta(MetaType::NominalPattern),
@@ -11792,6 +11842,10 @@ fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<Co
         (CompileType::Meta(MetaType::TypeBody), "OpaqueBody") => {
             Some(CompileType::Product(Vec::new()))
         }
+        (CompileType::Meta(MetaType::CharExpr), "CharExpr")
+        | (CompileType::Meta(MetaType::Expr), "CharExpr") => {
+            Some(CompileType::Named("Char".to_owned()))
+        }
         (CompileType::Meta(MetaType::Ident(_)), "Ident") => Some(CompileType::String),
         (CompileType::Meta(MetaType::CallExpr), "CallExpr") => Some(CompileType::Product(vec![
             CompileType::Meta(MetaType::Expr),
@@ -11930,7 +11984,7 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
         CompileType::Meta(MetaType::Item) => ["ModifiedItem", "TypeDeclarationItem", "UnstructuredItem"]
             .iter()
             .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
-        CompileType::Meta(MetaType::Expr) => ["Ident", "CallExpr", "StringExpr", "UnstructuredExpr"]
+        CompileType::Meta(MetaType::Expr) => ["Ident", "CallExpr", "CharExpr", "StringExpr", "UnstructuredExpr"]
             .iter()
             .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
         CompileType::Meta(MetaType::Pattern) => ["BindingPattern", "NominalPattern", "UnstructuredPattern"]
@@ -11949,6 +12003,10 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
                 nominal.name == expected
             })
         }
+        CompileType::Meta(MetaType::CharExpr) => patterns.iter().any(|pattern| {
+            let Pattern::Nominal(nominal) = strip_at_pattern(pattern) else { return false; };
+            nominal.name == "CharExpr" && compile_pattern_covers_type(&nominal.argument, &CompileType::Named("Char".to_owned()))
+        }),
         CompileType::Meta(MetaType::CallExpr) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("CallExpr")),
         CompileType::Meta(MetaType::Ident(None)) => patterns.iter().any(|pattern| {
             let Pattern::Nominal(nominal) = strip_at_pattern(pattern) else { return false; };
@@ -12243,6 +12301,10 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
         CompileType::Meta(MetaType::Ident(_)) => {
             vec![("Ident".to_owned(), vec![CompileType::String])]
         }
+        CompileType::Meta(MetaType::CharExpr) => vec![(
+            "CharExpr".to_owned(),
+            vec![CompileType::Named("Char".to_owned())],
+        )],
         CompileType::Meta(MetaType::CallExpr) => vec![(
             "CallExpr".to_owned(),
             vec![
@@ -12258,6 +12320,10 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
                     CompileType::Meta(MetaType::Expr),
                     CompileType::Meta(MetaType::Expr),
                 ],
+            ),
+            (
+                "CharExpr".to_owned(),
+                vec![CompileType::Named("Char".to_owned())],
             ),
             ("StringExpr".to_owned(), vec![CompileType::String]),
             ("UnstructuredExpr".to_owned(), Vec::new()),
@@ -12914,6 +12980,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         | Expression::RepeatedProduct(_)
         | Expression::String(_)
         | Expression::CString(_)
+        | Expression::Char(_)
         | Expression::Integer(_)
         | Expression::Float(_) => true,
     }
@@ -13238,6 +13305,15 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                     Value::Product(fields.clone().into(), false),
                     environment,
                 );
+            }
+            if pattern.namespace.is_none()
+                && pattern.name == "CharExpr"
+                && let Value::Syntax(SyntaxValue::Unstructured(Expression::Char(c))) = &value
+            {
+                let Ok(c) = staple_syntax::string_literal::decode_char(&c.literal) else {
+                    return false;
+                };
+                return bind_pattern(&pattern.argument, Value::Char(c), environment);
             }
             if pattern.namespace.is_none()
                 && pattern.name == "TypeDeclarationItem"
@@ -13827,6 +13903,7 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
             .as_ref()
             .is_none_or(|expected| expected == &name.name),
         (MetaType::CallExpr, Value::Syntax(SyntaxValue::Call(_))) => true,
+        (MetaType::CharExpr, Value::Syntax(SyntaxValue::Unstructured(Expression::Char(_)))) => true,
         (MetaType::StringExpr, Value::Syntax(SyntaxValue::Unstructured(Expression::String(_)))) => {
             true
         }
@@ -14140,6 +14217,7 @@ fn substitute_splices(
         | Expression::Name(_)
         | Expression::String(_)
         | Expression::CString(_)
+        | Expression::Char(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
     }
@@ -15281,6 +15359,7 @@ fn alpha_rename_expression(
         | Expression::Splice(_)
         | Expression::String(_)
         | Expression::CString(_)
+        | Expression::Char(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
     }
@@ -15365,6 +15444,7 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::Quote(value) => &mut value.syntax,
         Expression::Splice(value) => &mut value.syntax,
         Expression::Name(value) => &mut value.syntax,
+        Expression::Char(value) => &mut value.syntax,
         Expression::String(value) => &mut value.syntax,
         Expression::StringTemplate(value) => &mut value.syntax,
         Expression::CString(value) => &mut value.syntax,

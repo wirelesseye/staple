@@ -77,13 +77,13 @@ fn push_template_literal(
 fn matching_template_brace(content: &str, opening: usize) -> Option<usize> {
     let mut depth = 1usize;
     let mut cursor = opening + 1;
-    let mut string = false;
+    let mut quote = None;
     let mut escaped = false;
     while cursor < content.len() {
         let character = content[cursor..].chars().next()?;
-        if string {
-            if character == '"' && !escaped {
-                string = false;
+        if let Some(delimiter) = quote {
+            if character == delimiter && !escaped {
+                quote = None;
             }
             escaped = character == '\\' && !escaped;
             if character != '\\' {
@@ -97,7 +97,7 @@ fn matching_template_brace(content: &str, opening: usize) -> Option<usize> {
                 continue;
             }
             match character {
-                '"' => string = true,
+                '"' | '\'' => quote = Some(character),
                 '{' => depth += 1,
                 '}' => {
                     depth -= 1;
@@ -3159,6 +3159,7 @@ impl Grammar {
                     | TokenKind::LParen
                     | TokenKind::LBracket
                     | TokenKind::Identifier
+                    | TokenKind::Char
                     | TokenKind::Integer
                     | TokenKind::String
                     | TokenKind::Dollar
@@ -4073,6 +4074,14 @@ impl Grammar {
                 let syntax = self.syntax(start);
                 self.parse_string_or_template(token, syntax)
             }
+            Some(TokenKind::Char) => {
+                let start = self.position;
+                let literal = self.bump_token().expect("peeked char").text;
+                Ok(Expression::Char(CharExpression {
+                    syntax: self.syntax(start),
+                    literal,
+                }))
+            }
             Some(TokenKind::Integer) => {
                 let start = self.position;
                 let literal = self.bump_token().expect("peeked integer").text;
@@ -4623,6 +4632,7 @@ impl Grammar {
                     | TokenKind::Underscore
                     | TokenKind::Dollar
                     | TokenKind::String
+                    | TokenKind::Char
                     | TokenKind::Integer
                     | TokenKind::Float
             )

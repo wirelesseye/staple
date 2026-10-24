@@ -1017,6 +1017,7 @@ impl MacroExpander {
         let (value, consumed): (Value, usize) = match target {
             MetaType::Expr
             | MetaType::CallExpr
+            | MetaType::CharExpr
             | MetaType::StringExpr
             | MetaType::UnstructuredExpr => {
                 match staple_syntax::parse_expression_prefix(&rest, &mut self.next_syntax_id) {
@@ -1024,6 +1025,9 @@ impl MacroExpander {
                         let value = SyntaxValue::from_expression(expression);
                         let accepted = match target {
                             MetaType::CallExpr => matches!(value, SyntaxValue::Call(_)),
+                            MetaType::CharExpr => {
+                                matches!(value, SyntaxValue::Unstructured(Expression::Char(_)))
+                            }
                             MetaType::StringExpr => {
                                 matches!(value, SyntaxValue::Unstructured(Expression::String(_)))
                             }

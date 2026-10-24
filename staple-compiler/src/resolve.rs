@@ -100,6 +100,7 @@ pub enum BuiltinType {
     RawOpaquePtr,
     RawOpaqueMutPtr,
     CString,
+    Char,
     RawPtr,
     RawMutPtr,
     IO,
@@ -2366,6 +2367,7 @@ impl NameResolver {
             "Ident",
             "CallExpr",
             "StringExpr",
+            "CharExpr",
             "Sequence",
             "Separated",
             "Comma",
@@ -2403,6 +2405,13 @@ impl NameResolver {
             self.register_builtin_type(syntax, "std.syntax", name, BuiltinType::Syntax);
         }
 
+        if let Some(char_module) = program
+            .modules()
+            .iter()
+            .find(|m| m.path.ends_with("std/char.sta"))
+        {
+            self.register_builtin_type(char_module.id, "std.char", "Char", BuiltinType::Char);
+        }
         if let Some(cinterop) = program.standard_library_cinterop() {
             self.register_builtin_type(cinterop, "std.cinterop", "CChar", BuiltinType::CChar);
             self.register_builtin_type(cinterop, "std.cinterop", "CString", BuiltinType::CString);
@@ -3070,6 +3079,7 @@ impl NameResolver {
             } else if matches!(
                 builtin,
                 BuiltinType::CString
+                    | BuiltinType::Char
                     | BuiltinType::Buffer
                     | BuiltinType::SharedBuffer
                     | BuiltinType::Unique
@@ -3199,6 +3209,7 @@ impl NameResolver {
             BuiltinType::Shared => "std.shared.Shared",
             BuiltinType::Unique => "std.unique.Unique",
             BuiltinType::CString => "std.cinterop.CString",
+            BuiltinType::Char => "std.char.Char",
             _ => name,
         };
         self.type_names.insert(id, path.to_owned());
@@ -5698,6 +5709,7 @@ impl NameResolver {
             | Expression::String(_)
             | Expression::StringTemplate(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression was not desugared"),
@@ -6571,6 +6583,7 @@ impl NameResolver {
             )),
             Expression::String(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression was not desugared"),
@@ -8150,6 +8163,7 @@ fn compile_expression_type(expression: &Expression, scope: &CompileTimeScope) ->
             staple_syntax::QuoteKind::ParseQuote => "SyntaxNode".to_owned(),
         }),
         Expression::String(_) => Some("String".to_owned()),
+        Expression::Char(_) => Some("Char".to_owned()),
         Expression::Integer(_) => Some("Integer".to_owned()),
         Expression::Float(_) => Some("Float".to_owned()),
         Expression::TypeAscription(value) => Some(value.ty.to_string()),
@@ -8636,6 +8650,7 @@ impl<'a> InitializationAnalyzer<'a> {
             | Expression::String(_)
             | Expression::StringTemplate(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression was not desugared"),
@@ -8848,6 +8863,7 @@ fn find_block_type_declarations_in_expression<'a>(
         | Expression::String(_)
         | Expression::StringTemplate(_)
         | Expression::CString(_)
+        | Expression::Char(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
         Expression::Binary(_) => unreachable!("binary expression was not desugared"),

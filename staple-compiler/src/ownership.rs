@@ -628,6 +628,7 @@ impl<'a> OwnershipChecker<'a> {
             | Expression::Splice(_) => true,
             Expression::String(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => true,
             Expression::Binary(_) => unreachable!("binary expression reached ownership checking"),

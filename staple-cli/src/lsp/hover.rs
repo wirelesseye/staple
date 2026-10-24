@@ -435,6 +435,7 @@ impl Collector<'_> {
             | Expression::Name(_)
             | Expression::String(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
         }
@@ -1576,6 +1577,13 @@ impl Collector<'_> {
                     })
                 })
                 .unwrap_or(value_type);
+            let signature = if let Expression::Char(c) = expression {
+                staple_syntax::string_literal::decode_char(&c.literal)
+                    .map(|c| format!("{signature} (U+{:04X})", c as u32))
+                    .unwrap_or(signature)
+            } else {
+                signature
+            };
             let docs = declaration
                 .as_ref()
                 .map(|declaration| declaration.docs.clone())
@@ -1759,6 +1767,7 @@ impl Collector<'_> {
             | Expression::Name(_)
             | Expression::String(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
         }
@@ -2576,6 +2585,32 @@ impl Declaration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn char_literal_hover_includes_the_scalar_value() {
+        let source = "let c = 'é'\n";
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_owned();
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, &root)
+            .unwrap();
+        let typed = TypeChecker::new()
+            .check(NameResolver::new().resolve_program(program).unwrap())
+            .unwrap();
+        let module = parse(source).unwrap();
+        let hovers = entries(&module, &typed);
+        assert!(
+            hovers
+                .iter()
+                .any(|entry| entry.range.start == source.find('\'').unwrap()
+                    && entry.signature.contains("Char")
+                    && entry.signature.contains("U+00E9")),
+            "{hovers:?}"
+        );
+    }
 
     #[test]
     fn hovers_function_effect_lower_bound_types() {

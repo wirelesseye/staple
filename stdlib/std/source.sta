@@ -20,7 +20,7 @@ use package.string.String
 pub macro line: () -> Expr
 
 /// Expands to the 1-based column number of the invocation as an integer
-/// literal. Columns count characters, not bytes.
+/// literal. Columns count Chars (Unicode scalar values), not bytes.
 ///
 /// Inside a macro expansion, the column is that of the outermost macro
 /// invocation that led to this call, unless the call was written at that

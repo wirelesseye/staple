@@ -54,6 +54,7 @@ pub enum TokenKind {
     Underscore,
     Identifier,
     String,
+    Char,
     Integer,
     Float,
     Whitespace,

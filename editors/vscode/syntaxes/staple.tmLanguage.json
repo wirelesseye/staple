@@ -5,6 +5,7 @@
   "patterns": [
     { "include": "#comments" },
     { "include": "#strings" },
+    { "include": "#char" },
     { "include": "#declarations" },
     { "include": "#quotation" },
     { "include": "#keywords" },
@@ -38,13 +39,28 @@
           "patterns": [
             {
               "name": "constant.character.escape.staple",
-              "match": "\\\\[nrt0\\\\\"]"
+              "match": "\\\\(?:[nrt0\\\\\"'$]|u\\{[0-9a-fA-F]{1,6}\\})"
             },
             {
               "name": "invalid.illegal.escape.staple",
               "match": "\\\\."
             }
           ]
+        }
+      ]
+    },
+    "char": {
+      "name": "string.quoted.single.staple",
+      "begin": "'",
+      "end": "'|(?=$)",
+      "patterns": [
+        {
+          "name": "constant.character.escape.staple",
+          "match": "\\\\(?:[nrt0\\\\\"']|u\\{[0-9a-fA-F]{1,6}\\})"
+        },
+        {
+          "name": "invalid.illegal.escape.staple",
+          "match": "\\\\."
         }
       ]
     },

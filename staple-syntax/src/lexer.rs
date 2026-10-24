@@ -42,6 +42,7 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
             .or(comment)
             .or(block_comment)
             .or(string)
+            .or(|text: &str, at: usize| lex_char(text, at).map(|end| (TokenKind::Char, end)))
             .or(tag("::").map(|_| TokenKind::DoubleColon))
             .or(tag("=>").map(|_| TokenKind::FatArrow))
             .or(tag("->").map(|_| TokenKind::Arrow))
@@ -243,6 +244,10 @@ fn lex_string(source: &str, offset: usize) -> Option<usize> {
             cursor += character.len_utf8();
             continue;
         }
+        if character == '\'' {
+            cursor = lex_char(source, cursor)?;
+            continue;
+        }
         if character == '"' {
             cursor = lex_string(source, cursor)?;
             continue;
@@ -318,4 +323,26 @@ fn single_character_kind(character: char) -> TokenKind {
         '!' => TokenKind::Bang,
         _ => TokenKind::Unknown,
     }
+}
+
+fn lex_char(source: &str, offset: usize) -> Option<usize> {
+    if !source.get(offset..)?.starts_with('\'') {
+        return None;
+    }
+    let mut escaped = false;
+    for (index, ch) in source[offset + 1..].char_indices() {
+        let at = offset + 1 + index;
+        if matches!(ch, '\n' | '\r') {
+            return Some(at);
+        }
+        if ch == '\'' && !escaped {
+            return Some(at + 1);
+        }
+        if ch == '\\' && !escaped {
+            escaped = true;
+        } else {
+            escaped = false;
+        }
+    }
+    Some(source.len())
 }

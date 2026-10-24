@@ -8153,6 +8153,7 @@ impl TypeChecker {
             | Expression::Splice(_)
             | Expression::String(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => CheckedEffectSet::default(),
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
@@ -9050,6 +9051,7 @@ impl TypeChecker {
             | Expression::String(_)
             | Expression::StringTemplate(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => false,
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
@@ -9617,6 +9619,7 @@ impl TypeChecker {
             | Expression::Name(_)
             | Expression::String(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
@@ -13078,6 +13081,7 @@ impl TypeChecker {
                             && !matches!(
                                 call.argument.as_ref(),
                                 Expression::Integer(_)
+                                    | Expression::Char(_)
                                     | Expression::Float(_)
                                     | Expression::String(_)
                                     | Expression::CString(_)
@@ -14275,6 +14279,16 @@ impl TypeChecker {
                     );
                 }
                 CheckedType::String
+            }
+            Expression::Char(c) => {
+                if let Err(error) = staple_syntax::string_literal::decode_char(&c.literal) {
+                    self.diagnostics
+                        .push(Diagnostic::new(c.syntax.span.clone(), error.to_string()));
+                }
+                module
+                    .type_for_builtin(BuiltinType::Char)
+                    .map(|id| self.resolve_type_id(module, id, "Char"))
+                    .unwrap_or(CheckedType::Error)
             }
             Expression::CString(_) => self.cstring_type(module),
             Expression::Integer(integer) => {
@@ -19705,7 +19719,7 @@ impl TypeChecker {
     ) -> CheckedType {
         if let Some(builtin) = module
             .builtin_type(id)
-            .filter(|kind| *kind != BuiltinType::CString)
+            .filter(|kind| !matches!(kind, BuiltinType::CString | BuiltinType::Char))
         {
             return match builtin {
                 BuiltinType::Integer(integer) => CheckedType::integer(integer),
@@ -19735,7 +19749,7 @@ impl TypeChecker {
                 BuiltinType::RawOpaquePtr => CheckedType::RawOpaquePtr,
                 BuiltinType::RawOpaqueMutPtr => CheckedType::RawOpaqueMutPtr,
                 BuiltinType::CChar => CheckedType::CChar,
-                BuiltinType::CString => unreachable!(),
+                BuiltinType::CString | BuiltinType::Char => unreachable!(),
                 BuiltinType::RawPtr => CheckedType::TypeConstructor {
                     id,
                     name: "RawPtr".to_owned(),
@@ -23672,6 +23686,7 @@ fn expression_reads_reactive(
         | Expression::Splice(_)
         | Expression::String(_)
         | Expression::CString(_)
+        | Expression::Char(_)
         | Expression::Integer(_)
         | Expression::Float(_) => false,
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
@@ -23752,6 +23767,7 @@ fn collect_value_bindings(module: &ResolvedModule) -> Vec<Binding> {
             | Expression::Name(_)
             | Expression::String(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
@@ -23926,6 +23942,7 @@ fn expression_mentions_symbols(
         | Expression::Name(_)
         | Expression::String(_)
         | Expression::CString(_)
+        | Expression::Char(_)
         | Expression::Integer(_)
         | Expression::Float(_) => false,
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
@@ -24005,6 +24022,7 @@ fn expression_contains_assignment(expression: &Expression) -> bool {
         | Expression::Name(_)
         | Expression::String(_)
         | Expression::CString(_)
+        | Expression::Char(_)
         | Expression::Integer(_)
         | Expression::Float(_) => false,
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
@@ -24215,6 +24233,7 @@ fn synthesized_thunk_captures(module: &ResolvedModule, expression: &Expression) 
             | Expression::Splice(_)
             | Expression::String(_)
             | Expression::CString(_)
+            | Expression::Char(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),

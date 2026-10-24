@@ -1,5 +1,8 @@
 pub mod
 
+use package.char.Char
+use package.ops.(BitAnd, ShiftLeft)
+
 use package.ops.(Add)
 use package.cmp.(Eq)
 use package.convert.(ConversionError, TryConvert)
@@ -40,21 +43,6 @@ pub trait ToString T {
     to_string: T -> String
 }
 
-def string_to_bytes = value: String => List<U8> :: {
-    let String bytes = value
-    let length = SharedBuffer.length bytes
-    let mut result: List<U8> = List.with_capacity length
-    let mut index: USize = 0
-    loop {
-        if (index == length) { break }
-        result |> push (SharedBuffer.get_unchecked bytes index)
-        index = index + 1
-    }
-    result
-}
-
-def string_from_utf8_unchecked = move bytes: List<U8> => String :: String (List.into_buffer bytes |> Buffer.into_shared_buffer)
-
 /// A non-copying iterator over the UTF-8 bytes of a string.
 pub type StringBytes wrap (string: String, index: USize)
 
@@ -76,10 +64,70 @@ impl IntoIterator StringBytes {
     into_iterator = move iterator => iterator
 }
 
+/// A non-copying iterator over the Unicode scalar values of a string.
+pub type StringChars wrap (string: String, index: USize)
+
+impl Iterator StringChars {
+    type Item = Char
+    next = move StringChars (string, index) => {
+        let String bytes = string
+        if (index < SharedBuffer.length bytes) {
+            let first = (SharedBuffer.get_unchecked bytes index) as U32
+            let length: USize = when {
+                first < 128 => 1,
+                first < 224 => 2,
+                first < 240 => 3,
+                else => 4,
+            }
+            let mut scalar: U32 = when {
+                length == 1 => first,
+                length == 2 => BitAnd.bit_and (first; 31),
+                length == 3 => BitAnd.bit_and (first; 15),
+                else => BitAnd.bit_and (first; 7),
+            }
+            let mut offset: USize = 1
+            loop {
+                if (offset == length) { break }
+                let byte = (SharedBuffer.get_unchecked bytes (index + offset)) as U32
+                scalar = (ShiftLeft.shift_left (scalar; 6)) + (BitAnd.bit_and (byte; 63))
+                offset = offset + 1
+            }
+            Yield (Char.from_u32_unchecked scalar, StringChars (string: string, index: index + length))
+        } else {
+            Done (StringChars (string: string, index: index))
+        }
+    }
+}
+
+impl IntoIterator StringChars {
+    type Iter = StringChars
+    into_iterator = move iterator => iterator
+}
+
 companion String {
+    /// Iterates Unicode scalar values without copying the string's bytes.
+    pub def chars = value: String => StringChars :: StringChars (string: value, index: 0)
+
+    /// Counts Unicode scalar values in O(n) time.
+    pub def char_count = value: String => USize :: {
+        let mut count: USize = 0
+        for c in (chars value) { count = count + 1 }
+        count
+    }
 
     /// Copies the UTF-8 bytes of a string into a new list.
-    pub def to_bytes = value: String => List<U8> :: string_to_bytes value
+    pub def to_bytes = value: String => List<U8> :: {
+        let String bytes = value
+        let length = SharedBuffer.length bytes
+        let mut result: List<U8> = List.with_capacity length
+        let mut index: USize = 0
+        loop {
+            if (index == length) { break }
+            result |> push (SharedBuffer.get_unchecked bytes index)
+            index = index + 1
+        }
+        result
+    }
 
     /// Returns an iterator over the UTF-8 bytes of a string without copying them.
     pub def bytes = value: String => StringBytes :: StringBytes (string: value, index: 0)
@@ -95,7 +143,8 @@ companion String {
     }
 
     /// Constructs a string from bytes known to contain valid UTF-8.
-    pub def from_utf8_unchecked = move bytes: List<U8> => String :: string_from_utf8_unchecked bytes
+    pub def from_utf8_unchecked = move bytes: List<U8> => String ::
+        String (List.into_buffer bytes |> Buffer.into_shared_buffer)
 }
 
 impl Add String {
@@ -108,12 +157,34 @@ impl Eq String {
 
 impl Default String { default = () => "" }
 
+impl FromIterator String Char {
+    insert = (move start; move c) => {
+        let mut bytes = String.to_bytes start
+        package.char.append_utf8 bytes c
+        String.from_utf8_unchecked bytes
+    }
+    insert_all = <Iter where Iterator Iter, Iterator.Item Iter == Char> (move start; move chars) => {
+        let mut bytes = String.to_bytes start
+        let mut remaining = chars
+        loop {
+            match Iterator.next remaining {
+                Done _ => { break },
+                Yield (c, rest) => {
+                    remaining = rest
+                    package.char.append_utf8 bytes c
+                },
+            }
+        }
+        String.from_utf8_unchecked bytes
+    }
+}
+
 impl FromIterator String String {
     insert = (move left; move right) => left + right
     // Concatenating piece by piece would copy the text built so far each time.
     // Gather the bytes into one list instead, and build the string once.
     insert_all = <Iter where Iterator Iter, Iterator.Item Iter == String> (move start; move pieces) => {
-        let mut bytes = string_to_bytes start
+        let mut bytes = String.to_bytes start
         let mut remaining = pieces
         loop {
             match Iterator.next remaining {
@@ -124,7 +195,7 @@ impl FromIterator String String {
                 },
             }
         }
-        string_from_utf8_unchecked bytes
+        String.from_utf8_unchecked bytes
     }
 }
 

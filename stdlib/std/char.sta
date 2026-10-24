@@ -1,0 +1,133 @@
+pub mod
+
+use package.cmp.(Eq, PartialOrd, Ord)
+use package.convert.(Convert, TryConvert, ConversionError)
+use package.result.Ok
+use package.fmt.(Display, Debug, Formatter)
+use package.list.List
+use package.string.String
+use package.ops.(BitAnd, ShiftRight)
+
+/// A Unicode scalar value: a code point through U+10FFFF excluding
+/// the surrogates U+D800 ..= U+DFFF.
+/// A Char is not always one user-visible character: é can be one Char or
+/// e followed by U+0301. String.chars iterates scalars; String.bytes iterates bytes.
+pub type Char wrap U32
+
+companion Char {
+    /// Returns None for surrogates and values above U+10FFFF.
+    pub def from_u32 = value: U32 => Option<Char> :: {
+        if (value > 1114111) { None } else {
+            if (value >= 55296) {
+                if (value <= 57343) { None } else { Some (Char value) }
+            } else { Some (Char value) }
+        }
+    }
+
+    // The caller must guarantee that value is a Unicode scalar value.
+    pub(package) def from_u32_unchecked = value: U32 => Char :: Char value
+
+    /// Returns the Unicode code point.
+    pub def to_u32 = Char value => U32 :: value
+
+    /// Returns the number of bytes in the UTF-8 encoding (1 through 4).
+    pub def len_utf8 = Char value => USize :: when {
+        value < 128 => 1,
+        value < 2048 => 2,
+        value < 65536 => 3,
+        else => 4,
+    }
+
+    /// Returns whether this scalar is in U+0000 through U+007F.
+    pub def is_ascii = Char value => Bool :: value < 128
+}
+
+// Copy is inherited structurally from U32.
+impl Eq Char { eq = (Char left; Char right) => left == right }
+impl PartialOrd Char { partial_cmp = (Char left; Char right) => PartialOrd.partial_cmp (left; right) }
+impl Ord Char { cmp = (Char left; Char right) => Ord.cmp (left; right) }
+impl Convert Char U32 { convert = move Char value => value }
+impl TryConvert U32 Char {
+    type Error = ConversionError
+    try_convert = move value => match Char.from_u32 value {
+        Some c => Ok c,
+        None => ConversionError.OutOfRange,
+    }
+}
+
+// Every caller passes a byte-sized value derived from a valid scalar.
+def to_byte = value: U32 => U8 :: (TryConvert.try_convert.<U32, U8> value) |> unwrap
+
+def continuation = value: U32 => U8 :: to_byte ((BitAnd.bit_and (value; 63)) + 128)
+
+// Fixed-size storage avoids an allocation for each encoded scalar.
+pub(package) def encode_utf8 = Char value => ((U8, U8, U8, U8), USize) :: when {
+    value < 128 => ((to_byte value, 0, 0, 0), 1),
+    value < 2048 => ((
+        to_byte ((ShiftRight.shift_right (value; 6)) + 192),
+        continuation value, 0, 0,
+    ), 2),
+    value < 65536 => ((
+        to_byte ((ShiftRight.shift_right (value; 12)) + 224),
+        continuation (ShiftRight.shift_right (value; 6)),
+        continuation value, 0,
+    ), 3),
+    else => ((
+        to_byte ((ShiftRight.shift_right (value; 18)) + 240),
+        continuation (ShiftRight.shift_right (value; 12)),
+        continuation (ShiftRight.shift_right (value; 6)),
+        continuation value,
+    ), 4),
+}
+
+pub(package) def append_utf8 = (mut bytes: List<U8>; c: Char) => () :: {
+    let ((a, b, c, d), length) = encode_utf8 c
+    List.push bytes a
+    if (length > 1) { List.push bytes b }
+    if (length > 2) { List.push bytes c }
+    if (length > 3) { List.push bytes d }
+}
+
+impl Display Char {
+    fmt = (value, mut formatter) => {
+        let mut bytes: List<U8> = List.with_capacity 4
+        append_utf8 bytes value
+        let () = formatter |> write (String.from_utf8_unchecked bytes)
+    }
+}
+
+// Render non-ASCII scalars with a Unicode escape; this also makes combining
+// marks and invisible scalars unambiguous without requiring Unicode tables.
+def write_hex = (value: U32, mut formatter: Formatter) => () :: {
+    if (value >= 16) { write_hex (ShiftRight.shift_right (value; 4), formatter) }
+    let digit = BitAnd.bit_and (value; 15)
+    let ascii = if (digit < 10) { digit + 48 } else { digit + 87 }
+    Display.fmt (Char ascii, formatter)
+}
+
+impl Debug Char {
+    fmt = (value, mut formatter) => {
+        let () = formatter |> write "'"
+        let Char scalar = value
+        when {
+            scalar == 0 => formatter |> write "\\0",
+            scalar == 9 => formatter |> write "\\t",
+            scalar == 10 => formatter |> write "\\n",
+            scalar == 13 => formatter |> write "\\r",
+            scalar == 39 => formatter |> write "\\'",
+            scalar == 92 => formatter |> write "\\\\",
+            scalar < 32 => {
+                let () = formatter |> write "\\u{"
+                let () = write_hex (scalar, formatter)
+                let () = formatter |> write "}"
+            },
+            scalar >= 127 => {
+                let () = formatter |> write "\\u{"
+                let () = write_hex (scalar, formatter)
+                let () = formatter |> write "}"
+            },
+            else => Display.fmt (value, formatter),
+        }
+        let () = formatter |> write "'"
+    }
+}

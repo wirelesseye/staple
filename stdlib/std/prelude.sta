@@ -1,5 +1,6 @@
 pub mod
 
+pub use package.char.Char
 pub use package.clone.*
 pub use package.convert.*
 pub use package.default.*

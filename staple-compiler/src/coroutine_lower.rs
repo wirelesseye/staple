@@ -334,6 +334,7 @@ fn scan_expression(
         | Expression::Name(_)
         | Expression::String(_)
         | Expression::CString(_)
+        | Expression::Char(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
     }
@@ -480,6 +481,7 @@ fn collect_expression<'a>(
         | Expression::Name(_)
         | Expression::String(_)
         | Expression::CString(_)
+        | Expression::Char(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
     }

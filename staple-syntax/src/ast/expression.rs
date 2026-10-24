@@ -31,6 +31,7 @@ pub enum Expression {
     String(StringExpression),
     StringTemplate(StringTemplateExpression),
     CString(CStringExpression),
+    Char(CharExpression),
     Integer(IntegerExpression),
     Float(FloatExpression),
 }
@@ -66,6 +67,7 @@ impl Expression {
             Self::Name(expression) => &expression.syntax,
             Self::String(expression) => &expression.syntax,
             Self::StringTemplate(expression) => &expression.syntax,
+            Self::Char(expression) => &expression.syntax,
             Self::CString(expression) => &expression.syntax,
             Self::Integer(expression) => &expression.syntax,
             Self::Float(expression) => &expression.syntax,
@@ -476,6 +478,13 @@ pub struct NameExpression {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StringExpression {
+    pub syntax: Syntax,
+    /// The literal exactly as written, including its quotes.
+    pub literal: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharExpression {
     pub syntax: Syntax,
     /// The literal exactly as written, including its quotes.
     pub literal: String,
