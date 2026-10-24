@@ -122,13 +122,17 @@ fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 }
 
 fn temporary_sibling(path: &Path) -> PathBuf {
+    // Threads of one process share its ID, and the clock may be coarser than
+    // a nanosecond, so a per-process counter keeps concurrent names distinct.
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let name = path.file_name().unwrap_or_else(|| OsStr::new("object"));
     path.with_file_name(format!(
-        ".{}.tmp-{}-{nonce}",
+        ".{}.tmp-{}-{nonce}-{sequence}",
         name.to_string_lossy(),
         std::process::id()
     ))
@@ -453,6 +457,30 @@ mod tests {
         active: &ActiveFeatures,
     ) -> HashMap<PackageId, Fingerprint> {
         package_fingerprints(graph, active, packages, Fingerprint(1), "triple").unwrap()
+    }
+
+    /// Threads of one test process share its ID and may read the same clock
+    /// value, so temporary names must not depend on those alone.
+    #[test]
+    fn temporary_names_differ_between_concurrent_threads() {
+        let path = Path::new("/cache/std-0.o");
+        let names = std::thread::scope(|scope| {
+            let workers = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..100)
+                            .map(|_| temporary_sibling(path))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let unique = names.iter().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), names.len());
     }
 
     #[test]
