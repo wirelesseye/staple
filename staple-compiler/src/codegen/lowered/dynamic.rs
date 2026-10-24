@@ -889,16 +889,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let destination = BasicValueEnum::try_from(*value)
                         .map_err(|_| Diagnostic::new(span.clone(), "invalid mutable argument"))?
                         .into_pointer_value();
-                    let field = self
-                        .backend
-                        .builder
-                        .build_struct_gep(
-                            product.get_type(),
-                            storage,
-                            index as u32,
-                            "dynamic.packed.writeback",
-                        )
-                        .map_err(compiler_diagnostic)?;
+                    let field = self.backend.product_element_pointer(
+                        product.get_type().into_struct_type(),
+                        storage,
+                        index,
+                        "dynamic.packed.writeback",
+                    )?;
                     packed_writebacks.push((
                         self.backend.compile_type(parameter_types[index])?,
                         destination,
@@ -3977,15 +3973,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .into_struct_value();
                 let size = self
                     .backend
-                    .builder
-                    .build_extract_value(layout, 0, "gc.layout.size")
-                    .map_err(compiler_diagnostic)?
+                    .extract_product_element(layout, 0, "gc.layout.size")?
                     .into_int_value();
                 let align = self
                     .backend
-                    .builder
-                    .build_extract_value(layout, 1, "gc.layout.align")
-                    .map_err(compiler_diagnostic)?
+                    .extract_product_element(layout, 1, "gc.layout.align")?
                     .into_int_value();
                 let pointer = self
                     .backend

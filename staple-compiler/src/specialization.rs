@@ -339,34 +339,37 @@ impl CanonicalType {
             CheckedType::RawMutPtr { pointee } => CanonicalType::RawMutPtr {
                 pointee: Box::new(Self::convert(pointee, origin, runtime, binders)?),
             },
-            CheckedType::Product(product) => CanonicalType::Product {
-                slotted: product.slotted,
-                spreads: product.spreads.clone(),
-                runs: product
-                    .runs
-                    .iter()
-                    .map(|run| {
-                        Ok(CanonicalProductRun {
-                            element: CanonicalProductElement {
-                                name: run.element.name.clone(),
-                                value_type: Self::convert(
-                                    &run.element.value_type,
-                                    origin,
-                                    runtime,
-                                    binders,
-                                )?,
-                            },
-                            count: match &run.count {
-                                RunCount::Fixed(count) => CanonicalRunCount::Fixed(*count),
-                                RunCount::Symbolic(count) => CanonicalRunCount::Symbolic(Box::new(
-                                    Self::convert(count, origin, runtime, binders)?,
-                                )),
-                            },
+            CheckedType::Product(product) => {
+                let product = crate::normalize_checked_product_runs(product.clone());
+                CanonicalType::Product {
+                    slotted: product.slotted,
+                    spreads: product.spreads.clone(),
+                    runs: product
+                        .runs
+                        .iter()
+                        .map(|run| {
+                            Ok(CanonicalProductRun {
+                                element: CanonicalProductElement {
+                                    name: run.element.name.clone(),
+                                    value_type: Self::convert(
+                                        &run.element.value_type,
+                                        origin,
+                                        runtime,
+                                        binders,
+                                    )?,
+                                },
+                                count: match &run.count {
+                                    RunCount::Fixed(count) => CanonicalRunCount::Fixed(*count),
+                                    RunCount::Symbolic(count) => CanonicalRunCount::Symbolic(
+                                        Box::new(Self::convert(count, origin, runtime, binders)?),
+                                    ),
+                                },
+                            })
                         })
-                    })
-                    .collect::<Result<Vec<_>, Diagnostic>>()?,
-                variadic: product.variadic,
-            },
+                        .collect::<Result<Vec<_>, Diagnostic>>()?,
+                    variadic: product.variadic,
+                }
+            }
             CheckedType::Sum(sum) => CanonicalType::Sum {
                 alternatives: Self::convert_arguments(&sum.alternatives, origin, runtime, binders)?,
             },

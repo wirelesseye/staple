@@ -124,19 +124,31 @@ fn checked_active_slot(
             } else {
                 entry.signature.find(": ")? + 2
             };
-            let module =
-                staple_syntax::parse(&format!("type Shape = {}", &entry.signature[start..]))
-                    .ok()?;
+            let signature = &entry.signature[start..];
+            if signature.contains(" ^ ")
+                && let Some(slots) = normal_form_product_slots(signature)
+            {
+                return Some(slots);
+            }
+            let module = staple_syntax::parse(&format!("type Shape = {signature}")).ok()?;
             let staple_syntax::Item::TypeDeclaration(declaration) = module.items.first()? else {
                 return None;
             };
-            let staple_syntax::Type::Product(product) =
-                declaration.body.as_ref()?.underlying.as_ref()?
-            else {
-                return None;
-            };
-            (!product.variadic && product.elements.iter().all(|element| !element.spread))
-                .then_some(product.elements.len())
+            match declaration.body.as_ref()?.underlying.as_ref()? {
+                staple_syntax::Type::Product(product)
+                    if !product.variadic
+                        && product.elements.iter().all(|element| !element.spread) =>
+                {
+                    Some(product.elements.len())
+                }
+                staple_syntax::Type::Array(array) => {
+                    let staple_syntax::Type::NumberLiteral(count) = array.count.as_ref() else {
+                        return None;
+                    };
+                    count.literal.parse::<usize>().ok()
+                }
+                _ => None,
+            }
         })
     })
 }
@@ -215,6 +227,61 @@ fn argument_slots(
         return None;
     };
     literal_product_slots(expression)
+}
+
+/// Counts positions in a printed product normal form such as
+/// `(I32 ^ 3; String, I32 ^ 2)`, including the repeated slotted spelling
+/// `(I32 ^ 2;)` that is not valid source syntax.
+fn normal_form_product_slots(signature: &str) -> Option<usize> {
+    let start = signature.find('(')?;
+    let mut depth = 0usize;
+    let mut end = None;
+    for (index, character) in signature[start..].char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(start + index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let inner = &signature[start + 1..end?];
+    let mut slots = 0usize;
+    let mut segment_start = 0usize;
+    let mut depth = 0usize;
+    let mut segments = Vec::new();
+    for (index, character) in inner.char_indices() {
+        match character {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ';' | ',' if depth == 0 => {
+                segments.push(&inner[segment_start..index]);
+                segment_start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    segments.push(&inner[segment_start..]);
+    for segment in segments {
+        let segment = segment.trim().trim_end_matches(';').trim();
+        if segment.is_empty() {
+            continue;
+        }
+        if let Some((_, count)) = segment.rsplit_once(" ^ ") {
+            let digits = count
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>();
+            slots += digits.parse::<usize>().ok()?;
+        } else {
+            slots += 1;
+        }
+    }
+    Some(slots)
 }
 
 fn literal_product_slots(expression: &staple_syntax::Expression) -> Option<usize> {

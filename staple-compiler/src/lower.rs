@@ -16282,6 +16282,57 @@ mod tests {
     }
 
     #[test]
+    fn large_repeated_products_emit_compact_ir_and_run() {
+        let module = checked_program(concat!(
+            "def run: () -> I32 = () => {\n",
+            "    let values: (I32 ^ 10000) = (0 ^ 10000)\n",
+            "    values[9999]\n",
+            "}\n",
+            "run ()\n",
+        ));
+        let lowered = Lowerer::new().lower(&module).expect("large array lowers");
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .expect("large array emits");
+        assert!(
+            text.matches("insertvalue").count() < 1_000,
+            "repeated product should emit a loop, not one insert per element"
+        );
+        assert!(text.contains("repeated.body"));
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "large-repeated-product",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Main = unsafe extern "C" fn() -> i32;
+        let main = unsafe { engine.get_function::<Main>("main").unwrap() };
+        assert_eq!(unsafe { main.call() }, 0);
+        let run_name = lowered
+            .program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (lowered
+                    .program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "run")
+                    .then(|| instance.name.clone())
+            })
+            .expect("run instance");
+        type Run = unsafe extern "C" fn(*const usize) -> i32;
+        let run = unsafe { engine.get_function::<Run>(&run_name).unwrap() };
+        assert_eq!(unsafe { run.call(std::ptr::null()) }, 0);
+    }
+
+    #[test]
     fn consuming_slotted_spreads_drop_each_owned_field_once() {
         static COUNTS: [std::sync::atomic::AtomicI32; 14] =
             [const { std::sync::atomic::AtomicI32::new(0) }; 14];

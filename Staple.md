@@ -1928,8 +1928,12 @@ let zeros: (I32 ^ 3) = (0, 0, 0)
 
 `(T ^ N)` is exactly equivalent to a product containing `N` copies of `T`,
 rather than a distinct array type. In particular, `(T ^ 0)` is `()` and `(T ^ 1)`
-is `T`. A fully expanded array may contain at most 65,535 elements. The length
-is mandatory: there is no unsized array spelling.
+is `T`. Products may contain any number of repetitions that fits the target's
+layout. The length is mandatory: there is no unsized array spelling.
+
+Repeated products are stored as runs, so `(I32, I32, I32)` and `(I32 ^ 3)` are
+the same normal form. Types print in that normal form: a diagnostic shows
+`(I32 ^ 3)`, not three separate elements.
 
 The length is a compile-time type. Non-negative integer type literals such as
 `0`, `3`, and `42` are singleton subtypes of `USize` and automatically satisfy
@@ -1949,9 +1953,9 @@ let zeros: (I32 ^ 3) = (0 ^ 3) // (0, 0, 0)
 ```
 
 `(value ^ count)` is equivalent to a product with `count` copies of `value`;
-`(value ^ 0)` is `()` and `(value ^ 1)` is `value`, and the expanded product may
-contain at most 65,535 elements. The count uses the same grammar and rules as an
-array type's length: it is a compile-time type, not a value. A non-negative
+`(value ^ 0)` is `()` and `(value ^ 1)` is `value`. The count uses the same
+grammar and rules as an array type's length: it is a compile-time type, not a
+value. A non-negative
 integer type literal, a type alias, or a compile-time parameter constrained by
 `Natural` may be used, for example:
 

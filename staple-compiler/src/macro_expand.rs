@@ -539,6 +539,7 @@ enum ProductValue {
     },
 }
 
+#[allow(dead_code)]
 impl ProductValue {
     fn repeated(value: Value, count: usize) -> Self {
         Self::Repeated {

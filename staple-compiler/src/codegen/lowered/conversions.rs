@@ -472,17 +472,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         parameter: &CheckedType,
         index: usize,
     ) -> CodeGenerationResult<PointerValue<'context>> {
-        let offset = if let CheckedType::Product(product) = parameter {
+        if let CheckedType::Product(product) = parameter {
             let llvm = self.backend.compile_product_type(product)?;
             self.backend
-                .target_data
-                .offset_of_element(&llvm, index as u32)
-                .expect("conversion product field exists")
+                .product_element_pointer(llvm, storage, index, "conversion.field")
         } else {
-            0
-        };
-        self.backend
-            .dynamic_byte_offset(storage, self.backend.size_type.const_int(offset, false))
+            Ok(storage)
+        }
     }
 
     pub(super) fn conversion_copy(

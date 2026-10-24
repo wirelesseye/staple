@@ -723,11 +723,28 @@ impl<'program, 'context> Backend<'program, 'context> {
         &self,
         product: &CheckedProductType,
     ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
-        let fields = product
-            .iter_positions()
-            .map(|element| self.compile_type(&element.value_type))
+        // A homogeneous product is one `[n x T]` field so a million-element
+        // array stays O(1). Mixed products keep their historical flat layout
+        // (one field per position) to avoid changing unrelated ABIs.
+        if let [run] = product.runs.as_slice()
+            && let Some(count) = run.positions()
+            && count > 1
+        {
+            let element_type = self.compile_type(&run.element.value_type)?;
+            return Ok(self
+                .context
+                .struct_type(&[element_type.array_type(count as u32).into()], false));
+        }
+        let field_types = product
+            .runs
+            .iter()
+            .flat_map(|run| {
+                let count = run.positions().unwrap_or(1);
+                std::iter::repeat_n(&run.element.value_type, count)
+            })
+            .map(|value_type| self.compile_type(value_type).map(Into::into))
             .collect::<CodeGenerationResult<Vec<_>>>()?;
-        Ok(self.context.struct_type(&fields, false))
+        Ok(self.context.struct_type(&field_types, false))
     }
 
     pub(crate) fn compile_sum_type(
@@ -1413,10 +1430,17 @@ mod tests {
                         let field_layout = backend.descriptor_layout(&field.value_type).unwrap();
                         offset =
                             offset.div_ceil(field_layout.align as u64) * field_layout.align as u64;
-                        assert_eq!(
-                            backend.target_data.offset_of_element(&llvm, index as u32),
-                            Some(offset)
-                        );
+                        let element_type = backend.compile_type(&field.value_type).unwrap();
+                        let (llvm_field, array_index) = backend
+                            .product_field_position(llvm, index)
+                            .expect("product position");
+                        let field_offset = backend
+                            .target_data
+                            .offset_of_element(&llvm, llvm_field)
+                            .expect("product field");
+                        let array_offset = array_index.unwrap_or(0) as u64
+                            * backend.target_data.get_abi_size(&element_type);
+                        assert_eq!(field_offset + array_offset, offset);
                         offset += field_layout.store_size;
                         verify(backend, &field.value_type);
                     }

@@ -965,23 +965,32 @@ impl<'a> BodyCloner<'a> {
     }
 
     fn product_type(&self, product: &CheckedProductType) -> CheckedProductType {
-        CheckedProductType {
+        let runs = product
+            .runs
+            .iter()
+            .map(|run| crate::CheckedTypeRun {
+                element: crate::CheckedTypeElement {
+                    name: run.element.name.clone(),
+                    value_type: self.ty(&run.element.value_type),
+                    default: None,
+                },
+                count: match &run.count {
+                    crate::RunCount::Fixed(count) => crate::RunCount::Fixed(*count),
+                    crate::RunCount::Symbolic(count) => match self.ty(count) {
+                        crate::CheckedType::NumberLiteral(count) => {
+                            crate::RunCount::Fixed(count as usize)
+                        }
+                        count => crate::RunCount::Symbolic(Box::new(count)),
+                    },
+                },
+            })
+            .collect();
+        crate::normalize_checked_product_runs(CheckedProductType {
             slotted: product.slotted,
             spreads: product.spreads.clone(),
-            runs: product
-                .runs
-                .iter()
-                .map(|run| crate::CheckedTypeRun {
-                    element: crate::CheckedTypeElement {
-                        name: run.element.name.clone(),
-                        value_type: self.ty(&run.element.value_type),
-                        default: None,
-                    },
-                    count: run.count.clone(),
-                })
-                .collect(),
+            runs,
             variadic: product.variadic,
-        }
+        })
     }
 
     fn substitutions(&self, substitutions: &CallSubstitutions) -> CallSubstitutions {

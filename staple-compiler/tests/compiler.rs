@@ -2258,8 +2258,8 @@ fn repeated_product_values_expand_to_fixed_products() {
     };
     assert!(matches!(
         module.type_of_expression(zeros.value.as_ref().unwrap().syntax().id),
-        Some(CheckedType::Product(product)) if product.elements.len() == 3
-            && product.elements.iter().all(|element| element.value_type == CheckedType::I32),
+        Some(CheckedType::Product(product)) if product.position_count() == 3
+            && product.runs.iter().all(|run| run.element.value_type == CheckedType::I32),
     ));
 
     let Item::Binding(one) = &items[2] else {
@@ -2275,7 +2275,7 @@ fn repeated_product_values_expand_to_fixed_products() {
     };
     assert!(matches!(
         module.type_of_expression(none.value.as_ref().unwrap().syntax().id),
-        Some(CheckedType::Product(product)) if product.elements.is_empty(),
+        Some(CheckedType::Product(product)) if product.is_empty(),
     ));
 
     let context = Context::create();
@@ -3880,17 +3880,9 @@ fn rejects_slice_shared_destructuring() {
 }
 
 #[test]
-fn handles_array_edges_and_limits() {
+fn handles_array_edges_and_large_lengths() {
     type_check("let value: (...(I32 ^ 0), ...(I32 ^ 1), I32) = (1, 2)\n");
-
-    let diagnostics = TypeChecker::new()
-        .check(resolve("def too_large: (I32 ^ 65536)\n"))
-        .expect_err_diagnostics("oversized arrays must be rejected");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.message.contains("limit of 65535") })
-    );
+    type_check("let large: (I32 ^ 1_000_000) = (0 ^ 1_000_000)\n");
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
@@ -18021,7 +18013,6 @@ fn track_caller_modifier_is_stdlib_reserved() {
     );
 }
 
-#[test]
 #[test]
 fn track_caller_requires_an_import_from_std_source() {
     for source in [

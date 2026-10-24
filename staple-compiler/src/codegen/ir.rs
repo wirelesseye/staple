@@ -8,7 +8,7 @@ use crate::lower::internal_invariant;
 use inkwell::{
     AddressSpace,
     basic_block::BasicBlock,
-    types::{BasicTypeEnum, StructType},
+    types::{BasicType, BasicTypeEnum, StructType},
     values::{AnyValue, AnyValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue},
 };
 
@@ -1175,10 +1175,144 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(product.into())
     }
 
-    /// A builder positioned at the start of the current function's entry block.
-    /// Every stack slot is allocated through it, so a slot created inside a
-    /// loop body is allocated once per call and reused on each iteration
-    /// instead of growing the stack.
+    /// Builds a checked product using its run layout: each repeated run is one
+    /// LLVM array field.
+    pub(crate) fn build_checked_product_value(
+        &self,
+        product: &crate::CheckedProductType,
+        values: &[inkwell::values::BasicValueEnum<'context>],
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::BasicValueEnum<'context>> {
+        let product = &crate::normalize_checked_product_runs(product.clone());
+        let homogeneous_repeat = match product.runs.as_slice() {
+            [run] => run.positions().filter(|count| *count > 1),
+            _ => None,
+        };
+        let Some(_) = homogeneous_repeat else {
+            return self.build_product_value(values, span);
+        };
+        let mut field_types = Vec::with_capacity(product.runs.len());
+        let mut fields = Vec::with_capacity(product.runs.len());
+        let mut values = values.iter().copied();
+        for run in &product.runs {
+            let element_type = self.compile_type(&run.element.value_type)?;
+            let count = run.positions().unwrap_or(1);
+            let group = values
+                .by_ref()
+                .take(count)
+                .collect::<Vec<inkwell::values::BasicValueEnum<'context>>>();
+            if group.len() != count {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "product value has fewer positions than its type",
+                ));
+            }
+            if count == 1 {
+                field_types.push(element_type);
+                fields.push(group[0]);
+            } else {
+                let array_type = element_type.array_type(count as u32);
+                let mut array = array_type.const_zero();
+                for (index, value) in group.into_iter().enumerate() {
+                    array = self
+                        .builder
+                        .build_insert_value(array, value, index as u32, "product.element")
+                        .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+                        .into_array_value();
+                }
+                field_types.push(array_type.into());
+                fields.push(array.into());
+            }
+        }
+        let product_type = self.context.struct_type(&field_types, false);
+        let mut product_value = product_type.const_zero();
+        for (index, value) in fields.into_iter().enumerate() {
+            product_value = self
+                .builder
+                .build_insert_value(product_value, value, index as u32, "product.field")
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+                .into_struct_value();
+        }
+        Ok(product_value.into())
+    }
+
+    /// Maps a product position to its LLVM struct field and, for a repeated
+    /// run stored as an array, the element index within that field.
+    pub(crate) fn product_field_position(
+        &self,
+        product_type: inkwell::types::StructType<'context>,
+        position: usize,
+    ) -> Option<(u32, Option<u32>)> {
+        let mut remaining = position;
+        for index in 0..product_type.count_fields() {
+            let field = product_type.get_field_type_at_index(index)?;
+            let count = if field.is_array_type() {
+                field.into_array_type().len() as usize
+            } else {
+                1
+            };
+            if remaining < count {
+                return Some((index, (count > 1).then_some(u32::try_from(remaining).ok()?)));
+            }
+            remaining -= count;
+        }
+        None
+    }
+
+    pub(crate) fn extract_product_element(
+        &self,
+        product: inkwell::values::StructValue<'context>,
+        position: usize,
+        name: &str,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let (field, offset) = self
+            .product_field_position(product.get_type(), position)
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "product position out of range"))?;
+        let value = self
+            .builder
+            .build_extract_value(product, field, name)
+            .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+        match offset {
+            Some(offset) => self
+                .builder
+                .build_extract_value(value.into_array_value(), offset, name)
+                .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string())),
+            None => Ok(value),
+        }
+    }
+
+    pub(crate) fn product_element_pointer(
+        &self,
+        product_type: inkwell::types::StructType<'context>,
+        pointer: inkwell::values::PointerValue<'context>,
+        position: usize,
+        name: &str,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        let (field, offset) = self
+            .product_field_position(product_type, position)
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "product position out of range"))?;
+        let field_pointer = self
+            .builder
+            .build_struct_gep(product_type, pointer, field, name)
+            .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+        match offset {
+            Some(offset) => {
+                let array_type = product_type
+                    .get_field_type_at_index(field)
+                    .expect("field exists")
+                    .into_array_type();
+                let zero = self.context.i32_type().const_zero();
+                let index = self.context.i32_type().const_int(offset as u64, false);
+                unsafe {
+                    self.builder
+                        .build_gep(array_type, field_pointer, &[zero, index], name)
+                }
+                .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))
+            }
+            None => Ok(field_pointer),
+        }
+    }
+
     pub(crate) fn entry_builder(&self) -> inkwell::builder::Builder<'context> {
         let builder = self.context.create_builder();
         let entry = self
@@ -1730,17 +1864,6 @@ impl<'program, 'context> Backend<'program, 'context> {
             merge,
             cases,
         })
-    }
-
-    /// Rebuild a source product and pair it with its initial cursor.
-    pub(crate) fn build_structural_iterator(
-        &self,
-        values: &[BasicValueEnum<'context>],
-        span: Span,
-    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
-        let source_value = self.build_product_value(values, span.clone())?;
-        let cursor = self.size_type.const_int(0, false);
-        self.build_product_value(&[source_value, cursor.into()], span)
     }
 
     /// Shared Done/Yield control-flow and result storage.

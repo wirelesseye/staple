@@ -124,16 +124,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .context
                     .append_basic_block(function, "equality.merge");
                 for (index, delegate) in elements.iter().enumerate() {
-                    let left_field = self
-                        .backend
-                        .builder
-                        .build_extract_value(*left, index as u32, "equality.left")
-                        .map_err(compiler_diagnostic)?;
-                    let right_field = self
-                        .backend
-                        .builder
-                        .build_extract_value(*right, index as u32, "equality.right")
-                        .map_err(compiler_diagnostic)?;
+                    let left_field =
+                        self.backend
+                            .extract_product_element(*left, index, "equality.left")?;
+                    let right_field =
+                        self.backend
+                            .extract_product_element(*right, index, "equality.right")?;
                     let arguments = self.backend.build_trait_arguments(
                         &delegate.callee_type,
                         &[left_field, right_field],
@@ -241,11 +237,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             span.clone(),
                         )?,
                         DebugStep::Element { index, delegate } => {
-                            let field = self
-                                .backend
-                                .builder
-                                .build_extract_value(*value, *index as u32, "debug.element")
-                                .map_err(compiler_diagnostic)?;
+                            let field = self.backend.extract_product_element(
+                                *value,
+                                *index,
+                                "debug.element",
+                            )?;
                             self.emit_debug_delegate(
                                 delegate,
                                 field,
@@ -312,11 +308,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 )?;
                 for element in elements {
                     self.backend.builder.position_at_end(cases[element.index].1);
-                    let field = self
-                        .backend
-                        .builder
-                        .build_extract_value(*value, element.index as u32, "index.field")
-                        .map_err(compiler_diagnostic)?;
+                    let field = self.backend.extract_product_element(
+                        *value,
+                        element.index,
+                        "index.field",
+                    )?;
                     let field = self.emit_coercion(
                         field.as_any_value_enum(),
                         &element.element,
@@ -492,12 +488,28 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         Diagnostic::new(span.clone(), "trait method result is not first-class")
                     })?
             }
-            StructuralBody::IntoIterator { .. } => self
-                .backend
-                .build_structural_iterator(&values, span.clone())?,
+            StructuralBody::IntoIterator { source, iterator } => {
+                let cursor = self.backend.size_type.const_zero();
+                let source_value = if let Some(product) = crate::product_representation(source) {
+                    self.backend
+                        .build_checked_product_value(product, &values, span.clone())?
+                } else {
+                    self.backend.build_product_value(&values, span.clone())?
+                };
+                if let Some(product) = crate::product_representation(iterator) {
+                    self.backend.build_checked_product_value(
+                        product,
+                        &[source_value, cursor.into()],
+                        span.clone(),
+                    )?
+                } else {
+                    self.backend
+                        .build_product_value(&[source_value, cursor.into()], span.clone())?
+                }
+            }
             StructuralBody::Next {
                 elements,
-                iterator: _,
+                iterator,
                 item,
                 result,
                 done,
@@ -525,9 +537,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .backend
                     .begin_structural_next(*cursor, elements.len(), result)?;
                 self.backend.builder.position_at_end(done_block);
-                let iter_value = self
-                    .backend
-                    .build_product_value(&[*product, (*cursor).into()], span.clone())?;
+                let iter_value = if let Some(product_type) = crate::product_representation(iterator)
+                {
+                    self.backend.build_checked_product_value(
+                        product_type,
+                        &[*product, (*cursor).into()],
+                        span.clone(),
+                    )?
+                } else {
+                    self.backend
+                        .build_product_value(&[*product, (*cursor).into()], span.clone())?
+                };
                 let done_value =
                     self.emit_structural_alternative(iter_value, done, result, span)?;
                 self.backend
@@ -544,11 +564,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .begin_next_dispatch(*cursor, elements.len(), unreachable)?;
                 for element in elements {
                     self.backend.builder.position_at_end(cases[element.index].1);
-                    let field = self
-                        .backend
-                        .builder
-                        .build_extract_value(*product_value, element.index as u32, "next.field")
-                        .map_err(compiler_diagnostic)?;
+                    let field = self.backend.extract_product_element(
+                        *product_value,
+                        element.index,
+                        "next.field",
+                    )?;
                     let field = self.emit_coercion(
                         field.as_any_value_enum(),
                         &element.element,
@@ -563,12 +583,29 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .backend
                         .size_type
                         .const_int((element.index + 1) as u64, false);
-                    let next_iter = self
-                        .backend
-                        .build_product_value(&[*product, next_index.into()], span.clone())?;
-                    let yielded = self
-                        .backend
-                        .build_product_value(&[field, next_iter], span.clone())?;
+                    let next_iter =
+                        if let Some(product_type) = crate::product_representation(iterator) {
+                            self.backend.build_checked_product_value(
+                                product_type,
+                                &[*product, next_index.into()],
+                                span.clone(),
+                            )?
+                        } else {
+                            self.backend
+                                .build_product_value(&[*product, next_index.into()], span.clone())?
+                        };
+                    let yielded = if let Some(product_type) =
+                        crate::product_representation(&yield_.alternative)
+                    {
+                        self.backend.build_checked_product_value(
+                            product_type,
+                            &[field, next_iter],
+                            span.clone(),
+                        )?
+                    } else {
+                        self.backend
+                            .build_product_value(&[field, next_iter], span.clone())?
+                    };
                     let yielded =
                         self.emit_structural_alternative(yielded, yield_, result, span)?;
                     self.backend

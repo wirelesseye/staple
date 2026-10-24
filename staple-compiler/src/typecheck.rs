@@ -27,8 +27,6 @@ use staple_syntax::{
 
 mod product_spreads;
 
-pub(crate) const MAX_PRODUCT_ARITY: usize = 65_535;
-
 enum PlaceIssue {
     /// The root binding is not declared `mut` and cannot be reassigned.
     NotReassignable(String),
@@ -877,15 +875,11 @@ impl CheckedTypeRun {
         }
     }
 
-    fn positions(&self) -> Option<usize> {
+    pub(crate) fn positions(&self) -> Option<usize> {
         match self.count {
             RunCount::Fixed(count) => Some(count),
             RunCount::Symbolic(_) => None,
         }
-    }
-
-    fn is_symbolic(&self) -> bool {
-        matches!(self.count, RunCount::Symbolic(_))
     }
 }
 
@@ -11065,26 +11059,15 @@ impl TypeChecker {
                         }
                         match value_type {
                             CheckedType::Product(product) if !product.variadic => {
-                                if elements.len().saturating_add(product.position_count())
-                                    > MAX_PRODUCT_ARITY
-                                {
-                                    self.diagnostics.push(Diagnostic::new(
-                                        element.syntax.span.clone(),
-                                        format!(
-                                            "product arity exceeds the limit of {MAX_PRODUCT_ARITY}"
-                                        ),
-                                    ));
-                                } else {
-                                    for (offset, field) in product.iter_positions().enumerate() {
-                                        if let Some(name) = &field.name
-                                            && let Some(CheckedType::Product(expected_product)) =
-                                                expected
-                                            && let Some(expected_element) = expected_product
-                                                .position_element(elements.len() + offset)
-                                            && expected_element.name.as_deref()
-                                                != Some(name.as_str())
-                                        {
-                                            self.diagnostics.push(Diagnostic::new(
+                                for (offset, field) in product.iter_positions().enumerate() {
+                                    if let Some(name) = &field.name
+                                        && let Some(CheckedType::Product(expected_product)) =
+                                            expected
+                                        && let Some(expected_element) = expected_product
+                                            .position_element(elements.len() + offset)
+                                        && expected_element.name.as_deref() != Some(name.as_str())
+                                    {
+                                        self.diagnostics.push(Diagnostic::new(
                                                 element.syntax.span.clone(),
                                                 match expected_element.name.as_deref() {
                                                     Some(expected_name) => format!(
@@ -11095,18 +11078,17 @@ impl TypeChecker {
                                                     ),
                                                 },
                                             ));
-                                        }
-                                        if let Some(name) = &field.name
-                                            && !names.insert(name.clone())
-                                        {
-                                            self.diagnostics.push(Diagnostic::new(
-                                                element.syntax.span.clone(),
-                                                format!("duplicate product field name `{name}`"),
-                                            ));
-                                        }
                                     }
-                                    elements.extend(product.iter_positions().cloned());
+                                    if let Some(name) = &field.name
+                                        && !names.insert(name.clone())
+                                    {
+                                        self.diagnostics.push(Diagnostic::new(
+                                            element.syntax.span.clone(),
+                                            format!("duplicate product field name `{name}`"),
+                                        ));
+                                    }
                                 }
+                                elements.extend(product.iter_positions().cloned());
                             }
                             CheckedType::Error => {}
                             other => self.diagnostics.push(Diagnostic::new(
@@ -11132,12 +11114,7 @@ impl TypeChecker {
                     if self.did_return {
                         return CheckedType::empty_product();
                     }
-                    if elements.len() == MAX_PRODUCT_ARITY {
-                        self.diagnostics.push(Diagnostic::new(
-                            element.syntax.span.clone(),
-                            format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
-                        ));
-                    } else {
+                    {
                         if let Some(name) = &element.name {
                             if let Some(CheckedType::Product(expected_product)) = expected
                                 && let Some(expected_element) =
@@ -11242,61 +11219,53 @@ impl TypeChecker {
                 if self.did_return {
                     return CheckedType::empty_product();
                 }
-                let (literal_count, symbolic_count) = match self
-                    .resolve_source_type_inner(module, &repeated.count)
-                {
-                    CheckedType::NumberLiteral(count) => match usize::try_from(count) {
-                        Ok(count) if count <= MAX_PRODUCT_ARITY => (Some(count), None),
-                        Ok(_) => {
-                            self.diagnostics.push(Diagnostic::new(
-                                repeated.syntax.span.clone(),
-                                format!("array length exceeds the limit of {MAX_PRODUCT_ARITY}"),
-                            ));
-                            return CheckedType::Error;
-                        }
-                        Err(_) => {
-                            self.diagnostics.push(Diagnostic::new(
-                                repeated.syntax.span.clone(),
-                                "array length is too large",
-                            ));
-                            return CheckedType::Error;
-                        }
-                    },
-                    count_type @ CheckedType::Parameter { .. } => {
-                        let natural = self.natural_trait.is_some_and(|natural_trait| {
-                            self.trait_obligation_available(
-                                natural_trait,
-                                std::slice::from_ref(&count_type),
-                            )
-                        });
-                        if natural {
-                            (None, Some(count_type))
-                        } else {
-                            self.diagnostics.push(Diagnostic::new(
+                let (literal_count, symbolic_count) =
+                    match self.resolve_source_type_inner(module, &repeated.count) {
+                        CheckedType::NumberLiteral(count) => match usize::try_from(count) {
+                            Ok(count) => (Some(count), None),
+                            Err(_) => {
+                                self.diagnostics.push(Diagnostic::new(
+                                    repeated.syntax.span.clone(),
+                                    "array length is too large",
+                                ));
+                                return CheckedType::Error;
+                            }
+                        },
+                        count_type @ CheckedType::Parameter { .. } => {
+                            let natural = self.natural_trait.is_some_and(|natural_trait| {
+                                self.trait_obligation_available(
+                                    natural_trait,
+                                    std::slice::from_ref(&count_type),
+                                )
+                            });
+                            if natural {
+                                (None, Some(count_type))
+                            } else {
+                                self.diagnostics.push(Diagnostic::new(
                                 repeated.count.syntax().span.clone(),
                                 format!(
                                     "an array length must satisfy `Natural`, found `{count_type}`"
                                 ),
                             ));
+                                return CheckedType::Error;
+                            }
+                        }
+                        CheckedType::Inferred => {
+                            self.diagnostics.push(Diagnostic::new(
+                                repeated.count.syntax().span.clone(),
+                                "an array type must have a size",
+                            ));
                             return CheckedType::Error;
                         }
-                    }
-                    CheckedType::Inferred => {
-                        self.diagnostics.push(Diagnostic::new(
-                            repeated.count.syntax().span.clone(),
-                            "an array type must have a size",
-                        ));
-                        return CheckedType::Error;
-                    }
-                    CheckedType::Error => return CheckedType::Error,
-                    other => {
-                        self.diagnostics.push(Diagnostic::new(
-                            repeated.count.syntax().span.clone(),
-                            format!("an array length must satisfy `Natural`, found `{other}`"),
-                        ));
-                        return CheckedType::Error;
-                    }
-                };
+                        CheckedType::Error => return CheckedType::Error,
+                        other => {
+                            self.diagnostics.push(Diagnostic::new(
+                                repeated.count.syntax().span.clone(),
+                                format!("an array length must satisfy `Natural`, found `{other}`"),
+                            ));
+                            return CheckedType::Error;
+                        }
+                    };
                 match (literal_count, symbolic_count) {
                     (Some(count), _) => {
                         let bounds = self
@@ -18250,13 +18219,6 @@ impl TypeChecker {
                             ));
                             return CheckedType::Error;
                         };
-                        if count > MAX_PRODUCT_ARITY {
-                            self.diagnostics.push(Diagnostic::new(
-                                array.syntax.span.clone(),
-                                format!("array length exceeds the limit of {MAX_PRODUCT_ARITY}"),
-                            ));
-                            return CheckedType::Error;
-                        }
                         array_product(element, count)
                     }
                     CheckedType::Parameter { .. } => array_type(element, count),
@@ -19086,11 +19048,6 @@ impl TypeChecker {
         let mut runs = Vec::new();
         let mut spreads = Vec::new();
         let mut names = HashSet::new();
-        let positions = |runs: &[CheckedTypeRun]| {
-            runs.iter()
-                .map(|run| run.positions().unwrap_or(1))
-                .sum::<usize>()
-        };
         for element in &product.elements {
             if element.spread {
                 if let Type::Array(array) = &element.ty {
@@ -19104,13 +19061,6 @@ impl TypeChecker {
                             continue;
                         };
                         let value_type = self.resolve_source_type_inner(module, &array.element);
-                        if positions(&runs).saturating_add(count) > MAX_PRODUCT_ARITY {
-                            self.diagnostics.push(Diagnostic::new(
-                                element.syntax.span.clone(),
-                                format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
-                            ));
-                            continue;
-                        }
                         if count != 0 {
                             runs.push(CheckedTypeRun {
                                 element: CheckedTypeElement {
@@ -19126,28 +19076,19 @@ impl TypeChecker {
                 }
                 match self.resolve_source_type_inner(module, &element.ty) {
                     CheckedType::Product(product) if !product.variadic => {
-                        if positions(&runs).saturating_add(product.position_count())
-                            > MAX_PRODUCT_ARITY
-                        {
-                            self.diagnostics.push(Diagnostic::new(
-                                element.syntax.span.clone(),
-                                format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
-                            ));
-                        } else {
-                            for run in &product.runs {
-                                if let Some(name) = &run.element.name
-                                    && !names.insert(name.clone())
-                                {
-                                    self.diagnostics.push(Diagnostic::new(
-                                        element.syntax.span.clone(),
-                                        format!("duplicate product field name `{name}`"),
-                                    ));
-                                }
+                        for run in &product.runs {
+                            if let Some(name) = &run.element.name
+                                && !names.insert(name.clone())
+                            {
+                                self.diagnostics.push(Diagnostic::new(
+                                    element.syntax.span.clone(),
+                                    format!("duplicate product field name `{name}`"),
+                                ));
                             }
-                            let offset = runs.len();
-                            spreads.extend(product.spreads.into_iter().map(|index| offset + index));
-                            runs.extend(product.runs);
                         }
+                        let offset = runs.len();
+                        spreads.extend(product.spreads.into_iter().map(|index| offset + index));
+                        runs.extend(product.runs);
                     }
                     value_type @ (CheckedType::Parameter { .. } | CheckedType::Inferred) => {
                         spreads.push(runs.len());
@@ -19166,11 +19107,6 @@ impl TypeChecker {
                         format!("cannot spread non-product type `{other}`"),
                     )),
                 }
-            } else if positions(&runs) == MAX_PRODUCT_ARITY {
-                self.diagnostics.push(Diagnostic::new(
-                    element.syntax.span.clone(),
-                    format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
-                ));
             } else {
                 if let Some(name) = &element.name
                     && !names.insert(name.clone())
@@ -20124,6 +20060,18 @@ pub(crate) fn sum_through_implicit_wrapper(value_type: &CheckedType) -> Option<&
 }
 
 /// The representation of an implicitly introduced (`from`) wrapper type.
+/// The product layout a value type ultimately uses, looking through nominal
+/// wrappers. `None` for non-product values.
+pub(crate) fn product_representation(mut value_type: &CheckedType) -> Option<&CheckedProductType> {
+    loop {
+        match value_type {
+            CheckedType::Product(product) => return Some(product),
+            CheckedType::Wrapper { representation, .. } => value_type = representation,
+            _ => return None,
+        }
+    }
+}
+
 pub(crate) fn implicit_wrapper_representation(value_type: &CheckedType) -> Option<&CheckedType> {
     match value_type {
         CheckedType::Wrapper {
@@ -20552,9 +20500,6 @@ pub(crate) fn substitute_type(
                             let Ok(count) = usize::try_from(count) else {
                                 return CheckedType::Error;
                             };
-                            if count > MAX_PRODUCT_ARITY {
-                                return CheckedType::Error;
-                            }
                             resolved_symbolic_count = true;
                             RunCount::Fixed(count)
                         }
@@ -20587,9 +20532,7 @@ pub(crate) fn substitute_type(
                     result.runs.push(CheckedTypeRun { element, count });
                 }
             }
-            if result.len().is_some_and(|count| count > MAX_PRODUCT_ARITY)
-                || (result.slotted && result.runs.is_empty())
-            {
+            if result.slotted && result.runs.is_empty() {
                 CheckedType::Error
             } else {
                 normalize_checked_product_inner(result, had_spreads || resolved_symbolic_count)
@@ -22590,6 +22533,7 @@ fn infer_type_parameters_for_expected(
     infer_type_parameters_mode(true, template, expected, substitutions)
 }
 
+#[cfg(test)]
 fn normalize_product_type(elements: Vec<CheckedTypeElement>, variadic: bool) -> CheckedType {
     normalize_product_type_kind(elements, variadic, false)
 }
@@ -22609,6 +22553,24 @@ fn normalize_product_type_kind(
 
 fn normalize_checked_product(product: CheckedProductType) -> CheckedType {
     normalize_checked_product_inner(product, true)
+}
+
+/// Normalizes runs after lowering-time substitution while retaining the
+/// product wrapper, so a substituted product's LLVM shape matches the checker.
+pub(crate) fn normalize_checked_product_runs(product: CheckedProductType) -> CheckedProductType {
+    match normalize_checked_product_inner(product, false) {
+        CheckedType::Product(product) => product,
+        element => CheckedProductType::from_elements_raw(
+            false,
+            Vec::new(),
+            vec![CheckedTypeElement {
+                name: None,
+                value_type: element,
+                default: None,
+            }],
+            false,
+        ),
+    }
 }
 
 fn normalize_checked_product_inner(

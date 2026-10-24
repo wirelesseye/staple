@@ -196,7 +196,14 @@ pub(super) fn expand(plan: Plan, origin: &Origin) -> ExpansionResult {
                         representation: right,
                         ..
                     },
-                ) => {}
+                ) => {
+                    if needs_conversion(left, right) {
+                        requests.push(
+                            request(left, right, plan.direction, origin)
+                                .map_err(|error| vec![error])?,
+                        );
+                    }
+                }
                 _ => {}
             }
             plan.children = requests.iter().map(planned).collect();

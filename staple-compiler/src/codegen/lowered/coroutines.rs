@@ -1076,8 +1076,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .try_as_basic_value()
                     .unwrap_basic()
                     .into_struct_value();
-                // Natural product layout agrees with the runtime's C struct.
-                Ok(result.as_any_value_enum())
+                // The runtime returns a C struct of two count fields; the
+                // checked product is one repeated run.
+                let executed = self
+                    .backend
+                    .builder
+                    .build_extract_value(result, 0, "pump.executed")
+                    .map_err(compiler_diagnostic)?;
+                let ready = self
+                    .backend
+                    .builder
+                    .build_extract_value(result, 1, "pump.ready")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .build_product_value(&[executed, ready], span.clone())
+                    .map(|value| value.as_any_value_enum())
             }
             IntrinsicFunction::TaskIsFinished => {
                 let [BasicMetadataValueEnum::PointerValue(record)] = arguments else {
@@ -1249,24 +1262,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map_err(compiler_diagnostic)?;
                 }
                 // `(wait, resolver)` — both handles are the same record pointer.
-                let handles_type = self
-                    .backend
-                    .context
-                    .struct_type(&[pointer_type.into(), pointer_type.into()], false);
-                let mut value = handles_type.const_zero();
-                value = self
-                    .backend
-                    .builder
-                    .build_insert_value(value, record, 0, "completion.wait")
-                    .map_err(compiler_diagnostic)?
-                    .into_struct_value();
-                value = self
-                    .backend
-                    .builder
-                    .build_insert_value(value, record, 1, "completion.resolver")
-                    .map_err(compiler_diagnostic)?
-                    .into_struct_value();
-                Ok(value.as_any_value_enum())
+                self.backend
+                    .build_product_value(&[record.into(), record.into()], span.clone())
+                    .map(|value| value.as_any_value_enum())
             }
             IntrinsicFunction::ResolverComplete => {
                 let value_type = call.runtime.completion_value_type.clone().ok_or_else(|| {
@@ -1450,9 +1448,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         (0..fields)
             .map(|index| {
                 self.backend
-                    .builder
-                    .build_extract_value(product, index as u32, "argument.element")
-                    .map_err(compiler_diagnostic)
+                    .extract_product_element(product, index, "argument.element")
             })
             .collect()
     }

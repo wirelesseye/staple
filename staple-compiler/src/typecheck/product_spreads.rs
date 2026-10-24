@@ -59,7 +59,7 @@ fn invalid_spread_substitution(
                     count = count.saturating_add(run.positions().unwrap_or(1));
                 }
             }
-            if count > MAX_PRODUCT_ARITY || (product.slotted && count == 0) {
+            if product.slotted && count == 0 {
                 return Some("a slotted product needs at least one slot and cannot exceed the product arity limit".into());
             }
             None

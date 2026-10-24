@@ -1025,11 +1025,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     ));
                 };
                 for field in fields {
-                    let element = self
-                        .backend
-                        .builder
-                        .build_extract_value(product, field.index as u32, "drop.field")
-                        .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                    let element =
+                        self.backend
+                            .extract_product_element(product, field.index, "drop.field")?;
                     let plan = self.planned_drop_glue(&field.glue, span)?;
                     self.emit_drop_glue(element, plan, span)?;
                 }
@@ -1398,11 +1396,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .into_struct_type();
             for (index, symbol) in symbols.into_iter().enumerate() {
                 if let Some(symbol) = symbol {
-                    let field = self
-                        .backend
-                        .builder
-                        .build_struct_gep(llvm_type, pointer, index as u32, "parameter.field")
-                        .map_err(compiler_diagnostic)?;
+                    let field = self.backend.product_element_pointer(
+                        llvm_type,
+                        pointer,
+                        index,
+                        "parameter.field",
+                    )?;
                     environment.binding_cells.remove(&symbol);
                     environment.parameter_pointers.insert(symbol, field);
                 }
@@ -1459,11 +1458,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             | crate::LoweredPatternKind::At { .. }
             | crate::LoweredPatternKind::Wildcard
             | crate::LoweredPatternKind::Nominal { .. } => {
-                let value = self
-                    .backend
-                    .build_product_value(values, span)?
-                    .as_any_value_enum();
-                self.bind_pattern(owner, pattern, value, environment)
+                let value = if let CheckedType::Product(product) = &record.value_type {
+                    self.backend
+                        .build_checked_product_value(product, values, span)?
+                } else {
+                    self.backend.build_product_value(values, span)?
+                };
+                self.bind_pattern(owner, pattern, value.as_any_value_enum(), environment)
             }
             crate::LoweredPatternKind::Product { elements, .. } if elements.len() == 1 => {
                 self.bind_top_level_pattern(owner, elements[0], values, environment)
@@ -2479,9 +2480,26 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
         let parameters = function.get_params();
-        let value = self
-            .backend
-            .build_product_value(&parameters[1..], span.clone())?;
+        let value = match &plan.construction {
+            crate::ConstructorConstruction::Value { product, .. } => {
+                if let CheckedType::Product(product) = product {
+                    self.backend.build_checked_product_value(
+                        product,
+                        &parameters[1..],
+                        span.clone(),
+                    )?
+                } else {
+                    self.backend
+                        .build_product_value(&parameters[1..], span.clone())?
+                }
+            }
+            crate::ConstructorConstruction::Unexpanded => {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "constructor adapter plan was never expanded",
+                ));
+            }
+        };
         let result = match &plan.construction {
             crate::ConstructorConstruction::Value { .. } => value,
             crate::ConstructorConstruction::Unexpanded => {
@@ -3138,11 +3156,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         ));
                     };
                     for (index, element) in elements.iter().enumerate() {
-                        let extracted = self
-                            .backend
-                            .builder
-                            .build_extract_value(product, index as u32, "pattern.element")
-                            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                        let extracted = self.backend.extract_product_element(
+                            product,
+                            index,
+                            "pattern.element",
+                        )?;
                         self.bind_pattern(
                             owner,
                             *element,
@@ -3941,10 +3959,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     ));
                 };
                 self.backend
-                    .builder
-                    .build_extract_value(value, *index as u32, "element")
+                    .extract_product_element(value, *index, "element")
                     .map(|value| value.as_any_value_enum())
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))
             }
             crate::LoweredAccessKind::SharedBuffer { index, dereference } => {
                 let value = if dereference.is_empty() {
@@ -4058,15 +4074,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         ));
                     };
                     for (source, slot) in mappings {
-                        let element = self
-                            .backend
-                            .builder
-                            .build_extract_value(
-                                product_value,
-                                source as u32,
-                                "product.spread.element",
-                            )
-                            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                        let element = self.backend.extract_product_element(
+                            product_value,
+                            source,
+                            "product.spread.element",
+                        )?;
                         slots[slot] = Some(element);
                     }
                 }
@@ -4092,7 +4104,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .collect::<CodeGenerationResult<Vec<_>>>()?;
         Ok(self
             .backend
-            .build_product_value(&values, span.clone())?
+            .build_checked_product_value(&product.final_type, &values, span.clone())?
             .as_any_value_enum())
     }
 
@@ -4127,10 +4139,124 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "repeated product element has an invalid representation",
             )
         })?;
+        let span = expression.origin.span.clone();
+        if let CheckedType::Product(product) = &expression.value_type
+            && let [run] = product.runs.as_slice()
+            && run.count == crate::RunCount::Fixed(count)
+            && count > 1
+        {
+            let product_type = self.backend.compile_product_type(product)?;
+            let function = self
+                .backend
+                .builder
+                .get_insert_block()
+                .and_then(|block| block.get_parent())
+                .ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "repeated product outside a function")
+                })?;
+            let storage = self
+                .backend
+                .entry_builder()
+                .build_alloca(product_type, "repeated.product")
+                .map_err(compiler_diagnostic)?;
+            let array_pointer = self
+                .backend
+                .builder
+                .build_struct_gep(product_type, storage, 0, "repeated.array")
+                .map_err(compiler_diagnostic)?;
+            let array_type = product_type
+                .get_field_type_at_index(0)
+                .expect("repeated run field")
+                .into_array_type();
+            let index_slot = self
+                .backend
+                .entry_builder()
+                .build_alloca(self.backend.size_type, "repeated.index")
+                .map_err(compiler_diagnostic)?;
+            self.backend
+                .builder
+                .build_store(index_slot, self.backend.size_type.const_zero())
+                .map_err(compiler_diagnostic)?;
+            let check = self
+                .backend
+                .context
+                .append_basic_block(function, "repeated.check");
+            let body = self
+                .backend
+                .context
+                .append_basic_block(function, "repeated.body");
+            let done = self
+                .backend
+                .context
+                .append_basic_block(function, "repeated.done");
+            self.backend
+                .builder
+                .build_unconditional_branch(check)
+                .map_err(compiler_diagnostic)?;
+            self.backend.builder.position_at_end(check);
+            let index = self
+                .backend
+                .builder
+                .build_load(self.backend.size_type, index_slot, "repeated.index")
+                .map_err(compiler_diagnostic)?
+                .into_int_value();
+            let remaining = self
+                .backend
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::ULT,
+                    index,
+                    self.backend.size_type.const_int(count as u64, false),
+                    "repeated.remaining",
+                )
+                .map_err(compiler_diagnostic)?;
+            self.backend
+                .builder
+                .build_conditional_branch(remaining, body, done)
+                .map_err(compiler_diagnostic)?;
+            self.backend.builder.position_at_end(body);
+            let slot = unsafe {
+                self.backend.builder.build_gep(
+                    array_type,
+                    array_pointer,
+                    &[self.backend.size_type.const_zero(), index],
+                    "repeated.slot",
+                )
+            }
+            .map_err(compiler_diagnostic)?;
+            self.backend
+                .builder
+                .build_store(slot, value)
+                .map_err(compiler_diagnostic)?;
+            let next = self
+                .backend
+                .builder
+                .build_int_add(
+                    index,
+                    self.backend.size_type.const_int(1, false),
+                    "repeated.next",
+                )
+                .map_err(compiler_diagnostic)?;
+            self.backend
+                .builder
+                .build_store(index_slot, next)
+                .map_err(compiler_diagnostic)?;
+            self.backend
+                .builder
+                .build_unconditional_branch(check)
+                .map_err(compiler_diagnostic)?;
+            self.backend.builder.position_at_end(done);
+            return self
+                .backend
+                .builder
+                .build_load(product_type, storage, "repeated.value")
+                .map_err(compiler_diagnostic)
+                .map(|value| value.as_any_value_enum());
+        }
         let values = vec![value; count];
         Ok(self
             .backend
-            .build_product_value(&values, expression.origin.span.clone())?
+            .build_product_value(&values, span)?
             .as_any_value_enum())
     }
 
@@ -4691,11 +4817,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map_err(compiler_diagnostic);
                 }
                 for (index, element_pattern) in elements.iter().enumerate() {
-                    let element = self
-                        .backend
-                        .builder
-                        .build_extract_value(product_value, index as u32, "match.element")
-                        .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                    let element = self.backend.extract_product_element(
+                        product_value,
+                        index,
+                        "match.element",
+                    )?;
                     let next = if index + 1 == elements.len() {
                         success
                     } else {
@@ -5576,9 +5702,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             (0..product.position_count())
                 .map(|slot| {
                     self.backend
-                        .builder
-                        .build_struct_gep(ty, pointer, slot as u32, "capture.field")
-                        .map_err(compiler_diagnostic)
+                        .product_element_pointer(ty, pointer, slot, "capture.field")
                 })
                 .collect::<CodeGenerationResult<Vec<_>>>()?
         };
@@ -5679,11 +5803,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .iter()
                 .enumerate()
             {
-                let field = self
-                    .backend
-                    .builder
-                    .build_extract_value(value, slot as u32, "parameter.updated.slot")
-                    .map_err(compiler_diagnostic)?;
+                let field =
+                    self.backend
+                        .extract_product_element(value, slot, "parameter.updated.slot")?;
                 self.backend
                     .builder
                     .build_store(*destination, field)
@@ -5986,14 +6108,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             if parameter_count == 1 {
                 slots[0] = Some(value);
             } else if let BasicMetadataValueEnum::StructValue(product) = value
-                && product.get_type().count_fields() as usize == parameter_count
+                && product.get_type().count_fields() as usize <= parameter_count
             {
                 for index in 0..parameter_count {
                     slots[index] = Some(
                         self.backend
-                            .builder
-                            .build_extract_value(product, index as u32, "argument.element")
-                            .map_err(compiler_diagnostic)?
+                            .extract_product_element(product, index, "argument.element")?
                             .into(),
                     );
                 }
@@ -6007,11 +6127,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let product_type = self.backend.compile_product_type(product)?;
                 let indirect = self.backend.indirect_parameter_mask(&call.function_type);
                 for (index, element) in product.iter_positions().enumerate() {
-                    let field = self
-                        .backend
-                        .builder
-                        .build_struct_gep(product_type, pointer, index as u32, "argument.element")
-                        .map_err(compiler_diagnostic)?;
+                    let field = self.backend.product_element_pointer(
+                        product_type,
+                        pointer,
+                        index,
+                        "argument.element",
+                    )?;
                     slots[index] = Some(if indirect.get(index).copied().unwrap_or(false) {
                         field.into()
                     } else {
@@ -6153,9 +6274,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         })
                     })
                     .collect::<CodeGenerationResult<Vec<_>>>()?;
-                self.backend
-                    .build_product_value(&basic, call.origin.span.clone())
-                    .map(|value| value.as_any_value_enum())
+                let mut result_type = &call.result_type;
+                while let CheckedType::Wrapper { representation, .. } = result_type {
+                    result_type = representation;
+                }
+                let value = if basic.len() > 1
+                    && let CheckedType::Product(product) = result_type
+                    && product.position_count() == basic.len()
+                {
+                    self.backend.build_checked_product_value(
+                        product,
+                        &basic,
+                        call.origin.span.clone(),
+                    )?
+                } else {
+                    self.backend
+                        .build_product_value(&basic, call.origin.span.clone())?
+                };
+                Ok(value.as_any_value_enum())
             }
             // Trait implementation selection is already closed into a catalog binding.
             LoweredCallableTarget::TraitImplementation { .. }
@@ -6632,27 +6768,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 && record.pass_mode == LoweredArgumentPassMode::MutablePlace
                 && record.place.is_some()
             {
-                let pointer = self
-                    .backend
-                    .builder
-                    .build_struct_gep(
-                        product.get_type(),
-                        pointer,
-                        *source as u32,
-                        "product.spread.place",
-                    )
-                    .map_err(compiler_diagnostic)?;
+                let pointer = self.backend.product_element_pointer(
+                    product.get_type(),
+                    pointer,
+                    *source,
+                    "product.spread.place",
+                )?;
                 if record.drops_after_call {
                     cleanups.push((*slot, DropSource::Temporary(pointer)));
                 }
                 place_argument_slot(slots, *slot, pointer.into(), &call.origin.span)?;
                 continue;
             }
-            let element = self
-                .backend
-                .builder
-                .build_extract_value(product, *source as u32, "product.spread.element")
-                .map_err(compiler_diagnostic)?;
+            let element =
+                self.backend
+                    .extract_product_element(product, *source, "product.spread.element")?;
             let passed =
                 self.pass_computed_argument(record, *slot, element, by_value_route, cleanups)?;
             place_argument_slot(slots, *slot, passed, &call.origin.span)?;
@@ -6921,9 +7051,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     ));
                 };
                 self.backend
-                    .builder
-                    .build_struct_gep(container_llvm, pointer, *index as u32, "place.field")
-                    .map_err(compiler_diagnostic)
+                    .product_element_pointer(container_llvm, pointer, *index, "place.field")
             }
             // A wrapper representation read is the base place itself.
             crate::LoweredPlaceKind::Representation { base } => {
@@ -7049,9 +7177,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             for (slot, pointer) in pointers.into_iter().enumerate() {
                 let field = self
                     .backend
-                    .builder
-                    .build_extract_value(product, slot as u32, "assigned.slot")
-                    .map_err(compiler_diagnostic)?;
+                    .extract_product_element(product, slot, "assigned.slot")?;
                 self.backend
                     .builder
                     .build_store(pointer, field)
@@ -7293,7 +7419,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 elements.push(value_as_basic(value).ok_or_else(|| unsupported("index argument"))?);
             }
-            let product = self.backend.build_product_value(&elements, span.clone())?;
+            let product = if let CheckedType::Product(product) = method_type.parameter.as_ref() {
+                self.backend
+                    .build_checked_product_value(product, &elements, span.clone())?
+            } else {
+                self.backend.build_product_value(&elements, span.clone())?
+            };
             let llvm_type = self.backend.compile_type(&method_type.parameter)?;
             let pointer = self.backend.build_argument_temporary(
                 product,
@@ -7760,10 +7891,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map_err(compiler_diagnostic)
                 })
                 .collect::<CodeGenerationResult<Vec<_>>>()?;
-            return self
-                .backend
-                .build_product_value(&fields, span.clone())
-                .map(|value| value.as_any_value_enum());
+            let value = if let CheckedType::Product(product) = value_type {
+                self.backend
+                    .build_checked_product_value(product, &fields, span.clone())?
+            } else {
+                self.backend.build_product_value(&fields, span.clone())?
+            };
+            return Ok(value.as_any_value_enum());
         }
         if let Some(pointer) = environment.parameter_pointers.get(&symbol).copied() {
             let llvm_type = self.backend.compile_type(value_type)?;
@@ -8260,15 +8394,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 };
                 let size = self
                     .backend
-                    .builder
-                    .build_extract_value(*layout, 0, "layout.size")
-                    .map_err(compiler_diagnostic)?
+                    .extract_product_element(*layout, 0, "layout.size")?
                     .into_int_value();
                 let align = self
                     .backend
-                    .builder
-                    .build_extract_value(*layout, 1, "layout.align")
-                    .map_err(compiler_diagnostic)?
+                    .extract_product_element(*layout, 1, "layout.align")?
                     .into_int_value();
                 self.backend
                     .build_gc_layout_allocation(size, align, span)
