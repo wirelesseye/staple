@@ -71,6 +71,11 @@ pub(crate) struct Backend<'program, 'context> {
     caller_sites: std::cell::RefCell<
         std::collections::HashMap<(String, u32, u32), inkwell::values::PointerValue<'context>>,
     >,
+    /// The constant String for each literal text, deduplicated per LLVM
+    /// module.
+    string_literals: std::cell::RefCell<
+        std::collections::HashMap<String, inkwell::values::PointerValue<'context>>,
+    >,
 }
 
 impl<'program, 'context> Backend<'program, 'context> {
@@ -87,6 +92,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             target_data: target_machine.get_target_data(),
             layout,
             caller_sites: std::cell::RefCell::default(),
+            string_literals: std::cell::RefCell::default(),
         }
     }
 }

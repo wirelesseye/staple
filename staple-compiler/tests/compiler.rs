@@ -10123,8 +10123,8 @@ fn derives_debug_for_bodyless_singleton_types() {
         .expect("derived singleton Debug implementations should generate LLVM");
     // Each singleton's name is emitted as a string literal for its Debug impl,
     // and the sum reuses those per-variant impls through structural sum Debug.
-    assert!(llvm.contains("c\"Enabled\\00\""));
-    assert!(llvm.contains("c\"Disabled\\00\""));
+    assert!(llvm.contains("[7 x i8] c\"Enabled\" }"));
+    assert!(llvm.contains("[8 x i8] c\"Disabled\" }"));
     assert!(llvm.contains("debug.sum.fmt"));
 }
 
@@ -10150,8 +10150,8 @@ fn quoted_type_declarations_from_one_template_get_distinct_identity() {
     let llvm = CodeGenerator::new(&context)
         .compile_root(&lower(&module))
         .expect("distinct per-variant Debug implementations should generate LLVM");
-    assert!(llvm.contains("c\"Enabled\\00\""));
-    assert!(llvm.contains("c\"Disabled\\00\""));
+    assert!(llvm.contains("[7 x i8] c\"Enabled\" }"));
+    assert!(llvm.contains("[8 x i8] c\"Disabled\" }"));
 }
 
 #[test]

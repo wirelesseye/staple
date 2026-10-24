@@ -3687,9 +3687,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )),
             LoweredExpressionKind::String(string) => {
                 // Literal emission uses the common String builder.
-                self.backend
-                    .build_string_literal(&string.value, expression.origin.span.clone())
-                    .map(|value| value.as_any_value_enum())
+                Ok(self
+                    .backend
+                    .build_string_literal(&string.value)
+                    .as_any_value_enum())
             }
             LoweredExpressionKind::CString(string) => {
                 let text =
