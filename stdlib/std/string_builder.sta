@@ -1,0 +1,134 @@
+pub mod
+
+use package.list.List
+use package.char.(Char, encode_utf8)
+use package.string.(String, append_string_bytes)
+use package.fmt.(Display, Formatter, formatter_from_builder, formatter_into_builder)
+use package.iterator.FromIterator
+use package.default.Default
+
+/// A uniquely owned growable UTF-8 buffer. Appending is amortized O(1) per byte.
+pub type StringBuilder wrap List<U8>
+
+companion StringBuilder {
+    /// Creates an empty builder.
+    pub def new = () => StringBuilder :: StringBuilder (List.new ())
+
+    /// Creates an empty builder with capacity measured in bytes.
+    pub def with_capacity = capacity: USize => StringBuilder :: StringBuilder (List.with_capacity capacity)
+
+    /// Copies a string into a uniquely owned builder with one bulk byte copy.
+    pub def from_string = value: String => StringBuilder :: StringBuilder (String.to_bytes value)
+
+    /// Returns the length in bytes.
+    pub def length = builder: StringBuilder => USize :: List.length builder.*
+
+    /// Returns the allocated capacity in bytes.
+    pub def capacity = builder: StringBuilder => USize :: List.capacity builder.*
+
+    /// Returns whether the builder contains no bytes.
+    pub def is_empty = builder: StringBuilder => Bool :: length builder == 0
+
+    /// Appends one Unicode scalar value.
+    pub def push = (mut builder: StringBuilder; value: Char) => () :: {
+        let ((a, b, c, d), length) = encode_utf8 value
+        List.reserve builder.* length
+        List.push builder.* a
+        if (length > 1) { List.push builder.* b }
+        if (length > 2) { List.push builder.* c }
+        if (length > 3) { List.push builder.* d }
+    }
+
+    /// Appends a string with a bulk byte copy.
+    pub def append = (mut builder: StringBuilder; value: String) => () :: append_string_bytes builder.* value
+
+    /// Formats directly into the builder without an intermediate buffer.
+    pub def append_display = <T where Display T> (mut builder: StringBuilder; value: T) => () :: {
+        let mut formatter = formatter_from_builder builder
+        Display.fmt (value, formatter)
+        builder = formatter_into_builder formatter
+    }
+
+    /// Removes the final Unicode scalar, or returns None when empty.
+    pub def pop = mut builder: StringBuilder => Option<Char> :: {
+        let length = length builder
+        if (length == 0) { None } else {
+            let mut start = length - 1
+            while (List.get_unchecked builder.* start >= 128) {
+                if (List.get_unchecked builder.* start >= 192) { break }
+                start = start - 1
+            }
+            let first = List.get_unchecked builder.* start
+            let width = length - start
+            let mut scalar: U32 = (first as U32) - (when {
+                width == 1 => 0, width == 2 => 192, width == 3 => 224, else => 240,
+            })
+            let mut at = start + 1
+            while (at < length) {
+                scalar = scalar * 64 + ((List.get_unchecked builder.* at) as U32) - 128
+                at = at + 1
+            }
+            List.truncate builder.* start
+            Some (Char.from_u32_unchecked scalar)
+        }
+    }
+
+    /// Removes all text, retaining the allocated capacity.
+    pub def clear = mut builder: StringBuilder => () :: List.clear builder.*
+
+    /// Consumes the builder and reuses its allocation without copying.
+    pub def finish = move builder: StringBuilder => String :: {
+        let StringBuilder bytes = builder
+        String.from_utf8_unchecked bytes
+    }
+
+    /// Copies the contents, leaving this builder usable.
+    pub def to_string = builder: StringBuilder => String :: {
+        let mut bytes: List<U8> = List.with_capacity (length builder)
+        let mut at: USize = 0
+        while (at < length builder) {
+            List.push bytes (List.get_unchecked builder.* at)
+            at = at + 1
+        }
+        String.from_utf8_unchecked bytes
+    }
+    // Only formatting's escaping loop may temporarily append partial UTF-8.
+    pub(package) def push_byte_unchecked = (mut builder: StringBuilder; byte: U8) => () :: List.push builder.* byte
+}
+
+impl Default StringBuilder { default = () => StringBuilder.new () }
+impl Display StringBuilder {
+    fmt = (builder, mut formatter) => {
+        let mut at: USize = 0
+        while (at < StringBuilder.length builder) {
+            let first = List.get_unchecked builder.* at
+            let width: USize = when {
+                first < 128 => 1, first < 224 => 2, first < 240 => 3, else => 4,
+            }
+            let mut scalar: U32 = (first as U32) - (when {
+                width == 1 => 0, width == 2 => 192, width == 3 => 224, else => 240,
+            })
+            let mut offset: USize = 1
+            while (offset < width) {
+                scalar = scalar * 64 + ((List.get_unchecked builder.* (at + offset)) as U32) - 128
+                offset = offset + 1
+            }
+            Formatter.push formatter (Char.from_u32_unchecked scalar)
+            at = at + width
+        }
+    }
+}
+impl FromIterator StringBuilder Char {
+    insert = (move start; move value) => {
+        let mut builder = start
+        StringBuilder.push builder value
+        builder
+    }
+}
+impl FromIterator StringBuilder String {
+    insert = (move start; move value) => {
+        let mut builder = start
+        StringBuilder.append builder value
+        builder
+    }
+}

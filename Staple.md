@@ -935,8 +935,8 @@ dependency-alias machinery as any local dependency. `std.core` is the small,
 always-imported language interface: booleans, numbers, indexing protocols,
 reactive primitives, ranges, flow macros (`if`, `when`, `while`,
 `for`, and the rest of `std.flow`), and compiler modifiers. The separate
-`std.prelude` interface is imported by default and provides strings, lists,
-iteration, formatting traits, defaults, and results. Lower-level
+`std.prelude` interface is imported by default and provides strings,
+`StringBuilder`, lists, iteration, formatting traits, defaults, and results. Lower-level
 modules such as `std.shared`, `std.unique`, `std.buffer`, `std.shared_buffer`,
 `std.io`, `std.syntax`, and `std.cinterop` require explicit imports.
 
@@ -4686,6 +4686,64 @@ bytes; because the list is moved in, nothing can mutate the bytes
 after validation. `String.from_utf8_unchecked: move List<U8> => String` skips the
 validation when the caller knows the bytes are valid UTF-8. The underlying
 `SharedBuffer<U8>` is private to the standard library.
+
+`StringBuilder` is the mutable UTF-8 buffer for constructing strings. It is
+available from the prelude and owns its allocation uniquely; it is not `Copy`.
+`new ()`, `with_capacity bytes`, and `from_string text` create builders.
+`length` and `capacity` count bytes. `push` appends one `Char`, `append` copies
+one `String` with a bulk byte copy, and `append_display` formats a `Display`
+value directly into the builder's allocation. `pop` removes the last scalar,
+returning `None` when empty. `clear` retains the allocation. `finish` consumes
+the builder and returns a `String` without copying; `to_string` instead copies
+the contents and leaves the builder usable:
+
+```staple
+let mut output = StringBuilder.with_capacity 64
+output |> append "total: "
+output |> append_display 42
+output |> push '\n'
+let text = StringBuilder.finish output
+```
+
+Builders implement `Default`, `Display`, and `FromIterator` for both `Char`
+and `String`. Collecting into `String` also builds through a builder.
+`Formatter` wraps a builder, so interpolation and `Display`/`Debug` formatting
+use the same growth and copying operations. `Formatter.push` writes a scalar
+without an intermediate string allocation.
+
+String queries and ranges use **byte offsets**. `length` is the byte length;
+`char_count` counts Unicode scalars in O(n). `is_empty`, `is_char_boundary`,
+`starts_with`, `ends_with`, and `contains` inspect text without changing it.
+`find` and `rfind` return `Option<USize>` for the first or last substring
+match; `find_char` searches for a scalar. An empty needle matches at zero
+for `find` and at the byte length for `rfind`. `char_indices` yields
+`(byte_offset, Char)` pairs. `PartialOrd String` and `Ord String` compare
+UTF-8 bytes lexicographically, which also orders Unicode scalar values.
+
+`slice` takes a half-open `Range<USize>` and copies the substring. It returns
+`None` for reversed bounds, offsets past the end, or offsets inside a scalar.
+For example, `String.slice "héllo" ((USize :: 1) .. (USize :: 3))` returns
+`Some "é"`. `strip_prefix` and `strip_suffix` return copied substrings when
+the requested text matches. `trim`, `trim_start`, and `trim_end` remove Unicode
+`White_Space`, as defined by `Char.is_whitespace`.
+
+`split text separator`, `lines text`, and `split_whitespace text` are lazy,
+copyable iterators that allocate only the substrings they yield. `split`
+preserves empty fields, including a final empty field, and panics with
+`String.split: empty separator` for an empty separator. `split_once` returns
+an optional pair at the first match; an empty separator matches at the start.
+`lines` splits on LF, removes a trailing CR from each line, and omits the empty
+line after a final LF. `split_whitespace` skips runs of Unicode whitespace.
+
+`replace text needle replacement` replaces nonoverlapping matches; an empty
+needle inserts the replacement at every scalar boundary, including both ends.
+`repeat text count` repeats text, and `join separator values` joins any
+`IntoIterator` of strings. These operations build fresh strings.
+`to_ascii_uppercase`, `to_ascii_lowercase`, and `eq_ignore_ascii_case` affect
+ASCII letters only; non-ASCII scalars remain unchanged. `Char` has matching
+ASCII case operations, `to_string`, and the predicates `is_ascii_digit`,
+`is_ascii_alphabetic`, `is_ascii_alphanumeric`, `is_ascii_uppercase`, and
+`is_ascii_lowercase`.
 
 `Shared<T>` is a garbage-collected reference to a value of type `T`, declared in
 `std.shared` and imported with `use std.shared.(Shared)`. Its standard

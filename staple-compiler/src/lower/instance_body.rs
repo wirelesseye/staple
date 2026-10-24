@@ -1183,9 +1183,11 @@ impl<'a> BodyCloner<'a> {
                     .map(|place| place.value_type.clone())
                     .unwrap_or(CheckedType::Error);
                 // An indexed (`MutateIndex`) assignment never drops the
-                // previous value itself (the method does), exactly as lowering
-                // records it; only a plain assignment recomputes the fact.
+                // previous value itself (the method does). Plain assignments
+                // recompute drop requirements for the concrete type, preserving
+                // the ownership checker's moved-out restoration decision.
                 assignment.drop_previous = assignment.mutate_index.is_none()
+                    && !assignment.reinitializes_moved_value
                     && self.program.concrete_needs_drop(&concrete_target);
                 // The materialized base temporary's drop, recomputed from the
                 // substituted base type.

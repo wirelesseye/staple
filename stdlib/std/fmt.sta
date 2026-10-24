@@ -1,13 +1,14 @@
 pub mod
 
-use package.list.List
+use package.string_builder.StringBuilder
+use package.char.Char
 use package.string.(String, ToString)
 use package.flow.for
 use package.syntax.*
 use package.process.(panic)
 
-/// A growable UTF-8 output buffer used by formatting traits.
-pub type Formatter wrap List<U8>
+/// A UTF-8 output sink for formatting traits, backed by a StringBuilder.
+pub type Formatter wrap StringBuilder
 
 /// Formats a value for human-facing output.
 pub trait Display T {
@@ -113,12 +114,13 @@ pub macro @derive_debug: Item -> Sequence<Item> = item => match item {
     _ => panic "derive_debug item is unsupported",
 }
 
-def write_byte = mut formatter: Formatter => byte: U8 => () :: formatter.* |> push byte
+def formatter_write = (mut formatter: Formatter, value: String) => () ::
+    StringBuilder.append formatter.* value
 
-def formatter_write = (mut formatter: Formatter, value: String) => () :: {
-    for byte in (String.bytes value) {
-        write_byte formatter byte
-    }
+pub(package) def formatter_from_builder = move builder: StringBuilder => Formatter :: Formatter builder
+pub(package) def formatter_into_builder = move formatter: Formatter => StringBuilder :: {
+    let Formatter builder = formatter
+    builder
 }
 
 def formatter_write_debug = (mut formatter: Formatter, value: String) => () :: {
@@ -131,18 +133,18 @@ def formatter_write_debug = (mut formatter: Formatter, value: String) => () :: {
             byte == 13 => formatter |> write "\\r",
             byte == 34 => formatter |> write "\\\"",
             byte == 92 => formatter |> write "\\\\",
-            else => write_byte formatter byte,
+            else => StringBuilder.push_byte_unchecked formatter.* byte,
         }
     }
     formatter |> write "\""
 }
 
 def formatter_finish = move formatter: Formatter => String :: {
-    let Formatter list = formatter
-    String.from_utf8_unchecked list
+    let Formatter builder = formatter
+    StringBuilder.finish builder
 }
 
-def formatter_new = () => Formatter :: Formatter (List.with_capacity 16)
+def formatter_new = () => Formatter :: Formatter (StringBuilder.with_capacity 16)
 
 companion Formatter {
     use package.string.String
@@ -153,6 +155,9 @@ companion Formatter {
     /// Appends a UTF-8 string to the formatter.
     pub def write = (mut formatter: Formatter; value: String) =>
         () :: formatter_write (formatter, value)
+
+    /// Appends one Unicode scalar without allocating.
+    pub def push = (mut formatter: Formatter; value: Char) => () :: StringBuilder.push formatter.* value
 
     /// Finishes formatting and returns the accumulated string.
     pub def finish = move formatter: Formatter => String :: formatter_finish formatter

@@ -2629,6 +2629,10 @@ impl TypedModule {
             .is_some()
     }
 
+    pub(crate) fn reinitializes_moved_value(&self, syntax: SyntaxId) -> bool {
+        self.ownership.reinitializes_moved_value(syntax)
+    }
+
     pub(crate) fn moved_symbols(&self, syntax: SyntaxId) -> impl Iterator<Item = SymbolId> + '_ {
         self.ownership.moved_symbols(syntax)
     }

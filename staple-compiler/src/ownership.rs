@@ -7,11 +7,16 @@ use staple_syntax::{Diagnostic, Expression, Item, Pattern, Syntax, SyntaxId};
 pub(crate) struct OwnershipInfo {
     moved_uses: HashMap<SyntaxId, HashSet<SymbolId>>,
     taken_unique: HashSet<SyntaxId>,
+    reinitialized_assignments: HashSet<SyntaxId>,
     non_owning_symbols: HashSet<SymbolId>,
     borrowed_captures: HashSet<(FunctionId, SymbolId)>,
 }
 
 impl OwnershipInfo {
+    pub(crate) fn reinitializes_moved_value(&self, syntax: SyntaxId) -> bool {
+        self.reinitialized_assignments.contains(&syntax)
+    }
+
     pub(crate) fn takes_unique(&self, syntax: SyntaxId) -> bool {
         self.taken_unique.contains(&syntax)
     }
@@ -1002,6 +1007,9 @@ impl<'a> OwnershipChecker<'a> {
                     self.recheck_assignment_root(&assignment.target);
                 }
                 if let Some(symbol) = self.module.symbol_for(assignment.target.syntax().id) {
+                    if self.states.get(&symbol) == Some(&ValueState::Moved) {
+                        self.info.reinitialized_assignments.insert(assignment.syntax.id);
+                    }
                     self.states.insert(symbol, ValueState::Available);
                 }
                 true

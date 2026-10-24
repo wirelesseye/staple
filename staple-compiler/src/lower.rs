@@ -2831,6 +2831,8 @@ pub(crate) struct LoweredAssignmentItem {
     pub initialization_symbol: Option<SymbolId>,
     /// Whether the place's previous value must be dropped before the store.
     pub drop_previous: bool,
+    /// The target was definitely moved out, so its stale storage owns no value.
+    pub reinitializes_moved_value: bool,
     /// An indexed (`MutateIndex`) assignment whose base has no place
     /// materializes it into a temporary, dropped after the call when it needs
     /// drop.
@@ -4494,6 +4496,7 @@ impl LoweredProgram {
                 evidence,
                 initialization_symbol: None,
                 drop_previous: false,
+                reinitializes_moved_value: false,
                 drops_base_temporary,
                 signal_notify: None,
             });
@@ -4523,7 +4526,11 @@ impl LoweredProgram {
             mutate_index: None,
             evidence: None,
             initialization_symbol,
-            drop_previous: module.type_needs_drop(&target_type),
+            // A moved-out mutable parameter still has addressable storage, but
+            // its stale bits no longer own a value and must not be dropped.
+            drop_previous: module.type_needs_drop(&target_type)
+                && !module.reinitializes_moved_value(assignment.syntax.id),
+            reinitializes_moved_value: module.reinitializes_moved_value(assignment.syntax.id),
             drops_base_temporary: false,
             signal_notify,
         })
@@ -27020,6 +27027,7 @@ mod tests {
                 evidence: None,
                 initialization_symbol: None,
                 drop_previous: false,
+                reinitializes_moved_value: false,
                 drops_base_temporary: false,
                 signal_notify: None,
             });

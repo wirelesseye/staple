@@ -5,6 +5,8 @@ use package.iterator.IterStep.(Done, Yield)
 use package.alloc.Gc
 use package.buffer.(Buffer, BufferHeader, unsafe_buffer_into_raw)
 use package.ptr.(RawMutPtr, RawOpaqueMutPtr)
+use package.process.panic
+use package.shared_buffer.SharedBuffer
 use package.clone.Clone
 use package.default.Default
 use package.index.(Index, MutateIndex)
@@ -44,6 +46,31 @@ companion<T> List<T> {
 
     /// Returns the number of elements the list can hold without growing.
     pub def capacity = list: List<T> => USize :: list.* |> capacity
+
+    /// Reserves room for at least `additional` more elements.
+    pub def reserve = (mut list: List<T>; additional: USize) => () :: {
+        let required = length list + additional
+        if (required < length list) { panic "List capacity overflow" }
+        if (required > capacity list) {
+            let old = capacity list
+            let doubled = old * 2
+            let capacity = if (doubled > required) { doubled } else { required }
+            let mut destination: Buffer<T> = Buffer.with_capacity capacity
+            Buffer.transfer list.* destination
+            list = List destination
+        }
+    }
+
+    /// Drops elements after the requested length, retaining capacity.
+    pub def truncate = (mut list: List<T>; length: USize) => () :: {
+        while (List.length list > length) {
+            let removed = pop list
+            drop removed
+        }
+    }
+
+    /// Removes all elements, retaining capacity.
+    pub def clear = mut list: List<T> => () :: truncate list 0
 
     /// Appends a value, growing the list when necessary.
     pub def push = (mut list: List<T>; move value: T) => () :: {
@@ -169,5 +196,13 @@ impl<T> IntoIterator List<T> {
     into_iterator = move list => {
         let List buffer = list
         ListIntoIter (header: unsafe_buffer_into_raw buffer, front: 0)
+    }
+}
+
+// The source must not overlap this uniquely owned list's storage.
+companion List<U8> {
+    pub(package) def append_shared_bytes = (mut list: List<U8>; bytes: SharedBuffer<U8>) => () :: {
+        List.reserve list (SharedBuffer.length bytes)
+        Buffer.append_shared_bytes list.* bytes
     }
 }

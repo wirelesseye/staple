@@ -4,8 +4,8 @@ use package.cmp.(Eq, PartialOrd, Ord)
 use package.convert.(Convert, TryConvert, ConversionError)
 use package.result.Ok
 use package.fmt.(Display, Debug, Formatter)
-use package.list.List
 use package.string.String
+use package.string_builder.StringBuilder
 use package.ops.(BitAnd, ShiftRight)
 
 /// A Unicode scalar value: a code point through U+10FFFF excluding
@@ -40,6 +40,42 @@ companion Char {
 
     /// Returns whether this scalar is in U+0000 through U+007F.
     pub def is_ascii = Char value => Bool :: value < 128
+
+    /// Unicode White_Space (25 scalar values).
+    pub def is_whitespace = Char value => Bool :: when {
+        value >= 9 => when {
+            value <= 13 => True,
+            value == 32 => True,
+            value == 133 => True,
+            value == 160 => True,
+            value == 5760 => True,
+            value >= 8192 => when {
+                value <= 8202 => True,
+                value == 8232 => True,
+                value == 8233 => True,
+                value == 8239 => True,
+                value == 8287 => True,
+                value == 12288 => True,
+                else => False,
+            },
+            else => False,
+        },
+        else => False,
+    }
+
+    /// Creates a string containing this scalar.
+    pub def to_string = value: Char => String :: {
+        let mut builder = StringBuilder.with_capacity (len_utf8 value)
+        StringBuilder.push builder value
+        StringBuilder.finish builder
+    }
+    pub def is_ascii_digit = Char value => Bool :: if (value >= 48) { value <= 57 } else { False }
+    pub def is_ascii_uppercase = Char value => Bool :: if (value >= 65) { value <= 90 } else { False }
+    pub def is_ascii_lowercase = Char value => Bool :: if (value >= 97) { value <= 122 } else { False }
+    pub def is_ascii_alphabetic = value: Char => Bool :: if (is_ascii_uppercase value) { True } else { is_ascii_lowercase value }
+    pub def is_ascii_alphanumeric = value: Char => Bool :: if (is_ascii_digit value) { True } else { is_ascii_alphabetic value }
+    pub def to_ascii_uppercase = value: Char => Char :: if (is_ascii_lowercase value) { Char (to_u32 value - 32) } else { value }
+    pub def to_ascii_lowercase = value: Char => Char :: if (is_ascii_uppercase value) { Char (to_u32 value + 32) } else { value }
 }
 
 // Copy is inherited structurally from U32.
@@ -80,20 +116,8 @@ pub(package) def encode_utf8 = Char value => ((U8, U8, U8, U8), USize) :: when {
     ), 4),
 }
 
-pub(package) def append_utf8 = (mut bytes: List<U8>; c: Char) => () :: {
-    let ((a, b, c, d), length) = encode_utf8 c
-    List.push bytes a
-    if (length > 1) { List.push bytes b }
-    if (length > 2) { List.push bytes c }
-    if (length > 3) { List.push bytes d }
-}
-
 impl Display Char {
-    fmt = (value, mut formatter) => {
-        let mut bytes: List<U8> = List.with_capacity 4
-        append_utf8 bytes value
-        let () = formatter |> write (String.from_utf8_unchecked bytes)
-    }
+    fmt = (value, mut formatter) => Formatter.push formatter value
 }
 
 // Render non-ASCII scalars with a Unicode escape; this also makes combining
