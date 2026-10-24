@@ -1182,6 +1182,16 @@ struct CheckedResourceDependency {
     span: Span,
 }
 
+/// A requirement left by a `with` body because the provided resource depends
+/// on it, recorded so a contract violation can name the provider.
+#[derive(Debug, Clone)]
+struct DependencyDischarge {
+    dependency: CheckedType,
+    provider: CheckedType,
+    /// The `with {…}` entry that introduces `dependency`.
+    span: Span,
+}
+
 impl PartialEq for CheckedResource {
     fn eq(&self, other: &Self) -> bool {
         self.mutable == other.mutable && types_equivalent(&self.value_type, &other.value_type)
@@ -3309,6 +3319,9 @@ pub struct TypeChecker {
     /// resolved, and whether a closing hit an unfinished one meanwhile.
     resource_dependency_window: Vec<TypeId>,
     resource_dependencies_reentered: bool,
+    /// While a function body's effects are computed for its contract check,
+    /// the dependencies its `with` providers left unsatisfied.
+    dependency_discharges: Option<Vec<DependencyDischarge>>,
     resolved_named_types: HashMap<TypeId, CheckedType>,
     resolving_named_types: HashSet<TypeId>,
     /// Nesting depth of type-argument positions whose enclosing constructor is
@@ -4012,228 +4025,33 @@ impl TypeChecker {
         None
     }
 
-    /// Looks through a function body for the `with` provider that makes a
-    /// missing dependency necessary, so a contract diagnostic can name the
-    /// resource that depends on it instead of only the implied one.
-    fn with_provider_depending_on(
-        &self,
-        module: &ResolvedModule,
-        expression: &Expression,
-        missing: &CheckedType,
-        visited: &mut HashSet<SyntaxId>,
-    ) -> Option<(CheckedType, Span)> {
-        if !visited.insert(expression.syntax().id) {
-            return None;
-        }
-        if let Expression::With(with) = expression
-            && let Some(provider) = self.resource_types.get(&with.syntax.id)
-            && !types_equivalent(&provider.value_type, missing)
-            && let Some(span) = self.resource_dependency_path(
-                module,
-                &provider.value_type,
-                missing,
-                &mut HashSet::new(),
-            )
-        {
-            return Some((provider.value_type.clone(), span));
-        }
-        match expression {
-            Expression::Function(value) => {
-                self.with_provider_depending_on(module, &value.body, missing, visited)
-            }
-            Expression::TypeApplication(value) => {
-                self.with_provider_depending_on(module, &value.value, missing, visited)
-            }
-            Expression::TypeAscription(value) => {
-                self.with_provider_depending_on(module, &value.value, missing, visited)
-            }
-            Expression::Match(value) => {
-                if let Some(found) =
-                    self.with_provider_depending_on(module, &value.subject, missing, visited)
-                {
-                    return Some(found);
-                }
-                value.arms.iter().find_map(|arm| {
-                    self.with_provider_depending_on(module, &arm.body, missing, visited)
-                })
-            }
-            Expression::Loop(value) => {
-                self.items_with_provider_depending_on(module, &value.body.items, missing, visited)
-            }
-            Expression::Coro(value) => {
-                self.items_with_provider_depending_on(module, &value.body.items, missing, visited)
-            }
-            Expression::Await(value) => {
-                self.with_provider_depending_on(module, &value.operand, missing, visited)
-            }
-            Expression::Try(value) => {
-                self.with_provider_depending_on(module, &value.operand, missing, visited)
-            }
-            Expression::Conversion(value) => {
-                self.with_provider_depending_on(module, &value.value, missing, visited)
-            }
-            Expression::With(value) => {
-                if let Some(found) =
-                    self.with_provider_depending_on(module, &value.value, missing, visited)
-                {
-                    return Some(found);
-                }
-                self.items_with_provider_depending_on(module, &value.body.items, missing, visited)
-            }
-            Expression::Block(value) => {
-                self.items_with_provider_depending_on(module, &value.items, missing, visited)
-            }
-            Expression::Product(value) => value.elements.iter().find_map(|element| {
-                self.with_provider_depending_on(module, &element.value, missing, visited)
-            }),
-            Expression::RepeatedProduct(value) => {
-                self.with_provider_depending_on(module, &value.value, missing, visited)
-            }
-            Expression::Call(value) => {
-                if let Some(found) =
-                    self.with_provider_depending_on(module, &value.callee, missing, visited)
-                {
-                    return Some(found);
-                }
-                self.with_provider_depending_on(module, &value.argument, missing, visited)
-            }
-            Expression::Access(value) => {
-                self.with_provider_depending_on(module, &value.value, missing, visited)
-            }
-            Expression::Index(value) => {
-                if let Some(found) =
-                    self.with_provider_depending_on(module, &value.value, missing, visited)
-                {
-                    return Some(found);
-                }
-                self.with_provider_depending_on(module, &value.index, missing, visited)
-            }
-            Expression::Unary(value) => {
-                self.with_provider_depending_on(module, &value.operand, missing, visited)
-            }
-            Expression::Binary(value) => {
-                if let Some(found) =
-                    self.with_provider_depending_on(module, &value.left, missing, visited)
-                {
-                    return Some(found);
-                }
-                self.with_provider_depending_on(module, &value.right, missing, visited)
-            }
-            Expression::Pipe(value) => {
-                if let Some(found) =
-                    self.with_provider_depending_on(module, &value.receiver, missing, visited)
-                {
-                    return Some(found);
-                }
-                value.stage_arguments().into_iter().find_map(|argument| {
-                    self.with_provider_depending_on(module, argument, missing, visited)
-                })
-            }
-            Expression::Logical(value) => {
-                if let Some(found) =
-                    self.with_provider_depending_on(module, &value.left, missing, visited)
-                {
-                    return Some(found);
-                }
-                self.with_provider_depending_on(module, &value.right, missing, visited)
-            }
-            Expression::StringTemplate(value) => value.parts.iter().find_map(|part| {
-                let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part else {
-                    return None;
-                };
-                self.with_provider_depending_on(module, &interpolation.expression, missing, visited)
-            }),
-            Expression::Resource(_)
-            | Expression::Name(_)
-            | Expression::SyntaxArgument(_)
-            | Expression::VisibilityArgument(_)
-            | Expression::Quote(_)
-            | Expression::Splice(_)
-            | Expression::String(_)
-            | Expression::CString(_)
-            | Expression::Integer(_)
-            | Expression::Float(_) => None,
-        }
-    }
-
-    fn items_with_provider_depending_on(
-        &self,
-        module: &ResolvedModule,
-        items: &[Item],
-        missing: &CheckedType,
-        visited: &mut HashSet<SyntaxId>,
-    ) -> Option<(CheckedType, Span)> {
-        items.iter().find_map(|item| match item {
-            Item::Binding(value) => value
-                .value
-                .as_ref()
-                .and_then(|value| self.with_provider_depending_on(module, value, missing, visited)),
-            Item::PatternBinding(value) => {
-                self.with_provider_depending_on(module, &value.value, missing, visited)
-            }
-            Item::Assignment(value) => {
-                if let Some(found) =
-                    self.with_provider_depending_on(module, &value.target, missing, visited)
-                {
-                    return Some(found);
-                }
-                self.with_provider_depending_on(module, &value.value, missing, visited)
-            }
-            Item::Return(value) => {
-                self.with_provider_depending_on(module, &value.value, missing, visited)
-            }
-            Item::Break(value) => value
-                .value
-                .as_ref()
-                .and_then(|value| self.with_provider_depending_on(module, value, missing, visited)),
-            Item::Expression(value) => {
-                self.with_provider_depending_on(module, value, missing, visited)
-            }
-            Item::Submodule(value) => {
-                self.items_with_provider_depending_on(module, &value.module.items, missing, visited)
-            }
-            Item::Continue(_)
-            | Item::UseDeclaration(_)
-            | Item::ExternBlock(_)
-            | Item::TypeDeclaration(_)
-            | Item::MacroDeclaration(_)
-            | Item::TraitDeclaration(_)
-            | Item::TraitImplementation(_)
-            | Item::Modified(_)
-            | Item::VisibilityMacroInvocation(_)
-            | Item::VisibilitySplice(_)
-            | Item::RepeatedItemSplice(_) => None,
-        })
-    }
-
-    /// The extra diagnostic text naming where an implied resource came from.
+    /// The extra diagnostic text naming where an implied resource came from,
+    /// using the dependencies the body's `with` providers left unsatisfied.
     fn dependency_failure_note(
-        &self,
-        module: &ResolvedModule,
-        body: &Expression,
+        discharges: &[DependencyDischarge],
         actual: &CheckedEffectSet,
         allowed: &CheckedEffectSet,
     ) -> Option<String> {
-        for missing in &actual.resources {
-            if allowed
-                .resources
-                .iter()
-                .any(|resource| types_equivalent(&resource.value_type, &missing.value_type))
-            {
-                continue;
-            }
-            let mut visited = HashSet::new();
-            if let Some((provider, span)) =
-                self.with_provider_depending_on(module, body, &missing.value_type, &mut visited)
-            {
-                let location = span_location(&span);
-                return Some(format!(
-                    "; `{}` is required because `{provider}` depends on it (declared at {location})",
-                    missing.value_type
-                ));
-            }
-        }
-        None
+        actual
+            .resources
+            .iter()
+            .filter(|missing| {
+                !allowed
+                    .resources
+                    .iter()
+                    .any(|resource| types_equivalent(&resource.value_type, &missing.value_type))
+            })
+            .find_map(|missing| {
+                let discharge = discharges.iter().find(|discharge| {
+                    types_equivalent(&discharge.dependency, &missing.value_type)
+                })?;
+                Some(format!(
+                    "; `{}` is required because `{}` depends on it (declared at {})",
+                    missing.value_type,
+                    discharge.provider,
+                    span_location(&discharge.span)
+                ))
+            })
     }
 
     fn collect_string_representation(&mut self, module: &ResolvedModule) {
@@ -8135,10 +7953,32 @@ impl TypeChecker {
             Expression::With(value) => {
                 let provider = self.expression_effects_now(module, &value.value, target_parameters);
                 let body = self.block_effects_now(module, &value.body, target_parameters);
-                let body = self
-                    .resource_types
-                    .get(&value.syntax.id)
-                    .map_or(body.clone(), |resource| body.without(resource));
+                let Some(resource) = self.resource_types.get(&value.syntax.id).cloned() else {
+                    return provider.union(&body);
+                };
+                let body = body.without(&resource);
+                if self.dependency_discharges.is_some() {
+                    let discharges = body
+                        .resources
+                        .iter()
+                        .filter_map(|required| {
+                            let span = self.resource_dependency_path(
+                                module,
+                                &resource.value_type,
+                                &required.value_type,
+                                &mut HashSet::new(),
+                            )?;
+                            Some(DependencyDischarge {
+                                dependency: required.value_type.clone(),
+                                provider: resource.value_type.clone(),
+                                span,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(recorded) = &mut self.dependency_discharges {
+                        recorded.extend(discharges);
+                    }
+                }
                 provider.union(&body)
             }
             Expression::Block(value) => self.block_effects_now(module, value, target_parameters),
@@ -8743,8 +8583,11 @@ impl TypeChecker {
             let target_parameters = self.parameter_positions(function.id);
             self.current_effect_function.set(Some(function.id));
             *self.current_state_accesses.borrow_mut() = StateAccesses::default();
+            let outer_discharges = self.dependency_discharges.replace(Vec::new());
             let actual_body =
                 self.expression_effects_now(module, &function.body, &target_parameters);
+            let discharges = std::mem::replace(&mut self.dependency_discharges, outer_discharges)
+                .unwrap_or_default();
             self.function_state_accesses
                 .insert(function.id, self.current_state_accesses.borrow().clone());
             let mut actual =
@@ -8771,8 +8614,7 @@ impl TypeChecker {
                 } else {
                     "function body"
                 };
-                let note = self
-                    .dependency_failure_note(module, &function.body, &actual, allowed)
+                let note = Self::dependency_failure_note(&discharges, &actual, allowed)
                     .unwrap_or_default();
                 self.diagnostics.push(Diagnostic::new(
                     violation_span(allowed),

@@ -359,6 +359,38 @@ def invalid: () ->{} () = () => {
 }
 
 #[test]
+fn the_dependency_reason_names_only_a_provider_that_left_it() {
+    // `log ()` needs `Logger` directly. The `with Database` body needs
+    // nothing, so it must not be blamed although `Database` depends on it.
+    let diagnostics = check(
+        r#"
+type Logger wrap ()
+type Database with {Logger} wrap ()
+def log = () =>{Logger} () :: ()
+def invalid: () ->{} () = () => {
+    with Database = Database () {
+        ()
+    }
+    log ()
+}
+"#,
+    )
+    .expect_err("the contract excludes the logger");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("requires effects {Logger}")),
+        "{diagnostics:?}"
+    );
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("depends on")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
 #[cfg(unix)]
 fn trait_method_signatures_imply_dependencies() {
     // Trait signatures are resolved before most other passes, so this fails
