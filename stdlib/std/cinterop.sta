@@ -6,7 +6,6 @@ use package.string.(String, __valid_utf8, string_shared_bytes, string_from_share
 use package.ptr.(RawPtr, RawMutPtr, RawOpaqueMutPtr)
 use package.buffer.Buffer
 use package.shared_buffer.SharedBuffer
-use package.alloc.trap
 
 /// A C string cannot contain an embedded NUL byte.
 pub type InteriorNul
@@ -14,7 +13,7 @@ pub type InteriorNul
 use package.string.InvalidUtf8
 
 use package.syntax.(Expr, StringExpr, parse_quote)
-use package.process.panic
+use package.process.(panic, trap)
 
 /// A C-compatible character.
 @sized_opaque

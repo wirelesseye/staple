@@ -31,7 +31,6 @@ pub(package) extern "staple-intrinsic" {
 
     __gc_finalize_with: <T> (RawMutPtr<T>, (RawMutPtr<T>) -> ()) -> ()
 
-    __trap: () -> Never
     __checked_mul: (USize, USize) -> USize
 
     __pointer_read: <T> RawMutPtr<T> -> T
@@ -97,10 +96,6 @@ companion MemLayout {
 
 def finalize_of = <T where Finalize T> pointer: RawMutPtr<T> => () ::
     Finalize.finalize pointer
-
-/// Aborts execution. Used by library invariants that would otherwise need a
-/// caller-location aware panic.
-pub def trap = () => Never :: __trap ()
 
 companion Gc {
     /// Allocates an uninitialized block from the managed heap.

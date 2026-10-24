@@ -14601,10 +14601,10 @@ fn intrinsic_registration_checks_names_and_loaded_modules() {
             "unknown Staple intrinsic `__unknown`",
         ),
         (
-            "std/alloc.sta",
-            "    __trap: () -> Never\n",
+            "std/process.sta",
+            "extern \"staple-intrinsic\" {\n    __trap: () -> Never\n}\n",
             "",
-            "standard library `std.alloc` does not declare intrinsic `__trap`",
+            "standard library `std.process` does not declare intrinsic `__trap`",
         ),
         (
             "std/coroutine.sta",

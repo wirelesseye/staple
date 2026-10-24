@@ -6,6 +6,10 @@ use package.shared_buffer.SharedBuffer
 use package.source.(Location, track_caller)
 use package.string.(String, string_shared_bytes)
 
+extern "staple-intrinsic" {
+    __trap: () -> Never
+}
+
 // Nested so the raw C `exit` symbol (extern bindings are always named
 // exactly after their C symbol) doesn't collide with the `exit` wrapper
 // below.
@@ -22,6 +26,13 @@ pub def exit = code: I32 => Never :: {
     let _ = terminate code
     loop { continue }
 }
+
+/// Aborts the program by executing a trap instruction.
+///
+/// This is an unrecoverable failure for internal invariants: it does not
+/// unwind, drop values, or report a location. Use `panic` for failures that
+/// should carry a message and the caller's location.
+pub def trap = () => Never :: __trap ()
 
 /// Terminates the program after printing `message` and the location of the
 /// call to `panic`. Inside a `@track_caller` function, the location is that

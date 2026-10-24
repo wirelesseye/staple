@@ -2592,7 +2592,7 @@ impl NameResolver {
                 "__gc_finalize_with",
                 IntrinsicFunction::GcFinalizeWith,
             ),
-            ("std.alloc", "__trap", IntrinsicFunction::Trap),
+            ("std.process", "__trap", IntrinsicFunction::Trap),
             ("std.alloc", "__checked_mul", IntrinsicFunction::CheckedMul),
             (
                 "std.alloc",

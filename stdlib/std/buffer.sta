@@ -1,9 +1,10 @@
 pub mod
 
-use package.alloc.(Finalize, Gc, MemLayout, trap)
+use package.alloc.(Finalize, Gc, MemLayout)
 use package.clone.Clone
 use package.ptr.(RawMutPtr, RawOpaqueMutPtr)
 use package.shared_buffer.SharedBuffer
+use package.process.trap
 
 /// The prefix of every buffer allocation. Elements follow the header at the
 /// offset `MemLayout.extend` reports, so string literals and `String`'s
