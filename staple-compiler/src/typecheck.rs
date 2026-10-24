@@ -10913,6 +10913,7 @@ impl TypeChecker {
                         variable: None,
                         resources: vec![staple_syntax::ResourceEffect {
                             syntax: resource.resource.syntax().clone(),
+                            binding: None,
                             value_type: resource.resource.clone(),
                             mutable: false,
                         }],
@@ -10934,6 +10935,7 @@ impl TypeChecker {
                         variable: None,
                         resources: vec![staple_syntax::ResourceEffect {
                             syntax: with.resource.syntax().clone(),
+                            binding: None,
                             value_type: with.resource.clone(),
                             mutable: with.mutable,
                         }],
@@ -18316,6 +18318,12 @@ impl TypeChecker {
                 && let Some(id) = module.type_parameter_for(named.syntax.id)
                 && module.is_effect_parameter(id)
             {
+                if resource.binding.is_some() {
+                    self.diagnostics.push(Diagnostic::new(
+                        resource.syntax.span.clone(),
+                        "an effect variable cannot bind a resource value",
+                    ));
+                }
                 if variable.is_some() {
                     self.diagnostics.push(Diagnostic::new(
                         named.syntax.span.clone(),

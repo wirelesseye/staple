@@ -11,6 +11,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+mod resource_bindings;
+
 use crate::{ModuleId, Program};
 use staple_syntax::{
     Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
@@ -1518,6 +1520,7 @@ fn reexport_declaration(
 
 #[derive(Default)]
 pub struct NameResolver {
+    resource_symbols: HashMap<SymbolId, Type>,
     scopes: Vec<HashMap<String, SymbolId>>,
     shadowable: Vec<HashMap<String, bool>>,
     namespaces: Vec<HashMap<String, ModuleId>>,
@@ -2132,6 +2135,49 @@ impl NameResolver {
                 definitions
             })
             .collect();
+        // Canonicalize aliases after lexical resolution, so every compiler phase
+        // sees exactly the same resource expression as an explicit `resource T`.
+        let resource_references: HashMap<_, _> = self
+            .symbols
+            .iter()
+            .filter_map(|(syntax, symbol)| {
+                self.resource_symbols
+                    .get(symbol)
+                    .map(|ty| (*syntax, ty.clone()))
+            })
+            .collect();
+        if !resource_references.is_empty() {
+            for module in program.modules_mut() {
+                resource_bindings::rewrite_items(&mut module.syntax.items, &resource_references);
+            }
+            for function in &mut self.functions {
+                resource_bindings::rewrite_expression(&mut function.body, &resource_references);
+            }
+            for trait_ in self.traits.values_mut() {
+                for member in &mut trait_.declaration.members {
+                    if let Some(default) = &mut member.default {
+                        resource_bindings::rewrite_expression(default, &resource_references);
+                    }
+                }
+            }
+            for member in self.trait_methods.values_mut() {
+                if let Some(default) = &mut member.default {
+                    resource_bindings::rewrite_expression(default, &resource_references);
+                }
+            }
+        }
+        // Aliases have no independent value storage. Their temporary lexical
+        // symbols must not make resource expressions look like ordinary places
+        // or enter the runtime symbol catalog.
+        self.symbols
+            .retain(|_, symbol| !self.resource_symbols.contains_key(symbol));
+        for symbol in self.resource_symbols.keys() {
+            self.symbol_declarations.remove(symbol);
+            self.symbol_declaration_spans.remove(symbol);
+            self.symbol_modules.remove(symbol);
+            self.symbol_owners.remove(symbol);
+            self.mutable_annotations.remove(symbol);
+        }
         let mut resolved = ResolvedModule {
             program,
             functions: self.functions,
@@ -5993,6 +6039,25 @@ impl NameResolver {
                 self.loop_depth = 0;
                 self.push_scope();
                 self.declare_pattern(&function.pattern, None, &mut HashSet::new());
+                if let Some(effects) = &function.effect_lower_bound {
+                    for resource in &effects.resources {
+                        if let Some(binding) = &resource.binding {
+                            self.declare_fresh_name(
+                                &binding.name,
+                                binding.syntax.id,
+                                binding.syntax.span.clone(),
+                                None,
+                            );
+                            if let Some(symbol) = self.symbols.get(&binding.syntax.id).copied() {
+                                self.resource_symbols
+                                    .insert(symbol, resource.value_type.clone());
+                                if resource.mutable {
+                                    self.mutable_annotations.insert(symbol);
+                                }
+                            }
+                        }
+                    }
+                }
                 // A `mut` marker in a function parameter declares a mutation
                 // effect on that arrow; it is not an ordinary mutable local
                 // binding in the resolver's sense.
@@ -7329,6 +7394,10 @@ impl NameResolver {
     }
 
     fn record_capture(&mut self, symbol: SymbolId) {
+        // Resource names denote ambient accesses, not captured local storage.
+        if self.resource_symbols.contains_key(&symbol) {
+            return;
+        }
         let Some(mut function) = self.function_stack.last().copied() else {
             return;
         };

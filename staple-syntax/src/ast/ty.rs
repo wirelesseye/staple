@@ -435,6 +435,8 @@ pub struct EffectSet {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceEffect {
     pub syntax: Syntax,
+    /// A local alias, allowed only in a function value's effect set.
+    pub binding: Option<super::NameExpression>,
     pub value_type: Type,
     pub mutable: bool,
 }
@@ -443,6 +445,9 @@ impl fmt::Display for ResourceEffect {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.mutable {
             formatter.write_str("mut ")?;
+        }
+        if let Some(binding) = &self.binding {
+            write!(formatter, "{}: ", binding.name)?;
         }
         write!(formatter, "{}", self.value_type)
     }

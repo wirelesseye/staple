@@ -19843,3 +19843,140 @@ fn unique_into_inner_library_definition_requires_ownership_and_matching_payload(
         );
     }
 }
+
+#[test]
+fn named_resources_mutate_and_follow_lexical_scope_at_runtime() {
+    use std::sync::atomic::{AtomicI32, Ordering};
+    static RESULT: AtomicI32 = AtomicI32::new(0);
+    extern "C" fn record(value: i32) {
+        RESULT.store(value, Ordering::SeqCst);
+    }
+    let module = type_check(concat!(
+        "extern \"c\" { record: I32 -> () }\n",
+        "type Counter wrap (value: I32)\n",
+        "type Current = Counter\n",
+        "def bump: mut I32 -> () = mut value => { value = value + 1 }\n",
+        "def forward = () =>{mut counter: Current} bump counter.value\n",
+        "def update = () =>{mut counter: Current} {\n",
+        "  counter.value = counter.value + 1\n",
+        "  def nested = () => counter.value\n",
+        "  let read = nested\n",
+        "  def shadow = counter: I32 => counter\n",
+        "  read () + shadow 2\n",
+        "}\n",
+        "let mut counter = Counter (value: 39)\n",
+        "with mut Counter = counter { record (update ()) }\n",
+    ));
+    let nested = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "nested")
+        .unwrap();
+    assert!(
+        nested.captures.is_empty(),
+        "resource names must not capture local storage"
+    );
+    let context = Context::create();
+    let text = CodeGenerator::new(&context)
+        .compile_module(&lower_whole(&module))
+        .unwrap();
+    let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+        text.as_bytes(),
+        "named-resources",
+    );
+    let llvm = context.create_module_from_ir(buffer).unwrap();
+    llvm.verify().unwrap();
+    let engine = llvm
+        .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+        .unwrap();
+    engine.add_global_mapping(
+        &llvm.get_function("record").unwrap(),
+        record as *const () as usize,
+    );
+    type Main = unsafe extern "C" fn() -> i32;
+    let main = unsafe { engine.get_function::<Main>("main").unwrap() };
+    assert_eq!(unsafe { main.call() }, 0);
+    assert_eq!(RESULT.load(Ordering::SeqCst), 42);
+}
+
+#[test]
+fn named_resources_preserve_borrowing_and_effect_contracts() {
+    for (source, message) in [
+        (
+            concat!(
+                "use std.cinterop.*\n",
+                "type Handle wrap CString\n",
+                "def take: move Handle -> () = move value => ()\n",
+                "def invalid = () =>{handle: Handle} take handle\n",
+            ),
+            "borrowed resource",
+        ),
+        (
+            concat!(
+                "type Counter wrap (value: I32)\n",
+                "def invalid: () ->{Counter} () = () =>{counter: Counter} { counter.value = 1 }\n",
+            ),
+            "declared effect set",
+        ),
+        (
+            "def invalid = <effect E> () =>{value: E} ()\n",
+            "effect variable cannot bind",
+        ),
+    ] {
+        let diagnostics =
+            type_check_errors(source, "named resources preserve resource restrictions");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains(message)),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn named_resources_are_local_and_reject_duplicate_bindings() {
+    for source in [
+        "type Logger wrap I32\ndef invalid = logger: I32 =>{logger: Logger} logger\n",
+        "type Logger wrap I32\ndef invalid = () =>{logger: Logger, logger: Logger} ()\n",
+    ] {
+        let diagnostics = NameResolver::new()
+            .resolve(&parse(source).unwrap())
+            .expect_err_diagnostics("duplicate resource names are rejected");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("duplicate definition")),
+            "{diagnostics:?}"
+        );
+    }
+    let diagnostics = NameResolver::new()
+        .resolve(
+            &parse(concat!(
+                "type Logger wrap I32\n",
+                "def read = () =>{logger: Logger} logger\n",
+                "logger\n",
+            ))
+            .unwrap(),
+        )
+        .expect_err_diagnostics("resource names do not escape the body");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("logger"))
+    );
+}
+
+#[test]
+fn named_resources_work_in_macro_generated_functions() {
+    let module = type_check(concat!(
+        "type Counter wrap (value: I32)\n",
+        "macro reader = () => quote { () =>{counter: Counter} counter.value }\n",
+        "let read = reader ()\n",
+        "with Counter = Counter (value: 42) { read () }\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .unwrap();
+}

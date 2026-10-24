@@ -9237,6 +9237,9 @@ impl MacroExpander {
                     self.freshen_syntax(&mut effects.syntax, module, mark);
                     for resource in &mut effects.resources {
                         self.freshen_syntax(&mut resource.syntax, module, mark);
+                        if let Some(binding) = &mut resource.binding {
+                            self.freshen_syntax(&mut binding.syntax, module, mark);
+                        }
                         freshen_type(self, &mut resource.value_type, module, mark);
                     }
                 }
@@ -15120,6 +15123,15 @@ fn alpha_rename_expression(
         Expression::Function(function) => {
             let mut scope = HashMap::new();
             alpha_rename_pattern(&mut function.pattern, mark, &mut scope);
+            if let Some(effects) = &mut function.effect_lower_bound {
+                for resource in &mut effects.resources {
+                    if let Some(binding) = &mut resource.binding {
+                        let renamed = hygienic_name(&binding.name, mark);
+                        scope.insert(binding.name.clone(), renamed.clone());
+                        binding.name = renamed;
+                    }
+                }
+            }
             scopes.push(scope);
             alpha_rename_expression(&mut function.body, mark, scopes);
             scopes.pop();

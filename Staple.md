@@ -2524,9 +2524,7 @@ type Logger wrap (
 `resource` and `with` are reserved keywords and cannot be used as identifiers.
 
 Transparent aliases use the identity of their underlying nominal type. A
-structural type, ordinary opaque type, or unspecialized generic type is not
-eligible. The compiler-represented opaque `std.io.IO` and
-`std.core.Reactive` are exceptions.
+structural type, unsized type, or unspecialized generic type is not eligible.
 
 Resource ownership follows ordinary parameter ownership. An immutable `Copy`
 resource is copied, while an immutable non-`Copy` resource is shared-borrowed
@@ -2539,10 +2537,24 @@ def increment = () =>{mut Counter} () :: {
 }
 ```
 
+A function value's resource set may give a resource a local name:
+
+```staple
+def increment = () =>{mut counter: Counter} () :: {
+    counter.value = counter.value + 1
+}
+```
+
+Within the body, `counter` is an alias for `resource Counter`, with the same
+borrowing and mutation rules. Names follow lexical scope and may be shadowed
+inside nested scopes. They do not change the function's type or resource
+identity; function type signatures list only the resource types. Unnamed and
+named entries may appear in the same set.
+
 `mut R` subsumes `R` when checking a function body, and a set containing both
 canonicalizes to `mut R`. Mutation is performed directly through `resource R`
-or by forwarding that expression to a mutable parameter. Binding a local
-mutable-borrow alias from a resource is not supported.
+or its resource name, or by forwarding either expression to a mutable
+parameter. Binding a mutable-borrow alias with `let` is not supported.
 
 Function arrows list their effects in braces. Effect sets are
 unordered and duplicate-free, and each arrow in a curried type has its own set:
