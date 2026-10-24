@@ -123,7 +123,7 @@ pub(package) def formatter_into_builder = move formatter: Formatter => StringBui
     builder
 }
 
-def formatter_write_debug = (mut formatter: Formatter, value: String) => () :: {
+pub(package) def formatter_write_debug = (mut formatter: Formatter, value: String) => () :: {
     formatter |> write "\""
     for byte in (String.bytes value) {
         when {
@@ -179,8 +179,4 @@ companion Formatter {
 
 impl<T where Display T> ToString T {
     to_string = value => Formatter.display value
-}
-
-impl Debug String {
-    fmt = (value, mut formatter) => formatter_write_debug (formatter, value)
 }

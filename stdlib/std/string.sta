@@ -10,7 +10,7 @@ use package.range.Range
 use package.process.panic
 use package.convert.(ConversionError, TryConvert)
 use package.result.(Ok, Result)
-use package.fmt.(Display, Formatter)
+use package.fmt.(Display, Debug, Formatter, formatter_write_debug)
 
 /// The bytes are not valid UTF-8.
 pub type InvalidUtf8
@@ -175,6 +175,10 @@ impl Default String { default = () => "" }
 
 impl Display String {
     fmt = (value, mut formatter) => Formatter.write formatter value
+}
+
+impl Debug String {
+    fmt = (value, mut formatter) => formatter_write_debug (formatter, value)
 }
 
 impl FromIterator String Char {
