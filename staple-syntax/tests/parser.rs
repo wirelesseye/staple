@@ -4470,3 +4470,71 @@ fn parses_named_function_resources() {
         assert!(parse(source).is_err(), "{source}");
     }
 }
+
+#[test]
+fn parses_resource_dependencies_before_every_type_body_form() {
+    let source = concat!(
+        "type Logger wrap ()\n",
+        "type Plain with {Logger}\n",
+        "type Generic<T where Clone T> with {Logger, mut T} = T\n",
+        "type Handler{E} with {Logger} = () ->{E} ()\n",
+        "type Alias with {Logger} = Logger\n",
+        "type Wrapped with {Logger} wrap ()\n",
+        "type Derived with {Logger} from I32\n",
+        "type Opaque with {Logger} opaque\n",
+        "type Empty with {} wrap ()\n",
+    );
+    let module = parse(source).expect("resource dependency clauses should parse");
+    assert_eq!(module.syntax.text(), source);
+    let declarations = module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::TypeDeclaration(declaration) => Some(declaration),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(declarations.len(), 9);
+    for declaration in declarations.iter().skip(1) {
+        assert!(
+            declaration.resource_dependencies.is_some(),
+            "{} should keep its clause",
+            declaration.name
+        );
+    }
+    let plain = &declarations[1].resource_dependencies.as_ref().unwrap();
+    assert_eq!(plain.resources.len(), 1);
+    assert!(!plain.resources[0].mutable);
+    assert!(matches!(&plain.resources[0].value_type, Type::Named(named) if named.name == "Logger"));
+    let generic = &declarations[2].resource_dependencies.as_ref().unwrap();
+    assert_eq!(generic.resources.len(), 2);
+    assert!(generic.resources[1].mutable);
+    assert!(matches!(&generic.resources[1].value_type, Type::Named(named) if named.name == "T"));
+    assert_eq!(declarations[3].kind(), TypeDeclarationKind::Alias);
+    assert_eq!(declarations[4].kind(), TypeDeclarationKind::Alias);
+    assert_eq!(declarations[5].kind(), TypeDeclarationKind::Wrapper);
+    assert_eq!(declarations[6].kind(), TypeDeclarationKind::From);
+    assert_eq!(declarations[7].kind(), TypeDeclarationKind::Opaque);
+    assert_eq!(declarations[8].kind(), TypeDeclarationKind::Wrapper);
+    assert!(
+        declarations[8]
+            .resource_dependencies
+            .as_ref()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        declarations[3].type_parameters.as_slice(),
+        [staple_syntax::TypeParameterPattern::Effect(binding)] if binding.name == "E"
+    ));
+}
+
+#[test]
+fn rejects_doc_comments_on_extern_blocks() {
+    for source in [
+        "/// docs\npub extern \"c\" {}\n",
+        "/// docs\npub(package) extern \"c\" {}\n",
+    ] {
+        assert!(parse(source).is_err(), "{source}");
+    }
+}

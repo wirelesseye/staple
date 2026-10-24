@@ -1,6 +1,6 @@
 use super::{
-    DefaultTypeBound, EqualityBound, Expression, NamedType, SizedRelaxation, SubtypeBound, Syntax,
-    TraitBound, Type, TypeParameterPattern,
+    DefaultTypeBound, EffectSet, EqualityBound, Expression, NamedType, SizedRelaxation,
+    SubtypeBound, Syntax, TraitBound, Type, TypeParameterPattern,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,6 +347,10 @@ pub struct TypeDeclaration {
     pub equality_bounds: Vec<EqualityBound>,
     pub sized_relaxations: Vec<SizedRelaxation>,
     pub default_bounds: Vec<DefaultTypeBound>,
+    /// The `with {…}` clause naming resources this type's resource
+    /// requirement implies. `Some` even for an empty clause, so rendering
+    /// can preserve that it was written.
+    pub resource_dependencies: Option<EffectSet>,
 }
 
 impl TypeDeclaration {

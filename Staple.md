@@ -2526,6 +2526,81 @@ type Logger wrap (
 Transparent aliases use the identity of their underlying nominal type. A
 structural type, unsized type, or unspecialized generic type is not eligible.
 
+#### Resource dependencies
+
+A type declaration may require other resources with a `with` clause. The
+clause follows the declaration's generics and `where` constraints and comes
+before the body marker (`=`, `wrap`, `from`, or `opaque`), or before the end of
+a bodyless singleton declaration:
+
+```staple
+type Logger wrap (
+    write: String -> (),
+)
+
+type Database with {Logger} wrap (
+    path: String,
+)
+
+def log = (message: String) =>{Logger} () :: (resource Logger).write message
+
+def query = (sql: String) =>{Database} Rows :: {
+    log "query: $sql"   // allowed: `{Database}` implies `{Logger}`
+    ...
+}
+
+with Logger = stdout_logger () {
+    with Database = open_database "app.db" {
+        query "select 1"
+    }
+}
+```
+
+Braces are required even for one entry. `with {}` is accepted and means
+nothing. Entries may be marked `mut`. The clause adds requirements to effect
+sets; it does not bundle values. An effect set that mentions `Database` stands
+for `{Database, Logger}`. A function with that set receives one hidden
+parameter for each resource, and each is resolved from the innermost provider
+at the call site, exactly as if both had been written out.
+
+Every checked effect set is kept closed under dependencies, transitively.
+Closing happens before the canonical sort and merge, so `->{Database}` and
+`->{Database, Logger}` are the same type with the same hidden-parameter order.
+Mutability merges as usual: `{Database, mut Logger}` stays `mut Logger`, while
+`{Database}` gives `Logger` the mode declared by the dependency. The modes are
+independent: `{mut Database}` does not make `Logger` mutable, and `{Database}`
+does not make `Database` mutable. Effect-variable inference still chooses the
+minimal substitution, because every set it compares is already closed. Adding
+or removing a dependency changes the type of every function whose set mentions
+the type; for a public type this is a breaking change.
+
+Each entry must name a type that is valid as a resource on its own: concrete
+after substitution, sized, and nominal. Entries may name the declaration's type
+parameters, as in `type Cache<K> with {Store<K>}`; they are substituted when
+`Cache<…>` is used in an effect set. State effects, effect variables, named
+entries such as `{log: Logger}`, the declaring type itself, and any dependency
+cycle are rejected. Transparent aliases take their identity and dependencies
+from their underlying type, so they cannot declare a clause of their own. Each
+dependency must be at least as visible as the declaring type; a `pub` type
+cannot depend on a private resource that importers cannot name or provide.
+
+A named resource entry names only the type it spells. In `{db: Database}` the
+implied `Logger` is still reached as `resource Logger` inside the body. To name
+it as well, list it explicitly: `{db: Database, log: Logger}` has the same set,
+now with two names.
+
+Providers are not paired with dependencies. `with Database = …` does not
+capture a `Logger`; an inner `with Logger = quiet_logger () { … }` changes the
+logger that database code observes in that block. Nothing ties a database to
+"its" logger. A provider site is not checked for the dependencies of the
+provided type: the body's requirements include `Logger` once expanded and pass
+up to the enclosing function, so an error comes only from an explicit enclosing
+contract. Provider order matters only for initializers, which run in the outer
+scope; if `open_database` is itself `->{Logger}`, then `Logger` must be the
+outer provider. A `Database` passed, stored, or returned as an ordinary value
+carries no `Logger`; the clause matters only where the type appears in an
+effect set.
+
 Resource ownership follows ordinary parameter ownership. An immutable `Copy`
 resource is copied, while an immutable non-`Copy` resource is shared-borrowed
 and cannot be moved, dropped, or returned whole. A resource entry may be marked
@@ -3269,6 +3344,11 @@ Prerequisite cycles are rejected. A prerequisite is part of the bound's
 dictionary when the bound is passed at run time (see [Traits and bounded
 generic functions](#traits-and-bounded-generic-functions)): it adds nothing to
 code that is monomorphized.
+
+[Resource dependencies](#resource-dependencies) play a similar role by making
+another requirement available, but they are not coherent the way trait
+implementations are. They are re-resolved from the innermost provider at every
+call, so shadowing a provider changes what the dependency observes.
 
 A member may provide a default function body after `=`. An implementation may
 omit a defaulted member or replace it with an explicit member of the same name.

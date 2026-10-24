@@ -18,7 +18,7 @@ pub type IoError
 /// A line could not be read or was not valid UTF-8.
 pub type ReadLineError = IoError | InvalidUtf8
 
-/// Internal bridge to the target platform's C standard streams.
+// Internal bridge to the target platform's C standard streams.
 pub(package) extern "c" {
     /// Borrows standard input (0), output (1), or error (2); never close it.
     __staple_io_stream: I32 -> RawOpaqueMutPtr

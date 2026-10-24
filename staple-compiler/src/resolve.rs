@@ -1979,6 +1979,7 @@ impl NameResolver {
         }
 
         self.validate_trait_prerequisite_cycles();
+        self.validate_resource_dependency_cycles();
         self.validate_companion_targets(&program);
         self.validate_blanket_companions(&program);
 
@@ -4783,6 +4784,36 @@ impl NameResolver {
             self.resolve_type(&bound.left);
             self.resolve_type(&bound.right);
         }
+        if let Some(dependencies) = &declaration.resource_dependencies {
+            if declaration.kind() == staple_syntax::TypeDeclarationKind::Alias {
+                self.diagnostics.push(Diagnostic::new(
+                    dependencies.syntax.span.clone(),
+                    "a transparent alias cannot declare resource dependencies; declare them on the target type",
+                ));
+            }
+            for resource in &dependencies.resources {
+                if let Type::Named(named) = &resource.value_type
+                    && named.namespace.is_none()
+                    && self
+                        .lookup_type_parameter(&named.name)
+                        .is_some_and(|id| self.effect_parameters.contains(&id))
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        resource.syntax.span.clone(),
+                        "an effect variable cannot be a resource dependency",
+                    ));
+                    continue;
+                }
+                self.resolve_type(&resource.value_type);
+                if declaration.visibility != Visibility::Private {
+                    self.validate_type_visibility(
+                        &resource.value_type,
+                        declaration.visibility,
+                        "resource dependency",
+                    );
+                }
+            }
+        }
         let mut defaulted_parameters = HashSet::new();
         for bound in &declaration.default_bounds {
             if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
@@ -5761,6 +5792,90 @@ impl NameResolver {
         for trait_id in traits {
             if states.get(&trait_id).copied().unwrap_or_default() == 0 {
                 visit(trait_id, &adjacency, &mut states, &mut self.diagnostics);
+            }
+        }
+    }
+
+    /// The nominal type at the head of a resource dependency spelling, if it
+    /// names one. Generic dependencies such as `Store<K>` resolve to the
+    /// applied constructor's declaration.
+    fn resource_dependency_head(&self, ty: &Type) -> Option<TypeId> {
+        match ty {
+            Type::Named(named) => self.named_types.get(&named.syntax.id).copied(),
+            Type::Application(application) => self.resource_dependency_head(&application.callee),
+            Type::EffectApplication(application) => {
+                self.resource_dependency_head(&application.callee)
+            }
+            _ => None,
+        }
+    }
+
+    /// Follows transparent aliases so a cycle through an alias is caught on
+    /// the declaration that owns the dependencies.
+    fn resource_dependency_target(&self, ty: &Type) -> Option<TypeId> {
+        let mut target = self.resource_dependency_head(ty)?;
+        loop {
+            let declaration = self.type_declarations.get(&target)?;
+            if declaration.kind() != staple_syntax::TypeDeclarationKind::Alias {
+                return Some(target);
+            }
+            let Some(underlying) = declaration.underlying() else {
+                return Some(target);
+            };
+            let Some(next) = self.resource_dependency_head(underlying) else {
+                return Some(target);
+            };
+            if next == target {
+                return Some(target);
+            }
+            target = next;
+        }
+    }
+
+    fn validate_resource_dependency_cycles(&mut self) {
+        let adjacency = self
+            .type_declarations
+            .iter()
+            .filter_map(|(type_id, declaration)| {
+                let dependencies = declaration.resource_dependencies.as_ref()?;
+                let targets = dependencies
+                    .resources
+                    .iter()
+                    .filter_map(|resource| {
+                        Some((
+                            self.resource_dependency_target(&resource.value_type)?,
+                            resource.syntax.span.clone(),
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                Some((*type_id, targets))
+            })
+            .collect::<HashMap<_, _>>();
+        let mut types = adjacency.keys().copied().collect::<Vec<_>>();
+        types.sort_by_key(|type_id| type_id.0);
+        let mut states = HashMap::<TypeId, u8>::new();
+
+        fn visit(
+            type_id: TypeId,
+            adjacency: &HashMap<TypeId, Vec<(TypeId, Span)>>,
+            states: &mut HashMap<TypeId, u8>,
+            diagnostics: &mut Vec<Diagnostic>,
+        ) {
+            states.insert(type_id, 1);
+            for (dependency, span) in adjacency.get(&type_id).into_iter().flatten() {
+                match states.get(dependency).copied().unwrap_or_default() {
+                    0 => visit(*dependency, adjacency, states, diagnostics),
+                    1 => diagnostics
+                        .push(Diagnostic::new(span.clone(), "cyclic resource dependency")),
+                    _ => {}
+                }
+            }
+            states.insert(type_id, 2);
+        }
+
+        for type_id in types {
+            if states.get(&type_id).copied().unwrap_or_default() == 0 {
+                visit(type_id, &adjacency, &mut states, &mut self.diagnostics);
             }
         }
     }
@@ -7917,7 +8032,7 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         "Angled" => Some("<Contents> Contents -> Angled<Contents>"),
         "Braced" => Some("<Contents> Contents -> Braced<Contents>"),
         "TypeDeclarationItem" => Some(
-            "(kind: TypeDeclarationKind, name: Ident<String>, name_spelling: String, declared_type: Type, type_parameters: Sequence<Ident<String>>, underlying: Option<Type>) -> TypeDeclarationItem",
+            "(kind: TypeDeclarationKind, name: Ident<String>, name_spelling: String, declared_type: Type, type_parameters: Sequence<Ident<String>>, underlying: Option<Type>, resource_dependencies: Sequence<Type>) -> TypeDeclarationItem",
         ),
         "AliasBody" => Some("Type -> AliasBody<Type>"),
         "WrapperBody" => Some("(Visibility, Type) -> WrapperBody<Visibility, Type>"),

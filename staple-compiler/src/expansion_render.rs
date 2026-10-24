@@ -239,6 +239,10 @@ fn render_type_declaration(declaration: &staple_syntax::TypeDeclaration) -> Stri
         }
         out.push('>');
     }
+    if let Some(dependencies) = &declaration.resource_dependencies {
+        out.push_str(" with ");
+        out.push_str(&dependencies.to_string());
+    }
     match declaration.kind() {
         staple_syntax::TypeDeclarationKind::Alias => {
             if let Some(underlying) = declaration.underlying() {

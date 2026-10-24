@@ -11755,9 +11755,17 @@ fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<Co
             CompileType::Meta(MetaType::Item),
         ])),
         (CompileType::Meta(MetaType::TypeDeclarationItem), "TypeDeclarationItem")
-        | (CompileType::Meta(MetaType::Item), "TypeDeclarationItem") => Some(CompileType::Product(
-            vec![CompileType::Named("TypeDeclarationKind".to_owned())],
-        )),
+        | (CompileType::Meta(MetaType::Item), "TypeDeclarationItem") => {
+            Some(CompileType::Product(vec![
+                CompileType::Named("TypeDeclarationKind".to_owned()),
+                CompileType::Meta(MetaType::Ident(None)),
+                CompileType::String,
+                CompileType::Meta(MetaType::Type),
+                CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Ident(None)))),
+                CompileType::Meta(MetaType::Optional(Box::new(MetaType::Type))),
+                CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Type))),
+            ]))
+        }
         (CompileType::Meta(MetaType::TypeBody), "AliasBody") => {
             Some(CompileType::Meta(MetaType::Type))
         }
@@ -12166,6 +12174,7 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
                     CompileType::Meta(MetaType::Type),
                     CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Ident(None)))),
                     CompileType::Meta(MetaType::Optional(Box::new(MetaType::Type))),
+                    CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Type))),
                 ],
             ),
             ("UnstructuredItem".to_owned(), Vec::new()),
@@ -12186,6 +12195,7 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
                 CompileType::Meta(MetaType::Type),
                 CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Ident(None)))),
                 CompileType::Meta(MetaType::Optional(Box::new(MetaType::Type))),
+                CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Type))),
             ],
         )],
         CompileType::Meta(MetaType::TypeBody) => vec![
@@ -13488,6 +13498,17 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
             Box::new(Value::Product(Vec::new().into(), false)),
         ),
     };
+    let resource_dependencies = declaration
+        .resource_dependencies
+        .as_ref()
+        .map(|dependencies| {
+            dependencies
+                .resources
+                .iter()
+                .map(|resource| Value::Syntax(SyntaxValue::Type(resource.value_type.clone())))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     Value::Product(
         vec![
             (
@@ -13511,6 +13532,10 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
                 Value::Sequence(parameters.into()),
             ),
             (Some("underlying".to_owned()), underlying),
+            (
+                Some("resource_dependencies".to_owned()),
+                Value::Sequence(resource_dependencies.into()),
+            ),
         ]
         .into(),
         false,

@@ -1933,6 +1933,15 @@ impl Grammar {
             equality_bounds,
             sized_relaxations,
         } = clause;
+        // The clause stays on the declaration's line: a following `with`
+        // expression is a separate item, not a dependency clause.
+        let mut resource_dependencies =
+            if self.at(TokenKind::With) && !self.has_newline_before_next_token() {
+                self.bump_token();
+                Some(self.parse_effect_set(true)?)
+            } else {
+                None
+            };
         let has_body = !self.has_newline_before_next_token()
             && (self.at(TokenKind::Equals)
                 || self.peek_text("opaque")
@@ -1955,7 +1964,7 @@ impl Grammar {
             )
         {
             return Err(self.error(
-                "expected `<` for type parameters, or `=`, `wrap`, `from`, or `opaque` for a type body",
+                "expected `<` for type parameters, `with` for resource dependencies, or `=`, `wrap`, `from`, or `opaque` for a type body",
             ));
         }
         let body = if has_body {
@@ -1963,6 +1972,19 @@ impl Grammar {
         } else {
             None
         };
+        // An alias has no nominal identity of its own, so a dependency clause
+        // on it is rejected. Accept it after the underlying type as well, so
+        // the diagnostic names the alias rather than leaving `with` dangling.
+        if resource_dependencies.is_none()
+            && body
+                .as_ref()
+                .is_some_and(|body| body.kind == TypeBodyKind::Alias)
+            && self.at(TokenKind::With)
+            && !self.has_newline_before_next_token()
+        {
+            self.bump_token();
+            resource_dependencies = Some(self.parse_effect_set(true)?);
+        }
         Ok(TypeDeclaration {
             syntax: self.syntax(start),
             name_syntax,
@@ -1978,6 +2000,7 @@ impl Grammar {
             equality_bounds,
             sized_relaxations,
             default_bounds,
+            resource_dependencies,
         })
     }
 
