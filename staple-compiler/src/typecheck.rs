@@ -142,6 +142,18 @@ fn checked_builtin_type(ty: &CheckedType) -> Option<BuiltinType> {
     })
 }
 
+/// Where a declaration-site span points, for diagnostics reported elsewhere.
+fn span_location(span: &Span) -> String {
+    match span {
+        Span::User {
+            location: Some(location),
+            ..
+        } => format!("line {}, column {}", location.line, location.column),
+        Span::User { range, .. } => format!("byte {}", range.start),
+        Span::Compiler => "its declaration".to_owned(),
+    }
+}
+
 fn valid_resource_type(value_type: &CheckedType) -> bool {
     matches!(
         value_type,
@@ -3902,10 +3914,13 @@ impl TypeChecker {
     /// Closes an effect set under resource dependencies: every resource brings
     /// in its declaration's `with {…}` entries, transitively. The result is
     /// canonical, so equal closed sets have the same hidden-parameter order.
+    /// `origin` is the source that spells the set, where a dependency that is
+    /// invalid only after substitution is reported.
     fn close_effect_set(
         &mut self,
         module: &ResolvedModule,
         effects: CheckedEffectSet,
+        origin: &Span,
     ) -> CheckedEffectSet {
         let mut resources = effects.resources;
         let mut expanded = HashSet::new();
@@ -3923,10 +3938,13 @@ impl TypeChecker {
                     || !dependency.value_type.is_sized()
                 {
                     self.diagnostics.push(Diagnostic::new(
-                        span,
+                        origin.clone(),
                         format!(
-                            "resource dependency type `{}` must be a concrete, sized nominal type",
-                            dependency.value_type
+                            "resource dependency type `{}` of `{}` must be a concrete, sized \
+                             nominal type (declared at {})",
+                            dependency.value_type,
+                            resource.value_type,
+                            span_location(&span)
                         ),
                     ));
                     continue;
@@ -3964,7 +3982,7 @@ impl TypeChecker {
         source: &staple_syntax::EffectSet,
     ) -> CheckedEffectSet {
         let effects = self.resolve_effect_set(module, source);
-        self.close_effect_set(module, effects)
+        self.close_effect_set(module, effects, &source.syntax.span)
     }
 
     /// Finds a declared dependency path from `source` to `target`, returning
@@ -4208,14 +4226,7 @@ impl TypeChecker {
             if let Some((provider, span)) =
                 self.with_provider_depending_on(module, body, &missing.value_type, &mut visited)
             {
-                let location = match &span {
-                    Span::User {
-                        location: Some(location),
-                        ..
-                    } => format!("line {}, column {}", location.line, location.column),
-                    Span::User { range, .. } => format!("byte {}", range.start),
-                    Span::Compiler => "its declaration".to_owned(),
-                };
+                let location = span_location(&span);
                 return Some(format!(
                     "; `{}` is required because `{provider}` depends on it (declared at {location})",
                     missing.value_type
@@ -8119,7 +8130,7 @@ impl TypeChecker {
                     .cloned()
                     .map(|resource| CheckedEffectSet::canonical(vec![resource]))
                     .unwrap_or_default();
-                self.close_effect_set(module, resources)
+                self.close_effect_set(module, resources, &value.syntax.span)
             }
             Expression::With(value) => {
                 let provider = self.expression_effects_now(module, &value.value, target_parameters);

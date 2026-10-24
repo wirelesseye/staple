@@ -7,7 +7,7 @@ use inkwell::context::Context;
 use staple_compiler::{
     CodeGenerator, LoweredModule, Lowerer, NameResolver, ProgramLoader, TypeChecker, TypedModule,
 };
-use staple_syntax::Diagnostic;
+use staple_syntax::{Diagnostic, Span};
 use std::{
     path::Path,
     process::Command,
@@ -464,6 +464,35 @@ fn rejects_non_resource_eligible_entries() {
             "{source}: {diagnostics:?}"
         );
     }
+}
+
+#[test]
+fn substituted_dependency_errors_point_at_each_use() {
+    let source = concat!(
+        "type Cache<K> with {K} wrap ()\n",
+        "def a: () ->{Cache<(I32, I32)>} () = () => ()\n",
+        "def b = () => resource Cache<(I32, I32)>\n",
+    );
+    let diagnostics = check(source).expect_err("`(I32, I32)` is not a resource type");
+    let mut lines = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.message.contains("of `Cache<"))
+        .map(|diagnostic| match &diagnostic.span {
+            Span::User {
+                location: Some(location),
+                ..
+            } => location.line,
+            other => panic!("expected a user span, found {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    lines.sort();
+    assert_eq!(lines, [2, 3], "{diagnostics:?}");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("declared at line 1, column 21")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]
