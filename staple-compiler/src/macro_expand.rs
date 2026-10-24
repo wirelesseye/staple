@@ -2066,7 +2066,7 @@ impl MacroExpander {
                             {
                                 MacroKind::ParseQuote
                             } else if Some(source_module.id) == cinterop
-                                && declaration.name == "c_string"
+                                && declaration.name == "__c_string_literal"
                             {
                                 MacroKind::CString
                             } else if source_module

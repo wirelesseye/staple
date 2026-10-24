@@ -1181,13 +1181,7 @@ impl<'a> LoweredWalker<'a> {
                         )?;
                     }
                 }
-                IntrinsicFunction::StringFromCString => {
-                    self.visitor.drop_site(
-                        ArtifactUseSite::CStringConversion(id),
-                        &CheckedType::CString,
-                        &origin,
-                    )?;
-                }
+
                 IntrinsicFunction::ResolverComplete => {
                     if let Some(argument) = arguments.last() {
                         self.visitor.drop_site(
@@ -1816,7 +1810,6 @@ fn drop_glue_body(
         });
     }
     match value_type {
-        CheckedType::CString => Ok(DropGlueBody::CStringFree),
         CheckedType::Product(product) => {
             // The emitter iterates and drops fields in reverse element order,
             // skipping every field that does not need drop.
@@ -2173,7 +2166,7 @@ mod tests {
         let resolver = parameter_type(&program, "expose_resolver", 0);
         let token = parameter_type(&program, "expose_token", 0);
 
-        let mut types = vec![(CheckedType::CString, 0)];
+        let mut types = vec![(program.test_cstring_type(), 0)];
         for (site, value_type) in [
             resource.clone(),
             handle.clone(),
@@ -2206,11 +2199,14 @@ mod tests {
         let diagnostics = program.validate_artifact_closure(&hooks);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
 
-        // CString: the `free` branch.
-        assert_eq!(
-            drop_glue_plan(&program, &CheckedType::CString).body,
-            DropGlueBody::CStringFree
-        );
+        // CString uses the library's ordinary Drop implementation.
+        assert!(matches!(
+            drop_glue_plan(&program, &program.test_cstring_type()).body,
+            DropGlueBody::UserDrop {
+                representation: None,
+                ..
+            }
+        ));
 
         // User `Drop` on a non-represented wrapper: no representation glue.
         let plan = drop_glue_plan(&program, &resource);
@@ -2251,7 +2247,7 @@ mod tests {
         assert_eq!(
             program.specializations.artifact(representation_ordinal),
             Some(&ArtifactRequestKey::DropGlue(
-                CanonicalType::concrete(&CheckedType::CString, &Origin::compiler())
+                CanonicalType::concrete(&program.test_cstring_type(), &Origin::compiler())
                     .expect("concrete")
             ))
         );
@@ -2266,7 +2262,7 @@ mod tests {
                 .specializations
                 .artifact(drop_glue_ordinal(&program, representation)),
             Some(&ArtifactRequestKey::DropGlue(
-                CanonicalType::concrete(&CheckedType::CString, &Origin::compiler())
+                CanonicalType::concrete(&program.test_cstring_type(), &Origin::compiler())
                     .expect("concrete")
             ))
         );
@@ -2278,7 +2274,7 @@ mod tests {
         };
         assert_eq!(fields.len(), 1, "I32 fields are skipped");
         assert_eq!(fields[0].index, 1, "the CString field is index 1");
-        assert_eq!(fields[0].value_type, CheckedType::CString);
+        assert_eq!(fields[0].value_type, program.test_cstring_type());
 
         // Nested products: the outer field glue is the inner product's glue.
         let plan = drop_glue_plan(&program, &nested);
@@ -2310,7 +2306,7 @@ mod tests {
         };
         assert_eq!(alternatives.len(), 1, "I32 alternatives are skipped");
         assert_eq!(alternatives[0].index, 0);
-        assert_eq!(alternatives[0].value_type, CheckedType::CString);
+        assert_eq!(alternatives[0].value_type, program.test_cstring_type());
 
         // A recursive nominal type through a reference: the reference field is
         // skipped, so the glue body terminates on the CString.
@@ -2335,7 +2331,7 @@ mod tests {
             );
         };
         assert_eq!(alternatives.len(), 1);
-        assert_eq!(alternatives[0].value_type, CheckedType::CString);
+        assert_eq!(alternatives[0].value_type, program.test_cstring_type());
 
         // Runtime opaques: the dedicated cleanup routes.
         assert_eq!(
@@ -2674,42 +2670,43 @@ mod tests {
             id: nominal_type_id(&program, "Owned"),
             name: "Owned".to_string(),
             arguments: Vec::new(),
-            representation: Box::new(CheckedType::CString),
+            representation: Box::new(program.test_cstring_type()),
             introduction: crate::typecheck::WrapperIntroduction::Explicit,
         };
         let cell_capture = CheckedType::Wrapper {
             id: nominal_type_id(&program, "CellValue"),
             name: "CellValue".to_string(),
             arguments: Vec::new(),
-            representation: Box::new(CheckedType::CString),
+            representation: Box::new(program.test_cstring_type()),
             introduction: crate::typecheck::WrapperIntroduction::Explicit,
         };
         let borrowed_capture = CheckedType::Wrapper {
             id: nominal_type_id(&program, "BorrowedValue"),
             name: "BorrowedValue".to_string(),
             arguments: Vec::new(),
-            representation: Box::new(CheckedType::CString),
+            representation: Box::new(program.test_cstring_type()),
             introduction: crate::typecheck::WrapperIntroduction::Explicit,
         };
         let derived_capture = CheckedType::Wrapper {
             id: nominal_type_id(&program, "DerivedValue"),
             name: "DerivedValue".to_string(),
             arguments: Vec::new(),
-            representation: Box::new(CheckedType::CString),
+            representation: Box::new(program.test_cstring_type()),
             introduction: crate::typecheck::WrapperIntroduction::Explicit,
         };
         let wrapped_capture = CheckedType::Wrapper {
             id: nominal_type_id(&program, "Wrapped"),
             name: "Wrapped".to_string(),
             arguments: Vec::new(),
-            representation: Box::new(CheckedType::CString),
+            representation: Box::new(program.test_cstring_type()),
             introduction: crate::typecheck::WrapperIntroduction::Explicit,
         };
 
         let owned_closure = closure_instance_capturing(&program, &owned_capture);
         let mutable_closure = closure_instance_capturing(&program, &cell_capture);
         let borrowed_closure = closure_instance_capturing(&program, &borrowed_capture);
-        let generic_string_closure = closure_instance_capturing(&program, &CheckedType::CString);
+        let generic_string_closure =
+            closure_instance_capturing(&program, &program.test_cstring_type());
         let generic_wrapped_closure = closure_instance_capturing(&program, &wrapped_capture);
         let derived_closure =
             closure_instance_capturing_filtered(&program, &derived_capture, |capture| {
@@ -2743,10 +2740,11 @@ mod tests {
         let requests = vec![
             finalizer_request(
                 GcFinalizerKey::Payload(
-                    CanonicalType::concrete(&CheckedType::CString, &origin).expect("concrete"),
+                    CanonicalType::concrete(&program.test_cstring_type(), &origin)
+                        .expect("concrete"),
                 ),
                 GcFinalizerPlan::Payload {
-                    value_type: CheckedType::CString,
+                    value_type: program.test_cstring_type(),
                     glue: None,
                 },
                 &origin,
@@ -2806,10 +2804,10 @@ mod tests {
             ),
             request_for(
                 generic_string_closure,
-                &CheckedType::CString,
+                &program.test_cstring_type(),
                 GcFinalizerPlan::ClosureEnvironment {
                     closure: generic_string_closure,
-                    captures: vec![CheckedType::CString],
+                    captures: vec![program.test_cstring_type()],
                     drops: None,
                 },
                 6,
@@ -2844,8 +2842,8 @@ mod tests {
         // Payload/Cell/Buffer: every expanded finalizer has bound glue.
         for (key, expected) in [
             (
-                GcFinalizerKey::Payload(canonical(&CheckedType::CString)),
-                CheckedType::CString,
+                GcFinalizerKey::Payload(canonical(&program.test_cstring_type())),
+                program.test_cstring_type(),
             ),
             (
                 GcFinalizerKey::Cell(canonical(&owned_capture)),
@@ -2954,7 +2952,7 @@ mod tests {
         // Two generic instantiations produce two plans that each drop their own
         // capture.
         for (closure, capture) in [
-            (generic_string_closure, CheckedType::CString),
+            (generic_string_closure, program.test_cstring_type()),
             (generic_wrapped_closure, wrapped_capture.clone()),
         ] {
             let key = GcFinalizerKey::ClosureEnvironment {
@@ -3226,19 +3224,15 @@ mod tests {
             has(|site| matches!(site, ArtifactUseSite::PointerDropInPlace(_))),
             "a library finalizer drops its payload through the pointer primitive"
         );
-        assert!(
-            has(|site| matches!(site, ArtifactUseSite::CStringConversion(_))),
-            "a C-string conversion drop site"
-        );
 
         // A moved parameter is owned; a wildcard parameter registers nothing.
         assert_eq!(
             instance_bindings(program, "owned_param"),
-            vec![(OwnedStorage::Value, CheckedType::CString)]
+            vec![(OwnedStorage::Value, program.test_cstring_type())]
         );
         assert_eq!(
             instance_bindings(program, "ignore"),
-            vec![(OwnedStorage::Value, CheckedType::CString)]
+            vec![(OwnedStorage::Value, program.test_cstring_type())]
         );
         assert!(instance_bindings(program, "borrow_ignore").is_empty());
 
@@ -3266,8 +3260,8 @@ mod tests {
         assert_eq!(
             nested,
             vec![
-                (OwnedStorage::Value, CheckedType::CString),
-                (OwnedStorage::Value, CheckedType::CString)
+                (OwnedStorage::Value, program.test_cstring_type()),
+                (OwnedStorage::Value, program.test_cstring_type())
             ],
             "the function's own and nested block locals"
         );
@@ -3275,7 +3269,7 @@ mod tests {
         // A loop-body local registers like any other block local.
         assert_eq!(
             instance_bindings(program, "loop_local"),
-            vec![(OwnedStorage::Value, CheckedType::CString)]
+            vec![(OwnedStorage::Value, program.test_cstring_type())]
         );
 
         // The order is deterministic across repeated lowering.

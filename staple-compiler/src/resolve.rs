@@ -370,8 +370,6 @@ pub enum IntrinsicFunction {
     PointerAddress,
     AddressPointer,
     ValidateUtf8,
-    CStringValidUtf8,
-    StringHasNul,
     ToString {
         value: NumericType,
     },
@@ -414,8 +412,6 @@ pub enum IntrinsicFunction {
         float: FloatType,
         operation: IntegerCompareOperation,
     },
-    StringFromCString,
-    StringToCString,
     StringAdd,
     /// `std.source.__caller_file`: the file of the enclosing `@track_caller`
     /// function's caller, read from its closure environment.
@@ -2363,7 +2359,7 @@ impl NameResolver {
         if let Some(cinterop) = program.standard_library_cinterop() {
             self.register_builtin_type(cinterop, "std.cinterop", "CChar", BuiltinType::CChar);
             self.register_builtin_type(cinterop, "std.cinterop", "CString", BuiltinType::CString);
-            self.register_primitive_macro(cinterop, "c_string", PrimitiveMacro::CString);
+            self.register_primitive_macro(cinterop, "__c_string_literal", PrimitiveMacro::CString);
         }
         if let Some(io) = program.standard_library_io() {
             self.register_builtin_type(io, "std.io", "IO", BuiltinType::IO);
@@ -2485,23 +2481,12 @@ impl NameResolver {
                 ));
             }
         }
-        expected.push((
-            "__string_from_c_string_unchecked".to_owned(),
-            IntrinsicFunction::StringFromCString,
-        ));
-        expected.push((
-            "__string_to_c_string_unchecked".to_owned(),
-            IntrinsicFunction::StringToCString,
-        ));
         expected.push(("__string_add".to_owned(), IntrinsicFunction::StringAdd));
         // A declaration is identified by its owning module, companion, and name.
         let mut declarations: Vec<(String, Option<&str>, String, IntrinsicFunction)> = expected
             .into_iter()
             .map(|(name, intrinsic)| {
                 let module = match intrinsic {
-                    IntrinsicFunction::StringFromCString | IntrinsicFunction::StringToCString => {
-                        "std.cinterop"
-                    }
                     IntrinsicFunction::StringAdd => "std.string",
                     _ => "std.number",
                 };
@@ -2691,11 +2676,6 @@ impl NameResolver {
                 IntrinsicFunction::AddressPointer,
             ),
             (
-                "std.cinterop",
-                "__has_interior_nul",
-                IntrinsicFunction::StringHasNul,
-            ),
-            (
                 "std.ptr",
                 "__pointer_address",
                 IntrinsicFunction::PointerAddress,
@@ -2709,11 +2689,6 @@ impl NameResolver {
                 "std.string",
                 "__valid_utf8",
                 IntrinsicFunction::ValidateUtf8,
-            ),
-            (
-                "std.cinterop",
-                "__c_string_valid_utf8",
-                IntrinsicFunction::CStringValidUtf8,
             ),
             (
                 "std.buffer",
@@ -3047,7 +3022,8 @@ impl NameResolver {
                     && declaration.representation_visibility() == Visibility::Public
             } else if matches!(
                 builtin,
-                BuiltinType::Buffer
+                BuiltinType::CString
+                    | BuiltinType::Buffer
                     | BuiltinType::SharedBuffer
                     | BuiltinType::Unique
                     | BuiltinType::Shared
@@ -3175,6 +3151,7 @@ impl NameResolver {
         let path = match builtin {
             BuiltinType::Shared => "std.shared.Shared",
             BuiltinType::Unique => "std.unique.Unique",
+            BuiltinType::CString => "std.cinterop.CString",
             _ => name,
         };
         self.type_names.insert(id, path.to_owned());

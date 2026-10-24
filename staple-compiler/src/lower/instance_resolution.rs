@@ -444,7 +444,6 @@ pub(super) fn collect_referenced_parameters(
         | CheckedType::NumberLiteral(_)
         | CheckedType::String
         | CheckedType::StringLiteralSet(_)
-        | CheckedType::CString
         | CheckedType::RawOpaqueMutPtr
         | CheckedType::RawOpaquePtr
         | CheckedType::CChar => {}
@@ -2310,7 +2309,6 @@ fn concrete_type_needs_drop(program: &LoweredProgram, value_type: &CheckedType) 
         return true;
     }
     match value_type {
-        CheckedType::CString => true,
         CheckedType::Product(product) => product
             .runs
             .iter()
@@ -3104,7 +3102,6 @@ impl<'a> ParameterCollector<'a> {
             | CheckedType::NumberLiteral(_)
             | CheckedType::String
             | CheckedType::StringLiteralSet(_)
-            | CheckedType::CString
             | CheckedType::RawOpaqueMutPtr
             | CheckedType::RawOpaquePtr
             | CheckedType::CChar => {}

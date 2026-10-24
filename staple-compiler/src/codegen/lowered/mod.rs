@@ -445,19 +445,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.backend.size_type.fn_type(&[pointer.into()], false),
             );
         }
-        if requirements.contains(RuntimeRequirement::InteriorNulCheck) {
-            self.backend.declare_named_function(
-                "memchr",
-                pointer.fn_type(
-                    &[
-                        pointer.into(),
-                        self.backend.context.i32_type().into(),
-                        self.backend.size_type.into(),
-                    ],
-                    false,
-                ),
-            );
-        }
+
         Ok(())
     }
 
@@ -1022,15 +1010,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 self.backend.build_unique_free(buffer, span.clone())
             }
-            DropGlueBody::CStringFree => {
-                let BasicValueEnum::PointerValue(pointer) = value else {
-                    return Err(Diagnostic::new(
-                        span.clone(),
-                        "CString has an invalid representation",
-                    ));
-                };
-                self.backend.build_free_c_string(pointer, span.clone())
-            }
+
             DropGlueBody::Product { fields } => {
                 let BasicValueEnum::StructValue(product) = value else {
                     return Err(Diagnostic::new(
@@ -2568,9 +2548,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_direct_call(foreign, &arguments, "extern.call")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        let result = call.try_as_basic_value().basic().ok_or_else(|| {
-            Diagnostic::new(span.clone(), "extern adapter result is not first-class")
-        })?;
+        let result = call.try_as_basic_value().basic().unwrap_or_else(|| {
+            self.backend
+                .context
+                .struct_type(&[], false)
+                .const_zero()
+                .into()
+        });
         self.backend
             .builder
             .build_return(Some(&result))
@@ -8190,9 +8174,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// Concrete string kernels shared by both ABI emitters.
     fn emit_string_intrinsic(
         &mut self,
-        owner: EmissionOwner,
+        _owner: EmissionOwner,
         call: &crate::LoweredCall,
-        call_id: LoweredCallId,
+        _call_id: LoweredCallId,
         intrinsic: IntrinsicFunction,
         arguments: &[BasicMetadataValueEnum<'context>],
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
@@ -8217,24 +8201,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_validate_utf8(*bytes)?
                     .as_any_value_enum())
             }
-            IntrinsicFunction::StringHasNul => {
-                let [BasicMetadataValueEnum::PointerValue(string)] = arguments else {
-                    return Err(unsupported("interior-NUL operand"));
-                };
-                Ok(self
-                    .backend
-                    .build_string_has_nul(*string)?
-                    .as_any_value_enum())
-            }
-            IntrinsicFunction::CStringValidUtf8 => {
-                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
-                    return Err(unsupported("CString UTF-8 operand"));
-                };
-                Ok(self
-                    .backend
-                    .build_c_string_valid_utf8(*pointer)?
-                    .as_any_value_enum())
-            }
+
             IntrinsicFunction::ToString { value: numeric } => {
                 let [argument] = arguments else {
                     return Err(Diagnostic::new(
@@ -8249,39 +8216,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.backend
                     .build_numeric_to_string(numeric, argument, span)
             }
-            IntrinsicFunction::StringFromCString => {
-                let [BasicMetadataValueEnum::PointerValue(source)] = arguments else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "CString conversion requires a pointer",
-                    ));
-                };
-                // The shared conversion core; the CString release expands the
-                // recorded `CStringConversion` glue.
-                let result = self
-                    .backend
-                    .build_string_from_c_string(*source, span.clone())?;
-                self.emit_drop_site(
-                    owner,
-                    crate::ArtifactUseSite::CStringConversion(call_id),
-                    DropSource::Value((*source).into()),
-                    &span,
-                )?;
-                Ok(result.as_any_value_enum())
-            }
-            IntrinsicFunction::StringToCString => {
-                let [BasicMetadataValueEnum::PointerValue(string)] = arguments else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "String conversion requires a String value",
-                    ));
-                };
-                // Use the common runtime helper.
-                Ok(self
-                    .backend
-                    .build_string_to_c_string(*string, span)?
-                    .as_any_value_enum())
-            }
+
             IntrinsicFunction::StringAdd => {
                 let [
                     BasicMetadataValueEnum::PointerValue(left),
@@ -8321,11 +8256,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         match intrinsic {
             IntrinsicFunction::ParseNumber { .. }
             | IntrinsicFunction::ValidateUtf8
-            | IntrinsicFunction::StringHasNul
-            | IntrinsicFunction::CStringValidUtf8
             | IntrinsicFunction::ToString { .. }
-            | IntrinsicFunction::StringFromCString
-            | IntrinsicFunction::StringToCString
             | IntrinsicFunction::StringAdd => {
                 self.emit_string_intrinsic(owner, call, call_id, intrinsic, arguments)
             }

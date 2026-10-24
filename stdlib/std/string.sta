@@ -20,6 +20,14 @@ use package.iterator.IterStep.(Done, Yield)
 /// A UTF-8 byte sequence used as Staple's string type.
 pub type String wrap SharedBuffer<U8>
 
+pub(package) def string_shared_bytes = value: String => SharedBuffer<U8> :: {
+    let String bytes = value
+    bytes
+}
+
+// The caller must ensure the shared bytes contain valid UTF-8.
+pub(package) def string_from_shared_bytes_unchecked = bytes: SharedBuffer<U8> => String :: String bytes
+
 extern "staple-intrinsic" {
     __string_add: (String, String) -> String
 }
@@ -131,7 +139,7 @@ extern "staple-intrinsic" {
     __parse_usize: String -> (U8, USize)
     __parse_f32: String -> (U8, F32)
     __parse_f64: String -> (U8, F64)
-    __valid_utf8: SharedBuffer<U8> -> U8
+    pub(package) __valid_utf8: SharedBuffer<U8> -> U8
 }
 
 impl TryConvert String I8 {

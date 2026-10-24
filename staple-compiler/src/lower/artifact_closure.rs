@@ -174,8 +174,6 @@ pub(crate) enum ArtifactUseSite {
         call: LoweredCallId,
         argument: usize,
     },
-    /// A C-string conversion dropping its source `CString`.
-    CStringConversion(LoweredCallId),
     PointerDropInPlace(LoweredCallId),
     UniquePattern(PatternId),
     UniqueAccess(ExpressionId),
@@ -1907,7 +1905,7 @@ impl LoweredProgram {
                     report("expression", id.index());
                 }
             }
-            ArtifactUseSite::CStringConversion(id) | ArtifactUseSite::PointerDropInPlace(id) => {
+            ArtifactUseSite::PointerDropInPlace(id) => {
                 if !call(id) {
                     report("call", id.index());
                 }

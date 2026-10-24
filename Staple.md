@@ -1652,7 +1652,7 @@ interpolation requires the value's type to implement `Display`; `:?` requires
 expression feature and is rejected where the grammar requires a literal
 string, such as string-literal types and patterns.
 
-The primitive `c_string` macro from `std.cinterop` accepts only a string literal
+The `c_string` library macro from `std.cinterop` accepts only a string literal
 and produces an owned `CString` backed by allocated NUL-terminated storage:
 
 ```staple
@@ -4812,7 +4812,8 @@ it, not only its start. A `Shared` to one element of a `SharedBuffer`, or a
 `SharedBuffer` made by `Buffer.into_shared_buffer`, keeps the whole allocation alive, including the other
 elements, until no such pointer remains.
 
-`CChar` and `CString` are public opaque types in `std.cinterop`.
+`CChar` is a public opaque type in `std.cinterop`. `CString` is a public
+wrapper around `RawMutPtr<CChar>` with a private representation.
 `RawPtr`, `RawMutPtr`, `RawOpaquePtr`, and `RawOpaqueMutPtr` are public opaque
 types in `std.ptr`. Source code must import them explicitly, for example with
 `use std.cinterop.*` and `use std.ptr.*`. `RawPtr<T>` is a non-owning, low-level
@@ -4823,10 +4824,16 @@ type forms. `RawMutPtr<T>` permits raw reads and writes, while `RawPtr<T>`
 permits raw reads. Their opaque counterparts have no pointee type and must be
 converted to typed pointers before accessing memory.
 
-`CString` is an owned, move-only pointer to NUL-terminated bytes and drops with
-`free`. It is compatible with `RawPtr<CChar>`, but an arbitrary
-`RawPtr<CChar>` is not assumed to be NUL terminated. Passing a `CString` to a
-C function creates a call-scoped view rather than transferring ownership, and
+`CString` is an owned, move-only pointer to NUL-terminated bytes allocated with
+`malloc`. Its library `Drop` implementation releases that allocation with `free`.
+The `c_string` macro uses a literal primitive to copy constant bytes directly
+into malloc storage without first allocating a managed `String`.
+
+`CString` is compatible with `RawPtr<CChar>`, but an arbitrary `RawPtr<CChar>`
+is not assumed to be NUL terminated. Passing a `CString` to a
+C function creates a call-scoped view rather than transferring ownership. A
+temporary CString remains alive until the C call returns, then is freed. C code
+must not free the borrowed pointer or retain it beyond the owner's lifetime.
 C declarations may not return `CString`. `CString.to_string` takes its argument
 as `move CString`: it validates and copies UTF-8 into a `String`, returning
 `Result<String, InvalidUtf8>`. It frees the C string on success and failure, so

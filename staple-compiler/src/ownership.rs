@@ -533,7 +533,7 @@ impl<'a> OwnershipChecker<'a> {
                     && self
                         .module
                         .type_of_expression(value.argument.syntax().id)
-                        .is_some_and(|ty| matches!(ty, crate::CheckedType::CString));
+                        .is_some_and(|ty| ty.is_cstring());
                 if let Some(thunk) = self
                     .module
                     .synthesized_thunk_for(value.argument.syntax().id)

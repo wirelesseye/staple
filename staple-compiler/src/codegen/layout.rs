@@ -315,7 +315,7 @@ impl<'program, 'context> Backend<'program, 'context> {
                 Span::Compiler,
                 format!("opaque type `{name}` has no by-value representation"),
             )),
-            CheckedType::CString => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+
             CheckedType::String | CheckedType::StringLiteralSet(_) => self
                 .layout
                 .string_representation()

@@ -1345,7 +1345,7 @@ mod tests {
         let owned = framed
             .frame_bindings
             .iter()
-            .find(|binding| binding.value_type == CheckedType::CString)
+            .find(|binding| binding.value_type == program.test_cstring_type())
             .expect("the CString frame binding");
         assert!(
             owned.unwind_drop.is_some(),
@@ -1365,7 +1365,7 @@ mod tests {
         let plan = created_pair(program, "owning");
         let owning = frame(plan);
         assert!(
-            owning.captures.contains(&CheckedType::CString),
+            owning.captures.contains(&program.test_cstring_type()),
             "the droppable capture is recorded: {:?}",
             owning.captures
         );
@@ -1398,11 +1398,11 @@ mod tests {
                 let drops = drops.as_ref().expect("expanded");
                 let dropped = drops
                     .iter()
-                    .find(|drop| drop.value_type == CheckedType::CString)
+                    .find(|drop| drop.value_type == program.test_cstring_type())
                     .expect("the CString capture is dropped");
                 assert_eq!(
                     owning_captures[dropped.index],
-                    canonical(&CheckedType::CString),
+                    canonical(&program.test_cstring_type()),
                     "the dropped capture index names the CString capture"
                 );
             }
@@ -1441,14 +1441,14 @@ mod tests {
         let cell_capture = mutable_body
             .captures()
             .iter()
-            .find(|capture| capture.value_type == CheckedType::CString)
+            .find(|capture| capture.value_type == program.test_cstring_type())
             .expect("the CString capture");
         assert!(
             cell_capture.mutable_storage,
             "the CString capture is a mutable cell"
         );
         assert!(
-            mutable.captures.contains(&CheckedType::CString),
+            mutable.captures.contains(&program.test_cstring_type()),
             "the cell capture is recorded: {:?}",
             mutable.captures
         );
@@ -1508,7 +1508,7 @@ mod tests {
         assert_eq!(chained.resume_points, 2);
         assert_eq!(
             chained.await_result_types,
-            vec![CheckedType::I32, CheckedType::CString]
+            vec![CheckedType::I32, program.test_cstring_type()]
         );
         assert!(chained.wait_await_states.is_empty());
         assert!(chained.until_await_states.is_empty());
@@ -1965,7 +1965,7 @@ mod tests {
             .iter()
             .find(|(site, captures)| {
                 matches!(site, ArtifactUseSite::ReactiveCallbackEnvironment(_))
-                    && captures.contains(&CheckedType::CString)
+                    && captures.contains(&program.test_cstring_type())
             })
             .unwrap_or_else(|| panic!("the owned capture installs a finalizer: {environments:?}"));
         assert!(
@@ -1975,7 +1975,7 @@ mod tests {
         assert!(
             environments
                 .iter()
-                .all(|(_, captures)| captures.contains(&CheckedType::CString)),
+                .all(|(_, captures)| captures.contains(&program.test_cstring_type())),
             "only the droppable capture installs a finalizer: {environments:?}"
         );
     }

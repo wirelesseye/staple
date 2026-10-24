@@ -2,23 +2,64 @@ pub mod
 
 use package.convert.(TryConvert)
 use package.result.(Ok, Result)
-use package.string.(String)
+use package.string.(String, __valid_utf8, string_shared_bytes, string_from_shared_bytes_unchecked)
+use package.ptr.(RawPtr, RawMutPtr, RawOpaqueMutPtr)
+use package.buffer.Buffer
+use package.shared_buffer.SharedBuffer
+use package.alloc.trap
 
 /// A C string cannot contain an embedded NUL byte.
 pub type InteriorNul
 
 use package.string.InvalidUtf8
 
-
-use package.syntax.(Expr)
+use package.syntax.(Expr, StringExpr, parse_quote)
+use package.process.panic
 
 /// A C-compatible character.
 @sized_opaque
 pub type CChar opaque
-/// A null-terminated C string.
-@sized_opaque
-pub type CString opaque
+/// An owned, NUL-terminated C string allocated with `malloc`.
+///
+/// A CString owns its allocation and cannot be copied. Moving it transfers
+/// ownership; dropping it releases the allocation with `free`. Its representation
+/// is one pointer, compatible with a C character pointer at foreign call sites.
+///
+/// Use `c_string` for literals or `CString.from_string` to copy a String while
+/// rejecting interior NUL bytes. The unchecked constructor skips this check.
+/// CString bytes need not be valid UTF-8: `CString.to_string` validates them,
+/// while `to_string_unchecked` requires valid UTF-8. Both consume the CString,
+/// copy its bytes into a String, and free the original allocation.
+///
+/// Passing a CString to a C function borrows its pointer for that call. A
+/// temporary stays alive until the call returns, then is dropped. C code must
+/// neither free the borrowed pointer nor retain it beyond the owner's lifetime.
+pub type CString wrap RawMutPtr<CChar>
 impl !Copy CString {}
+
+extern "c" {
+    malloc: USize -> RawOpaqueMutPtr
+    free: RawOpaqueMutPtr -> ()
+    strlen: RawPtr<CChar> -> USize
+}
+
+impl Drop CString {
+    cleanup = CString pointer => free (pointer as RawOpaqueMutPtr)
+}
+
+// Copies the bytes without taking ownership of the C allocation.
+def c_string_bytes = value: CString => SharedBuffer<U8> :: {
+    let pointer = value.*
+    let length = strlen (pointer as RawPtr<CChar>)
+    let mut bytes: Buffer<U8> = Buffer.with_capacity length
+    let source = pointer as RawOpaqueMutPtr as RawMutPtr<U8>
+    let mut index: USize = 0
+    while (index < length) {
+        Buffer.push bytes (RawMutPtr.unsafe_read (((source as USize) + index) as RawMutPtr<U8>))
+        index = index + 1
+    }
+    Buffer.into_shared_buffer bytes
+}
 
 /// Converts a string literal to a null-terminated C string.
 ///
@@ -27,12 +68,14 @@ impl !Copy CString {}
 /// ```staple
 /// c_string "hello\\n"
 /// ```
-pub macro c_string: Expr -> Expr
-
-extern "staple-intrinsic" {
-    __string_from_c_string_unchecked: move CString -> String
-    __string_to_c_string_unchecked: String -> CString
+pub macro c_string: Expr -> Expr = value => match value {
+    literal: StringExpr => parse_quote { __c_string_literal $literal },
+    _ => panic "`c_string` requires a string literal",
 }
+
+// The literal primitive copies a global constant directly into malloc storage.
+// It must not first construct a garbage-collected String at runtime.
+pub macro __c_string_literal: Expr -> Expr
 
 companion CString {
     use package.string.(InvalidUtf8, String)
@@ -50,22 +93,46 @@ companion CString {
     /// Copies bytes known to be valid UTF-8, consuming and freeing the C string.
     /// The caller must ensure the bytes are valid UTF-8.
     pub def to_string_unchecked = move value: CString =>
-        String :: __string_from_c_string_unchecked value
+        String :: {
+            let bytes = c_string_bytes value
+            drop value
+            string_from_shared_bytes_unchecked bytes
+        }
 
     /// Copies and terminates a String without checking for embedded NUL bytes.
     /// The caller must ensure the String contains no embedded NUL bytes.
-    pub def from_string_unchecked = value: String => CString :: __string_to_c_string_unchecked value
+    pub def from_string_unchecked = value: String => CString :: {
+        let bytes = string_shared_bytes value
+        let length = SharedBuffer.length bytes
+        let allocation_length = length + 1
+        if (allocation_length <= length) { trap () }
+        let allocation = malloc allocation_length
+        if ((allocation as USize) == 0) { trap () }
+        let destination = allocation as RawMutPtr<U8>
+        let mut index: USize = 0
+        while (index < length) {
+            RawMutPtr.store (((destination as USize) + index) as RawMutPtr<U8>) (SharedBuffer.get_unchecked bytes index)
+            index = index + 1
+        }
+        RawMutPtr.store (((destination as USize) + length) as RawMutPtr<U8>) (U8 :: 0)
+        CString (allocation as RawMutPtr<CChar>)
+    }
 }
 
-extern "staple-intrinsic" {
-    __c_string_valid_utf8: CString -> U8
-    __has_interior_nul: String -> U8
+def has_interior_nul = value: String => Bool :: {
+    let bytes = string_shared_bytes value
+    let mut index: USize = 0
+    while (index < SharedBuffer.length bytes) {
+        if (SharedBuffer.get_unchecked bytes index == 0) { return True }
+        index = index + 1
+    }
+    False
 }
 
 impl TryConvert String CString {
     type Error = InteriorNul
     try_convert = move value => {
-        if (__has_interior_nul value == 1) {
+        if (has_interior_nul value) {
             InteriorNul
         } else {
             Ok (CString.from_string_unchecked value)
@@ -75,9 +142,13 @@ impl TryConvert String CString {
 
 impl TryConvert CString String {
     type Error = InvalidUtf8
-    try_convert = move value => if (__c_string_valid_utf8 value == 1) {
-        Ok (CString.to_string_unchecked value)
-    } else {
-        InvalidUtf8
+    try_convert = move value => {
+        let bytes = c_string_bytes value
+        drop value
+        if (__valid_utf8 bytes == 1) {
+            Ok (string_from_shared_bytes_unchecked bytes)
+        } else {
+            InvalidUtf8
+        }
     }
 }

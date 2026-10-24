@@ -750,7 +750,6 @@ impl LoweredArtifactPlan {
                     | DropGlueBody::UserDrop { .. }
                     | DropGlueBody::CoroutineCleanup
                     | DropGlueBody::RuntimeRelease(_)
-                    | DropGlueBody::CStringFree
                     | DropGlueBody::Wrapper { .. } => {}
                     DropGlueBody::Buffer { element, .. } => visit(Value(element)),
                     DropGlueBody::Product { fields } => {
@@ -1497,8 +1496,6 @@ pub(crate) enum DropGlueBody {
     CoroutineCleanup,
     /// Call the runtime release for one opaque runtime type.
     RuntimeRelease(RuntimeRelease),
-    /// Call `free` on the C-string pointer.
-    CStringFree,
     /// Drop every live element of an owned buffer, then release its allocation.
     Buffer {
         element: CheckedType,
@@ -1549,8 +1546,7 @@ impl DropGluePlan {
         match &self.body {
             DropGlueBody::Unexpanded
             | DropGlueBody::CoroutineCleanup
-            | DropGlueBody::RuntimeRelease(_)
-            | DropGlueBody::CStringFree => {}
+            | DropGlueBody::RuntimeRelease(_) => {}
             DropGlueBody::UserDrop {
                 method,
                 representation,
@@ -1585,8 +1581,7 @@ impl DropGluePlan {
         match &mut self.body {
             DropGlueBody::Unexpanded
             | DropGlueBody::CoroutineCleanup
-            | DropGlueBody::RuntimeRelease(_)
-            | DropGlueBody::CStringFree => {}
+            | DropGlueBody::RuntimeRelease(_) => {}
             DropGlueBody::UserDrop {
                 method,
                 representation,

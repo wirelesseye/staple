@@ -4665,11 +4665,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let result = match intrinsic {
             crate::IntrinsicFunction::ParseNumber { .. }
             | crate::IntrinsicFunction::ValidateUtf8
-            | crate::IntrinsicFunction::StringHasNul
-            | crate::IntrinsicFunction::CStringValidUtf8
             | crate::IntrinsicFunction::ToString { .. }
-            | crate::IntrinsicFunction::StringFromCString
-            | crate::IntrinsicFunction::StringToCString
             | crate::IntrinsicFunction::StringAdd => {
                 let Some(LoweredExpressionKind::Call(call_id)) =
                     self.view.expression(owner, id).map(|record| &record.kind)

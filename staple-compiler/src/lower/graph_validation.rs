@@ -596,9 +596,9 @@ pub(crate) mod tests {
 
     use crate::specialization::{ArtifactRequestKey, GcFinalizerKey};
     use crate::{
-        CallTypeSubstitution, CheckedType, LoweredArtifactPlan, LoweredModule, Lowerer,
-        NameResolver, ProgramLoader, StructuralBody, SubstitutionEnvironment, TypeChecker,
-        TypeParameterId, TypedModule,
+        CallTypeSubstitution, LoweredArtifactPlan, LoweredModule, Lowerer, NameResolver,
+        ProgramLoader, StructuralBody, SubstitutionEnvironment, TypeChecker, TypeParameterId,
+        TypedModule,
     };
 
     use super::super::{
@@ -1732,7 +1732,7 @@ pub(crate) mod tests {
             .iter()
             .find(|symbol| {
                 body.binding_symbol_type(**symbol)
-                    .is_some_and(|value_type| *value_type == CheckedType::CString)
+                    .is_some_and(|value_type| *value_type == program.test_cstring_type())
             })
             .copied()
             .expect("the fixture's CString frame binding");
@@ -1971,8 +1971,7 @@ pub(crate) mod tests {
                 && base.contains(&Utf8Validator)
                 && base.contains(&CStringFree)
                 && base.contains(&NumericToString)
-                && base.contains(&CStringLength)
-                && base.contains(&InteriorNulCheck),
+                && base.contains(&CStringLength),
             "the eagerly emitted library bodies reference these surfaces: {base:?}"
         );
         assert!(

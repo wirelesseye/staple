@@ -13881,10 +13881,10 @@ pub(crate) fn call_temporary_drop_type(
     operand: Option<&CheckedType>,
 ) -> CheckedType {
     match (expected, operand) {
-        (CheckedType::RawPtr { pointee }, Some(CheckedType::CString))
-            if **pointee == CheckedType::CChar =>
+        (CheckedType::RawPtr { pointee }, Some(operand))
+            if operand.is_cstring() && **pointee == CheckedType::CChar =>
         {
-            CheckedType::CString
+            operand.clone()
         }
         _ => expected.clone(),
     }
@@ -14149,8 +14149,6 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::PointerAddress
         | Intrinsic::AddressPointer
         | Intrinsic::ValidateUtf8
-        | Intrinsic::StringHasNul
-        | Intrinsic::CStringValidUtf8
         | Intrinsic::ToString { .. }
         | Intrinsic::IntegerBinary { .. }
         | Intrinsic::IntegerCompare { .. }
@@ -14162,8 +14160,6 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::FloatToBits { .. }
         | Intrinsic::FloatFromBits { .. }
         | Intrinsic::FloatCompare { .. }
-        | Intrinsic::StringFromCString
-        | Intrinsic::StringToCString
         | Intrinsic::StringAdd
         | Intrinsic::CallerFile
         | Intrinsic::CallerLine
@@ -14561,7 +14557,6 @@ fn checked_type_holds_gc_pointer(value_type: &CheckedType) -> bool {
         | CheckedType::F32
         | CheckedType::F64
         | CheckedType::NumberLiteral(_)
-        | CheckedType::CString
         | CheckedType::CChar
         | CheckedType::Parameter { .. } => false,
         CheckedType::RawOpaquePtr
@@ -20162,7 +20157,7 @@ mod tests {
             call.target,
             LoweredCallableTarget::ExternalFunction { .. }
         ) && call.arguments.iter().any(|argument| {
-            argument.drops_after_call && argument.expected == CheckedType::CString
+            argument.drops_after_call && argument.expected == program.test_cstring_type()
         })));
         assert!(
             calls
@@ -20479,10 +20474,14 @@ mod tests {
             .map(|(_, call)| call)
             .filter(|call| {
                 matches!(call.target, LoweredCallableTarget::IndirectClosure { .. })
-                    && *call.function_type.parameter == CheckedType::CString
+                    && *call.function_type.parameter == program.test_cstring_type()
+                    && call
+                        .arguments
+                        .first()
+                        .is_some_and(|argument| argument.place.is_none())
             })
             .collect::<Vec<_>>();
-        assert!(callbacks.len() >= 2, "both callback calls lower");
+        assert_eq!(callbacks.len(), 2, "both callback temporary calls lower");
         assert!(
             callbacks
                 .iter()
@@ -20516,7 +20515,7 @@ mod tests {
                             .get(expression)
                             .is_some_and(|expression| {
                                 matches!(expression.kind, LoweredExpressionKind::Call(_))
-                                    || expression.value_type == CheckedType::CString
+                                    || expression.value_type == program.test_cstring_type()
                             })
                     }) && argument.place.is_none()
                 })
@@ -20533,7 +20532,7 @@ mod tests {
         assert!(
             externs.iter().any(|call| call.arguments.len() == 1
                 && call.arguments[0].drops_after_call
-                && call.arguments[0].expected == CheckedType::CString),
+                && call.arguments[0].expected == program.test_cstring_type()),
             "strlen frees its converted temporary"
         );
     }
@@ -27064,6 +27063,30 @@ mod tests {
                     }
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+impl LoweredProgram {
+    pub(crate) fn test_cstring_type(&self) -> CheckedType {
+        let metadata = self
+            .types
+            .iter()
+            .find(|(_, _, ty)| ty.builtin == Some(BuiltinType::CString))
+            .expect("CString declaration")
+            .2;
+        CheckedType::Wrapper {
+            id: metadata.semantic_id,
+            name: "std.cinterop.CString".to_owned(),
+            arguments: Vec::new(),
+            representation: Box::new(
+                metadata
+                    .representation
+                    .clone()
+                    .expect("CString representation"),
+            ),
+            introduction: crate::typecheck::WrapperIntroduction::Explicit,
         }
     }
 }

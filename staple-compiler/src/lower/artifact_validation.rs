@@ -301,8 +301,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::{
-        CheckedType, DropGlueBody, LoweredArtifactPlan, LoweredModule, Lowerer, NameResolver,
-        ProgramLoader, TypeChecker,
+        CheckedType, LoweredArtifactPlan, LoweredModule, Lowerer, NameResolver, ProgramLoader,
+        TypeChecker,
     };
 
     use super::super::artifact_closure::{ArtifactUseSite, ProductionHooks};
@@ -392,7 +392,7 @@ mod tests {
                 matches!(
                     &artifact.plan,
                     Some(LoweredArtifactPlan::DropGlue(plan))
-                        if plan.body == DropGlueBody::CStringFree
+                        if plan.value_type.is_cstring()
                 )
             })
             .expect("the CString drop glue");

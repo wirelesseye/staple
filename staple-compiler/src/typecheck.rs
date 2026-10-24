@@ -88,7 +88,8 @@ fn checked_builtin_type(ty: &CheckedType) -> Option<BuiltinType> {
         CheckedType::F64 => BuiltinType::Float(FloatType::F64),
         CheckedType::String => BuiltinType::String,
         CheckedType::CChar => BuiltinType::CChar,
-        CheckedType::CString => BuiltinType::CString,
+        ty if ty.is_cstring() => BuiltinType::CString,
+
         _ => return None,
     })
 }
@@ -514,7 +515,6 @@ pub enum CheckedType {
     NumberLiteral(u64),
     String,
     StringLiteralSet(Vec<String>),
-    CString,
     CChar,
     RawOpaquePtr,
     RawOpaqueMutPtr,
@@ -1487,6 +1487,10 @@ impl CheckedType {
         }
     }
 
+    pub(crate) fn is_cstring(&self) -> bool {
+        matches!(self, Self::Wrapper { name, .. } if name == "std.cinterop.CString")
+    }
+
     pub fn integer_type(&self) -> Option<IntegerType> {
         Some(match self {
             Self::I8 => IntegerType::I8,
@@ -1597,7 +1601,6 @@ impl CheckedType {
             | Self::NumberLiteral(_)
             | Self::String
             | Self::StringLiteralSet(_)
-            | Self::CString
             | Self::RawOpaqueMutPtr
             | Self::RawOpaquePtr
             | Self::CChar
@@ -1639,7 +1642,6 @@ impl CheckedType {
             | Self::F64
             | Self::String
             | Self::StringLiteralSet(_)
-            | Self::CString
             | Self::RawOpaqueMutPtr
             | Self::RawOpaquePtr
             | Self::CChar => true,
@@ -1678,7 +1680,6 @@ impl fmt::Display for CheckedType {
                 }
                 Ok(())
             }
-            Self::CString => formatter.write_str("CString"),
             Self::RawOpaquePtr => formatter.write_str("RawOpaquePtr"),
             Self::RawOpaqueMutPtr => formatter.write_str("RawOpaqueMutPtr"),
             Self::CChar => formatter.write_str("CChar"),
@@ -1828,6 +1829,7 @@ fn format_type_application(
     let name = match name {
         "std.shared.Shared" => "Shared",
         "std.unique.Unique" => "Unique",
+        "std.cinterop.CString" => "CString",
         other => other,
     };
     formatter.write_str(name)?;
@@ -4198,14 +4200,12 @@ impl TypeChecker {
             if implementation.negative
                 && !matches!(
                     target,
-                    CheckedType::Wrapper { .. }
-                        | CheckedType::Opaque { sized: true, .. }
-                        | CheckedType::CString
+                    CheckedType::Wrapper { .. } | CheckedType::Opaque { sized: true, .. }
                 )
             {
                 self.diagnostics.push(Diagnostic::new(
                     span,
-                    "`!Copy` may only be implemented for a represented nominal type, sized opaque type, CString, or Buffer",
+                    "`!Copy` may only be implemented for a represented nominal type or sized opaque type",
                 ));
                 continue;
             }
@@ -6172,9 +6172,7 @@ impl TypeChecker {
                 | crate::IntrinsicFunction::PointerCast
                 | crate::IntrinsicFunction::PointerAddress
                 | crate::IntrinsicFunction::AddressPointer
-                | crate::IntrinsicFunction::ValidateUtf8
-                | crate::IntrinsicFunction::StringHasNul
-                | crate::IntrinsicFunction::CStringValidUtf8 => self
+                | crate::IntrinsicFunction::ValidateUtf8 => self
                     .symbol_value_type(*symbol)
                     .cloned()
                     .filter(|value| valid_conversion_intrinsic_type(value, *intrinsic))
@@ -6395,26 +6393,7 @@ impl TypeChecker {
                         result: Box::new(result),
                     })
                 }
-                crate::IntrinsicFunction::StringFromCString => {
-                    CheckedType::Function(CheckedFunctionType {
-                        default: None,
-                        parameter: Box::new(CheckedType::CString),
-                        mutations: Vec::new(),
-                        moves: vec![CheckedMutation::Whole],
-                        effects: CheckedEffectSet::default(),
-                        result: Box::new(CheckedType::String),
-                    })
-                }
-                crate::IntrinsicFunction::StringToCString => {
-                    CheckedType::Function(CheckedFunctionType {
-                        default: None,
-                        parameter: Box::new(CheckedType::String),
-                        mutations: Vec::new(),
-                        moves: Vec::new(),
-                        effects: CheckedEffectSet::default(),
-                        result: Box::new(CheckedType::CString),
-                    })
-                }
+
                 crate::IntrinsicFunction::CallerFile
                 | crate::IntrinsicFunction::CallerLine
                 | crate::IntrinsicFunction::CallerColumn => {
@@ -11937,7 +11916,7 @@ impl TypeChecker {
                         ));
                         return CheckedType::Error;
                     }
-                    CheckedType::CString
+                    self.cstring_type(module)
                 } else {
                     let trait_methods = self.pipe_trait_candidates(module, call.callee.syntax().id);
                     let trait_methods = trait_methods.as_slice();
@@ -13845,7 +13824,7 @@ impl TypeChecker {
                 }
                 CheckedType::String
             }
-            Expression::CString(_) => CheckedType::CString,
+            Expression::CString(_) => self.cstring_type(module),
             Expression::Integer(integer) => {
                 if let Some(CheckedType::NumberLiteral(expected_value)) = expected {
                     let Ok(value) = integer.literal.parse::<u64>() else {
@@ -19232,6 +19211,13 @@ impl TypeChecker {
         }
     }
 
+    fn cstring_type(&mut self, module: &ResolvedModule) -> CheckedType {
+        module
+            .type_for_builtin(BuiltinType::CString)
+            .map(|id| self.resolve_type_id(module, id, "CString"))
+            .unwrap_or(CheckedType::Error)
+    }
+
     fn resolve_named_type(
         &mut self,
         module: &ResolvedModule,
@@ -19255,7 +19241,10 @@ impl TypeChecker {
         id: TypeId,
         fallback_name: &str,
     ) -> CheckedType {
-        if let Some(builtin) = module.builtin_type(id) {
+        if let Some(builtin) = module
+            .builtin_type(id)
+            .filter(|kind| *kind != BuiltinType::CString)
+        {
             return match builtin {
                 BuiltinType::Integer(integer) => CheckedType::integer(integer),
                 BuiltinType::Never => CheckedType::Never,
@@ -19284,7 +19273,7 @@ impl TypeChecker {
                 BuiltinType::RawOpaquePtr => CheckedType::RawOpaquePtr,
                 BuiltinType::RawOpaqueMutPtr => CheckedType::RawOpaqueMutPtr,
                 BuiltinType::CChar => CheckedType::CChar,
-                BuiltinType::CString => CheckedType::CString,
+                BuiltinType::CString => unreachable!(),
                 BuiltinType::RawPtr => CheckedType::TypeConstructor {
                     id,
                     name: "RawPtr".to_owned(),
@@ -20046,7 +20035,6 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
         {
             Some(CheckedType::StringLiteralSet(expected))
         }
-        (CheckedType::CString, CheckedType::CString) => Some(CheckedType::CString),
         (CheckedType::RawOpaquePtr, CheckedType::RawOpaquePtr) => Some(CheckedType::RawOpaquePtr),
         (CheckedType::RawOpaqueMutPtr, CheckedType::RawOpaqueMutPtr) => {
             Some(CheckedType::RawOpaqueMutPtr)
@@ -20098,10 +20086,10 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
                     .collect::<Option<Vec<_>>>()?,
             })
         }
-        (CheckedType::CString, CheckedType::RawPtr { pointee })
-            if *pointee == CheckedType::CChar =>
+        (actual, CheckedType::RawPtr { pointee })
+            if actual.is_cstring() && *pointee == CheckedType::CChar =>
         {
-            Some(CheckedType::CString)
+            Some(actual)
         }
         (CheckedType::RawPtr { pointee: actual }, CheckedType::RawPtr { pointee: expected }) => {
             merge_types(*actual, *expected).map(|pointee| CheckedType::RawPtr {
@@ -24133,8 +24121,10 @@ fn checked_type_contains_slice(value_type: &CheckedType) -> bool {
 }
 
 fn checked_type_contains_cstring(value_type: &CheckedType) -> bool {
+    if value_type.is_cstring() {
+        return true;
+    }
     match value_type {
-        CheckedType::CString => true,
         CheckedType::Product(product) => product
             .runs
             .iter()
@@ -24319,7 +24309,6 @@ pub(crate) fn is_copy_type(
         | CheckedType::RawOpaqueMutPtr
         | CheckedType::RawOpaquePtr
         | CheckedType::CChar
-        | CheckedType::CString
         | CheckedType::Opaque { .. }
         | CheckedType::RawMutPtr { .. }
         | CheckedType::RawPtr { .. }
@@ -24378,7 +24367,6 @@ fn type_needs_drop(
         return true;
     }
     match value_type {
-        CheckedType::CString => true,
         CheckedType::Product(product) => product.runs.iter().any(|run| {
             type_needs_drop(
                 &run.element.value_type,
@@ -24835,12 +24823,7 @@ fn valid_conversion_intrinsic_type(
             is_shared_buffer_of(&function.parameter, &CheckedType::U8)
                 && *function.result == CheckedType::U8
         }
-        crate::IntrinsicFunction::StringHasNul => {
-            *function.parameter == CheckedType::String && *function.result == CheckedType::U8
-        }
-        crate::IntrinsicFunction::CStringValidUtf8 => {
-            *function.parameter == CheckedType::CString && *function.result == CheckedType::U8
-        }
+
         _ => false,
     }
 }

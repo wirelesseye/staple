@@ -148,6 +148,11 @@ impl<'program, 'context> Backend<'program, 'context> {
             &*function_type.parameter,
             CheckedType::Product(product) if product.variadic
         );
+        // C functions returning Staple's unit type return C void, rather than
+        // an LLVM empty struct. Call emission reconstructs the unit value.
+        if *function_type.result == CheckedType::empty_product() {
+            return Ok(self.context.void_type().fn_type(&parameter_types, variadic));
+        }
         Ok(match return_type {
             BasicTypeEnum::ArrayType(value) => value.fn_type(&parameter_types, variadic),
             BasicTypeEnum::FloatType(value) => value.fn_type(&parameter_types, variadic),

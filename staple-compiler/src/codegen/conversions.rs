@@ -356,59 +356,6 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    pub(crate) fn build_string_has_nul(
-        &self,
-        string: PointerValue<'context>,
-    ) -> CodeGenerationResult<IntValue<'context>> {
-        let (pointer, length) = self.string_parts(string)?;
-        let memchr = self
-            .llvm_module
-            .get_function("memchr")
-            .expect("interior-NUL check is recorded");
-        let nul = self
-            .builder
-            .build_direct_call(
-                memchr,
-                &[
-                    pointer.into(),
-                    self.context.i32_type().const_zero().into(),
-                    length.into(),
-                ],
-                "string.interior_nul",
-            )
-            .map_err(compiler_diagnostic)?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_pointer_value();
-        let has_nul = self
-            .builder
-            .build_is_not_null(nul, "string.has_interior_nul")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_int_z_extend(has_nul, self.context.i8_type(), "string.nul_status")
-            .map_err(compiler_diagnostic)
-    }
-
-    /// Validates the bytes of a NUL-terminated C string in place, without
-    /// allocating; the CString itself is left untouched.
-    pub(crate) fn build_c_string_valid_utf8(
-        &self,
-        pointer: PointerValue<'context>,
-    ) -> CodeGenerationResult<IntValue<'context>> {
-        let strlen = self
-            .llvm_module
-            .get_function("strlen")
-            .expect("C string length is recorded before emission");
-        let length = self
-            .builder
-            .build_direct_call(strlen, &[pointer.into()], "c_string.length")
-            .map_err(compiler_diagnostic)?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_int_value();
-        self.build_validate_utf8_range(pointer, length)
-    }
-
     fn errno_function_name(&self) -> &'static str {
         let triple = self.llvm_module.get_triple();
         let triple = triple.as_str().to_string_lossy();

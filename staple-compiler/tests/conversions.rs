@@ -300,3 +300,26 @@ fn raw_pointer_operations_reject_invalid_access_and_implicit_conversions() {
         );
     }
 }
+
+#[test]
+fn c_string_temporaries_and_foreign_unit_function_values_run() {
+    let lowered = lower(concat!(
+        "use std.cinterop.(CString, c_string)\n",
+        "use std.ptr.RawOpaqueMutPtr\n",
+        "extern \"c\" {\n",
+        "  malloc: USize -> RawOpaqueMutPtr\n",
+        "  free: RawOpaqueMutPtr -> ()\n",
+        "  strlen: CString -> USize\n",
+        "}\n",
+        "def require = value: Bool => if value { () } else { panic \"foreign call failed\" }\n",
+        "def release: ((RawOpaqueMutPtr -> ()), RawOpaqueMutPtr) -> () = (f, pointer) => f pointer\n",
+        "let measure = strlen\n",
+        "require (measure (c_string \"literal\") == 7)\n",
+        "require (strlen (CString.from_string_unchecked \"converted\") == 9)\n",
+        "require (CString.to_string_unchecked (c_string \"\") == \"\")\n",
+        "require (CString.to_string_unchecked (CString.from_string_unchecked \"\") == \"\")\n",
+        "release (free, malloc 1)\n",
+    ));
+    #[cfg(unix)]
+    run(&lowered);
+}

@@ -51,7 +51,6 @@ pub(crate) enum CanonicalType {
     StringLiteralSet(Vec<String>),
     SharedBuffer(Box<CanonicalType>),
     Buffer(Box<CanonicalType>),
-    CString,
     CChar,
     RawOpaquePtr,
     RawOpaqueMutPtr,
@@ -299,7 +298,7 @@ impl CanonicalType {
             CheckedType::StringLiteralSet(values) => {
                 CanonicalType::StringLiteralSet(values.clone())
             }
-            CheckedType::CString => CanonicalType::CString,
+
             CheckedType::CChar => CanonicalType::CChar,
             CheckedType::RawOpaquePtr => CanonicalType::RawOpaquePtr,
             CheckedType::RawOpaqueMutPtr => CanonicalType::RawOpaqueMutPtr,

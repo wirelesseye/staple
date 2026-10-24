@@ -43,13 +43,11 @@ pub(crate) enum RuntimeRequirement {
     NumericParse,
     /// Libc `strlen` for C-string conversion.
     CStringLength,
-    /// Libc `memchr` for interior-NUL checks.
-    InteriorNulCheck,
 }
 
 impl RuntimeRequirement {
     /// Every requirement in canonical order.
-    pub(crate) const ALL: [RuntimeRequirement; 10] = [
+    pub(crate) const ALL: [RuntimeRequirement; 9] = [
         RuntimeRequirement::GarbageCollector,
         RuntimeRequirement::CoroutineRuntime,
         RuntimeRequirement::ReactiveRuntime,
@@ -59,7 +57,6 @@ impl RuntimeRequirement {
         RuntimeRequirement::NumericToString,
         RuntimeRequirement::NumericParse,
         RuntimeRequirement::CStringLength,
-        RuntimeRequirement::InteriorNulCheck,
     ];
 
     /// Stable description for diagnostics and snapshots.
@@ -74,7 +71,6 @@ impl RuntimeRequirement {
             RuntimeRequirement::NumericToString => "numeric-to-string",
             RuntimeRequirement::NumericParse => "numeric-parse",
             RuntimeRequirement::CStringLength => "c-string-length",
-            RuntimeRequirement::InteriorNulCheck => "interior-nul-check",
         }
     }
 
@@ -85,9 +81,8 @@ impl RuntimeRequirement {
             .expect("internal invariant violated: every requirement is listed in ALL")
     }
 
-    #[cfg(test)]
     /// The requirement a fixed runtime symbol belongs to, when the symbol is
-    /// one of the recorded surfaces. Used by the runtime requirement tests.
+    /// one of the recorded surfaces. Also used for ordinary libc extern calls.
     pub(crate) fn for_runtime_symbol(name: &str) -> Option<RuntimeRequirement> {
         if name.starts_with("__staple_gc_") {
             return Some(RuntimeRequirement::GarbageCollector);
@@ -117,7 +112,6 @@ impl RuntimeRequirement {
             "strtoll" | "strtoull" | "strtof" | "strtod" | "__error" | "__errno_location"
             | "_errno" => Some(RuntimeRequirement::NumericParse),
             "strlen" => Some(RuntimeRequirement::CStringLength),
-            "memchr" => Some(RuntimeRequirement::InteriorNulCheck),
             _ => None,
         }
     }
@@ -214,6 +208,14 @@ impl LoweredProgram {
         for (_, artifact) in self.artifacts.iter() {
             if let Some(plan) = &artifact.plan {
                 record_plan_requirements(plan, &mut requirements);
+                if let LoweredArtifactPlan::ExternAdapter(plan) = plan
+                    && let Some(requirement) = self
+                        .symbols
+                        .get(plan.symbol)
+                        .and_then(|symbol| RuntimeRequirement::for_runtime_symbol(&symbol.name))
+                {
+                    requirements.record(requirement);
+                }
             }
         }
         (requirements.canonicalized(), diagnostics)
@@ -319,9 +321,7 @@ fn record_plan_requirements(
             ) => {
                 requirements.record(RuntimeRequirement::CoroutineRuntime);
             }
-            DropGlueBody::CStringFree => {
-                requirements.record(RuntimeRequirement::CStringFree);
-            }
+
             DropGlueBody::Buffer { .. } => {
                 requirements.record(RuntimeRequirement::CStringFree);
                 requirements.record(RuntimeRequirement::GarbageCollector);
@@ -435,6 +435,16 @@ impl RequirementVisitor<'_> {
 impl LoweredOwnerVisitor for RequirementVisitor<'_> {
     fn call_site(&mut self, call: &LoweredCall) -> Result<(), Vec<Diagnostic>> {
         match &call.target {
+            LoweredCallableTarget::ExternalFunction { symbol } => {
+                if let Some(requirement) = self
+                    .program
+                    .symbols
+                    .get(*symbol)
+                    .and_then(|symbol| RuntimeRequirement::for_runtime_symbol(&symbol.name))
+                {
+                    self.requirements.record(requirement);
+                }
+            }
             LoweredCallableTarget::Constructor {
                 recursive: Some(_), ..
             } => self.gc(),
@@ -451,24 +461,13 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
                 IntrinsicFunction::ValidateUtf8 => {
                     self.requirements.record(RuntimeRequirement::Utf8Validator);
                 }
-                IntrinsicFunction::CStringValidUtf8 => {
-                    self.requirements.record(RuntimeRequirement::Utf8Validator);
-                    self.requirements.record(RuntimeRequirement::CStringLength);
-                }
+
                 IntrinsicFunction::ToString { .. } => {
                     self.requirements
                         .record(RuntimeRequirement::NumericToString);
                     self.gc();
                 }
-                IntrinsicFunction::StringFromCString => {
-                    self.requirements.record(RuntimeRequirement::CStringLength);
-                    self.requirements.record(RuntimeRequirement::CStringFree);
-                    self.gc();
-                }
-                IntrinsicFunction::StringHasNul => {
-                    self.requirements
-                        .record(RuntimeRequirement::InteriorNulCheck);
-                }
+
                 IntrinsicFunction::StringAdd | IntrinsicFunction::CallerFile => self.gc(),
                 IntrinsicFunction::BufferWithCapacity
                 | IntrinsicFunction::BufferClone
