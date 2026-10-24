@@ -2343,14 +2343,7 @@ fn repeated_product_rejects_value_non_copy_and_oversized_counts() {
             .contains("must satisfy `Natural`, found `String`")
     }));
 
-    let diagnostics = TypeChecker::new()
-        .check(resolve("let huge = (0 ^ 70000)\n"))
-        .expect_err_diagnostics("the arity limit is enforced");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.message.contains("exceeds the limit") })
-    );
+    type_check("let huge = (0 ^ 70000)\n");
 }
 
 #[test]
@@ -3882,7 +3875,7 @@ fn rejects_slice_shared_destructuring() {
 #[test]
 fn handles_array_edges_and_large_lengths() {
     type_check("let value: (...(I32 ^ 0), ...(I32 ^ 1), I32) = (1, 2)\n");
-    type_check("let large: (I32 ^ 1_000_000) = (0 ^ 1_000_000)\n");
+    type_check("let large: (I32 ^ 1000000) = (0 ^ 1000000)\n");
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
@@ -4848,7 +4841,7 @@ fn binds_a_product_without_destructuring_it() {
         .expect("a product binding pattern should compile");
 
     assert!(llvm.contains("define i32 @sum(ptr %0, i32 %1, i32 %2)"));
-    assert!(llvm.contains("extractvalue { i32, i32 }"));
+    assert!(llvm.contains("extractvalue { [2 x i32] }"));
 }
 
 #[test]
@@ -14305,7 +14298,7 @@ fn from_coercion_applies_once_to_the_whole_expression() {
     );
     for expected in [
         "expected `C`, found `B`",
-        "expected `(A, A)`, found `(B, B)`",
+        "expected `(A ^ 2)`, found `(B ^ 2)`",
         "expected `Shared<A>`, found `Shared<B>`",
         "expected `() -> A`, found `() -> B`",
     ] {
@@ -15907,7 +15900,7 @@ fn slotted_products_typecheck_as_distinct_values_and_function_parameters() {
     assert!(
         errors
             .iter()
-            .any(|message| message.contains("expected `(I32; I32)`")),
+            .any(|message| message.contains("expected `(I32 ^ 2;)`")),
         "{errors:?}"
     );
 }

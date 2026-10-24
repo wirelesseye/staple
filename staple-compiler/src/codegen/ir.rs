@@ -1184,6 +1184,9 @@ impl<'program, 'context> Backend<'program, 'context> {
         span: Span,
     ) -> CodeGenerationResult<inkwell::values::BasicValueEnum<'context>> {
         let product = &crate::normalize_checked_product_runs(product.clone());
+        if let [value] = values {
+            return Ok(*value);
+        }
         let homogeneous_repeat = match product.runs.as_slice() {
             [run] => run.positions().filter(|count| *count > 1),
             _ => None,
