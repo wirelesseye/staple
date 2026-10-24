@@ -1,7 +1,15 @@
 pub mod
 
+use package.try.Try
+
 /// A successful value represented transparently by its payload.
 pub type Ok<T> from pub T
 
 /// The outcome of an operation: success as `Ok`, or an error value.
 pub type Result<T, E> = Ok<T> | E
+
+impl<T, E> Try Result<T, E> {
+    type Output = T
+    type Residual = E
+    branch = move value => value
+}

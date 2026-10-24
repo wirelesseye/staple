@@ -181,10 +181,6 @@ impl<T where Display T> ToString T {
     to_string = value => Formatter.display value
 }
 
-impl Display String {
-    fmt = (value, mut formatter) => formatter |> write value
-}
-
 impl Debug String {
     fmt = (value, mut formatter) => formatter_write_debug (formatter, value)
 }

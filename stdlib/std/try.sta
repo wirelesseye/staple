@@ -35,18 +35,3 @@ companion<T where Try T> T {
         _ => panic message,
     }
 }
-
-impl<T, E> Try Result<T, E> {
-    type Output = T
-    type Residual = E
-    branch = move value => value
-}
-
-impl<T> Try Option<T> {
-    type Output = T
-    type Residual = None
-    branch = move value => match value {
-        Some output => Ok output,
-        None => None,
-    }
-}
