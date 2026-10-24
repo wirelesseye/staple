@@ -303,6 +303,7 @@ impl<'context> CodeGenerator<'context> {
         module.set_data_layout(&target_data.get_data_layout());
         for install in [
             runtime::link_gc_runtime,
+            runtime::link_io_runtime,
             runtime::link_coroutine_runtime,
             runtime::link_reactive_runtime,
         ] {

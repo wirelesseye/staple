@@ -2800,6 +2800,35 @@ transitively through its function resource contract. Calling either output
 function from a non-entry module's top-level initialization is therefore
 still rejected.
 
+Standard output and input operations are byte based and preserve embedded NUL.
+`print`, `println`, `eprint`, and `eprintln` accept `String` and panic on write
+failure; the `e` variants use standard error. Their `try_` variants return
+`Result<(), IoError>`. `flush_stdout ()` and `flush_stderr ()` return the same
+result and expose errors that occur while draining buffered output. Flush output
+explicitly before waiting for a response to a prompt.
+
+`stdin ()`, `stdout ()`, and `stderr ()` return `Stdin`, `Stdout`, and `Stderr`
+handles to the process streams. They share the underlying C stdio buffering;
+creating or dropping a handle does not open or close the stream. `Read` supplies
+`read_byte: mut R ->{IO} Result<Option<U8>, IoError>`; `None` means EOF.
+`Write` supplies `write_all: (mut W; SharedBuffer<U8>) ->{IO} Result<(), IoError>`
+and `flush: mut W ->{IO} Result<(), IoError>`. A failed write may have emitted a
+prefix and must not be retried blindly. `IoError` currently reports failure
+without an operating-system error code. `write_string writer text` writes a
+string through any `Write` implementation without a C-string conversion.
+
+`read_line ()` reads standard input; `read_line_from reader` accepts any `Read`
+implementation. Both return `Result<Option<String>, ReadLineError>`, where
+`ReadLineError` is `IoError | InvalidUtf8`. They remove LF and a preceding CR,
+return `Some ""` for an empty line, return a final unterminated line, and return
+`None` only when EOF occurs before any bytes. Invalid UTF-8 consumes the full
+line and returns `InvalidUtf8`.
+
+The runtime supplies a target-specific stdio bridge using length-based
+`fwrite`, `fflush`, and `fgetc`; no new C interop syntax is required. Panic
+messages use a best-effort write and flush to standard error, including embedded
+NUL bytes, without recursively panicking if the diagnostic cannot be written.
+
 Macros may quote, splice, generate, and transform resource syntax. Attempting
 to evaluate `resource` or `with` as a compile-time macro operation is rejected;
 providers exist only in runtime lexical scopes.

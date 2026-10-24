@@ -472,9 +472,10 @@ fn panic_reports_the_location_of_its_call() {
         false,
     );
     assert_eq!(output.status.code(), Some(1));
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "before\n");
     assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        "before\npanic: stop at <stdin>.sta:3:3\n"
+        String::from_utf8(output.stderr).unwrap(),
+        "panic: stop at <stdin>.sta:3:3\n"
     );
 }
 
@@ -495,7 +496,7 @@ fn panic_inside_a_tracked_function_reports_its_caller() {
     );
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
         "panic: expected a positive value at <stdin>.sta:7:9\n"
     );
 }
@@ -613,7 +614,7 @@ fn try_unwrap_and_expect_panic_at_their_caller() {
     );
     assert_eq!(unwrap.status.code(), Some(1));
     assert_eq!(
-        String::from_utf8(unwrap.stdout).unwrap(),
+        String::from_utf8(unwrap.stderr).unwrap(),
         "panic: called `unwrap` on a failure at <stdin>.sta:2:17\n"
     );
     let expect = execute(
@@ -625,7 +626,7 @@ fn try_unwrap_and_expect_panic_at_their_caller() {
     );
     assert_eq!(expect.status.code(), Some(1));
     assert_eq!(
-        String::from_utf8(expect.stdout).unwrap(),
+        String::from_utf8(expect.stderr).unwrap(),
         "panic: loading config at <stdin>.sta:2:9\n"
     );
 }
@@ -653,7 +654,7 @@ fn integer_division_and_remainder_failures_panic_at_their_caller() {
     ] {
         let output = execute(source, false);
         assert_eq!(output.status.code(), Some(1), "for {source:?}");
-        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), expected);
     }
 }
 

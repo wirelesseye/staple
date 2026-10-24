@@ -1,10 +1,10 @@
 pub mod
 
-use package.io.printf
-use package.cinterop.(c_string, CString, InteriorNul)
+use package.io.(__staple_io_stream, __staple_io_write, __staple_io_flush)
+use package.ptr.RawOpaquePtr
+use package.shared_buffer.SharedBuffer
 use package.source.(Location, track_caller)
-use package.result.(Ok)
-use package.string.(String)
+use package.string.(String, string_shared_bytes)
 
 // Nested so the raw C `exit` symbol (extern bindings are always named
 // exactly after their C symbol) doesn't collide with the `exit` wrapper
@@ -29,9 +29,10 @@ pub def exit = code: I32 => Never :: {
 @track_caller
 pub def panic = message: String => Never :: {
     let location = Location.caller ()
-    match (CString.from_string "panic: ${message} at ${location}") {
-        Ok text => { let _ = printf (c_string "%s\n", text); () },
-        InteriorNul => { let _ = printf (c_string "panic: message contains an embedded NUL byte at %s\n", CString.from_string_unchecked "$location"); () },
-    }
+    let bytes = string_shared_bytes "panic: ${message} at ${location}\n"
+    let pointer = SharedBuffer.unsafe_data bytes
+    let stream = __staple_io_stream 2
+    let _ = __staple_io_write (stream, pointer as RawOpaquePtr, SharedBuffer.length bytes)
+    let _ = __staple_io_flush stream
     exit 1
 }
