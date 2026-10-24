@@ -2508,7 +2508,8 @@ signatures and intrinsics used as values.
 
 A typed resource is an implicit value identified by its concrete nominal type.
 There is no separate resource declaration: any fully concrete, sized nominal
-type may be used. For example:
+type may be used, including sized opaque types. Unsized types cannot be
+used as resources. For example:
 
 ```staple
 type Clock wrap (

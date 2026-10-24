@@ -1762,7 +1762,7 @@ fn standard_io_is_a_compiler_provided_resource_and_propagates_to_main() {
 }
 
 #[test]
-fn allows_io_at_entry_module_top_level_but_rejects_non_builtin_opaque_resources() {
+fn allows_io_at_entry_module_top_level_but_rejects_unsized_resources() {
     // `IO` is implicitly available to the entry module's top-level
     // items, so a bare `println` there now compiles.
     type_check("use std.io.println\nprintln \"entry module output\"\n");
@@ -1771,12 +1771,33 @@ fn allows_io_at_entry_module_top_level_but_rejects_non_builtin_opaque_resources(
         .check(resolve(
             "type Token opaque\ndef use_token: () ->{Token} () = () => ()\n",
         ))
-        .expect_err_diagnostics("only std.io.IO may be an opaque resource");
+        .expect_err_diagnostics("unsized opaque types cannot be resources");
     assert!(
         diagnostics
             .iter()
             .any(|diagnostic| { diagnostic.message.contains("concrete, sized nominal type") })
     );
+}
+
+#[test]
+fn sized_opaque_types_can_be_resources() {
+    let module = type_check(concat!(
+        "use std.ptr.RawPtr\n",
+        "use std.coroutine.Scheduler\n",
+        "type Hidden opaque\n",
+        "type Count = I32\n",
+        "def read: () ->{I32} I32 = () => resource Count\n",
+        "def inferred = () => resource I32\n",
+        "def bounded = () =>{I32} resource I32\n",
+        "def scheduler: () ->{Scheduler} () = () => ()\n",
+        "def hidden_pointer: () ->{RawPtr<Hidden>} RawPtr<Hidden> = () => resource RawPtr<Hidden>\n",
+        "def pointer: () ->{RawPtr<I32>} RawPtr<I32> = () => resource RawPtr<I32>\n",
+        "with Count = 42 { read (); inferred (); bounded () }\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("sized opaque resources should compile through code generation");
 }
 
 #[test]
@@ -16997,7 +17018,7 @@ fn function_effect_lower_bounds_respect_type_and_trait_contracts() {
 #[test]
 fn function_effect_lower_bounds_validate_resources_and_variables() {
     for source in [
-        "def invalid = () =>{I32} ()\n",
+        "type Token opaque\ndef invalid = () =>{Token} ()\n",
         "def invalid: <effect E, effect F> () ->{E} () = <effect E, effect F> () =>{E, F} ()\n",
     ] {
         let diagnostics = type_check_errors(source, "invalid lower bound");
