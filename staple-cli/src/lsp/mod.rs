@@ -8,6 +8,7 @@ pub mod source_projection;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::rc::Rc;
 
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::notification::{
@@ -15,7 +16,7 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::request::{
-    CodeActionRequest, Completion, GotoDefinition, HoverRequest, Request as _,
+    CodeActionRequest, Completion, GotoDefinition, HoverRequest, References, Request as _,
     ResolveCompletionItem, SemanticTokensFullRequest, SignatureHelpRequest,
 };
 use lsp_types::*;
@@ -36,6 +37,8 @@ struct Document {
     definition_entries: Vec<DefinitionEntry>,
     last_analysis: Option<Analysis>,
     last_resolved: Option<ResolvedDefinitions>,
+    reference_entries: Vec<definition::ReferenceEntry>,
+    last_typed: Option<KeptAnalysis>,
 }
 
 #[derive(Clone)]
@@ -55,6 +58,13 @@ struct ResolvedDefinitions {
     source: String,
     path: PathBuf,
     entries: Vec<DefinitionEntry>,
+}
+
+struct KeptAnalysis {
+    typed: Rc<staple_compiler::TypedModule>,
+    source: String,
+    path: PathBuf,
+    references: Vec<definition::ReferenceEntry>,
 }
 
 struct Server {
@@ -184,6 +194,7 @@ fn initialize(connection: &Connection) -> Result<(), String> {
             work_done_progress_options: WorkDoneProgressOptions::default(),
         }),
         definition_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         completion_provider: Some(CompletionOptions {
             resolve_provider: Some(true),
@@ -390,6 +401,17 @@ impl Server {
                     serde_json::to_value(actions).unwrap(),
                 )))
                 .map_err(|error| error.to_string())?;
+        } else if request.method == References::METHOD {
+            let params: ReferenceParams =
+                serde_json::from_value(request.params).map_err(|error| error.to_string())?;
+            let result = reference_locations(&self.documents, &params);
+            self.connection
+                .sender
+                .send(Message::Response(Response::new_ok(
+                    request.id,
+                    serde_json::to_value(result).unwrap(),
+                )))
+                .map_err(|error| error.to_string())?;
         } else if request.method == GotoDefinition::METHOD {
             let params: GotoDefinitionParams =
                 serde_json::from_value(request.params).map_err(|error| error.to_string())?;
@@ -540,6 +562,8 @@ impl Server {
                         definition_entries: Vec::new(),
                         last_analysis: None,
                         last_resolved: None,
+                        reference_entries: Vec::new(),
+                        last_typed: None,
                     },
                 );
                 self.analyze(&uri)?;
@@ -616,6 +640,7 @@ impl Server {
         let mut hover_entries = Vec::new();
         let mut document_completion = None;
         let mut definition_entries = None;
+        let mut reference_entries = Vec::new();
         let mut definition_path = path.clone();
         // The editor's own `parse` numbers `SyntaxId`s from zero, which only
         // lines up with the loaded program when this file was parsed first.
@@ -683,12 +708,14 @@ impl Server {
                         }
                         if let Some(typed) = typed {
                             let surface = rebased_module.as_ref().unwrap_or(module);
-                            definition_entries = Some(definition::entries_at_path(
+                            let index = definition::index_at_path(
                                 &definition_path,
                                 surface,
                                 typed.resolved(),
                                 Some(&typed),
-                            ));
+                            );
+                            definition_entries = Some(index.definitions);
+                            reference_entries = index.references;
                             hover_entries =
                                 hover::entries_at_path(&definition_path, surface, &typed);
                             let completion_index = crate::lsp::completion::index(surface, &typed);
@@ -709,6 +736,23 @@ impl Server {
             typed_for_tokens.as_ref(),
         );
         let document = self.documents.get_mut(uri).unwrap();
+        // Never mix IDs from a recovered program with those of the kept program.
+        if (!analysis_has_errors || document.last_typed.is_none())
+            && let Some(typed) = &typed_for_tokens
+        {
+            document.last_typed = Some(KeptAnalysis {
+                typed: Rc::new(typed.clone()),
+                source: text.clone(),
+                path: definition_path.clone(),
+                references: reference_entries,
+            });
+        }
+        document.reference_entries = document.last_typed.as_ref().map_or_else(Vec::new, |kept| {
+            kept.references
+                .iter()
+                .filter_map(|entry| remap_reference(entry, kept, &text))
+                .collect()
+        });
         if let Some(mut entries) = definition_entries {
             // Discarded regions have no entries of their own yet.
             if parse_error.is_some()
@@ -927,6 +971,146 @@ fn remap_hover_entries(source: &str, previous: &Analysis) -> Vec<HoverEntry> {
             })
         })
         .collect()
+}
+
+fn remap_reference(
+    entry: &definition::ReferenceEntry,
+    kept: &KeptAnalysis,
+    source: &str,
+) -> Option<definition::ReferenceEntry> {
+    let (start, end) =
+        TextChange::between(&kept.source, source).remap(entry.range.start, entry.range.end)?;
+    let range = start..end;
+    if kept.source.get(entry.range.clone())? != source.get(range.clone())? {
+        return None;
+    }
+    Some(definition::ReferenceEntry {
+        range,
+        ..entry.clone()
+    })
+}
+
+fn reference_locations(
+    documents: &HashMap<Uri, Document>,
+    params: &ReferenceParams,
+) -> Option<Vec<Location>> {
+    let uri = &params.text_document_position.text_document.uri;
+    let document = documents.get(uri)?;
+    let kept = document.last_typed.as_ref()?;
+    let offset = semantic::offset(&document.text, params.text_document_position.position)?;
+    let selected = document
+        .reference_entries
+        .iter()
+        .filter(|entry| entry.range.contains(&offset))
+        .min_by_key(|entry| entry.range.len())?;
+    if selected.definitions.is_empty() {
+        return None;
+    }
+    let resolved = kept.typed.resolved();
+    let targets = definition::declaration_targets(resolved);
+    // Derive the stdlib directory from the loaded program, including when the
+    // server used the default library location rather than an explicit flag.
+    let std_root = resolved.program().standard_library_core().and_then(|id| {
+        resolved
+            .program()
+            .module(id)
+            .path
+            .parent()
+            .map(Path::to_owned)
+    });
+    let in_std = |path: &Path| std_root.as_ref().is_some_and(|root| path.starts_with(root));
+    let include_std = in_std(&kept.path);
+    let mut entries = document.reference_entries.clone();
+    entries.extend(definition::references_in_program(
+        resolved,
+        Some(&kept.typed),
+        |source| source.path != kept.path && (include_std || !in_std(&source.path)),
+    ));
+    let declarations = selected
+        .definitions
+        .iter()
+        .filter_map(|id| targets.get(id))
+        .map(|target| (target.path.clone(), target.selection_range.clone()))
+        .collect::<Vec<_>>();
+    let mut hits = entries
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .definitions
+                .iter()
+                .any(|id| selected.definitions.contains(id))
+        })
+        .map(|entry| (entry.path, entry.range))
+        .collect::<Vec<_>>();
+    // Declaration positions belong to the kept source and need the same edit
+    // mapping as uses before includeDeclaration can be applied.
+    let declarations = declarations
+        .into_iter()
+        .filter_map(|(path, range)| {
+            if path == kept.path {
+                let entry = definition::ReferenceEntry {
+                    path,
+                    range,
+                    definitions: Vec::new(),
+                };
+                let mapped = remap_reference(&entry, kept, &document.text)?;
+                Some((mapped.path, mapped.range))
+            } else {
+                Some((path, range))
+            }
+        })
+        .collect::<Vec<_>>();
+    if params.context.include_declaration {
+        hits.extend(declarations);
+    } else {
+        hits.retain(|hit| !declarations.contains(hit));
+    }
+    let mut locations = hits
+        .into_iter()
+        .filter_map(|(path, range)| {
+            let target_uri = if path == kept.path {
+                uri.clone()
+            } else {
+                path_to_uri(&path)?
+            };
+            let open = documents.get(&target_uri).or_else(|| {
+                documents
+                    .iter()
+                    .find(|(uri, _)| {
+                        uri_to_path(uri).is_some_and(|p| normalized_source_path(&p) == path)
+                    })
+                    .map(|(_, document)| document)
+            });
+            let text = match open {
+                Some(document) => document.text.clone(),
+                None => std::fs::read_to_string(&path).ok()?,
+            };
+            // Aliases can differ from the cursor spelling. Compare each hit
+            // with its own saved token when another open buffer is dirty.
+            let name = text.get(range.clone())?;
+            if path != kept.path && open.is_some() {
+                let saved = std::fs::read_to_string(&path).ok()?;
+                if saved.get(range.clone())? != name {
+                    return None;
+                }
+            }
+            Some(Location {
+                uri: target_uri,
+                range: lsp_range(&text, range),
+            })
+        })
+        .collect::<Vec<_>>();
+    locations.sort_by(|a, b| {
+        a.uri
+            .as_str()
+            .cmp(b.uri.as_str())
+            .then(a.range.start.line.cmp(&b.range.start.line))
+            .then(a.range.start.character.cmp(&b.range.start.character))
+            .then(a.range.end.line.cmp(&b.range.end.line))
+            .then(a.range.end.character.cmp(&b.range.end.character))
+    });
+    locations.dedup();
+    (!locations.is_empty()).then_some(locations)
 }
 
 fn remap_definition_entries(source: &str, resolved: &ResolvedDefinitions) -> Vec<DefinitionEntry> {
@@ -2092,6 +2276,143 @@ mod tests {
     }
 
     #[test]
+    fn references_search_siblings_and_hide_dirty_buffer_hits() {
+        let root =
+            std::env::temp_dir().join(format!("staple-reference-siblings-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("staple.kdl"),
+            "package \"refs\" {\n    kind \"library\"\n    root \"src\"\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/root.sta"),
+            "pub mod\npub def shared = () => ()\n",
+        )
+        .unwrap();
+        let sibling = "pub mod\nuse package.shared\nshared ()\n";
+        std::fs::write(root.join("src/sibling.sta"), sibling).unwrap();
+        let source = "use package.shared\nshared ()\n";
+        std::fs::write(root.join("src/main.sta"), source).unwrap();
+        let uri = path_to_uri(&std::fs::canonicalize(root.join("src/main.sta")).unwrap()).unwrap();
+        let sibling_uri =
+            path_to_uri(&std::fs::canonicalize(root.join("src/sibling.sta")).unwrap()).unwrap();
+        let (connection, _client) = Connection::memory();
+        let mut server = Server {
+            connection,
+            documents: HashMap::from([(
+                uri.clone(),
+                Document {
+                    text: source.to_owned(),
+                    ..Document::default()
+                },
+            )]),
+            published_by_root: HashMap::new(),
+            stdlib: Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            ),
+        };
+        server.analyze(&uri).unwrap();
+        let params = ReferenceParams {
+            text_document_position: TextDocumentPositionParams::new(
+                TextDocumentIdentifier::new(uri),
+                Position::new(1, 1),
+            ),
+            context: ReferenceContext {
+                include_declaration: false,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        };
+        let hits = reference_locations(&server.documents, &params).unwrap();
+        assert_eq!(hits.iter().filter(|hit| hit.uri == sibling_uri).count(), 2);
+        server.documents.insert(
+            sibling_uri.clone(),
+            Document {
+                text: sibling.replace("shared", "absent"),
+                ..Document::default()
+            },
+        );
+        let hits = reference_locations(&server.documents, &params).unwrap();
+        assert!(hits.iter().all(|hit| hit.uri != sibling_uri));
+        assert_eq!(hits.len(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn references_use_utf16_and_survive_broken_buffers() {
+        let source = "// 😀\r\nlet café = 1\r\ncafé\r\ncafé\r\n";
+        let uri: Uri = "file:///tmp/staple-references-utf16.sta".parse().unwrap();
+        let (connection, client) = Connection::memory();
+        let mut server = Server {
+            connection,
+            documents: HashMap::from([(
+                uri.clone(),
+                Document {
+                    text: source.to_owned(),
+                    ..Document::default()
+                },
+            )]),
+            published_by_root: HashMap::new(),
+            stdlib: Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            ),
+        };
+        server.analyze(&uri).unwrap();
+        let mut params = ReferenceParams {
+            text_document_position: TextDocumentPositionParams::new(
+                TextDocumentIdentifier::new(uri.clone()),
+                Position::new(2, 1),
+            ),
+            context: ReferenceContext {
+                include_declaration: false,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        };
+        server
+            .request(Request {
+                id: 99.into(),
+                method: References::METHOD.to_owned(),
+                params: serde_json::to_value(&params).unwrap(),
+            })
+            .unwrap();
+        let Message::Response(response) = recv(&client) else {
+            panic!("expected references")
+        };
+        let hits: Vec<Location> =
+            serde_json::from_value(response.response_result.unwrap()).unwrap();
+        assert_eq!(
+            hits.iter().map(|hit| hit.range).collect::<Vec<_>>(),
+            vec![
+                Range::new(Position::new(2, 0), Position::new(2, 4)),
+                Range::new(Position::new(3, 0), Position::new(3, 4)),
+            ]
+        );
+        params.context.include_declaration = true;
+        assert_eq!(
+            reference_locations(&server.documents, &params)
+                .unwrap()
+                .len(),
+            3
+        );
+        server.documents.get_mut(&uri).unwrap().text =
+            format!("{source}def broken = \"unterminated");
+        server.analyze(&uri).unwrap();
+        params.text_document_position.position = Position::new(2, 1);
+        let hits = reference_locations(&server.documents, &params).unwrap();
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].range.start, Position::new(1, 4));
+        assert_eq!(hits[2].range.start, Position::new(3, 0));
+    }
+
+    #[test]
     fn serves_the_core_protocol_in_memory() {
         let (server_connection, client) = Connection::memory();
         let server = std::thread::spawn(|| {
@@ -2130,6 +2451,10 @@ mod tests {
             Some(PositionEncodingKind::UTF16)
         );
         assert!(result.capabilities.semantic_tokens_provider.is_some());
+        assert_eq!(
+            result.capabilities.references_provider,
+            Some(OneOf::Left(true))
+        );
         assert_eq!(
             result.capabilities.hover_provider,
             Some(HoverProviderCapability::Simple(true))

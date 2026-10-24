@@ -19,6 +19,18 @@ pub struct DefinitionEntry {
     pub targets: Vec<DefinitionTarget>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceEntry {
+    pub path: PathBuf,
+    pub range: Range<usize>,
+    pub definitions: Vec<DefinitionId>,
+}
+
+pub struct DefinitionIndex {
+    pub definitions: Vec<DefinitionEntry>,
+    pub references: Vec<ReferenceEntry>,
+}
+
 #[cfg(test)]
 pub fn entries(
     module: &Module,
@@ -35,6 +47,15 @@ pub fn entries_at_path(
     resolved: &ResolvedModule,
     typed: Option<&TypedModule>,
 ) -> Vec<DefinitionEntry> {
+    index_at_path(path, module, resolved, typed).definitions
+}
+
+pub fn index_at_path(
+    path: &Path,
+    module: &Module,
+    resolved: &ResolvedModule,
+    typed: Option<&TypedModule>,
+) -> DefinitionIndex {
     // The editor hands us its own freshly parsed `module`, still carrying the
     // unexpanded macro call sites we want to offer go-to-definition for. Its
     // `SyntaxId`s are numbered from zero, which only lines up with the loaded
@@ -73,6 +94,7 @@ pub fn entries_at_path(
         typed,
         targets,
         entries: Vec::new(),
+        references: Vec::new(),
         path,
         id_offset: editor_id_offset,
     };
@@ -101,10 +123,56 @@ pub fn entries_at_path(
             merged.push(entry);
         }
     }
-    merged
+    // Surface and expanded walks can both project onto the same source token.
+    // Keep the union so a cursor there queries every matching definition.
+    collector
+        .references
+        .sort_by_key(|entry| (entry.range.start, entry.range.end));
+    let mut references: Vec<ReferenceEntry> = Vec::new();
+    for entry in collector.references {
+        if let Some(previous) = references.last_mut()
+            && previous.range == entry.range
+        {
+            for definition in entry.definitions {
+                if !previous.definitions.contains(&definition) {
+                    previous.definitions.push(definition);
+                }
+            }
+        } else {
+            references.push(entry);
+        }
+    }
+    DefinitionIndex {
+        definitions: merged,
+        references,
+    }
 }
 
-fn declaration_targets(resolved: &ResolvedModule) -> HashMap<DefinitionId, DefinitionTarget> {
+/// Walk program-owned trees using their original syntax IDs and source paths.
+pub fn references_in_program(
+    resolved: &ResolvedModule,
+    typed: Option<&TypedModule>,
+    include: impl Fn(&SourceModule) -> bool,
+) -> Vec<ReferenceEntry> {
+    let mut collector = Collector {
+        resolved,
+        typed,
+        targets: declaration_targets(resolved),
+        entries: Vec::new(),
+        references: Vec::new(),
+        path: Path::new(""),
+        id_offset: 0,
+    };
+    for source in resolved.program().modules() {
+        if !source.companion && include(source) {
+            collector.path = &source.path;
+            collector.module(&source.syntax);
+        }
+    }
+    collector.references
+}
+
+pub fn declaration_targets(resolved: &ResolvedModule) -> HashMap<DefinitionId, DefinitionTarget> {
     let mut targets = HashMap::new();
     for source_module in resolved.program().modules() {
         let mut collector = DeclarationCollector {
@@ -447,6 +515,7 @@ struct Collector<'a> {
     typed: Option<&'a TypedModule>,
     targets: HashMap<DefinitionId, DefinitionTarget>,
     entries: Vec<DefinitionEntry>,
+    references: Vec<ReferenceEntry>,
     path: &'a Path,
     /// Added to every `SyntaxId` taken from the walked tree before it is used
     /// to query the resolver or type checker. Non-zero while walking an
@@ -1220,6 +1289,13 @@ impl Collector<'_> {
         else {
             return;
         };
+        if !definitions.is_empty() {
+            self.references.push(ReferenceEntry {
+                path: self.path.to_owned(),
+                range: range.clone(),
+                definitions: definitions.to_vec(),
+            });
+        }
         let mut targets = definitions
             .iter()
             .filter_map(|definition| self.targets.get(definition).cloned())
@@ -1313,6 +1389,50 @@ mod tests {
                     .iter()
                     .any(|target| target.selection_range.start == source.find("Clock").unwrap())),
             "{entries:?}"
+        );
+    }
+
+    #[test]
+    fn reference_ids_distinguish_shadowed_bindings() {
+        let source = "let value = 1\ndef local = value: I32 => value\nvalue\n";
+        let path = std::env::temp_dir().join("staple-reference-shadow.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let index = index_at_path(&path, &module, typed.resolved(), Some(&typed));
+        let outer = index
+            .references
+            .iter()
+            .find(|entry| entry.range.start == source.find("value").unwrap())
+            .unwrap();
+        let mut uses = index
+            .references
+            .iter()
+            .filter(|entry| {
+                entry
+                    .definitions
+                    .iter()
+                    .any(|id| outer.definitions.contains(id))
+            })
+            .map(|entry| entry.range.start)
+            .collect::<Vec<_>>();
+        uses.sort();
+        uses.dedup();
+        assert_eq!(
+            uses,
+            vec![
+                source.find("value").unwrap(),
+                source.rfind("value").unwrap()
+            ]
         );
     }
 
@@ -2123,6 +2243,32 @@ mod tests {
                 .map(|entry| entry.targets.clone())
                 .unwrap_or_default()
         };
+
+        let index = index_at_path(&path, &module, typed.resolved(), Some(&typed));
+        let program_references = references_in_program(typed.resolved(), Some(&typed), |source| {
+            source
+                .path
+                .starts_with(path.parent().unwrap().parent().unwrap())
+        });
+        let bar = index
+            .references
+            .iter()
+            .find(|entry| {
+                entry.range.start
+                    == source.find("package.middle.foo.bar ()").unwrap()
+                        + "package.middle.foo.".len()
+            })
+            .expect("bar call reference");
+        assert!(
+            program_references.iter().any(|entry| {
+                entry.path.ends_with("foo.sta")
+                    && entry
+                        .definitions
+                        .iter()
+                        .any(|id| bar.definitions.contains(id))
+            }),
+            "missing sibling reference: {program_references:?}"
+        );
 
         let line_11 = source.find("package.utils.add 1 2").unwrap();
         let line_10 = source.find("package.middle.foo.bar ()").unwrap();
