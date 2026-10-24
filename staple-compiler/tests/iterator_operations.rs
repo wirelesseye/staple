@@ -125,6 +125,38 @@ fn iterator_operations_produce_their_documented_output() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn tier_two_iterator_operations_produce_their_documented_output() {
+    let output = run(&lower(include_str!("fixtures/iterator_tier_two.sta")));
+    assert_eq!(
+        output,
+        concat!(
+            "flat_map: 0 0 1 0 1 2\n",
+            "scan: 1 3 6 10\n",
+            "scan stop: 1 3 6\n",
+            "skip_while: 4 5 6\n",
+            "step_by: 0 3 6 9\n",
+            "peek: 1\n",
+            "peek rest: 1 2 3\n",
+            "position: 3\n",
+            "position none: none\n",
+            "nth: 3\n",
+            "nth past end: none\n",
+            "min_by: 2\n",
+            "max_by: 6\n",
+            "try_fold ok: ok 10\n",
+            "try_fold err: err reached five\n",
+            "empty:\n",
+            "once: 7\n",
+            "repeat_n: 5 5 5\n",
+            "repeat_n zero:\n",
+            "successors: 1 2 3 4\n",
+            "successors empty:\n",
+        )
+    );
+}
+
 #[test]
 fn lazy_adapters_reject_effectful_functions() {
     // `Iterator.next` is pure, so an adapter cannot run an effect when it is

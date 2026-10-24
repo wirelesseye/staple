@@ -4294,6 +4294,11 @@ and does its work only when advanced.
 | `enumerate` | — | `(index, item)` pairs, counting from `0` |
 | `zip` | `move right: R` | `(item, right_item)` pairs, until either side runs out |
 | `chain` | `move second: R` (same item type) | the items of the iterator, then those of `second` |
+| `flat_map` | `f: move Item -> J` (`Iterator J`) | the items of each iterator `f` returns |
+| `scan` | `move init: S; f: (move S, move Item) -> (S, Option<B>)` | each `Some` value, stopping at `None` |
+| `skip_while` | `keep: Item -> Bool` | the items after the first one `keep` rejects; that item is kept |
+| `step_by` | `count: USize` | the first item, then every `count`th item |
+| `peekable` | — | the same items, with `Peekable.peek` to inspect the next one |
 
 *Consumers* drive the iterator to the end, or until they have their answer,
 and return a value.
@@ -4306,12 +4311,29 @@ and return a value.
 | `count` | — | `USize` |
 | `any` / `all` | `test: Item ->{E} Bool` | `Bool`; an empty iterator satisfies `all` |
 | `find` | `test: Item ->{E} Bool` | the first matching item, or `None` |
+| `position` | `test: Item ->{E} Bool` | the first matching index as `Option<USize>` |
+| `nth` | `index: USize` | the item at that index, or `None`; earlier items are dropped |
 | `last` | — | `Option<Item>` |
+| `try_fold` | `move init: A; f: (move A, move Item) ->{E} R` (`Try R`, `Try.Output R == A`) | `Result<A, Try.Residual R>`; a failure stops the fold |
 | `collect` | — (target from the expected type; `where Default C, FromIterator C Item`) | the collected target |
 | `to_list` | — | a new `List<Item>` |
 | `extend` | `move target: C` (`where FromIterator C Item`) | `target` with every item added |
 | `sum` | — (`where Add Item, Default Item`) | the total, starting from `Default.default ()` |
 | `min` / `max` | — (`where Ord Item`) | `Option<Item>`; the first smallest, the last largest |
+| `min_by` / `max_by` | `compare: (Item, Item) ->{E} Ordering` | `Option<Item>`; the first smallest, the last largest |
+
+Source constructors are free functions in `std.iterator`:
+
+| Constructor | Arguments | Yields |
+|---|---|---|
+| `empty` | `<T> ()` | no items |
+| `once` | `move value: T` | `value` once |
+| `repeat_n` | `move value: T; count: USize` (`Clone T`) | `count` copies of `value` |
+| `successors` | `move first: Option<T>; next: T -> Option<T>` | `first`, then each successor until `next` returns `None` |
+
+`peekable` is a consuming adapter like the others, so `Peekable.peek` returns
+the next item together with the iterator that still holds it:
+`(Option<Item>, Peekable<Iter, Item>)`.
 
 **Collecting.** `collect` is generic in its target: the expected type chooses
 it. It starts from `Default.default ()` and adds the items with
@@ -4371,13 +4393,17 @@ therefore rejected by adapters as well. Keep such state in a consumer's
 accumulator instead, as `fold` does.
 
 **Ownership.** Every operation takes the iterator by `move`. Functions that
-transform an item (`map`, `filter_map`, `fold`, `for_each`, `reduce`) receive
-it by `move`. Functions that only test an item (`filter`, `take_while`, `any`,
-`all`, `find`) borrow it, so the operation can still yield or return it, and
-this works for non-`Copy` items. `take_while` drops the first item it rejects.
+transform an item (`map`, `filter_map`, `flat_map`, `scan`, `fold`,
+`for_each`, `reduce`, `try_fold`) receive it by `move`. Functions that only
+test an item (`filter`, `take_while`, `skip_while`, `any`, `all`, `find`,
+`position`, `min_by`, `max_by`) borrow it, so the operation can still yield or
+return it, and this works for non-`Copy` items. `take_while` drops the first
+item it rejects. `skip_while` yields the first item its predicate rejects.
 `zip` drops an item it has taken from the left side when the right side has
-run out. Consumers that stop early (`any`, `all`, `find`) drop the rest of the
-iterator.
+run out. Consumers that stop early (`any`, `all`, `find`, `position`, `nth`,
+and `try_fold` on failure) drop the rest of the iterator. Source constructors
+take their functions by value as well, since they run while the iterator is
+advanced.
 
 **Adapter types.** Each adapter has its own result type (`Map<Iter, B>`,
 `Filter<Iter, Item>`, `Take<Iter, Item>`, and so on). Its closure is not part of

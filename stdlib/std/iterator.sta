@@ -1,9 +1,13 @@
 pub mod
 
-use package.cmp.(Ord)
+use package.cmp.(Ord, Ordering)
+use package.clone.Clone
 use package.default.(Default)
 use package.list.(List)
 use package.ops.(Add)
+use package.process.(panic)
+use package.result.(Ok, Result)
+use package.try.Try
 
 companion IterStep {
     pub type Done<Iter> wrap pub Iter
@@ -294,6 +298,305 @@ impl<L, R, Out> IntoIterator Chain<L, R, Out> {
     into_iterator = move iterator => iterator
 }
 
+/// The iterator returned by `flat_map`.
+pub type FlatMap<S, Inner, Out> wrap (
+    iter: S,
+    inner: Option<Inner>,
+    step: move S -> IterStep<S, Inner>,
+    inner_step: move Inner -> IterStep<Inner, Out>,
+)
+
+impl<S, Inner, Out> Iterator FlatMap<S, Inner, Out> {
+    type Item = Out
+    next = move FlatMap (iter, inner, step, inner_step) => {
+        let mut outer = iter
+        let mut current = inner
+        loop {
+            match current {
+                Some active => match inner_step active {
+                    Done _ => { current = None },
+                    Yield (item, rest) => {
+                        return Yield (item, FlatMap.<S, Inner, Out> (
+                            iter: outer,
+                            inner: Option<Inner> :: Some rest,
+                            step: step,
+                            inner_step: inner_step,
+                        ))
+                    },
+                },
+                None => match step outer {
+                    Done rest => {
+                        return Done (FlatMap.<S, Inner, Out> (
+                            iter: rest,
+                            inner: Option<Inner> :: None,
+                            step: step,
+                            inner_step: inner_step,
+                        ))
+                    },
+                    Yield (next_inner, rest) => {
+                        outer = rest
+                        current = Option<Inner> :: Some next_inner
+                    },
+                },
+            }
+        }
+    }
+}
+
+impl<S, Inner, Out> IntoIterator FlatMap<S, Inner, Out> {
+    type Iter = FlatMap<S, Inner, Out>
+    into_iterator = move iterator => iterator
+}
+
+/// The state carried between steps of a `scan` iterator.
+pub type ScanState<S, Iter> wrap (
+    state: Option<S>,
+    iter: Iter,
+)
+
+/// The iterator returned by `scan`.
+pub type Scan<S, Iter, Out> wrap (
+    state: ScanState<S, Iter>,
+    step: move ScanState<S, Iter> -> IterStep<ScanState<S, Iter>, Out>,
+)
+
+impl<S, Iter, Out> Iterator Scan<S, Iter, Out> {
+    type Item = Out
+    next = move Scan (state, step) => match step state {
+        Done next_state => Done (Scan.<S, Iter, Out> (state: next_state, step: step)),
+        Yield (item, next_state) => Yield (item, Scan.<S, Iter, Out> (
+            state: next_state,
+            step: step,
+        )),
+    }
+}
+
+impl<S, Iter, Out> IntoIterator Scan<S, Iter, Out> {
+    type Iter = Scan<S, Iter, Out>
+    into_iterator = move iterator => iterator
+}
+
+/// The iterator returned by `skip_while`.
+pub type SkipWhile<S, Out> wrap (
+    iter: S,
+    skipping: Bool,
+    step: move S -> IterStep<S, Out>,
+    keep: Out -> Bool,
+)
+
+impl<S, Out> Iterator SkipWhile<S, Out> {
+    type Item = Out
+    next = move SkipWhile (iter, skipping, step, keep) => {
+        let mut remaining = iter
+        let mut active = skipping
+        loop {
+            match step remaining {
+                Done rest => {
+                    return Done (SkipWhile.<S, Out> (
+                        iter: rest,
+                        skipping: False,
+                        step: step,
+                        keep: keep,
+                    ))
+                },
+                Yield (item, rest) => {
+                    if (active && keep item) {
+                        remaining = rest
+                    } else {
+                        return Yield (item, SkipWhile.<S, Out> (
+                            iter: rest,
+                            skipping: False,
+                            step: step,
+                            keep: keep,
+                        ))
+                    }
+                },
+            }
+        }
+    }
+}
+
+impl<S, Out> IntoIterator SkipWhile<S, Out> {
+    type Iter = SkipWhile<S, Out>
+    into_iterator = move iterator => iterator
+}
+
+/// The iterator returned by `step_by`.
+pub type StepBy<S, Out> wrap (
+    iter: S,
+    remaining: USize,
+    stride: USize,
+    step: move S -> IterStep<S, Out>,
+)
+
+impl<S, Out> Iterator StepBy<S, Out> {
+    type Item = Out
+    next = move StepBy (iter, remaining, stride, step) => {
+        let mut current = iter
+        let mut pending = remaining
+        loop {
+            match step current {
+                Done rest => {
+                    return Done (StepBy.<S, Out> (
+                        iter: rest,
+                        remaining: 0,
+                        stride: stride,
+                        step: step,
+                    ))
+                },
+                Yield (item, rest) => {
+                    if (pending == 0) {
+                        return Yield (item, StepBy.<S, Out> (
+                            iter: rest,
+                            remaining: stride - 1,
+                            stride: stride,
+                            step: step,
+                        ))
+                    }
+                    pending = pending - 1
+                    current = rest
+                },
+            }
+        }
+    }
+}
+
+impl<S, Out> IntoIterator StepBy<S, Out> {
+    type Iter = StepBy<S, Out>
+    into_iterator = move iterator => iterator
+}
+
+/// The iterator returned by `peekable`.
+pub type Peekable<S, Out> wrap (
+    iter: S,
+    peeked: Option<Out>,
+    step: move S -> IterStep<S, Out>,
+)
+
+impl<S, Out> Iterator Peekable<S, Out> {
+    type Item = Out
+    next = move Peekable (iter, peeked, step) => match peeked {
+        Some item => Yield (item, Peekable.<S, Out> (
+            iter: iter,
+            peeked: Option<Out> :: None,
+            step: step,
+        )),
+        None => match step iter {
+            Done rest => Done (Peekable.<S, Out> (
+                iter: rest,
+                peeked: Option<Out> :: None,
+                step: step,
+            )),
+            Yield (item, rest) => Yield (item, Peekable.<S, Out> (
+                iter: rest,
+                peeked: Option<Out> :: None,
+                step: step,
+            )),
+        },
+    }
+}
+
+impl<S, Out> IntoIterator Peekable<S, Out> {
+    type Iter = Peekable<S, Out>
+    into_iterator = move iterator => iterator
+}
+
+companion<S, Out where Copy Out> Peekable<S, Out> {
+    /// Returns the next item without consuming it, together with the iterator
+    /// that still holds it.
+    pub def peek = move iterator: Peekable<S, Out> => (Option<Out>, Peekable<S, Out>) ::
+        match iterator {
+            Peekable (iter, Some item, step) => (
+                Some item,
+                Peekable.<S, Out> (iter: iter, peeked: Option<Out> :: Some item, step: step),
+            ),
+            Peekable (iter, None, step) => match step iter {
+                Done rest => (
+                    None,
+                    Peekable.<S, Out> (iter: rest, peeked: Option<Out> :: None, step: step),
+                ),
+                Yield (item, rest) => (
+                    Some item,
+                    Peekable.<S, Out> (iter: rest, peeked: Option<Out> :: Some item, step: step),
+                ),
+            },
+        }
+}
+
+/// A source iterator that yields no items.
+pub type Empty<T> wrap ()
+
+impl<T> Iterator Empty<T> {
+    type Item = T
+    next = move iterator => match iterator {
+        Empty () => Done (Empty.<T> ()),
+    }
+}
+
+impl<T> IntoIterator Empty<T> {
+    type Iter = Empty<T>
+    into_iterator = move iterator => iterator
+}
+
+/// A source iterator that yields one value.
+pub type Once<T> wrap (value: Option<T>)
+
+impl<T> Iterator Once<T> {
+    type Item = T
+    next = move Once value => match value {
+        Some item => Yield (item, Once (value: Option<T> :: None)),
+        None => Done (Once (value: Option<T> :: None)),
+    }
+}
+
+impl<T> IntoIterator Once<T> {
+    type Iter = Once<T>
+    into_iterator = move iterator => iterator
+}
+
+/// A source iterator that yields one value a fixed number of times.
+pub type RepeatN<T> wrap (
+    value: T,
+    left: USize,
+)
+
+impl<T where Clone T> Iterator RepeatN<T> {
+    type Item = T
+    next = move RepeatN (value, left) => if (left == 0) {
+        Done (RepeatN (value: value, left: 0))
+    } else {
+        Yield (
+            Clone.clone value,
+            RepeatN (value: value, left: left - 1),
+        )
+    }
+}
+
+impl<T where Clone T> IntoIterator RepeatN<T> {
+    type Iter = RepeatN<T>
+    into_iterator = move iterator => iterator
+}
+
+/// A source iterator that starts from an optional value and applies a function
+/// to produce each successor.
+pub type Successors<T> wrap (
+    state: Option<T>,
+    step: move Option<T> -> IterStep<Option<T>, T>,
+)
+
+impl<T> Iterator Successors<T> {
+    type Item = T
+    next = move Successors (state, step) => match step state {
+        Done rest => Done (Successors (state: rest, step: step)),
+        Yield (item, rest) => Yield (item, Successors (state: rest, step: step)),
+    }
+}
+
+impl<T> IntoIterator Successors<T> {
+    type Iter = Successors<T>
+    into_iterator = move iterator => iterator
+}
+
 // Operations
 //
 // Every iterator gets these operations as blanket companion members, so
@@ -427,6 +730,86 @@ companion<Iter where Iterator Iter> Iter {
         )
     }
 
+    /// Lazily maps each item to an iterator and yields that iterator's items.
+    pub def flat_map = <Inner, B where Iterator Inner, Iterator.Item Inner == B>
+        (move iter: Iter; f: move Iterator.Item Iter -> Inner) => FlatMap<Iter, Inner, B> :: {
+        let step = move current: Iter => IterStep<Iter, Inner> :: match Iterator.next current {
+            Done rest => Done rest,
+            Yield (item, rest) => Yield (f item, rest),
+        }
+        let inner_step = move current: Inner => IterStep<Inner, B> :: Iterator.next current
+        FlatMap.<Iter, Inner, B> (
+            iter: iter,
+            inner: Option<Inner> :: None,
+            step: step,
+            inner_step: inner_step,
+        )
+    }
+
+    /// Lazily threads state through `f`, yielding each `Some` value and
+    /// stopping at the first `None`.
+    pub def scan = <S, I, B where Iterator.Item Iter == I>
+        (move iter: Iter; move init: S;
+         f: (move S, move I) -> (S, Option<B>)) => Scan<S, Iter, B> :: {
+        let step = move current: ScanState<S, Iter> => IterStep<ScanState<S, Iter>, B> ::
+            match current {
+                ScanState (state, iter) => match state {
+                    None => Done (ScanState (state: Option<S> :: None, iter: iter)),
+                    Some value => match Iterator.next iter {
+                        Done rest => Done (ScanState (state: Option<S> :: None, iter: rest)),
+                        Yield (item, rest) => match f (value, item) {
+                            (next, Some output) => Yield (
+                                output,
+                                ScanState (state: Option<S> :: Some next, iter: rest),
+                            ),
+                            (_next, None) => Done (ScanState (state: Option<S> :: None, iter: rest)),
+                        },
+                    },
+                },
+            }
+        Scan.<S, Iter, B> (
+            state: ScanState (state: Option<S> :: Some init, iter: iter),
+            step: step,
+        )
+    }
+
+    /// Lazily drops items while `keep` returns `True`, then yields the rest.
+    /// The first item `keep` rejects is yielded.
+    pub def skip_while =
+        (move iter: Iter; keep: Iterator.Item Iter -> Bool)
+        => SkipWhile<Iter, Iterator.Item Iter> :: {
+        let step = move current: Iter => IterStep<Iter, Iterator.Item Iter> ::
+            Iterator.next current
+        SkipWhile.<Iter, Iterator.Item Iter> (
+            iter: iter,
+            skipping: True,
+            step: step,
+            keep: keep,
+        )
+    }
+
+    /// Lazily yields the first item, then every `count`th item after it.
+    pub def step_by =
+        (move iter: Iter; count: USize) => StepBy<Iter, Iterator.Item Iter> :: {
+        if (count == 0) { panic "step_by requires a positive step" }
+        let step = move current: Iter => IterStep<Iter, Iterator.Item Iter> ::
+            Iterator.next current
+        StepBy.<Iter, Iterator.Item Iter> (
+            iter: iter,
+            remaining: 0,
+            stride: count,
+            step: step,
+        )
+    }
+
+    /// Lazily wraps an iterator so its next item can be inspected without
+    /// consuming it.
+    pub def peekable = move iter: Iter => Peekable<Iter, Iterator.Item Iter> :: {
+        let step = move current: Iter => IterStep<Iter, Iterator.Item Iter> ::
+            Iterator.next current
+        Peekable.<Iter, Iterator.Item Iter> (iter: iter, peeked: Option<Iterator.Item Iter> :: None, step: step)
+    }
+
     /// Combines every item into an accumulator, from first to last.
     ///
     /// ```staple
@@ -546,6 +929,68 @@ companion<Iter where Iterator Iter> Iter {
         }
     }
 
+    /// Returns the position of the first item for which `test` returns
+    /// `True`, counting from `0`.
+    pub def position = <effect E>
+        (move iter: Iter; test: Iterator.Item Iter ->{E} Bool) =>{E} Option<USize> :: {
+        let mut remaining = iter
+        let mut index: USize = 0
+        loop {
+            match Iterator.next remaining {
+                Done _ => { return None },
+                Yield (item, rest) => {
+                    if (test item) { return Some index }
+                    remaining = rest
+                    index = index + 1
+                },
+            }
+        }
+    }
+
+    /// Returns the item at position `index`, or `None` when the iterator ends
+    /// first. The items before it are dropped.
+    pub def nth = (move iter: Iter; index: USize) => Option<Iterator.Item Iter> :: {
+        let mut remaining = iter
+        let mut skipped: USize = 0
+        loop {
+            if (skipped == index) {
+                return match Iterator.next remaining {
+                    Done _ => None,
+                    Yield (item, _) => Some item,
+                }
+            }
+            match Iterator.next remaining {
+                Done _ => { return None },
+                Yield (_, rest) => {
+                    remaining = rest
+                    skipped = skipped + 1
+                },
+            }
+        }
+    }
+
+    /// Combines items until `f` reports failure, returning the first failure.
+    /// A successful fold is returned as `Ok` of the accumulated value.
+    pub def try_fold = <A, R, effect E where Try R, Try.Output R == A>
+        (move iter: Iter; move init: A; f: (move A, move Iterator.Item Iter) ->{E} R)
+        =>{E} Result<A, Try.Residual R> :: {
+        let mut accumulator = init
+        let mut remaining = iter
+        loop {
+            match Iterator.next remaining {
+                Done _ => { break },
+                Yield (item, rest) => {
+                    remaining = rest
+                    match Try.branch (f (accumulator, item)) {
+                        Ok next => { accumulator = next },
+                        residual => { return residual },
+                    }
+                },
+            }
+        }
+        accumulator
+    }
+
     /// Returns the last item, or `None` for an empty iterator.
     pub def last = move iter: Iter => Option<Iterator.Item Iter> :: {
         let mut remaining = iter
@@ -616,4 +1061,81 @@ companion<Iter where Iterator Iter, Ord (Iterator.Item Iter)> Iter {
             rest |> fold first ((move best, move item) => if (item < best) { best } else { item }),
         ),
     }
+}
+
+companion<Iter where Iterator Iter> Iter {
+    /// Returns the smallest item according to `compare`, or `None` for an empty
+    /// iterator. Of several equal smallest items, the first is returned.
+    pub def min_by = <effect E>
+        (move iter: Iter;
+         compare: (Iterator.Item Iter, Iterator.Item Iter) ->{E} Ordering)
+        =>{E} Option<Iterator.Item Iter> :: match Iterator.next iter {
+        Done _ => None,
+        Yield (first, rest) => {
+            let mut remaining = rest
+            let mut best = first
+            loop {
+                match Iterator.next remaining {
+                    Done _ => { break },
+                    Yield (item, after) => {
+                        remaining = after
+                        match compare (item, best) {
+                            Ordering.Less() => { best = item },
+                            _ => {},
+                        }
+                    },
+                }
+            }
+            Some best
+        },
+    }
+
+    /// Returns the largest item according to `compare`, or `None` for an empty
+    /// iterator. Of several equal largest items, the last is returned.
+    pub def max_by = <effect E>
+        (move iter: Iter;
+         compare: (Iterator.Item Iter, Iterator.Item Iter) ->{E} Ordering)
+        =>{E} Option<Iterator.Item Iter> :: match Iterator.next iter {
+        Done _ => None,
+        Yield (first, rest) => {
+            let mut remaining = rest
+            let mut best = first
+            loop {
+                match Iterator.next remaining {
+                    Done _ => { break },
+                    Yield (item, after) => {
+                        remaining = after
+                        match compare (item, best) {
+                            Ordering.Less() => {},
+                            _ => { best = item },
+                        }
+                    },
+                }
+            }
+            Some best
+        },
+    }
+}
+
+/// Creates an iterator that yields no items.
+pub def empty = <T> () => Empty<T> :: Empty ()
+
+/// Creates an iterator that yields `value` once.
+pub def once = <T> move value: T => Once<T> :: Once (value: Option<T> :: Some value)
+
+/// Creates an iterator that yields `value` `count` times.
+pub def repeat_n = <T where Clone T> (move value: T; count: USize) => RepeatN<T> ::
+    RepeatN (value: value, left: count)
+
+/// Creates an iterator from `first` and successive applications of `next`.
+pub def successors = <T>
+    (move first: Option<T>; next: T -> Option<T>) => Successors<T> :: {
+    let step = move current: Option<T> => IterStep<Option<T>, T> :: match current {
+        None => Done.<Option<T>> (Option<T> :: None),
+        Some value => match next value {
+            Some next_value => Yield.<T, Option<T>> (value, Option<T> :: Some next_value),
+            None => Yield.<T, Option<T>> (value, Option<T> :: None),
+        },
+    }
+    Successors (state: first, step: step)
 }
