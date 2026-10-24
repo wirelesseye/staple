@@ -4705,8 +4705,9 @@ output |> push '\n'
 let text = StringBuilder.finish output
 ```
 
-Builders implement `Default`, `Display`, and `FromIterator` for both `Char`
-and `String`. Collecting into `String` also builds through a builder.
+Builders implement `Default` and `FromIterator` for both `Char` and `String`.
+They do not implement `Display`: formatting takes its value by move, so
+interpolating a builder would consume it. Read the contents with `to_string`. Collecting into `String` also builds through a builder.
 `Formatter` wraps a builder, so interpolation and `Display`/`Debug` formatting
 use the same growth and copying operations. `Formatter.push` writes a scalar
 without an intermediate string allocation.
@@ -4732,8 +4733,8 @@ copyable iterators that allocate only the substrings they yield. `split`
 preserves empty fields, including a final empty field, and panics with
 `String.split: empty separator` for an empty separator. `split_once` returns
 an optional pair at the first match; an empty separator matches at the start.
-`lines` splits on LF, removes a trailing CR from each line, and omits the empty
-line after a final LF. `split_whitespace` skips runs of Unicode whitespace.
+`lines` splits on LF, removes a CR immediately before each LF, and omits the
+empty line after a final LF. A CR that is not followed by LF stays in the line. `split_whitespace` skips runs of Unicode whitespace.
 
 `replace text needle replacement` replaces nonoverlapping matches; an empty
 needle inserts the replacement at every scalar boundary, including both ends.

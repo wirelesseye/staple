@@ -116,7 +116,7 @@ def main = () => {
     let snapshot = StringBuilder.to_string original
     original |> append " second"
     println snapshot
-    println (Formatter.display original)
+    println (StringBuilder.to_string original)
 }
 main ()
 "#,
@@ -124,6 +124,59 @@ main ()
     assert_eq!(
         run(&lowered),
         "total: 42\nnested:7\ntotal: 42\nnested:7😀\n128512\n9731\n233\n97\nempty\nTrue True\n20000 10000\naé😀!\naé😀\nfirst\nfirst second\n"
+    );
+}
+
+#[test]
+fn builder_is_not_display() {
+    // Formatting moves its value, so interpolation would consume the builder.
+    let errors = check("let builder = StringBuilder.new ()\nlet text = \"${builder}\"\n").unwrap_err();
+    assert!(!errors.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn conditionally_moved_mut_parameter_drops_once() {
+    let lowered = lower(
+        r#"
+use std.io.println
+type Tag wrap I32
+impl !Copy Tag {}
+use std.cinterop.*
+use std.ptr.RawPtr
+extern "c" { printf: (RawPtr<CChar>, ...) -> I32 }
+impl Drop Tag {
+    cleanup = Tag n => { printf (c_string "drop %d\n", n); () }
+}
+def consume = <T> move value: T => () :: ()
+def replace = (mut value: Tag; flag: Bool) => () :: {
+    if (flag) { consume value }
+    value = Tag 9
+}
+def replace_any = <T> (mut value: T; move fresh: T; flag: Bool) => () :: {
+    if (flag) { consume value }
+    value = fresh
+}
+def main = () => {
+    let mut a = Tag 1
+    replace a True
+    println "a"
+    let mut b = Tag 2
+    replace b False
+    println "b"
+    let mut c = Tag 3
+    replace_any c (Tag 4) True
+    println "c"
+    let mut d = Tag 5
+    replace_any d (Tag 6) False
+    println "d"
+}
+main ()
+"#,
+    );
+    assert_eq!(
+        run(&lowered),
+        "drop 1\na\ndrop 2\nb\ndrop 3\nc\ndrop 5\nd\ndrop 6\ndrop 4\ndrop 9\ndrop 9\n"
     );
 }
 
@@ -198,7 +251,7 @@ let negative = -positive
 println (Formatter.display negative)
 let product: (Bool, Char, String) = (True, 'é', "日本")
 println (Formatter.debug product)
-println (Formatter.display (StringBuilder.from_string "é日本😀"))
+println (StringBuilder.to_string (StringBuilder.from_string "é日本😀"))
 "#,
     );
     assert_eq!(

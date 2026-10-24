@@ -3,7 +3,7 @@ pub mod
 use package.list.List
 use package.char.(Char, encode_utf8)
 use package.string.(String, append_string_bytes)
-use package.fmt.(Display, Formatter, formatter_from_builder, formatter_into_builder)
+use package.fmt.(Display, formatter_from_builder, formatter_into_builder)
 use package.iterator.FromIterator
 use package.default.Default
 
@@ -82,14 +82,10 @@ companion StringBuilder {
         String.from_utf8_unchecked bytes
     }
 
-    /// Copies the contents, leaving this builder usable.
+    /// Copies the contents with one bulk byte copy, leaving this builder usable.
     pub def to_string = builder: StringBuilder => String :: {
         let mut bytes: List<U8> = List.with_capacity (length builder)
-        let mut at: USize = 0
-        while (at < length builder) {
-            List.push bytes (List.get_unchecked builder.* at)
-            at = at + 1
-        }
+        List.append_list_bytes bytes builder.*
         String.from_utf8_unchecked bytes
     }
     // Only formatting's escaping loop may temporarily append partial UTF-8.
@@ -97,27 +93,8 @@ companion StringBuilder {
 }
 
 impl Default StringBuilder { default = () => StringBuilder.new () }
-impl Display StringBuilder {
-    fmt = (builder, mut formatter) => {
-        let mut at: USize = 0
-        while (at < StringBuilder.length builder) {
-            let first = List.get_unchecked builder.* at
-            let width: USize = when {
-                first < 128 => 1, first < 224 => 2, first < 240 => 3, else => 4,
-            }
-            let mut scalar: U32 = (first as U32) - (when {
-                width == 1 => 0, width == 2 => 192, width == 3 => 224, else => 240,
-            })
-            let mut offset: USize = 1
-            while (offset < width) {
-                scalar = scalar * 64 + ((List.get_unchecked builder.* (at + offset)) as U32) - 128
-                offset = offset + 1
-            }
-            Formatter.push formatter (Char.from_u32_unchecked scalar)
-            at = at + width
-        }
-    }
-}
+// No Display impl: formatting takes its value by move, so interpolating a
+// builder would consume it. Use `to_string` to read the contents.
 impl FromIterator StringBuilder Char {
     insert = (move start; move value) => {
         let mut builder = start
