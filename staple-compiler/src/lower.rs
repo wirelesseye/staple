@@ -15620,11 +15620,37 @@ impl<'a> SourceCoverage<'a> {
                 return;
             }
             for element in &product.elements {
-                self.visit_expression(owner, &element.value);
+                if element.spread {
+                    self.visit_expression(owner, &element.value);
+                } else {
+                    self.visit_argument_value(owner, &element.value);
+                }
             }
             return;
         }
         self.visit_expression(owner, argument);
+    }
+
+    /// One element of a decomposed product argument. `lower_argument_value`
+    /// lowers a plain `(value)` as `value` when `value` has a place, so the
+    /// group itself then has no lowered node of its own.
+    fn visit_argument_value(&mut self, owner: ExpressionOwner, value: &Expression) {
+        if let Expression::Product(product) = value
+            && let [element] = product.elements.as_slice()
+            && element.name.is_none()
+            && !element.spread
+            && !element.named_spread
+            && self.module.synthesized_thunk_for(product.syntax.id).is_none()
+            && !self.program.expression_lookup.contains_key(&ExpressionKey {
+                syntax: product.syntax.id,
+                owner,
+                context: ExpressionContext::Primary,
+            })
+        {
+            self.visit_argument_value(owner, &element.value);
+            return;
+        }
+        self.visit_expression(owner, value);
     }
 
     /// Mirrors the call lowering walk. Only indirect callees, juxtaposed chain
@@ -17922,14 +17948,17 @@ mod tests {
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         let diagnostics = lowered.program.validate_closed_catalog();
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        // The standard library plans dictionaries of its own, such as
+        // `Read Stdin` for `read_line`; count only this program's.
         assert_eq!(
             lowered
                 .program
                 .artifacts
                 .iter()
                 .filter(|(_, artifact)| matches!(
-                    artifact.plan,
-                    Some(LoweredArtifactPlan::TraitDictionary(_))
+                    &artifact.plan,
+                    Some(LoweredArtifactPlan::TraitDictionary(plan))
+                        if plan.trait_id == probe || plan.trait_id == root
                 ))
                 .count(),
             2
@@ -25515,8 +25544,13 @@ mod tests {
             .artifacts
             .iter()
             .find_map(|(_, artifact)| {
-                matches!(artifact.plan, Some(LoweredArtifactPlan::TraitDictionary(_)))
-                    .then(|| artifact.name.clone())
+                // The standard library plans dictionaries of its own, such
+                // as `Read Stdin`, so select this program's by trait.
+                matches!(
+                    &artifact.plan,
+                    Some(LoweredArtifactPlan::TraitDictionary(plan)) if plan.trait_id == probe
+                )
+                .then(|| artifact.name.clone())
             })
             .expect("the concrete caller demands a static dictionary");
         let finalizer = program

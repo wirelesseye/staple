@@ -2056,9 +2056,15 @@ mod tests {
         let _ = std::fs::remove_file(output);
 
         assert!(!result.status.success(), "panic should exit unsuccessfully");
+        // Panic messages go to standard error, not standard output.
         assert!(
-            String::from_utf8_lossy(&result.stdout).contains("boom"),
-            "expected panic message in stdout: {}",
+            String::from_utf8_lossy(&result.stderr).contains("boom"),
+            "expected panic message in stderr: {}",
+            String::from_utf8_lossy(&result.stderr),
+        );
+        assert!(
+            !String::from_utf8_lossy(&result.stdout).contains("boom"),
+            "panic message leaked into stdout: {}",
             String::from_utf8_lossy(&result.stdout),
         );
     }

@@ -2798,10 +2798,25 @@ pub(crate) fn runtime_module_symbols() -> &'static HashSet<String> {
     static SYMBOLS: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
     SYMBOLS.get_or_init(|| {
         let mut symbols = HashSet::new();
+        // `link_io_runtime` prefixes `io.ll` with a target-specific stream
+        // accessor and the C library globals or function it reads.
+        for name in [
+            "__staple_io_stream",
+            "__acrt_iob_func",
+            "stdin",
+            "stdout",
+            "stderr",
+            "__stdinp",
+            "__stdoutp",
+            "__stderrp",
+        ] {
+            symbols.insert(name.to_owned());
+        }
         for source in [
             include_str!("../gc.ll"),
             include_str!("../coroutine.ll"),
             include_str!("../reactive.ll"),
+            include_str!("../io.ll"),
         ] {
             for line in source.lines() {
                 let declares = line.starts_with("define") || line.starts_with("declare");

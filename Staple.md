@@ -560,7 +560,9 @@ preserve, reorder, or discard pending modifiers. A wrapped type declaration
 matches `ModifiedItem`, not `TypeDeclarationItem`, until unwrapped.
 `Item` exposes unwrapped type declarations as `TypeDeclarationItem`, including their
 kind, name and spelling, applied declared type, flattened type-parameter names,
-and optional opaque representation. All other items match `UnstructuredItem`
+optional opaque representation, and the entries of its `with {…}` clause as
+`ResourceDependency (resource_type, mutable)` values, in written order. All
+other items match `UnstructuredItem`
 and remain lossless but opaque. `BindingPattern` and `NominalPattern` provide
 the structured pattern construction needed by declaration modifiers.
 

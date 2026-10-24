@@ -7,7 +7,7 @@ use inkwell::context::Context;
 use staple_compiler::{
     CodeGenerator, LoweredModule, Lowerer, NameResolver, ProgramLoader, TypeChecker, TypedModule,
 };
-use staple_syntax::Diagnostic;
+use staple_syntax::{Diagnostic, Span};
 use std::{
     path::Path,
     process::Command,
@@ -359,6 +359,91 @@ def invalid: () ->{} () = () => {
 }
 
 #[test]
+fn the_dependency_reason_names_only_a_provider_that_left_it() {
+    // `log ()` needs `Logger` directly. The `with Database` body needs
+    // nothing, so it must not be blamed although `Database` depends on it.
+    let diagnostics = check(
+        r#"
+type Logger wrap ()
+type Database with {Logger} wrap ()
+def log = () =>{Logger} () :: ()
+def invalid: () ->{} () = () => {
+    with Database = Database () {
+        ()
+    }
+    log ()
+}
+"#,
+    )
+    .expect_err("the contract excludes the logger");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("requires effects {Logger}")),
+        "{diagnostics:?}"
+    );
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("depends on")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn trait_method_signatures_imply_dependencies() {
+    // Trait signatures are resolved before most other passes, so this fails
+    // if closing ever depends on dependency templates collected later.
+    let output = run(r#"
+use std.io.println
+type Logger wrap (write: String -> ())
+type Database with {Logger} wrap ()
+trait Query T {
+    run: T ->{Database} ()
+}
+type Q wrap ()
+impl Query Q {
+    run = q => (resource Logger).write "trait"
+}
+def go: () ->{Database} () = () => run (Q ())
+with Logger = Logger (write: message => println message) {
+    with Database = Database () {
+        go ()
+    }
+}
+"#);
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "trait\n");
+}
+
+#[test]
+fn rejects_representations_that_close_into_themselves() {
+    // `Handler`'s field set closes into `{Database, Handler, Logger}`, the
+    // same cycle as writing `Handler` in its own field's effect set.
+    for source in [
+        concat!(
+            "type Logger wrap ()\n",
+            "type Handler wrap (call: () ->{Database} ())\n",
+            "type Database with {Handler, Logger} wrap ()\n",
+        ),
+        concat!(
+            "type Logger wrap ()\n",
+            "type Database with {Handler, Logger} wrap ()\n",
+            "type Handler wrap (call: () ->{Database} ())\n",
+        ),
+    ] {
+        let diagnostics = check(source).expect_err("the representation is cyclic");
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("cyclic type definition involving `Handler`")),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
 fn rejects_self_and_transitive_cycles() {
     for source in [
         "type A with {A} wrap ()\n",
@@ -411,6 +496,35 @@ fn rejects_non_resource_eligible_entries() {
             "{source}: {diagnostics:?}"
         );
     }
+}
+
+#[test]
+fn substituted_dependency_errors_point_at_each_use() {
+    let source = concat!(
+        "type Cache<K> with {K} wrap ()\n",
+        "def a: () ->{Cache<(I32, I32)>} () = () => ()\n",
+        "def b = () => resource Cache<(I32, I32)>\n",
+    );
+    let diagnostics = check(source).expect_err("`(I32, I32)` is not a resource type");
+    let mut lines = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.message.contains("of `Cache<"))
+        .map(|diagnostic| match &diagnostic.span {
+            Span::User {
+                location: Some(location),
+                ..
+            } => location.line,
+            other => panic!("expected a user span, found {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    lines.sort();
+    assert_eq!(lines, [2, 3], "{diagnostics:?}");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("declared at line 1, column 21")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]
@@ -471,11 +585,11 @@ def inferred = () => {
 fn type_declaration_items_expose_the_dependency_clause() {
     check(
         r#"
-use std.syntax.(Item, Sequence, Type, TypeDeclarationItem, WrapperDeclaration)
+use std.syntax.(Item, ResourceDependency, Sequence, TypeDeclarationItem, WrapperDeclaration)
 type Logger wrap ()
 macro @inspect: Item -> Item = item => match item {
     TypeDeclarationItem(WrapperDeclaration(), _, _, _, _, _, dependencies) => {
-        let names: Sequence<Type> = dependencies
+        let entries: Sequence<ResourceDependency> = dependencies
         item
     },
     _ => item,
@@ -487,6 +601,42 @@ def query = () =>{Database} () :: log ()
 "#,
     )
     .expect("modifier macros should see and preserve resource dependencies");
+}
+
+#[test]
+fn type_declaration_items_expose_dependency_mutability() {
+    // The macro panics unless it sees the first entry's mode, and the second
+    // entry's mode, as written.
+    let source = r#"
+use std.syntax.(Item, ResourceDependency, Sequence, TypeDeclarationItem, WrapperDeclaration)
+type Logger wrap ()
+type Clock wrap ()
+macro @inspect: Item -> Item = item => match item {
+    TypeDeclarationItem(
+        WrapperDeclaration(), _, _, _, _, _,
+        Sequence (ResourceDependency (_, first), ResourceDependency (_, second)),
+    ) => {
+        if first {
+            if second { panic "second entry reported as mutable" }
+            item
+        } else {
+            panic "first entry reported as immutable"
+        }
+    },
+    _ => panic "dependencies were not exposed",
+}
+@inspect
+type Database with {mut Logger, Clock} wrap ()
+"#;
+    check(source).expect("each entry keeps its own mode");
+    let diagnostics = check(&source.replace("{mut Logger, Clock}", "{Logger, mut Clock}"))
+        .expect_err("an immutable first entry is reported as immutable");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("first entry reported as immutable")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]

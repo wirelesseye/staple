@@ -181,9 +181,10 @@ fn imports_standard_io_print_functions() {
     let llvm = fixture.compile_whole().expect("std.io should compile");
     assert!(llvm.contains("__staple_mstd.io.print"));
     assert!(llvm.contains("__staple_mstd.io.println"));
-    assert!(llvm.contains("@printf"));
-    assert!(llvm.contains("c\"%s\\00\""));
-    assert!(llvm.contains("c\"%s\\0A\\00\""));
+    // Output is byte based: both write through the stdio bridge, not `printf`.
+    assert!(llvm.contains("@__staple_io_write"));
+    assert!(llvm.contains("@fwrite"));
+    assert!(!llvm.contains("@printf"));
 }
 
 #[test]

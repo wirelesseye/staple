@@ -148,6 +148,9 @@ pub(crate) enum MetaType {
     TypeBody,
     TypeParameter,
     TypeParameters,
+    /// One `with {…}` entry of a type declaration: its resource type and
+    /// whether it is `mut`. Exposed for inspection only; it has no syntax.
+    ResourceDependency,
     UnstructuredItem,
     Visibility,
     MacroCallMetadata,
@@ -6469,6 +6472,7 @@ impl MacroExpander {
                     MetaType::TypeBody => "a type declaration body".to_owned(),
                     MetaType::TypeParameter => "a type parameter".to_owned(),
                     MetaType::TypeParameters => "type parameters".to_owned(),
+                    MetaType::ResourceDependency => "a resource dependency".to_owned(),
                     MetaType::UnstructuredItem => "an unstructured item".to_owned(),
                     MetaType::Visibility => "visibility syntax".to_owned(),
                     MetaType::MacroCallMetadata => "macro-call metadata".to_owned(),
@@ -9774,7 +9778,7 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
             })
         }
         MetaType::Visibility => matches!(argument, Expression::VisibilityArgument(_)),
-        MetaType::MacroCallMetadata => false,
+        MetaType::MacroCallMetadata | MetaType::ResourceDependency => false,
         MetaType::Syntax => true,
         MetaType::SyntaxNode => !matches!(argument, Expression::SyntaxArgument(_)),
         MetaType::Expr => !matches!(
@@ -10399,6 +10403,8 @@ fn match_syntax_fragment(
             unreachable!("declaration syntax is matched before expression parsing")
         }
         MetaType::MacroCallMetadata => unreachable!(),
+        // Only built from a declaration's clause; it has no syntax to parse.
+        MetaType::ResourceDependency => return None,
     };
     Some(Value::Syntax(syntax_value))
 }
@@ -10957,6 +10963,7 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::TypeBody => "TypeBody".to_owned(),
             MetaType::TypeParameter => "TypeParameter".to_owned(),
             MetaType::TypeParameters => "TypeParameters".to_owned(),
+            MetaType::ResourceDependency => "ResourceDependency".to_owned(),
             MetaType::UnstructuredItem => "UnstructuredItem".to_owned(),
             MetaType::Visibility => "Visibility".to_owned(),
             MetaType::MacroCallMetadata => "MacroCallMetadata".to_owned(),
@@ -11055,6 +11062,7 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
         MetaType::TypeBody => "TypeBody".to_owned(),
         MetaType::TypeParameter => "TypeParameter".to_owned(),
         MetaType::TypeParameters => "TypeParameters".to_owned(),
+        MetaType::ResourceDependency => "ResourceDependency".to_owned(),
         MetaType::UnstructuredItem => "UnstructuredItem".to_owned(),
         MetaType::Visibility => "Visibility".to_owned(),
         MetaType::MacroCallMetadata => "MacroCallMetadata".to_owned(),
@@ -11293,6 +11301,7 @@ fn compile_constructor_type(name: &str, argument: CompileType) -> CompileType {
         "TypeBody" => CompileType::Meta(MetaType::TypeBody),
         "TypeParameter" => CompileType::Meta(MetaType::TypeParameter),
         "TypeParameters" => CompileType::Meta(MetaType::TypeParameters),
+        "ResourceDependency" => CompileType::Meta(MetaType::ResourceDependency),
         "UnstructuredItem" => CompileType::Meta(MetaType::UnstructuredItem),
         "Parenthesized" => CompileType::Meta(MetaType::Delimited(
             DelimiterKind::Parenthesized,
@@ -11673,9 +11682,11 @@ fn compile_field_type(ty: &CompileType, accessor: &Accessor) -> Option<CompileTy
         (CompileType::Meta(MetaType::TypeParameter), "default") => Some(CompileType::Meta(
             MetaType::Optional(Box::new(MetaType::Type)),
         )),
-        (CompileType::Meta(MetaType::TypeParameter), "argument") => {
+        (CompileType::Meta(MetaType::TypeParameter), "argument")
+        | (CompileType::Meta(MetaType::ResourceDependency), "resource_type") => {
             Some(CompileType::Meta(MetaType::Type))
         }
+        (CompileType::Meta(MetaType::ResourceDependency), "mutable") => Some(CompileType::Bool),
         (CompileType::Meta(MetaType::TypeParameter | MetaType::TypeParameters), "declaration")
         | (CompileType::Meta(MetaType::TypeParameters), "arguments" | "bounds") => {
             Some(CompileType::Meta(MetaType::Syntax))
@@ -11722,6 +11733,9 @@ fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<Co
                 CompileType::Meta(MetaType::Type),
             ]))
         }
+        (CompileType::Meta(MetaType::ResourceDependency), "ResourceDependency") => Some(
+            CompileType::Product(vec![CompileType::Meta(MetaType::Type), CompileType::Bool]),
+        ),
         (CompileType::Meta(MetaType::TypeParameters), "TypeParameters") => {
             Some(CompileType::Product(vec![
                 CompileType::Meta(MetaType::Sequence(Box::new(MetaType::TypeParameter))),
@@ -11763,7 +11777,7 @@ fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<Co
                 CompileType::Meta(MetaType::Type),
                 CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Ident(None)))),
                 CompileType::Meta(MetaType::Optional(Box::new(MetaType::Type))),
-                CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Type))),
+                CompileType::Meta(MetaType::Sequence(Box::new(MetaType::ResourceDependency))),
             ]))
         }
         (CompileType::Meta(MetaType::TypeBody), "AliasBody") => {
@@ -11945,7 +11959,7 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
             nominal.name == "Ident" && matches!(nominal.argument.as_ref(), Pattern::StringLiteral(value) if staple_syntax::string_literal::decode(&value.literal).is_ok_and(|value| &value == spelling))
         }),
         CompileType::Meta(MetaType::ModifiedItem) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("ModifiedItem")),
-        CompileType::Meta(MetaType::TypeParameter | MetaType::TypeParameters) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(format_compile_type(ty).as_str())),
+        CompileType::Meta(MetaType::TypeParameter | MetaType::TypeParameters | MetaType::ResourceDependency) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(format_compile_type(ty).as_str())),
         CompileType::Meta(MetaType::TypeDeclarationItem) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("TypeDeclarationItem")),
         CompileType::Meta(MetaType::TypeBody) => ["AliasBody", "WrapperBody", "FromBody", "OpaqueBody"]
             .iter()
@@ -12107,7 +12121,9 @@ fn compile_sequence_coverage_pattern(
 
 fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<CompileType>)>> {
     Some(match ty {
-        CompileType::Meta(MetaType::TypeParameter | MetaType::TypeParameters) => {
+        CompileType::Meta(
+            MetaType::TypeParameter | MetaType::TypeParameters | MetaType::ResourceDependency,
+        ) => {
             let name = format_compile_type(ty);
             let CompileType::Product(fields) = compile_constructor_representation(ty, &name)?
             else {
@@ -12174,7 +12190,9 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
                     CompileType::Meta(MetaType::Type),
                     CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Ident(None)))),
                     CompileType::Meta(MetaType::Optional(Box::new(MetaType::Type))),
-                    CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Type))),
+                    CompileType::Meta(MetaType::Sequence(Box::new(
+                        MetaType::ResourceDependency,
+                    ))),
                 ],
             ),
             ("UnstructuredItem".to_owned(), Vec::new()),
@@ -12195,7 +12213,7 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
                 CompileType::Meta(MetaType::Type),
                 CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Ident(None)))),
                 CompileType::Meta(MetaType::Optional(Box::new(MetaType::Type))),
-                CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Type))),
+                CompileType::Meta(MetaType::Sequence(Box::new(MetaType::ResourceDependency))),
             ],
         )],
         CompileType::Meta(MetaType::TypeBody) => vec![
@@ -13505,7 +13523,22 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
             dependencies
                 .resources
                 .iter()
-                .map(|resource| Value::Syntax(SyntaxValue::Type(resource.value_type.clone())))
+                .map(|resource| {
+                    Value::Nominal(
+                        "ResourceDependency".to_owned(),
+                        Box::new(Value::Product(
+                            vec![
+                                (
+                                    Some("resource_type".to_owned()),
+                                    Value::Syntax(SyntaxValue::Type(resource.value_type.clone())),
+                                ),
+                                (Some("mutable".to_owned()), bool_value(resource.mutable)),
+                            ]
+                            .into(),
+                            false,
+                        )),
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -13818,6 +13851,7 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
             MetaType::TypeParameter | MetaType::TypeParameters,
             Value::Syntax(SyntaxValue::Parameters { kind, .. }),
         ) => expected == kind,
+        (MetaType::ResourceDependency, Value::Nominal(name, _)) => name == "ResourceDependency",
         (MetaType::TypeBody, Value::Nominal(name, _)) => {
             matches!(
                 name.as_str(),

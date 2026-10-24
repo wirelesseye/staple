@@ -114,8 +114,10 @@ pub type TypeDeclarationItem wrap pub (
     declared_type: Type,
     type_parameters: Sequence<Ident<String>>,
     underlying: Option<Type>,
-    resource_dependencies: Sequence<Type>,
+    resource_dependencies: Sequence<ResourceDependency>,
 )
+/// One entry of a type declaration's `with {…}` clause.
+pub type ResourceDependency wrap pub (resource_type: Type, mutable: Bool)
 /// A transparent alias type declaration body, written `= Type`.
 @recursive_constructor
 pub type AliasBody<Element> wrap Element

@@ -8032,8 +8032,9 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         "Angled" => Some("<Contents> Contents -> Angled<Contents>"),
         "Braced" => Some("<Contents> Contents -> Braced<Contents>"),
         "TypeDeclarationItem" => Some(
-            "(kind: TypeDeclarationKind, name: Ident<String>, name_spelling: String, declared_type: Type, type_parameters: Sequence<Ident<String>>, underlying: Option<Type>, resource_dependencies: Sequence<Type>) -> TypeDeclarationItem",
+            "(kind: TypeDeclarationKind, name: Ident<String>, name_spelling: String, declared_type: Type, type_parameters: Sequence<Ident<String>>, underlying: Option<Type>, resource_dependencies: Sequence<ResourceDependency>) -> TypeDeclarationItem",
         ),
+        "ResourceDependency" => Some("(resource_type: Type, mutable: Bool) -> ResourceDependency"),
         "AliasBody" => Some("Type -> AliasBody<Type>"),
         "WrapperBody" => Some("(Visibility, Type) -> WrapperBody<Visibility, Type>"),
         "FromBody" => Some("(Visibility, Type) -> FromBody<Visibility, Type>"),

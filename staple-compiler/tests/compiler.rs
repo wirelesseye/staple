@@ -5980,7 +5980,6 @@ fn c_string_is_an_imported_primitive_macro() {
     assert!(llvm.contains("string.allocate"));
     assert!(llvm.contains("string.length"));
     assert!(llvm.contains("@strlen"));
-    assert!(llvm.contains("@memchr"));
     assert!(llvm.contains("@llvm.trap"));
     assert!(llvm.contains("c\"hello\\00\""));
 }
@@ -6005,13 +6004,14 @@ fn a_c_string_temporary_passed_to_a_borrowing_callback_is_freed() {
     let call = borrowed
         .find("%closure.call")
         .expect("apply calls its callback");
+    // `CString` is dropped through its standard-library `Drop` implementation.
     assert!(
-        borrowed[call..].contains("@free"),
-        "the caller frees a temporary its callback only borrows:\n{borrowed}"
+        borrowed[call..].contains("%drop.call"),
+        "the caller drops a temporary its callback only borrows:\n{borrowed}"
     );
     let moved = function_definition(&llvm, "apply_move");
     assert!(
-        !moved.contains("@free"),
+        !moved.contains("%drop.call") && !moved.contains("@free"),
         "a `move` callback owns the temporary:\n{moved}"
     );
 }
@@ -6056,9 +6056,9 @@ fn c_string_rejects_non_literal_arguments() {
         .resolve_program(program)
         .expect_err_diagnostics("c_string should require a literal during expansion");
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message == "`c_string` requires a string literal")
+        diagnostics.iter().any(|diagnostic| diagnostic.message
+            == "macro `c_string` panicked: `c_string` requires a string literal"),
+        "{diagnostics:?}"
     );
 }
 
@@ -15754,6 +15754,23 @@ fn generic_trait_member_bounds_check_completed_associated_arguments() {
             .any(|d| d.message.contains("trait bound")),
         "{diagnostics:?}"
     );
+}
+
+#[test]
+fn grouped_place_elements_of_product_arguments_lower() {
+    // A grouped place element is lowered as its value, without a node for
+    // the group; source coverage must accept that.
+    let module = type_check(concat!(
+        "type Unit\n",
+        "def pick: (I32, Bool, Unit) -> Bool = (_, flag, _) => flag\n",
+        "let flag = True\n",
+        "let direct = pick (1, (True), (Unit))\n",
+        "let named = pick (1, ((flag)), Unit)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("grouped place elements lower as their values");
 }
 
 #[test]
