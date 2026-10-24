@@ -17922,14 +17922,17 @@ mod tests {
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         let diagnostics = lowered.program.validate_closed_catalog();
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        // The standard library plans dictionaries of its own, such as
+        // `Read Stdin` for `read_line`; count only this program's.
         assert_eq!(
             lowered
                 .program
                 .artifacts
                 .iter()
                 .filter(|(_, artifact)| matches!(
-                    artifact.plan,
-                    Some(LoweredArtifactPlan::TraitDictionary(_))
+                    &artifact.plan,
+                    Some(LoweredArtifactPlan::TraitDictionary(plan))
+                        if plan.trait_id == probe || plan.trait_id == root
                 ))
                 .count(),
             2
@@ -25515,8 +25518,13 @@ mod tests {
             .artifacts
             .iter()
             .find_map(|(_, artifact)| {
-                matches!(artifact.plan, Some(LoweredArtifactPlan::TraitDictionary(_)))
-                    .then(|| artifact.name.clone())
+                // The standard library plans dictionaries of its own, such
+                // as `Read Stdin`, so select this program's by trait.
+                matches!(
+                    &artifact.plan,
+                    Some(LoweredArtifactPlan::TraitDictionary(plan)) if plan.trait_id == probe
+                )
+                .then(|| artifact.name.clone())
             })
             .expect("the concrete caller demands a static dictionary");
         let finalizer = program
