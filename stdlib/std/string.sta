@@ -10,7 +10,7 @@ use package.range.Range
 use package.process.panic
 use package.convert.(ConversionError, TryConvert)
 use package.result.(Ok, Result)
-use package.fmt.(Display, Debug, Formatter, formatter_write_debug)
+use package.fmt.(Display, Debug, Formatter)
 
 /// The bytes are not valid UTF-8.
 pub type InvalidUtf8
@@ -178,7 +178,23 @@ impl Display String {
 }
 
 impl Debug String {
-    fmt = (value, mut formatter) => formatter_write_debug (formatter, value)
+    // Escapes are all ASCII, so unescaped scalars pass through unchanged.
+    fmt = (value, mut formatter) => {
+        Formatter.write formatter "\""
+        for c in (String.chars value) {
+            let scalar = Char.to_u32 c
+            when {
+                scalar == 0 => Formatter.write formatter "\\0",
+                scalar == 9 => Formatter.write formatter "\\t",
+                scalar == 10 => Formatter.write formatter "\\n",
+                scalar == 13 => Formatter.write formatter "\\r",
+                scalar == 34 => Formatter.write formatter "\\\"",
+                scalar == 92 => Formatter.write formatter "\\\\",
+                else => Formatter.push formatter c,
+            }
+        }
+        Formatter.write formatter "\""
+    }
 }
 
 impl FromIterator String Char {

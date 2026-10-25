@@ -663,27 +663,39 @@ fn is_shared_buffer_of(value_type: &CheckedType, element: &CheckedType) -> bool 
     )
 }
 
+/// The standard `Formatter`: the second parameter of the standard
+/// `Display.fmt: (T, mut Formatter) -> ()`. Anchoring on the trait keeps a
+/// program's own type named `Formatter` from being selected.
+fn standard_formatter_type(module: &ResolvedModule) -> Option<TypeId> {
+    let display = module.traits().get(&module.standard_trait("Display")?)?;
+    let member = display
+        .declaration
+        .members
+        .iter()
+        .find(|member| member.name == "fmt")?;
+    let staple_syntax::Type::Function(function) = &member.annotation else {
+        return None;
+    };
+    let staple_syntax::Type::Product(parameter) = function.parameter.as_ref() else {
+        return None;
+    };
+    let staple_syntax::Type::Named(formatter) = &parameter.elements.get(1)?.ty else {
+        return None;
+    };
+    module.type_for(formatter.syntax.id)
+}
+
+/// A public companion function of the standard `Formatter`.
+fn standard_formatter_function(module: &ResolvedModule, member: &str) -> Option<FunctionId> {
+    let symbol = module.companion_member(standard_formatter_type(module)?, member, None)?;
+    module.function_for_symbol(symbol)
+}
+
 /// Rewrites an instantiated representation into a compact template: nominal
 /// types stop at a `Opaque` reference (id plus arguments) instead of carrying
 /// their expanded representation, and contextual defaults are dropped. The
 /// result stays proportional to the declaration's own syntax even when nested
 /// nominal types would expand exponentially.
-/// Selects one of the standard-library formatting helpers by name. Mirrors
-/// the backend's historical lookup so lowering can record the selection once:
-/// an exact match, or the trailing component of a `__staple_m...` qualified
-/// function name.
-fn standard_function_named(module: &ResolvedModule, name: &str) -> Option<FunctionId> {
-    module.functions().iter().find_map(|function| {
-        let candidate = function.name.as_str();
-        let matches = candidate == name
-            || candidate
-                .strip_prefix("__staple_m")
-                .and_then(|rest| rest.rsplit_once('.'))
-                .is_some_and(|(_, last)| last == name);
-        matches.then_some(function.id)
-    })
-}
-
 fn compact_type_template(value_type: CheckedType) -> CheckedType {
     match value_type {
         CheckedType::Forall(mut scheme) => {
@@ -3512,11 +3524,11 @@ impl TypeChecker {
             .iter()
             .map(|(id, resolved)| (*id, resolved.declaration.name.clone()))
             .collect();
-        self.string_formatting.formatter_new = standard_function_named(&module, "formatter_new");
+        self.string_formatting.formatter_new = standard_formatter_function(&module, "new");
         self.string_formatting.formatter_write =
-            standard_function_named(&module, "formatter_write");
+            standard_formatter_function(&module, "write");
         self.string_formatting.formatter_finish =
-            standard_function_named(&module, "formatter_finish");
+            standard_formatter_function(&module, "finish");
         self.collect_type_declarations(&module);
         self.collect_string_representation(&module);
         self.collect_traits(&module);

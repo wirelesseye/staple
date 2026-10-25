@@ -114,53 +114,24 @@ pub macro @derive_debug: Item -> Sequence<Item> = item => match item {
     _ => panic "derive_debug item is unsupported",
 }
 
-def formatter_write = (mut formatter: Formatter, value: String) => () ::
-    StringBuilder.append formatter.* value
-
-pub(package) def formatter_from_builder = move builder: StringBuilder => Formatter :: Formatter builder
-pub(package) def formatter_into_builder = move formatter: Formatter => StringBuilder :: {
-    let Formatter builder = formatter
-    builder
-}
-
-pub(package) def formatter_write_debug = (mut formatter: Formatter, value: String) => () :: {
-    formatter |> write "\""
-    for byte in (String.bytes value) {
-        when {
-            byte == 0 => formatter |> write "\\0",
-            byte == 9 => formatter |> write "\\t",
-            byte == 10 => formatter |> write "\\n",
-            byte == 13 => formatter |> write "\\r",
-            byte == 34 => formatter |> write "\\\"",
-            byte == 92 => formatter |> write "\\\\",
-            else => StringBuilder.push_byte_unchecked formatter.* byte,
-        }
-    }
-    formatter |> write "\""
-}
-
-def formatter_finish = move formatter: Formatter => String :: {
-    let Formatter builder = formatter
-    StringBuilder.finish builder
-}
-
-def formatter_new = () => Formatter :: Formatter (StringBuilder.with_capacity 16)
-
 companion Formatter {
     use package.string.String
 
     /// Creates an empty formatter.
-    pub def new = () => Formatter :: formatter_new ()
+    pub def new = () => Formatter :: Formatter (StringBuilder.with_capacity 16)
 
     /// Appends a UTF-8 string to the formatter.
     pub def write = (mut formatter: Formatter; value: String) =>
-        () :: formatter_write (formatter, value)
+        () :: StringBuilder.append formatter.* value
 
     /// Appends one Unicode scalar without allocating.
     pub def push = (mut formatter: Formatter; value: Char) => () :: StringBuilder.push formatter.* value
 
     /// Finishes formatting and returns the accumulated string.
-    pub def finish = move formatter: Formatter => String :: formatter_finish formatter
+    pub def finish = move formatter: Formatter => String :: {
+        let Formatter builder = formatter
+        StringBuilder.finish builder
+    }
 
     /// Formats a value using its Display implementation.
     pub def display = <T where Display T> value: T => String :: {

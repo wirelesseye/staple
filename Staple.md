@@ -4692,7 +4692,7 @@ available from the prelude and owns its allocation uniquely; it is not `Copy`.
 `new ()`, `with_capacity bytes`, and `from_string text` create builders.
 `length` and `capacity` count bytes. `push` appends one `Char`, `append` copies
 one `String` with a bulk byte copy, and `append_display` formats a `Display`
-value directly into the builder's allocation. `pop` removes the last scalar,
+value and appends the resulting text. `pop` removes the last scalar,
 returning `None` when empty. `clear` retains the allocation. `finish` consumes
 the builder and returns a `String` without copying; `to_string` instead copies
 the contents and leaves the builder usable:

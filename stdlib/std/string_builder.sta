@@ -3,7 +3,7 @@ pub mod
 use package.list.List
 use package.char.(Char, encode_utf8)
 use package.string.(String, append_string_bytes)
-use package.fmt.(Display, formatter_from_builder, formatter_into_builder)
+use package.fmt.(Display, Formatter)
 use package.iterator.FromIterator
 use package.default.Default
 
@@ -42,12 +42,9 @@ companion StringBuilder {
     /// Appends a string with a bulk byte copy.
     pub def append = (mut builder: StringBuilder; value: String) => () :: append_string_bytes builder.* value
 
-    /// Formats directly into the builder without an intermediate buffer.
-    pub def append_display = <T where Display T> (mut builder: StringBuilder; value: T) => () :: {
-        let mut formatter = formatter_from_builder builder
-        Display.fmt (value, formatter)
-        builder = formatter_into_builder formatter
-    }
+    /// Formats a value with its Display implementation and appends the text.
+    pub def append_display = <T where Display T> (mut builder: StringBuilder; value: T) => () ::
+        append builder (Formatter.display value)
 
     /// Removes the final Unicode scalar, or returns None when empty.
     pub def pop = mut builder: StringBuilder => Option<Char> :: {
@@ -88,8 +85,6 @@ companion StringBuilder {
         List.append_list_bytes bytes builder.*
         String.from_utf8_unchecked bytes
     }
-    // Only formatting's escaping loop may temporarily append partial UTF-8.
-    pub(package) def push_byte_unchecked = (mut builder: StringBuilder; byte: U8) => () :: List.push builder.* byte
 }
 
 impl Default StringBuilder { default = () => StringBuilder.new () }
