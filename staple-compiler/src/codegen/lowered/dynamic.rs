@@ -3946,9 +3946,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .bool_type()
                         .const_int(self.view.concrete_needs_drop(&value_type) as u64, false)
                 };
-                let Some(sum) =
-                    crate::typecheck::bool_sum_through_implicit_wrapper(None, &call.result_type)
-                else {
+                let Some(sum) = crate::typecheck::bool_sum(None, &call.result_type) else {
                     return Err(Diagnostic::new(
                         span.clone(),
                         "needs_drop result is not Bool",
@@ -4801,10 +4799,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         result_type: &CheckedType,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<inkwell::values::BasicValueEnum<'context>> {
-        let sum = crate::typecheck::bool_sum_through_implicit_wrapper(None, result_type)
-            .ok_or_else(|| {
-                Diagnostic::new(span.clone(), "dynamic comparison result must be Bool")
-            })?;
+        let sum = crate::typecheck::bool_sum(None, result_type).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "dynamic comparison result must be Bool")
+        })?;
         let sum_type = self.backend.compile_sum_type(sum)?;
         inkwell::values::BasicValueEnum::try_from(self.backend.build_bool_value(
             condition,

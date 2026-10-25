@@ -137,7 +137,7 @@ fn bool_alias_introduces_from_bool_and_keeps_the_bool_runtime_contract() {
 fn bool_alias_flows_through_option_and_result() {
     let output = run(concat!(
         "use std.io.println\n",
-        "def option = (flag: Bool) => Option<Bool> :: Some (Bool :: flag)\n",
+        "def option = (flag: Bool) => Option<Bool> :: Some flag\n",
         "def preserve = (value: Option<Bool>) => Option<Bool> :: {\n",
         "    let ?Some(flag) = value\n",
         "    Some flag\n",
@@ -147,7 +147,7 @@ fn bool_alias_flows_through_option_and_result() {
         "    Some False => \"false\",\n",
         "    None => \"none\",\n",
         "}\n",
-        "def result = (flag: Bool) => Result<Bool, String> :: if flag { Ok (Bool :: True) } else { \"absent\" }\n",
+        "def result = (flag: Bool) => Result<Bool, String> :: if flag { Ok True } else { \"absent\" }\n",
         "def preserve_result = (value: Result<Bool, String>) => Result<Bool, String> :: {\n",
         "    let ?Ok(flag) = value\n",
         "    Ok flag\n",
@@ -244,5 +244,58 @@ fn bool_alias_is_the_only_bool_shape_recognized_by_the_coroutine_runner() {
             .iter()
             .any(|message| message.contains("found `True | I32`")),
         "a `True | I32` predicate should not be accepted as `Bool`: {messages:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bool_alias_singletons_fill_generic_bool_parameters() {
+    // `False` alone is the singleton `False`; the expected result widens it
+    // to the `Bool` that `Some` and `Ok` need, and a generic `Bool` result
+    // widens into a sum containing `Bool`.
+    let output = run(concat!(
+        "use std.io.println\n",
+        "def identity = <T> move value: T => T :: value\n",
+        "def show = (value: Bool | I32) => String :: match value {\n",
+        "    True => \"true\",\n",
+        "    False => \"false\",\n",
+        "    number: I32 => \"${number}\",\n",
+        "}\n",
+        "def main = () => {\n",
+        "    let absent: Option<Bool> = Some False\n",
+        "    let present: Result<Bool, String> = Ok True\n",
+        "    let flag: Bool = True\n",
+        "    let wide: Bool | I32 = identity flag\n",
+        "    let literal: Bool | I32 = identity False\n",
+        "    let first = match absent {\n",
+        "        Some True => \"some true\",\n",
+        "        Some False => \"some false\",\n",
+        "        None => \"none\",\n",
+        "    }\n",
+        "    let second = match present {\n",
+        "        Ok value => \"ok ${value}\",\n",
+        "        _: String => \"error\",\n",
+        "    }\n",
+        "    println \"${first} ${second} ${show wide} ${show literal}\"\n",
+        "}\n",
+        "main ()\n",
+    ));
+    assert_eq!(output, "some false ok True true false\n");
+}
+
+#[test]
+fn bool_alias_from_wrappers_are_not_bool() {
+    // `Flag` is its own type: it is not a condition, even though `Bool`
+    // converts into it.
+    let messages = check_errors(concat!(
+        "type Flag from Bool\n",
+        "let flag: Flag = True\n",
+        "let chosen = if flag { 1 } else { 0 }\n",
+    ));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("found `Flag`")),
+        "{messages:?}"
     );
 }

@@ -2461,6 +2461,17 @@ let answer = identity 42
 let int_identity: I32 -> I32 = identity
 ```
 
+The argument is inferred first. When the type arguments it gives conflict with
+the expected type, they are inferred from the expected type alone, provided
+the argument coerces into the resulting parameter type. A numeric literal
+argument takes its type from the expected type in the same way:
+
+```staple
+let absent: Option<Bool> = Some False   // `T = Bool`, not the singleton `False`
+let wide: Option<I64> = Some 7          // `T = I64`, not the default `I32`
+let either: Bool | I32 = identity flag  // `T = Bool | I32`
+```
+
 Type arguments can also be supplied explicitly with `.<…>`, which binds like
 member access, before function application. `_` leaves one to inference; a
 `_` nested inside an argument (`RawPtr<_>`) is completed from the expected type,

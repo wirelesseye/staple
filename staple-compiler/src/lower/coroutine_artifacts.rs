@@ -389,16 +389,9 @@ pub(super) fn expand_reactive_runner(
                 )]);
             };
             let predicate_type = record.function_type.clone();
-            // The runner branches on the first tag, so the predicate must
-            // return exactly the `Bool` sum `True | False`. Checked names may
-            // be qualified, so the name-based helper matches the last
-            // component like `lower_logical`.
-            if !crate::typecheck::bool_sum_through_implicit_wrapper(
-                None,
-                &predicate_type.result,
-            )
-            .is_some()
-            {
+            // The runner branches on the `Bool` tag, so the predicate must
+            // return exactly the `Bool` sum `True | False`.
+            if crate::typecheck::bool_sum(None, &predicate_type.result).is_none() {
                 return Err(vec![Diagnostic::new(
                     origin.span.clone(),
                     format!(
@@ -1994,11 +1987,7 @@ mod tests {
             panic!("an `until` runner carries an until body")
         };
         assert!(
-            crate::typecheck::bool_sum_through_implicit_wrapper(
-                None,
-                predicate_type.result.as_ref(),
-            )
-            .is_some(),
+            crate::typecheck::bool_sum(None, predicate_type.result.as_ref()).is_some(),
             "the predicate returns exactly `Bool`: {predicate_type:?}"
         );
 

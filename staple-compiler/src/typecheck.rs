@@ -6679,9 +6679,7 @@ impl TypeChecker {
                             }
                             _ => None,
                         })
-                        .filter(|value| {
-                            bool_sum_through_implicit_wrapper(Some(module), value).is_some()
-                        })
+                        .filter(|value| bool_sum(Some(module), value).is_some())
                         .unwrap_or(CheckedType::Error);
                     CheckedType::Function(CheckedFunctionType {
                         default: None,
@@ -6807,9 +6805,7 @@ impl TypeChecker {
                             }
                             _ => None,
                         })
-                        .filter(|value| {
-                            bool_sum_through_implicit_wrapper(Some(module), value).is_some()
-                        })
+                        .filter(|value| bool_sum(Some(module), value).is_some())
                         .unwrap_or(CheckedType::Error);
                     CheckedType::Function(CheckedFunctionType {
                         default: None,
@@ -12986,10 +12982,40 @@ impl TypeChecker {
                         },
                         _ => None,
                     };
+                    // A numeric literal has no type of its own until checked,
+                    // so when the expected result fixes the parameter it
+                    // fills, as in `let wide: Option<I64> = Some 5`, the
+                    // literal is checked against that instantiated parameter
+                    // instead of defaulting.
+                    let literal_expected_owned =
+                        match (&raw_callee_type, call.argument.as_ref(), expected) {
+                            (
+                                CheckedType::Function(function),
+                                Expression::Integer(_) | Expression::Float(_),
+                                Some(expected_result),
+                            ) if !function.is_slotted() && function.default.is_none() => {
+                                let mut substitutions = HashMap::new();
+                                infer_type_parameters_for_expected(
+                                    &function.result,
+                                    expected_result,
+                                    &mut substitutions,
+                                )
+                                .then(|| {
+                                    substitute_type(
+                                        function.parameter.as_ref().clone(),
+                                        &substitutions,
+                                    )
+                                })
+                                .filter(|parameter| !contains_type_parameter(parameter))
+                            }
+                            _ => None,
+                        };
                     let argument_expected = if call.spread {
                         None
                     } else {
-                        argument_expected_owned.as_ref()
+                        literal_expected_owned
+                            .as_ref()
+                            .or(argument_expected_owned.as_ref())
                     };
                     let bare_parameter_string_literal =
                         match (&raw_callee_type, call.argument.as_ref()) {
@@ -17747,24 +17773,22 @@ impl TypeChecker {
         // be solved by use-site inference.
         let mut substitutions = HashMap::new();
         collect_rigid_parameters(&value_type, &declared_parameters, &mut substitutions);
-        if let Some(argument) = argument
-            && !infer_type_parameters(
-                match function.parameter.as_ref() {
-                    CheckedType::Product(product)
-                        if !matches!(argument, CheckedType::Product(_))
-                            && product.position_count() > 1
-                            && product
-                                .iter_positions()
-                                .skip(1)
-                                .all(|field| field.default.is_some()) =>
-                    {
-                        &product.position_element(0).unwrap().value_type
-                    }
-                    parameter => parameter,
-                },
-                argument,
-                &mut substitutions,
-            )
+        let rigid = substitutions.clone();
+        let parameter_template = argument.map(|argument| match function.parameter.as_ref() {
+            CheckedType::Product(product)
+                if !matches!(argument, CheckedType::Product(_))
+                    && product.position_count() > 1
+                    && product
+                        .iter_positions()
+                        .skip(1)
+                        .all(|field| field.default.is_some()) =>
+            {
+                &product.position_element(0).unwrap().value_type
+            }
+            parameter => parameter,
+        });
+        if let (Some(argument), Some(parameter)) = (argument, parameter_template)
+            && !infer_type_parameters(parameter, argument, &mut substitutions)
         {
             self.diagnostics.push(Diagnostic::new(
                 span.clone(),
@@ -17781,9 +17805,22 @@ impl TypeChecker {
             } else {
                 &value_type
             };
-            if !infer_type_parameters_for_expected(template, expected, &mut substitutions) {
+            let mut from_argument = substitutions.clone();
+            if infer_type_parameters_for_expected(template, expected, &mut from_argument) {
+                substitutions = from_argument;
+            } else if let (Some(argument), Some(parameter)) = (argument, parameter_template)
+                && let Some(from_expected) =
+                    infer_from_expected_accepting(template, expected, parameter, argument, &rigid)
+            {
+                // The argument fixed a parameter more narrowly than the
+                // expected result allows, as `False` does for `T` in
+                // `let flag: Option<Bool> = Some False`. Solve from the
+                // expected type instead; the argument then coerces into the
+                // instantiated parameter.
+                substitutions = from_expected;
+            } else {
                 let polymorphic_recursion = declared_parameters.iter().any(|id| {
-                    substitutions.get(id).is_some_and(|replacement| {
+                    from_argument.get(id).is_some_and(|replacement| {
                         type_contains_parameter(replacement, *id)
                             && !matches!(replacement, CheckedType::Parameter { id: replacement_id, .. } if replacement_id == id)
                     })
@@ -20746,12 +20783,24 @@ pub(crate) enum FromCoercion {
     Forbidden,
 }
 
+/// The `std.boolean` singleton a checked wrapper name denotes, if any. A
+/// checked name is `std.boolean.True` when the program has several modules
+/// and the bare `True` otherwise; a `True` declared in another module is
+/// never a `Bool` singleton.
+fn bool_singleton_name(name: &str) -> Option<&'static str> {
+    match name {
+        "True" | "std.boolean.True" => Some("True"),
+        "False" | "std.boolean.False" => Some("False"),
+        _ => None,
+    }
+}
+
 /// Whether `sum` is exactly the standard library `Bool` sum, `True | False`.
 ///
 /// With a resolved module the alternatives are recognized by their
 /// declarations in `std.boolean`; without one (lowering and emission) their
-/// checked display names are compared instead. A wider sum such as
-/// `True | False | I32` is not a `Bool`.
+/// checked names are compared instead, under the same rule that pins their
+/// tags. A wider sum such as `True | False | I32` is not a `Bool`.
 pub(crate) fn is_bool_sum(resolved: Option<&ResolvedModule>, sum: &CheckedSumType) -> bool {
     fn alternative_name<'a>(
         resolved: Option<&'a ResolvedModule>,
@@ -20766,7 +20815,7 @@ pub(crate) fn is_bool_sum(resolved: Option<&ResolvedModule>, sum: &CheckedSumTyp
             (resolved.program().module_dotted_name(module).as_deref() == Some("std.boolean"))
                 .then_some(declaration.name.as_str())
         } else {
-            Some(name.rsplit('.').next().unwrap_or(name))
+            bool_singleton_name(name)
         }
     }
     let [first, second] = sum.alternatives.as_slice() else {
@@ -20781,13 +20830,16 @@ pub(crate) fn is_bool_sum(resolved: Option<&ResolvedModule>, sum: &CheckedSumTyp
     )
 }
 
-/// The `Bool` sum a value type denotes, directly or through one implicit
-/// `from` wrapper.
-pub(crate) fn bool_sum_through_implicit_wrapper<'a>(
+/// The `Bool` sum a value type is. A `from` type over `Bool`, such as
+/// `type Flag from Bool`, is a different type and is not looked through.
+pub(crate) fn bool_sum<'a>(
     resolved: Option<&ResolvedModule>,
     value_type: &'a CheckedType,
 ) -> Option<&'a CheckedSumType> {
-    sum_through_implicit_wrapper(value_type).filter(|sum| is_bool_sum(resolved, sum))
+    match value_type {
+        CheckedType::Sum(sum) if is_bool_sum(resolved, sum) => Some(sum),
+        _ => None,
+    }
 }
 
 /// A sum type, seen through at most one implicitly introduced (`from`)
@@ -23210,6 +23262,28 @@ fn clear_function_effects(value_type: &mut CheckedType) {
     }
 }
 
+/// Solves a generic call's parameters from its expected result alone, for a
+/// call whose argument fixed them more narrowly than that result allows. The
+/// solution is used only when it fixes every parameter of the call's
+/// parameter type and the argument coerces into that instantiated parameter.
+fn infer_from_expected_accepting(
+    template: &CheckedType,
+    expected: &CheckedType,
+    parameter: &CheckedType,
+    argument: &CheckedType,
+    rigid: &HashMap<TypeParameterId, CheckedType>,
+) -> Option<HashMap<TypeParameterId, CheckedType>> {
+    let mut substitutions = rigid.clone();
+    if !infer_type_parameters_for_expected(template, expected, &mut substitutions) {
+        return None;
+    }
+    let instantiated = substitute_type(parameter.clone(), &substitutions);
+    let solved = type_parameter_ids(&instantiated)
+        .iter()
+        .all(|id| rigid.contains_key(id));
+    (solved && can_coerce_type(argument, &instantiated)).then_some(substitutions)
+}
+
 fn infer_type_parameters_for_expected(
     template: &CheckedType,
     expected: &CheckedType,
@@ -24619,10 +24693,10 @@ fn checked_type_sort_key(value_type: &CheckedType) -> String {
         // Tags cross package object boundaries. TypeId is local to one
         // loading session and cannot determine the public representation.
         // Preserve the runtime's Bool contract: False is tag 0, True tag 1.
-        CheckedType::Wrapper { name, .. } if name == "False" || name == "std.boolean.False" => {
+        CheckedType::Wrapper { name, .. } if bool_singleton_name(name) == Some("False") => {
             "0:0".to_owned()
         }
-        CheckedType::Wrapper { name, .. } if name == "True" || name == "std.boolean.True" => {
+        CheckedType::Wrapper { name, .. } if bool_singleton_name(name) == Some("True") => {
             "0:1".to_owned()
         }
         CheckedType::Wrapper { .. } => format!("0:2:{value_type}"),
@@ -26058,6 +26132,8 @@ mod sum_abi_tests {
             vec![nominal(90, "True"), CheckedType::I32],
             vec![nominal(90, "True"), nominal(1, "False"), CheckedType::I32],
             vec![nominal(90, "True")],
+            // Singletons with the same names from another module.
+            vec![nominal(90, "app.True"), nominal(1, "app.False")],
         ] {
             let sum = normalize_substituted_sum(alternatives);
             assert!(
@@ -26065,5 +26141,16 @@ mod sum_abi_tests {
                 "a wider sum is not `Bool`: {sum:?}"
             );
         }
+
+        // `type Flag from Bool` is its own type, not a `Bool`.
+        let flag = CheckedType::Wrapper {
+            id: TypeId(7),
+            name: "Flag".to_owned(),
+            arguments: Vec::new(),
+            representation: Box::new(CheckedType::Sum(exact.clone())),
+            introduction: WrapperIntroduction::Implicit,
+        };
+        assert!(bool_sum(None, &CheckedType::Sum(exact)).is_some());
+        assert!(bool_sum(None, &flag).is_none());
     }
 }

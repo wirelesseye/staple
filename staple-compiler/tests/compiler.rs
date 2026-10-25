@@ -15833,6 +15833,48 @@ fn effect_parameters_bind_to_rigid_effect_rows() {
 }
 
 #[test]
+fn expected_results_guide_generic_arguments() {
+    const IDENTITY: &str = "def identity = <T> move value: T => T :: value\n";
+    // A numeric literal argument takes its type from the expected result,
+    // and an argument narrower than the expected parameter coerces into it.
+    type_check(&format!(
+        "{IDENTITY}{}",
+        concat!(
+            "let wide: I64 = identity 5000000000\n",
+            "let byte: U8 = identity 255\n",
+            "let some: Option<I64> = Some 7\n",
+            "let either: Option<I32 | String> = Some 5\n",
+            "let number: I32 = 5\n",
+            "let widened: Option<I32 | String> = Some number\n",
+            "let mixed: I32 | String = identity number\n",
+        )
+    ));
+
+    let source = format!("{IDENTITY}let bad: U8 = identity 300\n");
+    let diagnostics = TypeChecker::new()
+        .check(resolve(&source))
+        .expect_err_diagnostics("the literal does not fit the expected `U8`");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("does not fit in `U8`")),
+        "{diagnostics:?}"
+    );
+
+    // The expected type only widens an argument; it never converts one.
+    let source = "let number: I32 = 5\nlet text: Option<String> = Some number\n";
+    let diagnostics = TypeChecker::new()
+        .check(resolve(source))
+        .expect_err_diagnostics("an `I32` cannot fill `Option<String>`");
+    assert!(
+        diagnostics.iter().any(|d| d
+            .message
+            .starts_with("generic function conflicts with the expected type")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
 fn lowering_admits_polymorphic_values_stored_and_called() {
     let module = type_check(concat!(
         "def identity: <T> move T -> T = <T> move value => value\n",

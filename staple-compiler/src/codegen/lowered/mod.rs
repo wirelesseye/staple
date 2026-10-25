@@ -5224,7 +5224,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "`Bool` value has an invalid representation",
             ));
         };
-        if crate::typecheck::bool_sum_through_implicit_wrapper(None, &logical.bool_type).is_none() {
+        if crate::typecheck::bool_sum(None, &logical.bool_type).is_none() {
             return Err(Diagnostic::new(
                 span.clone(),
                 "`&&`/`||` require `Bool` to be the sum `True | False`",
@@ -8279,8 +8279,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         result_type: &CheckedType,
         span: staple_syntax::Span,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let Some(sum) = crate::typecheck::bool_sum_through_implicit_wrapper(None, result_type)
-        else {
+        let Some(sum) = crate::typecheck::bool_sum(None, result_type) else {
             return Err(Diagnostic::new(span, "comparison result must be Bool"));
         };
         let sum_type = self.backend.compile_sum_type(sum)?;
