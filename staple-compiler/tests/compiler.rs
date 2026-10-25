@@ -6676,6 +6676,43 @@ typegroup Switch { @b Enabled, Disabled }
 }
 
 #[test]
+fn repeated_modifier_prefixes_are_not_recursive() {
+    resolve(
+        r#"
+macro @identity: Item -> Item = item => item
+@identity @identity @identity
+let original = 0
+"#,
+    );
+}
+
+#[test]
+fn typegroup_group_modifiers_keep_source_order() {
+    // The doc comment precedes `@all`, so it must be applied to the group
+    // before `@derive_debug`, which does not accept pending modifiers.
+    let module = type_check(
+        r#"
+use std.fmt.*
+/// A switch.
+@all(@derive_debug)
+typegroup Switch { Enabled, Disabled }
+let group_debug: String = Formatter.debug (Switch :: Switch.Enabled)
+"#,
+    );
+    let group = module
+        .resolved()
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::TypeDeclaration(item) if item.name == "Switch" => Some(item),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(group.docs, [" A switch."]);
+}
+
+#[test]
 fn typegroup_unknown_distributed_modifier_is_reported_once() {
     let diagnostics = resolve_result("@all(@typo) typegroup Switch { Enabled, Disabled }\n")
         .expect_err_diagnostics("unknown nested modifier");
@@ -7984,6 +8021,26 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
         (
             "macro @recurse: Item -> Item = _ => parse_quote { @recurse let value = 1 }\n@recurse\nlet original = 0\n",
             "recursive modifier macro expansion of `@recurse`",
+        ),
+        // The rebuilt invocation reuses the written name, so it carries source
+        // provenance, but it is a new invocation rather than a pending one.
+        (
+            concat!(
+                "macro @identity: Item -> Item = item => item\n",
+                "macro @again: (Parenthesized<Modifier>; Item) -> Item = (inner; item) => match inner {\n",
+                "    ModifierCall (namespace, name, Some argument) => ModifiedItem (\n",
+                "        modifiers: Sequence (\n",
+                "            first: ModifierCall (namespace: namespace, name: name, argument: Some (quote { @again($argument) })),\n",
+                "            rest: Sequence (),\n",
+                "        ),\n",
+                "        item: item,\n",
+                "    ),\n",
+                "    _ => item,\n",
+                "}\n",
+                "@again(@again(@identity))\n",
+                "let original = 0\n",
+            ),
+            "recursive modifier macro expansion of `@again`",
         ),
     ] {
         let loaded = ProgramLoader::new()

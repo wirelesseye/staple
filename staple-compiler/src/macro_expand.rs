@@ -1899,6 +1899,9 @@ struct MacroExpander {
     next_mark: u64,
     steps: usize,
     expansion_stack: Vec<MacroKey>,
+    /// One entry per active modifier application: its key and the syntax IDs
+    /// of the modifiers that were still pending on its input item.
+    modifier_frames: Vec<(MacroKey, Vec<SyntaxId>)>,
     emitted_items: Option<Vec<Item>>,
     invocations: HashMap<SyntaxId, ResolvedMacro>,
     quote_context: Option<MetaType>,
@@ -2842,6 +2845,7 @@ impl MacroExpander {
             next_mark: 1,
             steps: 0,
             expansion_stack: Vec::new(),
+            modifier_frames: Vec::new(),
             emitted_items: None,
             invocations: HashMap::new(),
             quote_context: None,
@@ -4963,16 +4967,32 @@ impl MacroExpander {
             return Some(ModifierChainResult::Item(current));
         }
         let key = definition.key.clone();
-        // A repeated source prefix (including a duplicated modifier argument)
-        // is a distinct application. Generated self-invocations remain recursive.
-        if self.expansion_stack.contains(&key) && invocation.syntax.definition_module().is_some() {
+        // Re-entering a modifier is recursion unless the invocation was already
+        // pending on the input of every active application of that modifier,
+        // which is the case for repeated prefixes such as `@x @x def ...` that
+        // the outer application merely passed through. A modifier that emits
+        // a new invocation of itself is always reported.
+        let recursive = self
+            .modifier_frames
+            .iter()
+            .any(|(active, pending)| *active == key && !pending.contains(&invocation.syntax.id));
+        if recursive {
             self.diagnostics.push(Diagnostic::new(
                 invocation.syntax.span.clone(),
                 format!("recursive modifier macro expansion of `@{}`", key.name),
             ));
             return None;
         }
+        let pending = match &current {
+            Item::Modified(pending) => pending
+                .modifiers
+                .iter()
+                .map(|modifier| modifier.syntax.id)
+                .collect(),
+            _ => Vec::new(),
+        };
         self.expansion_stack.push(key.clone());
+        self.modifier_frames.push((key.clone(), pending));
         let diagnostic_start = self.diagnostics.len();
         let result = self.invoke_modifier(
             module,
@@ -4983,6 +5003,7 @@ impl MacroExpander {
         );
         let Some(items) = result else {
             self.expansion_stack.pop();
+            self.modifier_frames.pop();
             if self.diagnostics.len() > diagnostic_start {
                 if self.suppress_expansion_trailer {
                     self.suppress_expansion_trailer = false;
@@ -5003,6 +5024,7 @@ impl MacroExpander {
                     Some(ModifierChainResult::Items(items)) => expanded.extend(items),
                     None => {
                         self.expansion_stack.pop();
+                        self.modifier_frames.pop();
                         return None;
                     }
                 }
@@ -5011,6 +5033,7 @@ impl MacroExpander {
             }
         }
         self.expansion_stack.pop();
+        self.modifier_frames.pop();
         match expanded.as_slice() {
             [item] => Some(ModifierChainResult::Item(item.clone())),
             _ => Some(ModifierChainResult::Items(expanded)),
@@ -7660,12 +7683,14 @@ impl MacroExpander {
                 match argument {
                     Value::Nominal(kind, _) if kind == "None" => {},
                     Value::Nominal(kind, value) if kind == "Some" => {
-                        let Value::Syntax(SyntaxValue::Raw(syntax)) = value.as_ref() else {
+                        // `quote` may return a structured value, so accept any
+                        // syntax value and splice its tokens.
+                        let Some(syntax) = parse::value_syntax(value.as_ref()) else {
                             self.diagnostics.push(Diagnostic::new(span, invalid));
                             return None;
                         };
                         tokens.extend(staple_syntax::lex("("));
-                        append_syntax_tokens(&mut tokens, syntax);
+                        append_syntax_tokens(&mut tokens, &syntax);
                         tokens.extend(staple_syntax::lex(")"));
                     },
                     _ => {
@@ -16282,17 +16307,39 @@ fn modifier_call_field_types() -> Vec<CompileType> {
 }
 
 fn modifier_call_value(invocation: &ModifierInvocation) -> Value {
-    let ident = |name: &str| {
+    // Each path segment gets the syntax of its own token so that splicing a
+    // name emits just that name, not the whole `@path(argument)` invocation.
+    let tokens = invocation.syntax.tokens();
+    let segments = tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| !token.kind.is_trivia())
+        .skip(1)
+        .take_while(|(_, token)| token.kind != staple_syntax::TokenKind::LParen)
+        .filter(|(_, token)| token.kind != staple_syntax::TokenKind::Dot)
+        .map(|(index, _)| syntax_slice(&invocation.syntax, index, index + 1))
+        .collect::<Vec<_>>();
+    let path = invocation
+        .namespace
+        .as_deref()
+        .map(|path| path.split('.').collect::<Vec<_>>())
+        .unwrap_or_default();
+    let ident = |index: usize, name: &str| {
+        let syntax = if segments.len() == path.len() + 1 {
+            segments[index].clone()
+        } else {
+            invocation.syntax.clone()
+        };
         Value::Syntax(SyntaxValue::Ident(staple_syntax::NameExpression {
-            syntax: invocation.syntax.clone(),
+            syntax,
             name: name.to_owned(),
         }))
     };
-    let namespace = invocation
-        .namespace
-        .as_deref()
-        .map(|path| path.split('.').map(ident).collect::<Vec<_>>())
-        .unwrap_or_default();
+    let namespace = path
+        .iter()
+        .enumerate()
+        .map(|(index, name)| ident(index, name))
+        .collect::<Vec<_>>();
     let argument = match &invocation.argument {
         Some(argument) => {
             let tokens = argument.syntax.tokens();
@@ -16324,7 +16371,7 @@ fn modifier_call_value(invocation: &ModifierInvocation) -> Value {
                 Some("namespace".to_owned()),
                 Value::Sequence(namespace.into()),
             ),
-            (Some("name".to_owned()), ident(&invocation.name)),
+            (Some("name".to_owned()), ident(path.len(), &invocation.name)),
             (Some("argument".to_owned()), argument),
         ]
         .into(),

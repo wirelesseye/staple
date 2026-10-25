@@ -1409,6 +1409,43 @@ mod tests {
     }
 
     #[test]
+    fn expand_prints_spliced_modifier_names_as_bare_identifiers() {
+        let expanded = expand_source(
+            "modifier-names",
+            concat!(
+                "use std.syntax.*\n",
+                "let tag: I32 = 7\n",
+                "let lib: I32 = 3\n",
+                "macro emit modifiers (@tag(Expr)): (MacroCallMetadata; Expr) -> Item = ((modifiers, _); value) => match modifiers {\n",
+                "    Sequence (first, rest) => match first {\n",
+                "        ModifierCall (_, name, _) => parse_quote { let tagged: I32 = $name },\n",
+                "        _ => parse_quote { let tagged: I32 = 0 },\n",
+                "    },\n",
+                "    _ => parse_quote { let tagged: I32 = 0 },\n",
+                "}\n",
+                "macro qualifier = (metadata: MacroCallMetadata; value: Expr) => match metadata.modifiers {\n",
+                "    Sequence (first, rest) => match first {\n",
+                "        ModifierCall (Sequence (segment, more), _, _) => parse_quote { let qualified: I32 = $segment },\n",
+                "        _ => parse_quote { let qualified: I32 = 0 },\n",
+                "    },\n",
+                "    _ => parse_quote { let qualified: I32 = 0 },\n",
+                "}\n",
+                "@tag(5) emit ()\n",
+                "@lib.inner.bar qualifier ()\n",
+            ),
+        );
+        assert!(
+            expanded.contains("let tagged: I32 = tag"),
+            "expected the bare modifier name, got:\n{expanded}"
+        );
+        assert!(
+            expanded.contains("let qualified: I32 = lib"),
+            "expected the first namespace segment, got:\n{expanded}"
+        );
+        staple_syntax::parse(&expanded).expect("expanded source should parse");
+    }
+
+    #[test]
     fn expand_uses_the_expanded_flattened_inline_module() {
         let expanded = expand_source(
             "inline-module",

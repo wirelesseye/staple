@@ -29,20 +29,23 @@ def typegroup_modifier_contents = syntax: Syntax => Sequence<Modifier> :: {
     }
 }
 
-def typegroup_split_modifiers = modifiers: Sequence<Modifier> => (Sequence<Modifier>, Sequence<Modifier>, Sequence<Modifier>) :: match modifiers {
-    Sequence () => (Sequence (), Sequence (), Sequence ()),
+// Splits prefix modifiers into those distributed to every variant and those
+// applied to the group. The group keeps source order, with each `@all(...)`
+// replaced by its contents and each `@variants(...)` removed.
+def typegroup_split_modifiers = modifiers: Sequence<Modifier> => (Sequence<Modifier>, Sequence<Modifier>) :: match modifiers {
+    Sequence () => (Sequence (), Sequence ()),
     Sequence (first, rest) => {
-        let (variants, group, remaining) = typegroup_split_modifiers rest
+        let (variants, group) = typegroup_split_modifiers rest
         match first {
             ModifierCall (Sequence (), Ident "all", Some argument) => {
                 let contents = typegroup_modifier_contents argument
-                (typegroup_prepend (contents, variants), typegroup_prepend (contents, group), remaining)
+                (typegroup_prepend (contents, variants), typegroup_prepend (contents, group))
             },
             ModifierCall (Sequence (), Ident "variants", Some argument) => {
                 let contents = typegroup_modifier_contents argument
-                (typegroup_prepend (contents, variants), group, remaining)
+                (typegroup_prepend (contents, variants), group)
             },
-            _ => (variants, group, Sequence (first: first, rest: remaining)),
+            _ => (variants, Sequence (first: first, rest: group)),
         }
     },
 }
@@ -208,8 +211,7 @@ pub macro typegroup
     (MacroCallMetadata; Ident<String>; Option<TypeParameters>; Braced<Separated<(Sequence<Modifier>; Ident<String>; Option<TypeBody>), Comma>>) ->
     Sequence<Item> =
     ((modifiers, visibility); group; parameters; body) => {
-    let (shared, group_modifiers, remaining) = typegroup_split_modifiers modifiers
-    let modifiers = typegroup_prepend (group_modifiers, remaining)
+    let (shared, modifiers) = typegroup_split_modifiers modifiers
     match body {
     Braced (Separated (
         separator,

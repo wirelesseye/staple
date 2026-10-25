@@ -557,7 +557,7 @@ fn describe_position(syntax: &Syntax, cursor: usize) -> String {
 }
 
 /// The syntax a value stands for as a whole, for `stream` and `parse_all`.
-fn value_syntax(value: &Value) -> Option<Syntax> {
+pub(super) fn value_syntax(value: &Value) -> Option<Syntax> {
     match value {
         Value::Product(fields, false) if fields.len() == 1 && fields[0].0.is_none() => {
             value_syntax(&fields[0].1)

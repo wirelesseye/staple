@@ -630,8 +630,9 @@ automatically.
 `typegroup` accepts `@all(...)` for its group and every variant, and
 `@variants(...)` for its variants alone. Their comma-separated modifiers are
 prepended in prefix order, ahead of each variant's own modifiers. Ordinary
-prefixes still apply only to the group. Repeated unknown-modifier errors from
-the same source location are reported once.
+prefixes still apply only to the group, which keeps the written prefix order
+with each `@all(...)` replaced by its contents. Repeated unknown-modifier
+errors from the same source location are reported once.
 
 An ordinary `Visibility` parameter may appear in any position. At that
 position each visibility form consumes one source atom; if none is present,
