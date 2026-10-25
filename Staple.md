@@ -3778,8 +3778,8 @@ any value.
 
 A nominal pattern selects one sum alternative and may recursively destructure
 its representation with binding, product, nominal, and wildcard patterns.
-Patterns also see through one [`from`](#from) layer, so a `Bool` subject is
-matched by its variants directly. A
+Patterns also see through one [`from`](#from) layer, so a subject whose nominal
+type is a `from` wrapper is matched by patterns for its representation. A
 bare singleton name selects its unique alternative, including the
 standard-library boolean values:
 
@@ -5391,22 +5391,20 @@ The same form can select a singleton alternative in a propagating binding:
 let ?Ready() = operation()
 ```
 
-The standard-library `Bool` type is defined entirely in these terms, using
-the `typegroup` macro described under [Sum types](#sum-types):
+The standard-library `Bool` type is defined entirely in these terms:
 
 ```staple
-pub typegroup Bool {
-    True,
-    False,
-}
-pub use Bool.*
+pub type True
+pub type False
+pub type Bool = True | False
 ```
 
-This declares the singletons `Bool.True` and `Bool.False` and
-`pub type Bool from pub Bool.True | Bool.False`. `True` and `False` are the
-two values of `Bool`: each is introduced implicitly wherever a `Bool` is
-expected, and patterns such as `True` see through `Bool` to its
-representation. `Bool` has no compiler-specific type identity.
+`True` and `False` are ordinary singletons, and `Bool` is an
+[alias](#aliases) of their sum. It is therefore exactly `True | False`, not a
+nominal type or a `from` wrapper, and it has no compiler-specific type
+identity. A bare `True` or `False` is injected into a `Bool` where one is
+expected, and patterns such as `True` select the matching sum alternative
+directly.
 
 #### `wrap`
 
@@ -5641,14 +5639,35 @@ at least as visible as the type. `@recursive_constructor` types cannot use
 `from`.
 
 Patterns see through one `from` layer. When a pattern does not select the
-`from` type itself, it is checked against the type's visible representation,
-so `match flag { True => ..., False => ... }` works on a `Bool`. Within a sum,
-a pattern that selects no alternative directly matches inside the unique
-`from` alternative whose representation it selects from, so `True` matches the
-`Bool` alternative of `Bool | I32`. Typed patterns, destructuring bindings,
-and propagating bindings (`let ?Some(value) = option`) see through the same
-way. Exhaustiveness is checked against the representation, and the
-representation must be visible where the pattern is written.
+`from` type itself, it is checked against the type's visible representation:
+
+```staple
+type Point from (I32, I32)
+
+match point {
+    (x, y) => x + y,    // matches through `Point`'s product representation
+}
+```
+
+Within a sum, a pattern that selects no alternative directly matches inside the
+unique `from` alternative whose representation it selects from. Here `Inner`
+is the only alternative whose representation contains `I32`, so the typed
+pattern reaches it through `Inner`'s representation:
+
+```staple
+type Inner from I32
+let choice: Inner | String = 4
+
+match choice {
+    number: I32 => number,
+    _: String => 0,
+}
+```
+
+Typed patterns, destructuring bindings, and propagating bindings
+(`let ?Some(value) = option`) see through the same way. Exhaustiveness is
+checked against the representation, and the representation must be visible
+where the pattern is written.
 
 #### Aliases
 
@@ -5665,7 +5684,8 @@ type Person = (
 Here, `person` is exactly the named product type on the right-hand side. The alias
 does not create a separate nominal identity, and it has no companion of its
 own: `companion Person` would be `companion` of the underlying type (see [Type
-companions](#type-companions)).
+companions](#type-companions)). Diagnostics describe an alias by its underlying
+type, so an error about a `Bool` may name `True | False`.
 
 ### Sum types
 
@@ -5718,7 +5738,8 @@ type.
 Sums are unordered, flattened, and duplicate-free. Consequently `A | B` and
 `B | A` are the same type, nested sums are flattened, and `A | A` is `A`.
 Because `Never` has no values, it is removed when normalizing a sum with another
-alternative, so `Never | A` is `A`.
+alternative, so `Never | A` is `A`. An alias of a sum dissolves the same way, so
+`Bool | I32` is the three-alternative sum `True | False | I32`, with one tag.
 Variant identity is the complete type, so different applications of one
 constructor, such as `Ok<I32> | Ok<String>`, are distinct alternatives. A nominal
 pattern must select exactly one alternative; use a typed binding to disambiguate
@@ -5752,7 +5773,8 @@ parameter alternative stands for every alternative the rest of the sum leaves
 unmatched: none (`Never`), one, or a sum of several. Passing an
 `Ok<I32> | String | Bool` to `<T, E> Result<T, E> -> T` infers `T = I32` and
 `E = String | Bool`. With two or more bare parameter alternatives, each must
-match a single alternative or `Never`.
+match a single alternative or `Never`. Because `Bool` is the two alternatives
+`True | False`, `<A, B> A | B` does not infer from a `Bool | I32` value.
 
 #### Propagating bindings
 

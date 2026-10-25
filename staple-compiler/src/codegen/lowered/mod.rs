@@ -5224,10 +5224,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "`Bool` value has an invalid representation",
             ));
         };
-        if crate::typecheck::sum_through_implicit_wrapper(&logical.bool_type).is_none() {
+        if crate::typecheck::bool_sum_through_implicit_wrapper(None, &logical.bool_type).is_none() {
             return Err(Diagnostic::new(
                 span.clone(),
-                "`&&`/`||` require `Bool` to be a sum type",
+                "`&&`/`||` require `Bool` to be the sum `True | False`",
             ));
         }
         let tag = self.backend.build_sum_tag(left_struct, "logical.tag")?;
@@ -8279,12 +8279,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         result_type: &CheckedType,
         span: staple_syntax::Span,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let Some(sum) = crate::typecheck::sum_through_implicit_wrapper(result_type) else {
+        let Some(sum) = crate::typecheck::bool_sum_through_implicit_wrapper(None, result_type)
+        else {
             return Err(Diagnostic::new(span, "comparison result must be Bool"));
         };
-        if sum.alternatives.len() != 2 {
-            return Err(Diagnostic::new(span, "comparison result must be Bool"));
-        }
         let sum_type = self.backend.compile_sum_type(sum)?;
         self.backend.build_bool_value(condition, sum_type, span)
     }

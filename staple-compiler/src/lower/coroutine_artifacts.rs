@@ -389,11 +389,16 @@ pub(super) fn expand_reactive_runner(
                 )]);
             };
             let predicate_type = record.function_type.clone();
-            // `Bool` is the sum carrying the `True` alternative; the runner
-            // branches on the result's tag, so a non-`Bool` predicate is a
-            // requester error. Names may be qualified in a module scope, so
-            // the check matches the last name component like `lower_logical`.
-            if !is_bool_type(&predicate_type.result) {
+            // The runner branches on the first tag, so the predicate must
+            // return exactly the `Bool` sum `True | False`. Checked names may
+            // be qualified, so the name-based helper matches the last
+            // component like `lower_logical`.
+            if !crate::typecheck::bool_sum_through_implicit_wrapper(
+                None,
+                &predicate_type.result,
+            )
+            .is_some()
+            {
                 return Err(vec![Diagnostic::new(
                     origin.span.clone(),
                     format!(
@@ -477,26 +482,6 @@ pub(super) fn expand_reactive_runner(
         }
     };
     Ok((plan, Vec::new()))
-}
-
-/// Whether `value_type` is the `Bool` sum, directly or through its wrapper
-/// representation. Alternative names may be qualified, so the last component
-/// is compared.
-fn is_bool_type(value_type: &CheckedType) -> bool {
-    fn alternative_is_true(alternative: &CheckedType) -> bool {
-        let name = match alternative {
-            CheckedType::Wrapper { name, .. }
-            | CheckedType::Opaque { name, .. }
-            | CheckedType::TypeConstructor { name, .. } => name,
-            _ => return false,
-        };
-        name == "True" || name.ends_with(".True")
-    }
-    match value_type {
-        CheckedType::Sum(sum) => sum.alternatives.iter().any(alternative_is_true),
-        CheckedType::Wrapper { representation, .. } => is_bool_type(representation),
-        _ => false,
-    }
 }
 
 /// One reaction payload slot: a pointer when `mutable || !concrete_is_copy`.
@@ -2009,11 +1994,12 @@ mod tests {
             panic!("an `until` runner carries an until body")
         };
         assert!(
-            crate::typecheck::sum_through_implicit_wrapper(predicate_type.result.as_ref())
-                .is_some_and(|sum| sum.alternatives.iter().any(|alternative| {
-                    matches!(alternative, CheckedType::Wrapper { name, .. } if name == "True")
-                })),
-            "the predicate returns `Bool`: {predicate_type:?}"
+            crate::typecheck::bool_sum_through_implicit_wrapper(
+                None,
+                predicate_type.result.as_ref(),
+            )
+            .is_some(),
+            "the predicate returns exactly `Bool`: {predicate_type:?}"
         );
 
         // `doubled` is an initializer derived binding; `observed = doubled` is

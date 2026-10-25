@@ -6671,14 +6671,18 @@ impl TypeChecker {
                 }
                 crate::IntrinsicFunction::IntegerCompare { integer, .. } => {
                     let integer = CheckedType::integer(*integer);
-                    let result = self.symbol_value_type(*symbol).and_then(|value| match value {
-                        CheckedType::Function(function) => Some(function.result.as_ref().clone()),
-                        _ => None,
-                    }).filter(|value| sum_through_implicit_wrapper(value).is_some_and(|sum|
-                        sum.alternatives.len() == 2
-                            && matches!(&sum.alternatives[0], CheckedType::Wrapper { name, .. } if name.ends_with("True"))
-                            && matches!(&sum.alternatives[1], CheckedType::Wrapper { name, .. } if name.ends_with("False"))
-                    )).unwrap_or(CheckedType::Error);
+                    let result = self
+                        .symbol_value_type(*symbol)
+                        .and_then(|value| match value {
+                            CheckedType::Function(function) => {
+                                Some(function.result.as_ref().clone())
+                            }
+                            _ => None,
+                        })
+                        .filter(|value| {
+                            bool_sum_through_implicit_wrapper(Some(module), value).is_some()
+                        })
+                        .unwrap_or(CheckedType::Error);
                     CheckedType::Function(CheckedFunctionType {
                         default: None,
                         parameter: Box::new(CheckedType::Product(
@@ -6795,14 +6799,18 @@ impl TypeChecker {
                 }
                 crate::IntrinsicFunction::FloatCompare { float, .. } => {
                     let float = CheckedType::float(*float);
-                    let result = self.symbol_value_type(*symbol).and_then(|value| match value {
-                        CheckedType::Function(function) => Some(function.result.as_ref().clone()),
-                        _ => None,
-                    }).filter(|value| sum_through_implicit_wrapper(value).is_some_and(|sum|
-                        sum.alternatives.len() == 2
-                            && matches!(&sum.alternatives[0], CheckedType::Wrapper { name, .. } if name.ends_with("True"))
-                            && matches!(&sum.alternatives[1], CheckedType::Wrapper { name, .. } if name.ends_with("False"))
-                    )).unwrap_or(CheckedType::Error);
+                    let result = self
+                        .symbol_value_type(*symbol)
+                        .and_then(|value| match value {
+                            CheckedType::Function(function) => {
+                                Some(function.result.as_ref().clone())
+                            }
+                            _ => None,
+                        })
+                        .filter(|value| {
+                            bool_sum_through_implicit_wrapper(Some(module), value).is_some()
+                        })
+                        .unwrap_or(CheckedType::Error);
                     CheckedType::Function(CheckedFunctionType {
                         default: None,
                         parameter: Box::new(CheckedType::Product(
@@ -20738,8 +20746,52 @@ pub(crate) enum FromCoercion {
     Forbidden,
 }
 
+/// Whether `sum` is exactly the standard library `Bool` sum, `True | False`.
+///
+/// With a resolved module the alternatives are recognized by their
+/// declarations in `std.boolean`; without one (lowering and emission) their
+/// checked display names are compared instead. A wider sum such as
+/// `True | False | I32` is not a `Bool`.
+pub(crate) fn is_bool_sum(resolved: Option<&ResolvedModule>, sum: &CheckedSumType) -> bool {
+    fn alternative_name<'a>(
+        resolved: Option<&'a ResolvedModule>,
+        alternative: &'a CheckedType,
+    ) -> Option<&'a str> {
+        let CheckedType::Wrapper { id, name, .. } = alternative else {
+            return None;
+        };
+        if let Some(resolved) = resolved {
+            let declaration = resolved.type_declarations().get(id)?;
+            let module = resolved.definition_module(DefinitionId::Type(*id))?;
+            (resolved.program().module_dotted_name(module).as_deref() == Some("std.boolean"))
+                .then_some(declaration.name.as_str())
+        } else {
+            Some(name.rsplit('.').next().unwrap_or(name))
+        }
+    }
+    let [first, second] = sum.alternatives.as_slice() else {
+        return false;
+    };
+    matches!(
+        (
+            alternative_name(resolved, first),
+            alternative_name(resolved, second),
+        ),
+        (Some("True"), Some("False")) | (Some("False"), Some("True"))
+    )
+}
+
+/// The `Bool` sum a value type denotes, directly or through one implicit
+/// `from` wrapper.
+pub(crate) fn bool_sum_through_implicit_wrapper<'a>(
+    resolved: Option<&ResolvedModule>,
+    value_type: &'a CheckedType,
+) -> Option<&'a CheckedSumType> {
+    sum_through_implicit_wrapper(value_type).filter(|sum| is_bool_sum(resolved, sum))
+}
+
 /// A sum type, seen through at most one implicitly introduced (`from`)
-/// wrapper, such as the standard library's `Bool`.
+/// wrapper, such as an `Option`.
 pub(crate) fn sum_through_implicit_wrapper(value_type: &CheckedType) -> Option<&CheckedSumType> {
     match implicit_wrapper_representation(value_type).unwrap_or(value_type) {
         CheckedType::Sum(sum) => Some(sum),
@@ -23203,6 +23255,19 @@ fn infer_type_parameters_for_expected(
     if !matches!(template, CheckedType::Sum(_))
         && let CheckedType::Sum(sum) = expected
     {
+        // A bare parameter may stand for the whole expected sum, including an
+        // alias such as `Bool = True | False`. A parameter already fixed by an
+        // argument still has to accept the whole sum, or fall back to one of
+        // its alternatives below.
+        if let CheckedType::Parameter { id, .. } = template {
+            if substitutions.contains_key(id) {
+                if infer_type_parameters_mode(true, template, expected, substitutions) {
+                    return true;
+                }
+            } else {
+                return infer_type_parameters_mode(true, template, expected, substitutions);
+            }
+        }
         let matches = sum
             .alternatives
             .iter()
@@ -24554,12 +24619,10 @@ fn checked_type_sort_key(value_type: &CheckedType) -> String {
         // Tags cross package object boundaries. TypeId is local to one
         // loading session and cannot determine the public representation.
         // Preserve the runtime's Bool contract: True is tag 0, False tag 1.
-        CheckedType::Wrapper { name, .. } if name == "True" || name == "std.boolean.Bool.True" => {
+        CheckedType::Wrapper { name, .. } if name == "True" || name == "std.boolean.True" => {
             "0:0".to_owned()
         }
-        CheckedType::Wrapper { name, .. }
-            if name == "False" || name == "std.boolean.Bool.False" =>
-        {
+        CheckedType::Wrapper { name, .. } if name == "False" || name == "std.boolean.False" => {
             "0:1".to_owned()
         }
         CheckedType::Wrapper { .. } => format!("0:2:{value_type}"),
@@ -25908,12 +25971,72 @@ mod sum_abi_tests {
 
     #[test]
     fn standard_bool_keeps_its_runtime_tag_contract() {
-        let sum = normalize_substituted_sum(vec![nominal(90, "True"), nominal(1, "False")]);
-        let CheckedType::Sum(sum) = sum else {
+        for names in [["True", "False"], ["std.boolean.True", "std.boolean.False"]] {
+            for (first, second) in [(names[0], names[1]), (names[1], names[0])] {
+                let sum = normalize_substituted_sum(vec![nominal(90, first), nominal(1, second)]);
+                let CheckedType::Sum(sum) = sum else {
+                    panic!("expected sum")
+                };
+                assert!(
+                    matches!(&sum.alternatives[0], CheckedType::Wrapper { name, .. } if name.ends_with("True")),
+                    "{first} | {second} should keep `True` at tag 0: {sum:?}"
+                );
+                assert!(is_bool_sum(None, &sum));
+            }
+        }
+    }
+
+    #[test]
+    fn a_bool_row_infers_both_singletons() {
+        let parameter = TypeParameterId(0);
+        let none = nominal(1, "std.option.None");
+        let template = normalize_substituted_sum(vec![
+            none.clone(),
+            CheckedType::Parameter {
+                id: parameter,
+                name: "T".to_owned(),
+                sized: true,
+            },
+        ]);
+        let actual = normalize_substituted_sum(vec![
+            nominal(2, "std.boolean.True"),
+            nominal(3, "std.boolean.False"),
+            none,
+        ]);
+        let mut substitutions = HashMap::new();
+        assert!(infer_type_parameters(
+            &template,
+            &actual,
+            &mut substitutions
+        ));
+        let inferred = substitutions.get(&parameter).expect("T should infer");
+        assert!(
+            matches!(inferred, CheckedType::Sum(sum) if is_bool_sum(None, sum)),
+            "T should be the `Bool` sum, found {inferred:?}"
+        );
+    }
+
+    #[test]
+    fn bool_is_exactly_the_true_false_sum() {
+        let exact = normalize_substituted_sum(vec![
+            nominal(90, "std.boolean.False"),
+            nominal(1, "std.boolean.True"),
+        ]);
+        let CheckedType::Sum(exact) = exact else {
             panic!("expected sum")
         };
-        assert!(
-            matches!(&sum.alternatives[0], CheckedType::Wrapper { name, .. } if name.ends_with("True"))
-        );
+        assert!(is_bool_sum(None, &exact));
+
+        for alternatives in [
+            vec![nominal(90, "True"), CheckedType::I32],
+            vec![nominal(90, "True"), nominal(1, "False"), CheckedType::I32],
+            vec![nominal(90, "True")],
+        ] {
+            let sum = normalize_substituted_sum(alternatives);
+            assert!(
+                !matches!(&sum, CheckedType::Sum(sum) if is_bool_sum(None, sum)),
+                "a wider sum is not `Bool`: {sum:?}"
+            );
+        }
     }
 }

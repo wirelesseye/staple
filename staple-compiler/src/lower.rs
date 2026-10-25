@@ -33,9 +33,9 @@ use crate::{
     CheckedTraitDispatch, CheckedType, DefinitionId, FloatType, FromCoercion, FunctionId,
     IntegerType, IntrinsicFunction, ModuleId, RecursiveConstruction, ResolvedFunction,
     ResolvedModule, SourceModule, StructuralTraitMethod, SymbolId, TraitId, TraitMethodId, TypeId,
-    TypeParameterId, TypedModule, contains_type_parameter, implicit_wrapper_representation,
-    infer_type_parameters, infer_type_parameters_with_schemes, select_sum_alternative_with,
-    sum_through_implicit_wrapper,
+    TypeParameterId, TypedModule, bool_sum_through_implicit_wrapper, contains_type_parameter,
+    implicit_wrapper_representation, infer_type_parameters, infer_type_parameters_with_schemes,
+    select_sum_alternative_with, sum_through_implicit_wrapper,
 };
 
 mod artifact_closure;
@@ -6795,21 +6795,22 @@ impl LoweredProgram {
                 .cloned()
                 .unwrap_or(CheckedType::Never),
         };
-        let true_index = match sum_through_implicit_wrapper(&bool_type) {
-            Some(sum) => bool_true_index(module.resolved(), sum).ok_or_else(|| {
-                Diagnostic::new(
-                    logical.syntax.span.clone(),
-                    "`Bool` has no `True` alternative",
-                )
-            })?,
-            None if bool_type == CheckedType::Never => 0,
-            None => {
-                return Err(Diagnostic::new(
-                    logical.syntax.span.clone(),
-                    "`&&`/`||` require `Bool` to be a sum type",
-                ));
-            }
-        };
+        let true_index =
+            match bool_sum_through_implicit_wrapper(Some(module.resolved()), &bool_type) {
+                Some(sum) => bool_true_index(module.resolved(), sum).ok_or_else(|| {
+                    Diagnostic::new(
+                        logical.syntax.span.clone(),
+                        "`Bool` has no `True` alternative",
+                    )
+                })?,
+                None if bool_type == CheckedType::Never => 0,
+                None => {
+                    return Err(Diagnostic::new(
+                        logical.syntax.span.clone(),
+                        "`&&`/`||` require `Bool` to be the sum `True | False`",
+                    ));
+                }
+            };
         Ok(LoweredLogical {
             operator: logical.operator,
             left,
@@ -16127,8 +16128,8 @@ fn validate_checked_module(module: &TypedModule) -> Vec<Diagnostic> {
 
 /// The position of `Bool`'s `True` alternative in its sum. The alternative is
 /// found by its declaration: a checked wrapper's name is a display name, which
-/// is qualified (`std.boolean.Bool.True`) in a module that does not import
-/// the variants, such as `std.number`.
+/// is qualified (`std.boolean.True`) in a module that does not import the
+/// variants, such as `std.number`.
 fn bool_true_index(resolved: &ResolvedModule, sum: &crate::CheckedSumType) -> Option<usize> {
     sum.alternatives.iter().position(|alternative| {
         matches!(
@@ -22343,8 +22344,10 @@ mod tests {
         assert_eq!(logical.operator, staple_syntax::LogicalOperator::And);
         assert!(program.expressions.contains(logical.left));
         assert!(program.expressions.contains(logical.right));
-        let Some(sum) = sum_through_implicit_wrapper(&logical.bool_type) else {
-            panic!("`Bool` is a `from` type over a sum");
+        let Some(sum) =
+            bool_sum_through_implicit_wrapper(Some(module.resolved()), &logical.bool_type)
+        else {
+            panic!("`Bool` is the sum `True | False`");
         };
         let expected_true =
             bool_true_index(module.resolved(), sum).expect("`Bool` has a `True` alternative");
@@ -22625,20 +22628,14 @@ mod tests {
         let LoweredExpressionKind::Match(match_) = &invert.kind else {
             panic!("invert should be a match");
         };
-        let Some(bool_sum) = sum_through_implicit_wrapper(&match_.source) else {
-            panic!("Bool should be a `from` type over a sum");
+        let Some(bool_sum) =
+            bool_sum_through_implicit_wrapper(Some(module.resolved()), &match_.source)
+        else {
+            panic!("Bool should be the sum `True | False`");
         };
         for arm in &match_.arms {
-            // `True`/`False` see through `Bool` as if written `Bool True`.
-            let projection = lowered_pattern(&program, arm.pattern);
-            assert_eq!(
-                projection.test.identity,
-                LoweredPatternIdentity::Representation
-            );
-            let LoweredPatternKind::Nominal { argument, .. } = &projection.kind else {
-                panic!("`True`/`False` should project through `Bool`");
-            };
-            let pattern = lowered_pattern(&program, *argument);
+            // `True`/`False` select `Bool` sum alternatives directly.
+            let pattern = lowered_pattern(&program, arm.pattern);
             let LoweredPatternKind::Binding {
                 singleton: Some(singleton),
                 ..
@@ -22647,6 +22644,7 @@ mod tests {
                 panic!("`True`/`False` should lower to singleton bindings");
             };
             assert_eq!(pattern.test.identity, LoweredPatternIdentity::Singleton);
+            assert_eq!(pattern.test.subject, CheckedType::Sum(bool_sum.clone()));
             let expected = bool_sum
                 .alternatives
                 .iter()

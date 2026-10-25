@@ -3,7 +3,6 @@ pub mod
 use package.ops.(Not)
 use package.cmp.(Eq)
 use package.default.Default
-use package.typegroup.(typegroup)
 use package.convert.(Convert)
 use package.string.(String, ToString)
 
@@ -11,28 +10,27 @@ use package.string.(String, ToString)
 pub type InvalidBool
 
 use package.fmt.(Display, Debug, Formatter)
+use package.fmt.derive_debug
+
+/// The logical true value.
+@derive_debug
+pub type True
+
+/// The logical false value.
+@derive_debug
+pub type False
 
 /// A logical value that is either true or false.
-pub typegroup Bool {
-    /// The logical true value.
-    True,
-    /// The logical false value.
-    False,
-}
-pub use Bool.*
+pub type Bool = True | False
 
 impl Display Bool {
     fmt = (value, mut formatter) => formatter |> write (if value { "True" } else { "False" })
 }
 
-impl Debug Bool {
-    fmt = (value, mut formatter) => Display.fmt (value, formatter)
-}
-
 impl Eq Bool {
     eq = (left; right) => match (left, right) {
-        (True(), True()) => True,
-        (False(), False()) => True,
+        (True, True) => True,
+        (False, False) => True,
         _ => False,
     }
 }

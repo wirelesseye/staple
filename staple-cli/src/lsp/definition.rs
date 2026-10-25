@@ -2001,7 +2001,8 @@ mod tests {
                     && entry.targets.iter().any(|target| {
                         target.path.ends_with("boolean.sta")
                             && &boolean[target.selection_range.clone()] == "True"
-                            && target.range == target.selection_range
+                            && target.range.start <= target.selection_range.start
+                            && target.selection_range.end <= target.range.end
                     })
             }),
             "missing Bool variant origin: {entries:?}"

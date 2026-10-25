@@ -13063,7 +13063,7 @@ fn rejects_non_bool_logical_operands() {
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("expected `Bool`, found `I32`"))
+            .any(|diagnostic| diagnostic.message.contains("expected `True | False`, found `I32`"))
     );
 }
 
@@ -14839,10 +14839,11 @@ fn patterns_see_through_one_from_layer() {
     // Only one `from` layer is seen through.
     let messages = type_check_errors(
         concat!(
-            "type Choice from Bool | I32\n",
+            "type Inner from I32\n",
+            "type Choice from Inner | String\n",
             "def choose: Choice -> I32 = choice => match choice {\n",
-            "    True => 1,\n",
-            "    _ => 0,\n",
+            "    number: I32 => number,\n",
+            "    _: String => 0,\n",
             "}\n",
         ),
         "patterns see through a single `from` layer",
@@ -14850,7 +14851,7 @@ fn patterns_see_through_one_from_layer() {
     assert!(
         messages
             .iter()
-            .any(|message| message.contains("singleton pattern `True` cannot match")),
+            .any(|message| message.contains("does not select an alternative")),
         "{messages:?}"
     );
 }

@@ -3946,7 +3946,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .bool_type()
                         .const_int(self.view.concrete_needs_drop(&value_type) as u64, false)
                 };
-                let Some(sum) = crate::typecheck::sum_through_implicit_wrapper(&call.result_type)
+                let Some(sum) =
+                    crate::typecheck::bool_sum_through_implicit_wrapper(None, &call.result_type)
                 else {
                     return Err(Diagnostic::new(
                         span.clone(),
@@ -4800,9 +4801,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         result_type: &CheckedType,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<inkwell::values::BasicValueEnum<'context>> {
-        let sum = crate::typecheck::sum_through_implicit_wrapper(result_type).ok_or_else(|| {
-            Diagnostic::new(span.clone(), "dynamic comparison result must be Bool")
-        })?;
+        let sum = crate::typecheck::bool_sum_through_implicit_wrapper(None, result_type)
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "dynamic comparison result must be Bool")
+            })?;
         let sum_type = self.backend.compile_sum_type(sum)?;
         inkwell::values::BasicValueEnum::try_from(self.backend.build_bool_value(
             condition,
@@ -8965,8 +8967,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let collapsed =
                     product.fields.len() == 1 && !matches!(raw_type, CheckedType::Product(_));
                 {
+                    // The stored value is the product before any coercion to
+                    // its contextual target (for example a sum alternative),
+                    // so its field layout comes from the source type.
                     let descriptor = self.dynamic_descriptor(
-                        &expression.value_type,
+                        raw_type,
                         environment,
                         &expression.origin.span,
                     )?;

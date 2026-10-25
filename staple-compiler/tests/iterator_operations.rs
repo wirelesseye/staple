@@ -257,7 +257,9 @@ fn collect_rejects_targets_that_cannot_hold_the_items() {
         "a target without a `FromIterator` implementation is rejected",
     );
     assert!(
-        errors.iter().any(|error| error.contains("(Bool, I32)")),
+        errors
+            .iter()
+            .any(|error| error.contains("(True | False, I32)")),
         "{errors:?}"
     );
     let errors = errors_of(
