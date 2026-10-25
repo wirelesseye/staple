@@ -10158,7 +10158,7 @@ fn quoted_type_declarations_from_one_template_get_distinct_identity() {
 fn exposes_type_declarations_as_structured_items() {
     let module = type_check(concat!(
         "macro @inspect_item: Item -> Item = item => match item {\n",
-        "  TypeDeclarationItem (WrapperDeclaration(), Ident name, spelling, declared_type, parameters, Some representation, _) => item,\n",
+        "  TypeDeclarationItem (Ident name, declared_type, parameters, Some (WrapperBody (visibility, representation)), _) => item,\n",
         "  UnstructuredItem() => item,\n",
         "  _ => panic \"inspect_item item is unsupported\",\n",
         "}\n",

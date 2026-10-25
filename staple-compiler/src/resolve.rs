@@ -2383,12 +2383,6 @@ impl NameResolver {
             "Pattern",
             "BindingPattern",
             "NominalPattern",
-            "AliasDeclaration",
-            "WrapperDeclaration",
-            "FromDeclaration",
-            "SingletonDeclaration",
-            "OpaqueDeclaration",
-            "TypeDeclarationKind",
             "TypeDeclarationItem",
             "TypeBody",
             "AliasBody",
@@ -8045,7 +8039,7 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         "Angled" => Some("<Contents> Contents -> Angled<Contents>"),
         "Braced" => Some("<Contents> Contents -> Braced<Contents>"),
         "TypeDeclarationItem" => Some(
-            "(kind: TypeDeclarationKind, name: Ident<String>, name_spelling: String, declared_type: Type, type_parameters: Sequence<Ident<String>>, underlying: Option<Type>, resource_dependencies: Sequence<ResourceDependency>) -> TypeDeclarationItem",
+            "(name: Ident<String>, declared_type: Type, type_parameters: Sequence<Ident<String>>, body: Option<TypeBody>, resource_dependencies: Sequence<ResourceDependency>) -> TypeDeclarationItem",
         ),
         "ResourceDependency" => Some("(resource_type: Type, mutable: Bool) -> ResourceDependency"),
         "AliasBody" => Some("Type -> AliasBody<Type>"),
@@ -8063,12 +8057,6 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         | "TypeBody"
         | "UnstructuredItem"
         | "Modifier"
-        | "TypeDeclarationKind"
-        | "AliasDeclaration"
-        | "WrapperDeclaration"
-        | "FromDeclaration"
-        | "SingletonDeclaration"
-        | "OpaqueDeclaration"
         | "Visibility"
         | "MacroCallMetadata"
         | "Comma"
@@ -8144,12 +8132,6 @@ fn compile_expression_type(expression: &Expression, scope: &CompileTimeScope) ->
                     | "FromBody"
                     | "OpaqueBody"
                     | "UnstructuredItem"
-                    | "TypeDeclarationKind"
-                    | "AliasDeclaration"
-                    | "WrapperDeclaration"
-                    | "FromDeclaration"
-                    | "SingletonDeclaration"
-                    | "OpaqueDeclaration"
                     | "Visibility"
                     | "MacroCallMetadata"
                     | "Comma"

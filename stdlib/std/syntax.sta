@@ -14,23 +14,28 @@ use package.default.(Default)
 /// An identifier syntax node, optionally constrained to one spelling.
 @recursive_constructor
 pub type Ident<Spelling = String where Spelling <: String> wrap pub Spelling
+
 /// A structured call expression syntax node.
 @recursive_constructor
 pub type CallExpr wrap pub (
     callee: Expr,
     argument: Expr,
 )
+
 /// A string-literal expression constructed from a compile-time string.
 @recursive_constructor
 pub type StringExpr wrap pub String
+
 /// A character-literal expression constructed from a compile-time Char.
 @recursive_constructor
 pub type CharExpr wrap pub Char
+
 /// A sequence of syntax values.
 @recursive_constructor
 pub type Sequence<Element> wrap pub
     () |
     (first: Element, rest: Sequence<Element>)
+
 /// A separated syntax sequence with its separator and trailing state.
 @recursive_constructor
 pub type Separated<Element, Separator> wrap pub (
@@ -38,25 +43,33 @@ pub type Separated<Element, Separator> wrap pub (
     elements: Sequence<Element>,
     trailing: Bool,
 )
+
 /// A comma punctuation syntax node.
 pub type Comma
+
 /// An equals-sign punctuation syntax node.
 pub type Equals
+
 /// A fat-arrow punctuation syntax node.
 pub type FatArrow
+
 /// A parenthesized syntax fragment.
 @recursive_constructor
 pub type Parenthesized<Contents> wrap pub Contents
+
 /// A bracketed syntax fragment.
 @recursive_constructor
 pub type Bracketed<Contents> wrap pub Contents
+
 /// A braced syntax fragment.
 @recursive_constructor
 pub type Braced<Contents> wrap pub Contents
+
 /// An explicitly requested angle-bracketed syntax fragment. Comparisons are
 /// not implicitly treated as delimited syntax.
 @recursive_constructor
 pub type Angled<Contents> wrap pub Contents
+
 /// One declaration parameter, retaining its original syntax and optional default.
 @recursive_constructor
 pub type TypeParameter wrap pub (
@@ -65,6 +78,7 @@ pub type TypeParameter wrap pub (
     declaration: Syntax,
     argument: Type,
 )
+
 /// A declaration's complete `<...>` header, including defaults and bounds.
 /// `arguments` contains only `<T, U, ...>`, suitable for applying the type.
 @recursive_constructor
@@ -74,80 +88,88 @@ pub type TypeParameters wrap pub (
     arguments: Syntax,
     bounds: Syntax,
 )
+
 /// An expression syntax node without structured fields.
 @sized_opaque
 pub type UnstructuredExpr opaque
+
 impl !Copy UnstructuredExpr {}
+
 /// The syntax category for expressions.
 pub type Expr = Ident<String> | CallExpr | StringExpr | CharExpr | UnstructuredExpr
 
 /// The syntax category for types.
 @sized_opaque
 pub type Type opaque
+
 impl !Copy Type {}
+
 /// A binding pattern constructed from an identifier.
 @recursive_constructor
 pub type BindingPattern wrap pub Ident<String>
+
 /// A nominal destructuring pattern.
 @recursive_constructor
 pub type NominalPattern wrap pub (name: Ident<String>, argument: Pattern)
+
 /// A pattern whose structure is not exposed yet.
 @sized_opaque
 pub type UnstructuredPattern opaque
+
 impl !Copy UnstructuredPattern {}
+
 /// The syntax category for patterns.
 pub type Pattern = BindingPattern | NominalPattern | UnstructuredPattern
-/// The kind of a type declaration.
-pub type AliasDeclaration
-pub type WrapperDeclaration
-pub type FromDeclaration
-pub type SingletonDeclaration
-pub type OpaqueDeclaration
-pub type TypeDeclarationKind =
-    AliasDeclaration |
-    WrapperDeclaration |
-    FromDeclaration |
-    SingletonDeclaration |
-    OpaqueDeclaration
+
 /// An inspectable type declaration item. Type parameters are exposed by name;
 /// their original declaration syntax remains part of the lossless item value.
+/// `body` is `None` for a bodyless singleton declaration.
 @recursive_constructor
 pub type TypeDeclarationItem wrap pub (
-    kind: TypeDeclarationKind,
     name: Ident<String>,
-    name_spelling: String,
     declared_type: Type,
     type_parameters: Sequence<Ident<String>>,
-    underlying: Option<Type>,
+    body: Option<TypeBody>,
     resource_dependencies: Sequence<ResourceDependency>,
 )
+
 /// One entry of a type declaration's `with {…}` clause.
 pub type ResourceDependency wrap pub (resource_type: Type, mutable: Bool)
+
 /// A transparent alias type declaration body, written `= Type`.
 @recursive_constructor
 pub type AliasBody<Element> wrap Element
+
 /// A `wrap` type declaration body with its representation visibility.
 @recursive_constructor
 pub type WrapperBody<Representation, Element> wrap (Representation, Element)
+
 /// A `from` type declaration body with its representation visibility.
 @recursive_constructor
 pub type FromBody<Representation, Element> wrap (Representation, Element)
+
 /// An `opaque` type declaration body.
 pub type OpaqueBody
+
 /// The body of a type declaration: `= Type`, `wrap Type`, `from Type`, or `opaque`.
 pub type TypeBody =
     AliasBody<Type> |
     WrapperBody<Visibility, Type> |
     FromBody<Visibility, Type> |
     OpaqueBody
+
 /// An item whose structure is not exposed yet.
 @sized_opaque
 pub type UnstructuredItem opaque
+
 impl !Copy UnstructuredItem {}
+
 /// A lossless modifier invocation whose structure is intentionally opaque.
 @sized_opaque
 pub type Modifier opaque
+
 impl !Copy Modifier {}
+
 /// An item carrying modifiers that have not yet been applied. Modifiers are
 /// ordered outermost first.
 @recursive_constructor
@@ -155,6 +177,7 @@ pub type ModifiedItem wrap pub (
     modifiers: Sequence<Modifier>,
     item: Item,
 )
+
 /// The syntax category for items.
 pub type Item = ModifiedItem | TypeDeclarationItem | UnstructuredItem
 
@@ -164,6 +187,7 @@ pub type MacroCallMetadata wrap (
     modifiers: Sequence<Modifier>,
     visibility: Visibility,
 )
+
 /// Private visibility syntax.
 pub type Private
 /// Package-scoped visibility syntax.
@@ -172,12 +196,15 @@ pub type Package
 pub type Public
 /// The syntax category for visibility markers.
 pub type Visibility = Private | Package | Public
+
 /// An arbitrary lossless syntax fragment. `SyntaxNode` is exactly one structural
 /// node; delimiter nodes retain their complete opaque contents.
 /// An opaque lossless syntax fragment.
 @sized_opaque
 pub type Syntax opaque
+
 impl !Copy Syntax {}
+
 /// Exactly one structural syntax node.
 pub type SyntaxNode = Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | TypeParameter | TypeParameters | Angled<Syntax> | Parenthesized<Syntax> | Bracketed<Syntax> | Braced<Syntax>
 
@@ -189,6 +216,7 @@ pub type SyntaxNode = Expr | Type | Pattern | Item | Visibility | Comma | Equals
 /// macro identity = value: Expr => quote { $value }
 /// ```
 pub macro quote: Braced<Syntax> -> Syntax
+
 /// Produces parsed syntax of the expected category from a braced quotation.
 ///
 /// # Example
@@ -200,6 +228,7 @@ pub macro parse_quote: Braced<Syntax> -> Syntax
 
 /// A compile-time parse failure.
 pub type ParseError wrap pub (message: String)
+
 /// A cursor over a syntax fragment. Copying a stream forks it: `let mut fork =
 /// input` is a backtracking point and `input = fork` commits it.
 @sized_opaque
@@ -310,6 +339,7 @@ impl<C where Parse C> Parse Parenthesized<C> {
         }
     }
 }
+
 impl<C where Parse C> Parse Bracketed<C> {
     parse = mut input => {
         let (source, inner) = __bracketed_group input?
@@ -322,6 +352,7 @@ impl<C where Parse C> Parse Bracketed<C> {
         }
     }
 }
+
 impl<C where Parse C> Parse Angled<C> {
     parse = mut input => {
         let (source, inner) = __angled_group input?
@@ -334,6 +365,7 @@ impl<C where Parse C> Parse Angled<C> {
         }
     }
 }
+
 impl<C where Parse C> Parse Braced<C> {
     parse = mut input => {
         let (source, inner) = __braced_group input?
@@ -378,13 +410,16 @@ impl<T> Iterator Sequence<T> {
         Sequence (first, rest) => Yield (first, rest),
     }
 }
+
 impl<T> IntoIterator Sequence<T> {
     type Iter = Sequence<T>
     into_iterator = move sequence => sequence
 }
+
 impl<T> Default (Sequence<T>) {
     default = () => Sequence ()
 }
+
 impl<T> FromIterator Sequence<T> T {
     insert = (move sequence: Sequence<T>; move item: T) => Sequence<T> ::
         __sequence_push (sequence; item)

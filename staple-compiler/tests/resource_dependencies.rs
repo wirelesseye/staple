@@ -585,10 +585,10 @@ def inferred = () => {
 fn type_declaration_items_expose_the_dependency_clause() {
     check(
         r#"
-use std.syntax.(Item, ResourceDependency, Sequence, TypeDeclarationItem, WrapperDeclaration)
+use std.syntax.(Item, ResourceDependency, Sequence, TypeDeclarationItem, WrapperBody)
 type Logger wrap ()
 macro @inspect: Item -> Item = item => match item {
-    TypeDeclarationItem(WrapperDeclaration(), _, _, _, _, _, dependencies) => {
+    TypeDeclarationItem(_, _, _, Some (WrapperBody _), dependencies) => {
         let entries: Sequence<ResourceDependency> = dependencies
         item
     },
@@ -608,12 +608,12 @@ fn type_declaration_items_expose_dependency_mutability() {
     // The macro panics unless it sees the first entry's mode, and the second
     // entry's mode, as written.
     let source = r#"
-use std.syntax.(Item, ResourceDependency, Sequence, TypeDeclarationItem, WrapperDeclaration)
+use std.syntax.(Item, ResourceDependency, Sequence, TypeDeclarationItem, WrapperBody)
 type Logger wrap ()
 type Clock wrap ()
 macro @inspect: Item -> Item = item => match item {
     TypeDeclarationItem(
-        WrapperDeclaration(), _, _, _, _, _,
+        _, _, _, Some (WrapperBody _),
         Sequence (ResourceDependency (_, first), ResourceDependency (_, second)),
     ) => {
         if first {

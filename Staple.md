@@ -558,9 +558,12 @@ Modifiers are ordered outermost first and represented by lossless, opaque
 `Modifier` values. `ModifiedItem` can be destructured and reconstructed to
 preserve, reorder, or discard pending modifiers. A wrapped type declaration
 matches `ModifiedItem`, not `TypeDeclarationItem`, until unwrapped.
-`Item` exposes unwrapped type declarations as `TypeDeclarationItem`, including their
-kind, name and spelling, applied declared type, flattened type-parameter names,
-optional opaque representation, and the entries of its `with {…}` clause as
+`Item` exposes unwrapped type declarations as `TypeDeclarationItem (name,
+declared_type, type_parameters, body, resource_dependencies)`: the name as an
+`Ident` (match `Ident spelling` for its text), the applied declared type, the
+flattened type-parameter names, the body as an `Option<TypeBody>` (`None` for a
+bodyless singleton; `WrapperBody` and `FromBody` carry the representation
+visibility and type), and the entries of its `with {…}` clause as
 `ResourceDependency (resource_type, mutable)` values, in written order. All
 other items match `UnstructuredItem`
 and remain lossless but opaque. `BindingPattern` and `NominalPattern` provide

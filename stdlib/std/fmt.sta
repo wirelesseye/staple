@@ -85,7 +85,7 @@ def derived_singleton_debug_implementation = (name: String, target: Type) => Ite
 /// ```
 pub macro @derive_debug: Item -> Sequence<Item> = item => match item {
     TypeDeclarationItem (
-        WrapperDeclaration(), name_syntax, name, target, parameters, Some representation, _,
+        name_syntax@(Ident name), target, parameters, Some (WrapperBody (_, representation)), _,
     ) => Sequence (
         first: item,
         rest: Sequence (
@@ -94,7 +94,7 @@ pub macro @derive_debug: Item -> Sequence<Item> = item => match item {
         ),
     ),
     TypeDeclarationItem (
-        FromDeclaration(), name_syntax, name, target, parameters, Some representation, _,
+        name_syntax@(Ident name), target, parameters, Some (FromBody (_, representation)), _,
     ) => Sequence (
         first: item,
         rest: Sequence (
@@ -102,9 +102,7 @@ pub macro @derive_debug: Item -> Sequence<Item> = item => match item {
             rest: Sequence (),
         ),
     ),
-    TypeDeclarationItem (
-        SingletonDeclaration(), _, name, target, _, None, _,
-    ) => Sequence (
+    TypeDeclarationItem (Ident name, target, _, None, _) => Sequence (
         first: item,
         rest: Sequence (
             first: derived_singleton_debug_implementation (name, target),

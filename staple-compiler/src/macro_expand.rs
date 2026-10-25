@@ -11816,12 +11816,10 @@ fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<Co
         (CompileType::Meta(MetaType::TypeDeclarationItem), "TypeDeclarationItem")
         | (CompileType::Meta(MetaType::Item), "TypeDeclarationItem") => {
             Some(CompileType::Product(vec![
-                CompileType::Named("TypeDeclarationKind".to_owned()),
                 CompileType::Meta(MetaType::Ident(None)),
-                CompileType::String,
                 CompileType::Meta(MetaType::Type),
                 CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Ident(None)))),
-                CompileType::Meta(MetaType::Optional(Box::new(MetaType::Type))),
+                CompileType::Meta(MetaType::Optional(Box::new(MetaType::TypeBody))),
                 CompileType::Meta(MetaType::Sequence(Box::new(MetaType::ResourceDependency))),
             ]))
         }
@@ -11971,9 +11969,6 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
                 }
         }
         CompileType::Meta(MetaType::Visibility) => ["Private", "Package", "Public"]
-            .iter()
-            .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
-        CompileType::Named(name) if name == "TypeDeclarationKind" => ["AliasDeclaration", "WrapperDeclaration", "FromDeclaration", "SingletonDeclaration", "OpaqueDeclaration"]
             .iter()
             .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
         CompileType::Meta(MetaType::Item) => ["ModifiedItem", "TypeDeclarationItem", "UnstructuredItem"]
@@ -12197,13 +12192,6 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
                 elements.iter().cloned().map(CompileType::Meta).collect(),
             )]
         }
-        CompileType::Named(name) if name == "TypeDeclarationKind" => vec![
-            ("AliasDeclaration".to_owned(), Vec::new()),
-            ("WrapperDeclaration".to_owned(), Vec::new()),
-            ("FromDeclaration".to_owned(), Vec::new()),
-            ("SingletonDeclaration".to_owned(), Vec::new()),
-            ("OpaqueDeclaration".to_owned(), Vec::new()),
-        ],
         CompileType::Meta(MetaType::Sequence(element)) => vec![
             ("Sequence.Empty".to_owned(), Vec::new()),
             (
@@ -12237,12 +12225,10 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
             (
                 "TypeDeclarationItem".to_owned(),
                 vec![
-                    CompileType::Named("TypeDeclarationKind".to_owned()),
                     CompileType::Meta(MetaType::Ident(None)),
-                    CompileType::String,
                     CompileType::Meta(MetaType::Type),
                     CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Ident(None)))),
-                    CompileType::Meta(MetaType::Optional(Box::new(MetaType::Type))),
+                    CompileType::Meta(MetaType::Optional(Box::new(MetaType::TypeBody))),
                     CompileType::Meta(MetaType::Sequence(Box::new(
                         MetaType::ResourceDependency,
                     ))),
@@ -12260,12 +12246,10 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
         CompileType::Meta(MetaType::TypeDeclarationItem) => vec![(
             "TypeDeclarationItem".to_owned(),
             vec![
-                CompileType::Named("TypeDeclarationKind".to_owned()),
                 CompileType::Meta(MetaType::Ident(None)),
-                CompileType::String,
                 CompileType::Meta(MetaType::Type),
                 CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Ident(None)))),
-                CompileType::Meta(MetaType::Optional(Box::new(MetaType::Type))),
+                CompileType::Meta(MetaType::Optional(Box::new(MetaType::TypeBody))),
                 CompileType::Meta(MetaType::Sequence(Box::new(MetaType::ResourceDependency))),
             ],
         )],
@@ -13233,6 +13217,17 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             );
             true
         }
+        // A parenthesized single pattern is grouping, as in the type checker's
+        // `bind_pattern_types`, so `Some (WrapperBody _)` matches the payload.
+        // A genuine one-element product, as in `ParseError (message)`, still
+        // destructures below.
+        Pattern::Product(product)
+            if product.elements.len() == 1
+                && !matches!(&value, Value::Product(values, _) if values.len() == 1)
+                && !matches!(&value, Value::Sequence(values) if values.len() == 1) =>
+        {
+            bind_pattern(&product.elements[0], value, environment)
+        }
         Pattern::Product(product) => {
             let values = match value {
                 Value::Product(values, _) => values,
@@ -13533,13 +13528,6 @@ fn type_body_value(body: &staple_syntax::TypeBody) -> Value {
 }
 
 fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> Value {
-    let kind = match declaration.kind() {
-        staple_syntax::TypeDeclarationKind::Alias => "AliasDeclaration",
-        staple_syntax::TypeDeclarationKind::Wrapper => "WrapperDeclaration",
-        staple_syntax::TypeDeclarationKind::From => "FromDeclaration",
-        staple_syntax::TypeDeclarationKind::Singleton => "SingletonDeclaration",
-        staple_syntax::TypeDeclarationKind::Opaque => "OpaqueDeclaration",
-    };
     let identifier = |name: &str| {
         let mut syntax = if name == declaration.name {
             declaration.name_syntax.clone()
@@ -13577,11 +13565,8 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
             bracketed: true,
         });
     }
-    let underlying = match declaration.underlying() {
-        Some(ty) => Value::Nominal(
-            "Some".to_owned(),
-            Box::new(Value::Syntax(SyntaxValue::Type(ty.clone()))),
-        ),
+    let body = match &declaration.body {
+        Some(body) => Value::Nominal("Some".to_owned(), Box::new(type_body_value(body))),
         None => Value::Nominal(
             "None".to_owned(),
             Box::new(Value::Product(Vec::new().into(), false)),
@@ -13615,18 +13600,7 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
         .unwrap_or_default();
     Value::Product(
         vec![
-            (
-                Some("kind".to_owned()),
-                Value::Nominal(
-                    kind.to_owned(),
-                    Box::new(Value::Product(Vec::new().into(), false)),
-                ),
-            ),
             (Some("name".to_owned()), identifier(&declaration.name)),
-            (
-                Some("name_spelling".to_owned()),
-                Value::String(declaration.name.clone()),
-            ),
             (
                 Some("declared_type".to_owned()),
                 Value::Syntax(SyntaxValue::Type(declared_type)),
@@ -13635,7 +13609,7 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
                 Some("type_parameters".to_owned()),
                 Value::Sequence(parameters.into()),
             ),
-            (Some("underlying".to_owned()), underlying),
+            (Some("body".to_owned()), body),
             (
                 Some("resource_dependencies".to_owned()),
                 Value::Sequence(resource_dependencies.into()),
