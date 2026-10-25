@@ -386,7 +386,9 @@ impl Program {
                 index += 1;
             }
         } else if let Some(first) = parts.first()
-            && let Some(child) = self.child_named(source, first)
+            && let Some(child) = self
+                .child_named(source, first)
+                .or_else(|| self.imported_type_namespace(source, first))
         {
             target = child;
             index = 1;
@@ -397,6 +399,43 @@ impl Program {
             target = self.child_named(target, part)?;
         }
         Some(target)
+    }
+
+    /// Follow an imported nominal type to its public companion namespace.
+    /// Imports themselves are checked by resolution; this supplies the module
+    /// identity needed by a later `use ImportedType.*` declaration.
+    fn imported_type_namespace(&self, source: ModuleId, name: &str) -> Option<ModuleId> {
+        self.modules[source.0].syntax.items.iter().find_map(|item| {
+            let Item::UseDeclaration(import) = item else {
+                return None;
+            };
+            let imported = self.imported_module(import.syntax.id)?;
+            let (owner, original) = match &import.kind {
+                UseKind::Dotted if import.path.last().is_some_and(|last| last == name) => {
+                    (self.dotted_import(import.syntax.id)?.item_module?, name)
+                }
+                UseKind::Selected(entries) => {
+                    let entry = entries
+                        .iter()
+                        .find(|entry| entry.alias.as_deref().unwrap_or(&entry.name) == name)?;
+                    (imported, entry.name.as_str())
+                }
+                UseKind::Renamed { item, alias } if alias == name => (imported, item.as_str()),
+                UseKind::Glob => (imported, name),
+                _ => return None,
+            };
+            let declaration = declared_type(&self.modules[owner.0].syntax.items, original)?;
+            if declaration.visibility == Visibility::Private {
+                return None;
+            }
+            if declaration.visibility == Visibility::Package
+                && self.module_packages[owner.0] != self.module_packages[source.0]
+            {
+                return None;
+            }
+            let child = self.child_named(owner, original)?;
+            self.modules[child.0].namespace.then_some(child)
+        })
     }
 
     /// Registers inline modules introduced after parsing, such as macro output.
@@ -1996,6 +2035,28 @@ impl ProgramLoader {
         let [name] = declaration.path.as_slice() else {
             return false;
         };
+        // Imported types can acquire a companion namespace only after macros
+        // such as typegroup expand in their defining module.
+        if self.modules[module.0].syntax.items.iter().any(|item| {
+            let Item::UseDeclaration(import) = item else {
+                return false;
+            };
+            if import.syntax.id == declaration.syntax.id {
+                return false;
+            }
+            self.imported_modules.contains_key(&import.syntax.id)
+                && match &import.kind {
+                    UseKind::Dotted => import.path.last() == Some(name),
+                    UseKind::Selected(entries) => entries
+                        .iter()
+                        .any(|entry| entry.alias.as_ref().unwrap_or(&entry.name) == name),
+                    UseKind::Renamed { alias, .. } => alias == name,
+                    UseKind::Glob => true,
+                    _ => false,
+                }
+        }) {
+            return true;
+        }
         self.modules[module.0]
             .syntax
             .items

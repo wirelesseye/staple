@@ -256,6 +256,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             // An executable always needs the collector for its entry harness.
             self.backend.install_gc_runtime()?;
             self.backend.install_io_runtime()?;
+            if requirements.contains(RuntimeRequirement::FileSystem) {
+                self.backend.install_fs_runtime()?;
+            }
             if requirements.contains(RuntimeRequirement::ReactiveRuntime) {
                 self.backend.install_reactive_runtime()?;
             }
@@ -264,6 +267,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         } else {
             self.backend.declare_runtime_symbols()?;
+            if requirements.contains(RuntimeRequirement::FileSystem) {
+                self.backend.declare_fs_runtime()?;
+            }
         }
         self.declare_required_runtime_symbols()?;
 

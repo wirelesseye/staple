@@ -1,0 +1,533 @@
+/// Files, directories, and UTF-8 file system paths.
+pub mod
+
+use package.string.(String, InvalidUtf8, string_shared_bytes)
+use package.result.(Result, Ok)
+use package.list.List
+use package.buffer.Buffer
+use package.shared_buffer.SharedBuffer
+use package.ptr.*
+use package.cinterop.(CString, InteriorNul)
+use package.io.(IO, Read, Write, IoError, __staple_io_read_byte, __staple_io_write, __staple_io_flush)
+use package.typegroup.typegroup
+use package.fmt.(Display, Formatter)
+use package.flow.for
+use package.range.Range
+use package.convert.(TryConvert, ConversionError)
+use package.try.Try
+
+/// A UTF-8 path. Interior NUL is rejected at the operating system boundary.
+pub type Path from pub String
+
+// Slices here are always at ASCII separator boundaries.
+def slice = (text: String; start: USize; end: USize) => String ::
+    match (String.slice text (Range (start, end))) { Some value => value, None => "" }
+
+def trimmed = text: String => String :: {
+    let mut end = String.length text
+    while (end > 1 && String.ends_with (slice text 0 end) "/") { end = end - 1 }
+    slice text 0 end
+}
+
+companion Path {
+    pub def to_string = path: Path => String :: path.*
+
+    pub def is_absolute = path: Path => Bool :: String.starts_with path.* "/"
+
+    /// An absolute child replaces the base.
+    pub def join = (base: Path; child: Path) => Path :: {
+        if (is_absolute child || String.is_empty base.*) { child } else {
+            if (String.is_empty child.*) { base } else {
+                Path ((trimmed base.*) + (if (trimmed base.* == "/") { "" } else { "/" }) + child.*)
+            }
+        }
+    }
+
+    pub def parent = path: Path => Option<Path> :: {
+        let text = trimmed path.*
+        if (text == "/" || text == "") { return None }
+        match (String.rfind text "/") {
+            Some at => Some (Path (slice text 0 (if (at == 0) { 1 } else { at }))),
+            None => Some (Path ""),
+        }
+    }
+
+    pub def file_name = path: Path => Option<String> :: {
+        let text = trimmed path.*
+        if (text == "/" || text == "") { return None }
+        match (String.rfind text "/") {
+            Some at => Some (slice text (at + 1) (String.length text)),
+            None => Some text,
+        }
+    }
+
+    pub def extension = path: Path => Option<String> :: {
+        let name = match (file_name path) { Some value => value, None => { return None } }
+        match (String.rfind name ".") {
+            Some at => if (at == 0) { None } else { Some (slice name (at + 1) (String.length name)) },
+            None => None,
+        }
+    }
+
+    pub def file_stem = path: Path => Option<String> :: {
+        let name = match (file_name path) { Some value => value, None => { return None } }
+        match (String.rfind name ".") {
+            Some at => Some (if (at == 0) { name } else { slice name 0 at }),
+            None => Some name,
+        }
+    }
+
+    pub def with_extension = (path: Path; extension: String) => Path :: {
+        let stem = match (file_stem path) { Some value => value, None => { return path } }
+        let name = stem + (if (extension == "") { "" } else { "." + extension })
+        match (parent path) { Some base => join base (Path name), None => Path name }
+    }
+
+    /// Components omit repeated separators; an absolute path starts with "/".
+    pub def components = path: Path => List<String> :: {
+        let mut parts: List<String> = List.new ()
+        if (is_absolute path) { List.push parts "/" }
+        for part in (String.split path.* "/") {
+            if (part != "") { List.push parts part }
+        }
+        parts
+    }
+}
+
+impl Display Path { fmt = (path, mut formatter) => Formatter.write formatter path.* }
+
+/// An operating system file operation failed.
+pub typegroup FsError {
+    NotFound,
+    PermissionDenied,
+    AlreadyExists,
+    NotADirectory,
+    IsADirectory,
+    DirectoryNotEmpty,
+    InvalidPath,
+    Os wrap pub (code: I32),
+}
+pub typegroup FileKind {
+    Regular,
+    Directory,
+    Symlink,
+    Other,
+}
+pub typegroup SeekFrom {
+    Start wrap pub U64,
+    Current wrap pub I64,
+    End wrap pub I64,
+}
+
+extern "c" {
+    __staple_fs_errno: () -> I32
+    __staple_fs_errno_value: I32 -> I32
+    __staple_fs_open: (CString, I32) -> RawOpaqueMutPtr
+    __staple_fs_stat: (CString, I32, RawMutPtr<U64>, RawMutPtr<U64>, RawMutPtr<I64>, RawMutPtr<U32>) -> I32
+    __staple_fs_fstat: (RawOpaqueMutPtr, RawMutPtr<U64>, RawMutPtr<U64>, RawMutPtr<I64>, RawMutPtr<U32>) -> I32
+    __staple_fs_dir_open: CString -> RawOpaqueMutPtr
+    __staple_fs_dir_next: (RawOpaqueMutPtr, RawMutPtr<RawOpaqueMutPtr>, RawMutPtr<USize>, RawMutPtr<U64>) -> I32
+    __staple_fs_dir_close: RawOpaqueMutPtr -> ()
+    free: RawOpaqueMutPtr -> ()
+    strlen: RawOpaqueMutPtr -> USize
+    fclose: RawOpaqueMutPtr -> I32
+    fseeko: (RawOpaqueMutPtr, I64, I32) -> I32
+    ftello: RawOpaqueMutPtr -> I64
+    fileno: RawOpaqueMutPtr -> I32
+    fsync: I32 -> I32
+    mkdir: (CString, U32) -> I32
+    rmdir: CString -> I32
+    unlink: CString -> I32
+    __staple_fs_rename: (CString, CString) -> I32
+    realpath: (CString, RawOpaqueMutPtr) -> RawOpaqueMutPtr
+    getcwd: (RawOpaqueMutPtr, USize) -> RawOpaqueMutPtr
+}
+
+def fs_error_from_errno = code: I32 => FsError :: {
+    if (code == __staple_fs_errno_value 0) { return FsError.NotFound }
+    if (code == __staple_fs_errno_value 1 || code == __staple_fs_errno_value 7) { return FsError.PermissionDenied }
+    if (code == __staple_fs_errno_value 2) { return FsError.AlreadyExists }
+    if (code == __staple_fs_errno_value 3) { return FsError.NotADirectory }
+    if (code == __staple_fs_errno_value 4) { return FsError.IsADirectory }
+    if (code == __staple_fs_errno_value 5) { return FsError.DirectoryNotEmpty }
+    FsError.Os (code: code)
+}
+
+def last_error = () => FsError :: fs_error_from_errno (__staple_fs_errno ())
+
+def cpath = path: Path => Result<CString, FsError> :: match (CString.from_string path.*) {
+    Ok value => Ok value,
+    InteriorNul => FsError.InvalidPath,
+}
+
+def status = code: I32 => Result<(), FsError> :: if (code == 0) { Ok () } else { last_error () }
+
+def file_kind = code: U64 => FileKind :: {
+    if (code == 1) { return FileKind.Regular }
+    if (code == 2) { return FileKind.Directory }
+    if (code == 3) { return FileKind.Symlink }
+    FileKind.Other
+}
+
+/// Metadata timestamps are nanoseconds since the Unix epoch; permissions are POSIX mode bits.
+pub type Metadata wrap (
+    kind: FileKind,
+    size: U64,
+    modified: I64,
+    permissions: U32,
+    read_only: Bool
+)
+
+companion Metadata {
+    pub def kind = value: Metadata => FileKind :: value.*.kind
+    pub def size = value: Metadata => U64 :: value.*.size
+    pub def modified_nanos = value: Metadata => I64 :: value.*.modified
+    pub def permissions = value: Metadata => U32 :: value.*.permissions
+    pub def is_read_only = value: Metadata => Bool :: value.*.read_only
+    pub def is_file = value: Metadata => Bool :: match value.*.kind { FileKind.Regular => True, _ => False }
+    pub def is_dir = value: Metadata => Bool :: match value.*.kind { FileKind.Directory => True, _ => False }
+    pub def is_symlink = value: Metadata => Bool :: match value.*.kind { FileKind.Symlink => True, _ => False }
+}
+
+def make_metadata = (kind: U64; size: U64; modified: I64; mode: U32) => Metadata ::
+    Metadata (
+        kind: file_kind kind,
+        size: size,
+        modified: modified,
+        permissions: mode,
+        read_only: (mode / 128 % 2 == 0 && mode / 16 % 2 == 0 && mode / 2 % 2 == 0)
+    )
+
+def stat_path = (path: Path; follow: I32) =>{IO} Result<Metadata, FsError> :: {
+    let name = cpath path ?
+    let slots = SharedBuffer.from_array (U64 :: 0, U64 :: 0, U64 :: 0, U64 :: 0)
+    let pointer = (SharedBuffer.unsafe_data slots) as USize
+    status (__staple_fs_stat (name, follow, pointer as RawMutPtr<U64>, (pointer + 8) as RawMutPtr<U64>, (pointer + 16) as RawMutPtr<I64>, (pointer + 24) as RawMutPtr<U32>)) ?
+    Ok (metadata_slots slots)
+}
+
+/// Follows the final symbolic link.
+pub def metadata = path: Path =>{IO} Result<Metadata, FsError> :: stat_path path 1
+/// Inspects the final symbolic link itself.
+pub def symlink_metadata = path: Path =>{IO} Result<Metadata, FsError> :: stat_path path 0
+/// Returns false for NotFound and preserves every other error.
+pub def exists = path: Path =>{IO} Result<Bool, FsError> :: match (metadata path) {
+    Ok _ => Ok (Bool :: True),
+    FsError.NotFound => Ok (Bool :: False),
+    error: FsError => error,
+}
+
+/// An owned buffered stream. Drop closes it and discards close errors.
+pub type File wrap RawOpaqueMutPtr
+
+impl !Copy File {}
+
+impl Drop File { cleanup = File stream => { let _ = fclose stream } }
+
+/// At least one of read, write or append must be enabled.
+pub type OpenOptions wrap pub (
+    read: Bool = True,
+    write: Bool = False,
+    append: Bool = False,
+    create: Bool = False,
+    truncate: Bool = False,
+    create_new: Bool = False,
+)
+
+companion File {
+    pub def open = path: Path =>{IO} Result<File, FsError> :: open_with path (OpenOptions ())
+
+    pub def create = path: Path =>{IO} Result<File, FsError> ::
+        open_with path (OpenOptions (
+            read: False,
+            write: True,
+            append: False,
+            create: True,
+            truncate: True,
+            create_new: False
+        ))
+    
+    pub def open_with = (path: Path; options: OpenOptions) =>{IO} Result<File, FsError> :: {
+        let flags = options.*
+        let writable = flags.write || flags.append
+        if ((!flags.read && !writable) || ((flags.truncate || flags.create || flags.create_new) && !writable) || (flags.truncate && flags.append)) {
+            return FsError.InvalidPath
+        }
+        let name = cpath path ?
+        let bits: I32 = (if (flags.read) { 1 } else { 0 }) + (if (writable) { 2 } else { 0 }) +
+            (if (flags.append) { 4 } else { 0 }) + (if (flags.create || flags.create_new) { 8 } else { 0 }) +
+            (if (flags.truncate) { 16 } else { 0 }) + (if (flags.create_new) { 32 } else { 0 })
+        let stream = __staple_fs_open (name, bits)
+        if ((stream as USize) == 0) { return last_error () }
+        let file = File stream
+        let info = File.metadata file ?
+        if (Metadata.is_dir info) { return FsError.IsADirectory }
+        Ok file
+    }
+
+    pub def metadata = file: File =>{IO} Result<Metadata, FsError> :: {
+        let slots = SharedBuffer.from_array (U64 :: 0, U64 :: 0, U64 :: 0, U64 :: 0)
+        let pointer = (SharedBuffer.unsafe_data slots) as USize
+        status (__staple_fs_fstat (file.*, pointer as RawMutPtr<U64>, (pointer + 8) as RawMutPtr<U64>, (pointer + 16) as RawMutPtr<I64>, (pointer + 24) as RawMutPtr<U32>)) ?
+        Ok (metadata_slots slots)
+    }
+
+    /// Appends at most max bytes; zero means EOF.
+    pub def read_into = (mut file: File; mut into: List<U8>; max: USize) =>{IO} Result<USize, FsError> :: {
+        let mut count: USize = 0
+        while (count < max) {
+            let byte = __staple_io_read_byte file.*
+            if (byte == -1) { break }
+            if (byte == -2) { return last_error () }
+            let value: U8 = match (Result<U8, ConversionError> :: TryConvert.try_convert byte) { Ok value => value, _ => { return last_error () } }
+            List.push into value
+            count = count + 1
+        }
+        Ok count
+    }
+
+    pub def read_to_end = mut file: File =>{IO} Result<List<U8>, FsError> :: {
+        let mut bytes: List<U8> = List.new ()
+        loop { if (read_into file bytes 8192 ? == 0) { break } }
+        Ok bytes
+    }
+
+    pub def write_all = (mut file: File; bytes: SharedBuffer<U8>) =>{IO} Result<(), FsError> ::
+        status (__staple_io_write (file.*, (SharedBuffer.unsafe_data bytes) as RawOpaquePtr, SharedBuffer.length bytes))
+    
+    pub def write_string = (mut file: File; text: String) =>{IO} Result<(), FsError> :: write_all file (string_shared_bytes text)
+
+    pub def flush = mut file: File =>{IO} Result<(), FsError> :: status (__staple_io_flush file.*)
+
+    pub def sync = mut file: File =>{IO} Result<(), FsError> :: { flush file ?; status (fsync (fileno file.*)) }
+
+    pub def seek = (mut file: File; to: SeekFrom) =>{IO} Result<U64, FsError> :: {
+        let (offset, origin) = match to {
+            SeekFrom.Start value => {
+                let signed: I64 = match (Result<I64, ConversionError> :: TryConvert.try_convert value) { Ok n => n, _ => { return FsError.InvalidPath } }
+                (signed, I32 :: 0)
+            },
+            SeekFrom.Current value => (value, I32 :: 1),
+            SeekFrom.End value => (value, I32 :: 2),
+        }
+        status (fseeko (file.*, offset, origin)) ?
+        let position = ftello file.*
+        if (position < 0) { return last_error () }
+        let result: U64 = match (Result<U64, ConversionError> :: TryConvert.try_convert position) { Ok n => n, _ => { return last_error () } }
+        Ok result
+    }
+
+    /// Consumes the stream and reports errors deferred until close.
+    pub def close = move file: File =>{IO} Result<(), FsError> :: {
+        let File stream = file
+        status (fclose stream)
+    }
+}
+
+impl Read File {
+    read_byte = mut file => {
+        let byte = __staple_io_read_byte file.*
+        if (byte == -1) { return Ok (Option<U8> :: None) }
+        if (byte == -2) { return IoError }
+        let value: U8 = match (Result<U8, ConversionError> :: TryConvert.try_convert byte) { Ok n => n, _ => { return IoError } }
+        Ok (Option<U8> :: Some value)
+    }
+}
+
+impl Write File {
+    write_all = (mut file; bytes) => match (File.write_all file bytes) { Ok _ => Ok (), _ => IoError }
+    flush = mut file => match (File.flush file) { Ok _ => Ok (), _ => IoError }
+}
+
+/// Reads all bytes, preserving embedded NUL.
+pub def read = path: Path =>{IO} Result<List<U8>, FsError> :: {
+    let mut file = File.open path ?
+    let bytes = File.read_to_end file ?
+    File.close file ?
+    Ok bytes
+}
+
+/// Reads a complete UTF-8 file; invalid encoding is a separate error.
+pub def read_to_string = path: Path =>{IO} Result<String, FsError | InvalidUtf8> :: {
+    let bytes = read path ?
+    let text = String.from_utf8 bytes ?
+    Ok text
+}
+
+/// Creates or truncates a file and reports errors deferred until close.
+pub def write = (path: Path; bytes: SharedBuffer<U8>) =>{IO} Result<(), FsError> :: {
+    let mut file = File.create path ?
+    File.write_all file bytes ?
+    File.close file
+}
+
+/// Writes UTF-8 text, preserving embedded NUL.
+pub def write_string = (path: Path; text: String) =>{IO} Result<(), FsError> :: write path (string_shared_bytes text)
+
+/// Appends text, creating the file if needed, and checks close errors.
+pub def append_string = (path: Path; text: String) =>{IO} Result<(), FsError> :: {
+    let mut file = File.open_with path (OpenOptions (read: False, write: False, append: True, create: True, truncate: False, create_new: False)) ?
+    File.write_string file text ?
+    File.close file
+}
+
+/// Copies file contents and returns the byte count.
+pub def copy = (source: Path; destination: Path) =>{IO} Result<U64, FsError> :: {
+    let bytes = read source ?
+    let count = (List.length bytes) as U64
+    let buffer = List.into_buffer bytes
+    write destination (Buffer.into_shared_buffer buffer) ?
+    Ok count
+}
+
+/// Creates one directory; an existing entry is an error.
+pub def create_dir = path: Path =>{IO} Result<(), FsError> :: { let name = cpath path ?; status (mkdir (name, 511)) }
+
+/// Removes a file or symbolic link.
+pub def remove_file = path: Path =>{IO} Result<(), FsError> :: { let name = cpath path ?; status (unlink name) }
+
+/// Removes an empty directory.
+pub def remove_dir = path: Path =>{IO} Result<(), FsError> :: { let name = cpath path ?; status (rmdir name) }
+
+/// Renames an entry using the operating system replacement rules.
+pub def rename = (source: Path; destination: Path) =>{IO} Result<(), FsError> :: {
+    let a = cpath source ?
+    let b = cpath destination ?
+    status (__staple_fs_rename (a, b))
+}
+
+/// Creates missing parents; existing directories are accepted.
+pub def create_dir_all = path: Path =>{IO} Result<(), FsError> :: {
+    if (path.* == "") { return Ok () }
+    match (create_dir path) {
+        Ok _ => Ok (),
+        FsError.AlreadyExists => {
+            let info = metadata path ?
+            if (Metadata.is_dir info) { Ok () } else { FsError.AlreadyExists }
+        },
+        FsError.NotFound => {
+            match (Path.parent path) { Some parent => { create_dir_all parent ? }, None => { return FsError.NotFound } }
+            // Recheck after creation so concurrent creators are harmless.
+            match (create_dir path) {
+                Ok _ => Ok (),
+                FsError.AlreadyExists => { let info = metadata path ?; if (Metadata.is_dir info) { Ok () } else { FsError.AlreadyExists } },
+                error: FsError => error,
+            }
+        },
+        error: FsError => error,
+    }
+}
+
+/// Resolves links and returns an absolute UTF-8 path.
+pub def canonicalize = path: Path =>{IO} Result<Path, FsError | InvalidUtf8> :: {
+    let name = cpath path ?
+    let pointer = realpath (name, (USize :: 0) as RawOpaqueMutPtr)
+    if ((pointer as USize) == 0) { return last_error () }
+    let text = owned_text pointer ?
+    Ok (Path text)
+}
+
+/// Returns the process working directory as an absolute UTF-8 path.
+pub def current_dir = () =>{IO} Result<Path, FsError | InvalidUtf8> :: {
+    let pointer = getcwd (((USize :: 0) as RawOpaqueMutPtr), 0)
+    if ((pointer as USize) == 0) { return last_error () }
+    let text = owned_text pointer ?
+    Ok (Path text)
+}
+
+pub type DirEntry wrap (path: Path, name: String, kind: FileKind)
+
+companion DirEntry {
+    pub def path = entry: DirEntry => Path :: entry.*.path
+    pub def name = entry: DirEntry => String :: entry.*.name
+    pub def kind = entry: DirEntry => FileKind :: entry.*.kind
+    pub def metadata = entry: DirEntry =>{IO} Result<Metadata, FsError> :: stat_path entry.*.path 1
+}
+
+// Directory streams are always released, including on UTF-8 and metadata errors.
+type DirectoryStream wrap RawOpaqueMutPtr
+
+impl !Copy DirectoryStream {}
+
+impl Drop DirectoryStream { cleanup = DirectoryStream stream => __staple_fs_dir_close stream }
+
+/// Eager, sorted listing, excluding dot entries. Invalid UTF-8 fails the call.
+pub def read_dir = path: Path =>{IO} Result<List<DirEntry>, FsError | InvalidUtf8> :: {
+    let name = cpath path ?
+    let pointer = __staple_fs_dir_open name
+    if ((pointer as USize) == 0) { return last_error () }
+    let stream = DirectoryStream pointer
+    let mut entries: List<DirEntry> = List.new ()
+    loop {
+        let slots = SharedBuffer.from_array (U64 :: 0, U64 :: 0, U64 :: 0)
+        let pointer = (SharedBuffer.unsafe_data slots) as USize
+        let result = __staple_fs_dir_next (stream.*, pointer as RawMutPtr<RawOpaqueMutPtr>, (pointer + 8) as RawMutPtr<USize>, (pointer + 16) as RawMutPtr<U64>)
+        let name_pointer = RawMutPtr.unsafe_read (pointer as RawMutPtr<RawOpaqueMutPtr>)
+        let length = RawMutPtr.unsafe_read ((pointer + 8) as RawMutPtr<USize>)
+        if (result == 0) { break }
+        if (result < 0) { return fs_error_from_errno (0 - result) }
+        let mut bytes: List<U8> = List.new ()
+        let mut index: USize = 0
+        while (index < length) {
+            List.push bytes (RawMutPtr.unsafe_read (((name_pointer as USize) + index) as RawMutPtr<U8>))
+            index = index + 1
+        }
+        let name = String.from_utf8 bytes ?
+        if (name != "." && name != "..") {
+            let full = Path.join path (Path name)
+            // Always stat: d_type may be DT_UNKNOWN on valid file systems.
+            let info = symlink_metadata full ?
+            let entry = DirEntry (path: full, name: name, kind: Metadata.kind info)
+            List.push entries entry
+        }
+    }
+    // Insertion sort keeps ordering independent of readdir and locale.
+    let mut index: USize = 1
+    while (index < List.length entries) {
+        let mut at = index
+        while (at > 0) {
+            let left = List.get_unchecked entries (at - 1)
+            let right = List.get_unchecked entries at
+            if (DirEntry.name left <= DirEntry.name right) { break }
+            let _ = List.set entries (at - 1) right
+            let _ = List.set entries at left
+            at = at - 1
+        }
+        index = index + 1
+    }
+    Ok entries
+}
+
+/// Recursively removes entries without following symbolic links.
+/// Names that are not UTF-8 are reported as an OS error (EILSEQ).
+pub def remove_dir_all = path: Path =>{IO} Result<(), FsError> :: {
+    let info = symlink_metadata path ?
+    if (!Metadata.is_dir info) { return remove_file path }
+    let entries = match (read_dir path) {
+        Ok value => value,
+        InvalidUtf8 => { return fs_error_from_errno (__staple_fs_errno_value 6) },
+        error: FsError => { return error },
+    }
+    for entry in entries { remove_dir_all (DirEntry.path entry) ? }
+    remove_dir path
+}
+
+// Takes ownership of the malloc allocation returned by realpath/getcwd.
+def owned_text = pointer: RawOpaqueMutPtr => Result<String, InvalidUtf8> :: {
+    let length = strlen pointer
+    let mut bytes: List<U8> = List.new ()
+    let mut index: USize = 0
+    while (index < length) {
+        List.push bytes (RawMutPtr.unsafe_read (((pointer as USize) + index) as RawMutPtr<U8>))
+        index = index + 1
+    }
+    free pointer
+    String.from_utf8 bytes
+}
+
+def metadata_slots = slots: SharedBuffer<U64> => Metadata :: {
+    let pointer = (SharedBuffer.unsafe_data slots) as USize
+    make_metadata (SharedBuffer.get_unchecked slots 0) (SharedBuffer.get_unchecked slots 1)
+        (RawMutPtr.unsafe_read ((pointer + 16) as RawMutPtr<I64>))
+        (RawMutPtr.unsafe_read ((pointer + 24) as RawMutPtr<U32>))
+}

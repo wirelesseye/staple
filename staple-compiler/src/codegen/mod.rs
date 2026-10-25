@@ -315,6 +315,17 @@ impl<'context> CodeGenerator<'context> {
         ] {
             install(self.context, &target_data, &module).map_err(|diagnostic| vec![diagnostic])?;
         }
+        let triple = target_machine.get_triple();
+        let triple = triple.as_str().to_string_lossy();
+        if (triple.contains("apple") || triple.contains("linux"))
+            && matches!(
+                triple.split('-').next(),
+                Some("x86_64" | "aarch64" | "arm64")
+            )
+        {
+            runtime::link_fs_runtime(self.context, &target_data, &module)
+                .map_err(|diagnostic| vec![diagnostic])?;
+        }
         runtime::export_runtime_functions(&module);
         module
             .verify()

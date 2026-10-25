@@ -49,6 +49,29 @@ impl<'program, 'context> Backend<'program, 'context> {
         link_io_runtime(self.context, &self.target_data, &self.llvm_module)
     }
 
+    pub(crate) fn install_fs_runtime(&self) -> CodeGenerationResult<()> {
+        link_fs_runtime(self.context, &self.target_data, &self.llvm_module)
+    }
+
+    pub(crate) fn declare_fs_runtime(&self) -> CodeGenerationResult<()> {
+        let scratch = self.context.create_module("staple-fs-declarations");
+        scratch.set_triple(&self.llvm_module.get_triple());
+        link_fs_runtime(self.context, &self.target_data, &scratch)?;
+        for function in scratch.get_functions() {
+            if function.count_basic_blocks() > 0 {
+                let name = function
+                    .get_name()
+                    .to_str()
+                    .map_err(|e| Diagnostic::new(Span::Compiler, e.to_string()))?;
+                if self.llvm_module.get_function(name).is_none() {
+                    self.llvm_module
+                        .add_function(name, function.get_type(), None);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn install_gc_runtime(&self) -> CodeGenerationResult<()> {
         link_gc_runtime(self.context, &self.target_data, &self.llvm_module)
     }
@@ -673,4 +696,152 @@ define ptr @__staple_io_stream(i32 %which) {{
         )
         .replace("{{STREAMS}}", &streams);
     link_runtime_source(context, module, &source, "I/O", "staple-io")
+}
+
+/// Build the filesystem bridge only for layouts whose ABI is specified here.
+pub(crate) fn link_fs_runtime<'context>(
+    context: &'context inkwell::context::Context,
+    target_data: &inkwell::targets::TargetData,
+    module: &inkwell::module::Module<'context>,
+) -> CodeGenerationResult<()> {
+    let triple = module.get_triple();
+    let triple = triple.as_str().to_string_lossy();
+    let apple = triple.contains("apple");
+    let arch = triple.split('-').next().unwrap_or_default();
+    if !(apple || triple.contains("linux"))
+        || !matches!(arch, "x86_64" | "aarch64" | "arm64")
+        || target_data.get_pointer_byte_size(None) != 8
+    {
+        return Err(Diagnostic::new(
+            Span::Compiler,
+            format!(
+                "std.fs is not supported on target `{triple}`; supported targets are 64-bit Linux and Apple x86_64/aarch64"
+            ),
+        ));
+    }
+    let stat = if apple && arch == "x86_64" {
+        "stat$INODE64"
+    } else {
+        "stat"
+    };
+    let lstat = if apple && arch == "x86_64" {
+        "lstat$INODE64"
+    } else {
+        "lstat"
+    };
+    let fstat = if apple && arch == "x86_64" {
+        "fstat$INODE64"
+    } else {
+        "fstat"
+    };
+    let stat_decls = if apple {
+        format!(
+            "declare i32 @{stat}(ptr, ptr)\ndeclare i32 @{lstat}(ptr, ptr)\ndeclare i32 @{fstat}(i32, ptr)"
+        )
+    } else {
+        "declare i32 @statx(i32, ptr, i32, i32, ptr)".to_owned()
+    };
+    let stat_call = if apple {
+        format!(
+            "%followed = icmp ne i32 %follow, 0\n  %callee = select i1 %followed, ptr @{stat}, ptr @{lstat}\n  %result = call i32 %callee(ptr %path, ptr %buffer)"
+        )
+    } else {
+        "%followed = icmp ne i32 %follow, 0\n  %flags = select i1 %followed, i32 0, i32 256\n  %result = call i32 @statx(i32 -100, ptr %path, i32 %flags, i32 767, ptr %buffer)".to_owned()
+    };
+    let fstat_call = if apple {
+        format!("%result = call i32 @{fstat}(i32 %fd, ptr %buffer)")
+    } else {
+        "%result = call i32 @statx(i32 %fd, ptr @__staple_fs_empty, i32 4096, i32 767, ptr %buffer)"
+            .to_owned()
+    };
+    let mut source = include_str!("../fs.ll").to_owned();
+    for (key, value) in [
+        ("SIZE", "i64".to_owned()),
+        (
+            "ERRNO",
+            if apple { "__error" } else { "__errno_location" }.to_owned(),
+        ),
+        (
+            "READDIR",
+            if apple && arch == "x86_64" {
+                "readdir$INODE64"
+            } else if apple {
+                "readdir"
+            } else {
+                "readdir64"
+            }
+            .to_owned(),
+        ),
+        ("ENOTEMPTY", if apple { "66" } else { "39" }.to_owned()),
+        ("EILSEQ", if apple { "92" } else { "84" }.to_owned()),
+        ("O_APPEND", if apple { "8" } else { "1024" }.to_owned()),
+        ("O_CREAT", if apple { "512" } else { "64" }.to_owned()),
+        ("O_TRUNC", if apple { "1024" } else { "512" }.to_owned()),
+        ("O_EXCL", if apple { "2048" } else { "128" }.to_owned()),
+        ("STAT_SIZE", if apple { "144" } else { "256" }.to_owned()),
+        ("MODE_OFFSET", if apple { "4" } else { "28" }.to_owned()),
+        ("SIZE_OFFSET", if apple { "96" } else { "40" }.to_owned()),
+        ("TIME_OFFSET", if apple { "48" } else { "112" }.to_owned()),
+        ("NSEC_TYPE", if apple { "i64" } else { "i32" }.to_owned()),
+        (
+            "NSEC_EXTEND",
+            if apple {
+                "%nanos = add i64 %ns, 0"
+            } else {
+                "%nanos = zext i32 %ns to i64"
+            }
+            .to_owned(),
+        ),
+        ("NAME_OFFSET", if apple { "21" } else { "19" }.to_owned()),
+        ("TYPE_OFFSET", if apple { "20" } else { "18" }.to_owned()),
+        ("STAT_DECLS", stat_decls),
+        ("STAT_CALL", stat_call),
+        ("FSTAT_CALL", fstat_call),
+    ] {
+        source = source.replace(&format!("{{{{{key}}}}}"), &value);
+    }
+    link_runtime_source(context, module, &source, "filesystem", "staple-fs")
+}
+
+#[cfg(test)]
+mod fs_tests {
+    use super::link_fs_runtime;
+    use inkwell::{
+        context::Context,
+        targets::{TargetData, TargetTriple},
+    };
+
+    #[test]
+    fn filesystem_bridge_verifies_for_supported_layouts() {
+        for triple in [
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-musl",
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+        ] {
+            let context = Context::create();
+            let module = context.create_module("fs-test");
+            module.set_triple(&TargetTriple::create(triple));
+            let data = TargetData::create("e-p:64:64-i64:64");
+            link_fs_runtime(&context, &data, &module).unwrap();
+            module.verify().unwrap();
+            assert!(module.get_function("__staple_fs_stat").is_some());
+        }
+    }
+
+    #[test]
+    fn filesystem_bridge_rejects_unsupported_targets() {
+        for triple in [
+            "x86_64-pc-windows-msvc",
+            "i686-unknown-linux-gnu",
+            "aarch64-unknown-freebsd",
+        ] {
+            let context = Context::create();
+            let module = context.create_module("fs-test");
+            module.set_triple(&TargetTriple::create(triple));
+            let data = TargetData::create("e-p:64:64-i64:64");
+            let error = link_fs_runtime(&context, &data, &module).unwrap_err();
+            assert!(error.message.contains("std.fs is not supported"));
+        }
+    }
 }
