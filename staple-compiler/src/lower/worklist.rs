@@ -5595,7 +5595,8 @@ mod tests {
             count: 0,
         };
         let value = [42u8; 17];
-        for (tag, expected) in [(0u32, 1), (1u32, 0)] {
+        // `False` is tag 0 and `True` is tag 1.
+        for (tag, expected) in [(0u32, 0), (1u32, 1)] {
             let mut flag = [0u8; 8];
             flag[..4].copy_from_slice(&tag.to_ne_bytes());
             let mut result = 0;

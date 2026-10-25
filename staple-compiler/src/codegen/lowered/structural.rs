@@ -153,9 +153,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         ));
                     };
                     let tag = self.backend.build_sum_tag(compared, "equality.tag")?;
-                    let equal = self
-                        .backend
-                        .build_sum_tag_compare(tag, 0, "equality.equal")?;
+                    let equal = self.backend.build_sum_tag_compare(
+                        tag,
+                        crate::codegen::ir::BOOL_TRUE_TAG,
+                        "equality.equal",
+                    )?;
                     let next = self
                         .backend
                         .context

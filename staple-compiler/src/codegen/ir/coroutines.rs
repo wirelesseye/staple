@@ -592,11 +592,11 @@ impl<'program, 'context> Backend<'program, 'context> {
             .build_extract_value(result, 0, "until.bool.tag")
             .map_err(compiler_diagnostic)?
             .into_int_value();
-        // `Bool` is `True | False`; `True` is alternative 0.
+        // `Bool` is `True | False`; `False` is tag 0 and `True` is tag 1.
         let is_true = self
             .builder
             .build_int_compare(
-                inkwell::IntPredicate::EQ,
+                inkwell::IntPredicate::NE,
                 tag,
                 i32_type.const_zero(),
                 "until.is.true",

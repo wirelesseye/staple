@@ -14,6 +14,9 @@ use inkwell::{
 
 use super::{Backend, CodeGenerationResult, Diagnostic, Span, compiler_diagnostic};
 
+/// The tag of `True` in the `Bool` sum; `False` is tag 0.
+pub(crate) const BOOL_TRUE_TAG: usize = 1;
+
 impl<'program, 'context> Backend<'program, 'context> {
     /// Registers a GC heap region `[pointer, pointer + size)` as a root.
     pub(crate) fn register_gc_root_region(
@@ -914,24 +917,17 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// The emitter's Bool builder: tag 0 (`True`) or 1 (`False`) in the two-arm sum.
+    /// The emitter's Bool builder: tag 0 (`False`) or 1 (`True`) in the two-arm sum.
     pub(crate) fn build_bool_value(
         &self,
         condition: inkwell::values::IntValue<'context>,
         sum_type: inkwell::types::StructType<'context>,
         span: Span,
     ) -> CodeGenerationResult<inkwell::values::AnyValueEnum<'context>> {
-        // `Bool` is declared as `True | False` in the standard-library contract.
-        let true_index = 0;
-        let false_index = 1;
+        // `Bool`'s tag is the condition itself: `False` is 0 and `True` is 1.
         let tag = self
             .builder
-            .build_select(
-                condition,
-                self.context.i32_type().const_int(true_index as u64, false),
-                self.context.i32_type().const_int(false_index as u64, false),
-                "bool.tag",
-            )
+            .build_int_z_extend(condition, self.context.i32_type(), "bool.tag")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         self.builder
             .build_insert_value(sum_type.const_zero(), tag, 0, "bool.value")

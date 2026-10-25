@@ -24618,11 +24618,11 @@ fn checked_type_sort_key(value_type: &CheckedType) -> String {
     match value_type {
         // Tags cross package object boundaries. TypeId is local to one
         // loading session and cannot determine the public representation.
-        // Preserve the runtime's Bool contract: True is tag 0, False tag 1.
-        CheckedType::Wrapper { name, .. } if name == "True" || name == "std.boolean.True" => {
+        // Preserve the runtime's Bool contract: False is tag 0, True tag 1.
+        CheckedType::Wrapper { name, .. } if name == "False" || name == "std.boolean.False" => {
             "0:0".to_owned()
         }
-        CheckedType::Wrapper { name, .. } if name == "False" || name == "std.boolean.False" => {
+        CheckedType::Wrapper { name, .. } if name == "True" || name == "std.boolean.True" => {
             "0:1".to_owned()
         }
         CheckedType::Wrapper { .. } => format!("0:2:{value_type}"),
@@ -25978,12 +25978,39 @@ mod sum_abi_tests {
                     panic!("expected sum")
                 };
                 assert!(
-                    matches!(&sum.alternatives[0], CheckedType::Wrapper { name, .. } if name.ends_with("True")),
-                    "{first} | {second} should keep `True` at tag 0: {sum:?}"
+                    matches!(&sum.alternatives[0], CheckedType::Wrapper { name, .. } if name.ends_with("False")),
+                    "{first} | {second} should keep `False` at tag 0: {sum:?}"
+                );
+                assert!(
+                    matches!(&sum.alternatives[1], CheckedType::Wrapper { name, .. } if name.ends_with("True")),
+                    "{first} | {second} should keep `True` at tag 1: {sum:?}"
                 );
                 assert!(is_bool_sum(None, &sum));
             }
         }
+    }
+
+    #[test]
+    fn bool_singletons_stay_pinned_ahead_of_other_nominal_alternatives() {
+        // `Apple` sorts before `False` by name, so only the pin keeps the
+        // singletons at tags 0 and 1 inside a wider sum.
+        let sum = normalize_substituted_sum(vec![
+            nominal(5, "Apple"),
+            nominal(90, "std.boolean.True"),
+            nominal(1, "std.boolean.False"),
+        ]);
+        let CheckedType::Sum(sum) = sum else {
+            panic!("expected sum")
+        };
+        let names = sum
+            .alternatives
+            .iter()
+            .map(|alternative| match alternative {
+                CheckedType::Wrapper { name, .. } => name.as_str(),
+                other => panic!("expected nominal alternatives: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["std.boolean.False", "std.boolean.True", "Apple"]);
     }
 
     #[test]

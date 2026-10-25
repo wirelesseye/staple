@@ -13063,7 +13063,7 @@ fn rejects_non_bool_logical_operands() {
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("expected `True | False`, found `I32`"))
+            .any(|diagnostic| diagnostic.message.contains("expected `False | True`, found `I32`"))
     );
 }
 
