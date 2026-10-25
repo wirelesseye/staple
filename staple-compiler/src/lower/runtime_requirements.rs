@@ -477,6 +477,7 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
 
                 IntrinsicFunction::StringAdd | IntrinsicFunction::CallerFile => self.gc(),
                 IntrinsicFunction::BufferWithCapacity
+                | IntrinsicFunction::BufferFromArray
                 | IntrinsicFunction::BufferClone
                 | IntrinsicFunction::BufferGet
                 | IntrinsicFunction::BufferIntoShared => {

@@ -22473,6 +22473,16 @@ mod tests {
         assert_eq!(match_.source, subject_type);
     }
 
+    /// The position of the nominal alternative named `name` in `sum`.
+    fn sum_alternative_index(sum: &crate::typecheck::CheckedSumType, name: &str) -> usize {
+        sum.alternatives
+            .iter()
+            .position(|alternative| {
+                matches!(alternative, CheckedType::Wrapper { name: alternative, .. } if alternative == name)
+            })
+            .unwrap_or_else(|| panic!("`{name}` should be an alternative of {sum:?}"))
+    }
+
     #[test]
     fn coercion_and_pattern_plans_match_checked_decisions() {
         let module = checked_program(concat!(
@@ -22550,7 +22560,11 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!(*alternative, 0);
+        // Sum alternatives are ordered by name, so `IOError` precedes `Ok`.
+        let CheckedType::Sum(injected_sum) = &injected.value_type else {
+            unreachable!()
+        };
+        assert_eq!(*alternative, sum_alternative_index(injected_sum, "Ok"));
         assert_eq!(**payload, LoweredCoercionPlan::Identity);
 
         // Patterns: the literal payload is decoded, the sum alternatives match
@@ -23967,7 +23981,13 @@ mod tests {
         };
         assert!(binding.propagating);
         let propagation = binding.propagation.as_ref().expect("checked propagation");
-        assert_eq!(propagation.success_index, 0);
+        let CheckedType::Sum(source_sum) = &propagation.source else {
+            panic!("the propagated source should be a sum");
+        };
+        assert_eq!(
+            propagation.success_index,
+            sum_alternative_index(source_sum, "Ok")
+        );
         let pattern = lowered_pattern(&program, binding.pattern);
         assert!(matches!(
             &pattern.kind,

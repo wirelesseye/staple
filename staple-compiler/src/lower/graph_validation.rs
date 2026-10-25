@@ -2076,6 +2076,11 @@ pub(crate) mod tests {
 
         let fixtures = [
             concat!(
+                "use std.io.IO\n",
+                "use std.fs.(Path, FsError, exists)\n",
+                "def probe = () =>{IO} Result<Bool, FsError> :: exists (Path \"/tmp\")\n",
+            ),
+            concat!(
                 "use std.cinterop.(CString, c_string)\n",
                 "extern \"c\" { inspect: CString -> I32 }\n",
                 "def convert: move CString -> String = move value => CString.to_string_unchecked value\n",
