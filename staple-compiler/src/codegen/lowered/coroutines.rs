@@ -563,10 +563,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "`await` result is not a `Completed | Cancelled` sum",
             ));
         };
-        let [completed_type, cancelled_type, ..] = outcome_sum.alternatives.as_slice() else {
+        let Some((completed_type, cancelled_type)) =
+            crate::lower::await_outcome_alternatives(outcome_sum)
+        else {
             return Err(Diagnostic::new(
                 span.clone(),
-                "`await` outcome sum has fewer than two alternatives",
+                "`await` outcome sum lacks `Completed` or `Cancelled`",
             ));
         };
         let outcome_plans = await_.outcome.as_ref().ok_or_else(|| {

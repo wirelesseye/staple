@@ -1818,12 +1818,25 @@ pub(crate) struct LoweredAwait {
     pub outcome: Option<LoweredAwaitOutcome>,
 }
 
-/// The `Completed payload | Cancelled` injections of one external await, at the
-/// result sum's fixed positions (0 and 1).
+/// The `Completed payload | Cancelled` injections of one external await.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LoweredAwaitOutcome {
     pub completed: LoweredCoercionPlan,
     pub cancelled: LoweredCoercionPlan,
+}
+
+/// The `Completed` and `Cancelled` alternatives of an await outcome sum.
+/// Sum alternatives are ordered by name, so they are found by name rather
+/// than by position.
+pub(crate) fn await_outcome_alternatives(
+    outcome: &crate::CheckedSumType,
+) -> Option<(&CheckedType, &CheckedType)> {
+    let named = |wanted: &str| {
+        outcome.alternatives.iter().find(|alternative| {
+            matches!(alternative, CheckedType::Wrapper { name, .. } if name == wanted)
+        })
+    };
+    Some((named("Completed")?, named("Cancelled")?))
 }
 
 impl LoweredAwaitOutcome {
@@ -1841,8 +1854,8 @@ impl LoweredAwaitOutcome {
         let CheckedType::Sum(outcome) = result_type else {
             return Err("`await` result is not a `Completed | Cancelled` sum".to_string());
         };
-        let [completed, cancelled, ..] = outcome.alternatives.as_slice() else {
-            return Err("`await` outcome sum has fewer than two alternatives".to_string());
+        let Some((completed, cancelled)) = await_outcome_alternatives(outcome) else {
+            return Err("`await` outcome sum lacks `Completed` or `Cancelled`".to_string());
         };
         Ok(Some(Self {
             completed: LoweredCoercionPlan::plan(completed, result_type)?,

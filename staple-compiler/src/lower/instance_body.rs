@@ -7368,14 +7368,30 @@ mod tests {
                 continue;
             };
             for (_, await_) in body.awaits.iter_mut() {
+                // Alternatives are ordered by name, so check each plan injects
+                // into the alternative of that name rather than a fixed index.
+                let CheckedType::Sum(sum) = &await_.result_type else {
+                    panic!("an external await yields an outcome sum");
+                };
+                let index_of = |wanted: &str| {
+                    sum.alternatives
+                        .iter()
+                        .position(|alternative| {
+                            matches!(alternative, CheckedType::Wrapper { name, .. } if name == wanted)
+                        })
+                        .unwrap()
+                };
+                let (completed, cancelled) = (index_of("Completed"), index_of("Cancelled"));
                 if let Some(outcome) = await_.outcome.as_mut() {
                     assert!(matches!(
                         outcome.completed,
-                        super::super::LoweredCoercionPlan::SumInject { alternative: 0, .. }
+                        super::super::LoweredCoercionPlan::SumInject { alternative, .. }
+                            if alternative == completed
                     ));
                     assert!(matches!(
                         outcome.cancelled,
-                        super::super::LoweredCoercionPlan::SumInject { alternative: 1, .. }
+                        super::super::LoweredCoercionPlan::SumInject { alternative, .. }
+                            if alternative == cancelled
                     ));
                     std::mem::swap(&mut outcome.completed, &mut outcome.cancelled);
                     recorded += 1;
