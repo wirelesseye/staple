@@ -2801,6 +2801,28 @@ pub(crate) fn runtime_module_symbols() -> &'static HashSet<String> {
         // `link_io_runtime` prefixes `io.ll` with a target-specific stream
         // accessor and the C library globals or function it reads.
         for name in [
+            "stat",
+            "lstat",
+            "fstat",
+            "statx",
+            "stat$INODE64",
+            "lstat$INODE64",
+            "fstat$INODE64",
+            "readdir",
+            "readdir64",
+            "readdir$INODE64",
+            "__error",
+            "__errno_location",
+            "__staple_fs_errno",
+            "__staple_fs_errno_value",
+            "__staple_fs_open",
+            "__staple_fs_stat",
+            "__staple_fs_fstat",
+            "__staple_fs_decode",
+            "__staple_fs_dir_open",
+            "__staple_fs_dir_next",
+            "__staple_fs_dir_close",
+            "__staple_fs_rename",
             "__staple_io_stream",
             "__acrt_iob_func",
             "stdin",
@@ -2817,6 +2839,7 @@ pub(crate) fn runtime_module_symbols() -> &'static HashSet<String> {
             include_str!("../coroutine.ll"),
             include_str!("../reactive.ll"),
             include_str!("../io.ll"),
+            include_str!("../fs.ll"),
         ] {
             for line in source.lines() {
                 let declares = line.starts_with("define") || line.starts_with("declare");

@@ -20053,3 +20053,24 @@ fn mutable_resource_arguments_update_the_provider_at_runtime() {
         assert_eq!(RESULT.load(Ordering::SeqCst), 44, "{effects}");
     }
 }
+
+#[test]
+fn filesystem_errors_propagate_across_success_types_and_widen_residuals() {
+    let module = type_check(r#"
+use std.fs.FsError
+use std.string.InvalidUtf8
+use FsError.*
+def source = () => Result<I32, FsError> :: NotFound
+def forwarded = () => Result<String, FsError | InvalidUtf8> :: {
+    let value = source () ?
+    Ok "success"
+}
+def inspect = value: Result<String, FsError | InvalidUtf8> => I32 :: match value {
+    Ok _ => 0,
+    FsError.Os (code) => code,
+    _ => -1,
+}
+"#);
+    let context = Context::create();
+    CodeGenerator::new(&context).compile_root(&lower(&module)).expect("filesystem residuals lower");
+}

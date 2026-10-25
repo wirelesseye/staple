@@ -1,0 +1,104 @@
+use std.fs.*
+use std.io
+use std.io.(IO, println, read_line_from)
+use std.process.panic
+use std.source.track_caller
+use std.string.(String, InvalidUtf8)
+use std.list.List
+use std.shared_buffer.SharedBuffer
+use std.result.*
+use std.try.*
+use std.flow.for
+
+@track_caller
+def require = value: Bool => () :: if (!value) { panic "filesystem assertion failed" }
+
+def test = () =>{IO} () :: {
+    require (Path.to_string (Path.join "a/" "b") == "a/b")
+    require (Path.to_string (Path.join "a" "/b") == "/b")
+    require (Path.to_string (Path.join "/" "b") == "/b")
+    require (match (Path.parent "/") { None => True, _ => False })
+    require (match (Path.parent "a") { Some parent => Path.to_string parent == "", _ => False })
+    require (match (Path.extension ".bashrc") { None => True, _ => False })
+    require (Path.to_string (Path.with_extension "dir/name/" "txt") == "dir/name.txt")
+    require (match (Path.file_name "dir/name///") { Some name => name == "name", _ => False })
+    require (List.length (Path.components "/a//b/") == 3)
+
+    match (write_string "text" "first\n") {
+        Ok _ => (),
+        FsError.Os (code) => panic "initial write errno ${code}",
+        FsError.NotFound => panic "initial write NotFound",
+        FsError.PermissionDenied => panic "initial write PermissionDenied",
+        _ => panic "initial write failed",
+    }
+    append_string "text" "second\n" |> unwrap
+    append_string "text" "third" |> unwrap
+    require ((read_to_string "text" |> unwrap) == "first\nsecond\nthird")
+    write "binary" (SharedBuffer.from_array (U8 :: 97, U8 :: 0, U8 :: 98)) |> unwrap
+    require ((read_to_string "binary" |> unwrap) == "a\0b")
+    let binary: List<U8> = read "binary" |> unwrap
+    require (List.length binary == 3)
+    require ((copy "binary" "copied" |> unwrap) == 3)
+    require ((read_to_string "copied" |> unwrap) == "a\0b")
+    require (match (read "missing") { FsError.NotFound => True, _ => False })
+    require (match (read "bad\0path") { FsError.InvalidPath => True, _ => False })
+    require (match (read_to_string "invalid") { InvalidUtf8 => True, _ => False })
+    // INVALID_NAME_CHECK
+
+    create_dir_all "tree/a/b" |> unwrap
+    create_dir_all "tree/a/b" |> unwrap
+    require (match (create_dir "tree") { FsError.AlreadyExists => True, _ => False })
+    require (match (remove_dir "tree") { FsError.DirectoryNotEmpty => True, _ => False })
+    require (match (File.open "tree") { FsError.IsADirectory => True, _ => False })
+    write_string "tree/z" "z" |> unwrap
+    let entries = read_dir "tree" |> unwrap
+    require (List.length entries == 3)
+    require (DirEntry.name (List.get_unchecked entries 0) == "a")
+    require (DirEntry.name (List.get_unchecked entries 1) == "link")
+    require (DirEntry.name (List.get_unchecked entries 2) == "z")
+    require (Metadata.is_dir (DirEntry.metadata (List.get_unchecked entries 0) |> unwrap))
+    require (Metadata.is_file (metadata "text" |> unwrap))
+    require (Metadata.size (metadata "binary" |> unwrap) == 3)
+    require (Metadata.modified_nanos (metadata "text" |> unwrap) > 0)
+    require (exists "text" |> unwrap)
+    require (!(exists "missing" |> unwrap))
+    require (Path.is_absolute (canonicalize "text" |> unwrap))
+    require (Path.is_absolute (current_dir () |> unwrap))
+
+    let mut file = File.open_with "text" (OpenOptions (.write: True)) |> unwrap
+    require ((File.seek file (SeekFrom.Start 6) |> unwrap) == 6)
+    let mut bytes: List<U8> = List.new ()
+    require ((File.read_into file bytes 6 |> unwrap) == 6)
+    require ((String.from_utf8 bytes |> unwrap) == "second")
+    require ((File.seek file (SeekFrom.End (-(I64 :: 5))) |> unwrap) == 13)
+    require ((File.seek file (SeekFrom.Current 0) |> unwrap) == 13)
+    File.write_string file "THIRD" |> unwrap
+    File.sync file |> unwrap
+    require (Metadata.size (File.metadata file |> unwrap) == 18)
+    File.close file |> unwrap
+    require (match (File.open_with "text" (OpenOptions (.write: True, .create_new: True))) { FsError.AlreadyExists => True, _ => False })
+    let mut reader = File.open "text" |> unwrap
+    require (match (read_line_from reader |> unwrap) { Some line => line == "first", _ => False })
+    File.close reader |> unwrap
+    let mut writer = File.create "trait" |> unwrap
+    io.write_string writer "traits" |> unwrap
+    File.close writer |> unwrap
+    require ((read_to_string "trait" |> unwrap) == "traits")
+
+    // More simultaneous opens than the harness's descriptor limit if Drop leaks.
+    let mut count: I32 = 0
+    while (count < 512) {
+        let opened = File.open "text" |> unwrap
+        count = count + 1
+    }
+    rename "trait" "renamed" |> unwrap
+    remove_file "renamed" |> unwrap
+    require (!(exists "renamed" |> unwrap))
+    require (Metadata.is_symlink (symlink_metadata "tree/link" |> unwrap))
+    remove_dir_all "tree" |> unwrap
+    require (exists "outside/keep" |> unwrap)
+    require (!(exists "tree" |> unwrap))
+    println "fs ok"
+}
+
+test ()

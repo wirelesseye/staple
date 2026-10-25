@@ -24539,10 +24539,19 @@ fn structural_index_length(target: &CheckedType) -> Option<usize> {
 
 fn checked_type_sort_key(value_type: &CheckedType) -> String {
     match value_type {
-        CheckedType::Wrapper { id, arguments, .. } => {
-            format!("{:020}:{arguments:?}", id.0)
+        // Tags cross package object boundaries. TypeId is local to one
+        // loading session and cannot determine the public representation.
+        // Preserve the runtime's Bool contract: True is tag 0, False tag 1.
+        CheckedType::Wrapper { name, .. } if name == "True" || name == "std.boolean.Bool.True" => {
+            "0:0".to_owned()
         }
-        other => format!("{other:?}"),
+        CheckedType::Wrapper { name, .. }
+            if name == "False" || name == "std.boolean.Bool.False" =>
+        {
+            "0:1".to_owned()
+        }
+        CheckedType::Wrapper { .. } => format!("0:2:{value_type}"),
+        other => format!("1:{other}"),
     }
 }
 
@@ -25851,6 +25860,48 @@ mod slotted_product_tests {
         assert_eq!(
             normalize_product_type_kind(vec![element], false, true),
             CheckedType::I32
+        );
+    }
+}
+
+#[cfg(test)]
+mod sum_abi_tests {
+    use super::*;
+
+    fn nominal(id: usize, name: &str) -> CheckedType {
+        CheckedType::Wrapper {
+            id: TypeId(id),
+            name: name.to_owned(),
+            arguments: Vec::new(),
+            representation: Box::new(CheckedType::empty_product()),
+            introduction: WrapperIntroduction::Explicit,
+        }
+    }
+
+    #[test]
+    fn sum_tag_order_uses_names_instead_of_load_order() {
+        for ids in [[1, 90], [90, 1]] {
+            let sum = normalize_substituted_sum(vec![
+                nominal(ids[0], "std.result.Ok"),
+                nominal(ids[1], "std.fs.FsError"),
+            ]);
+            let CheckedType::Sum(sum) = sum else {
+                panic!("expected sum")
+            };
+            assert!(
+                matches!(&sum.alternatives[0], CheckedType::Wrapper { name, .. } if name == "std.fs.FsError")
+            );
+        }
+    }
+
+    #[test]
+    fn standard_bool_keeps_its_runtime_tag_contract() {
+        let sum = normalize_substituted_sum(vec![nominal(90, "True"), nominal(1, "False")]);
+        let CheckedType::Sum(sum) = sum else {
+            panic!("expected sum")
+        };
+        assert!(
+            matches!(&sum.alternatives[0], CheckedType::Wrapper { name, .. } if name.ends_with("True"))
         );
     }
 }

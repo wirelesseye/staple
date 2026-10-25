@@ -26,6 +26,8 @@ use super::{
 pub(crate) enum RuntimeRequirement {
     /// The garbage-collector runtime module (`gc.ll`).
     GarbageCollector,
+    /// POSIX filesystem bridge (`fs.ll`).
+    FileSystem,
     /// The coroutine, scheduler, task, and completion runtime module
     /// (`coroutine.ll`).
     CoroutineRuntime,
@@ -47,8 +49,9 @@ pub(crate) enum RuntimeRequirement {
 
 impl RuntimeRequirement {
     /// Every requirement in canonical order.
-    pub(crate) const ALL: [RuntimeRequirement; 9] = [
+    pub(crate) const ALL: [RuntimeRequirement; 10] = [
         RuntimeRequirement::GarbageCollector,
+        RuntimeRequirement::FileSystem,
         RuntimeRequirement::CoroutineRuntime,
         RuntimeRequirement::ReactiveRuntime,
         RuntimeRequirement::Utf8Validator,
@@ -62,6 +65,7 @@ impl RuntimeRequirement {
     /// Stable description for diagnostics and snapshots.
     pub(crate) fn description(self) -> &'static str {
         match self {
+            RuntimeRequirement::FileSystem => "filesystem",
             RuntimeRequirement::GarbageCollector => "garbage-collector",
             RuntimeRequirement::CoroutineRuntime => "coroutine-runtime",
             RuntimeRequirement::ReactiveRuntime => "reactive-runtime",
@@ -84,6 +88,9 @@ impl RuntimeRequirement {
     /// The requirement a fixed runtime symbol belongs to, when the symbol is
     /// one of the recorded surfaces. Also used for ordinary libc extern calls.
     pub(crate) fn for_runtime_symbol(name: &str) -> Option<RuntimeRequirement> {
+        if name.starts_with("__staple_fs_") {
+            return Some(RuntimeRequirement::FileSystem);
+        }
         if name.starts_with("__staple_gc_") {
             return Some(RuntimeRequirement::GarbageCollector);
         }

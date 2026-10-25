@@ -2940,6 +2940,32 @@ return `Some ""` for an empty line, return a final unterminated line, and return
 `None` only when EOF occurs before any bytes. Invalid UTF-8 consumes the full
 line and returns `InvalidUtf8`.
 
+`std.fs` provides files and directories on 64-bit Linux and Apple targets.
+All disk operations require `IO`. `Path` accepts a `String` implicitly and
+provides pure `/`-separated path operations; interior NUL produces
+`FsError.InvalidPath` at the OS boundary. `FsError` is one nominal error type
+with qualified variants such as `FsError.NotFound`, `PermissionDenied`,
+`AlreadyExists`, `NotADirectory`, `IsADirectory`, `DirectoryNotEmpty`, and
+`Os (code: I32)` for other OS errors. `exists` returns false only for
+`NotFound`; other errors propagate.
+
+`read`, `read_to_string`, `write`, `write_string`, and `append_string` open
+and close files within the call. Writes report errors deferred until close.
+`File` supports streaming, seeking, metadata, flushing, and syncing, and
+implements `std.io.Read` and `Write`. It is not `Copy`; dropping it closes
+its stream and ignores close errors. Consume it with `File.close` to observe
+those errors. `File.open_with` takes `OpenOptions`; use named overrides such
+as `OpenOptions (.write: True, .create_new: True)`.
+
+`read_dir` eagerly returns a name-sorted `List<DirEntry>`, excluding `.` and
+`..`. Invalid UTF-8 names fail the entire listing with `InvalidUtf8`.
+`metadata` follows symlinks; `symlink_metadata` inspects the final link.
+`remove_dir_all` inspects links rather than traversing their targets; a
+non-UTF-8 child name produces `FsError.Os` with the target's `EILSEQ` code.
+Paths and directory names are UTF-8. Windows filesystem calls currently
+produce an unsupported-target diagnostic; Windows path separators and wide
+character APIs are reserved for a later phase.
+
 The runtime supplies a target-specific stdio bridge using length-based
 `fwrite`, `fflush`, and `fgetc`; no new C interop syntax is required. Panic
 messages use a best-effort write and flush to standard error, including embedded

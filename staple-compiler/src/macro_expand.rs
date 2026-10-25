@@ -1195,33 +1195,28 @@ fn lower_try_expression(
         callee: Box::new(branch),
         argument: operand,
     });
-    let success = staple_syntax::MatchArm {
-        syntax: freshened_syntax(&syntax, next_syntax_id),
-        pattern: Pattern::Nominal(staple_syntax::NominalPattern {
-            syntax: defined_in(std_modules.result, next_syntax_id),
-            namespace: None,
-            name: "Ok".to_owned(),
-            moved: false,
-            argument: Box::new(binding("$output", next_syntax_id)),
-            annotation: None,
-        }),
-        body: name("$output", next_syntax_id),
-    };
-    let failure = staple_syntax::MatchArm {
-        syntax: freshened_syntax(&syntax, next_syntax_id),
-        pattern: binding("$residual", next_syntax_id),
-        body: Expression::Block(staple_syntax::BlockExpression {
-            syntax: freshened_syntax(&syntax, next_syntax_id),
-            items: vec![Item::Return(staple_syntax::ReturnItem {
+    // Use the same residual-aware path as `let ?Ok output = value`.
+    // A catch-all match binding retains the entire source sum and would
+    // incorrectly require the success type to match the enclosing result.
+    let pattern = Pattern::Nominal(staple_syntax::NominalPattern {
+        syntax: defined_in(std_modules.result, next_syntax_id),
+        namespace: None,
+        name: "Ok".to_owned(),
+        moved: false,
+        argument: Box::new(binding("$output", next_syntax_id)),
+        annotation: None,
+    });
+    Expression::Block(staple_syntax::BlockExpression {
+        syntax: syntax.clone(),
+        items: vec![
+            Item::PatternBinding(staple_syntax::PatternBinding {
                 syntax: freshened_syntax(&syntax, next_syntax_id),
-                value: name("$residual", next_syntax_id),
-            })],
-        }),
-    };
-    Expression::Match(staple_syntax::MatchExpression {
-        syntax,
-        subject: Box::new(subject),
-        arms: vec![success, failure],
+                kind: staple_syntax::PatternBindingKind::Propagating,
+                pattern,
+                value: subject,
+            }),
+            Item::Expression(name("$output", next_syntax_id)),
+        ],
     })
 }
 
