@@ -1128,6 +1128,51 @@ impl Grammar {
         let name = self
             .expect(TokenKind::Identifier, "expected macro name")?
             .text;
+        let modifier_vocabulary = if self.at(TokenKind::Identifier)
+            && self.tokens[self.next_non_trivia(self.position)].text == "modifiers"
+        {
+            self.eat(TokenKind::Identifier);
+            if modifier {
+                return Err(self.error("modifier macros cannot declare a modifier vocabulary"));
+            }
+            self.expect(TokenKind::LParen, "expected `(` after `modifiers`")?;
+            let mut entries = Vec::new();
+            while !self.at(TokenKind::RParen) {
+                let entry_start = self.position;
+                self.expect(TokenKind::At, "expected `@` before vocabulary name")?;
+                let name = self
+                    .expect(TokenKind::Identifier, "expected modifier name")?
+                    .text;
+                let argument = if self.eat(TokenKind::LParen) {
+                    let argument = self.parse_type()?;
+                    self.expect(
+                        TokenKind::RParen,
+                        "expected `)` after modifier argument type",
+                    )?;
+                    Some(argument)
+                } else {
+                    None
+                };
+                if entries
+                    .iter()
+                    .any(|entry: &ModifierVocabularyEntry| entry.name == name)
+                {
+                    return Err(self.error("duplicate modifier vocabulary name"));
+                }
+                entries.push(ModifierVocabularyEntry {
+                    syntax: self.syntax(entry_start),
+                    name,
+                    argument,
+                });
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RParen, "expected `)` after modifier vocabulary")?;
+            Some(entries)
+        } else {
+            None
+        };
         let mut type_parameters = Vec::new();
         let mut trait_bounds = Vec::new();
         let mut subtype_bounds = Vec::new();
@@ -1160,6 +1205,7 @@ impl Grammar {
             visibility,
             name,
             modifier,
+            modifier_vocabulary,
             type_parameters,
             trait_bounds,
             subtype_bounds,

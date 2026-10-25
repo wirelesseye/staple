@@ -504,6 +504,29 @@ impl Collector<'_> {
                 self.item(&value.item);
             }
             Item::VisibilityMacroInvocation(value) => {
+                let mut head = &value.expression;
+                while let Expression::Call(call) = head {
+                    head = &call.callee;
+                }
+                if let Some(info) = self.typed.resolved().macro_invocation_for(head.syntax().id) {
+                    for modifier in &value.modifiers {
+                        if let Some(entry) = info.modifier_vocabulary.iter().find(|entry| {
+                            modifier.namespace.is_none() && entry.name == modifier.name
+                        }) {
+                            self.entries.push(HoverEntry {
+                                range: modifier.syntax.span.to_range(),
+                                signature: format!(
+                                    "macro {} modifier {}",
+                                    info.name,
+                                    entry.syntax.text().trim()
+                                ),
+                                documentation: Vec::new(),
+                                module: None,
+                                instantiation: None,
+                            });
+                        }
+                    }
+                }
                 for modifier in &value.modifiers {
                     if let Some(expression) = modifier
                         .argument

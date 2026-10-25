@@ -13,6 +13,7 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SyntaxIntrinsic {
     Stream,
+    DuplicateModifier,
     IsEmpty,
     Remaining,
     ErrorAt,
@@ -34,6 +35,7 @@ impl SyntaxIntrinsic {
     pub(super) fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "stream" => Self::Stream,
+            "duplicate_modifier" => Self::DuplicateModifier,
             "is_empty" => Self::IsEmpty,
             "remaining" => Self::Remaining,
             "error_at" => Self::ErrorAt,
@@ -748,6 +750,36 @@ impl MacroExpander {
             return None;
         }
         match intrinsic {
+            SyntaxIntrinsic::DuplicateModifier => {
+                let Value::Syntax(SyntaxValue::Modifier(modifier)) = argument else {
+                    return None;
+                };
+                let mut duplicate = || {
+                    let invocation = if modifier.invocation.doc.is_some() {
+                        let mut invocation = modifier.invocation.clone();
+                        invocation.syntax =
+                            freshened_syntax(&invocation.syntax, &mut self.next_syntax_id);
+                        invocation
+                    } else {
+                        staple_syntax::parse_modifier_fragment(
+                            &modifier.invocation.syntax,
+                            &mut self.next_syntax_id,
+                        )
+                        .ok()?
+                    };
+                    Some((
+                        None,
+                        Value::Syntax(SyntaxValue::Modifier(OpaqueModifier {
+                            invocation,
+                            enclosing: None,
+                        })),
+                    ))
+                };
+                Some(Value::Product(
+                    vec![duplicate()?, duplicate()?].into(),
+                    false,
+                ))
+            }
             SyntaxIntrinsic::Stream => {
                 let Some(syntax) = value_syntax(&argument) else {
                     self.diagnostics
@@ -1085,8 +1117,16 @@ impl MacroExpander {
                     Err(error) => return fail(Some(error.message)),
                 }
             }
-            MetaType::Modifier => {
+            MetaType::Modifier | MetaType::ModifierCall | MetaType::UnstructuredModifier => {
                 match staple_syntax::parse_modifier_prefix(&rest, &mut self.next_syntax_id) {
+                    Ok((invocation, _))
+                        if matches!(target, MetaType::UnstructuredModifier)
+                            && invocation.doc.is_none()
+                            || matches!(target, MetaType::ModifierCall)
+                                && invocation.doc.is_some() =>
+                    {
+                        return fail(None);
+                    }
                     Ok((invocation, consumed)) => (
                         Value::Syntax(SyntaxValue::Modifier(OpaqueModifier {
                             invocation,

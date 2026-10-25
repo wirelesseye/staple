@@ -144,6 +144,8 @@ pub(crate) enum MetaType {
     NominalPattern,
     Item,
     Modifier,
+    ModifierCall,
+    UnstructuredModifier,
     ModifiedItem,
     TypeDeclarationItem,
     TypeBody,
@@ -1861,6 +1863,19 @@ pub(crate) fn expand_program_recovering(
         }
     }
     let analysis = expander.analysis();
+    let mut unknown_modifiers = Vec::new();
+    expander.diagnostics.retain(|diagnostic| {
+        if !diagnostic.message.starts_with("unknown modifier macro `") {
+            return true;
+        }
+        let key = (diagnostic.span.clone(), diagnostic.message.clone());
+        if unknown_modifiers.contains(&key) {
+            false
+        } else {
+            unknown_modifiers.push(key);
+            true
+        }
+    });
     Ok((program, analysis, expander.diagnostics))
 }
 
@@ -2974,11 +2989,21 @@ impl MacroExpander {
                 continue;
             }
             let mut expected = CompileType::Meta(definition.result.clone());
-            for parameter in definition.parameters.iter().rev() {
-                expected = CompileType::Function(
-                    Box::new(CompileType::Meta(parameter.clone())),
-                    Box::new(expected),
-                );
+            for (index, parameter) in definition.parameters.iter().enumerate().rev() {
+                let parameter = if definition.key.modifier
+                    && index + 1 != definition.parameters.len()
+                {
+                    match modifier_argument_meta_type(parameter) {
+                        Some(MetaType::Delimited(_, DelimitedMetaContents::Separated { element, separator })) => {
+                            CompileType::Meta(MetaType::Nominal("Separated".to_owned(), vec![element.as_ref().clone(), separator.as_ref().clone()]))
+                        }
+                        Some(inner) => CompileType::Meta(inner.clone()),
+                        None => CompileType::Meta(parameter.clone()),
+                    }
+                } else {
+                    CompileType::Meta(parameter.clone())
+                };
+                expected = CompileType::Function(Box::new(parameter), Box::new(expected));
             }
             let mut environment = CompileEnvironment::new();
             self.check_compile_expression(
@@ -4081,6 +4106,25 @@ impl MacroExpander {
                     "slotted product syntax shapes may only appear inside delimited contents",
                 ));
             }
+            if let Some(entries) = &definition.declaration.modifier_vocabulary {
+                if definition.key.modifier
+                    || definition.parameters.first() != Some(&MetaType::MacroCallMetadata)
+                {
+                    self.diagnostics.push(Diagnostic::new(definition.declaration.syntax.span.clone(), "a modifier vocabulary requires a function-style macro whose first parameter is `MacroCallMetadata`"));
+                }
+                for entry in entries {
+                    if entry
+                        .argument
+                        .as_ref()
+                        .is_some_and(|ty| vocabulary_argument_meta(ty).is_none())
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            entry.syntax.span.clone(),
+                            "invalid modifier vocabulary argument type",
+                        ));
+                    }
+                }
+            }
             validate_top_level_sequence(definition, &mut self.diagnostics);
             if definition.parameters.iter().any(invalid_raw_syntax_shape) {
                 self.diagnostics.push(Diagnostic::new(
@@ -4158,17 +4202,7 @@ impl MacroExpander {
                 let valid_parameters = match definition.parameters.as_slice() {
                     [MetaType::Item] => true,
                     [leading, MetaType::Item] => {
-                        modifier_argument_meta_type(leading).is_some_and(|argument| {
-                            matches!(
-                                argument,
-                                MetaType::Expr
-                                    | MetaType::Ident(_)
-                                    | MetaType::CallExpr
-                                    | MetaType::UnstructuredExpr
-                                    | MetaType::Type
-                                    | MetaType::Pattern
-                            )
-                        })
+                        modifier_argument_meta_type(leading).is_some_and(valid_modifier_argument)
                     }
                     _ => false,
                 };
@@ -4542,6 +4576,43 @@ impl MacroExpander {
             invocation.syntax.span.clone(),
         )?;
         self.record_invocation(head.syntax().id, &selected.definition);
+        if let Some(entries) = &selected.definition.declaration.modifier_vocabulary {
+            for prefix in &invocation.modifiers {
+                if let Some(entry) = entries
+                    .iter()
+                    .find(|entry| prefix.namespace.is_none() && entry.name == prefix.name)
+                {
+                    let valid = match (&entry.argument, &prefix.argument) {
+                        (None, None) => true,
+                        (Some(ty), Some(argument)) => vocabulary_argument_meta(ty)
+                            .is_some_and(|expected| modifier_argument_matches(&expected, argument)),
+                        _ => false,
+                    };
+                    if !valid {
+                        self.diagnostics.push(Diagnostic::new(
+                            prefix.syntax.span.clone(),
+                            format!(
+                                "invalid argument for modifier `@{}` of macro `{}`",
+                                prefix.name, selected.definition.key.name
+                            ),
+                        ));
+                        return None;
+                    }
+                } else if self
+                    .resolve_modifier(module, prefix)
+                    .is_none_or(|keys| keys.is_empty())
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        prefix.syntax.span.clone(),
+                        format!(
+                            "macro `{}` does not accept modifier `@{}`",
+                            selected.definition.key.name, prefix.name
+                        ),
+                    ));
+                    return None;
+                }
+            }
+        }
         if depth >= MAX_EXPANSION_DEPTH {
             self.diagnostics.push(Diagnostic::new(
                 invocation.syntax.span.clone(),
@@ -4892,7 +4963,9 @@ impl MacroExpander {
             return Some(ModifierChainResult::Item(current));
         }
         let key = definition.key.clone();
-        if self.expansion_stack.contains(&key) {
+        // A repeated source prefix (including a duplicated modifier argument)
+        // is a distinct application. Generated self-invocations remain recursive.
+        if self.expansion_stack.contains(&key) && invocation.syntax.definition_module().is_some() {
             self.diagnostics.push(Diagnostic::new(
                 invocation.syntax.span.clone(),
                 format!("recursive modifier macro expansion of `@{}`", key.name),
@@ -4985,7 +5058,7 @@ impl MacroExpander {
         &mut self,
         module: ModuleId,
         invocation: &ModifierInvocation,
-    ) -> Option<(MacroDefinition, Option<SyntaxValue>)> {
+    ) -> Option<(MacroDefinition, Option<Value>)> {
         let Some(keys) = self.resolve_modifier(module, invocation) else {
             let context = invocation
                 .syntax
@@ -5086,33 +5159,15 @@ impl MacroExpander {
         &mut self,
         expected: &MetaType,
         argument: &ModifierArgument,
-    ) -> Option<SyntaxValue> {
-        match expected {
-            MetaType::Type => {
-                staple_syntax::parse_type_fragment(&argument.syntax, true, &mut self.next_syntax_id)
-                    .ok()
-                    .map(SyntaxValue::Type)
-            }
-            MetaType::Pattern => staple_syntax::parse_pattern_fragment(
-                &argument.syntax,
-                true,
-                &mut self.next_syntax_id,
-            )
-            .ok()
-            .map(SyntaxValue::Pattern),
-            _ => argument.expression.clone().map(|expression| {
-                SyntaxValue::from_expression(
-                    meta_argument_expression(expected, &expression).clone(),
-                )
-            }),
-        }
+    ) -> Option<Value> {
+        parse_modifier_argument_value(expected, argument, &mut self.next_syntax_id)
     }
 
     fn invoke_modifier(
         &mut self,
         module: ModuleId,
         definition: &MacroDefinition,
-        argument: Option<SyntaxValue>,
+        argument: Option<Value>,
         item: Item,
         call_span: Span,
     ) -> Option<Vec<Item>> {
@@ -5126,7 +5181,7 @@ impl MacroExpander {
         &mut self,
         module: ModuleId,
         definition: &MacroDefinition,
-        argument: Option<SyntaxValue>,
+        argument: Option<Value>,
         item: Item,
         call_span: Span,
     ) -> Option<Vec<Item>> {
@@ -5142,7 +5197,7 @@ impl MacroExpander {
             let mut value =
                 self.eval_expression(definition.key.module, body, &mut Environment::new())?;
             if let Some(argument) = argument {
-                value = self.apply_value(value, Value::Syntax(argument), call_span.clone())?;
+                value = self.apply_value(value, argument, call_span.clone())?;
             }
             self.apply_value(
                 value,
@@ -6468,6 +6523,8 @@ impl MacroExpander {
                     MetaType::NominalPattern => "a nominal pattern".to_owned(),
                     MetaType::Item => "an item".to_owned(),
                     MetaType::Modifier => "a modifier".to_owned(),
+                    MetaType::ModifierCall => "a modifier call".to_owned(),
+                    MetaType::UnstructuredModifier => "an unstructured modifier".to_owned(),
                     MetaType::ModifiedItem => "a modified item".to_owned(),
                     MetaType::TypeDeclarationItem => "a type declaration item".to_owned(),
                     MetaType::TypeBody => "a type declaration body".to_owned(),
@@ -6976,6 +7033,8 @@ impl MacroExpander {
                             | "StringExpr"
                             | "BindingPattern"
                             | "NominalPattern"
+                            | "ModifierCall"
+                            | "UnstructuredModifier"
                             | "ModifiedItem"
                             | "Sequence"
                             | "Separated"
@@ -7085,6 +7144,16 @@ impl MacroExpander {
                             None
                         }
                     };
+                }
+                if let Value::Syntax(SyntaxValue::Modifier(modifier)) = &value {
+                    if modifier.invocation.doc.is_some() {
+                        self.diagnostics.push(Diagnostic::new(
+                            access.syntax.span.clone(),
+                            "unstructured modifier syntax has no inspectable fields",
+                        ));
+                        return None;
+                    }
+                    value = modifier_call_value(&modifier.invocation);
                 }
                 if let Value::Syntax(SyntaxValue::Parameters { fields, .. }) = &value {
                     value = Value::Product(fields.clone().into(), false);
@@ -7559,6 +7628,69 @@ impl MacroExpander {
                         annotation: None,
                     },
                 ))))
+            }
+            "ModifierCall" => {
+                let invalid = "`ModifierCall` requires `(namespace: Sequence<Ident<String>>, name: Ident<String>, argument: Option<Syntax>)`";
+                let Value::Product(fields, _) = argument else {
+                    self.diagnostics.push(Diagnostic::new(span, invalid));
+                    return None;
+                };
+                let fields = fields.to_vec();
+                let [
+                    (Some(namespace_field), Value::Sequence(namespace)),
+                    (Some(name_field), Value::Syntax(SyntaxValue::Ident(name))),
+                    (Some(argument_field), argument),
+                ] = fields.as_slice() else {
+                    self.diagnostics.push(Diagnostic::new(span, invalid));
+                    return None;
+                };
+                if namespace_field != "namespace" || name_field != "name" || argument_field != "argument" {
+                    self.diagnostics.push(Diagnostic::new(span, invalid));
+                    return None;
+                }
+                let Some(namespace) = namespace.iter().map(|value| match value {
+                    Value::Syntax(SyntaxValue::Ident(name)) => Some(name.name.clone()),
+                    _ => None,
+                }).collect::<Option<Vec<_>>>() else {
+                    self.diagnostics.push(Diagnostic::new(span, invalid));
+                    return None;
+                };
+                let path = namespace.iter().map(|name| format!("{name}.")).collect::<String>();
+                let mut tokens = staple_syntax::lex(&format!("@{path}{}", name.name));
+                match argument {
+                    Value::Nominal(kind, _) if kind == "None" => {},
+                    Value::Nominal(kind, value) if kind == "Some" => {
+                        let Value::Syntax(SyntaxValue::Raw(syntax)) = value.as_ref() else {
+                            self.diagnostics.push(Diagnostic::new(span, invalid));
+                            return None;
+                        };
+                        tokens.extend(staple_syntax::lex("("));
+                        append_syntax_tokens(&mut tokens, syntax);
+                        tokens.extend(staple_syntax::lex(")"));
+                    },
+                    _ => {
+                        self.diagnostics.push(Diagnostic::new(span, invalid));
+                        return None;
+                    },
+                }
+                let mut offset = 0;
+                for token in &mut tokens {
+                    token.span = offset..offset + token.text.len();
+                    offset += token.text.len();
+                }
+                let mut syntax = self.generated_syntax(module, span);
+                syntax.definition_module = name.syntax.definition_module;
+                syntax.expansion_mark = name.syntax.expansion_mark;
+                syntax.tokens = tokens.into();
+                syntax.token_range = 0..syntax.tokens.len();
+                let invocation = match staple_syntax::parse_modifier_fragment(&syntax, &mut self.next_syntax_id) {
+                    Ok(invocation) => invocation,
+                    Err(error) => {
+                        self.diagnostics.push(Diagnostic::new(syntax.span, format!("invalid `ModifierCall`: {}", error.message)));
+                        return None;
+                    },
+                };
+                Some(Value::Syntax(SyntaxValue::Modifier(OpaqueModifier { invocation, enclosing: None })))
             }
             "ModifiedItem" => {
                 let Value::Product(fields, _) = argument else {
@@ -8240,6 +8372,8 @@ impl MacroExpander {
                                 | "StringExpr"
                                 | "BindingPattern"
                                 | "NominalPattern"
+                                | "ModifierCall"
+                                | "UnstructuredModifier"
                                 | "ModifiedItem"
                                 | "Sequence"
                                 | "Separated"
@@ -9565,6 +9699,8 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
             "NominalPattern" => Some(MetaType::NominalPattern),
             "Item" => Some(MetaType::Item),
             "Modifier" => Some(MetaType::Modifier),
+            "ModifierCall" => Some(MetaType::ModifierCall),
+            "UnstructuredModifier" => Some(MetaType::UnstructuredModifier),
             "ModifiedItem" => Some(MetaType::ModifiedItem),
             "TypeDeclarationItem" => Some(MetaType::TypeDeclarationItem),
             "TypeBody" => Some(MetaType::TypeBody),
@@ -9834,6 +9970,8 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
         ),
         MetaType::Item
         | MetaType::Modifier
+        | MetaType::ModifierCall
+        | MetaType::UnstructuredModifier
         | MetaType::ModifiedItem
         | MetaType::TypeDeclarationItem
         | MetaType::TypeBody
@@ -10418,8 +10556,13 @@ fn match_syntax_fragment(
             }
             SyntaxValue::Item(Box::new(item))
         }
-        MetaType::Modifier => {
+        MetaType::Modifier | MetaType::ModifierCall | MetaType::UnstructuredModifier => {
             let invocation = staple_syntax::parse_modifier_fragment(syntax, next_syntax_id).ok()?;
+            if matches!(expected, MetaType::ModifierCall) && invocation.doc.is_some()
+                || matches!(expected, MetaType::UnstructuredModifier) && invocation.doc.is_none()
+            {
+                return None;
+            }
             SyntaxValue::Modifier(OpaqueModifier {
                 invocation,
                 enclosing: None,
@@ -10764,6 +10907,10 @@ fn private_visibility() -> VisibilitySyntax {
 /// spelled `Parenthesized<(...)>` to match how every other delimited macro
 /// argument is declared, down to the single meta type it wraps.
 fn modifier_argument_meta_type(declared: &MetaType) -> Option<&MetaType> {
+    if matches!(declared, MetaType::Delimited(DelimiterKind::Parenthesized, DelimitedMetaContents::Separated { element, separator }) if **element == MetaType::Modifier && **separator == MetaType::Comma)
+    {
+        return Some(declared);
+    }
     let MetaType::Delimited(DelimiterKind::Parenthesized, DelimitedMetaContents::Slotted(inner)) =
         declared
     else {
@@ -10776,25 +10923,74 @@ fn modifier_argument_meta_type(declared: &MetaType) -> Option<&MetaType> {
 }
 
 fn modifier_argument_matches(expected: &MetaType, argument: &ModifierArgument) -> bool {
+    parse_modifier_argument_value(expected, argument, &mut 0).is_some()
+}
+
+fn valid_modifier_argument(expected: &MetaType) -> bool {
+    matches!(
+        expected,
+        MetaType::Expr
+            | MetaType::Ident(_)
+            | MetaType::CallExpr
+            | MetaType::UnstructuredExpr
+            | MetaType::Type
+            | MetaType::Pattern
+            | MetaType::Modifier
+    ) || matches!(expected, MetaType::Delimited(DelimiterKind::Parenthesized, DelimitedMetaContents::Separated { element, separator }) if **element == MetaType::Modifier && **separator == MetaType::Comma)
+}
+
+fn parse_modifier_argument_value(
+    expected: &MetaType,
+    argument: &ModifierArgument,
+    ids: &mut usize,
+) -> Option<Value> {
     match expected {
-        MetaType::Type => {
-            let mut next_syntax_id = 0;
-            staple_syntax::parse_type_fragment(&argument.syntax, true, &mut next_syntax_id).is_ok()
+        MetaType::Type => staple_syntax::parse_type_fragment(&argument.syntax, true, ids)
+            .ok()
+            .map(|value| Value::Syntax(SyntaxValue::Type(value))),
+        MetaType::Pattern => staple_syntax::parse_pattern_fragment(&argument.syntax, true, ids)
+            .ok()
+            .map(|value| Value::Syntax(SyntaxValue::Pattern(value))),
+        MetaType::Modifier => {
+            let tokens = argument.syntax.tokens();
+            let first = tokens.iter().position(|token| !token.kind.is_trivia())?;
+            let last = tokens.iter().rposition(|token| !token.kind.is_trivia())?;
+            match_syntax_fragment(
+                expected,
+                &syntax_slice(&argument.syntax, first + 1, last),
+                ids,
+            )
         }
-        MetaType::Pattern => {
-            let mut next_syntax_id = 0;
-            staple_syntax::parse_pattern_fragment(&argument.syntax, true, &mut next_syntax_id)
-                .is_ok()
+        MetaType::Delimited(_, DelimitedMetaContents::Separated { .. }) => {
+            let SyntaxValue::Delimited(value) =
+                delimiter_argument_value(expected, &argument.syntax, ids)?
+            else {
+                return None;
+            };
+            let DelimitedValueContents::Separated {
+                elements,
+                separator,
+                trailing,
+            } = value.contents
+            else {
+                return None;
+            };
+            Some(Value::Separated {
+                elements,
+                separator,
+                trailing,
+            })
         }
-        MetaType::Item
-        | MetaType::Syntax
-        | MetaType::SyntaxNode
-        | MetaType::Visibility
-        | MetaType::MacroCallMetadata => false,
-        _ => argument
+        _ if valid_modifier_argument(expected) => argument
             .expression
             .as_ref()
-            .is_some_and(|expression| meta_type_matches(expected, expression)),
+            .filter(|expression| meta_type_matches(expected, expression))
+            .map(|expression| {
+                Value::Syntax(SyntaxValue::from_expression(
+                    meta_argument_expression(expected, expression).clone(),
+                ))
+            }),
+        _ => None,
     }
 }
 
@@ -11001,6 +11197,8 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::NominalPattern => "NominalPattern".to_owned(),
             MetaType::Item => "Item".to_owned(),
             MetaType::Modifier => "Modifier".to_owned(),
+            MetaType::ModifierCall => "ModifierCall".to_owned(),
+            MetaType::UnstructuredModifier => "UnstructuredModifier".to_owned(),
             MetaType::ModifiedItem => "ModifiedItem".to_owned(),
             MetaType::TypeDeclarationItem => "TypeDeclarationItem".to_owned(),
             MetaType::TypeBody => "TypeBody".to_owned(),
@@ -11061,6 +11259,7 @@ fn resolved_macro(definition: &MacroDefinition) -> ResolvedMacro {
             format!("<{} where {}> ", parameters.join(", "), bounds.join(", "))
         };
         return ResolvedMacro {
+            modifier_vocabulary: Vec::new(),
             declaration: definition.declaration.syntax.id,
             name: definition.key.name.clone(),
             modifier: false,
@@ -11076,6 +11275,11 @@ fn resolved_macro(definition: &MacroDefinition) -> ResolvedMacro {
         format!("{parameters} -> {result}")
     };
     ResolvedMacro {
+        modifier_vocabulary: definition
+            .declaration
+            .modifier_vocabulary
+            .clone()
+            .unwrap_or_default(),
         declaration: definition.declaration.syntax.id,
         name: definition.key.name.clone(),
         modifier: definition.key.modifier,
@@ -11101,6 +11305,8 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
         MetaType::NominalPattern => "NominalPattern".to_owned(),
         MetaType::Item => "Item".to_owned(),
         MetaType::Modifier => "Modifier".to_owned(),
+        MetaType::ModifierCall => "ModifierCall".to_owned(),
+        MetaType::UnstructuredModifier => "UnstructuredModifier".to_owned(),
         MetaType::ModifiedItem => "ModifiedItem".to_owned(),
         MetaType::TypeDeclarationItem => "TypeDeclarationItem".to_owned(),
         MetaType::TypeBody => "TypeBody".to_owned(),
@@ -11341,6 +11547,8 @@ fn compile_constructor_type(name: &str, argument: CompileType) -> CompileType {
         "StringExpr" => CompileType::Meta(MetaType::StringExpr),
         "BindingPattern" => CompileType::Meta(MetaType::BindingPattern),
         "NominalPattern" => CompileType::Meta(MetaType::NominalPattern),
+        "ModifierCall" => CompileType::Meta(MetaType::ModifierCall),
+        "UnstructuredModifier" => CompileType::Meta(MetaType::UnstructuredModifier),
         "ModifiedItem" => CompileType::Meta(MetaType::ModifiedItem),
         "TypeDeclarationItem" => CompileType::Meta(MetaType::TypeDeclarationItem),
         "TypeBody" => CompileType::Meta(MetaType::TypeBody),
@@ -11465,6 +11673,11 @@ fn compile_types_compatible(actual: &CompileType, expected: &CompileType) -> boo
                     if **actual == MetaType::SyntaxNode || **expected == MetaType::SyntaxNode || actual == expected)
                 || *expected == MetaType::SyntaxNode
                 || (*expected == MetaType::Expr && actual.is_expression())
+                || (*expected == MetaType::Modifier
+                    && matches!(
+                        actual,
+                        MetaType::ModifierCall | MetaType::UnstructuredModifier
+                    ))
                 || (*expected == MetaType::Item
                     && matches!(
                         actual,
@@ -11737,6 +11950,15 @@ fn compile_field_type(ty: &CompileType, accessor: &Accessor) -> Option<CompileTy
             Some(CompileType::Meta(MetaType::Syntax))
         }
 
+        (CompileType::Meta(MetaType::ModifierCall), "namespace") => Some(CompileType::Meta(
+            MetaType::Sequence(Box::new(MetaType::Ident(None))),
+        )),
+        (CompileType::Meta(MetaType::ModifierCall), "name") => {
+            Some(CompileType::Meta(MetaType::Ident(None)))
+        }
+        (CompileType::Meta(MetaType::ModifierCall), "argument") => Some(CompileType::Meta(
+            MetaType::Optional(Box::new(MetaType::Syntax)),
+        )),
         (CompileType::Meta(MetaType::CallExpr), "callee" | "argument") => {
             Some(CompileType::Meta(MetaType::Expr))
         }
@@ -11770,6 +11992,9 @@ fn compile_product_fields(ty: &CompileType, length: usize) -> Vec<CompileType> {
 
 fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<CompileType> {
     match (ty, name) {
+        (CompileType::Meta(MetaType::Nominal(kind, arguments)), "Separated") if kind == "Separated" && arguments.len() == 2 => {
+            Some(CompileType::Product(vec![CompileType::Meta(arguments[1].clone()), CompileType::Meta(MetaType::Sequence(Box::new(arguments[0].clone()))), CompileType::Bool]))
+        },
         (CompileType::Meta(MetaType::TypeParameter), "TypeParameter") => {
             Some(CompileType::Product(vec![
                 CompileType::Meta(MetaType::Ident(None)),
@@ -11808,6 +12033,13 @@ fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<Co
                 CompileType::Meta(MetaType::Sequence(element.clone())),
             ]))
         }
+        (CompileType::Meta(MetaType::Modifier | MetaType::ModifierCall), "ModifierCall") => {
+            Some(CompileType::Product(modifier_call_field_types()))
+        }
+        (
+            CompileType::Meta(MetaType::Modifier | MetaType::UnstructuredModifier),
+            "UnstructuredModifier",
+        ) => Some(CompileType::Product(Vec::new())),
         (CompileType::Meta(MetaType::ModifiedItem), "ModifiedItem")
         | (CompileType::Meta(MetaType::Item), "ModifiedItem") => Some(CompileType::Product(vec![
             CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Modifier))),
@@ -11937,6 +12169,7 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
         return true;
     }
     match ty {
+        CompileType::Meta(MetaType::Nominal(name, _)) if name == "Separated" => compile_pattern_matrix_is_exhaustive(ty, patterns),
         CompileType::Bool => ["True", "False"]
             .iter()
             .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
@@ -11971,6 +12204,9 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
         CompileType::Meta(MetaType::Visibility) => ["Private", "Package", "Public"]
             .iter()
             .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
+        CompileType::Meta(MetaType::Modifier) => ["ModifierCall", "UnstructuredModifier"].iter().all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
+        CompileType::Meta(MetaType::ModifierCall) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("ModifierCall")),
+        CompileType::Meta(MetaType::UnstructuredModifier) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("UnstructuredModifier")),
         CompileType::Meta(MetaType::Item) => ["ModifiedItem", "TypeDeclarationItem", "UnstructuredItem"]
             .iter()
             .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
@@ -12169,6 +12405,10 @@ fn compile_sequence_coverage_pattern(
 
 fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<CompileType>)>> {
     Some(match ty {
+        CompileType::Meta(MetaType::Nominal(name, _)) if name == "Separated" => {
+            let CompileType::Product(fields) = compile_constructor_representation(ty, name)? else { return None; };
+            vec![(name.clone(), fields)]
+        },
         CompileType::Meta(
             MetaType::TypeParameter | MetaType::TypeParameters | MetaType::ResourceDependency,
         ) => {
@@ -12236,6 +12476,16 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
             ),
             ("UnstructuredItem".to_owned(), Vec::new()),
         ],
+        CompileType::Meta(MetaType::Modifier) => vec![
+            ("ModifierCall".to_owned(), modifier_call_field_types()),
+            ("UnstructuredModifier".to_owned(), Vec::new()),
+        ],
+        CompileType::Meta(MetaType::ModifierCall) => {
+            vec![("ModifierCall".to_owned(), modifier_call_field_types())]
+        }
+        CompileType::Meta(MetaType::UnstructuredModifier) => {
+            vec![("UnstructuredModifier".to_owned(), Vec::new())]
+        }
         CompileType::Meta(MetaType::ModifiedItem) => vec![(
             "ModifiedItem".to_owned(),
             vec![
@@ -12687,6 +12937,8 @@ fn type_contains_syntax(ty: &Type) -> bool {
                 | "Pattern"
                 | "Item"
                 | "Modifier"
+                | "ModifierCall"
+                | "UnstructuredModifier"
                 | "ModifiedItem"
                 | "Visibility"
                 | "MacroCallMetadata"
@@ -13168,6 +13420,9 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                 .is_ok_and(|literal| literal == value)
         }
         Pattern::Binding(binding) => {
+            if binding.name == "UnstructuredModifier" {
+                return matches!(&value, Value::Syntax(SyntaxValue::Modifier(modifier)) if modifier.invocation.doc.is_some());
+            }
             if let Value::Syntax(SyntaxValue::Visibility(visibility)) = &value
                 && matches!(
                     binding.name.as_str(),
@@ -13274,6 +13529,24 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                     ),
                     environment,
                 );
+            }
+            if pattern.namespace.is_none()
+                && let Value::Syntax(SyntaxValue::Modifier(modifier)) = &value
+            {
+                if pattern.name == "ModifierCall" && modifier.invocation.doc.is_none() {
+                    return bind_pattern(
+                        &pattern.argument,
+                        modifier_call_value(&modifier.invocation),
+                        environment,
+                    );
+                }
+                if pattern.name == "UnstructuredModifier" && modifier.invocation.doc.is_some() {
+                    return bind_pattern(
+                        &pattern.argument,
+                        Value::Product(Vec::new().into(), false),
+                        environment,
+                    );
+                }
             }
             if pattern.namespace.is_none()
                 && pattern.name == "ModifiedItem"
@@ -13887,6 +14160,12 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
         }
         (MetaType::Item, Value::Syntax(SyntaxValue::Item(_))) => true,
         (MetaType::Modifier, Value::Syntax(SyntaxValue::Modifier(_))) => true,
+        (MetaType::ModifierCall, Value::Syntax(SyntaxValue::Modifier(value))) => {
+            value.invocation.doc.is_none()
+        }
+        (MetaType::UnstructuredModifier, Value::Syntax(SyntaxValue::Modifier(value))) => {
+            value.invocation.doc.is_some()
+        }
         (MetaType::ModifiedItem, Value::Syntax(SyntaxValue::Item(item))) => {
             matches!(item.as_ref(), Item::Modified(_))
         }
@@ -15992,4 +16271,78 @@ fn reject_compile_forall(ty: &Type, diagnostics: &mut Vec<Diagnostic>) {
         | Type::StringLiteral(_)
         | Type::Splice(_) => {}
     }
+}
+
+fn modifier_call_field_types() -> Vec<CompileType> {
+    vec![
+        CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Ident(None)))),
+        CompileType::Meta(MetaType::Ident(None)),
+        CompileType::Meta(MetaType::Optional(Box::new(MetaType::Syntax))),
+    ]
+}
+
+fn modifier_call_value(invocation: &ModifierInvocation) -> Value {
+    let ident = |name: &str| {
+        Value::Syntax(SyntaxValue::Ident(staple_syntax::NameExpression {
+            syntax: invocation.syntax.clone(),
+            name: name.to_owned(),
+        }))
+    };
+    let namespace = invocation
+        .namespace
+        .as_deref()
+        .map(|path| path.split('.').map(ident).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let argument = match &invocation.argument {
+        Some(argument) => {
+            let tokens = argument.syntax.tokens();
+            let first = tokens
+                .iter()
+                .position(|token| !token.kind.is_trivia())
+                .unwrap();
+            let last = tokens
+                .iter()
+                .rposition(|token| !token.kind.is_trivia())
+                .unwrap();
+            Value::Nominal(
+                "Some".to_owned(),
+                Box::new(Value::Syntax(SyntaxValue::Raw(syntax_slice(
+                    &argument.syntax,
+                    first + 1,
+                    last,
+                )))),
+            )
+        }
+        None => Value::Nominal(
+            "None".to_owned(),
+            Box::new(Value::Product(Vec::new().into(), false)),
+        ),
+    };
+    Value::Product(
+        vec![
+            (
+                Some("namespace".to_owned()),
+                Value::Sequence(namespace.into()),
+            ),
+            (Some("name".to_owned()), ident(&invocation.name)),
+            (Some("argument".to_owned()), argument),
+        ]
+        .into(),
+        false,
+    )
+}
+
+fn vocabulary_argument_meta(ty: &Type) -> Option<MetaType> {
+    let expected = if let Some((element, separator)) = separated_meta_type(ty) {
+        MetaType::Delimited(
+            DelimiterKind::Parenthesized,
+            DelimitedMetaContents::Separated {
+                element: Box::new(element),
+                separator: Box::new(separator),
+            },
+        )
+    } else {
+        meta_type(ty)?
+    };
+    valid_modifier_argument(&expected).then_some(expected)
 }

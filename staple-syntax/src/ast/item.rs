@@ -403,6 +403,7 @@ pub struct MacroDeclaration {
     pub visibility: Visibility,
     pub name: String,
     pub modifier: bool,
+    pub modifier_vocabulary: Option<Vec<ModifierVocabularyEntry>>,
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
@@ -642,4 +643,11 @@ impl Binding {
         }
         prefix
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModifierVocabularyEntry {
+    pub syntax: Syntax,
+    pub name: String,
+    pub argument: Option<Type>,
 }

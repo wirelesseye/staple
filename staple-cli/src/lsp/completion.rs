@@ -79,6 +79,7 @@ struct ModuleIndex {
 
 #[derive(Debug, Clone, Default)]
 pub struct CompletionIndex {
+    modifier_vocabularies: Vec<(Range<usize>, Vec<CompletionItem>)>,
     modules: Vec<ModuleIndex>,
     methods: Vec<MethodSite>,
     qualifiers: Vec<MethodSite>,
@@ -307,6 +308,11 @@ impl CompletionIndex {
                 .then(left.detail.cmp(&right.detail))
         });
         result.extend(external);
+        for (range, entries) in &self.modifier_vocabularies {
+            if contains(range, offset) {
+                result.extend(entries.clone());
+            }
+        }
         result
     }
 
@@ -782,6 +788,30 @@ impl Collector<'_> {
                 self.item(&value.item, module_index);
             }
             Item::VisibilityMacroInvocation(value) => {
+                let mut head = &value.expression;
+                while let Expression::Call(call) = head {
+                    head = &call.callee;
+                }
+                if let Some(info) = self.typed.resolved().macro_invocation_for(head.syntax().id) {
+                    let entries = info
+                        .modifier_vocabulary
+                        .iter()
+                        .map(|entry| CompletionItem {
+                            label: entry.name.clone(),
+                            kind: Some(CompletionItemKind::FUNCTION),
+                            detail: Some(format!(
+                                "{} modifier {}",
+                                info.name,
+                                entry.syntax.text().trim()
+                            )),
+                            ..CompletionItem::default()
+                        })
+                        .collect();
+                    self.index.modifier_vocabularies.push((
+                        syntax_range(&value.syntax).start..syntax_range(head.syntax()).start,
+                        entries,
+                    ));
+                }
                 for modifier in &value.modifiers {
                     if let Some(expression) = modifier
                         .argument
@@ -2582,5 +2612,34 @@ mod tests {
         assert!(!items.iter().any(|item| item.label == "legs"), "{items:?}");
         let named = index.named_method_items("count", receiver_end);
         assert!(named.iter().any(|item| item.label == "triple"), "{named:?}");
+    }
+    #[test]
+    fn completes_and_hovers_macro_modifier_vocabulary() {
+        let source = "use std.syntax.*\nmacro emit modifiers (@traced): (MacroCallMetadata; Expr) -> Item = (metadata; value) => parse_quote { let answer = 42 }\n@traced emit ()\n";
+        let path = std::env::temp_dir().join("staple-vocabulary-completion.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let items = index(&module, &typed).items(source.rfind("@traced").unwrap() + 1);
+        let item = items
+            .iter()
+            .find(|item| item.label == "traced")
+            .expect("vocabulary completion");
+        assert!(item.detail.as_ref().unwrap().contains("@traced"));
+        let hover = super::super::hover::entries(&module, &typed);
+        assert!(
+            hover
+                .iter()
+                .any(|entry| entry.signature == "macro emit modifier @traced")
+        );
     }
 }

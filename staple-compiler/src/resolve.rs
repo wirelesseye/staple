@@ -329,6 +329,7 @@ pub enum PrimitiveMacro {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedMacro {
+    pub modifier_vocabulary: Vec<staple_syntax::ModifierVocabularyEntry>,
     pub declaration: SyntaxId,
     pub name: String,
     pub modifier: bool,
@@ -2390,6 +2391,8 @@ impl NameResolver {
             "FromBody",
             "OpaqueBody",
             "Modifier",
+            "ModifierCall",
+            "UnstructuredModifier",
             "ModifiedItem",
             "UnstructuredItem",
             "Item",
@@ -8046,6 +8049,10 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         "WrapperBody" => Some("(Visibility, Type) -> WrapperBody<Visibility, Type>"),
         "FromBody" => Some("(Visibility, Type) -> FromBody<Visibility, Type>"),
         "OpaqueBody" => Some("OpaqueBody"),
+        "ModifierCall" => Some(
+            "(namespace: Sequence<Ident<String>>, name: Ident<String>, argument: Option<Syntax>) -> ModifierCall",
+        ),
+        "UnstructuredModifier" => Some("UnstructuredModifier"),
         "ModifiedItem" => Some("(modifiers: Sequence<Modifier>, item: Item) -> ModifiedItem"),
         "Syntax"
         | "SyntaxNode"
@@ -8124,6 +8131,8 @@ fn compile_expression_type(expression: &Expression, scope: &CompileTimeScope) ->
                     | "NominalPattern"
                     | "Item"
                     | "Modifier"
+                    | "ModifierCall"
+                    | "UnstructuredModifier"
                     | "ModifiedItem"
                     | "TypeDeclarationItem"
                     | "TypeBody"

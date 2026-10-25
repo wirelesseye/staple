@@ -11,6 +11,42 @@ def typegroup_apply_modifiers = (
     _ => ModifiedItem (modifiers: modifiers, item: item),
 }
 
+// Macro helpers reuse syntax values, as with TypeParameters below. Explicitly
+// duplicate distributed modifiers so every application gets fresh syntax IDs.
+def typegroup_prepend = (prefix: Sequence<Modifier>, suffix: Sequence<Modifier>) => Sequence<Modifier> :: match prefix {
+    Sequence () => suffix,
+    Sequence (first, rest) => {
+        let (copy, _) = duplicate_modifier first
+        Sequence (first: copy, rest: typegroup_prepend (rest, suffix))
+    },
+}
+
+def typegroup_modifier_contents = syntax: Syntax => Sequence<Modifier> :: {
+    let wrapped = quote { ($syntax) }
+    match Parse.parse_all.<Parenthesized<Separated<Modifier, Comma>>> wrapped {
+        Ok (Parenthesized (Separated (_, elements, _))) => elements,
+        _ => panic "invalid typegroup modifier argument",
+    }
+}
+
+def typegroup_split_modifiers = modifiers: Sequence<Modifier> => (Sequence<Modifier>, Sequence<Modifier>, Sequence<Modifier>) :: match modifiers {
+    Sequence () => (Sequence (), Sequence (), Sequence ()),
+    Sequence (first, rest) => {
+        let (variants, group, remaining) = typegroup_split_modifiers rest
+        match first {
+            ModifierCall (Sequence (), Ident "all", Some argument) => {
+                let contents = typegroup_modifier_contents argument
+                (typegroup_prepend (contents, variants), typegroup_prepend (contents, group), remaining)
+            },
+            ModifierCall (Sequence (), Ident "variants", Some argument) => {
+                let contents = typegroup_modifier_contents argument
+                (typegroup_prepend (contents, variants), group, remaining)
+            },
+            _ => (variants, group, Sequence (first: first, rest: remaining)),
+        }
+    },
+}
+
 def typegroup_body_item = (variant: Ident<String>, body: TypeBody) => Item :: match body {
     AliasBody underlying => parse_quote { pub type $variant = $underlying },
     WrapperBody (visibility, underlying) => match visibility {
@@ -48,38 +84,39 @@ def typegroup_generic_body_item = (
     }
 }
 
-def typegroup_items = entries: Sequence<(Sequence<Modifier>; Ident<String>; Option<TypeBody>)> => Sequence<Item> :: match entries {
+def typegroup_items = (shared: Sequence<Modifier>, entries: Sequence<(Sequence<Modifier>; Ident<String>; Option<TypeBody>)>) => Sequence<Item> :: match entries {
     Sequence () => Sequence (),
     Sequence (first, rest) => match first {
         (modifiers; variant; None) => {
             let base: Item = parse_quote { pub type $variant }
-            let item = typegroup_apply_modifiers (modifiers, base)
-            Sequence (first: item, rest: typegroup_items rest)
+            let item = typegroup_apply_modifiers (typegroup_prepend (shared, modifiers), base)
+            Sequence (first: item, rest: typegroup_items (shared, rest))
         },
         (modifiers; variant; Some body) => {
             let base: Item = typegroup_body_item (variant, body)
-            let item = typegroup_apply_modifiers (modifiers, base)
-            Sequence (first: item, rest: typegroup_items rest)
+            let item = typegroup_apply_modifiers (typegroup_prepend (shared, modifiers), base)
+            Sequence (first: item, rest: typegroup_items (shared, rest))
         },
     },
 }
 
 def typegroup_generic_items = (
+    shared: Sequence<Modifier>,
     parameters: TypeParameters,
     entries: Sequence<(Sequence<Modifier>; Ident<String>; Option<TypeBody>)>,
 ) => Sequence<Item> :: match entries {
     Sequence () => Sequence (),
     Sequence (first, rest) => {
-        let tail = typegroup_generic_items (parameters, rest)
+        let tail = typegroup_generic_items (shared, parameters, rest)
         match first {
             (modifiers; variant; None) => {
                 let base: Item = parse_quote { pub type $variant }
-                let item = typegroup_apply_modifiers (modifiers, base)
+                let item = typegroup_apply_modifiers (typegroup_prepend (shared, modifiers), base)
                 Sequence (first: item, rest: tail)
             },
             (modifiers; variant; Some body) => {
                 let base: Item = typegroup_generic_body_item (variant, parameters, body)
-                let item = typegroup_apply_modifiers (modifiers, base)
+                let item = typegroup_apply_modifiers (typegroup_prepend (shared, modifiers), base)
                 Sequence (first: item, rest: tail)
             },
         }
@@ -159,10 +196,20 @@ def typegroup_generic_sum_syntax = (
 ///     Empty,
 /// }
 /// ```
-pub macro typegroup:
+/// `@all(@derive_debug)` applies to the group and every variant.
+/// `@variants(@derive_debug)` applies only to variants. Distributed modifiers
+/// precede each variant's own modifiers, in the order of the prefixes.
+pub macro typegroup
+    modifiers (
+        @all(Separated<Modifier, Comma>),
+        @variants(Separated<Modifier, Comma>),
+    )
+    :
     (MacroCallMetadata; Ident<String>; Option<TypeParameters>; Braced<Separated<(Sequence<Modifier>; Ident<String>; Option<TypeBody>), Comma>>) ->
     Sequence<Item> =
     ((modifiers, visibility); group; parameters; body) => {
+    let (shared, group_modifiers, remaining) = typegroup_split_modifiers modifiers
+    let modifiers = typegroup_prepend (group_modifiers, remaining)
     match body {
     Braced (Separated (
         separator,
@@ -171,7 +218,7 @@ pub macro typegroup:
     )) => {
         match parameters {
             None => {
-                let items = typegroup_items elements
+                let items = typegroup_items (shared, elements)
                 let sum = typegroup_sum (group, elements)
                 // The group is a `from` type over its variants' sum, exposing
                 // its representation as widely as the group itself.
@@ -193,7 +240,7 @@ pub macro typegroup:
             },
             Some parameters => {
                 let declaration = parameters.declaration
-                let items = typegroup_generic_items (parameters, elements)
+                let items = typegroup_generic_items (shared, parameters, elements)
                 let sum = typegroup_generic_sum_syntax (group, parameters, elements)
                 let base: Item = match visibility {
                     Private => Item :: parse_quote {

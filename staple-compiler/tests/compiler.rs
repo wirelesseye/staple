@@ -6449,6 +6449,352 @@ fn modifier_arguments_support_expression_type_and_pattern_syntax() {
 }
 
 #[test]
+fn macro_modifier_values_and_vocabulary() {
+    type_check(
+        r#"
+use std.syntax.*
+macro inspect modifiers (@traced, @limit(Expr)): (MacroCallMetadata; Expr) -> Item = ((modifiers, _); value) => match modifiers {
+    Sequence (first, rest) => match (first, rest) {
+        (ModifierCall (Sequence (), Ident "traced", None), Sequence (first, rest)) => match first {
+            ModifierCall (_, Ident "limit", Some argument) => parse_quote { let answer: I32 = $argument },
+            _ => panic "expected limit",
+        },
+        _ => panic "expected traced",
+    },
+    _ => panic "unexpected modifier structure",
+}
+@traced @limit(3) inspect ()
+let result: I32 = answer
+"#,
+    );
+}
+
+#[test]
+fn macro_modifier_arguments() {
+    type_check(
+        r#"
+use std.syntax.*
+macro @identity: Item -> Item = item => item
+macro @twice: (Parenthesized<Modifier>; Item) -> Item = (modifier; item) => {
+    let (first, second) = duplicate_modifier modifier
+    ModifiedItem (modifiers: Sequence (first: first, rest: Sequence (first: second, rest: Sequence ())), item: item)
+}
+@twice(@identity) let answer: I32 = 42
+"#,
+    );
+    let diagnostics = resolve_result(
+        r#"
+use std.syntax.*
+macro @twice: (Parenthesized<Modifier>; Item) -> Item = (modifier; item) => item
+@twice(identity) let answer = 42
+"#,
+    )
+    .expect_err_diagnostics("a nested modifier requires @");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("no overload of modifier"))
+    );
+}
+
+#[test]
+fn macro_modifier_vocabulary_rejects_unknown_and_wrong_arguments() {
+    for (prefix, expected) in [
+        ("@typo", "does not accept modifier"),
+        ("@limit", "invalid argument"),
+        ("@limit(@foo)", "invalid argument"),
+    ] {
+        let source = format!(
+            r#"
+use std.syntax.*
+macro emit modifiers (@limit(Expr)): (MacroCallMetadata; Expr) -> Item = (metadata; value) => parse_quote {{ let answer = 42 }}
+{prefix} emit ()
+"#
+        );
+        let diagnostics =
+            resolve_result(&source).expect_err_diagnostics("invalid vocabulary prefix");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn typegroup_distributed_modifiers() {
+    type_check(
+        r#"
+use std.syntax.*
+macro @identity: Item -> Item = item => item
+@all(@identity) @variants(@identity)
+typegroup Switch { @identity Enabled, Disabled }
+let value: Switch = Switch.Enabled
+@all(@identity)
+typegroup Boxed<T> { Value wrap pub T, Empty }
+let boxed: Boxed<I32> = Boxed.Value 42
+"#,
+    );
+}
+
+#[test]
+fn macro_modifier_namespace_and_construction() {
+    type_check(
+        r#"
+use std.syntax.*
+macro @identity: Item -> Item = item => item
+macro emit: (MacroCallMetadata; Expr) -> Item = ((modifiers, _); value) => match modifiers {
+    Sequence (first, rest) => match first {
+    ModifierCall (Sequence (Ident "lib", Ident "inner"), Ident "bar", None) => {
+        let modifier = ModifierCall (namespace: Sequence (), name: Ident "identity", argument: None)
+        ModifiedItem (modifiers: Sequence (first: modifier, rest: Sequence ()), item: parse_quote { let answer: I32 = 42 })
+    },
+    _ => panic "unexpected modifier structure",
+    },
+    _ => panic "expected modifier",
+}
+@lib.inner.bar emit ()
+let result: I32 = answer
+"#,
+    );
+}
+
+#[test]
+fn macro_modifier_doc_comments_are_unstructured() {
+    type_check(
+        r#"
+use std.syntax.*
+macro emit: (MacroCallMetadata; Expr) -> Item = ((modifiers, _); value) => match modifiers {
+    Sequence (first, rest) => match rest {
+        Sequence (first, rest) => match first {
+            UnstructuredModifier => parse_quote { let answer: I32 = 42 },
+            _ => panic "expected comment",
+        },
+        _ => panic "expected second modifier",
+    },
+    _ => panic "unexpected modifier structure",
+}
+@unresolved
+/// retained comment
+emit ()
+let result: I32 = answer
+"#,
+    );
+    let diagnostics = resolve_result(
+        r#"
+use std.syntax.*
+macro emit: (MacroCallMetadata; Expr) -> Item = ((modifiers, _); value) => match modifiers {
+    Sequence (first, rest) => match first { ModifierCall _ => parse_quote { let answer = 42 } },
+    _ => parse_quote { let answer = 0 },
+}
+"#,
+    )
+    .expect_err_diagnostics("Modifier includes unstructured modifiers");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("exhaustive")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn typegroup_distributed_debug() {
+    let module = type_check(
+        r#"
+use std.fmt.*
+@all(@derive_debug)
+typegroup Switch { Enabled, Disabled }
+let group_debug: String = Formatter.debug (Switch :: Switch.Enabled)
+let enabled_debug: String = Formatter.debug Switch.Enabled
+let disabled_debug: String = Formatter.debug Switch.Disabled
+@all(@derive_debug)
+typegroup Boxed<T> { Value wrap pub T, Empty }
+let boxed_debug: String = Formatter.debug (Boxed<I32> :: Boxed.Value 42)
+let value_debug: String = Formatter.debug (Boxed.Value 42)
+@variants(@derive_debug)
+typegroup Variants { One, Two }
+let one_debug: String = Formatter.debug Variants.One
+"#,
+    );
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("distributed Debug implementations should lower");
+}
+
+#[test]
+fn typegroup_distributed_modifiers_keep_order() {
+    let module = resolve(
+        r#"
+use std.syntax.*
+def add_doc = (syntax: Syntax, item: Item) => Item :: match Parse.parse_all.<Modifier> syntax {
+    Ok modifier => ModifiedItem (modifiers: Sequence (first: modifier, rest: Sequence ()), item: item),
+    _ => panic "expected doc modifier",
+}
+macro @a: Item -> Item = item => add_doc (quote { @doc("a") }, item)
+macro @b: Item -> Item = item => add_doc (quote { @doc("b") }, item)
+macro @c: Item -> Item = item => add_doc (quote { @doc("c") }, item)
+@all(@a) @variants(@c) @doc("group")
+typegroup Switch { @b Enabled, Disabled }
+"#,
+    );
+    let group = module
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::TypeDeclaration(item) if item.name == "Switch" => Some(item),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(group.docs, ["a", "group"]);
+    let companion =
+        module
+            .program()
+            .modules()
+            .iter()
+            .find(|module| {
+                module.syntax.items.iter().any(
+                    |item| matches!(item, Item::TypeDeclaration(item) if item.name == "Enabled"),
+                )
+            })
+            .unwrap();
+    let enabled = companion
+        .syntax
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::TypeDeclaration(item) if item.name == "Enabled" => Some(item),
+            _ => None,
+        })
+        .unwrap();
+    // Each marker prepends a doc to the already documented declaration, so
+    // applying a, then c, then the variant's own b records them in reverse.
+    assert_eq!(enabled.docs, ["b", "c", "a"]);
+}
+
+#[test]
+fn typegroup_unknown_distributed_modifier_is_reported_once() {
+    let diagnostics = resolve_result("@all(@typo) typegroup Switch { Enabled, Disabled }\n")
+        .expect_err_diagnostics("unknown nested modifier");
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message == "unknown modifier macro `@typo`")
+            .count(),
+        1,
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn macro_modifier_vocabulary_shadows_only_unqualified_modifiers() {
+    type_check(
+        r#"
+use std.syntax.*
+mod attrs {
+    use std.syntax.*
+    pub macro @all: Item -> Item = item => item
+}
+use attrs.all
+macro emit modifiers (@all): (MacroCallMetadata; Expr) -> Item = ((modifiers, _); value) => match modifiers {
+    Sequence (first, rest) => match (first, rest) {
+        (ModifierCall (Sequence (), Ident "all", None), Sequence (first, rest)) => match first {
+            ModifierCall (Sequence (Ident "attrs"), Ident "all", None) => parse_quote { let answer: I32 = 42 },
+            _ => panic "expected qualified all",
+        },
+        _ => panic "expected unqualified all",
+    },
+    _ => panic "vocabulary must match by spelling",
+}
+@all @attrs.all emit ()
+let result: I32 = answer
+"#,
+    );
+    type_check(
+        r#"
+use std.syntax.*
+macro emit: (MacroCallMetadata; Expr) -> Item = (metadata; value) => parse_quote { let answer = 42 }
+@unknown emit ()
+"#,
+    );
+    let diagnostics = resolve_result(
+        r#"
+use std.syntax.*
+macro emit modifiers (@traced): Expr -> Item = value => parse_quote { let answer = 42 }
+"#,
+    )
+    .expect_err_diagnostics("vocabulary requires metadata");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("first parameter")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn macro_modifier_separated_arguments() {
+    type_check(
+        r#"
+use std.syntax.*
+macro @identity: Item -> Item = item => item
+macro @apply: (Parenthesized<Separated<Modifier, Comma>>; Item) -> Item = (argument; item) => match argument { Separated (_, modifiers, _) => ModifiedItem (modifiers: modifiers, item: item), }
+@apply(@identity, @identity,) let answer: I32 = 42
+"#,
+    );
+}
+
+#[test]
+fn typegroup_variants_do_not_derive_group_debug() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            r#"
+use std.fmt.*
+@variants(@derive_debug)
+typegroup Switch { Enabled, Disabled }
+let debug: String = Formatter.debug (Switch :: Switch.Enabled)
+"#,
+        ))
+        .expect_err_diagnostics("variants-only must leave the group without Debug");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("trait bound is not satisfied")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn macro_modifier_vocabularies_belong_to_selected_overloads() {
+    let declarations = r#"
+use std.syntax.*
+macro emit modifiers (@first): (MacroCallMetadata; Ident<"one">) -> Item = (metadata; value) => parse_quote { let one = 1 }
+macro emit modifiers (@second): (MacroCallMetadata; Ident<"two">) -> Item = (metadata; value) => parse_quote { let two = 2 }
+"#;
+    type_check(&format!("{declarations}\n@first emit one\n@second emit two\n"));
+    let diagnostics = resolve_result(&format!("{declarations}\n@first emit two\n")).expect_err_diagnostics("vocabulary cannot select an overload");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("does not accept modifier `@first`")), "{diagnostics:?}");
+}
+
+#[test]
+fn macro_modifier_nested_arguments_stay_lossless() {
+    let module = resolve(r#"
+use std.syntax.*
+macro @apply: (Parenthesized<Separated<Modifier, Comma>>; Item) -> Item = (argument; item) => match argument {
+    Separated (_, modifiers, _) => ModifiedItem (modifiers: modifiers, item: item),
+}
+@apply(@doc("x,y"), @doc("nested (parentheses)"),)
+let documented = 42
+"#);
+    let binding = module.syntax().items.iter().find_map(|item| match item { Item::Binding(binding) if binding.name == "documented" => Some(binding), _ => None }).unwrap();
+    assert_eq!(binding.docs, ["x,y", "nested (parentheses)"]);
+}
+
+
+#[test]
 fn expands_modifier_lists_generated_by_item_macros() {
     let module = type_check(concat!(
         "macro @replace: Item -> Item = _ => parse_quote { let generated: I32 = 42 }\n",

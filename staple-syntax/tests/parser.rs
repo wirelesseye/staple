@@ -4538,3 +4538,25 @@ fn rejects_doc_comments_on_extern_blocks() {
         assert!(parse(source).is_err(), "{source}");
     }
 }
+
+#[test]
+fn parses_macro_modifier_vocabulary() {
+    let source = "macro emit modifiers (@traced, @all(Separated<Modifier, Comma>),): (MacroCallMetadata; Expr) -> Item = (_; _) => value\n";
+    let module = parse(source).unwrap();
+    let Item::MacroDeclaration(declaration) = &module.items[0] else {
+        panic!("expected macro");
+    };
+    let entries = declaration.modifier_vocabulary.as_ref().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].name, "traced");
+    assert!(entries[0].argument.is_none());
+    assert_eq!(
+        entries[1].argument.as_ref().unwrap().syntax().text(),
+        "Separated<Modifier, Comma>"
+    );
+    assert_eq!(module.syntax.text(), source);
+    assert!(parse("macro @emit modifiers (@traced): Item -> Item = item => item").is_err());
+    assert!(
+        parse("macro emit modifiers (@traced, @traced): Expr -> Expr = value => value").is_err()
+    );
+}

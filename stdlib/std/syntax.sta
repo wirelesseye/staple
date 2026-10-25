@@ -164,11 +164,23 @@ pub type UnstructuredItem opaque
 
 impl !Copy UnstructuredItem {}
 
-/// A lossless modifier invocation whose structure is intentionally opaque.
-@sized_opaque
-pub type Modifier opaque
+/// A written modifier invocation. The namespace lists qualifiers outermost
+/// first and is empty for an unqualified name. The argument excludes its parentheses.
+@recursive_constructor
+pub type ModifierCall wrap pub (
+    namespace: Sequence<Ident<String>>,
+    name: Ident<String>,
+    argument: Option<Syntax>,
+)
 
-impl !Copy Modifier {}
+/// A modifier whose structure is not exposed, such as a doc comment.
+@sized_opaque
+pub type UnstructuredModifier opaque
+
+impl !Copy UnstructuredModifier {}
+
+/// The syntax category for pending modifiers.
+pub type Modifier = ModifierCall | UnstructuredModifier
 
 /// An item carrying modifiers that have not yet been applied. Modifiers are
 /// ordered outermost first.
@@ -235,6 +247,8 @@ pub type ParseError wrap pub (message: String)
 pub type ParseStream opaque
 
 pub extern "staple-intrinsic" {
+    /// Duplicates a modifier with fresh syntax identities, preserving its source.
+    duplicate_modifier: Modifier -> (Modifier, Modifier)
     /// Starts a stream at the beginning of `syntax`.
     stream: Syntax -> ParseStream
     /// `True` when only trivia remains.
@@ -292,6 +306,8 @@ impl Parse ModifiedItem { parse = mut input => __parse_primitive.<ModifiedItem> 
 impl Parse TypeDeclarationItem { parse = mut input => __parse_primitive.<TypeDeclarationItem> input }
 impl Parse UnstructuredItem { parse = mut input => __parse_primitive.<UnstructuredItem> input }
 impl Parse Modifier { parse = mut input => __parse_primitive.<Modifier> input }
+impl Parse ModifierCall { parse = mut input => __parse_primitive.<ModifierCall> input }
+impl Parse UnstructuredModifier { parse = mut input => __parse_primitive.<UnstructuredModifier> input }
 impl Parse TypeBody { parse = mut input => __parse_primitive.<TypeBody> input }
 impl Parse TypeParameter { parse = mut input => __parse_primitive.<TypeParameter> input }
 impl Parse TypeParameters { parse = mut input => __parse_primitive.<TypeParameters> input }

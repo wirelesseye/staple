@@ -382,7 +382,8 @@ The built-in nodes implement `Parse` with ordinary `impl` items in
 
 - `Expr`, `CallExpr`, `StringExpr`, `UnstructuredExpr`, `Type`, `Pattern`,
   `BindingPattern`, `NominalPattern`, `Item`, `ModifiedItem`,
-  `TypeDeclarationItem`, `UnstructuredItem`, `Modifier`, and `TypeBody` read the
+  `TypeDeclarationItem`, `UnstructuredItem`, `Modifier`, `ModifierCall`,
+  `UnstructuredModifier`, and `TypeBody` read the
   longest node the grammar accepts from the cursor and stop where it stops: `Expr`
   reads `a + b` from `a + b, c`.
 - `Ident<S>` (a spelling or `String`), `Comma`, `Equals`, and `FatArrow` read one
@@ -522,7 +523,8 @@ remain ordinary modifiers.
 
 A modifier has signature `Item -> Item`, `Item -> Sequence<Item>`, or
 `Item -> Syntax`, optionally preceded by one optional explicit
-`Parenthesized<Expr>`, `Parenthesized<Type>`, or `Parenthesized<Pattern>`
+`Parenthesized<Expr>`, `Parenthesized<Type>`, `Parenthesized<Pattern>`,
+`Parenthesized<Modifier>`, or `Parenthesized<Separated<Modifier, Comma>>`
 argument before the compiler-supplied item. `Parenthesized` is required
 because the explicit argument is always delimited by parentheses, including
 an expression argument, matching how every other delimited macro argument is
@@ -554,8 +556,15 @@ expanded independently; a returned `ModifiedItem` continues with its own
 outermost modifier. Producing zero items deletes the modified item.
 
 `Item` exposes pending modifier lists as `ModifiedItem (modifiers, item)`.
-Modifiers are ordered outermost first and represented by lossless, opaque
-`Modifier` values. `ModifiedItem` can be destructured and reconstructed to
+Modifiers are ordered outermost first and represented by lossless `Modifier`
+values, a sum of `ModifierCall` and `UnstructuredModifier`. Written invocations
+match `ModifierCall (namespace, name, argument)`: the namespace is a sequence of
+identifiers, outermost first, and the optional opaque `Syntax` argument excludes
+its parentheses. Documentation comments match only `UnstructuredModifier` and
+retain their comment form when passed through. Constructing a `ModifierCall`
+reparses its invocation. `duplicate_modifier` creates two independent modifiers
+with fresh syntax identities, preserving source locations and dropping any
+original enclosing item wrapper. `ModifiedItem` can be destructured and reconstructed to
 preserve, reorder, or discard pending modifiers. A wrapped type declaration
 matches `ModifiedItem`, not `TypeDeclarationItem`, until unwrapped.
 `Item` exposes unwrapped type declarations as `TypeDeclarationItem (name,
@@ -598,6 +607,31 @@ calls receive an empty modifier sequence. A prefixed call is parsed in
 module-item grammar, but its macro may return either an item or an expression.
 Normal syntax placement rules still reject type, pattern, or visibility results
 that have no valid placement.
+
+A function-style macro whose first parameter is `MacroCallMetadata` may declare
+its vocabulary between its name and annotation:
+
+```staple
+macro emit modifiers (@traced, @all(Separated<Modifier, Comma>)):
+    (MacroCallMetadata; Expr) -> Item = (metadata; value) => ...
+```
+
+Only unqualified prefixes match vocabulary names, by spelling. A listed name
+wins even when a real modifier macro of that name is in scope; qualify the name
+to reach that macro. Arguments follow the modifier argument rules above. A
+nested modifier must include `@`, as in `@all(@derive_debug)`. Other prefixes
+must name real modifier macros in scope. Unknown prefixes and wrong argument
+shapes are errors at the call site. Each overload has its own vocabulary,
+checked after overload selection; vocabulary does not select an overload.
+Macros without a clause retain permissive metadata prefixes. Nested modifiers
+remain unresolved until applied. Prefixes left in metadata are not forwarded
+automatically.
+
+`typegroup` accepts `@all(...)` for its group and every variant, and
+`@variants(...)` for its variants alone. Their comma-separated modifiers are
+prepended in prefix order, ahead of each variant's own modifiers. Ordinary
+prefixes still apply only to the group. Repeated unknown-modifier errors from
+the same source location are reported once.
 
 An ordinary `Visibility` parameter may appear in any position. At that
 position each visibility form consumes one source atom; if none is present,
