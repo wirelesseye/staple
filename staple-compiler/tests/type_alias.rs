@@ -93,6 +93,31 @@ fn a_method_on_an_alias_of_a_wrapper_finds_the_wrapper_companion() {
 }
 
 #[test]
+fn a_value_of_a_function_alias_is_callable() {
+    check(concat!(
+        "type Step = I32 -> I32\n",
+        "type Thunk = () -> I32\n",
+        "def apply = (f: Step) => I32 :: f 1\n",
+        "def run = (f: Thunk) => I32 :: f ()\n",
+        "let ran = run { 1 }\n",
+    ));
+}
+
+#[test]
+fn a_local_of_a_function_alias_is_a_pipe_target() {
+    check("type Step = I32 -> I32\ndef apply = (f: Step, x: I32) => I32 :: x |> f\n");
+}
+
+#[test]
+fn a_block_argument_fills_a_callback_whose_parameter_is_an_alias_of_unit() {
+    check(concat!(
+        "type Unit = ()\n",
+        "def run = (f: Unit -> I32) => I32 :: f ()\n",
+        "let ran = run { 1 }\n",
+    ));
+}
+
+#[test]
 fn a_display_implementation_on_bool_still_resolves() {
     check(concat!(
         "let flag: Bool = True\n",

@@ -4608,6 +4608,42 @@ let result: String = Box.choose.<I32, String> (Box 1, "yes")
     }
 
     #[test]
+    fn hover_preserves_alias_names_on_pattern_bindings() {
+        let source = concat!(
+            "def flip: Bool -> Bool = b => !b\n",
+            "def pick = (flag: Bool, o: Option<Bool>) => Bool :: match o {\n",
+            "    Some v => v,\n",
+            "    None => flag,\n",
+            "}\n",
+        );
+        let hovers = checked_entries_for(source, "alias-patterns");
+        for (needle, expected) in [
+            ("b =>", "b: Bool"),
+            ("flag: Bool", "flag: Bool"),
+            ("o: Option", "o: Option<Bool>"),
+            ("v =>", "v: Bool"),
+        ] {
+            let start = source.find(needle).unwrap();
+            let signatures = hovers
+                .iter()
+                .filter(|entry| entry.range.start == start)
+                .map(|entry| entry.signature.as_str())
+                .collect::<Vec<_>>();
+            assert!(
+                signatures.contains(&expected),
+                "`{needle}`: {signatures:?}"
+            );
+            assert!(
+                signatures
+                    .iter()
+                    .all(|signature| !signature.contains("False | True")
+                        && !signature.contains("None | Some")),
+                "`{needle}`: {signatures:?}"
+            );
+        }
+    }
+
+    #[test]
     fn hover_shows_an_imported_alias_by_its_source_name() {
         let root = std::env::temp_dir().join(format!(
             "staple-hover-imported-alias-{}",

@@ -1872,7 +1872,9 @@ fn format_mutable_and_moved_checked_parameter(
 impl CheckedType {
     /// The rank-1 template exposed to consumers outside the checker.
     pub(crate) fn scheme_body(&self) -> &Self {
-        match self {
+        // An alias of a scheme answers with the scheme's body; any other
+        // alias keeps its name.
+        match self.desugared() {
             Self::Forall(scheme) => &scheme.body,
             _ => self,
         }
@@ -10672,15 +10674,18 @@ impl TypeChecker {
         pattern: &Pattern,
         value_type: &CheckedType,
     ) {
+        // Patterns inspect the aliased shape, but bindings and recorded
+        // pattern types keep the alias for display.
+        let original = value_type;
         let value_type = value_type.desugared();
         self.pattern_types
-            .insert(pattern.syntax().id, value_type.clone());
+            .insert(pattern.syntax().id, original.clone());
         match pattern {
             Pattern::At(at) => {
                 self.bind_pattern_types(
                     module,
                     &Pattern::Binding(at.binding.as_ref().clone()),
-                    value_type,
+                    original,
                 );
                 self.require_copy_at_pattern(at, value_type);
                 self.bind_pattern_types(module, &at.pattern, value_type);
@@ -10723,11 +10728,11 @@ impl TypeChecker {
                     return;
                 }
                 let value_type = if matches!(binding.ty, Type::Inferred(_)) {
-                    value_type.clone()
+                    original.clone()
                 } else {
                     let declared = self.resolve_source_type(module, &binding.ty);
                     self.require_compatible(
-                        value_type.clone(),
+                        original.clone(),
                         declared,
                         binding.syntax.span.clone(),
                     )
@@ -13274,7 +13279,7 @@ impl TypeChecker {
                     );
                     self.expression_types
                         .insert(selector.syntax.id, callee_type.clone());
-                    let result = match callee_type {
+                    let result = match callee_type.desugared() {
                         CheckedType::Function(function) => {
                             self.check_call_argument(
                                 module,
@@ -13283,19 +13288,21 @@ impl TypeChecker {
                                 &function.parameter,
                                 call.argument.syntax().span.clone(),
                             );
-                            *function.result
+                            function.result.as_ref().clone()
                         }
                         CheckedType::Error => CheckedType::Error,
-                        other => {
+                        _ => {
                             self.diagnostics.push(Diagnostic::new(
                                 selector.syntax.span.clone(),
                                 if matches!(
                                     self.pipe_targets.get(&selector.syntax.id),
                                     Some(PipeTarget::Local(_))
                                 ) {
-                                    format!("`{method}` is not callable: `{other}`")
+                                    format!("`{method}` is not callable: `{callee_type}`")
                                 } else {
-                                    format!("companion item `{method}` is not callable: `{other}`")
+                                    format!(
+                                        "companion item `{method}` is not callable: `{callee_type}`"
+                                    )
                                 },
                             ));
                             CheckedType::Error
@@ -13744,7 +13751,7 @@ impl TypeChecker {
                         );
                         self.expression_types
                             .insert(call.callee.syntax().id, callee_type.clone());
-                        let result = match callee_type {
+                        let result = match callee_type.desugared() {
                             CheckedType::Function(function) => {
                                 self.check_call_argument(
                                     module,
@@ -13753,9 +13760,9 @@ impl TypeChecker {
                                     &function.parameter,
                                     call.argument.syntax().span.clone(),
                                 );
-                                *function.result
+                                function.result.as_ref().clone()
                             }
-                            other => other,
+                            _ => callee_type,
                         };
                         return self.finish_expression_type(expression, result, expected);
                     }
@@ -14751,7 +14758,7 @@ impl TypeChecker {
                     );
                     self.expression_types
                         .insert(call.callee.syntax().id, callee_type.clone());
-                    match callee_type {
+                    match callee_type.desugared() {
                         CheckedType::Function(function) => {
                             self.check_call_argument(
                                 module,
@@ -14760,13 +14767,13 @@ impl TypeChecker {
                                 &function.parameter,
                                 call.argument.syntax().span.clone(),
                             );
-                            *function.result
+                            function.result.as_ref().clone()
                         }
                         CheckedType::Error => CheckedType::Error,
-                        other => {
+                        _ => {
                             self.diagnostics.push(Diagnostic::new(
                                 call.callee.syntax().span.clone(),
-                                format!("cannot call a value of type `{other}`"),
+                                format!("cannot call a value of type `{callee_type}`"),
                             ));
                             CheckedType::Error
                         }
@@ -15885,15 +15892,18 @@ impl TypeChecker {
         pattern: &Pattern,
         value_type: &CheckedType,
     ) {
+        // Patterns inspect the aliased shape, but bindings and recorded
+        // pattern types keep the alias for display.
+        let original = value_type;
         let value_type = value_type.desugared();
         self.pattern_types
-            .insert(pattern.syntax().id, value_type.clone());
+            .insert(pattern.syntax().id, original.clone());
         match pattern {
             Pattern::At(at) => {
                 self.bind_pattern_types(
                     module,
                     &Pattern::Binding(at.binding.as_ref().clone()),
-                    value_type,
+                    original,
                 );
                 self.require_copy_at_pattern(at, value_type);
                 self.check_match_pattern(module, &at.pattern, value_type);
@@ -15973,7 +15983,7 @@ impl TypeChecker {
                 }
             }
             Pattern::Binding(_) | Pattern::Wildcard(_) => {
-                self.bind_pattern_types(module, pattern, value_type);
+                self.bind_pattern_types(module, pattern, original);
             }
             Pattern::StringLiteral(pattern) => {
                 let Ok(value) = staple_syntax::string_literal::decode(&pattern.literal) else {
@@ -18898,7 +18908,11 @@ impl TypeChecker {
                 .filter(|symbol| !companions.contains(symbol));
             if let Some(symbol) = local {
                 self.ensure_binding_checked(module, symbol);
-                match self.symbol_types.get(&symbol).map(CheckedType::scheme_body) {
+                match self
+                    .symbol_types
+                    .get(&symbol)
+                    .map(|value_type| value_type.scheme_body().desugared())
+                {
                     // A value that cannot be called never competes for the stage.
                     Some(CheckedType::Function(_) | CheckedType::Error) => {}
                     Some(_) => local = None,
@@ -25541,7 +25555,7 @@ fn default_chain_takes_callback(function: &CheckedFunctionType) -> bool {
 }
 
 fn is_empty_product_type(value_type: &CheckedType) -> bool {
-    matches!(value_type, CheckedType::Product(product) if product.is_empty() && !product.variadic)
+    matches!(value_type.desugared(), CheckedType::Product(product) if product.is_empty() && !product.variadic)
 }
 
 /// Whether `product` is eligible for a structural derivation (`Index`,
