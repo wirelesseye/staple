@@ -691,7 +691,12 @@ Type :: parse_quote { $left | $right }
 
 Macros are hygienic. Names and bindings written in a quotation retain the
 definition module's environment and receive a fresh expansion identity, while
-spliced expressions retain their caller environment. A macro normally consumes
+spliced expressions retain their caller environment. Hygiene follows the
+syntax rather than the API that parses it: each token of a quotation records
+where it was written, so a `quote` fragment reparsed by `parse_quote` or by
+`Parse` resolves its quoted names in the macro's module and its spliced names
+where the caller wrote them. Syntax taken directly from a caller is
+unaffected and resolves at the call site. A macro normally consumes
 the number of arguments described by its syntax-node parameter slots;
 a top-level `Sequence` instead consumes as many matching arguments as possible
 while preserving a match for any following parameters. When it is the final

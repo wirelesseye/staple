@@ -1257,6 +1257,16 @@ impl MacroExpander {
                 return None;
             }
         };
+        // Syntax quoted by a macro resolves where it was quoted, as
+        // `parse_quote` does; tokens from a caller keep the caller's context.
+        let mut value = value;
+        if let Value::Syntax(syntax_value) = &mut value
+            && tokens[..consumed.min(tokens.len())]
+                .iter()
+                .any(|token| token.hygiene.is_some())
+        {
+            self.freshen_by_tokens(syntax_value, ModuleId(0), 0);
+        }
         self.advance_stream(
             &place,
             Value::Stream {

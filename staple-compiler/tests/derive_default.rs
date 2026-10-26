@@ -228,6 +228,26 @@ fn derived_defaults_ignore_a_local_default_trait() {
     assert_eq!(output, "5 0 42\n");
 }
 
+#[cfg(unix)]
+#[test]
+fn derived_defaults_resolve_field_types_at_the_call_site() {
+    // `std.default` sees `std.syntax.ParseError`; the spliced field type must
+    // still name the caller's own `ParseError`.
+    let output = run(concat!(
+        "use std.io.println\n",
+        "type ParseError wrap I32\n",
+        "impl Default ParseError { default = () => ParseError 7 }\n",
+        "@derive_default\n",
+        "type Holder wrap (error: ParseError, n: I32 = 1)\n",
+        "def main = () => {\n",
+        "    let Holder (ParseError code, n) = Holder :: default ()\n",
+        "    println \"${code} ${n}\"\n",
+        "}\n",
+        "main ()\n",
+    ));
+    assert_eq!(output, "7 1\n");
+}
+
 #[test]
 fn derived_defaults_require_default_fields() {
     let messages = check_errors(concat!(

@@ -133,6 +133,11 @@ pub struct SyntaxToken {
     pub text: String,
     pub span: Range<usize>,
     pub origin: Option<Span>,
+    /// The definition module and expansion mark of the quotation that wrote
+    /// this token, set when quoted tokens are spliced together. Reparsed
+    /// syntax takes each node's hygiene from its first token, so tokens
+    /// spliced in from a caller keep the caller's name resolution.
+    pub hygiene: Option<(usize, u64)>,
 }
 
 impl SyntaxToken {

@@ -871,10 +871,35 @@ fn quote_contains_raw_splice(contents: &Syntax, environment: &Environment) -> bo
     })
 }
 
-fn append_syntax_tokens(output: &mut Vec<staple_syntax::SyntaxToken>, syntax: &Syntax) {
+/// The hygiene to give a spliced value's tokens that carry none of their own.
+/// Tokens that went through a quotation already record where each was
+/// written, so a raw fragment, or a value with any such token, keeps them;
+/// a value built only from its syntax tree inherits its root's context.
+fn splice_hygiene(value: &SyntaxValue, syntax: &Syntax) -> Option<(usize, u64)> {
+    if matches!(value, SyntaxValue::Raw(_)) {
+        return None;
+    }
+    root_hygiene(syntax)
+}
+
+fn root_hygiene(syntax: &Syntax) -> Option<(usize, u64)> {
+    if syntax.tokens().iter().any(|token| token.hygiene.is_some()) {
+        return None;
+    }
+    syntax.definition_module().zip(syntax.expansion_mark)
+}
+
+fn append_syntax_tokens(
+    output: &mut Vec<staple_syntax::SyntaxToken>,
+    syntax: &Syntax,
+    hygiene: Option<(usize, u64)>,
+) {
     let mut occurrences = HashMap::<String, usize>::new();
     for token in syntax.tokens() {
         let mut token = token.clone();
+        if token.hygiene.is_none() && !token.kind.is_trivia() {
+            token.hygiene = hygiene;
+        }
         if token.origin.is_none() && !token.kind.is_trivia() {
             let occurrence = occurrences.entry(token.text.clone()).or_default();
             token.origin = syntax
@@ -1903,6 +1928,10 @@ struct MacroExpander {
     diagnostics: Vec<Diagnostic>,
     next_syntax_id: usize,
     next_annotation_id: usize,
+    /// While set, freshening takes each node's hygiene from its first
+    /// token instead of the module and mark it is given; see
+    /// [`staple_syntax::SyntaxToken::hygiene`].
+    token_hygiene: bool,
     next_mark: u64,
     steps: usize,
     expansion_stack: Vec<MacroKey>,
@@ -2849,6 +2878,7 @@ impl MacroExpander {
             diagnostics: Vec::new(),
             next_syntax_id,
             next_annotation_id: 0,
+            token_hygiene: false,
             next_mark: 1,
             steps: 0,
             expansion_stack: Vec::new(),
@@ -7702,7 +7732,11 @@ impl MacroExpander {
                             return None;
                         };
                         tokens.extend(staple_syntax::lex("("));
-                        append_syntax_tokens(&mut tokens, &syntax);
+                        let hygiene = match value.as_ref() {
+                            Value::Syntax(value) => splice_hygiene(value, &syntax),
+                            _ => None,
+                        };
+                        append_syntax_tokens(&mut tokens, &syntax, hygiene);
                         tokens.extend(staple_syntax::lex(")"));
                     },
                     _ => {
@@ -9211,29 +9245,25 @@ impl MacroExpander {
                     staple_syntax::parse_expression_fragment(syntax, &mut self.next_syntax_id)
                         .ok()?;
                 alpha_rename_expression(&mut expression, mark, &mut Vec::new());
-                self.freshen_expression(&mut expression, module, mark);
                 SyntaxValue::from_expression(expression)
             }
             MetaType::Type | MetaType::ProductType | MetaType::UnstructuredType => {
-                let mut ty =
+                let ty =
                     staple_syntax::parse_type_fragment(syntax, false, &mut self.next_syntax_id)
                         .ok()
                         .filter(|ty| type_category_matches(expected, ty))?;
-                freshen_type(self, &mut ty, module, mark);
                 SyntaxValue::Type(ty)
             }
             MetaType::Pattern => {
-                let mut pattern =
+                let pattern =
                     staple_syntax::parse_pattern_fragment(syntax, false, &mut self.next_syntax_id)
                         .ok()?;
-                freshen_pattern(self, &mut pattern, module, mark);
                 SyntaxValue::Pattern(pattern)
             }
             MetaType::Item => {
                 let mut item =
                     staple_syntax::parse_item_fragment(syntax, &mut self.next_syntax_id).ok()?;
                 alpha_rename_item(&mut item, mark);
-                freshen_item(self, &mut item, module, mark);
                 SyntaxValue::Item(Box::new(item))
             }
             MetaType::Sequence(element) if **element == MetaType::Item => {
@@ -9242,12 +9272,13 @@ impl MacroExpander {
                         .ok()?;
                 for item in &mut items {
                     alpha_rename_item(item, mark);
-                    freshen_item(self, item, module, mark);
                 }
                 SyntaxValue::Items(items)
             }
             _ => return None,
         };
+        let mut value = value;
+        self.freshen_by_tokens(&mut value, module, mark);
         Some(Value::Syntax(value))
     }
 
@@ -9276,10 +9307,15 @@ impl MacroExpander {
             }),
             _ => None,
         };
+        let mark = self.next_mark;
+        self.next_mark += 1;
         let push_template = |output: &mut Vec<staple_syntax::SyntaxToken>, index: usize| {
             let mut token = input[index].clone();
             if token.origin.is_none() {
                 token.origin = template_origin(&token);
+            }
+            if !token.kind.is_trivia() {
+                token.hygiene = Some((module.0, mark));
             }
             output.push(token);
         };
@@ -9318,7 +9354,8 @@ impl MacroExpander {
             match value {
                 Value::Syntax(SyntaxValue::Items(items)) if repeated => {
                     for item in items {
-                        append_syntax_tokens(&mut output, item_syntax(&item));
+                        let syntax = item_syntax(&item);
+                        append_syntax_tokens(&mut output, syntax, root_hygiene(syntax));
                     }
                 }
                 Value::Sequence(values) if repeated => {
@@ -9331,7 +9368,7 @@ impl MacroExpander {
                             return None;
                         };
                         let syntax = value.syntax()?;
-                        append_syntax_tokens(&mut output, syntax);
+                        append_syntax_tokens(&mut output, syntax, splice_hygiene(&value, syntax));
                     }
                 }
                 Value::Syntax(value) if !repeated => {
@@ -9342,7 +9379,7 @@ impl MacroExpander {
                         ));
                         return None;
                     };
-                    append_syntax_tokens(&mut output, syntax);
+                    append_syntax_tokens(&mut output, syntax, splice_hygiene(&value, syntax));
                 }
                 _ => {
                     self.diagnostics.push(Diagnostic::new(
@@ -9376,8 +9413,6 @@ impl MacroExpander {
             range: 0..offset,
             location: None,
         };
-        let mark = self.next_mark;
-        self.next_mark += 1;
         Some(syntax.generated(module.0, mark))
     }
 
@@ -9418,7 +9453,44 @@ impl MacroExpander {
         } else {
             self.fresh_id()
         };
+        if self.token_hygiene {
+            // A node written in a quotation resolves where it was written,
+            // and one spliced in from a caller keeps the caller's context.
+            let hygiene = syntax
+                .tokens()
+                .iter()
+                .find(|token| !token.kind.is_trivia())
+                .and_then(|token| token.hygiene);
+            if let Some((module, mark)) = hygiene {
+                *syntax = syntax.clone().generated(module, mark);
+            }
+            return;
+        }
         *syntax = syntax.clone().generated(module.0, mark);
+    }
+
+    /// Freshens syntax reparsed from spliced tokens, each node taking the
+    /// hygiene its tokens recorded.
+    fn freshen_by_tokens(&mut self, value: &mut SyntaxValue, module: ModuleId, mark: u64) {
+        let previous = std::mem::replace(&mut self.token_hygiene, true);
+        match value {
+            SyntaxValue::Ident(_) | SyntaxValue::Call(_) | SyntaxValue::Unstructured(_) => {
+                if let Some(mut expression) = value.to_expression() {
+                    self.freshen_expression(&mut expression, module, mark);
+                    *value = SyntaxValue::from_expression(expression);
+                }
+            }
+            SyntaxValue::Type(ty) => freshen_type(self, ty, module, mark),
+            SyntaxValue::Pattern(pattern) => freshen_pattern(self, pattern, module, mark),
+            SyntaxValue::Item(item) => freshen_item(self, item, module, mark),
+            SyntaxValue::Items(items) => {
+                for item in items {
+                    freshen_item(self, item, module, mark);
+                }
+            }
+            _ => {}
+        }
+        self.token_hygiene = previous;
     }
 
     fn freshen_expression(&mut self, expression: &mut Expression, module: ModuleId, mark: u64) {
