@@ -841,7 +841,7 @@ impl MacroExpander {
             }
             SyntaxIntrinsic::Offset => {
                 let (_, cursor) = self.stream_argument(argument, span)?;
-                Some(Value::Integer(cursor as i128))
+                Some(Value::Integer(cursor as i128, None))
             }
             SyntaxIntrinsic::Float(intrinsic) => {
                 self.eval_float_intrinsic(intrinsic, argument, span)
@@ -1967,7 +1967,7 @@ impl MacroExpander {
             Intrinsic::FloatBinary { float, .. } => (float, 2),
             Intrinsic::FloatTernary { float, .. } => (float, 3),
             Intrinsic::FloatFromBits { float } => {
-                let Value::Integer(bits) = argument else {
+                let Value::Integer(bits, _) = argument else {
                     self.diagnostics.push(Diagnostic::new(
                         span,
                         "float bit-cast operand must be an integer",
@@ -2028,10 +2028,13 @@ impl MacroExpander {
                 apply_float_ternary(float, operation, values[0], values[1], values[2])
             }
             Intrinsic::FloatToBits { .. } => {
-                return Some(Value::Integer(match float {
-                    FloatType::F32 => i128::from(narrow_to_f32(values[0]).to_bits()),
-                    FloatType::F64 => i128::from(values[0].to_bits()),
-                }));
+                return Some(Value::Integer(
+                    match float {
+                        FloatType::F32 => i128::from(narrow_to_f32(values[0]).to_bits()),
+                        FloatType::F64 => i128::from(values[0].to_bits()),
+                    },
+                    None,
+                ));
             }
             _ => unreachable!("handled above"),
         };
@@ -2051,6 +2054,7 @@ impl MacroExpander {
             Intrinsic::IntegerOverflowing { integer, .. } => (integer, 2),
             Intrinsic::IntegerCount { integer, .. } => (integer, 1),
             Intrinsic::IntegerUnary { integer, .. } => (integer, 1),
+            Intrinsic::IntegerSignCast { integer } => (integer, 1),
             Intrinsic::IntegerRotate { integer, .. } => (integer, 2),
             _ => unreachable!("integer companions declare only integer intrinsics"),
         };
@@ -2077,7 +2081,7 @@ impl MacroExpander {
         }
         let mut values = Vec::with_capacity(arity);
         for operand in operands {
-            let Value::Integer(value) = operand else {
+            let Value::Integer(value, _) = operand else {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     "integer intrinsic operands must be integers",
@@ -2092,8 +2096,8 @@ impl MacroExpander {
                     fold_integer_overflow(integer, width, operation, values[0], values[1]);
                 Some(Value::Product(
                     vec![
-                        (None, Value::Integer(i128::from(u8::from(overflow)))),
-                        (None, Value::Integer(value)),
+                        (None, Value::Integer(i128::from(u8::from(overflow)), None)),
+                        (None, Value::Integer(value, None)),
                     ]
                     .into(),
                     false,
@@ -2101,15 +2105,21 @@ impl MacroExpander {
             }
             Intrinsic::IntegerCount { operation, .. } => {
                 let value = fold_integer_count(integer, width, operation, values[0]);
-                Some(Value::Integer(i128::from(value)))
+                Some(Value::Integer(i128::from(value), None))
             }
             Intrinsic::IntegerUnary { operation, .. } => {
                 let value = fold_integer_unary(integer, width, operation, values[0]);
-                Some(Value::Integer(value))
+                Some(Value::Integer(value, None))
+            }
+            Intrinsic::IntegerSignCast { .. } => {
+                let counterpart = integer.sign_counterpart();
+                let value = truncate_integer(integer, width, values[0]);
+                let value = truncate_integer(counterpart, width, value);
+                Some(Value::Integer(value, Some(counterpart)))
             }
             Intrinsic::IntegerRotate { direction, .. } => {
                 let value = fold_integer_rotate(integer, width, direction, values[0], values[1]);
-                Some(Value::Integer(value))
+                Some(Value::Integer(value, None))
             }
             _ => unreachable!("handled above"),
         }

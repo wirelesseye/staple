@@ -246,7 +246,8 @@ pub struct StringLiteralType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NumberLiteralType {
     pub syntax: Syntax,
-    /// The non-negative decimal literal exactly as written.
+    /// The literal exactly as written: any radix and digit separators, but
+    /// never a type suffix.
     pub literal: String,
 }
 

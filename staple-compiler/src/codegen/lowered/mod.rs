@@ -8561,6 +8561,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_integer_unary(integer, operation, *value)?;
                 Ok(value.as_any_value_enum())
             }
+            IntrinsicFunction::IntegerSignCast { integer: _ } => {
+                let [BasicMetadataValueEnum::IntValue(value)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "integer sign cast operand must be an integer",
+                    ));
+                };
+                // LLVM integers have no signedness, and both types have the
+                // same width, so the operand already is the result.
+                Ok((*value).into())
+            }
             IntrinsicFunction::IntegerRotate { integer, direction } => {
                 let [
                     BasicMetadataValueEnum::IntValue(value),

@@ -190,11 +190,23 @@
       "patterns": [
         {
           "name": "constant.numeric.float.staple",
-          "match": "(?<![_\\p{Alphabetic}\\p{Number}])(?:[0-9]+\\.(?:[0-9]+(?:[eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+|(?![_\\p{Alphabetic}]))|\\.[0-9]+(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)(?![_\\p{Alphabetic}\\p{Number}])"
+          "match": "(?<![_\\p{Alphabetic}\\p{Number}])(?:(?:[0-9](?:_?[0-9])*\\.(?:[0-9](?:_?[0-9])*(?:[eE][+-]?[0-9](?:_?[0-9])*)?|[eE][+-]?[0-9](?:_?[0-9])*|(?![_\\p{Alphabetic}]))|\\.[0-9](?:_?[0-9])*(?:[eE][+-]?[0-9](?:_?[0-9])*)?|[0-9](?:_?[0-9])*[eE][+-]?[0-9](?:_?[0-9])*)(?:_?f(?:32|64))?|[0-9](?:_?[0-9])*_?f(?:32|64))(?![_\\p{Alphabetic}\\p{Number}])"
         },
         {
           "name": "constant.numeric.integer.staple",
-          "match": "(?<![_\\p{Alphabetic}\\p{Number}])[0-9]+(?![_\\p{Alphabetic}\\p{Number}])"
+          "match": "(?<![_\\p{Alphabetic}\\p{Number}])0x[0-9A-Fa-f](?:_?[0-9A-Fa-f])*(?:_?(?:i8|i16|i32|i64|isize|u8|u16|u32|u64|usize))?(?![_\\p{Alphabetic}\\p{Number}])"
+        },
+        {
+          "name": "constant.numeric.integer.staple",
+          "match": "(?<![_\\p{Alphabetic}\\p{Number}])0b[01](?:_?[01])*(?:_?(?:i8|i16|i32|i64|isize|u8|u16|u32|u64|usize))?(?![_\\p{Alphabetic}\\p{Number}])"
+        },
+        {
+          "name": "constant.numeric.integer.staple",
+          "match": "(?<![_\\p{Alphabetic}\\p{Number}])0o[0-7](?:_?[0-7])*(?:_?(?:i8|i16|i32|i64|isize|u8|u16|u32|u64|usize))?(?![_\\p{Alphabetic}\\p{Number}])"
+        },
+        {
+          "name": "constant.numeric.integer.staple",
+          "match": "(?<![_\\p{Alphabetic}\\p{Number}])[0-9](?:_?[0-9])*(?:_?(?:i8|i16|i32|i64|isize|u8|u16|u32|u64|usize))?(?![_\\p{Alphabetic}\\p{Number}])"
         }
       ]
     },

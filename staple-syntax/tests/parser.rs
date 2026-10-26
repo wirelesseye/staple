@@ -411,6 +411,63 @@ fn unmodified_item(item: &Item) -> &Item {
 }
 
 #[test]
+fn lexes_number_literals_radixes_separators_and_suffixes() {
+    for (source, expected) in [
+        ("0xFF", TokenKind::Integer),
+        ("0xffu8", TokenKind::Integer),
+        ("0b1010", TokenKind::Integer),
+        ("0o755", TokenKind::Integer),
+        ("1_000_000", TokenKind::Integer),
+        ("1_000.5", TokenKind::Float),
+        ("6.022_140_76e23", TokenKind::Float),
+        (".5e-3", TokenKind::Float),
+        ("1e1_0", TokenKind::Float),
+        ("0x7F_i8", TokenKind::Integer),
+        ("1_f32", TokenKind::Float),
+        ("0b1010_u16", TokenKind::Integer),
+        ("42u8", TokenKind::Integer),
+        ("7f64", TokenKind::Float),
+        ("1.5f32", TokenKind::Float),
+        ("1e3f32", TokenKind::Float),
+        ("0b1f32", TokenKind::Integer),
+        ("42abc", TokenKind::Integer),
+        ("0x", TokenKind::Integer),
+    ] {
+        let tokens = staple_syntax::lex(source);
+        assert_eq!(tokens.len(), 1, "{source}: {tokens:?}");
+        assert_eq!(tokens[0].kind, expected, "{source}");
+        assert_eq!(tokens[0].text, source, "{source}");
+        assert_eq!(tokens[0].span, 0..source.len(), "{source}");
+    }
+
+    for source in [
+        "pair.0", "x.0.1", "1.field", "1._x", "pair.0\nx.0.1\n1.field\n1._x\n",
+    ] {
+        let text = staple_syntax::lex(source)
+            .iter()
+            .map(|token| token.text.as_str())
+            .collect::<String>();
+        assert_eq!(text, source);
+    }
+    assert!(matches!(
+        parse("1._x\n").expect("member access").items[0],
+        Item::Expression(Expression::Access(_))
+    ));
+}
+
+#[test]
+fn access_indexes_reject_non_decimal_spellings() {
+    for source in ["pair.0x1\n", "pair.1_0\n", "pair.0u8\n"] {
+        let error = parse(source).expect_err("a product index must be decimal");
+        assert!(
+            error.message.contains("plain decimal digits"),
+            "{source}: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
 fn parses_float_literals_losslessly_without_stealing_access_dots() {
     let source = "1.0\n1.\n.5\n1e3\n1.5e-2\n1.e2\n1.field\n(1, 2).0\n";
     let root = parse(source).expect("float literals should parse");

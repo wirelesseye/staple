@@ -119,7 +119,8 @@ pub(super) fn value_shape(value: &Value) -> MetaType {
             MetaType::Nominal("Separated".into(), vec![unknown(), unknown()])
         }
         Value::Nominal(name, _) => MetaType::Nominal(name.clone(), vec![]),
-        Value::Integer(_) => MetaType::Nominal("{integer}".into(), vec![]),
+        Value::Integer(_, Some(integer)) => MetaType::Nominal(integer.name().into(), vec![]),
+        Value::Integer(_, None) => MetaType::Nominal("{integer}".into(), vec![]),
         Value::Float(_, _) => MetaType::Nominal("{float}".into(), vec![]),
         Value::Char(_) => MetaType::Nominal("Char".into(), vec![]),
         Value::String(_) => MetaType::Nominal("String".into(), vec![]),

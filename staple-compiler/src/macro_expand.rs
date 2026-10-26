@@ -9,7 +9,7 @@ mod parse;
 mod traits;
 
 use crate::program::source_location_at;
-use crate::{FloatType, ModuleId, Program, ResolvedMacro};
+use crate::{FloatType, IntegerType, ModuleId, Program, ResolvedMacro};
 use parse::{ParseImpl, ParseTarget, SyntaxIntrinsic, TypeEnv};
 use staple_syntax::{
     Accessor, BinaryOperator, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
@@ -528,7 +528,10 @@ enum Value {
         cursor: usize,
     },
     Product(ProductValue, bool),
-    Integer(i128),
+    /// An integer and the integer type it is known to have. `None` is an
+    /// untyped literal, or arithmetic over only those, whose type the checker
+    /// infers from context later.
+    Integer(i128, Option<IntegerType>),
     Char(char),
     /// A float and the float type it is known to have. `None` is an
     /// unannotated literal, or arithmetic over only those, whose type the
@@ -6847,17 +6850,56 @@ impl MacroExpander {
             },
             Expression::String(string) => Some(Value::String(string.literal.clone())),
             Expression::Integer(integer) => {
-                integer.literal.parse::<i128>().ok().map(Value::Integer)
+                match staple_syntax::number_literal::decode_integer(&integer.literal) {
+                    Ok(decoded) => {
+                        let Ok(value) = i128::try_from(decoded.value) else {
+                            self.diagnostics.push(Diagnostic::new(
+                                integer.syntax.span.clone(),
+                                "integer literal is too large",
+                            ));
+                            return None;
+                        };
+                        let integer_type = decoded
+                            .suffix
+                            .and_then(crate::IntegerType::from_number_suffix);
+                        Some(Value::Integer(value, integer_type))
+                    }
+                    Err(error) => {
+                        self.diagnostics
+                            .push(Diagnostic::new(integer.syntax.span.clone(), error.to_string()));
+                        None
+                    }
+                }
             }
-            Expression::Float(float) => float
-                .literal
-                .parse::<f64>()
-                .ok()
-                // A float *literal* must still be finite; only computed
-                // values may reify as NaN or infinity. Leaving a non-finite
-                // literal unfolded lets the checker's literal rule report it.
-                .filter(|value| value.is_finite())
-                .map(|value| Value::Float(value, None)),
+            Expression::Float(float) => {
+                match staple_syntax::number_literal::decode_float(&float.literal) {
+                    Ok(decoded) => {
+                        let float_type =
+                            decoded.suffix.and_then(crate::FloatType::from_number_suffix);
+                        decoded
+                            .digits
+                            .parse::<f64>()
+                            .ok()
+                            .map(|value| match float_type {
+                                Some(FloatType::F32) => {
+                                    parse::round_float(FloatType::F32, value)
+                                }
+                                _ => value,
+                            })
+                            // A float *literal* must still be finite; only
+                            // computed values may reify as NaN or infinity.
+                            // Leaving a non-finite literal unfolded lets the
+                            // checker's literal rule report it.
+                            .filter(|value| value.is_finite())
+                            .map(|value| Value::Float(value, float_type))
+                    }
+                    Err(error) => {
+                        self.diagnostics
+                            .push(Diagnostic::new(float.syntax.span.clone(), error.to_string()));
+                        None
+                    }
+                }
+            }
             Expression::SyntaxArgument(argument) => {
                 self.diagnostics.push(Diagnostic::new(
                     argument.syntax.span.clone(),
@@ -6934,7 +6976,11 @@ impl MacroExpander {
             Expression::RepeatedProduct(repeated) => {
                 let value = self.eval_expression(module, &repeated.value, environment)?;
                 let count = match repeated.count.as_ref() {
-                    Type::NumberLiteral(literal) => literal.literal.parse::<i128>().ok(),
+                    Type::NumberLiteral(literal) => {
+                        staple_syntax::number_literal::decode_integer(&literal.literal)
+                            .ok()
+                            .and_then(|literal| i128::try_from(literal.value).ok())
+                    }
                     _ => None,
                 };
                 let Some(count) = count else {
@@ -7300,7 +7346,7 @@ impl MacroExpander {
                     ));
                     return None;
                 };
-                let Value::Integer(position) =
+                let Value::Integer(position, _) =
                     self.eval_expression(module, &index.index, environment)?
                 else {
                     self.diagnostics.push(Diagnostic::new(
@@ -8648,8 +8694,8 @@ impl MacroExpander {
     ) -> Option<Value> {
         let operand = self.eval_expression(module, &unary.operand, environment)?;
         match (unary.operator, &operand) {
-            (staple_syntax::UnaryOperator::Negate, Value::Integer(value)) => {
-                Some(Value::Integer(value.wrapping_neg()))
+            (staple_syntax::UnaryOperator::Negate, Value::Integer(value, integer_type)) => {
+                Some(Value::Integer(value.wrapping_neg(), *integer_type))
             }
             (staple_syntax::UnaryOperator::Negate, Value::Float(value, float)) => {
                 Some(Value::Float(-value, *float))
@@ -8692,33 +8738,47 @@ impl MacroExpander {
             value => value,
         };
         match value {
-            Value::Integer(integer) if integer >= 0 => {
+            Value::Integer(integer, integer_type) if integer >= 0 => {
+                let suffix = integer_type
+                    .map(crate::IntegerType::suffix)
+                    .unwrap_or_default();
                 Some(Expression::Integer(staple_syntax::IntegerExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span),
-                    literal: integer.to_string(),
+                    literal: format!("{integer}{suffix}"),
                 }))
             }
-            Value::Integer(integer) => {
+            Value::Integer(integer, integer_type) => {
                 // Literals cannot carry a leading `-`. Keep `0 - |n|` as
                 // operator syntax so desugaring binds the standard trait.
                 // Subtract one from the magnitude first, so even the smallest
                 // value of a narrow type reifies with a literal that fits.
-                let zero = Expression::Integer(staple_syntax::IntegerExpression {
-                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                    literal: "0".to_string(),
-                });
-                // Keep the annotation on the zero so a magnitude too large for
-                // the default literal type is still checked against the
+                // A typed value suffixes the zero; an untyped one puts the
+                // binding's annotation on it instead, so a magnitude too large
+                // for the default literal type is still checked against the
                 // constant's own integer type.
-                let zero = match expected {
-                    Some(ty) => Expression::TypeAscription(Box::new(
-                        staple_syntax::TypeAscriptionExpression {
+                let zero = match integer_type {
+                    Some(integer_type) => {
+                        Expression::Integer(staple_syntax::IntegerExpression {
                             syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                            value: Box::new(zero),
-                            ty: ty.clone(),
-                        },
-                    )),
-                    None => zero,
+                            literal: format!("0{}", integer_type.suffix()),
+                        })
+                    }
+                    None => {
+                        let zero = Expression::Integer(staple_syntax::IntegerExpression {
+                            syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                            literal: "0".to_string(),
+                        });
+                        match expected {
+                            Some(ty) => Expression::TypeAscription(Box::new(
+                                staple_syntax::TypeAscriptionExpression {
+                                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                                    value: Box::new(zero),
+                                    ty: ty.clone(),
+                                },
+                            )),
+                            None => zero,
+                        }
+                    }
                 };
                 let magnitude = Expression::Integer(staple_syntax::IntegerExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
@@ -8886,7 +8946,7 @@ impl MacroExpander {
                     Value::Sequence(_) => "a sequence value",
                     Value::Separated { .. } => "a separated sequence value",
                     Value::Nominal(..) => "a nominal value",
-                    Value::Integer(_)
+                    Value::Integer(_, _)
                     | Value::Float(..)
                     | Value::Char(_)
                     | Value::String(_)
@@ -8983,28 +9043,66 @@ impl MacroExpander {
         let Some(right) = self.eval_expression(module, right_argument, environment) else {
             return Some(None);
         };
+        // An integer fold keeps the type either operand names; a typed operand
+        // types the result. Mixing two different integer types is the same
+        // error as mixing `F32` and `F64`.
+        let folded_integer_type = match (&left, &right) {
+            (Value::Integer(_, left_type), Value::Integer(_, right_type)) => {
+                match (left_type, right_type) {
+                    (Some(left_type), Some(right_type)) if left_type != right_type => {
+                        self.diagnostics.push(Diagnostic::new(
+                            access.syntax.span.clone(),
+                            format!(
+                                "expected `{}`, found `{}`",
+                                left_type.name(),
+                                right_type.name()
+                            ),
+                        ));
+                        return Some(None);
+                    }
+                    (Some(integer_type), _) | (_, Some(integer_type)) => Some(*integer_type),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
         Some(match (&left, &right, operator) {
-            (Value::Integer(left), Value::Integer(right), "+") => {
-                Some(Value::Integer(left.wrapping_add(*right)))
+            (Value::Integer(left, _), Value::Integer(right, _), "+") => Some(Value::Integer(
+                left.wrapping_add(*right),
+                folded_integer_type,
+            )),
+            (Value::Integer(left, _), Value::Integer(right, _), "-") => Some(Value::Integer(
+                left.wrapping_sub(*right),
+                folded_integer_type,
+            )),
+            (Value::Integer(left, _), Value::Integer(right, _), "*") => Some(Value::Integer(
+                left.wrapping_mul(*right),
+                folded_integer_type,
+            )),
+            (Value::Integer(left, _), Value::Integer(right, _), "/") if *right != 0 => Some(
+                Value::Integer(left.wrapping_div(*right), folded_integer_type),
+            ),
+            (Value::Integer(left, _), Value::Integer(right, _), "%") if *right != 0 => Some(
+                Value::Integer(left.wrapping_rem(*right), folded_integer_type),
+            ),
+            (Value::Integer(left, _), Value::Integer(right, _), "==") => {
+                Some(bool_value(left == right))
             }
-            (Value::Integer(left), Value::Integer(right), "-") => {
-                Some(Value::Integer(left.wrapping_sub(*right)))
+            (Value::Integer(left, _), Value::Integer(right, _), "!=") => {
+                Some(bool_value(left != right))
             }
-            (Value::Integer(left), Value::Integer(right), "*") => {
-                Some(Value::Integer(left.wrapping_mul(*right)))
+            (Value::Integer(left, _), Value::Integer(right, _), "<") => {
+                Some(bool_value(left < right))
             }
-            (Value::Integer(left), Value::Integer(right), "/") if *right != 0 => {
-                Some(Value::Integer(left.wrapping_div(*right)))
+            (Value::Integer(left, _), Value::Integer(right, _), "<=") => {
+                Some(bool_value(left <= right))
             }
-            (Value::Integer(left), Value::Integer(right), "%") if *right != 0 => {
-                Some(Value::Integer(left.wrapping_rem(*right)))
+            (Value::Integer(left, _), Value::Integer(right, _), ">") => {
+                Some(bool_value(left > right))
             }
-            (Value::Integer(left), Value::Integer(right), "==") => Some(bool_value(left == right)),
-            (Value::Integer(left), Value::Integer(right), "!=") => Some(bool_value(left != right)),
-            (Value::Integer(left), Value::Integer(right), "<") => Some(bool_value(left < right)),
-            (Value::Integer(left), Value::Integer(right), "<=") => Some(bool_value(left <= right)),
-            (Value::Integer(left), Value::Integer(right), ">") => Some(bool_value(left > right)),
-            (Value::Integer(left), Value::Integer(right), ">=") => Some(bool_value(left >= right)),
+            (Value::Integer(left, _), Value::Integer(right, _), ">=") => {
+                Some(bool_value(left >= right))
+            }
             (Value::Char(left), Value::Char(right), "==") => Some(bool_value(left == right)),
             (Value::Char(left), Value::Char(right), "!=") => Some(bool_value(left != right)),
             (Value::String(left), Value::String(right), "==") => Some(bool_value(left == right)),

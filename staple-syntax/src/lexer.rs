@@ -31,8 +31,7 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
         let identifier = |text: &str, at: usize| {
             lex_identifier(text, at).map(|end| (TokenKind::Identifier, end))
         };
-        let float = |text: &str, at: usize| lex_float(text, at).map(|end| (TokenKind::Float, end));
-        let integer = take_while1(|c| c.is_ascii_digit()).map(|_| TokenKind::Integer);
+        let number = |text: &str, at: usize| lex_number(text, at);
         let fixed_operator = |text: &str, at: usize| {
             lex_fixed_operator(text, at).map(|end| (TokenKind::Operator, end))
         };
@@ -47,9 +46,8 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
             .or(tag("=>").map(|_| TokenKind::FatArrow))
             .or(tag("->").map(|_| TokenKind::Arrow))
             .or(tag("...").map(|_| TokenKind::Ellipsis))
-            .or(float)
+            .or(number)
             .or(identifier)
-            .or(integer)
             .or(fixed_operator)
             .parse(source, offset);
 
@@ -108,12 +106,21 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
     tokens
 }
 
-fn lex_float(source: &str, offset: usize) -> Option<usize> {
+/// Lexes a number literal: an optional radix prefix, digit runs with
+/// separators, an optional fraction and exponent, and the type suffix or other
+/// trailing identifier characters.
+///
+/// The lexer never rejects a number; malformed literals stay one token so the
+/// checker can report the decoder's diagnostic. The token kind is `Float` when
+/// the spelling has a fraction, an exponent, or an `f32`/`f64` suffix on a
+/// decimal literal, and `Integer` otherwise.
+fn lex_number(source: &str, offset: usize) -> Option<(TokenKind, usize)> {
     let bytes = source.as_bytes();
-    let mut end = offset;
-    let mut has_dot = false;
 
-    if bytes.get(end) == Some(&b'.') {
+    if bytes.get(offset) == Some(&b'.') {
+        // A `.` that follows an identifier, `)`, `]`, `}` or `*` is member
+        // access, not a fraction. A `.` followed by anything but a digit is
+        // member access too.
         if source[..offset]
             .chars()
             .next_back()
@@ -125,44 +132,99 @@ fn lex_float(source: &str, offset: usize) -> Option<usize> {
         {
             return None;
         }
-        if !bytes.get(end + 1).is_some_and(u8::is_ascii_digit) {
+        if !bytes.get(offset + 1).is_some_and(u8::is_ascii_digit) {
             return None;
         }
-        has_dot = true;
-        end += 1;
-        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
-            end += 1;
-        }
-    } else if bytes.get(end).is_some_and(u8::is_ascii_digit) {
-        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
-            end += 1;
-        }
-        let exponent_after_dot = matches!(bytes.get(end + 1), Some(b'e' | b'E')) && {
-            let mut exponent_digit = end + 2;
-            if matches!(bytes.get(exponent_digit), Some(b'+' | b'-')) {
-                exponent_digit += 1;
-            }
-            bytes.get(exponent_digit).is_some_and(u8::is_ascii_digit)
-        };
-        if bytes.get(end) == Some(&b'.')
-            && bytes.get(end + 1) != Some(&b'.')
-            && (exponent_after_dot
-                || !source[end + 1..]
-                    .chars()
-                    .next()
-                    .is_some_and(|character| character == '_' || character.is_alphabetic()))
+        let mut end = offset + 1;
+        while bytes
+            .get(end)
+            .is_some_and(|byte| byte.is_ascii_digit() || *byte == b'_')
         {
-            has_dot = true;
             end += 1;
-            while bytes.get(end).is_some_and(u8::is_ascii_digit) {
-                end += 1;
-            }
         }
-    } else {
+        let (_, end) = lex_exponent(source, end);
+        return Some((TokenKind::Float, lex_number_tail(source, end)));
+    }
+
+    if !bytes.get(offset).is_some_and(u8::is_ascii_digit) {
         return None;
     }
 
+    // `0x`, `0b`, `0o` (and their uppercase forms, which the decoder rejects
+    // with a fix-it) are always integers. Everything alphanumeric after the
+    // prefix stays in the token so `0b1010u8` and `0xG1` are one literal.
+    if bytes.get(offset) == Some(&b'0')
+        && matches!(
+            bytes.get(offset + 1),
+            Some(b'x' | b'X' | b'b' | b'B' | b'o' | b'O')
+        )
+    {
+        let mut end = offset + 2;
+        while bytes
+            .get(end)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            end += 1;
+        }
+        return Some((TokenKind::Integer, end));
+    }
+
+    let mut end = offset;
+    while bytes
+        .get(end)
+        .is_some_and(|byte| byte.is_ascii_digit() || *byte == b'_')
+    {
+        end += 1;
+    }
+
+    let mut has_dot = false;
+    let exponent_after_dot = matches!(bytes.get(end + 1), Some(b'e' | b'E')) && {
+        let mut exponent_digit = end + 2;
+        if matches!(bytes.get(exponent_digit), Some(b'+' | b'-')) {
+            exponent_digit += 1;
+        }
+        bytes
+            .get(exponent_digit)
+            .is_some_and(u8::is_ascii_digit)
+    };
+    if bytes.get(end) == Some(&b'.')
+        && bytes.get(end + 1) != Some(&b'.')
+        && (exponent_after_dot
+            || !source[end + 1..]
+                .chars()
+                .next()
+                .is_some_and(|character| character == '_' || character.is_alphabetic()))
+    {
+        has_dot = true;
+        end += 1;
+        while bytes
+            .get(end)
+            .is_some_and(|byte| byte.is_ascii_digit() || *byte == b'_')
+        {
+            end += 1;
+        }
+    }
+
+    let (has_exponent, end) = lex_exponent(source, end);
+
+    let suffix_start = end;
+    let end = lex_number_tail(source, end);
+    let suffix = &source[suffix_start..end];
+    let has_float_suffix = suffix.starts_with("f32") || suffix.starts_with("f64");
+    let kind = if has_dot || has_exponent || has_float_suffix {
+        TokenKind::Float
+    } else {
+        TokenKind::Integer
+    };
+    Some((kind, end))
+}
+
+/// Consumes an exponent at `end` when one is present, returning whether it was
+/// consumed and the new end offset.
+fn lex_exponent(source: &str, end: usize) -> (bool, usize) {
+    let bytes = source.as_bytes();
     let mut has_exponent = false;
+    let mut end = end;
     if matches!(bytes.get(end), Some(b'e' | b'E')) {
         let exponent = end;
         let mut exponent_end = end + 1;
@@ -170,7 +232,10 @@ fn lex_float(source: &str, offset: usize) -> Option<usize> {
             exponent_end += 1;
         }
         let digits = exponent_end;
-        while bytes.get(exponent_end).is_some_and(u8::is_ascii_digit) {
+        while bytes
+            .get(exponent_end)
+            .is_some_and(|byte| byte.is_ascii_digit() || *byte == b'_')
+        {
             exponent_end += 1;
         }
         let next_is_identifier = source[exponent_end..]
@@ -182,8 +247,21 @@ fn lex_float(source: &str, offset: usize) -> Option<usize> {
             end = exponent_end.max(exponent + 1);
         }
     }
+    (has_exponent, end)
+}
 
-    (has_dot || has_exponent).then_some(end)
+/// Absorbs the identifier characters that follow a number so a malformed
+/// suffix is one token instead of a literal followed by a name.
+fn lex_number_tail(source: &str, offset: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut end = offset;
+    while bytes
+        .get(end)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        end += 1;
+    }
+    end
 }
 
 /// Returns the byte offset just past a `/* ... */` block comment starting at

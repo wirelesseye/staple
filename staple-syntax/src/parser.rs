@@ -4044,7 +4044,16 @@ impl Grammar {
                             Accessor::Name(self.bump_token().expect("peeked name").text)
                         }
                         Some(TokenKind::Integer) => {
-                            Accessor::Index(self.bump_token().expect("peeked index").text)
+                            let token = self.bump_token().expect("peeked index");
+                            if !token.text.bytes().all(|byte| byte.is_ascii_digit()) {
+                                return Err(ParseError {
+                                    offset: token.span.start,
+                                    location: self.location(token.span.start),
+                                    message:
+                                        "a product index must be plain decimal digits".to_owned(),
+                                });
+                            }
+                            Accessor::Index(token.text)
                         }
                         _ => {
                             return Err(self.error(

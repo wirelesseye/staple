@@ -3,6 +3,7 @@ mod combinator;
 mod diagnostic;
 mod formatter;
 mod lexer;
+pub mod number_literal;
 mod parser;
 mod recovery;
 pub mod string_literal;

@@ -6251,7 +6251,9 @@ impl LoweredProgram {
         module: &TypedModule,
         integer: &staple_syntax::IntegerExpression,
     ) -> Result<LoweredInteger, Diagnostic> {
-        let value = integer.literal.parse::<u64>().map_err(|_| {
+        let decoded = staple_syntax::number_literal::decode_integer(&integer.literal)
+            .map_err(|error| Diagnostic::new(integer.syntax.span.clone(), error.to_string()))?;
+        let value = u64::try_from(decoded.value).map_err(|_| {
             Diagnostic::new(
                 integer.syntax.span.clone(),
                 format!("integer literal `{}` is too large", integer.literal),
@@ -6292,9 +6294,11 @@ impl LoweredProgram {
             .type_of_expression(float.syntax.id)
             .and_then(CheckedType::float_type)
             .unwrap_or(FloatType::F64);
+        let decoded = staple_syntax::number_literal::decode_float(&float.literal)
+            .map_err(|error| Diagnostic::new(float.syntax.span.clone(), error.to_string()))?;
         let value = match float_type {
-            FloatType::F32 => float.literal.parse::<f32>().map(f64::from),
-            FloatType::F64 => float.literal.parse::<f64>(),
+            FloatType::F32 => decoded.digits.parse::<f32>().map(f64::from),
+            FloatType::F64 => decoded.digits.parse::<f64>(),
         }
         .map_err(|_| Diagnostic::new(float.syntax.span.clone(), "invalid float literal"))?;
         if !value.is_finite() {
@@ -14220,6 +14224,7 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::IntegerOverflowing { .. }
         | Intrinsic::IntegerCount { .. }
         | Intrinsic::IntegerUnary { .. }
+        | Intrinsic::IntegerSignCast { .. }
         | Intrinsic::IntegerRotate { .. }
         | Intrinsic::FloatBinary { .. }
         | Intrinsic::FloatUnary { .. }

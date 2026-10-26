@@ -7658,6 +7658,16 @@ impl TypeChecker {
                         result: Box::new(integer),
                     })
                 }
+                crate::IntrinsicFunction::IntegerSignCast { integer } => {
+                    CheckedType::Function(CheckedFunctionType {
+                        default: None,
+                        parameter: Box::new(CheckedType::integer(*integer)),
+                        mutations: Vec::new(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
+                        result: Box::new(CheckedType::integer(integer.sign_counterpart())),
+                    })
+                }
                 crate::IntrinsicFunction::IntegerRotate { integer, .. } => {
                     let integer = CheckedType::integer(*integer);
                     CheckedType::Function(CheckedFunctionType {
@@ -11051,10 +11061,7 @@ impl TypeChecker {
                     self.expression_types
                         .insert(assignment.target.syntax().id, arguments[2].clone());
                     if let Expression::Integer(literal) = index.index.as_ref()
-                        && literal
-                            .literal
-                            .parse::<usize>()
-                            .ok()
+                        && integer_literal_index(&literal.literal)
                             .is_some_and(|position| {
                                 structural_index_length(&arguments[0])
                                     .is_some_and(|length| position >= length)
@@ -14066,7 +14073,12 @@ impl TypeChecker {
                         };
                     let bare_natural_number_literal =
                         match (&raw_callee_type, call.argument.as_ref()) {
-                            (CheckedType::Function(function), Expression::Integer(integer)) => {
+                            (CheckedType::Function(function), Expression::Integer(integer))
+                                if staple_syntax::number_literal::decode_integer(
+                                    &integer.literal,
+                                )
+                                .is_ok_and(|literal| literal.suffix.is_none()) =>
+                            {
                                 match function.parameter.as_ref() {
                                     CheckedType::Parameter { id, .. }
                                         if self.natural_trait.is_some_and(|natural_trait| {
@@ -14104,17 +14116,26 @@ impl TypeChecker {
                     // generally) so other expected-type-driven checking
                     // elsewhere in the compiler is unaffected.
                     let argument_type = if let Some(integer) = bare_natural_number_literal {
-                        match integer.literal.parse::<u64>() {
-                            Ok(value) => {
-                                let literal_type = CheckedType::NumberLiteral(value);
-                                self.expression_types
-                                    .insert(integer.syntax.id, literal_type.clone());
-                                literal_type
-                            }
-                            Err(_) => {
+                        match staple_syntax::number_literal::decode_integer(&integer.literal) {
+                            Ok(literal) => match u64::try_from(literal.value) {
+                                Ok(value) => {
+                                    let literal_type = CheckedType::NumberLiteral(value);
+                                    self.expression_types
+                                        .insert(integer.syntax.id, literal_type.clone());
+                                    literal_type
+                                }
+                                Err(_) => {
+                                    self.diagnostics.push(Diagnostic::new(
+                                        integer.syntax.span.clone(),
+                                        "number literal is too large",
+                                    ));
+                                    CheckedType::Error
+                                }
+                            },
+                            Err(error) => {
                                 self.diagnostics.push(Diagnostic::new(
                                     integer.syntax.span.clone(),
-                                    "number literal is too large",
+                                    error.to_string(),
                                 ));
                                 CheckedType::Error
                             }
@@ -15069,7 +15090,7 @@ impl TypeChecker {
                 match accessible.desugared() {
                     CheckedType::Product(product) => {
                         let index = match &access.accessor {
-                            Accessor::Index(index) => index.parse::<usize>().ok(),
+                            Accessor::Index(index) => integer_literal_index(index),
                             Accessor::Name(name) => product
                                 .iter_positions()
                                 .position(|element| element.name.as_deref() == Some(name)),
@@ -15129,7 +15150,7 @@ impl TypeChecker {
                         };
                         match &access.accessor {
                             Accessor::Index(index) => {
-                                let Some(index) = index.parse::<usize>().ok() else {
+                                let Some(index) = integer_literal_index(index) else {
                                     self.diagnostics.push(Diagnostic::new(
                                         access.syntax.span.clone(),
                                         format!("invalid slice index `{index}`"),
@@ -15214,14 +15235,10 @@ impl TypeChecker {
                 };
                 if structural_index_length(&arguments[0]).is_some()
                     && let Expression::Integer(literal) = index.index.as_ref()
-                    && literal
-                        .literal
-                        .parse::<usize>()
-                        .ok()
-                        .is_some_and(|position| {
-                            structural_index_length(&arguments[0])
-                                .is_some_and(|length| position >= length)
-                        })
+                    && integer_literal_index(&literal.literal).is_some_and(|position| {
+                        structural_index_length(&arguments[0])
+                            .is_some_and(|length| position >= length)
+                    })
                 {
                     self.diagnostics.push(Diagnostic::new(
                         literal.syntax.span.clone(),
@@ -15378,8 +15395,21 @@ impl TypeChecker {
             }
             Expression::CString(_) => self.cstring_type(module),
             Expression::Integer(integer) => {
-                if let Some(CheckedType::NumberLiteral(expected_value)) = expected {
-                    let Ok(value) = integer.literal.parse::<u64>() else {
+                let decoded =
+                    match staple_syntax::number_literal::decode_integer(&integer.literal) {
+                        Ok(decoded) => decoded,
+                        Err(error) => {
+                            self.diagnostics.push(Diagnostic::new(
+                                integer.syntax.span.clone(),
+                                error.to_string(),
+                            ));
+                            return CheckedType::Error;
+                        }
+                    };
+                if let Some(CheckedType::NumberLiteral(expected_value)) = expected
+                    && decoded.suffix.is_none()
+                {
+                    let Ok(value) = u64::try_from(decoded.value) else {
                         self.diagnostics.push(Diagnostic::new(
                             integer.syntax.span.clone(),
                             "integer literal is too large",
@@ -15393,22 +15423,24 @@ impl TypeChecker {
                         ));
                         return CheckedType::Error;
                     }
-                    CheckedType::NumberLiteral(value)
-                } else {
-                    let integer_type = expected
-                        .map(literal_expectation)
-                        .and_then(CheckedType::integer_type)
-                        .unwrap_or(IntegerType::I32);
-                    if let Some(width) = integer_type.fixed_width()
-                        && integer.literal.parse::<u128>().ok().is_none_or(|value| {
-                            let value_bits = if integer_type.is_signed() {
-                                width - 1
-                            } else {
-                                width
-                            };
-                            value > ((1_u128 << value_bits) - 1)
-                        })
-                    {
+                    return CheckedType::NumberLiteral(value);
+                }
+                let integer_type = decoded
+                    .suffix
+                    .and_then(IntegerType::from_number_suffix)
+                    .or_else(|| {
+                        expected
+                            .map(literal_expectation)
+                            .and_then(CheckedType::integer_type)
+                    })
+                    .unwrap_or(IntegerType::I32);
+                if let Some(width) = integer_type.fixed_width() {
+                    let value_bits = if integer_type.is_signed() {
+                        width - 1
+                    } else {
+                        width
+                    };
+                    if decoded.value > ((1_u128 << value_bits) - 1) {
                         self.diagnostics.push(Diagnostic::new(
                             integer.syntax.span.clone(),
                             format!(
@@ -15418,17 +15450,30 @@ impl TypeChecker {
                             ),
                         ));
                     }
-                    CheckedType::integer(integer_type)
                 }
+                CheckedType::integer(integer_type)
             }
             Expression::Float(float) => {
-                let float_type = expected
-                    .map(literal_expectation)
-                    .and_then(CheckedType::float_type)
+                let decoded = match staple_syntax::number_literal::decode_float(&float.literal) {
+                    Ok(decoded) => decoded,
+                    Err(error) => {
+                        self.diagnostics
+                            .push(Diagnostic::new(float.syntax.span.clone(), error.to_string()));
+                        return CheckedType::Error;
+                    }
+                };
+                let float_type = decoded
+                    .suffix
+                    .and_then(FloatType::from_number_suffix)
+                    .or_else(|| {
+                        expected
+                            .map(literal_expectation)
+                            .and_then(CheckedType::float_type)
+                    })
                     .unwrap_or(FloatType::F64);
                 let valid = match float_type {
-                    FloatType::F32 => float.literal.parse::<f32>().is_ok_and(f32::is_finite),
-                    FloatType::F64 => float.literal.parse::<f64>().is_ok_and(f64::is_finite),
+                    FloatType::F32 => decoded.digits.parse::<f32>().is_ok_and(f32::is_finite),
+                    FloatType::F64 => decoded.digits.parse::<f64>().is_ok_and(f64::is_finite),
                 };
                 if !valid {
                     self.diagnostics.push(Diagnostic::new(
@@ -19640,16 +19685,32 @@ impl TypeChecker {
     ) -> CheckedType {
         match source_type {
             Type::Inferred(_) => CheckedType::Inferred,
-            Type::NumberLiteral(literal) => match literal.literal.parse::<u64>() {
-                Ok(value) => CheckedType::NumberLiteral(value),
-                Err(_) => {
-                    self.diagnostics.push(Diagnostic::new(
-                        literal.syntax.span.clone(),
-                        "number literal type is too large",
-                    ));
-                    CheckedType::Error
+            Type::NumberLiteral(literal) => {
+                match staple_syntax::number_literal::decode_integer(&literal.literal) {
+                    Ok(decoded) if decoded.suffix.is_some() => {
+                        self.diagnostics.push(Diagnostic::new(
+                            literal.syntax.span.clone(),
+                            "a number literal type cannot have a type suffix",
+                        ));
+                        CheckedType::Error
+                    }
+                    Ok(decoded) => match u64::try_from(decoded.value) {
+                        Ok(value) => CheckedType::NumberLiteral(value),
+                        Err(_) => {
+                            self.diagnostics.push(Diagnostic::new(
+                                literal.syntax.span.clone(),
+                                "number literal type is too large",
+                            ));
+                            CheckedType::Error
+                        }
+                    },
+                    Err(error) => {
+                        self.diagnostics
+                            .push(Diagnostic::new(literal.syntax.span.clone(), error.to_string()));
+                        CheckedType::Error
+                    }
                 }
-            },
+            }
             Type::StringLiteral(literal) => {
                 match staple_syntax::string_literal::decode(&literal.literal) {
                     Ok(value) => CheckedType::StringLiteralSet(vec![value]),
@@ -25939,6 +26000,12 @@ pub(crate) fn structural_trait_arguments(
         }
     }
     None
+}
+
+/// The value of an integer literal used as a structural index.
+fn integer_literal_index(literal: &str) -> Option<usize> {
+    let decoded = staple_syntax::number_literal::decode_integer(literal).ok()?;
+    usize::try_from(decoded.value).ok()
 }
 
 fn structural_index_length(target: &CheckedType) -> Option<usize> {

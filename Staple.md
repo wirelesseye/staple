@@ -1262,6 +1262,13 @@ Signed companions add `abs`, `unsigned_abs`, negation helpers, `signum`, and
 sign tests. Unsigned companions add power-of-two helpers, `divide_ceil`, and
 `checked_add_signed`.
 
+The unsigned companions also provide `cast_signed`, which reinterprets the bits
+as the signed type of the same width (`U8` to `I8`, ..., `USize` to `ISize`);
+the signed companions provide the reverse as `cast_unsigned`. These are not
+range-checked conversions: `U32.cast_signed 0xFFFF_FFFF` is `-1`, and
+`I8.cast_unsigned I8.Min` is `128`. LLVM integers have no signedness and both
+types have the same width, so a sign cast compiles to no instruction.
+
 `checked_*` returns `Option<T>`, and `overflowing_*` returns `(T, Bool)`, the
 wrapped result and whether it overflowed. Counts and exponents are `U32`, as
 is `Bits` where a companion defines it. `abs` wraps at the minimum value, just
@@ -1655,7 +1662,13 @@ operation on non-NaN operands, such as `0.0 / 0.0` or `F64.sqrt (-1.0)`,
 produces the positive quiet NaN (`0x7FF8000000000000`, or `0x7FC00000` for
 `F32`), and a NaN operand propagates with its sign and payload, quieted. `abs`
 and `copysign` change only the sign bit, even of a NaN. A NaN the program
-computes at run time is whatever the target's hardware produces. `const` requires an initializer, and, like a compile-time
+computes at run time is whatever the target's hardware produces. A folded
+integer likewise keeps the integer type a suffix or a typed operand gave it.
+A suffixed literal folds to a typed value, arithmetic over it keeps that type,
+and mixing two different integer types while folding is an error, the same as
+mixing `F32` and `F64`. An untyped folded integer reifies as a plain decimal
+literal and takes its type from context as before; a typed one reifies with its
+suffix, so `const Small = 5u8` is a `U8` constant. `const` requires an initializer, and, like a compile-time
 helper's evaluation generally, an initializer that recurses without bound
 (including through a self-referential `const`) is rejected rather than left to
 hang or exhaust memory.
@@ -1690,20 +1703,58 @@ staple is expression-oriented. Function values, function applications, products,
 and blocks are all expressions.
 
 The syntax currently recognized for literal values includes strings, characters, integers,
-and decimal floating-point numbers:
+and floating-point numbers:
 
 ```staple
 "hello"
 42
-1.0
+0xFF
+0b1010
+0o755
+1_000_000
+1.5
 .5
 1e3
+3u8
+0x7F_i8
+1.5f32
+7f64
 ```
 
+Integer literals are decimal unless they start with `0x` (hexadecimal), `0b`
+(binary), or `0o` (octal). The prefixes are lowercase; `0X`, `0B`, and `0O` are
+errors. A leading zero does not make a literal octal: `0755` is seven hundred
+fifty-five, and `0o755` is the octal spelling. A single `_` may separate digits,
+as in `1_000_000`, `0xFFFF_FFFF`, and `0b1010_0101`; it is valid only between
+digits (or immediately before a type suffix) and carries no meaning. A literal
+cannot begin with `_`.
+
+A lowercase type suffix fixes the literal's type: `42i8`, `3u8`, `0x7F_i8`,
+and `1usize` are integers of the named type, while `0.5f32`, `1e3f64`, and
+`7f64` are floats. A suffixed literal does not take its type from context, so
+`let x: I32 = 3u8` is a type mismatch. Uppercase suffixes such as `42U8` are
+errors. A separator
+cannot sit next to a `.` or an exponent marker; `1_.5` and `1.5_e3` are
+malformed. An integer suffix on a float literal (`1.5u8`) and a float suffix on
+a binary or octal literal (`0b1f32`, `0o7f64`) are errors. On a hexadecimal
+literal a trailing `f32` or `f64` is read as hex digits, so `0x1f32` and
+`0x1_f32` are the integer `0x1F32`.
+
 Float literals accept decimal points and scientific notation. They use an
-expected `F32` or `F64` type when available and otherwise default to `F64`.
+expected `F32` or `F64` type when available and otherwise default to `F64`; an
+`f32`/`f64` suffix overrides the expected type just as an integer suffix does.
 `1.` is a float literal, while `1.field` remains member access. Integer literals
 remain integer values; Staple does not implicitly convert between numeric types.
+
+A prefixed or separated integer literal denotes the same non-negative number as
+its decimal spelling and must fit its target type by the same magnitude rule as
+any other literal. Reading a literal as a bit pattern for a signed type is not
+implicit: `0xFFFFFFFF` is a valid `U32` but not a valid `I32`, and `0x80i8` is
+an error. Prefix `-` is not part of a literal, so `-128i8` is also an error:
+`128i8` is range-checked before the negation applies. Use `I8.Min` for that
+value, or reinterpret bits deliberately with `U32.cast_signed` (the unsigned
+companions' `cast_signed`, or `I8.cast_unsigned` in the other direction); the
+pipe form is `0xFFFF_FFFFu32 |> cast_signed`.
 
 String literals use double quotes and produce owned UTF-8 `String` values. A
 backslash protects the following quote from ending the string. Supported
@@ -2053,14 +2104,16 @@ the same normal form. Types print in that normal form: a diagnostic shows
 `(I32 ^ 3)`, not three separate elements.
 
 The length is a compile-time type. Non-negative integer type literals such as
-`0`, `3`, and `42` are singleton subtypes of `USize` and automatically satisfy
-the sealed prelude trait `Natural`. An alias or a parameter constrained by that
-trait may be used as a length, for example
-`type Vector<T, N where Natural N> = (T ^ N)`. The length must resolve to one
-singleton literal before code generation. Number literal types use the `USize`
-runtime representation, so an exact value annotation such as `let three: 3 = 3`
-is valid and widens to `USize`; an unconstrained `let three = 3` still infers
-`I32`.
+`0`, `3`, `0x10`, and `1_024` are singleton subtypes of `USize` and
+automatically satisfy the sealed prelude trait `Natural`. A literal type accepts
+any radix and digit separators, but never a type suffix, since it has no
+runtime type of its own: `(U8 ^ 1_024)` is valid and `(U8 ^ 3u8)` is not. An
+alias or a parameter constrained by that trait may be used as a length, for
+example `type Vector<T, N where Natural N> = (T ^ N)`. The length must resolve
+to one singleton literal before code generation. Number literal types use the
+`USize` runtime representation, so an exact value annotation such as
+`let three: 3 = 3` is valid and widens to `USize`; an unconstrained
+`let three = 3` still infers `I32`.
 
 An array *value* whose elements are all the same may be written with the
 repetition form `(value ^ count)`:
@@ -4724,8 +4777,8 @@ traits `Eq`, `PartialOrd`, and `Ord` and the `Ordering` result live in
 works without those imports. These are
 ordinary type names rather than keywords, so a local declaration or explicit
 import can shadow a prelude name. Integer literals use an expected integer type
-when one is available and otherwise default to `I32`. Mixed-type arithmetic is
-not implicit.
+when one is available and otherwise default to `I32`, unless a type suffix names
+their type. Mixed-type arithmetic is not implicit.
 
 `Option<T>` is declared in `std.option` as the sum `None | Some<T>`, where
 `None` is a singleton type and `Some<T>` is a `from` type; `std.core` re-exports

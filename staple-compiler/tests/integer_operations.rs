@@ -417,6 +417,152 @@ let g = U8.rotate_left 1 1
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn same_width_sign_casts_run_at_the_type_edges() {
+    let source = r#"
+use std.io.println
+
+println "${U8.cast_signed 255}"
+println "${U8.cast_signed 128}"
+println "${U8.cast_signed 127}"
+println "${I8.cast_unsigned I8.Min}"
+println "${I8.cast_unsigned I8.Max}"
+println "${U16.cast_signed U16.Max}"
+println "${I16.cast_unsigned I16.Min}"
+println "${U32.cast_signed U32.Max}"
+println "${I32.cast_unsigned I32.Min}"
+println "${U64.cast_signed U64.Max}"
+println "${I64.cast_unsigned I64.Min}"
+
+def round_trip = (value: I32) => I32 :: value |> cast_unsigned |> cast_signed
+println "${round_trip I32.Min}"
+println "${round_trip ((I32 :: 0) - 1)}"
+println "${round_trip 0}"
+println "${round_trip I32.Max}"
+
+println "${USize.cast_signed 1}"
+println "${ISize.cast_unsigned 1}"
+"#;
+    assert_eq!(
+        run_lines(source),
+        [
+            "-1",
+            "-128",
+            "127",
+            "128",
+            "127",
+            "-1",
+            "32768",
+            "-1",
+            "2147483648",
+            "-1",
+            "9223372036854775808",
+            "-2147483648",
+            "-1",
+            "0",
+            "2147483647",
+            "1",
+            "1",
+        ]
+    );
+}
+
+#[test]
+fn same_width_sign_casts_emit_no_conversion_instruction() {
+    let ir = compile_ir(
+        r#"
+let value: U32 = 0xFFFF_FFFF
+let signed = U32.cast_signed value
+let unsigned = I32.cast_unsigned (I32 :: 0)
+"#,
+    );
+    for name in [
+        "__staple_mstd.number.types.U32.cast_signed",
+        "__staple_mstd.number.types.I32.cast_unsigned",
+    ] {
+        let body = function_definition(&ir, name);
+        for instruction in ["zext", "sext", "trunc", "call"] {
+            assert!(
+                !body.contains(instruction),
+                "a sign cast must not emit `{instruction}`:\n{body}"
+            );
+        }
+    }
+    assert!(
+        !ir.contains("__u32_cast_sign") && !ir.contains("__i32_cast_sign"),
+        "the sign-cast intrinsics must not survive into IR"
+    );
+}
+
+/// Extracts one `define` body, from its `define` to the matching brace.
+fn function_definition<'a>(ir: &'a str, name: &str) -> &'a str {
+    let marker = format!("@{name}(");
+    let name_start = ir
+        .find(&marker)
+        .unwrap_or_else(|| panic!("missing function `{name}`"));
+    let start = ir[..name_start]
+        .rfind("define ")
+        .unwrap_or_else(|| panic!("missing definition for `{name}`"));
+    let open = ir[start..]
+        .find('{')
+        .map(|offset| start + offset)
+        .unwrap_or_else(|| panic!("missing body for `{name}`"));
+    let mut depth = 0_usize;
+    for (offset, character) in ir[open..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &ir[start..=open + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated body for `{name}`")
+}
+
+#[cfg(unix)]
+#[test]
+fn same_width_sign_cast_constants_fold_with_the_counterpart_type() {
+    check(concat!(
+        "const AllOnes = U32.cast_signed 0xFFFF_FFFF\n",
+        "let typed: I32 = AllOnes\n",
+    ))
+    .unwrap_or_else(|errors| panic!("check: {errors:?}"));
+    assert_eq!(
+        run_lines(concat!(
+            "use std.io.println\n",
+            "const AllOnes = U32.cast_signed 0xFFFF_FFFF\n",
+            "println \"${AllOnes}\"\n",
+        )),
+        ["-1"]
+    );
+}
+
+#[test]
+fn same_width_sign_cast_checking_rejects_wrong_types() {
+    let diagnostics = check("let value = I32.cast_signed 1\n")
+        .expect_err("signed companions have no cast_signed");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("no accessible companion member named `cast_signed`")),
+        "{diagnostics:?}"
+    );
+
+    let diagnostics = check("let value: I32 = 1\nlet cast = U32.cast_signed value\n")
+        .expect_err("the source value must be a U32");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("expected `U32`, found `I32`")),
+        "{diagnostics:?}"
+    );
+}
+
 #[test]
 fn integer_companion_constants_fold_at_their_declared_width() {
     let module = check(concat!(

@@ -181,6 +181,7 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::IntegerOverflowing { .. }
         | IntrinsicFunction::IntegerCount { .. }
         | IntrinsicFunction::IntegerUnary { .. }
+        | IntrinsicFunction::IntegerSignCast { .. }
         | IntrinsicFunction::IntegerRotate { .. }
         | IntrinsicFunction::FloatBinary { .. }
         | IntrinsicFunction::FloatUnary { .. }
@@ -541,6 +542,7 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::IntegerOverflowing { .. }
             | IntrinsicFunction::IntegerCount { .. }
             | IntrinsicFunction::IntegerUnary { .. }
+            | IntrinsicFunction::IntegerSignCast { .. }
             | IntrinsicFunction::IntegerRotate { .. }
             | IntrinsicFunction::FloatBinary { .. }
             | IntrinsicFunction::FloatUnary { .. }

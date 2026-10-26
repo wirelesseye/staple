@@ -64,6 +64,7 @@ companion I8 {
         __i8_reverse_bits: I8 -> I8
         __i8_rotate_left: (I8, U32) -> I8
         __i8_rotate_right: (I8, U32) -> I8
+        __i8_cast_sign: I8 -> U8
     }
 
     /// The smallest value.
@@ -402,6 +403,9 @@ companion I8 {
     /// Reverses the bit order.
     pub def reverse_bits = (value: I8) => I8 :: __i8_reverse_bits value
 
+    /// Reinterprets the bits as the unsigned type of the same width.
+    pub def cast_unsigned = (value: I8) => U8 :: __i8_cast_sign value
+
     /// Returns the absolute value, wrapping at `Min` like prefix `-`.
     pub def abs = (value: I8) => I8 :: if (value < 0) { 0 - value } else { value }
 
@@ -476,6 +480,7 @@ companion I16 {
         __i16_reverse_bits: I16 -> I16
         __i16_rotate_left: (I16, U32) -> I16
         __i16_rotate_right: (I16, U32) -> I16
+        __i16_cast_sign: I16 -> U16
     }
 
     /// The smallest value.
@@ -814,6 +819,9 @@ companion I16 {
     /// Reverses the bit order.
     pub def reverse_bits = (value: I16) => I16 :: __i16_reverse_bits value
 
+    /// Reinterprets the bits as the unsigned type of the same width.
+    pub def cast_unsigned = (value: I16) => U16 :: __i16_cast_sign value
+
     /// Returns the absolute value, wrapping at `Min` like prefix `-`.
     pub def abs = (value: I16) => I16 :: if (value < 0) { 0 - value } else { value }
 
@@ -888,6 +896,7 @@ companion I32 {
         __i32_reverse_bits: I32 -> I32
         __i32_rotate_left: (I32, U32) -> I32
         __i32_rotate_right: (I32, U32) -> I32
+        __i32_cast_sign: I32 -> U32
     }
 
     /// The smallest value.
@@ -1226,6 +1235,9 @@ companion I32 {
     /// Reverses the bit order.
     pub def reverse_bits = (value: I32) => I32 :: __i32_reverse_bits value
 
+    /// Reinterprets the bits as the unsigned type of the same width.
+    pub def cast_unsigned = (value: I32) => U32 :: __i32_cast_sign value
+
     /// Returns the absolute value, wrapping at `Min` like prefix `-`.
     pub def abs = (value: I32) => I32 :: if (value < 0) { 0 - value } else { value }
 
@@ -1300,6 +1312,7 @@ companion I64 {
         __i64_reverse_bits: I64 -> I64
         __i64_rotate_left: (I64, U32) -> I64
         __i64_rotate_right: (I64, U32) -> I64
+        __i64_cast_sign: I64 -> U64
     }
 
     /// The smallest value.
@@ -1632,6 +1645,9 @@ companion I64 {
     /// Reverses the bit order.
     pub def reverse_bits = (value: I64) => I64 :: __i64_reverse_bits value
 
+    /// Reinterprets the bits as the unsigned type of the same width.
+    pub def cast_unsigned = (value: I64) => U64 :: __i64_cast_sign value
+
     /// Returns the absolute value, wrapping at `Min` like prefix `-`.
     pub def abs = (value: I64) => I64 :: if (value < 0) { 0 - value } else { value }
 
@@ -1706,6 +1722,7 @@ companion U8 {
         __u8_reverse_bits: U8 -> U8
         __u8_rotate_left: (U8, U32) -> U8
         __u8_rotate_right: (U8, U32) -> U8
+        __u8_cast_sign: U8 -> I8
     }
 
     /// The smallest value.
@@ -2003,6 +2020,9 @@ companion U8 {
     /// Reverses the bit order.
     pub def reverse_bits = (value: U8) => U8 :: __u8_reverse_bits value
 
+    /// Reinterprets the bits as the signed type of the same width.
+    pub def cast_signed = (value: U8) => I8 :: __u8_cast_sign value
+
     /// Returns whether `value` is a power of two.
     pub def is_power_of_two = (value: U8) => Bool :: value != 0 && (BitAnd.bit_and (value; value - 1)) == 0
 
@@ -2073,6 +2093,7 @@ companion U16 {
         __u16_reverse_bits: U16 -> U16
         __u16_rotate_left: (U16, U32) -> U16
         __u16_rotate_right: (U16, U32) -> U16
+        __u16_cast_sign: U16 -> I16
     }
 
     /// The smallest value.
@@ -2370,6 +2391,9 @@ companion U16 {
     /// Reverses the bit order.
     pub def reverse_bits = (value: U16) => U16 :: __u16_reverse_bits value
 
+    /// Reinterprets the bits as the signed type of the same width.
+    pub def cast_signed = (value: U16) => I16 :: __u16_cast_sign value
+
     /// Returns whether `value` is a power of two.
     pub def is_power_of_two = (value: U16) => Bool :: value != 0 && (BitAnd.bit_and (value; value - 1)) == 0
 
@@ -2440,6 +2464,7 @@ companion U32 {
         __u32_reverse_bits: U32 -> U32
         __u32_rotate_left: (U32, U32) -> U32
         __u32_rotate_right: (U32, U32) -> U32
+        __u32_cast_sign: U32 -> I32
     }
 
     /// The smallest value.
@@ -2731,6 +2756,9 @@ companion U32 {
     /// Reverses the bit order.
     pub def reverse_bits = (value: U32) => U32 :: __u32_reverse_bits value
 
+    /// Reinterprets the bits as the signed type of the same width.
+    pub def cast_signed = (value: U32) => I32 :: __u32_cast_sign value
+
     /// Returns whether `value` is a power of two.
     pub def is_power_of_two = (value: U32) => Bool :: value != 0 && (BitAnd.bit_and (value; value - 1)) == 0
 
@@ -2801,6 +2829,7 @@ companion U64 {
         __u64_reverse_bits: U64 -> U64
         __u64_rotate_left: (U64, U32) -> U64
         __u64_rotate_right: (U64, U32) -> U64
+        __u64_cast_sign: U64 -> I64
     }
 
     /// The smallest value.
@@ -3092,6 +3121,9 @@ companion U64 {
     /// Reverses the bit order.
     pub def reverse_bits = (value: U64) => U64 :: __u64_reverse_bits value
 
+    /// Reinterprets the bits as the signed type of the same width.
+    pub def cast_signed = (value: U64) => I64 :: __u64_cast_sign value
+
     /// Returns whether `value` is a power of two.
     pub def is_power_of_two = (value: U64) => Bool :: value != 0 && (BitAnd.bit_and (value; value - 1)) == 0
 
@@ -3163,6 +3195,7 @@ companion ISize {
         __isize_reverse_bits: ISize -> ISize
         __isize_rotate_left: (ISize, U32) -> ISize
         __isize_rotate_right: (ISize, U32) -> ISize
+        __isize_cast_sign: ISize -> USize
     }
 
     def bits = () => U32 :: match (TryConvert.try_convert.<USize, U32> (MemLayout.stride.<USize> () * 8)) {
@@ -3544,6 +3577,9 @@ companion ISize {
     /// Reverses the bit order.
     pub def reverse_bits = (value: ISize) => ISize :: __isize_reverse_bits value
 
+    /// Reinterprets the bits as the unsigned type of the same width.
+    pub def cast_unsigned = (value: ISize) => USize :: __isize_cast_sign value
+
     /// Returns -1, 0, or 1 according to the sign of `value`.
     pub def signum = (value: ISize) => ISize :: when {
         value < 0 => ((ISize :: 0) - 1),
@@ -3582,6 +3618,7 @@ companion USize {
         __usize_reverse_bits: USize -> USize
         __usize_rotate_left: (USize, U32) -> USize
         __usize_rotate_right: (USize, U32) -> USize
+        __usize_cast_sign: USize -> ISize
     }
 
     def bits = () => U32 :: match (TryConvert.try_convert.<USize, U32> (MemLayout.stride.<USize> () * 8)) {
@@ -3872,6 +3909,9 @@ companion USize {
 
     /// Reverses the bit order.
     pub def reverse_bits = (value: USize) => USize :: __usize_reverse_bits value
+
+    /// Reinterprets the bits as the signed type of the same width.
+    pub def cast_signed = (value: USize) => ISize :: __usize_cast_sign value
 
     /// Returns whether `value` is a power of two.
     pub def is_power_of_two = (value: USize) => Bool :: value != 0 && (BitAnd.bit_and (value; value - 1)) == 0

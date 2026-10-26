@@ -853,7 +853,7 @@ debug_pair 5
             "staple-compiler/examples/language_tour.sta",
             "core",
         )),
-        "Staple language tour\nProducts, closures, nested patterns, and operators evaluated successfully.\n",
+        "Staple language tour\nProducts, closures, nested patterns, and operators evaluated successfully.\nRadix and separator literals: 16711680, 5, 1000000.\n",
     ),
     expect_stdout(
         must_run(file(

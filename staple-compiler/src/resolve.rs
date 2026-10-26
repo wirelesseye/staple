@@ -150,6 +150,18 @@ impl FloatType {
             Self::F64 => "f64",
         }
     }
+
+    /// The float type named by a literal suffix, if it is a float suffix.
+    pub fn from_number_suffix(
+        suffix: staple_syntax::number_literal::NumberSuffix,
+    ) -> Option<Self> {
+        use staple_syntax::number_literal::NumberSuffix;
+        match suffix {
+            NumberSuffix::F32 => Some(Self::F32),
+            NumberSuffix::F64 => Some(Self::F64),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -217,6 +229,22 @@ impl IntegerType {
         )
     }
 
+    /// The signedness counterpart of this integer type at the same width.
+    pub fn sign_counterpart(self) -> Self {
+        match self {
+            Self::I8 => Self::U8,
+            Self::I16 => Self::U16,
+            Self::I32 => Self::U32,
+            Self::I64 => Self::U64,
+            Self::ISize => Self::USize,
+            Self::U8 => Self::I8,
+            Self::U16 => Self::I16,
+            Self::U32 => Self::I32,
+            Self::U64 => Self::I64,
+            Self::USize => Self::ISize,
+        }
+    }
+
     pub fn fixed_width(self) -> Option<u32> {
         match self {
             Self::I8 | Self::U8 => Some(8),
@@ -225,6 +253,31 @@ impl IntegerType {
             Self::I64 | Self::U64 => Some(64),
             Self::ISize | Self::USize => None,
         }
+    }
+
+    /// The integer type named by a literal suffix, if it is an integer suffix.
+    pub fn from_number_suffix(
+        suffix: staple_syntax::number_literal::NumberSuffix,
+    ) -> Option<Self> {
+        use staple_syntax::number_literal::NumberSuffix;
+        match suffix {
+            NumberSuffix::I8 => Some(Self::I8),
+            NumberSuffix::I16 => Some(Self::I16),
+            NumberSuffix::I32 => Some(Self::I32),
+            NumberSuffix::I64 => Some(Self::I64),
+            NumberSuffix::ISize => Some(Self::ISize),
+            NumberSuffix::U8 => Some(Self::U8),
+            NumberSuffix::U16 => Some(Self::U16),
+            NumberSuffix::U32 => Some(Self::U32),
+            NumberSuffix::U64 => Some(Self::U64),
+            NumberSuffix::USize => Some(Self::USize),
+            NumberSuffix::F32 | NumberSuffix::F64 => None,
+        }
+    }
+
+    /// The literal spelling for this integer type (`u8`, `isize`, ...).
+    pub fn suffix(self) -> &'static str {
+        self.intrinsic_name()
     }
 }
 
@@ -353,7 +406,7 @@ pub enum IntegerBitwiseOperation {
 /// evaluation read this one table.
 pub(crate) fn integer_companion_intrinsics(
     integer: IntegerType,
-) -> [(&'static str, IntrinsicFunction); 10] {
+) -> [(&'static str, IntrinsicFunction); 11] {
     use IntegerCountOperation as Count;
     use IntegerOverflowOperation as Overflow;
     use IntegerRotateDirection as Rotate;
@@ -428,6 +481,10 @@ pub(crate) fn integer_companion_intrinsics(
                 integer,
                 direction: Rotate::Right,
             },
+        ),
+        (
+            "cast_sign",
+            IntrinsicFunction::IntegerSignCast { integer },
         ),
     ]
 }
@@ -517,6 +574,8 @@ pub enum IntrinsicFunction {
         integer: IntegerType,
         operation: IntegerUnaryOperation,
     },
+    /// Reinterpret the bits as the signed type of the same width.
+    IntegerSignCast { integer: IntegerType },
     /// A rotation whose `U32` count is reduced modulo the integer's width.
     IntegerRotate {
         integer: IntegerType,

@@ -3,6 +3,9 @@ use std.io.println
 
 let greeting: String = "Staple language tour"
 let details: (name: String, year: I32) = (name: greeting, year: 2026)
+let color = 0x00FF_0000
+let flags = 0b0000_0101
+let budget = 1_000_000
 
 def add_curried: I32 -> I32 -> I32 = left => right => left + right
 def add_ten = add_curried 10
@@ -21,3 +24,4 @@ let operator_results = (1 + 2 * 3, 1 < 2, 0 .. 3)
 
 println details.0
 println "Products, closures, nested patterns, and operators evaluated successfully."
+println "Radix and separator literals: ${color}, ${flags}, ${budget}."

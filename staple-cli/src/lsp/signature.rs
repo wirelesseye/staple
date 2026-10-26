@@ -145,7 +145,9 @@ fn checked_active_slot(
                     let staple_syntax::Type::NumberLiteral(count) = array.count.as_ref() else {
                         return None;
                     };
-                    count.literal.parse::<usize>().ok()
+                    let decoded =
+                        staple_syntax::number_literal::decode_integer(&count.literal).ok()?;
+                    usize::try_from(decoded.value).ok()
                 }
                 _ => None,
             }

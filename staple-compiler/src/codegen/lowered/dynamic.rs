@@ -4755,6 +4755,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .backend
                 .build_integer_unary(integer, operation, values[0].into_int_value())?
                 .as_basic_value_enum(),
+            crate::IntrinsicFunction::IntegerSignCast { integer: _ } => values[0],
             crate::IntrinsicFunction::IntegerRotate { integer, direction } => self
                 .backend
                 .build_integer_rotate(
