@@ -608,3 +608,59 @@ fn raw_pointer_stores_move_non_copy_values_without_dropping_previous_contents() 
     // value drops once, only after ownership of its storage is reconstructed.
     assert_eq!(run(source), "stored\ndrop 2\ndrop 4\ndrop 6\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn list_and_buffer_equality_preserves_owned_elements() {
+    let source = r#"
+use std.buffer.Buffer
+use std.list.List
+use std.cmp.Eq
+use std.cinterop.*
+use std.ptr.RawPtr
+extern "c" { printf: (RawPtr<CChar>, ...) -> I32 }
+
+type Tag wrap I32
+impl !Copy Tag {}
+impl Eq Tag { eq = (Tag left; Tag right) => left == right }
+impl Drop Tag {
+    cleanup = Tag value => {
+        printf (c_string "drop %d\n", value)
+        ()
+    }
+}
+
+def main = () => I32 :: {
+    let mut a: Buffer<Tag> = Buffer.with_capacity 5
+    Buffer.push a (Tag 1)
+    Buffer.push a (Tag 2)
+    let b = Buffer.from_array (Tag 1, Tag 2)
+    let c = Buffer.from_array (Tag 2, Tag 1)
+    let d = Buffer.from_array (Tag 1)
+    let empty: Buffer<Tag> = Buffer.with_capacity 0
+    let spare: Buffer<Tag> = Buffer.with_capacity 3
+    if (!(a == b) || a == c || a == d || !(a == a) || !(empty == spare)) { 1 } else {
+        let x = List.of (Tag 3, Tag 4)
+        let y = List.of (Tag 3, Tag 4)
+        let z = List.of (Tag 4, Tag 3)
+        let short = List.of (Tag 3)
+        let empty_list: List<Tag> = List.new ()
+        let spare_list: List<Tag> = List.with_capacity 4
+        if (!(x == y) || x == z || x == short || !(x == x) || !(empty_list == spare_list)) { 2 } else { 0 }
+    }
+}
+printf (c_string "result %d\n", main ())
+"#;
+    for dynamic in [false, true] {
+        let output = run_mode(source, dynamic);
+        assert!(output.ends_with("result 0\n"), "{output}");
+        assert_eq!(output.lines().count(), 15, "{output}");
+        for (value, count) in [(1, 4), (2, 3), (3, 4), (4, 3)] {
+            assert_eq!(
+                output.lines().filter(|line| *line == format!("drop {value}")).count(),
+                count,
+                "{output}"
+            );
+        }
+    }
+}
