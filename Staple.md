@@ -1663,12 +1663,17 @@ produces the positive quiet NaN (`0x7FF8000000000000`, or `0x7FC00000` for
 `F32`), and a NaN operand propagates with its sign and payload, quieted. `abs`
 and `copysign` change only the sign bit, even of a NaN. A NaN the program
 computes at run time is whatever the target's hardware produces. A folded
-integer likewise keeps the integer type a suffix or a typed operand gave it.
-A suffixed literal folds to a typed value, arithmetic over it keeps that type,
-and mixing two different integer types while folding is an error, the same as
-mixing `F32` and `F64`. An untyped folded integer reifies as a plain decimal
-literal and takes its type from context as before; a typed one reifies with its
-suffix, so `const Small = 5u8` is a `U8` constant. `const` requires an initializer, and, like a compile-time
+integer likewise keeps the integer type a suffix, an annotation, or a typed
+operand gave it. A suffixed literal folds to a typed value, as does a reference
+to an annotated constant such as `U8.Max` and the result of an integer
+companion member such as `U8.reverse_bits` or `U8.count_ones` (a `U32`).
+Arithmetic over a typed value keeps that type, and mixing two different integer
+types while folding is an error, the same as mixing `F32` and `F64`. Folding
+computes exactly and does not wrap: a typed result outside its type's range is
+an error in either direction, so `const Big = 255u8 + 1u8` and
+`const Under: U8 = 0 - 1` are both rejected. An untyped folded integer reifies
+as a plain decimal literal and takes its type from context as before; a typed
+one reifies with its suffix, so `const Small = 5u8` is a `U8` constant. `const` requires an initializer, and, like a compile-time
 helper's evaluation generally, an initializer that recurses without bound
 (including through a self-referential `const`) is rejected rather than left to
 hang or exhaust memory.

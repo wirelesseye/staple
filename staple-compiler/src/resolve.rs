@@ -574,7 +574,8 @@ pub enum IntrinsicFunction {
         integer: IntegerType,
         operation: IntegerUnaryOperation,
     },
-    /// Reinterpret the bits as the signed type of the same width.
+    /// Reinterpret the bits as the other signedness at the same width
+    /// (`cast_signed` on unsigned types, `cast_unsigned` on signed ones).
     IntegerSignCast { integer: IntegerType },
     /// A rotation whose `U32` count is reduced modulo the integer's width.
     IntegerRotate {

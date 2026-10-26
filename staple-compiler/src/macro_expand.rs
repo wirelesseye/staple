@@ -2000,6 +2000,8 @@ struct MacroExpander {
     /// The companions of all ten integer types, whose width-aware intrinsics
     /// fold at compile time.
     integer_companion_modules: [Option<ModuleId>; 10],
+    /// The namespaces of the ten integer types, in `IntegerType::ALL` order.
+    integer_namespaces: [Option<ModuleId>; 10],
     /// Every implementation of `Parse`, standard and user-written.
     parse_impls: Vec<ParseImpl>,
     trait_registry: traits::Registry,
@@ -2099,6 +2101,9 @@ impl MacroExpander {
             number_types.and_then(|module| program.child_named(module, "F32")),
             number_types.and_then(|module| program.child_named(module, "F64")),
         ];
+        let integer_namespaces = crate::IntegerType::ALL.map(|integer| {
+            number_types.and_then(|module| program.child_named(module, integer.name()))
+        });
         let cinterop = program.standard_library_cinterop();
         let standard_library_process = program
             .modules()
@@ -2939,6 +2944,7 @@ impl MacroExpander {
             float_companion_modules,
             float_namespaces,
             integer_companion_modules,
+            integer_namespaces,
             parse_impls: Vec::new(),
             trait_registry: traits::Registry::default(),
             call_targets: HashMap::new(),
@@ -5548,9 +5554,14 @@ impl MacroExpander {
                     let annotation = binding.annotation_body();
                     let float =
                         annotation.and_then(|annotation| self.named_float_type(module, annotation));
+                    let integer = annotation
+                        .and_then(|annotation| self.named_integer_type(module, annotation));
                     let folded = self
                         .eval_expression(module, value, &mut Environment::new())
                         .and_then(|result| self.assign_float_type(result, float, span.clone()))
+                        .and_then(|result| {
+                            self.assign_integer_type(result, integer, span.clone())
+                        })
                         .and_then(|result| {
                             self.value_to_expression(result, span, module, annotation)
                         });
@@ -6764,7 +6775,10 @@ impl MacroExpander {
                 let value =
                     self.eval_expression_target(module, &ascription.value, environment, target)?;
                 let float = self.named_float_type(module, &ascription.ty);
-                self.assign_float_type(value, float, ascription.syntax.span.clone())
+                let value =
+                    self.assign_float_type(value, float, ascription.syntax.span.clone())?;
+                let integer = self.named_integer_type(module, &ascription.ty);
+                self.assign_integer_type(value, integer, ascription.syntax.span.clone())
             }
             Expression::Binary(binary) => self.eval_binary_expression(module, binary, environment),
             Expression::Unary(unary) => self.eval_unary_expression(module, unary, environment),
@@ -8302,9 +8316,14 @@ impl MacroExpander {
             .binding
             .annotation_body()
             .and_then(|annotation| self.named_float_type(helper.module, annotation));
+        let integer = helper
+            .binding
+            .annotation_body()
+            .and_then(|annotation| self.named_integer_type(helper.module, annotation));
         let value = helper.binding.value.as_ref()?;
         let value = self.eval_helper_value(helper.module, value, span.clone())?;
-        self.assign_float_type(value, float, span)
+        let value = self.assign_float_type(value, float, span.clone())?;
+        self.assign_integer_type(value, integer, span)
     }
 
     /// The `companion F32`/`companion F64` module of `float`.
@@ -8319,6 +8338,25 @@ impl MacroExpander {
     /// to its companion's namespace, so this recognizes `F64` and an import
     /// of it under another name, and not an unrelated type called `F64`.
     fn named_float_type(&self, module: ModuleId, ty: &Type) -> Option<FloatType> {
+        let target = self.named_type_namespace(module, ty)?;
+        FloatType::ALL
+            .into_iter()
+            .find(|float| self.float_namespaces[*float as usize] == Some(target))
+    }
+
+    /// The integer type a type expression names in `module`, recognized the
+    /// same way as [`Self::named_float_type`].
+    fn named_integer_type(&self, module: ModuleId, ty: &Type) -> Option<IntegerType> {
+        let target = self.named_type_namespace(module, ty)?;
+        IntegerType::ALL
+            .into_iter()
+            .zip(self.integer_namespaces)
+            .find(|(_, namespace)| *namespace == Some(target))
+            .map(|(integer, _)| integer)
+    }
+
+    /// The namespace an unqualified type name reaches from `module`.
+    fn named_type_namespace(&self, module: ModuleId, ty: &Type) -> Option<ModuleId> {
         let Type::Named(named) = ty else {
             return None;
         };
@@ -8328,14 +8366,35 @@ impl MacroExpander {
         let mut cursor = module;
         loop {
             if let Some(target) = self.scopes[cursor.0].namespaces.get(&named.name) {
-                return FloatType::ALL
-                    .into_iter()
-                    .find(|float| self.float_namespaces[*float as usize] == Some(*target));
+                return Some(*target);
             }
             if !self.companion_modules[cursor.0] {
                 return None;
             }
             cursor = self.parent_modules[cursor.0]?;
+        }
+    }
+
+    /// Gives an untyped integer the integer type its context names. An integer
+    /// already known to have a different type is a type error, as for floats.
+    fn assign_integer_type(
+        &mut self,
+        value: Value,
+        integer: Option<IntegerType>,
+        span: Span,
+    ) -> Option<Value> {
+        match (value, integer) {
+            (Value::Integer(value, None), Some(integer)) => {
+                Some(Value::Integer(value, Some(integer)))
+            }
+            (Value::Integer(_, Some(actual)), Some(integer)) if actual != integer => {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!("expected `{}`, found `{}`", integer.name(), actual.name()),
+                ));
+                None
+            }
+            (value, _) => Some(value),
         }
     }
 
@@ -8737,6 +8796,27 @@ impl MacroExpander {
             Value::Float(float, None) if float_hint.is_some() => Value::Float(float, float_hint),
             value => value,
         };
+        if let Value::Integer(integer, Some(integer_type)) = value
+            && let Some(width) = integer_type.fixed_width()
+        {
+            let (min, max) = if integer_type.is_signed() {
+                (-(1_i128 << (width - 1)), (1_i128 << (width - 1)) - 1)
+            } else {
+                (0, (1_i128 << width) - 1)
+            };
+            // Report the folded value itself: the literal a reification would
+            // spell is not something the user wrote.
+            if integer < min || integer > max {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!(
+                        "constant value `{integer}` does not fit in `{}`",
+                        integer_type.name()
+                    ),
+                ));
+                return None;
+            }
+        }
         match value {
             Value::Integer(integer, integer_type) if integer >= 0 => {
                 let suffix = integer_type

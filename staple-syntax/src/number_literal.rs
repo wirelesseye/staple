@@ -296,6 +296,21 @@ pub fn decode_integer(literal: &str) -> Result<IntegerLiteral, NumberLiteralErro
             let previous_is_digit = previous.is_some_and(|previous| radix.is_digit(previous));
             let next_is_valid =
                 next.is_some_and(|next| radix.is_digit(next) || is_suffix_start(next));
+            if previous_is_digit
+                && let Some(next) = next
+                && !next_is_valid
+                && next.is_ascii_alphanumeric()
+            {
+                // The separator is fine; what follows it is not. In `0b1_2`
+                // that is a digit outside the radix; in `1_abc` it is a
+                // suffix that names no type.
+                if radix == Radix::Decimal {
+                    return Err(NumberLiteralError::UnknownSuffix {
+                        suffix: body[offset + 1..].to_owned(),
+                    });
+                }
+                return Err(NumberLiteralError::InvalidDigit { digit: next, radix });
+            }
             if !previous_is_digit || !next_is_valid {
                 return Err(NumberLiteralError::MisplacedSeparator);
             }
@@ -619,6 +634,26 @@ mod tests {
             ("0x_1", NumberLiteralError::MisplacedSeparator),
             ("1_", NumberLiteralError::MisplacedSeparator),
             ("1__0", NumberLiteralError::MisplacedSeparator),
+            (
+                "0b1_2",
+                NumberLiteralError::InvalidDigit {
+                    digit: '2',
+                    radix: Radix::Binary,
+                },
+            ),
+            (
+                "0x1_g",
+                NumberLiteralError::InvalidDigit {
+                    digit: 'g',
+                    radix: Radix::Hexadecimal,
+                },
+            ),
+            (
+                "1_abc",
+                NumberLiteralError::UnknownSuffix {
+                    suffix: "abc".into(),
+                },
+            ),
             (
                 "42U8",
                 NumberLiteralError::UppercaseSuffix {

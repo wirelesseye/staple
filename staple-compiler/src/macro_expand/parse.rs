@@ -2096,8 +2096,14 @@ impl MacroExpander {
                     fold_integer_overflow(integer, width, operation, values[0], values[1]);
                 Some(Value::Product(
                     vec![
-                        (None, Value::Integer(i128::from(u8::from(overflow)), None)),
-                        (None, Value::Integer(value, None)),
+                        (
+                            None,
+                            Value::Integer(
+                                i128::from(u8::from(overflow)),
+                                Some(crate::IntegerType::U8),
+                            ),
+                        ),
+                        (None, Value::Integer(value, Some(integer))),
                     ]
                     .into(),
                     false,
@@ -2105,11 +2111,14 @@ impl MacroExpander {
             }
             Intrinsic::IntegerCount { operation, .. } => {
                 let value = fold_integer_count(integer, width, operation, values[0]);
-                Some(Value::Integer(i128::from(value), None))
+                Some(Value::Integer(
+                    i128::from(value),
+                    Some(crate::IntegerType::U32),
+                ))
             }
             Intrinsic::IntegerUnary { operation, .. } => {
                 let value = fold_integer_unary(integer, width, operation, values[0]);
-                Some(Value::Integer(value, None))
+                Some(Value::Integer(value, Some(integer)))
             }
             Intrinsic::IntegerSignCast { .. } => {
                 let counterpart = integer.sign_counterpart();
@@ -2119,7 +2128,7 @@ impl MacroExpander {
             }
             Intrinsic::IntegerRotate { direction, .. } => {
                 let value = fold_integer_rotate(integer, width, direction, values[0], values[1]);
-                Some(Value::Integer(value, None))
+                Some(Value::Integer(value, Some(integer)))
             }
             _ => unreachable!("handled above"),
         }

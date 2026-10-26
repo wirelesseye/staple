@@ -567,7 +567,7 @@ fn same_width_sign_cast_checking_rejects_wrong_types() {
 fn integer_companion_constants_fold_at_their_declared_width() {
     let module = check(concat!(
         "const min: I8 = I8.Min\n",
-        "const ones: U8 = U8.count_ones 255\n",
+        "const ones: U32 = U8.count_ones 255\n",
         "const sum: I8 = match (I8.checked_add 100 20) { Some value => value, None => 0 }\n",
         "const wrapped: I8 = match (I8.checked_add 100 100) { Some value => value, None => 0 }\n",
         "const rotated: U8 = U8.rotate_left 1 7\n",
@@ -578,10 +578,10 @@ fn integer_companion_constants_fold_at_their_declared_width() {
     ))
     .unwrap_or_else(|errors| panic!("check: {errors:?}"));
     for (name, expected) in [
-        ("ones", "8"),
-        ("sum", "120"),
-        ("wrapped", "0"),
-        ("rotated", "128"),
+        ("ones", "8u32"),
+        ("sum", "120i8"),
+        ("wrapped", "0i8"),
+        ("rotated", "128u8"),
     ] {
         match folded_value(&module, name) {
             staple_syntax::Expression::Integer(integer) => {

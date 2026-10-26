@@ -276,13 +276,58 @@ fn mixed_or_overflowing_folds_are_rejected() {
         "{diagnostics:?}"
     );
 
-    let diagnostics = check("const Big = 255u8 + 1u8\n").expect_err("overflowing U8 constant");
+    // A folded value out of its type's range is an error in either
+    // direction, and the message names the value rather than a literal the
+    // user never wrote.
+    for (source, message) in [
+        ("const Big = 255u8 + 1u8\n", "constant value `256` does not fit in `U8`"),
+        ("const Under = 0u8 - 1u8\n", "constant value `-1` does not fit in `U8`"),
+        ("const Annotated: U8 = 0 - 1\n", "constant value `-1` does not fit in `U8`"),
+        ("const Wide = 0x7F_i8 + 1\n", "constant value `128` does not fit in `I8`"),
+        ("const Low = I8.Min - 1\n", "constant value `-129` does not fit in `I8`"),
+    ] {
+        let diagnostics = check(source).expect_err("out-of-range constant");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(message)),
+            "{source}: {diagnostics:?}"
+        );
+    }
+
+    let diagnostics = check("const Mismatch: I32 = 1u8\n").expect_err("annotation mismatch");
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("does not fit in `U8`")),
+            .any(|diagnostic| diagnostic.message.contains("expected `I32`, found `U8`")),
         "{diagnostics:?}"
     );
+}
+
+#[test]
+fn companion_folds_and_constant_references_keep_their_type() {
+    let module = check(concat!(
+        "const Reversed = U8.reverse_bits 1u8\n",
+        "const Swapped = U16.swap_bytes 1\n",
+        "const Rotated = U8.rotate_left 1 1\n",
+        "const Ones = U8.count_ones 0xFFu8\n",
+        "const Max = U8.Max\n",
+        "const Min = I8.Min\n",
+        "const Signed = U32.cast_signed 0xFFFF_FFFF\n",
+        "let reversed: U8 = Reversed\n",
+        "let swapped: U16 = Swapped\n",
+        "let rotated: U8 = Rotated\n",
+        "let ones: U32 = Ones\n",
+        "let max: U8 = Max\n",
+        "let min: I8 = Min\n",
+        "let signed: I32 = Signed\n",
+    ))
+    .unwrap_or_else(|errors| panic!("check: {errors:?}"));
+    assert_eq!(folded_integer(&module, "Reversed"), "128u8");
+    assert_eq!(folded_integer(&module, "Swapped"), "256u16");
+    assert_eq!(folded_integer(&module, "Rotated"), "2u8");
+    assert_eq!(folded_integer(&module, "Ones"), "8u32");
+    assert_eq!(folded_integer(&module, "Max"), "255u8");
 }
 
 #[test]
