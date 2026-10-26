@@ -4739,6 +4739,31 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .backend
                 .build_integer_not(integer, values[0].into_int_value())?
                 .as_basic_value_enum(),
+            crate::IntrinsicFunction::IntegerOverflowing { integer, operation } => {
+                self.backend.build_integer_overflowing(
+                    integer,
+                    operation,
+                    values[0].into_int_value(),
+                    values[1].into_int_value(),
+                )?
+            }
+            crate::IntrinsicFunction::IntegerCount { integer, operation } => self
+                .backend
+                .build_integer_count(integer, operation, values[0].into_int_value())?
+                .as_basic_value_enum(),
+            crate::IntrinsicFunction::IntegerUnary { integer, operation } => self
+                .backend
+                .build_integer_unary(integer, operation, values[0].into_int_value())?
+                .as_basic_value_enum(),
+            crate::IntrinsicFunction::IntegerRotate { integer, direction } => self
+                .backend
+                .build_integer_rotate(
+                    integer,
+                    direction,
+                    values[0].into_int_value(),
+                    values[1].into_int_value(),
+                )?
+                .as_basic_value_enum(),
             crate::IntrinsicFunction::FloatBinary { float, operation } => self
                 .backend
                 .build_float_binary(

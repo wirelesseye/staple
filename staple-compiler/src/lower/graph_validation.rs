@@ -805,13 +805,22 @@ pub(crate) mod tests {
             .next()
             .map(|(id, _)| id)
             .expect("instance");
+        // Pick an id beyond the standard library's instances, which grow with
+        // the library, so the target is definitely missing.
+        let missing = program
+            .instances
+            .iter()
+            .map(|(id, _)| id.index())
+            .max()
+            .unwrap_or(0)
+            + 1;
         program
             .instances
             .get_mut(id)
             .expect("instance")
             .dependencies
             .push(LoweredInstanceDependency {
-                instance: FunctionInstanceId::for_test(999),
+                instance: FunctionInstanceId::for_test(missing),
                 origin,
                 kind: LoweredInstanceDependencyKind::DirectCall,
                 closure_phase: false,

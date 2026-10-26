@@ -633,6 +633,8 @@ impl<'program, 'context> Backend<'program, 'context> {
     /// The emitter's integer bitwise builder with its SSA names
     /// (`{type}.and`/`.or`/`.xor`/`.shift_left`/`.shift_right`). Right shifts
     /// are arithmetic for signed integers and logical for unsigned integers.
+    /// Shift callers guarantee the count is in `0..Bits`; LLVM treats any
+    /// other count as poison.
     pub(crate) fn build_integer_bitwise(
         &self,
         integer: crate::IntegerType,
@@ -676,6 +678,224 @@ impl<'program, 'context> Backend<'program, 'context> {
         self.builder
             .build_not(value, &format!("{}.not", integer.intrinsic_name()))
             .map_err(compiler_diagnostic)
+    }
+
+    /// Emits wrapping integer arithmetic together with whether it overflowed,
+    /// as the `(U8, T)` product the companion converts into `Option` or
+    /// `(T, Bool)`.
+    pub(crate) fn build_integer_overflowing(
+        &self,
+        integer: crate::IntegerType,
+        operation: crate::IntegerOverflowOperation,
+        left: inkwell::values::IntValue<'context>,
+        right: inkwell::values::IntValue<'context>,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        use crate::IntegerOverflowOperation;
+        let ty = self.compile_integer_type(integer);
+        let signed = integer.is_signed();
+        let operation = match operation {
+            IntegerOverflowOperation::Add => "add",
+            IntegerOverflowOperation::Subtract => "sub",
+            IntegerOverflowOperation::Multiply => "mul",
+        };
+        let kind = if signed { "s" } else { "u" };
+        let name = format!(
+            "llvm.{kind}{operation}.with.overflow.i{}",
+            ty.get_bit_width()
+        );
+        let pair = self
+            .context
+            .struct_type(&[ty.into(), self.context.bool_type().into()], false);
+        let function = self.llvm_module.get_function(&name).unwrap_or_else(|| {
+            self.llvm_module
+                .add_function(&name, pair.fn_type(&[ty.into(), ty.into()], false), None)
+        });
+        let result = self
+            .builder
+            .build_direct_call(function, &[left.into(), right.into()], "integer.overflow")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    Span::Compiler,
+                    "integer overflow intrinsic returned no value",
+                )
+            })?
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "integer.overflow.value")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let overflow = self
+            .builder
+            .build_extract_value(result, 1, "integer.overflow.flag")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let status = self
+            .builder
+            .build_int_z_extend(overflow, self.context.i8_type(), "integer.overflow.status")
+            .map_err(compiler_diagnostic)?;
+        let product = crate::CheckedProductType::from_elements(
+            false,
+            Vec::new(),
+            vec![
+                crate::CheckedTypeElement {
+                    name: None,
+                    value_type: crate::CheckedType::U8,
+                    default: None,
+                },
+                crate::CheckedTypeElement {
+                    name: None,
+                    value_type: crate::CheckedType::integer(integer),
+                    default: None,
+                },
+            ],
+            false,
+        );
+        self.build_checked_product_value(&product, &[status.into(), value.into()], Span::Compiler)
+    }
+
+    /// Emits a bit count and widens or truncates it to the companion's `U32`.
+    pub(crate) fn build_integer_count(
+        &self,
+        integer: crate::IntegerType,
+        operation: crate::IntegerCountOperation,
+        value: inkwell::values::IntValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        use crate::IntegerCountOperation;
+        let ty = self.compile_integer_type(integer);
+        let width = ty.get_bit_width();
+        let (operation, zero_is_poison) = match operation {
+            IntegerCountOperation::CountOnes => ("ctpop", None),
+            IntegerCountOperation::LeadingZeros => ("ctlz", Some(false)),
+            IntegerCountOperation::TrailingZeros => ("cttz", Some(false)),
+        };
+        let name = format!("llvm.{operation}.i{width}");
+        let function = self.llvm_module.get_function(&name).unwrap_or_else(|| {
+            let parameters = match zero_is_poison {
+                Some(_) => vec![ty.into(), self.context.bool_type().into()],
+                None => vec![ty.into()],
+            };
+            self.llvm_module
+                .add_function(&name, ty.fn_type(&parameters, false), None)
+        });
+        let mut arguments = vec![value.into()];
+        if let Some(zero_is_poison) = zero_is_poison {
+            arguments.push(
+                self.context
+                    .bool_type()
+                    .const_int(u64::from(zero_is_poison), false)
+                    .into(),
+            );
+        }
+        let count = self
+            .builder
+            .build_direct_call(function, &arguments, "integer.count")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| {
+                Diagnostic::new(Span::Compiler, "bit count intrinsic returned no value")
+            })?
+            .into_int_value();
+        let target = self.context.i32_type();
+        let target_width = target.get_bit_width();
+        if width < target_width {
+            self.builder
+                .build_int_z_extend(count, target, "integer.count.value")
+                .map_err(compiler_diagnostic)
+        } else if width > target_width {
+            self.builder
+                .build_int_truncate(count, target, "integer.count.value")
+                .map_err(compiler_diagnostic)
+        } else {
+            Ok(count)
+        }
+    }
+
+    /// Emits `swap_bytes` or `reverse_bits` within the integer's width.
+    pub(crate) fn build_integer_unary(
+        &self,
+        integer: crate::IntegerType,
+        operation: crate::IntegerUnaryOperation,
+        value: inkwell::values::IntValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        use crate::IntegerUnaryOperation;
+        let ty = self.compile_integer_type(integer);
+        let width = ty.get_bit_width();
+        let operation = match operation {
+            IntegerUnaryOperation::SwapBytes => "bswap",
+            IntegerUnaryOperation::ReverseBits => "bitreverse",
+        };
+        if operation == "bswap" && width == 8 {
+            return Ok(value);
+        }
+        let name = format!("llvm.{operation}.i{width}");
+        let function = self.llvm_module.get_function(&name).unwrap_or_else(|| {
+            self.llvm_module
+                .add_function(&name, ty.fn_type(&[ty.into()], false), None)
+        });
+        self.builder
+            .build_direct_call(function, &[value.into()], "integer.unary")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| {
+                Diagnostic::new(Span::Compiler, "integer unary intrinsic returned no value")
+            })
+            .map(|value| value.into_int_value())
+    }
+
+    /// Emits a left or right rotation. The count is reduced to the integer's
+    /// width and funnel shifts already take it modulo that width.
+    pub(crate) fn build_integer_rotate(
+        &self,
+        integer: crate::IntegerType,
+        direction: crate::IntegerRotateDirection,
+        value: inkwell::values::IntValue<'context>,
+        count: inkwell::values::IntValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        use crate::IntegerRotateDirection;
+        let ty = self.compile_integer_type(integer);
+        let width = ty.get_bit_width();
+        let count = if count.get_type().get_bit_width() < width {
+            self.builder
+                .build_int_z_extend(count, ty, "integer.rotate.count")
+                .map_err(compiler_diagnostic)?
+        } else if count.get_type().get_bit_width() > width {
+            self.builder
+                .build_int_truncate(count, ty, "integer.rotate.count")
+                .map_err(compiler_diagnostic)?
+        } else {
+            count
+        };
+        let direction = match direction {
+            IntegerRotateDirection::Left => "l",
+            IntegerRotateDirection::Right => "r",
+        };
+        let name = format!("llvm.fsh{direction}.i{width}");
+        let function = self.llvm_module.get_function(&name).unwrap_or_else(|| {
+            self.llvm_module.add_function(
+                &name,
+                ty.fn_type(&[ty.into(), ty.into(), ty.into()], false),
+                None,
+            )
+        });
+        self.builder
+            .build_direct_call(
+                function,
+                &[value.into(), value.into(), count.into()],
+                "integer.rotate",
+            )
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| {
+                Diagnostic::new(Span::Compiler, "integer rotate intrinsic returned no value")
+            })
+            .map(|value| value.into_int_value())
     }
 
     /// The emitter's integer compare builder with its SSA name

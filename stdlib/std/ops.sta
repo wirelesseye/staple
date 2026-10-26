@@ -73,12 +73,18 @@ pub trait BitNot T {
 
 /// Provides left shifts.
 pub trait ShiftLeft T {
-    /// Returns the left value shifted left by the right value.
+    /// Returns the left value shifted left by the right value. Implementations
+    /// that can fail, such as an integer shift count outside the type's width,
+    /// panic at the caller.
+    @track_caller
     shift_left: (T; T) -> T
 }
 
 /// Provides right shifts.
 pub trait ShiftRight T {
-    /// Returns the left value shifted right by the right value.
+    /// Returns the left value shifted right by the right value. Implementations
+    /// that can fail, such as an integer shift count outside the type's width,
+    /// panic at the caller.
+    @track_caller
     shift_right: (T; T) -> T
 }

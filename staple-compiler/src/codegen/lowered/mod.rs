@@ -8521,6 +8521,62 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let value = self.backend.build_integer_not(integer, *value)?;
                 Ok(value.as_any_value_enum())
             }
+            IntrinsicFunction::IntegerOverflowing { integer, operation } => {
+                let [
+                    BasicMetadataValueEnum::IntValue(left),
+                    BasicMetadataValueEnum::IntValue(right),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "integer overflow operands must be integers",
+                    ));
+                };
+                let value = self
+                    .backend
+                    .build_integer_overflowing(integer, operation, *left, *right)?;
+                Ok(value.as_any_value_enum())
+            }
+            IntrinsicFunction::IntegerCount { integer, operation } => {
+                let [BasicMetadataValueEnum::IntValue(value)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "integer bit count operand must be an integer",
+                    ));
+                };
+                let value = self
+                    .backend
+                    .build_integer_count(integer, operation, *value)?;
+                Ok(value.as_any_value_enum())
+            }
+            IntrinsicFunction::IntegerUnary { integer, operation } => {
+                let [BasicMetadataValueEnum::IntValue(value)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "integer unary intrinsic operand must be an integer",
+                    ));
+                };
+                let value = self
+                    .backend
+                    .build_integer_unary(integer, operation, *value)?;
+                Ok(value.as_any_value_enum())
+            }
+            IntrinsicFunction::IntegerRotate { integer, direction } => {
+                let [
+                    BasicMetadataValueEnum::IntValue(value),
+                    BasicMetadataValueEnum::IntValue(count),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "integer rotate operands must be integers",
+                    ));
+                };
+                let value = self
+                    .backend
+                    .build_integer_rotate(integer, direction, *value, *count)?;
+                Ok(value.as_any_value_enum())
+            }
             IntrinsicFunction::FloatBinary { float, operation } => {
                 let [
                     BasicMetadataValueEnum::FloatValue(left),

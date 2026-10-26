@@ -42,6 +42,3885 @@ pub type F32 opaque
 pub type F64 opaque
 
 // ---------------------------------------------------------------------------
+// I8 math
+// ---------------------------------------------------------------------------
+
+companion I8 {
+    use package.convert.(ConversionError, TryConvert)
+    use package.ops.(BitAnd, BitNot, ShiftLeft, ShiftRight)
+    use package.option.(Option, Some, None)
+    use package.result.(Ok, Result)
+    use package.process.(panic)
+    use package.source.(track_caller)
+
+    extern "staple-intrinsic" {
+        __i8_overflowing_add: (I8, I8) -> (U8, I8)
+        __i8_overflowing_subtract: (I8, I8) -> (U8, I8)
+        __i8_overflowing_multiply: (I8, I8) -> (U8, I8)
+        __i8_count_ones: I8 -> U32
+        __i8_leading_zeros: I8 -> U32
+        __i8_trailing_zeros: I8 -> U32
+        __i8_swap_bytes: I8 -> I8
+        __i8_reverse_bits: I8 -> I8
+        __i8_rotate_left: (I8, U32) -> I8
+        __i8_rotate_right: (I8, U32) -> I8
+    }
+
+    /// The smallest value.
+    pub const Min: I8 = -127 - 1
+    /// The largest value.
+    pub const Max: I8 = 127
+    /// The width in bits.
+    pub const Bits: U32 = 8
+
+    /// Returns the smaller of two values.
+    pub def min = (left: I8; right: I8) => I8 :: if (left < right) { left } else { right }
+
+    /// Returns the larger of two values.
+    pub def max = (left: I8; right: I8) => I8 :: if (left > right) { left } else { right }
+
+    /// Constrains `value` to the inclusive range `lo ..= hi`. Panics at the
+    /// caller when `lo > hi`.
+    @track_caller
+    pub def clamp = (value: I8; lo: I8; hi: I8) => I8 :: {
+        if (lo > hi) {
+            panic "clamp: invalid bounds"
+        }
+        if (value < lo) {
+            lo
+        } else if (value > hi) {
+            hi
+        } else {
+            value
+        }
+    }
+
+    /// Returns the absolute difference between two values as an unsigned value.
+    pub def abs_diff = (left: I8; right: I8) => U8 :: {
+        let high = if (left < right) { right } else { left }
+        let low = if (left < right) { left } else { right }
+        if (low < 0 && high >= 0) {
+            unsigned_abs high + unsigned_abs low
+        } else {
+            unsigned_abs (high - low)
+        }
+    }
+
+    /// Returns `left + right`, or `None` on overflow.
+    pub def checked_add = (left: I8; right: I8) => Option<I8> :: {
+        let (status, value) = __i8_overflowing_add (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left - right`, or `None` on overflow.
+    pub def checked_subtract = (left: I8; right: I8) => Option<I8> :: {
+        let (status, value) = __i8_overflowing_subtract (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left * right`, or `None` on overflow.
+    pub def checked_multiply = (left: I8; right: I8) => Option<I8> :: {
+        let (status, value) = __i8_overflowing_multiply (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left / right`, or `None` for a zero divisor or `Min / -1`.
+    pub def checked_divide = (left: I8; right: I8) => Option<I8> :: {
+        if (right == 0 || (left == Min && right == ((I8 :: 0) - 1))) {
+            None
+        } else {
+            Some (left / right)
+        }
+    }
+
+    /// Returns `left % right`, or `None` for a zero divisor.
+    pub def checked_remainder = (left: I8; right: I8) => Option<I8> :: {
+        if (right == 0) { None } else { Some (left % right) }
+    }
+
+    /// Returns `value` shifted left by `count`, or `None` when the count is not
+    /// smaller than the width.
+    pub def checked_shift_left = (value: I8; count: U32) => Option<I8> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_left value count) }
+    }
+
+    /// Returns `value` shifted right by `count`, or `None` when the count is
+    /// not smaller than the width.
+    pub def checked_shift_right = (value: I8; count: U32) => Option<I8> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_right value count) }
+    }
+
+    /// Returns `left + right`, wrapping on overflow.
+    pub def wrapping_add = (left: I8; right: I8) => I8 :: left + right
+
+    /// Returns `left - right`, wrapping on overflow.
+    pub def wrapping_subtract = (left: I8; right: I8) => I8 :: left - right
+
+    /// Returns `left * right`, wrapping on overflow.
+    pub def wrapping_multiply = (left: I8; right: I8) => I8 :: left * right
+
+    /// Returns `value` shifted left by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_left = (value: I8; count: U32) => I8 :: {
+        let shift = count % Bits
+        let amount: I8 = match (TryConvert.try_convert.<U32, I8> shift) {
+            Ok amount => amount,
+            _ => 0,
+        }
+        ShiftLeft.shift_left (value; amount)
+    }
+
+    /// Returns `value` shifted right by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_right = (value: I8; count: U32) => I8 :: {
+        let shift = count % Bits
+        let amount: I8 = match (TryConvert.try_convert.<U32, I8> shift) {
+            Ok amount => amount,
+            _ => 0,
+        }
+        ShiftRight.shift_right (value; amount)
+    }
+
+    /// Returns `left + right`, saturating at the type's bounds.
+    pub def saturating_add = (left: I8; right: I8) => I8 :: {
+        let (status, value) = __i8_overflowing_add (left, right)
+        if (status == 0) {
+            value
+        } else if (right > 0) {
+            Max
+        } else {
+            Min
+        }
+    }
+
+    /// Returns `left - right`, saturating at the type's bounds.
+    pub def saturating_subtract = (left: I8; right: I8) => I8 :: {
+        let (status, value) = __i8_overflowing_subtract (left, right)
+        if (status == 0) {
+            value
+        } else if (right > 0) {
+            Min
+        } else {
+            Max
+        }
+    }
+
+    /// Returns `left * right`, saturating at the type's bounds.
+    pub def saturating_multiply = (left: I8; right: I8) => I8 :: {
+        let (status, value) = __i8_overflowing_multiply (left, right)
+        if (status == 0) {
+            value
+        } else if ((left < 0) != (right < 0)) {
+            Min
+        } else {
+            Max
+        }
+    }
+
+    /// Returns the wrapped result and whether the addition overflowed.
+    pub def overflowing_add = (left: I8; right: I8) => (I8, Bool) :: {
+        let (status, value) = __i8_overflowing_add (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the subtraction overflowed.
+    pub def overflowing_subtract = (left: I8; right: I8) => (I8, Bool) :: {
+        let (status, value) = __i8_overflowing_subtract (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the multiplication overflowed.
+    pub def overflowing_multiply = (left: I8; right: I8) => (I8, Bool) :: {
+        let (status, value) = __i8_overflowing_multiply (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the Euclidean quotient of `left / right`. Panics at the caller
+    /// for a zero divisor or `Min / -1`.
+    @track_caller
+    pub def divide_euclid = (left: I8; right: I8) => I8 :: {
+        let quotient = left / right
+        let remainder = left % right
+        if (remainder < 0) {
+            if (right > 0) { quotient - 1 } else { quotient + 1 }
+        } else {
+            quotient
+        }
+    }
+
+    /// Returns the non-negative Euclidean remainder of `left / right`. Panics
+    /// at the caller for a zero divisor.
+    @track_caller
+    pub def remainder_euclid = (left: I8; right: I8) => I8 :: {
+        let remainder = left % right
+        if (remainder < 0) {
+            if (right > 0) { remainder + right } else { remainder - right }
+        } else {
+            remainder
+        }
+    }
+
+    /// Returns `base` raised to `exponent`, wrapping like `*`.
+    pub def pow = (base: I8; exponent: U32) => I8 :: {
+        let mut result: I8 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = result * factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = factor * factor
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, or `None` on overflow.
+    pub def checked_pow = (base: I8; exponent: U32) => Option<I8> :: {
+        let mut result: Option<I8> = Some 1
+        let mut factor: Option<I8> = Some base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = match (result, factor) {
+                    (Some value, Some power) => checked_multiply value power,
+                    _ => None,
+                }
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = match factor {
+                    Some value => checked_multiply value value,
+                    None => None,
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, saturating at the type's bounds.
+    pub def saturating_pow = (base: I8; exponent: U32) => I8 :: {
+        let mut result: I8 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = saturating_multiply result factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = saturating_multiply factor factor
+            }
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm. Panics at the caller for `value <= 0`.
+    @track_caller
+    pub def ilog2 = (value: I8) => U32 :: {
+        if (value <= 0) {
+            panic "ilog2: non-positive value"
+        } else {
+            Bits - 1 - leading_zeros value
+        }
+    }
+
+    /// Returns the base-10 logarithm. Panics at the caller for `value <= 0`.
+    @track_caller
+    pub def ilog10 = (value: I8) => U32 :: {
+        if (value <= 0) {
+            panic "ilog10: non-positive value"
+        }
+        let mut remaining = value
+        let mut result: U32 = 0
+        while (remaining >= 10) {
+            remaining = remaining / 10
+            result = result + 1
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm, or `None` for `value <= 0`.
+    pub def checked_ilog2 = (value: I8) => Option<U32> :: {
+        if (value <= 0) { None } else { Some (ilog2 value) }
+    }
+
+    /// Returns the base-10 logarithm, or `None` for `value <= 0`.
+    pub def checked_ilog10 = (value: I8) => Option<U32> :: {
+        if (value <= 0) { None } else { Some (ilog10 value) }
+    }
+
+    /// Returns the integer square root. Panics at the caller for a negative
+    /// value.
+    @track_caller
+    pub def isqrt = (value: I8) => I8 :: {
+        if (value < 0) {
+            panic "isqrt: negative value"
+        }
+        if (value < 2) {
+            value
+        } else {
+            let mut x = value / 2 + 1
+            let mut y = (x + value / x) / 2
+            while (y < x) {
+                x = y
+                y = (x + value / x) / 2
+            }
+            x
+        }
+    }
+
+    /// Returns the number of one bits.
+    pub def count_ones = (value: I8) => U32 :: __i8_count_ones value
+
+    /// Returns the number of zero bits.
+    pub def count_zeros = (value: I8) => U32 :: Bits - count_ones value
+
+    /// Returns the number of leading zero bits.
+    pub def leading_zeros = (value: I8) => U32 :: __i8_leading_zeros value
+
+    /// Returns the number of trailing zero bits.
+    pub def trailing_zeros = (value: I8) => U32 :: __i8_trailing_zeros value
+
+    /// Returns the number of leading one bits.
+    pub def leading_ones = (value: I8) => U32 :: leading_zeros (BitNot.bit_not value)
+
+    /// Returns the number of trailing one bits.
+    pub def trailing_ones = (value: I8) => U32 :: trailing_zeros (BitNot.bit_not value)
+
+    /// Rotates the bits left by `count`, reducing the count modulo the width.
+    pub def rotate_left = (value: I8; count: U32) => I8 :: __i8_rotate_left (value, count)
+
+    /// Rotates the bits right by `count`, reducing the count modulo the width.
+    pub def rotate_right = (value: I8; count: U32) => I8 :: __i8_rotate_right (value, count)
+
+    /// Reverses the byte order.
+    pub def swap_bytes = (value: I8) => I8 :: __i8_swap_bytes value
+
+    /// Reverses the bit order.
+    pub def reverse_bits = (value: I8) => I8 :: __i8_reverse_bits value
+
+    /// Returns the absolute value, wrapping at `Min` like prefix `-`.
+    pub def abs = (value: I8) => I8 :: if (value < 0) { 0 - value } else { value }
+
+    /// Returns the absolute value, or `None` at `Min`.
+    pub def checked_abs = (value: I8) => Option<I8> :: {
+        if (value < 0) { checked_negate value } else { Some value }
+    }
+
+    /// Returns the exact magnitude of `value` as an unsigned value.
+    pub def unsigned_abs = (value: I8) => U8 :: {
+        if (value >= 0) {
+            match (Result<U8, ConversionError> :: TryConvert.try_convert value) {
+                Ok result => result,
+                _ => 0,
+            }
+        } else {
+            let negated = 0 - value
+            if (negated >= 0) {
+                match (Result<U8, ConversionError> :: TryConvert.try_convert negated) {
+                    Ok result => result,
+                    _ => 0,
+                }
+            } else {
+                U8.Max - (U8.Max / 2)
+            }
+        }
+    }
+
+    /// Returns `-value`, or `None` at `Min`.
+    pub def checked_negate = (value: I8) => Option<I8> :: {
+        let (status, negated) = __i8_overflowing_subtract (0, value)
+        if (status == 0) { Some negated } else { None }
+    }
+
+    /// Returns `-value`, wrapping at `Min`.
+    pub def wrapping_negate = (value: I8) => I8 :: 0 - value
+
+    /// Returns -1, 0, or 1 according to the sign of `value`.
+    pub def signum = (value: I8) => I8 :: when {
+        value < 0 => ((I8 :: 0) - 1),
+        value > 0 => 1,
+        else => 0,
+    }
+
+    /// Returns whether `value` is negative.
+    pub def is_negative = (value: I8) => Bool :: value < 0
+
+    /// Returns whether `value` is positive.
+    pub def is_positive = (value: I8) => Bool :: value > 0
+}
+
+// ---------------------------------------------------------------------------
+// I16 math
+// ---------------------------------------------------------------------------
+
+companion I16 {
+    use package.convert.(ConversionError, TryConvert)
+    use package.ops.(BitAnd, BitNot, ShiftLeft, ShiftRight)
+    use package.option.(Option, Some, None)
+    use package.result.(Ok, Result)
+    use package.process.(panic)
+    use package.source.(track_caller)
+
+    extern "staple-intrinsic" {
+        __i16_overflowing_add: (I16, I16) -> (U8, I16)
+        __i16_overflowing_subtract: (I16, I16) -> (U8, I16)
+        __i16_overflowing_multiply: (I16, I16) -> (U8, I16)
+        __i16_count_ones: I16 -> U32
+        __i16_leading_zeros: I16 -> U32
+        __i16_trailing_zeros: I16 -> U32
+        __i16_swap_bytes: I16 -> I16
+        __i16_reverse_bits: I16 -> I16
+        __i16_rotate_left: (I16, U32) -> I16
+        __i16_rotate_right: (I16, U32) -> I16
+    }
+
+    /// The smallest value.
+    pub const Min: I16 = -32767 - 1
+    /// The largest value.
+    pub const Max: I16 = 32767
+    /// The width in bits.
+    pub const Bits: U32 = 16
+
+    /// Returns the smaller of two values.
+    pub def min = (left: I16; right: I16) => I16 :: if (left < right) { left } else { right }
+
+    /// Returns the larger of two values.
+    pub def max = (left: I16; right: I16) => I16 :: if (left > right) { left } else { right }
+
+    /// Constrains `value` to the inclusive range `lo ..= hi`. Panics at the
+    /// caller when `lo > hi`.
+    @track_caller
+    pub def clamp = (value: I16; lo: I16; hi: I16) => I16 :: {
+        if (lo > hi) {
+            panic "clamp: invalid bounds"
+        }
+        if (value < lo) {
+            lo
+        } else if (value > hi) {
+            hi
+        } else {
+            value
+        }
+    }
+
+    /// Returns the absolute difference between two values as an unsigned value.
+    pub def abs_diff = (left: I16; right: I16) => U16 :: {
+        let high = if (left < right) { right } else { left }
+        let low = if (left < right) { left } else { right }
+        if (low < 0 && high >= 0) {
+            unsigned_abs high + unsigned_abs low
+        } else {
+            unsigned_abs (high - low)
+        }
+    }
+
+    /// Returns `left + right`, or `None` on overflow.
+    pub def checked_add = (left: I16; right: I16) => Option<I16> :: {
+        let (status, value) = __i16_overflowing_add (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left - right`, or `None` on overflow.
+    pub def checked_subtract = (left: I16; right: I16) => Option<I16> :: {
+        let (status, value) = __i16_overflowing_subtract (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left * right`, or `None` on overflow.
+    pub def checked_multiply = (left: I16; right: I16) => Option<I16> :: {
+        let (status, value) = __i16_overflowing_multiply (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left / right`, or `None` for a zero divisor or `Min / -1`.
+    pub def checked_divide = (left: I16; right: I16) => Option<I16> :: {
+        if (right == 0 || (left == Min && right == ((I16 :: 0) - 1))) {
+            None
+        } else {
+            Some (left / right)
+        }
+    }
+
+    /// Returns `left % right`, or `None` for a zero divisor.
+    pub def checked_remainder = (left: I16; right: I16) => Option<I16> :: {
+        if (right == 0) { None } else { Some (left % right) }
+    }
+
+    /// Returns `value` shifted left by `count`, or `None` when the count is not
+    /// smaller than the width.
+    pub def checked_shift_left = (value: I16; count: U32) => Option<I16> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_left value count) }
+    }
+
+    /// Returns `value` shifted right by `count`, or `None` when the count is
+    /// not smaller than the width.
+    pub def checked_shift_right = (value: I16; count: U32) => Option<I16> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_right value count) }
+    }
+
+    /// Returns `left + right`, wrapping on overflow.
+    pub def wrapping_add = (left: I16; right: I16) => I16 :: left + right
+
+    /// Returns `left - right`, wrapping on overflow.
+    pub def wrapping_subtract = (left: I16; right: I16) => I16 :: left - right
+
+    /// Returns `left * right`, wrapping on overflow.
+    pub def wrapping_multiply = (left: I16; right: I16) => I16 :: left * right
+
+    /// Returns `value` shifted left by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_left = (value: I16; count: U32) => I16 :: {
+        let shift = count % Bits
+        let amount: I16 = match (TryConvert.try_convert.<U32, I16> shift) {
+            Ok amount => amount,
+            _ => 0,
+        }
+        ShiftLeft.shift_left (value; amount)
+    }
+
+    /// Returns `value` shifted right by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_right = (value: I16; count: U32) => I16 :: {
+        let shift = count % Bits
+        let amount: I16 = match (TryConvert.try_convert.<U32, I16> shift) {
+            Ok amount => amount,
+            _ => 0,
+        }
+        ShiftRight.shift_right (value; amount)
+    }
+
+    /// Returns `left + right`, saturating at the type's bounds.
+    pub def saturating_add = (left: I16; right: I16) => I16 :: {
+        let (status, value) = __i16_overflowing_add (left, right)
+        if (status == 0) {
+            value
+        } else if (right > 0) {
+            Max
+        } else {
+            Min
+        }
+    }
+
+    /// Returns `left - right`, saturating at the type's bounds.
+    pub def saturating_subtract = (left: I16; right: I16) => I16 :: {
+        let (status, value) = __i16_overflowing_subtract (left, right)
+        if (status == 0) {
+            value
+        } else if (right > 0) {
+            Min
+        } else {
+            Max
+        }
+    }
+
+    /// Returns `left * right`, saturating at the type's bounds.
+    pub def saturating_multiply = (left: I16; right: I16) => I16 :: {
+        let (status, value) = __i16_overflowing_multiply (left, right)
+        if (status == 0) {
+            value
+        } else if ((left < 0) != (right < 0)) {
+            Min
+        } else {
+            Max
+        }
+    }
+
+    /// Returns the wrapped result and whether the addition overflowed.
+    pub def overflowing_add = (left: I16; right: I16) => (I16, Bool) :: {
+        let (status, value) = __i16_overflowing_add (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the subtraction overflowed.
+    pub def overflowing_subtract = (left: I16; right: I16) => (I16, Bool) :: {
+        let (status, value) = __i16_overflowing_subtract (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the multiplication overflowed.
+    pub def overflowing_multiply = (left: I16; right: I16) => (I16, Bool) :: {
+        let (status, value) = __i16_overflowing_multiply (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the Euclidean quotient of `left / right`. Panics at the caller
+    /// for a zero divisor or `Min / -1`.
+    @track_caller
+    pub def divide_euclid = (left: I16; right: I16) => I16 :: {
+        let quotient = left / right
+        let remainder = left % right
+        if (remainder < 0) {
+            if (right > 0) { quotient - 1 } else { quotient + 1 }
+        } else {
+            quotient
+        }
+    }
+
+    /// Returns the non-negative Euclidean remainder of `left / right`. Panics
+    /// at the caller for a zero divisor.
+    @track_caller
+    pub def remainder_euclid = (left: I16; right: I16) => I16 :: {
+        let remainder = left % right
+        if (remainder < 0) {
+            if (right > 0) { remainder + right } else { remainder - right }
+        } else {
+            remainder
+        }
+    }
+
+    /// Returns `base` raised to `exponent`, wrapping like `*`.
+    pub def pow = (base: I16; exponent: U32) => I16 :: {
+        let mut result: I16 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = result * factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = factor * factor
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, or `None` on overflow.
+    pub def checked_pow = (base: I16; exponent: U32) => Option<I16> :: {
+        let mut result: Option<I16> = Some 1
+        let mut factor: Option<I16> = Some base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = match (result, factor) {
+                    (Some value, Some power) => checked_multiply value power,
+                    _ => None,
+                }
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = match factor {
+                    Some value => checked_multiply value value,
+                    None => None,
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, saturating at the type's bounds.
+    pub def saturating_pow = (base: I16; exponent: U32) => I16 :: {
+        let mut result: I16 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = saturating_multiply result factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = saturating_multiply factor factor
+            }
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm. Panics at the caller for `value <= 0`.
+    @track_caller
+    pub def ilog2 = (value: I16) => U32 :: {
+        if (value <= 0) {
+            panic "ilog2: non-positive value"
+        } else {
+            Bits - 1 - leading_zeros value
+        }
+    }
+
+    /// Returns the base-10 logarithm. Panics at the caller for `value <= 0`.
+    @track_caller
+    pub def ilog10 = (value: I16) => U32 :: {
+        if (value <= 0) {
+            panic "ilog10: non-positive value"
+        }
+        let mut remaining = value
+        let mut result: U32 = 0
+        while (remaining >= 10) {
+            remaining = remaining / 10
+            result = result + 1
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm, or `None` for `value <= 0`.
+    pub def checked_ilog2 = (value: I16) => Option<U32> :: {
+        if (value <= 0) { None } else { Some (ilog2 value) }
+    }
+
+    /// Returns the base-10 logarithm, or `None` for `value <= 0`.
+    pub def checked_ilog10 = (value: I16) => Option<U32> :: {
+        if (value <= 0) { None } else { Some (ilog10 value) }
+    }
+
+    /// Returns the integer square root. Panics at the caller for a negative
+    /// value.
+    @track_caller
+    pub def isqrt = (value: I16) => I16 :: {
+        if (value < 0) {
+            panic "isqrt: negative value"
+        }
+        if (value < 2) {
+            value
+        } else {
+            let mut x = value / 2 + 1
+            let mut y = (x + value / x) / 2
+            while (y < x) {
+                x = y
+                y = (x + value / x) / 2
+            }
+            x
+        }
+    }
+
+    /// Returns the number of one bits.
+    pub def count_ones = (value: I16) => U32 :: __i16_count_ones value
+
+    /// Returns the number of zero bits.
+    pub def count_zeros = (value: I16) => U32 :: Bits - count_ones value
+
+    /// Returns the number of leading zero bits.
+    pub def leading_zeros = (value: I16) => U32 :: __i16_leading_zeros value
+
+    /// Returns the number of trailing zero bits.
+    pub def trailing_zeros = (value: I16) => U32 :: __i16_trailing_zeros value
+
+    /// Returns the number of leading one bits.
+    pub def leading_ones = (value: I16) => U32 :: leading_zeros (BitNot.bit_not value)
+
+    /// Returns the number of trailing one bits.
+    pub def trailing_ones = (value: I16) => U32 :: trailing_zeros (BitNot.bit_not value)
+
+    /// Rotates the bits left by `count`, reducing the count modulo the width.
+    pub def rotate_left = (value: I16; count: U32) => I16 :: __i16_rotate_left (value, count)
+
+    /// Rotates the bits right by `count`, reducing the count modulo the width.
+    pub def rotate_right = (value: I16; count: U32) => I16 :: __i16_rotate_right (value, count)
+
+    /// Reverses the byte order.
+    pub def swap_bytes = (value: I16) => I16 :: __i16_swap_bytes value
+
+    /// Reverses the bit order.
+    pub def reverse_bits = (value: I16) => I16 :: __i16_reverse_bits value
+
+    /// Returns the absolute value, wrapping at `Min` like prefix `-`.
+    pub def abs = (value: I16) => I16 :: if (value < 0) { 0 - value } else { value }
+
+    /// Returns the absolute value, or `None` at `Min`.
+    pub def checked_abs = (value: I16) => Option<I16> :: {
+        if (value < 0) { checked_negate value } else { Some value }
+    }
+
+    /// Returns the exact magnitude of `value` as an unsigned value.
+    pub def unsigned_abs = (value: I16) => U16 :: {
+        if (value >= 0) {
+            match (Result<U16, ConversionError> :: TryConvert.try_convert value) {
+                Ok result => result,
+                _ => 0,
+            }
+        } else {
+            let negated = 0 - value
+            if (negated >= 0) {
+                match (Result<U16, ConversionError> :: TryConvert.try_convert negated) {
+                    Ok result => result,
+                    _ => 0,
+                }
+            } else {
+                U16.Max - (U16.Max / 2)
+            }
+        }
+    }
+
+    /// Returns `-value`, or `None` at `Min`.
+    pub def checked_negate = (value: I16) => Option<I16> :: {
+        let (status, negated) = __i16_overflowing_subtract (0, value)
+        if (status == 0) { Some negated } else { None }
+    }
+
+    /// Returns `-value`, wrapping at `Min`.
+    pub def wrapping_negate = (value: I16) => I16 :: 0 - value
+
+    /// Returns -1, 0, or 1 according to the sign of `value`.
+    pub def signum = (value: I16) => I16 :: when {
+        value < 0 => ((I16 :: 0) - 1),
+        value > 0 => 1,
+        else => 0,
+    }
+
+    /// Returns whether `value` is negative.
+    pub def is_negative = (value: I16) => Bool :: value < 0
+
+    /// Returns whether `value` is positive.
+    pub def is_positive = (value: I16) => Bool :: value > 0
+}
+
+// ---------------------------------------------------------------------------
+// I32 math
+// ---------------------------------------------------------------------------
+
+companion I32 {
+    use package.convert.(ConversionError, TryConvert)
+    use package.ops.(BitAnd, BitNot, ShiftLeft, ShiftRight)
+    use package.option.(Option, Some, None)
+    use package.result.(Ok, Result)
+    use package.process.(panic)
+    use package.source.(track_caller)
+
+    extern "staple-intrinsic" {
+        __i32_overflowing_add: (I32, I32) -> (U8, I32)
+        __i32_overflowing_subtract: (I32, I32) -> (U8, I32)
+        __i32_overflowing_multiply: (I32, I32) -> (U8, I32)
+        __i32_count_ones: I32 -> U32
+        __i32_leading_zeros: I32 -> U32
+        __i32_trailing_zeros: I32 -> U32
+        __i32_swap_bytes: I32 -> I32
+        __i32_reverse_bits: I32 -> I32
+        __i32_rotate_left: (I32, U32) -> I32
+        __i32_rotate_right: (I32, U32) -> I32
+    }
+
+    /// The smallest value.
+    pub const Min: I32 = -2147483647 - 1
+    /// The largest value.
+    pub const Max: I32 = 2147483647
+    /// The width in bits.
+    pub const Bits: U32 = 32
+
+    /// Returns the smaller of two values.
+    pub def min = (left: I32; right: I32) => I32 :: if (left < right) { left } else { right }
+
+    /// Returns the larger of two values.
+    pub def max = (left: I32; right: I32) => I32 :: if (left > right) { left } else { right }
+
+    /// Constrains `value` to the inclusive range `lo ..= hi`. Panics at the
+    /// caller when `lo > hi`.
+    @track_caller
+    pub def clamp = (value: I32; lo: I32; hi: I32) => I32 :: {
+        if (lo > hi) {
+            panic "clamp: invalid bounds"
+        }
+        if (value < lo) {
+            lo
+        } else if (value > hi) {
+            hi
+        } else {
+            value
+        }
+    }
+
+    /// Returns the absolute difference between two values as an unsigned value.
+    pub def abs_diff = (left: I32; right: I32) => U32 :: {
+        let high = if (left < right) { right } else { left }
+        let low = if (left < right) { left } else { right }
+        if (low < 0 && high >= 0) {
+            unsigned_abs high + unsigned_abs low
+        } else {
+            unsigned_abs (high - low)
+        }
+    }
+
+    /// Returns `left + right`, or `None` on overflow.
+    pub def checked_add = (left: I32; right: I32) => Option<I32> :: {
+        let (status, value) = __i32_overflowing_add (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left - right`, or `None` on overflow.
+    pub def checked_subtract = (left: I32; right: I32) => Option<I32> :: {
+        let (status, value) = __i32_overflowing_subtract (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left * right`, or `None` on overflow.
+    pub def checked_multiply = (left: I32; right: I32) => Option<I32> :: {
+        let (status, value) = __i32_overflowing_multiply (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left / right`, or `None` for a zero divisor or `Min / -1`.
+    pub def checked_divide = (left: I32; right: I32) => Option<I32> :: {
+        if (right == 0 || (left == Min && right == ((I32 :: 0) - 1))) {
+            None
+        } else {
+            Some (left / right)
+        }
+    }
+
+    /// Returns `left % right`, or `None` for a zero divisor.
+    pub def checked_remainder = (left: I32; right: I32) => Option<I32> :: {
+        if (right == 0) { None } else { Some (left % right) }
+    }
+
+    /// Returns `value` shifted left by `count`, or `None` when the count is not
+    /// smaller than the width.
+    pub def checked_shift_left = (value: I32; count: U32) => Option<I32> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_left value count) }
+    }
+
+    /// Returns `value` shifted right by `count`, or `None` when the count is
+    /// not smaller than the width.
+    pub def checked_shift_right = (value: I32; count: U32) => Option<I32> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_right value count) }
+    }
+
+    /// Returns `left + right`, wrapping on overflow.
+    pub def wrapping_add = (left: I32; right: I32) => I32 :: left + right
+
+    /// Returns `left - right`, wrapping on overflow.
+    pub def wrapping_subtract = (left: I32; right: I32) => I32 :: left - right
+
+    /// Returns `left * right`, wrapping on overflow.
+    pub def wrapping_multiply = (left: I32; right: I32) => I32 :: left * right
+
+    /// Returns `value` shifted left by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_left = (value: I32; count: U32) => I32 :: {
+        let shift = count % Bits
+        let amount: I32 = match (TryConvert.try_convert.<U32, I32> shift) {
+            Ok amount => amount,
+            _ => 0,
+        }
+        ShiftLeft.shift_left (value; amount)
+    }
+
+    /// Returns `value` shifted right by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_right = (value: I32; count: U32) => I32 :: {
+        let shift = count % Bits
+        let amount: I32 = match (TryConvert.try_convert.<U32, I32> shift) {
+            Ok amount => amount,
+            _ => 0,
+        }
+        ShiftRight.shift_right (value; amount)
+    }
+
+    /// Returns `left + right`, saturating at the type's bounds.
+    pub def saturating_add = (left: I32; right: I32) => I32 :: {
+        let (status, value) = __i32_overflowing_add (left, right)
+        if (status == 0) {
+            value
+        } else if (right > 0) {
+            Max
+        } else {
+            Min
+        }
+    }
+
+    /// Returns `left - right`, saturating at the type's bounds.
+    pub def saturating_subtract = (left: I32; right: I32) => I32 :: {
+        let (status, value) = __i32_overflowing_subtract (left, right)
+        if (status == 0) {
+            value
+        } else if (right > 0) {
+            Min
+        } else {
+            Max
+        }
+    }
+
+    /// Returns `left * right`, saturating at the type's bounds.
+    pub def saturating_multiply = (left: I32; right: I32) => I32 :: {
+        let (status, value) = __i32_overflowing_multiply (left, right)
+        if (status == 0) {
+            value
+        } else if ((left < 0) != (right < 0)) {
+            Min
+        } else {
+            Max
+        }
+    }
+
+    /// Returns the wrapped result and whether the addition overflowed.
+    pub def overflowing_add = (left: I32; right: I32) => (I32, Bool) :: {
+        let (status, value) = __i32_overflowing_add (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the subtraction overflowed.
+    pub def overflowing_subtract = (left: I32; right: I32) => (I32, Bool) :: {
+        let (status, value) = __i32_overflowing_subtract (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the multiplication overflowed.
+    pub def overflowing_multiply = (left: I32; right: I32) => (I32, Bool) :: {
+        let (status, value) = __i32_overflowing_multiply (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the Euclidean quotient of `left / right`. Panics at the caller
+    /// for a zero divisor or `Min / -1`.
+    @track_caller
+    pub def divide_euclid = (left: I32; right: I32) => I32 :: {
+        let quotient = left / right
+        let remainder = left % right
+        if (remainder < 0) {
+            if (right > 0) { quotient - 1 } else { quotient + 1 }
+        } else {
+            quotient
+        }
+    }
+
+    /// Returns the non-negative Euclidean remainder of `left / right`. Panics
+    /// at the caller for a zero divisor.
+    @track_caller
+    pub def remainder_euclid = (left: I32; right: I32) => I32 :: {
+        let remainder = left % right
+        if (remainder < 0) {
+            if (right > 0) { remainder + right } else { remainder - right }
+        } else {
+            remainder
+        }
+    }
+
+    /// Returns `base` raised to `exponent`, wrapping like `*`.
+    pub def pow = (base: I32; exponent: U32) => I32 :: {
+        let mut result: I32 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = result * factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = factor * factor
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, or `None` on overflow.
+    pub def checked_pow = (base: I32; exponent: U32) => Option<I32> :: {
+        let mut result: Option<I32> = Some 1
+        let mut factor: Option<I32> = Some base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = match (result, factor) {
+                    (Some value, Some power) => checked_multiply value power,
+                    _ => None,
+                }
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = match factor {
+                    Some value => checked_multiply value value,
+                    None => None,
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, saturating at the type's bounds.
+    pub def saturating_pow = (base: I32; exponent: U32) => I32 :: {
+        let mut result: I32 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = saturating_multiply result factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = saturating_multiply factor factor
+            }
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm. Panics at the caller for `value <= 0`.
+    @track_caller
+    pub def ilog2 = (value: I32) => U32 :: {
+        if (value <= 0) {
+            panic "ilog2: non-positive value"
+        } else {
+            Bits - 1 - leading_zeros value
+        }
+    }
+
+    /// Returns the base-10 logarithm. Panics at the caller for `value <= 0`.
+    @track_caller
+    pub def ilog10 = (value: I32) => U32 :: {
+        if (value <= 0) {
+            panic "ilog10: non-positive value"
+        }
+        let mut remaining = value
+        let mut result: U32 = 0
+        while (remaining >= 10) {
+            remaining = remaining / 10
+            result = result + 1
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm, or `None` for `value <= 0`.
+    pub def checked_ilog2 = (value: I32) => Option<U32> :: {
+        if (value <= 0) { None } else { Some (ilog2 value) }
+    }
+
+    /// Returns the base-10 logarithm, or `None` for `value <= 0`.
+    pub def checked_ilog10 = (value: I32) => Option<U32> :: {
+        if (value <= 0) { None } else { Some (ilog10 value) }
+    }
+
+    /// Returns the integer square root. Panics at the caller for a negative
+    /// value.
+    @track_caller
+    pub def isqrt = (value: I32) => I32 :: {
+        if (value < 0) {
+            panic "isqrt: negative value"
+        }
+        if (value < 2) {
+            value
+        } else {
+            let mut x = value / 2 + 1
+            let mut y = (x + value / x) / 2
+            while (y < x) {
+                x = y
+                y = (x + value / x) / 2
+            }
+            x
+        }
+    }
+
+    /// Returns the number of one bits.
+    pub def count_ones = (value: I32) => U32 :: __i32_count_ones value
+
+    /// Returns the number of zero bits.
+    pub def count_zeros = (value: I32) => U32 :: Bits - count_ones value
+
+    /// Returns the number of leading zero bits.
+    pub def leading_zeros = (value: I32) => U32 :: __i32_leading_zeros value
+
+    /// Returns the number of trailing zero bits.
+    pub def trailing_zeros = (value: I32) => U32 :: __i32_trailing_zeros value
+
+    /// Returns the number of leading one bits.
+    pub def leading_ones = (value: I32) => U32 :: leading_zeros (BitNot.bit_not value)
+
+    /// Returns the number of trailing one bits.
+    pub def trailing_ones = (value: I32) => U32 :: trailing_zeros (BitNot.bit_not value)
+
+    /// Rotates the bits left by `count`, reducing the count modulo the width.
+    pub def rotate_left = (value: I32; count: U32) => I32 :: __i32_rotate_left (value, count)
+
+    /// Rotates the bits right by `count`, reducing the count modulo the width.
+    pub def rotate_right = (value: I32; count: U32) => I32 :: __i32_rotate_right (value, count)
+
+    /// Reverses the byte order.
+    pub def swap_bytes = (value: I32) => I32 :: __i32_swap_bytes value
+
+    /// Reverses the bit order.
+    pub def reverse_bits = (value: I32) => I32 :: __i32_reverse_bits value
+
+    /// Returns the absolute value, wrapping at `Min` like prefix `-`.
+    pub def abs = (value: I32) => I32 :: if (value < 0) { 0 - value } else { value }
+
+    /// Returns the absolute value, or `None` at `Min`.
+    pub def checked_abs = (value: I32) => Option<I32> :: {
+        if (value < 0) { checked_negate value } else { Some value }
+    }
+
+    /// Returns the exact magnitude of `value` as an unsigned value.
+    pub def unsigned_abs = (value: I32) => U32 :: {
+        if (value >= 0) {
+            match (Result<U32, ConversionError> :: TryConvert.try_convert value) {
+                Ok result => result,
+                _ => 0,
+            }
+        } else {
+            let negated = 0 - value
+            if (negated >= 0) {
+                match (Result<U32, ConversionError> :: TryConvert.try_convert negated) {
+                    Ok result => result,
+                    _ => 0,
+                }
+            } else {
+                U32.Max - (U32.Max / 2)
+            }
+        }
+    }
+
+    /// Returns `-value`, or `None` at `Min`.
+    pub def checked_negate = (value: I32) => Option<I32> :: {
+        let (status, negated) = __i32_overflowing_subtract (0, value)
+        if (status == 0) { Some negated } else { None }
+    }
+
+    /// Returns `-value`, wrapping at `Min`.
+    pub def wrapping_negate = (value: I32) => I32 :: 0 - value
+
+    /// Returns -1, 0, or 1 according to the sign of `value`.
+    pub def signum = (value: I32) => I32 :: when {
+        value < 0 => ((I32 :: 0) - 1),
+        value > 0 => 1,
+        else => 0,
+    }
+
+    /// Returns whether `value` is negative.
+    pub def is_negative = (value: I32) => Bool :: value < 0
+
+    /// Returns whether `value` is positive.
+    pub def is_positive = (value: I32) => Bool :: value > 0
+}
+
+// ---------------------------------------------------------------------------
+// I64 math
+// ---------------------------------------------------------------------------
+
+companion I64 {
+    use package.convert.(ConversionError, TryConvert)
+    use package.ops.(BitAnd, BitNot, ShiftLeft, ShiftRight)
+    use package.option.(Option, Some, None)
+    use package.result.(Ok, Result)
+    use package.process.(panic)
+    use package.source.(track_caller)
+
+    extern "staple-intrinsic" {
+        __i64_overflowing_add: (I64, I64) -> (U8, I64)
+        __i64_overflowing_subtract: (I64, I64) -> (U8, I64)
+        __i64_overflowing_multiply: (I64, I64) -> (U8, I64)
+        __i64_count_ones: I64 -> U32
+        __i64_leading_zeros: I64 -> U32
+        __i64_trailing_zeros: I64 -> U32
+        __i64_swap_bytes: I64 -> I64
+        __i64_reverse_bits: I64 -> I64
+        __i64_rotate_left: (I64, U32) -> I64
+        __i64_rotate_right: (I64, U32) -> I64
+    }
+
+    /// The smallest value.
+    pub const Min: I64 = -9223372036854775807 - 1
+    /// The largest value.
+    pub const Max: I64 = 9223372036854775807
+    /// The width in bits.
+    pub const Bits: U32 = 64
+
+    /// Returns the smaller of two values.
+    pub def min = (left: I64; right: I64) => I64 :: if (left < right) { left } else { right }
+
+    /// Returns the larger of two values.
+    pub def max = (left: I64; right: I64) => I64 :: if (left > right) { left } else { right }
+
+    /// Constrains `value` to the inclusive range `lo ..= hi`. Panics at the
+    /// caller when `lo > hi`.
+    @track_caller
+    pub def clamp = (value: I64; lo: I64; hi: I64) => I64 :: {
+        if (lo > hi) {
+            panic "clamp: invalid bounds"
+        }
+        if (value < lo) {
+            lo
+        } else if (value > hi) {
+            hi
+        } else {
+            value
+        }
+    }
+
+    /// Returns the absolute difference between two values as an unsigned value.
+    pub def abs_diff = (left: I64; right: I64) => U64 :: {
+        let high = if (left < right) { right } else { left }
+        let low = if (left < right) { left } else { right }
+        if (low < 0 && high >= 0) {
+            unsigned_abs high + unsigned_abs low
+        } else {
+            unsigned_abs (high - low)
+        }
+    }
+
+    /// Returns `left + right`, or `None` on overflow.
+    pub def checked_add = (left: I64; right: I64) => Option<I64> :: {
+        let (status, value) = __i64_overflowing_add (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left - right`, or `None` on overflow.
+    pub def checked_subtract = (left: I64; right: I64) => Option<I64> :: {
+        let (status, value) = __i64_overflowing_subtract (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left * right`, or `None` on overflow.
+    pub def checked_multiply = (left: I64; right: I64) => Option<I64> :: {
+        let (status, value) = __i64_overflowing_multiply (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left / right`, or `None` for a zero divisor or `Min / -1`.
+    pub def checked_divide = (left: I64; right: I64) => Option<I64> :: {
+        if (right == 0 || (left == Min && right == ((I64 :: 0) - 1))) {
+            None
+        } else {
+            Some (left / right)
+        }
+    }
+
+    /// Returns `left % right`, or `None` for a zero divisor.
+    pub def checked_remainder = (left: I64; right: I64) => Option<I64> :: {
+        if (right == 0) { None } else { Some (left % right) }
+    }
+
+    /// Returns `value` shifted left by `count`, or `None` when the count is not
+    /// smaller than the width.
+    pub def checked_shift_left = (value: I64; count: U32) => Option<I64> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_left value count) }
+    }
+
+    /// Returns `value` shifted right by `count`, or `None` when the count is
+    /// not smaller than the width.
+    pub def checked_shift_right = (value: I64; count: U32) => Option<I64> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_right value count) }
+    }
+
+    /// Returns `left + right`, wrapping on overflow.
+    pub def wrapping_add = (left: I64; right: I64) => I64 :: left + right
+
+    /// Returns `left - right`, wrapping on overflow.
+    pub def wrapping_subtract = (left: I64; right: I64) => I64 :: left - right
+
+    /// Returns `left * right`, wrapping on overflow.
+    pub def wrapping_multiply = (left: I64; right: I64) => I64 :: left * right
+
+    /// Returns `value` shifted left by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_left = (value: I64; count: U32) => I64 :: {
+        let shift = count % Bits
+        let amount: I64 = shift as I64
+        ShiftLeft.shift_left (value; amount)
+    }
+
+    /// Returns `value` shifted right by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_right = (value: I64; count: U32) => I64 :: {
+        let shift = count % Bits
+        let amount: I64 = shift as I64
+        ShiftRight.shift_right (value; amount)
+    }
+
+    /// Returns `left + right`, saturating at the type's bounds.
+    pub def saturating_add = (left: I64; right: I64) => I64 :: {
+        let (status, value) = __i64_overflowing_add (left, right)
+        if (status == 0) {
+            value
+        } else if (right > 0) {
+            Max
+        } else {
+            Min
+        }
+    }
+
+    /// Returns `left - right`, saturating at the type's bounds.
+    pub def saturating_subtract = (left: I64; right: I64) => I64 :: {
+        let (status, value) = __i64_overflowing_subtract (left, right)
+        if (status == 0) {
+            value
+        } else if (right > 0) {
+            Min
+        } else {
+            Max
+        }
+    }
+
+    /// Returns `left * right`, saturating at the type's bounds.
+    pub def saturating_multiply = (left: I64; right: I64) => I64 :: {
+        let (status, value) = __i64_overflowing_multiply (left, right)
+        if (status == 0) {
+            value
+        } else if ((left < 0) != (right < 0)) {
+            Min
+        } else {
+            Max
+        }
+    }
+
+    /// Returns the wrapped result and whether the addition overflowed.
+    pub def overflowing_add = (left: I64; right: I64) => (I64, Bool) :: {
+        let (status, value) = __i64_overflowing_add (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the subtraction overflowed.
+    pub def overflowing_subtract = (left: I64; right: I64) => (I64, Bool) :: {
+        let (status, value) = __i64_overflowing_subtract (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the multiplication overflowed.
+    pub def overflowing_multiply = (left: I64; right: I64) => (I64, Bool) :: {
+        let (status, value) = __i64_overflowing_multiply (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the Euclidean quotient of `left / right`. Panics at the caller
+    /// for a zero divisor or `Min / -1`.
+    @track_caller
+    pub def divide_euclid = (left: I64; right: I64) => I64 :: {
+        let quotient = left / right
+        let remainder = left % right
+        if (remainder < 0) {
+            if (right > 0) { quotient - 1 } else { quotient + 1 }
+        } else {
+            quotient
+        }
+    }
+
+    /// Returns the non-negative Euclidean remainder of `left / right`. Panics
+    /// at the caller for a zero divisor.
+    @track_caller
+    pub def remainder_euclid = (left: I64; right: I64) => I64 :: {
+        let remainder = left % right
+        if (remainder < 0) {
+            if (right > 0) { remainder + right } else { remainder - right }
+        } else {
+            remainder
+        }
+    }
+
+    /// Returns `base` raised to `exponent`, wrapping like `*`.
+    pub def pow = (base: I64; exponent: U32) => I64 :: {
+        let mut result: I64 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = result * factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = factor * factor
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, or `None` on overflow.
+    pub def checked_pow = (base: I64; exponent: U32) => Option<I64> :: {
+        let mut result: Option<I64> = Some 1
+        let mut factor: Option<I64> = Some base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = match (result, factor) {
+                    (Some value, Some power) => checked_multiply value power,
+                    _ => None,
+                }
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = match factor {
+                    Some value => checked_multiply value value,
+                    None => None,
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, saturating at the type's bounds.
+    pub def saturating_pow = (base: I64; exponent: U32) => I64 :: {
+        let mut result: I64 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = saturating_multiply result factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = saturating_multiply factor factor
+            }
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm. Panics at the caller for `value <= 0`.
+    @track_caller
+    pub def ilog2 = (value: I64) => U32 :: {
+        if (value <= 0) {
+            panic "ilog2: non-positive value"
+        } else {
+            Bits - 1 - leading_zeros value
+        }
+    }
+
+    /// Returns the base-10 logarithm. Panics at the caller for `value <= 0`.
+    @track_caller
+    pub def ilog10 = (value: I64) => U32 :: {
+        if (value <= 0) {
+            panic "ilog10: non-positive value"
+        }
+        let mut remaining = value
+        let mut result: U32 = 0
+        while (remaining >= 10) {
+            remaining = remaining / 10
+            result = result + 1
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm, or `None` for `value <= 0`.
+    pub def checked_ilog2 = (value: I64) => Option<U32> :: {
+        if (value <= 0) { None } else { Some (ilog2 value) }
+    }
+
+    /// Returns the base-10 logarithm, or `None` for `value <= 0`.
+    pub def checked_ilog10 = (value: I64) => Option<U32> :: {
+        if (value <= 0) { None } else { Some (ilog10 value) }
+    }
+
+    /// Returns the integer square root. Panics at the caller for a negative
+    /// value.
+    @track_caller
+    pub def isqrt = (value: I64) => I64 :: {
+        if (value < 0) {
+            panic "isqrt: negative value"
+        }
+        if (value < 2) {
+            value
+        } else {
+            let mut x = value / 2 + 1
+            let mut y = (x + value / x) / 2
+            while (y < x) {
+                x = y
+                y = (x + value / x) / 2
+            }
+            x
+        }
+    }
+
+    /// Returns the number of one bits.
+    pub def count_ones = (value: I64) => U32 :: __i64_count_ones value
+
+    /// Returns the number of zero bits.
+    pub def count_zeros = (value: I64) => U32 :: Bits - count_ones value
+
+    /// Returns the number of leading zero bits.
+    pub def leading_zeros = (value: I64) => U32 :: __i64_leading_zeros value
+
+    /// Returns the number of trailing zero bits.
+    pub def trailing_zeros = (value: I64) => U32 :: __i64_trailing_zeros value
+
+    /// Returns the number of leading one bits.
+    pub def leading_ones = (value: I64) => U32 :: leading_zeros (BitNot.bit_not value)
+
+    /// Returns the number of trailing one bits.
+    pub def trailing_ones = (value: I64) => U32 :: trailing_zeros (BitNot.bit_not value)
+
+    /// Rotates the bits left by `count`, reducing the count modulo the width.
+    pub def rotate_left = (value: I64; count: U32) => I64 :: __i64_rotate_left (value, count)
+
+    /// Rotates the bits right by `count`, reducing the count modulo the width.
+    pub def rotate_right = (value: I64; count: U32) => I64 :: __i64_rotate_right (value, count)
+
+    /// Reverses the byte order.
+    pub def swap_bytes = (value: I64) => I64 :: __i64_swap_bytes value
+
+    /// Reverses the bit order.
+    pub def reverse_bits = (value: I64) => I64 :: __i64_reverse_bits value
+
+    /// Returns the absolute value, wrapping at `Min` like prefix `-`.
+    pub def abs = (value: I64) => I64 :: if (value < 0) { 0 - value } else { value }
+
+    /// Returns the absolute value, or `None` at `Min`.
+    pub def checked_abs = (value: I64) => Option<I64> :: {
+        if (value < 0) { checked_negate value } else { Some value }
+    }
+
+    /// Returns the exact magnitude of `value` as an unsigned value.
+    pub def unsigned_abs = (value: I64) => U64 :: {
+        if (value >= 0) {
+            match (Result<U64, ConversionError> :: TryConvert.try_convert value) {
+                Ok result => result,
+                _ => 0,
+            }
+        } else {
+            let negated = 0 - value
+            if (negated >= 0) {
+                match (Result<U64, ConversionError> :: TryConvert.try_convert negated) {
+                    Ok result => result,
+                    _ => 0,
+                }
+            } else {
+                U64.Max - (U64.Max / 2)
+            }
+        }
+    }
+
+    /// Returns `-value`, or `None` at `Min`.
+    pub def checked_negate = (value: I64) => Option<I64> :: {
+        let (status, negated) = __i64_overflowing_subtract (0, value)
+        if (status == 0) { Some negated } else { None }
+    }
+
+    /// Returns `-value`, wrapping at `Min`.
+    pub def wrapping_negate = (value: I64) => I64 :: 0 - value
+
+    /// Returns -1, 0, or 1 according to the sign of `value`.
+    pub def signum = (value: I64) => I64 :: when {
+        value < 0 => ((I64 :: 0) - 1),
+        value > 0 => 1,
+        else => 0,
+    }
+
+    /// Returns whether `value` is negative.
+    pub def is_negative = (value: I64) => Bool :: value < 0
+
+    /// Returns whether `value` is positive.
+    pub def is_positive = (value: I64) => Bool :: value > 0
+}
+
+// ---------------------------------------------------------------------------
+// U8 math
+// ---------------------------------------------------------------------------
+
+companion U8 {
+    use package.convert.(ConversionError, TryConvert)
+    use package.ops.(BitAnd, BitNot, ShiftLeft, ShiftRight)
+    use package.option.(Option, Some, None)
+    use package.result.(Ok, Result)
+    use package.process.(panic)
+    use package.source.(track_caller)
+
+    extern "staple-intrinsic" {
+        __u8_overflowing_add: (U8, U8) -> (U8, U8)
+        __u8_overflowing_subtract: (U8, U8) -> (U8, U8)
+        __u8_overflowing_multiply: (U8, U8) -> (U8, U8)
+        __u8_count_ones: U8 -> U32
+        __u8_leading_zeros: U8 -> U32
+        __u8_trailing_zeros: U8 -> U32
+        __u8_swap_bytes: U8 -> U8
+        __u8_reverse_bits: U8 -> U8
+        __u8_rotate_left: (U8, U32) -> U8
+        __u8_rotate_right: (U8, U32) -> U8
+    }
+
+    /// The smallest value.
+    pub const Min: U8 = 0
+    /// The largest value.
+    pub const Max: U8 = 255
+    /// The width in bits.
+    pub const Bits: U32 = 8
+
+    /// Returns the smaller of two values.
+    pub def min = (left: U8; right: U8) => U8 :: if (left < right) { left } else { right }
+
+    /// Returns the larger of two values.
+    pub def max = (left: U8; right: U8) => U8 :: if (left > right) { left } else { right }
+
+    /// Constrains `value` to the inclusive range `lo ..= hi`. Panics at the
+    /// caller when `lo > hi`.
+    @track_caller
+    pub def clamp = (value: U8; lo: U8; hi: U8) => U8 :: {
+        if (lo > hi) {
+            panic "clamp: invalid bounds"
+        }
+        if (value < lo) {
+            lo
+        } else if (value > hi) {
+            hi
+        } else {
+            value
+        }
+    }
+
+    /// Returns the absolute difference between two values.
+    pub def abs_diff = (left: U8; right: U8) => U8 :: if (left < right) { right - left } else { left - right }
+
+    /// Returns `left + right`, or `None` on overflow.
+    pub def checked_add = (left: U8; right: U8) => Option<U8> :: {
+        let (status, value) = __u8_overflowing_add (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left - right`, or `None` on underflow.
+    pub def checked_subtract = (left: U8; right: U8) => Option<U8> :: {
+        let (status, value) = __u8_overflowing_subtract (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left * right`, or `None` on overflow.
+    pub def checked_multiply = (left: U8; right: U8) => Option<U8> :: {
+        let (status, value) = __u8_overflowing_multiply (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left / right`, or `None` for a zero divisor.
+    pub def checked_divide = (left: U8; right: U8) => Option<U8> :: {
+        if (right == 0) { None } else { Some (left / right) }
+    }
+
+    /// Returns `left % right`, or `None` for a zero divisor.
+    pub def checked_remainder = (left: U8; right: U8) => Option<U8> :: {
+        if (right == 0) { None } else { Some (left % right) }
+    }
+
+    /// Returns `value` shifted left by `count`, or `None` when the count is not
+    /// smaller than the width.
+    pub def checked_shift_left = (value: U8; count: U32) => Option<U8> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_left value count) }
+    }
+
+    /// Returns `value` shifted right by `count`, or `None` when the count is
+    /// not smaller than the width.
+    pub def checked_shift_right = (value: U8; count: U32) => Option<U8> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_right value count) }
+    }
+
+    /// Returns `left + right`, wrapping on overflow.
+    pub def wrapping_add = (left: U8; right: U8) => U8 :: left + right
+
+    /// Returns `left - right`, wrapping on underflow.
+    pub def wrapping_subtract = (left: U8; right: U8) => U8 :: left - right
+
+    /// Returns `left * right`, wrapping on overflow.
+    pub def wrapping_multiply = (left: U8; right: U8) => U8 :: left * right
+
+    /// Returns `value` shifted left by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_left = (value: U8; count: U32) => U8 :: {
+        let shift = count % Bits
+        let amount: U8 = match (TryConvert.try_convert.<U32, U8> shift) {
+            Ok amount => amount,
+            _ => 0,
+        }
+        ShiftLeft.shift_left (value; amount)
+    }
+
+    /// Returns `value` shifted right by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_right = (value: U8; count: U32) => U8 :: {
+        let shift = count % Bits
+        let amount: U8 = match (TryConvert.try_convert.<U32, U8> shift) {
+            Ok amount => amount,
+            _ => 0,
+        }
+        ShiftRight.shift_right (value; amount)
+    }
+
+    /// Returns `left + right`, saturating at the type's bounds.
+    pub def saturating_add = (left: U8; right: U8) => U8 :: {
+        let (status, value) = __u8_overflowing_add (left, right)
+        if (status == 0) { value } else { Max }
+    }
+
+    /// Returns `left - right`, saturating at the type's bounds.
+    pub def saturating_subtract = (left: U8; right: U8) => U8 :: {
+        let (status, value) = __u8_overflowing_subtract (left, right)
+        if (status == 0) { value } else { Min }
+    }
+
+    /// Returns `left * right`, saturating at the type's bounds.
+    pub def saturating_multiply = (left: U8; right: U8) => U8 :: {
+        let (status, value) = __u8_overflowing_multiply (left, right)
+        if (status == 0) { value } else { Max }
+    }
+
+    /// Returns the wrapped result and whether the addition overflowed.
+    pub def overflowing_add = (left: U8; right: U8) => (U8, Bool) :: {
+        let (status, value) = __u8_overflowing_add (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the subtraction overflowed.
+    pub def overflowing_subtract = (left: U8; right: U8) => (U8, Bool) :: {
+        let (status, value) = __u8_overflowing_subtract (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the multiplication overflowed.
+    pub def overflowing_multiply = (left: U8; right: U8) => (U8, Bool) :: {
+        let (status, value) = __u8_overflowing_multiply (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the Euclidean quotient of `left / right`. Panics at the caller
+    /// for a zero divisor.
+    @track_caller
+    pub def divide_euclid = (left: U8; right: U8) => U8 :: left / right
+
+    /// Returns the Euclidean remainder of `left / right`. Panics at the caller
+    /// for a zero divisor.
+    @track_caller
+    pub def remainder_euclid = (left: U8; right: U8) => U8 :: left % right
+
+    /// Returns the quotient rounded up. Panics at the caller for a zero
+    /// divisor.
+    @track_caller
+    pub def divide_ceil = (left: U8; right: U8) => U8 :: {
+        let quotient = left / right
+        if (left % right == 0) { quotient } else { quotient + 1 }
+    }
+
+    /// Returns `base` raised to `exponent`, wrapping like `*`.
+    pub def pow = (base: U8; exponent: U32) => U8 :: {
+        let mut result: U8 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = result * factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = factor * factor
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, or `None` on overflow.
+    pub def checked_pow = (base: U8; exponent: U32) => Option<U8> :: {
+        let mut result: Option<U8> = Some 1
+        let mut factor: Option<U8> = Some base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = match (result, factor) {
+                    (Some value, Some power) => checked_multiply value power,
+                    _ => None,
+                }
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = match factor {
+                    Some value => checked_multiply value value,
+                    None => None,
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, saturating at the type's bounds.
+    pub def saturating_pow = (base: U8; exponent: U32) => U8 :: {
+        let mut result: U8 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = saturating_multiply result factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = saturating_multiply factor factor
+            }
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm. Panics at the caller for zero.
+    @track_caller
+    pub def ilog2 = (value: U8) => U32 :: {
+        if (value == 0) {
+            panic "ilog2: zero value"
+        } else {
+            Bits - 1 - leading_zeros value
+        }
+    }
+
+    /// Returns the base-10 logarithm. Panics at the caller for zero.
+    @track_caller
+    pub def ilog10 = (value: U8) => U32 :: {
+        if (value == 0) {
+            panic "ilog10: zero value"
+        }
+        let mut remaining = value
+        let mut result: U32 = 0
+        while (remaining >= 10) {
+            remaining = remaining / 10
+            result = result + 1
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm, or `None` for zero.
+    pub def checked_ilog2 = (value: U8) => Option<U32> :: {
+        if (value == 0) { None } else { Some (ilog2 value) }
+    }
+
+    /// Returns the base-10 logarithm, or `None` for zero.
+    pub def checked_ilog10 = (value: U8) => Option<U32> :: {
+        if (value == 0) { None } else { Some (ilog10 value) }
+    }
+
+    /// Returns the integer square root.
+    @track_caller
+    pub def isqrt = (value: U8) => U8 :: {
+        if (value < 2) {
+            value
+        } else {
+            let mut x = value / 2 + 1
+            let mut y = (x + value / x) / 2
+            while (y < x) {
+                x = y
+                y = (x + value / x) / 2
+            }
+            x
+        }
+    }
+
+    /// Returns the number of one bits.
+    pub def count_ones = (value: U8) => U32 :: __u8_count_ones value
+
+    /// Returns the number of zero bits.
+    pub def count_zeros = (value: U8) => U32 :: Bits - count_ones value
+
+    /// Returns the number of leading zero bits.
+    pub def leading_zeros = (value: U8) => U32 :: __u8_leading_zeros value
+
+    /// Returns the number of trailing zero bits.
+    pub def trailing_zeros = (value: U8) => U32 :: __u8_trailing_zeros value
+
+    /// Returns the number of leading one bits.
+    pub def leading_ones = (value: U8) => U32 :: leading_zeros (BitNot.bit_not value)
+
+    /// Returns the number of trailing one bits.
+    pub def trailing_ones = (value: U8) => U32 :: trailing_zeros (BitNot.bit_not value)
+
+    /// Rotates the bits left by `count`, reducing the count modulo the width.
+    pub def rotate_left = (value: U8; count: U32) => U8 :: __u8_rotate_left (value, count)
+
+    /// Rotates the bits right by `count`, reducing the count modulo the width.
+    pub def rotate_right = (value: U8; count: U32) => U8 :: __u8_rotate_right (value, count)
+
+    /// Reverses the byte order.
+    pub def swap_bytes = (value: U8) => U8 :: __u8_swap_bytes value
+
+    /// Reverses the bit order.
+    pub def reverse_bits = (value: U8) => U8 :: __u8_reverse_bits value
+
+    /// Returns whether `value` is a power of two.
+    pub def is_power_of_two = (value: U8) => Bool :: value != 0 && (BitAnd.bit_and (value; value - 1)) == 0
+
+    /// Returns the smallest power of two greater than or equal to `value`,
+    /// wrapping to zero past the top.
+    pub def next_power_of_two = (value: U8) => U8 :: {
+        if (value <= 1) {
+            1
+        } else {
+            let mut result: U8 = 1
+            while (result < value && result != 0) {
+                result = ShiftLeft.shift_left (result; 1)
+            }
+            result
+        }
+    }
+
+    /// Returns the smallest power of two greater than or equal to `value`, or
+    /// `None` when it does not fit.
+    pub def checked_next_power_of_two = (value: U8) => Option<U8> :: {
+        let result = next_power_of_two value
+        if (result == 0) { None } else { Some result }
+    }
+
+    /// Adds a signed value, or returns `None` when the result is out of range.
+    pub def checked_add_signed = (left: U8; right: I8) => Option<U8> :: {
+        if (right >= 0) {
+            let amount: U8 = match (Result<U8, ConversionError> :: TryConvert.try_convert right) {
+                Ok value => value,
+                _ => 0,
+            }
+            checked_add left amount
+        } else {
+            let negated = 0 - right
+            let amount: U8 = if (negated < 0) {
+                Max - (Max / 2)
+            } else {
+                match (Result<U8, ConversionError> :: TryConvert.try_convert negated) {
+                    Ok value => value,
+                    _ => 0,
+                }
+            }
+            checked_subtract left amount
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// U16 math
+// ---------------------------------------------------------------------------
+
+companion U16 {
+    use package.convert.(ConversionError, TryConvert)
+    use package.ops.(BitAnd, BitNot, ShiftLeft, ShiftRight)
+    use package.option.(Option, Some, None)
+    use package.result.(Ok, Result)
+    use package.process.(panic)
+    use package.source.(track_caller)
+
+    extern "staple-intrinsic" {
+        __u16_overflowing_add: (U16, U16) -> (U8, U16)
+        __u16_overflowing_subtract: (U16, U16) -> (U8, U16)
+        __u16_overflowing_multiply: (U16, U16) -> (U8, U16)
+        __u16_count_ones: U16 -> U32
+        __u16_leading_zeros: U16 -> U32
+        __u16_trailing_zeros: U16 -> U32
+        __u16_swap_bytes: U16 -> U16
+        __u16_reverse_bits: U16 -> U16
+        __u16_rotate_left: (U16, U32) -> U16
+        __u16_rotate_right: (U16, U32) -> U16
+    }
+
+    /// The smallest value.
+    pub const Min: U16 = 0
+    /// The largest value.
+    pub const Max: U16 = 65535
+    /// The width in bits.
+    pub const Bits: U32 = 16
+
+    /// Returns the smaller of two values.
+    pub def min = (left: U16; right: U16) => U16 :: if (left < right) { left } else { right }
+
+    /// Returns the larger of two values.
+    pub def max = (left: U16; right: U16) => U16 :: if (left > right) { left } else { right }
+
+    /// Constrains `value` to the inclusive range `lo ..= hi`. Panics at the
+    /// caller when `lo > hi`.
+    @track_caller
+    pub def clamp = (value: U16; lo: U16; hi: U16) => U16 :: {
+        if (lo > hi) {
+            panic "clamp: invalid bounds"
+        }
+        if (value < lo) {
+            lo
+        } else if (value > hi) {
+            hi
+        } else {
+            value
+        }
+    }
+
+    /// Returns the absolute difference between two values.
+    pub def abs_diff = (left: U16; right: U16) => U16 :: if (left < right) { right - left } else { left - right }
+
+    /// Returns `left + right`, or `None` on overflow.
+    pub def checked_add = (left: U16; right: U16) => Option<U16> :: {
+        let (status, value) = __u16_overflowing_add (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left - right`, or `None` on underflow.
+    pub def checked_subtract = (left: U16; right: U16) => Option<U16> :: {
+        let (status, value) = __u16_overflowing_subtract (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left * right`, or `None` on overflow.
+    pub def checked_multiply = (left: U16; right: U16) => Option<U16> :: {
+        let (status, value) = __u16_overflowing_multiply (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left / right`, or `None` for a zero divisor.
+    pub def checked_divide = (left: U16; right: U16) => Option<U16> :: {
+        if (right == 0) { None } else { Some (left / right) }
+    }
+
+    /// Returns `left % right`, or `None` for a zero divisor.
+    pub def checked_remainder = (left: U16; right: U16) => Option<U16> :: {
+        if (right == 0) { None } else { Some (left % right) }
+    }
+
+    /// Returns `value` shifted left by `count`, or `None` when the count is not
+    /// smaller than the width.
+    pub def checked_shift_left = (value: U16; count: U32) => Option<U16> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_left value count) }
+    }
+
+    /// Returns `value` shifted right by `count`, or `None` when the count is
+    /// not smaller than the width.
+    pub def checked_shift_right = (value: U16; count: U32) => Option<U16> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_right value count) }
+    }
+
+    /// Returns `left + right`, wrapping on overflow.
+    pub def wrapping_add = (left: U16; right: U16) => U16 :: left + right
+
+    /// Returns `left - right`, wrapping on underflow.
+    pub def wrapping_subtract = (left: U16; right: U16) => U16 :: left - right
+
+    /// Returns `left * right`, wrapping on overflow.
+    pub def wrapping_multiply = (left: U16; right: U16) => U16 :: left * right
+
+    /// Returns `value` shifted left by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_left = (value: U16; count: U32) => U16 :: {
+        let shift = count % Bits
+        let amount: U16 = match (TryConvert.try_convert.<U32, U16> shift) {
+            Ok amount => amount,
+            _ => 0,
+        }
+        ShiftLeft.shift_left (value; amount)
+    }
+
+    /// Returns `value` shifted right by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_right = (value: U16; count: U32) => U16 :: {
+        let shift = count % Bits
+        let amount: U16 = match (TryConvert.try_convert.<U32, U16> shift) {
+            Ok amount => amount,
+            _ => 0,
+        }
+        ShiftRight.shift_right (value; amount)
+    }
+
+    /// Returns `left + right`, saturating at the type's bounds.
+    pub def saturating_add = (left: U16; right: U16) => U16 :: {
+        let (status, value) = __u16_overflowing_add (left, right)
+        if (status == 0) { value } else { Max }
+    }
+
+    /// Returns `left - right`, saturating at the type's bounds.
+    pub def saturating_subtract = (left: U16; right: U16) => U16 :: {
+        let (status, value) = __u16_overflowing_subtract (left, right)
+        if (status == 0) { value } else { Min }
+    }
+
+    /// Returns `left * right`, saturating at the type's bounds.
+    pub def saturating_multiply = (left: U16; right: U16) => U16 :: {
+        let (status, value) = __u16_overflowing_multiply (left, right)
+        if (status == 0) { value } else { Max }
+    }
+
+    /// Returns the wrapped result and whether the addition overflowed.
+    pub def overflowing_add = (left: U16; right: U16) => (U16, Bool) :: {
+        let (status, value) = __u16_overflowing_add (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the subtraction overflowed.
+    pub def overflowing_subtract = (left: U16; right: U16) => (U16, Bool) :: {
+        let (status, value) = __u16_overflowing_subtract (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the multiplication overflowed.
+    pub def overflowing_multiply = (left: U16; right: U16) => (U16, Bool) :: {
+        let (status, value) = __u16_overflowing_multiply (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the Euclidean quotient of `left / right`. Panics at the caller
+    /// for a zero divisor.
+    @track_caller
+    pub def divide_euclid = (left: U16; right: U16) => U16 :: left / right
+
+    /// Returns the Euclidean remainder of `left / right`. Panics at the caller
+    /// for a zero divisor.
+    @track_caller
+    pub def remainder_euclid = (left: U16; right: U16) => U16 :: left % right
+
+    /// Returns the quotient rounded up. Panics at the caller for a zero
+    /// divisor.
+    @track_caller
+    pub def divide_ceil = (left: U16; right: U16) => U16 :: {
+        let quotient = left / right
+        if (left % right == 0) { quotient } else { quotient + 1 }
+    }
+
+    /// Returns `base` raised to `exponent`, wrapping like `*`.
+    pub def pow = (base: U16; exponent: U32) => U16 :: {
+        let mut result: U16 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = result * factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = factor * factor
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, or `None` on overflow.
+    pub def checked_pow = (base: U16; exponent: U32) => Option<U16> :: {
+        let mut result: Option<U16> = Some 1
+        let mut factor: Option<U16> = Some base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = match (result, factor) {
+                    (Some value, Some power) => checked_multiply value power,
+                    _ => None,
+                }
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = match factor {
+                    Some value => checked_multiply value value,
+                    None => None,
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, saturating at the type's bounds.
+    pub def saturating_pow = (base: U16; exponent: U32) => U16 :: {
+        let mut result: U16 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = saturating_multiply result factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = saturating_multiply factor factor
+            }
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm. Panics at the caller for zero.
+    @track_caller
+    pub def ilog2 = (value: U16) => U32 :: {
+        if (value == 0) {
+            panic "ilog2: zero value"
+        } else {
+            Bits - 1 - leading_zeros value
+        }
+    }
+
+    /// Returns the base-10 logarithm. Panics at the caller for zero.
+    @track_caller
+    pub def ilog10 = (value: U16) => U32 :: {
+        if (value == 0) {
+            panic "ilog10: zero value"
+        }
+        let mut remaining = value
+        let mut result: U32 = 0
+        while (remaining >= 10) {
+            remaining = remaining / 10
+            result = result + 1
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm, or `None` for zero.
+    pub def checked_ilog2 = (value: U16) => Option<U32> :: {
+        if (value == 0) { None } else { Some (ilog2 value) }
+    }
+
+    /// Returns the base-10 logarithm, or `None` for zero.
+    pub def checked_ilog10 = (value: U16) => Option<U32> :: {
+        if (value == 0) { None } else { Some (ilog10 value) }
+    }
+
+    /// Returns the integer square root.
+    @track_caller
+    pub def isqrt = (value: U16) => U16 :: {
+        if (value < 2) {
+            value
+        } else {
+            let mut x = value / 2 + 1
+            let mut y = (x + value / x) / 2
+            while (y < x) {
+                x = y
+                y = (x + value / x) / 2
+            }
+            x
+        }
+    }
+
+    /// Returns the number of one bits.
+    pub def count_ones = (value: U16) => U32 :: __u16_count_ones value
+
+    /// Returns the number of zero bits.
+    pub def count_zeros = (value: U16) => U32 :: Bits - count_ones value
+
+    /// Returns the number of leading zero bits.
+    pub def leading_zeros = (value: U16) => U32 :: __u16_leading_zeros value
+
+    /// Returns the number of trailing zero bits.
+    pub def trailing_zeros = (value: U16) => U32 :: __u16_trailing_zeros value
+
+    /// Returns the number of leading one bits.
+    pub def leading_ones = (value: U16) => U32 :: leading_zeros (BitNot.bit_not value)
+
+    /// Returns the number of trailing one bits.
+    pub def trailing_ones = (value: U16) => U32 :: trailing_zeros (BitNot.bit_not value)
+
+    /// Rotates the bits left by `count`, reducing the count modulo the width.
+    pub def rotate_left = (value: U16; count: U32) => U16 :: __u16_rotate_left (value, count)
+
+    /// Rotates the bits right by `count`, reducing the count modulo the width.
+    pub def rotate_right = (value: U16; count: U32) => U16 :: __u16_rotate_right (value, count)
+
+    /// Reverses the byte order.
+    pub def swap_bytes = (value: U16) => U16 :: __u16_swap_bytes value
+
+    /// Reverses the bit order.
+    pub def reverse_bits = (value: U16) => U16 :: __u16_reverse_bits value
+
+    /// Returns whether `value` is a power of two.
+    pub def is_power_of_two = (value: U16) => Bool :: value != 0 && (BitAnd.bit_and (value; value - 1)) == 0
+
+    /// Returns the smallest power of two greater than or equal to `value`,
+    /// wrapping to zero past the top.
+    pub def next_power_of_two = (value: U16) => U16 :: {
+        if (value <= 1) {
+            1
+        } else {
+            let mut result: U16 = 1
+            while (result < value && result != 0) {
+                result = ShiftLeft.shift_left (result; 1)
+            }
+            result
+        }
+    }
+
+    /// Returns the smallest power of two greater than or equal to `value`, or
+    /// `None` when it does not fit.
+    pub def checked_next_power_of_two = (value: U16) => Option<U16> :: {
+        let result = next_power_of_two value
+        if (result == 0) { None } else { Some result }
+    }
+
+    /// Adds a signed value, or returns `None` when the result is out of range.
+    pub def checked_add_signed = (left: U16; right: I16) => Option<U16> :: {
+        if (right >= 0) {
+            let amount: U16 = match (Result<U16, ConversionError> :: TryConvert.try_convert right) {
+                Ok value => value,
+                _ => 0,
+            }
+            checked_add left amount
+        } else {
+            let negated = 0 - right
+            let amount: U16 = if (negated < 0) {
+                Max - (Max / 2)
+            } else {
+                match (Result<U16, ConversionError> :: TryConvert.try_convert negated) {
+                    Ok value => value,
+                    _ => 0,
+                }
+            }
+            checked_subtract left amount
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// U32 math
+// ---------------------------------------------------------------------------
+
+companion U32 {
+    use package.convert.(ConversionError, TryConvert)
+    use package.ops.(BitAnd, BitNot, ShiftLeft, ShiftRight)
+    use package.option.(Option, Some, None)
+    use package.result.(Ok, Result)
+    use package.process.(panic)
+    use package.source.(track_caller)
+
+    extern "staple-intrinsic" {
+        __u32_overflowing_add: (U32, U32) -> (U8, U32)
+        __u32_overflowing_subtract: (U32, U32) -> (U8, U32)
+        __u32_overflowing_multiply: (U32, U32) -> (U8, U32)
+        __u32_count_ones: U32 -> U32
+        __u32_leading_zeros: U32 -> U32
+        __u32_trailing_zeros: U32 -> U32
+        __u32_swap_bytes: U32 -> U32
+        __u32_reverse_bits: U32 -> U32
+        __u32_rotate_left: (U32, U32) -> U32
+        __u32_rotate_right: (U32, U32) -> U32
+    }
+
+    /// The smallest value.
+    pub const Min: U32 = 0
+    /// The largest value.
+    pub const Max: U32 = 4294967295
+    /// The width in bits.
+    pub const Bits: U32 = 32
+
+    /// Returns the smaller of two values.
+    pub def min = (left: U32; right: U32) => U32 :: if (left < right) { left } else { right }
+
+    /// Returns the larger of two values.
+    pub def max = (left: U32; right: U32) => U32 :: if (left > right) { left } else { right }
+
+    /// Constrains `value` to the inclusive range `lo ..= hi`. Panics at the
+    /// caller when `lo > hi`.
+    @track_caller
+    pub def clamp = (value: U32; lo: U32; hi: U32) => U32 :: {
+        if (lo > hi) {
+            panic "clamp: invalid bounds"
+        }
+        if (value < lo) {
+            lo
+        } else if (value > hi) {
+            hi
+        } else {
+            value
+        }
+    }
+
+    /// Returns the absolute difference between two values.
+    pub def abs_diff = (left: U32; right: U32) => U32 :: if (left < right) { right - left } else { left - right }
+
+    /// Returns `left + right`, or `None` on overflow.
+    pub def checked_add = (left: U32; right: U32) => Option<U32> :: {
+        let (status, value) = __u32_overflowing_add (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left - right`, or `None` on underflow.
+    pub def checked_subtract = (left: U32; right: U32) => Option<U32> :: {
+        let (status, value) = __u32_overflowing_subtract (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left * right`, or `None` on overflow.
+    pub def checked_multiply = (left: U32; right: U32) => Option<U32> :: {
+        let (status, value) = __u32_overflowing_multiply (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left / right`, or `None` for a zero divisor.
+    pub def checked_divide = (left: U32; right: U32) => Option<U32> :: {
+        if (right == 0) { None } else { Some (left / right) }
+    }
+
+    /// Returns `left % right`, or `None` for a zero divisor.
+    pub def checked_remainder = (left: U32; right: U32) => Option<U32> :: {
+        if (right == 0) { None } else { Some (left % right) }
+    }
+
+    /// Returns `value` shifted left by `count`, or `None` when the count is not
+    /// smaller than the width.
+    pub def checked_shift_left = (value: U32; count: U32) => Option<U32> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_left value count) }
+    }
+
+    /// Returns `value` shifted right by `count`, or `None` when the count is
+    /// not smaller than the width.
+    pub def checked_shift_right = (value: U32; count: U32) => Option<U32> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_right value count) }
+    }
+
+    /// Returns `left + right`, wrapping on overflow.
+    pub def wrapping_add = (left: U32; right: U32) => U32 :: left + right
+
+    /// Returns `left - right`, wrapping on underflow.
+    pub def wrapping_subtract = (left: U32; right: U32) => U32 :: left - right
+
+    /// Returns `left * right`, wrapping on overflow.
+    pub def wrapping_multiply = (left: U32; right: U32) => U32 :: left * right
+
+    /// Returns `value` shifted left by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_left = (value: U32; count: U32) => U32 :: {
+        let shift = count % Bits
+        let amount: U32 = shift as U32
+        ShiftLeft.shift_left (value; amount)
+    }
+
+    /// Returns `value` shifted right by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_right = (value: U32; count: U32) => U32 :: {
+        let shift = count % Bits
+        let amount: U32 = shift as U32
+        ShiftRight.shift_right (value; amount)
+    }
+
+    /// Returns `left + right`, saturating at the type's bounds.
+    pub def saturating_add = (left: U32; right: U32) => U32 :: {
+        let (status, value) = __u32_overflowing_add (left, right)
+        if (status == 0) { value } else { Max }
+    }
+
+    /// Returns `left - right`, saturating at the type's bounds.
+    pub def saturating_subtract = (left: U32; right: U32) => U32 :: {
+        let (status, value) = __u32_overflowing_subtract (left, right)
+        if (status == 0) { value } else { Min }
+    }
+
+    /// Returns `left * right`, saturating at the type's bounds.
+    pub def saturating_multiply = (left: U32; right: U32) => U32 :: {
+        let (status, value) = __u32_overflowing_multiply (left, right)
+        if (status == 0) { value } else { Max }
+    }
+
+    /// Returns the wrapped result and whether the addition overflowed.
+    pub def overflowing_add = (left: U32; right: U32) => (U32, Bool) :: {
+        let (status, value) = __u32_overflowing_add (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the subtraction overflowed.
+    pub def overflowing_subtract = (left: U32; right: U32) => (U32, Bool) :: {
+        let (status, value) = __u32_overflowing_subtract (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the multiplication overflowed.
+    pub def overflowing_multiply = (left: U32; right: U32) => (U32, Bool) :: {
+        let (status, value) = __u32_overflowing_multiply (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the Euclidean quotient of `left / right`. Panics at the caller
+    /// for a zero divisor.
+    @track_caller
+    pub def divide_euclid = (left: U32; right: U32) => U32 :: left / right
+
+    /// Returns the Euclidean remainder of `left / right`. Panics at the caller
+    /// for a zero divisor.
+    @track_caller
+    pub def remainder_euclid = (left: U32; right: U32) => U32 :: left % right
+
+    /// Returns the quotient rounded up. Panics at the caller for a zero
+    /// divisor.
+    @track_caller
+    pub def divide_ceil = (left: U32; right: U32) => U32 :: {
+        let quotient = left / right
+        if (left % right == 0) { quotient } else { quotient + 1 }
+    }
+
+    /// Returns `base` raised to `exponent`, wrapping like `*`.
+    pub def pow = (base: U32; exponent: U32) => U32 :: {
+        let mut result: U32 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = result * factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = factor * factor
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, or `None` on overflow.
+    pub def checked_pow = (base: U32; exponent: U32) => Option<U32> :: {
+        let mut result: Option<U32> = Some 1
+        let mut factor: Option<U32> = Some base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = match (result, factor) {
+                    (Some value, Some power) => checked_multiply value power,
+                    _ => None,
+                }
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = match factor {
+                    Some value => checked_multiply value value,
+                    None => None,
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, saturating at the type's bounds.
+    pub def saturating_pow = (base: U32; exponent: U32) => U32 :: {
+        let mut result: U32 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = saturating_multiply result factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = saturating_multiply factor factor
+            }
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm. Panics at the caller for zero.
+    @track_caller
+    pub def ilog2 = (value: U32) => U32 :: {
+        if (value == 0) {
+            panic "ilog2: zero value"
+        } else {
+            Bits - 1 - leading_zeros value
+        }
+    }
+
+    /// Returns the base-10 logarithm. Panics at the caller for zero.
+    @track_caller
+    pub def ilog10 = (value: U32) => U32 :: {
+        if (value == 0) {
+            panic "ilog10: zero value"
+        }
+        let mut remaining = value
+        let mut result: U32 = 0
+        while (remaining >= 10) {
+            remaining = remaining / 10
+            result = result + 1
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm, or `None` for zero.
+    pub def checked_ilog2 = (value: U32) => Option<U32> :: {
+        if (value == 0) { None } else { Some (ilog2 value) }
+    }
+
+    /// Returns the base-10 logarithm, or `None` for zero.
+    pub def checked_ilog10 = (value: U32) => Option<U32> :: {
+        if (value == 0) { None } else { Some (ilog10 value) }
+    }
+
+    /// Returns the integer square root.
+    @track_caller
+    pub def isqrt = (value: U32) => U32 :: {
+        if (value < 2) {
+            value
+        } else {
+            let mut x = value / 2 + 1
+            let mut y = (x + value / x) / 2
+            while (y < x) {
+                x = y
+                y = (x + value / x) / 2
+            }
+            x
+        }
+    }
+
+    /// Returns the number of one bits.
+    pub def count_ones = (value: U32) => U32 :: __u32_count_ones value
+
+    /// Returns the number of zero bits.
+    pub def count_zeros = (value: U32) => U32 :: Bits - count_ones value
+
+    /// Returns the number of leading zero bits.
+    pub def leading_zeros = (value: U32) => U32 :: __u32_leading_zeros value
+
+    /// Returns the number of trailing zero bits.
+    pub def trailing_zeros = (value: U32) => U32 :: __u32_trailing_zeros value
+
+    /// Returns the number of leading one bits.
+    pub def leading_ones = (value: U32) => U32 :: leading_zeros (BitNot.bit_not value)
+
+    /// Returns the number of trailing one bits.
+    pub def trailing_ones = (value: U32) => U32 :: trailing_zeros (BitNot.bit_not value)
+
+    /// Rotates the bits left by `count`, reducing the count modulo the width.
+    pub def rotate_left = (value: U32; count: U32) => U32 :: __u32_rotate_left (value, count)
+
+    /// Rotates the bits right by `count`, reducing the count modulo the width.
+    pub def rotate_right = (value: U32; count: U32) => U32 :: __u32_rotate_right (value, count)
+
+    /// Reverses the byte order.
+    pub def swap_bytes = (value: U32) => U32 :: __u32_swap_bytes value
+
+    /// Reverses the bit order.
+    pub def reverse_bits = (value: U32) => U32 :: __u32_reverse_bits value
+
+    /// Returns whether `value` is a power of two.
+    pub def is_power_of_two = (value: U32) => Bool :: value != 0 && (BitAnd.bit_and (value; value - 1)) == 0
+
+    /// Returns the smallest power of two greater than or equal to `value`,
+    /// wrapping to zero past the top.
+    pub def next_power_of_two = (value: U32) => U32 :: {
+        if (value <= 1) {
+            1
+        } else {
+            let mut result: U32 = 1
+            while (result < value && result != 0) {
+                result = ShiftLeft.shift_left (result; 1)
+            }
+            result
+        }
+    }
+
+    /// Returns the smallest power of two greater than or equal to `value`, or
+    /// `None` when it does not fit.
+    pub def checked_next_power_of_two = (value: U32) => Option<U32> :: {
+        let result = next_power_of_two value
+        if (result == 0) { None } else { Some result }
+    }
+
+    /// Adds a signed value, or returns `None` when the result is out of range.
+    pub def checked_add_signed = (left: U32; right: I32) => Option<U32> :: {
+        if (right >= 0) {
+            let amount: U32 = match (Result<U32, ConversionError> :: TryConvert.try_convert right) {
+                Ok value => value,
+                _ => 0,
+            }
+            checked_add left amount
+        } else {
+            let negated = 0 - right
+            let amount: U32 = if (negated < 0) {
+                Max - (Max / 2)
+            } else {
+                match (Result<U32, ConversionError> :: TryConvert.try_convert negated) {
+                    Ok value => value,
+                    _ => 0,
+                }
+            }
+            checked_subtract left amount
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// U64 math
+// ---------------------------------------------------------------------------
+
+companion U64 {
+    use package.convert.(ConversionError, TryConvert)
+    use package.ops.(BitAnd, BitNot, ShiftLeft, ShiftRight)
+    use package.option.(Option, Some, None)
+    use package.result.(Ok, Result)
+    use package.process.(panic)
+    use package.source.(track_caller)
+
+    extern "staple-intrinsic" {
+        __u64_overflowing_add: (U64, U64) -> (U8, U64)
+        __u64_overflowing_subtract: (U64, U64) -> (U8, U64)
+        __u64_overflowing_multiply: (U64, U64) -> (U8, U64)
+        __u64_count_ones: U64 -> U32
+        __u64_leading_zeros: U64 -> U32
+        __u64_trailing_zeros: U64 -> U32
+        __u64_swap_bytes: U64 -> U64
+        __u64_reverse_bits: U64 -> U64
+        __u64_rotate_left: (U64, U32) -> U64
+        __u64_rotate_right: (U64, U32) -> U64
+    }
+
+    /// The smallest value.
+    pub const Min: U64 = 0
+    /// The largest value.
+    pub const Max: U64 = 18446744073709551615
+    /// The width in bits.
+    pub const Bits: U32 = 64
+
+    /// Returns the smaller of two values.
+    pub def min = (left: U64; right: U64) => U64 :: if (left < right) { left } else { right }
+
+    /// Returns the larger of two values.
+    pub def max = (left: U64; right: U64) => U64 :: if (left > right) { left } else { right }
+
+    /// Constrains `value` to the inclusive range `lo ..= hi`. Panics at the
+    /// caller when `lo > hi`.
+    @track_caller
+    pub def clamp = (value: U64; lo: U64; hi: U64) => U64 :: {
+        if (lo > hi) {
+            panic "clamp: invalid bounds"
+        }
+        if (value < lo) {
+            lo
+        } else if (value > hi) {
+            hi
+        } else {
+            value
+        }
+    }
+
+    /// Returns the absolute difference between two values.
+    pub def abs_diff = (left: U64; right: U64) => U64 :: if (left < right) { right - left } else { left - right }
+
+    /// Returns `left + right`, or `None` on overflow.
+    pub def checked_add = (left: U64; right: U64) => Option<U64> :: {
+        let (status, value) = __u64_overflowing_add (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left - right`, or `None` on underflow.
+    pub def checked_subtract = (left: U64; right: U64) => Option<U64> :: {
+        let (status, value) = __u64_overflowing_subtract (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left * right`, or `None` on overflow.
+    pub def checked_multiply = (left: U64; right: U64) => Option<U64> :: {
+        let (status, value) = __u64_overflowing_multiply (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left / right`, or `None` for a zero divisor.
+    pub def checked_divide = (left: U64; right: U64) => Option<U64> :: {
+        if (right == 0) { None } else { Some (left / right) }
+    }
+
+    /// Returns `left % right`, or `None` for a zero divisor.
+    pub def checked_remainder = (left: U64; right: U64) => Option<U64> :: {
+        if (right == 0) { None } else { Some (left % right) }
+    }
+
+    /// Returns `value` shifted left by `count`, or `None` when the count is not
+    /// smaller than the width.
+    pub def checked_shift_left = (value: U64; count: U32) => Option<U64> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_left value count) }
+    }
+
+    /// Returns `value` shifted right by `count`, or `None` when the count is
+    /// not smaller than the width.
+    pub def checked_shift_right = (value: U64; count: U32) => Option<U64> :: {
+        if (count >= Bits) { None } else { Some (wrapping_shift_right value count) }
+    }
+
+    /// Returns `left + right`, wrapping on overflow.
+    pub def wrapping_add = (left: U64; right: U64) => U64 :: left + right
+
+    /// Returns `left - right`, wrapping on underflow.
+    pub def wrapping_subtract = (left: U64; right: U64) => U64 :: left - right
+
+    /// Returns `left * right`, wrapping on overflow.
+    pub def wrapping_multiply = (left: U64; right: U64) => U64 :: left * right
+
+    /// Returns `value` shifted left by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_left = (value: U64; count: U32) => U64 :: {
+        let shift = count % Bits
+        let amount: U64 = shift as U64
+        ShiftLeft.shift_left (value; amount)
+    }
+
+    /// Returns `value` shifted right by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_right = (value: U64; count: U32) => U64 :: {
+        let shift = count % Bits
+        let amount: U64 = shift as U64
+        ShiftRight.shift_right (value; amount)
+    }
+
+    /// Returns `left + right`, saturating at the type's bounds.
+    pub def saturating_add = (left: U64; right: U64) => U64 :: {
+        let (status, value) = __u64_overflowing_add (left, right)
+        if (status == 0) { value } else { Max }
+    }
+
+    /// Returns `left - right`, saturating at the type's bounds.
+    pub def saturating_subtract = (left: U64; right: U64) => U64 :: {
+        let (status, value) = __u64_overflowing_subtract (left, right)
+        if (status == 0) { value } else { Min }
+    }
+
+    /// Returns `left * right`, saturating at the type's bounds.
+    pub def saturating_multiply = (left: U64; right: U64) => U64 :: {
+        let (status, value) = __u64_overflowing_multiply (left, right)
+        if (status == 0) { value } else { Max }
+    }
+
+    /// Returns the wrapped result and whether the addition overflowed.
+    pub def overflowing_add = (left: U64; right: U64) => (U64, Bool) :: {
+        let (status, value) = __u64_overflowing_add (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the subtraction overflowed.
+    pub def overflowing_subtract = (left: U64; right: U64) => (U64, Bool) :: {
+        let (status, value) = __u64_overflowing_subtract (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the multiplication overflowed.
+    pub def overflowing_multiply = (left: U64; right: U64) => (U64, Bool) :: {
+        let (status, value) = __u64_overflowing_multiply (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the Euclidean quotient of `left / right`. Panics at the caller
+    /// for a zero divisor.
+    @track_caller
+    pub def divide_euclid = (left: U64; right: U64) => U64 :: left / right
+
+    /// Returns the Euclidean remainder of `left / right`. Panics at the caller
+    /// for a zero divisor.
+    @track_caller
+    pub def remainder_euclid = (left: U64; right: U64) => U64 :: left % right
+
+    /// Returns the quotient rounded up. Panics at the caller for a zero
+    /// divisor.
+    @track_caller
+    pub def divide_ceil = (left: U64; right: U64) => U64 :: {
+        let quotient = left / right
+        if (left % right == 0) { quotient } else { quotient + 1 }
+    }
+
+    /// Returns `base` raised to `exponent`, wrapping like `*`.
+    pub def pow = (base: U64; exponent: U32) => U64 :: {
+        let mut result: U64 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = result * factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = factor * factor
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, or `None` on overflow.
+    pub def checked_pow = (base: U64; exponent: U32) => Option<U64> :: {
+        let mut result: Option<U64> = Some 1
+        let mut factor: Option<U64> = Some base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = match (result, factor) {
+                    (Some value, Some power) => checked_multiply value power,
+                    _ => None,
+                }
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = match factor {
+                    Some value => checked_multiply value value,
+                    None => None,
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, saturating at the type's bounds.
+    pub def saturating_pow = (base: U64; exponent: U32) => U64 :: {
+        let mut result: U64 = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = saturating_multiply result factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = saturating_multiply factor factor
+            }
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm. Panics at the caller for zero.
+    @track_caller
+    pub def ilog2 = (value: U64) => U32 :: {
+        if (value == 0) {
+            panic "ilog2: zero value"
+        } else {
+            Bits - 1 - leading_zeros value
+        }
+    }
+
+    /// Returns the base-10 logarithm. Panics at the caller for zero.
+    @track_caller
+    pub def ilog10 = (value: U64) => U32 :: {
+        if (value == 0) {
+            panic "ilog10: zero value"
+        }
+        let mut remaining = value
+        let mut result: U32 = 0
+        while (remaining >= 10) {
+            remaining = remaining / 10
+            result = result + 1
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm, or `None` for zero.
+    pub def checked_ilog2 = (value: U64) => Option<U32> :: {
+        if (value == 0) { None } else { Some (ilog2 value) }
+    }
+
+    /// Returns the base-10 logarithm, or `None` for zero.
+    pub def checked_ilog10 = (value: U64) => Option<U32> :: {
+        if (value == 0) { None } else { Some (ilog10 value) }
+    }
+
+    /// Returns the integer square root.
+    @track_caller
+    pub def isqrt = (value: U64) => U64 :: {
+        if (value < 2) {
+            value
+        } else {
+            let mut x = value / 2 + 1
+            let mut y = (x + value / x) / 2
+            while (y < x) {
+                x = y
+                y = (x + value / x) / 2
+            }
+            x
+        }
+    }
+
+    /// Returns the number of one bits.
+    pub def count_ones = (value: U64) => U32 :: __u64_count_ones value
+
+    /// Returns the number of zero bits.
+    pub def count_zeros = (value: U64) => U32 :: Bits - count_ones value
+
+    /// Returns the number of leading zero bits.
+    pub def leading_zeros = (value: U64) => U32 :: __u64_leading_zeros value
+
+    /// Returns the number of trailing zero bits.
+    pub def trailing_zeros = (value: U64) => U32 :: __u64_trailing_zeros value
+
+    /// Returns the number of leading one bits.
+    pub def leading_ones = (value: U64) => U32 :: leading_zeros (BitNot.bit_not value)
+
+    /// Returns the number of trailing one bits.
+    pub def trailing_ones = (value: U64) => U32 :: trailing_zeros (BitNot.bit_not value)
+
+    /// Rotates the bits left by `count`, reducing the count modulo the width.
+    pub def rotate_left = (value: U64; count: U32) => U64 :: __u64_rotate_left (value, count)
+
+    /// Rotates the bits right by `count`, reducing the count modulo the width.
+    pub def rotate_right = (value: U64; count: U32) => U64 :: __u64_rotate_right (value, count)
+
+    /// Reverses the byte order.
+    pub def swap_bytes = (value: U64) => U64 :: __u64_swap_bytes value
+
+    /// Reverses the bit order.
+    pub def reverse_bits = (value: U64) => U64 :: __u64_reverse_bits value
+
+    /// Returns whether `value` is a power of two.
+    pub def is_power_of_two = (value: U64) => Bool :: value != 0 && (BitAnd.bit_and (value; value - 1)) == 0
+
+    /// Returns the smallest power of two greater than or equal to `value`,
+    /// wrapping to zero past the top.
+    pub def next_power_of_two = (value: U64) => U64 :: {
+        if (value <= 1) {
+            1
+        } else {
+            let mut result: U64 = 1
+            while (result < value && result != 0) {
+                result = ShiftLeft.shift_left (result; 1)
+            }
+            result
+        }
+    }
+
+    /// Returns the smallest power of two greater than or equal to `value`, or
+    /// `None` when it does not fit.
+    pub def checked_next_power_of_two = (value: U64) => Option<U64> :: {
+        let result = next_power_of_two value
+        if (result == 0) { None } else { Some result }
+    }
+
+    /// Adds a signed value, or returns `None` when the result is out of range.
+    pub def checked_add_signed = (left: U64; right: I64) => Option<U64> :: {
+        if (right >= 0) {
+            let amount: U64 = match (Result<U64, ConversionError> :: TryConvert.try_convert right) {
+                Ok value => value,
+                _ => 0,
+            }
+            checked_add left amount
+        } else {
+            let negated = 0 - right
+            let amount: U64 = if (negated < 0) {
+                Max - (Max / 2)
+            } else {
+                match (Result<U64, ConversionError> :: TryConvert.try_convert negated) {
+                    Ok value => value,
+                    _ => 0,
+                }
+            }
+            checked_subtract left amount
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ISize math
+// ---------------------------------------------------------------------------
+
+companion ISize {
+    use package.alloc.MemLayout
+    use package.convert.(ConversionError, TryConvert)
+    use package.ops.(BitAnd, BitNot, ShiftLeft, ShiftRight)
+    use package.option.(Option, Some, None)
+    use package.result.(Ok, Result)
+    use package.process.(panic)
+    use package.source.(track_caller)
+
+    extern "staple-intrinsic" {
+        __isize_overflowing_add: (ISize, ISize) -> (U8, ISize)
+        __isize_overflowing_subtract: (ISize, ISize) -> (U8, ISize)
+        __isize_overflowing_multiply: (ISize, ISize) -> (U8, ISize)
+        __isize_count_ones: ISize -> U32
+        __isize_leading_zeros: ISize -> U32
+        __isize_trailing_zeros: ISize -> U32
+        __isize_swap_bytes: ISize -> ISize
+        __isize_reverse_bits: ISize -> ISize
+        __isize_rotate_left: (ISize, U32) -> ISize
+        __isize_rotate_right: (ISize, U32) -> ISize
+    }
+
+    def bits = () => U32 :: match (TryConvert.try_convert.<USize, U32> (MemLayout.stride.<USize> () * 8)) {
+        Ok value => value,
+        _ => 0,
+    }
+
+    def max_value = () => ISize :: match (TryConvert.try_convert.<USize, ISize> ((BitNot.bit_not (USize :: 0)) / 2)) {
+        Ok value => value,
+        _ => 0,
+    }
+
+    def min_value = () => ISize :: 0 - max_value () - 1
+
+    /// Returns the smaller of two values.
+    pub def min = (left: ISize; right: ISize) => ISize :: if (left < right) { left } else { right }
+
+    /// Returns the larger of two values.
+    pub def max = (left: ISize; right: ISize) => ISize :: if (left > right) { left } else { right }
+
+    /// Constrains `value` to the inclusive range `lo ..= hi`. Panics at the
+    /// caller when `lo > hi`.
+    @track_caller
+    pub def clamp = (value: ISize; lo: ISize; hi: ISize) => ISize :: {
+        if (lo > hi) {
+            panic "clamp: invalid bounds"
+        }
+        if (value < lo) {
+            lo
+        } else if (value > hi) {
+            hi
+        } else {
+            value
+        }
+    }
+
+    /// Returns the absolute value, wrapping at the minimum like prefix `-`.
+    pub def abs = (value: ISize) => ISize :: if (value < 0) { 0 - value } else { value }
+
+    /// Returns `-value`, or `None` at the minimum value.
+    pub def checked_negate = (value: ISize) => Option<ISize> :: {
+        let (status, negated) = __isize_overflowing_subtract (0, value)
+        if (status == 0) { Some negated } else { None }
+    }
+
+    /// Returns `-value`, wrapping at the minimum value.
+    pub def wrapping_negate = (value: ISize) => ISize :: 0 - value
+
+    /// Returns the absolute value, or `None` at the minimum value.
+    pub def checked_abs = (value: ISize) => Option<ISize> :: {
+        if (value < 0) { checked_negate value } else { Some value }
+    }
+
+    /// Returns the exact magnitude of `value` as an unsigned value.
+    pub def unsigned_abs = (value: ISize) => USize :: {
+        if (value >= 0) {
+            match (Result<USize, ConversionError> :: TryConvert.try_convert value) {
+                Ok result => result,
+                _ => 0,
+            }
+        } else {
+            let negated = 0 - value
+            if (negated >= 0) {
+                match (Result<USize, ConversionError> :: TryConvert.try_convert negated) {
+                    Ok result => result,
+                    _ => 0,
+                }
+            } else {
+                ((BitNot.bit_not (USize :: 0)) / 2) + 1
+            }
+        }
+    }
+
+    /// Returns the absolute difference between two values as an unsigned value.
+    pub def abs_diff = (left: ISize; right: ISize) => USize :: {
+        let high = if (left < right) { right } else { left }
+        let low = if (left < right) { left } else { right }
+        if (low < 0 && high >= 0) {
+            unsigned_abs high + unsigned_abs low
+        } else {
+            unsigned_abs (high - low)
+        }
+    }
+
+    /// Returns the wrapped result and whether the addition overflowed.
+    pub def overflowing_add = (left: ISize; right: ISize) => (ISize, Bool) :: {
+        let (status, value) = __isize_overflowing_add (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the subtraction overflowed.
+    pub def overflowing_subtract = (left: ISize; right: ISize) => (ISize, Bool) :: {
+        let (status, value) = __isize_overflowing_subtract (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the multiplication overflowed.
+    pub def overflowing_multiply = (left: ISize; right: ISize) => (ISize, Bool) :: {
+        let (status, value) = __isize_overflowing_multiply (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns `left + right`, or `None` on overflow.
+    pub def checked_add = (left: ISize; right: ISize) => Option<ISize> :: {
+        let (status, value) = __isize_overflowing_add (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left - right`, or `None` on overflow.
+    pub def checked_subtract = (left: ISize; right: ISize) => Option<ISize> :: {
+        let (status, value) = __isize_overflowing_subtract (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left * right`, or `None` on overflow.
+    pub def checked_multiply = (left: ISize; right: ISize) => Option<ISize> :: {
+        let (status, value) = __isize_overflowing_multiply (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left + right`, wrapping on overflow.
+    pub def wrapping_add = (left: ISize; right: ISize) => ISize :: left + right
+
+    /// Returns `left - right`, wrapping on overflow.
+    pub def wrapping_subtract = (left: ISize; right: ISize) => ISize :: left - right
+
+    /// Returns `left * right`, wrapping on overflow.
+    pub def wrapping_multiply = (left: ISize; right: ISize) => ISize :: left * right
+
+    /// Returns `value` shifted left by `count`, or `None` when the count is not
+    /// smaller than the width.
+    pub def checked_shift_left = (value: ISize; count: U32) => Option<ISize> :: {
+        if (count >= bits ()) { None } else { Some (wrapping_shift_left value count) }
+    }
+
+    /// Returns `value` shifted right by `count`, or `None` when the count is
+    /// not smaller than the width.
+    pub def checked_shift_right = (value: ISize; count: U32) => Option<ISize> :: {
+        if (count >= bits ()) { None } else { Some (wrapping_shift_right value count) }
+    }
+
+    /// Returns `value` shifted left by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_left = (value: ISize; count: U32) => ISize :: {
+        let shift = count % bits ()
+        let amount: ISize = match (TryConvert.try_convert.<U32, ISize> shift) {
+            Ok amount => amount,
+            _ => 0,
+        }
+        ShiftLeft.shift_left (value; amount)
+    }
+
+    /// Returns `value` shifted right by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_right = (value: ISize; count: U32) => ISize :: {
+        let shift = count % bits ()
+        let amount: ISize = match (TryConvert.try_convert.<U32, ISize> shift) {
+            Ok amount => amount,
+            _ => 0,
+        }
+        ShiftRight.shift_right (value; amount)
+    }
+
+    /// Returns `left + right`, saturating at the type's bounds.
+    pub def saturating_add = (left: ISize; right: ISize) => ISize :: {
+        let (status, value) = __isize_overflowing_add (left, right)
+        if (status == 0) {
+            value
+        } else if (right > 0) {
+            max_value ()
+        } else {
+            min_value ()
+        }
+    }
+
+    /// Returns `left - right`, saturating at the type's bounds.
+    pub def saturating_subtract = (left: ISize; right: ISize) => ISize :: {
+        let (status, value) = __isize_overflowing_subtract (left, right)
+        if (status == 0) {
+            value
+        } else if (right > 0) {
+            min_value ()
+        } else {
+            max_value ()
+        }
+    }
+
+    /// Returns `left * right`, saturating at the type's bounds.
+    pub def saturating_multiply = (left: ISize; right: ISize) => ISize :: {
+        let (status, value) = __isize_overflowing_multiply (left, right)
+        if (status == 0) {
+            value
+        } else if ((left < 0) != (right < 0)) {
+            min_value ()
+        } else {
+            max_value ()
+        }
+    }
+
+    /// Returns `left / right`, or `None` for a zero divisor or the overflowing
+    /// minimum divided by -1.
+    pub def checked_divide = (left: ISize; right: ISize) => Option<ISize> :: {
+        if (right == 0 || (right == ((ISize :: 0) - 1) && unsigned_abs left == ((BitNot.bit_not (USize :: 0)) / 2) + 1)) {
+            None
+        } else {
+            Some (left / right)
+        }
+    }
+
+    /// Returns `left % right`, or `None` for a zero divisor.
+    pub def checked_remainder = (left: ISize; right: ISize) => Option<ISize> :: {
+        if (right == 0) { None } else { Some (left % right) }
+    }
+
+    /// Returns the Euclidean quotient of `left / right`. Panics at the caller
+    /// for a zero divisor or the overflowing minimum divided by -1.
+    @track_caller
+    pub def divide_euclid = (left: ISize; right: ISize) => ISize :: {
+        let quotient = left / right
+        let remainder = left % right
+        if (remainder < 0) {
+            if (right > 0) { quotient - 1 } else { quotient + 1 }
+        } else {
+            quotient
+        }
+    }
+
+    /// Returns the non-negative Euclidean remainder of `left / right`. Panics
+    /// at the caller for a zero divisor.
+    @track_caller
+    pub def remainder_euclid = (left: ISize; right: ISize) => ISize :: {
+        let remainder = left % right
+        if (remainder < 0) {
+            if (right > 0) { remainder + right } else { remainder - right }
+        } else {
+            remainder
+        }
+    }
+
+    /// Returns `base` raised to `exponent`, wrapping like `*`.
+    pub def pow = (base: ISize; exponent: U32) => ISize :: {
+        let mut result: ISize = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = result * factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = factor * factor
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, or `None` on overflow.
+    pub def checked_pow = (base: ISize; exponent: U32) => Option<ISize> :: {
+        let mut result: Option<ISize> = Some 1
+        let mut factor: Option<ISize> = Some base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = match (result, factor) {
+                    (Some value, Some power) => checked_multiply value power,
+                    _ => None,
+                }
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = match factor {
+                    Some value => checked_multiply value value,
+                    None => None,
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, saturating at the type's bounds.
+    pub def saturating_pow = (base: ISize; exponent: U32) => ISize :: {
+        let mut result: ISize = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = saturating_multiply result factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = saturating_multiply factor factor
+            }
+        }
+        result
+    }
+
+    /// Returns the integer square root. Panics at the caller for a negative
+    /// value.
+    @track_caller
+    pub def isqrt = (value: ISize) => ISize :: {
+        if (value < 0) {
+            panic "isqrt: negative value"
+        }
+        if (value < 2) {
+            value
+        } else {
+            let mut x = value / 2 + 1
+            let mut y = (x + value / x) / 2
+            while (y < x) {
+                x = y
+                y = (x + value / x) / 2
+            }
+            x
+        }
+    }
+
+    /// Returns the base-2 logarithm. Panics at the caller for `value <= 0`.
+    @track_caller
+    pub def ilog2 = (value: ISize) => U32 :: {
+        if (value <= 0) {
+            panic "ilog2: non-positive value"
+        } else {
+            bits () - 1 - leading_zeros value
+        }
+    }
+
+    /// Returns the base-10 logarithm. Panics at the caller for `value <= 0`.
+    @track_caller
+    pub def ilog10 = (value: ISize) => U32 :: {
+        if (value <= 0) {
+            panic "ilog10: non-positive value"
+        }
+        let mut remaining = value
+        let mut result: U32 = 0
+        while (remaining >= 10) {
+            remaining = remaining / 10
+            result = result + 1
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm, or `None` for `value <= 0`.
+    pub def checked_ilog2 = (value: ISize) => Option<U32> :: {
+        if (value <= 0) { None } else { Some (ilog2 value) }
+    }
+
+    /// Returns the base-10 logarithm, or `None` for `value <= 0`.
+    pub def checked_ilog10 = (value: ISize) => Option<U32> :: {
+        if (value <= 0) { None } else { Some (ilog10 value) }
+    }
+
+    /// Returns the number of one bits.
+    pub def count_ones = (value: ISize) => U32 :: __isize_count_ones value
+
+    /// Returns the number of zero bits.
+    pub def count_zeros = (value: ISize) => U32 :: bits () - count_ones value
+
+    /// Returns the number of leading zero bits.
+    pub def leading_zeros = (value: ISize) => U32 :: __isize_leading_zeros value
+
+    /// Returns the number of trailing zero bits.
+    pub def trailing_zeros = (value: ISize) => U32 :: __isize_trailing_zeros value
+
+    /// Returns the number of leading one bits.
+    pub def leading_ones = (value: ISize) => U32 :: leading_zeros (BitNot.bit_not value)
+
+    /// Returns the number of trailing one bits.
+    pub def trailing_ones = (value: ISize) => U32 :: trailing_zeros (BitNot.bit_not value)
+
+    /// Rotates the bits left by `count`, reducing the count modulo the width.
+    pub def rotate_left = (value: ISize; count: U32) => ISize :: __isize_rotate_left (value, count)
+
+    /// Rotates the bits right by `count`, reducing the count modulo the width.
+    pub def rotate_right = (value: ISize; count: U32) => ISize :: __isize_rotate_right (value, count)
+
+    /// Reverses the byte order.
+    pub def swap_bytes = (value: ISize) => ISize :: __isize_swap_bytes value
+
+    /// Reverses the bit order.
+    pub def reverse_bits = (value: ISize) => ISize :: __isize_reverse_bits value
+
+    /// Returns -1, 0, or 1 according to the sign of `value`.
+    pub def signum = (value: ISize) => ISize :: when {
+        value < 0 => ((ISize :: 0) - 1),
+        value > 0 => 1,
+        else => 0,
+    }
+
+    /// Returns whether `value` is negative.
+    pub def is_negative = (value: ISize) => Bool :: value < 0
+
+    /// Returns whether `value` is positive.
+    pub def is_positive = (value: ISize) => Bool :: value > 0
+}
+
+// ---------------------------------------------------------------------------
+// USize math
+// ---------------------------------------------------------------------------
+
+companion USize {
+    use package.alloc.MemLayout
+    use package.convert.(ConversionError, TryConvert)
+    use package.ops.(BitAnd, BitNot, ShiftLeft, ShiftRight)
+    use package.option.(Option, Some, None)
+    use package.result.(Ok, Result)
+    use package.process.(panic)
+    use package.source.(track_caller)
+
+    extern "staple-intrinsic" {
+        __usize_overflowing_add: (USize, USize) -> (U8, USize)
+        __usize_overflowing_subtract: (USize, USize) -> (U8, USize)
+        __usize_overflowing_multiply: (USize, USize) -> (U8, USize)
+        __usize_count_ones: USize -> U32
+        __usize_leading_zeros: USize -> U32
+        __usize_trailing_zeros: USize -> U32
+        __usize_swap_bytes: USize -> USize
+        __usize_reverse_bits: USize -> USize
+        __usize_rotate_left: (USize, U32) -> USize
+        __usize_rotate_right: (USize, U32) -> USize
+    }
+
+    def bits = () => U32 :: match (TryConvert.try_convert.<USize, U32> (MemLayout.stride.<USize> () * 8)) {
+        Ok value => value,
+        _ => 0,
+    }
+
+    def max_value = () => USize :: BitNot.bit_not (USize :: 0)
+
+    /// Returns the smaller of two values.
+    pub def min = (left: USize; right: USize) => USize :: if (left < right) { left } else { right }
+
+    /// Returns the larger of two values.
+    pub def max = (left: USize; right: USize) => USize :: if (left > right) { left } else { right }
+
+    /// Constrains `value` to the inclusive range `lo ..= hi`. Panics at the
+    /// caller when `lo > hi`.
+    @track_caller
+    pub def clamp = (value: USize; lo: USize; hi: USize) => USize :: {
+        if (lo > hi) {
+            panic "clamp: invalid bounds"
+        }
+        if (value < lo) {
+            lo
+        } else if (value > hi) {
+            hi
+        } else {
+            value
+        }
+    }
+
+    /// Returns the absolute difference between two values.
+    pub def abs_diff = (left: USize; right: USize) => USize :: if (left < right) { right - left } else { left - right }
+
+    /// Returns the wrapped result and whether the addition overflowed.
+    pub def overflowing_add = (left: USize; right: USize) => (USize, Bool) :: {
+        let (status, value) = __usize_overflowing_add (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the subtraction overflowed.
+    pub def overflowing_subtract = (left: USize; right: USize) => (USize, Bool) :: {
+        let (status, value) = __usize_overflowing_subtract (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns the wrapped result and whether the multiplication overflowed.
+    pub def overflowing_multiply = (left: USize; right: USize) => (USize, Bool) :: {
+        let (status, value) = __usize_overflowing_multiply (left, right)
+        (value, status != 0)
+    }
+
+    /// Returns `left + right`, or `None` on overflow.
+    pub def checked_add = (left: USize; right: USize) => Option<USize> :: {
+        let (status, value) = __usize_overflowing_add (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left - right`, or `None` on underflow.
+    pub def checked_subtract = (left: USize; right: USize) => Option<USize> :: {
+        let (status, value) = __usize_overflowing_subtract (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left * right`, or `None` on overflow.
+    pub def checked_multiply = (left: USize; right: USize) => Option<USize> :: {
+        let (status, value) = __usize_overflowing_multiply (left, right)
+        if (status == 0) { Some value } else { None }
+    }
+
+    /// Returns `left + right`, wrapping on overflow.
+    pub def wrapping_add = (left: USize; right: USize) => USize :: left + right
+
+    /// Returns `left - right`, wrapping on underflow.
+    pub def wrapping_subtract = (left: USize; right: USize) => USize :: left - right
+
+    /// Returns `left * right`, wrapping on overflow.
+    pub def wrapping_multiply = (left: USize; right: USize) => USize :: left * right
+
+    /// Returns `value` shifted left by `count`, or `None` when the count is not
+    /// smaller than the width.
+    pub def checked_shift_left = (value: USize; count: U32) => Option<USize> :: {
+        if (count >= bits ()) { None } else { Some (wrapping_shift_left value count) }
+    }
+
+    /// Returns `value` shifted right by `count`, or `None` when the count is
+    /// not smaller than the width.
+    pub def checked_shift_right = (value: USize; count: U32) => Option<USize> :: {
+        if (count >= bits ()) { None } else { Some (wrapping_shift_right value count) }
+    }
+
+    /// Returns `value` shifted left by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_left = (value: USize; count: U32) => USize :: {
+        let shift = count % bits ()
+        let amount: USize = shift as USize
+        ShiftLeft.shift_left (value; amount)
+    }
+
+    /// Returns `value` shifted right by `count`, reducing the count modulo the
+    /// width.
+    pub def wrapping_shift_right = (value: USize; count: U32) => USize :: {
+        let shift = count % bits ()
+        let amount: USize = shift as USize
+        ShiftRight.shift_right (value; amount)
+    }
+
+    /// Returns `left + right`, saturating at the type's bounds.
+    pub def saturating_add = (left: USize; right: USize) => USize :: {
+        let (status, value) = __usize_overflowing_add (left, right)
+        if (status == 0) { value } else { max_value () }
+    }
+
+    /// Returns `left - right`, saturating at the type's bounds.
+    pub def saturating_subtract = (left: USize; right: USize) => USize :: {
+        let (status, value) = __usize_overflowing_subtract (left, right)
+        if (status == 0) { value } else { 0 }
+    }
+
+    /// Returns `left * right`, saturating at the type's bounds.
+    pub def saturating_multiply = (left: USize; right: USize) => USize :: {
+        let (status, value) = __usize_overflowing_multiply (left, right)
+        if (status == 0) { value } else { max_value () }
+    }
+
+    /// Returns `left / right`, or `None` for a zero divisor.
+    pub def checked_divide = (left: USize; right: USize) => Option<USize> :: {
+        if (right == 0) { None } else { Some (left / right) }
+    }
+
+    /// Returns `left % right`, or `None` for a zero divisor.
+    pub def checked_remainder = (left: USize; right: USize) => Option<USize> :: {
+        if (right == 0) { None } else { Some (left % right) }
+    }
+
+    /// Returns the Euclidean quotient of `left / right`. Panics at the caller
+    /// for a zero divisor.
+    @track_caller
+    pub def divide_euclid = (left: USize; right: USize) => USize :: left / right
+
+    /// Returns the Euclidean remainder of `left / right`. Panics at the caller
+    /// for a zero divisor.
+    @track_caller
+    pub def remainder_euclid = (left: USize; right: USize) => USize :: left % right
+
+    /// Returns the quotient rounded up. Panics at the caller for a zero
+    /// divisor.
+    @track_caller
+    pub def divide_ceil = (left: USize; right: USize) => USize :: {
+        let quotient = left / right
+        if (left % right == 0) { quotient } else { quotient + 1 }
+    }
+
+    /// Returns `base` raised to `exponent`, wrapping like `*`.
+    pub def pow = (base: USize; exponent: U32) => USize :: {
+        let mut result: USize = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = result * factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = factor * factor
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, or `None` on overflow.
+    pub def checked_pow = (base: USize; exponent: U32) => Option<USize> :: {
+        let mut result: Option<USize> = Some 1
+        let mut factor: Option<USize> = Some base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = match (result, factor) {
+                    (Some value, Some power) => checked_multiply value power,
+                    _ => None,
+                }
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = match factor {
+                    Some value => checked_multiply value value,
+                    None => None,
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns `base` raised to `exponent`, saturating at the type's bounds.
+    pub def saturating_pow = (base: USize; exponent: U32) => USize :: {
+        let mut result: USize = 1
+        let mut factor = base
+        let mut remaining = exponent
+        while (remaining > 0) {
+            if (BitAnd.bit_and (remaining; 1) == 1) {
+                result = saturating_multiply result factor
+            }
+            remaining = ShiftRight.shift_right (remaining; 1)
+            if (remaining > 0) {
+                factor = saturating_multiply factor factor
+            }
+        }
+        result
+    }
+
+    /// Returns the integer square root.
+    @track_caller
+    pub def isqrt = (value: USize) => USize :: {
+        if (value < 2) {
+            value
+        } else {
+            let mut x = value / 2 + 1
+            let mut y = (x + value / x) / 2
+            while (y < x) {
+                x = y
+                y = (x + value / x) / 2
+            }
+            x
+        }
+    }
+
+    /// Returns the base-2 logarithm. Panics at the caller for zero.
+    @track_caller
+    pub def ilog2 = (value: USize) => U32 :: {
+        if (value == 0) {
+            panic "ilog2: zero value"
+        } else {
+            bits () - 1 - leading_zeros value
+        }
+    }
+
+    /// Returns the base-10 logarithm. Panics at the caller for zero.
+    @track_caller
+    pub def ilog10 = (value: USize) => U32 :: {
+        if (value == 0) {
+            panic "ilog10: zero value"
+        }
+        let mut remaining = value
+        let mut result: U32 = 0
+        while (remaining >= 10) {
+            remaining = remaining / 10
+            result = result + 1
+        }
+        result
+    }
+
+    /// Returns the base-2 logarithm, or `None` for zero.
+    pub def checked_ilog2 = (value: USize) => Option<U32> :: {
+        if (value == 0) { None } else { Some (ilog2 value) }
+    }
+
+    /// Returns the base-10 logarithm, or `None` for zero.
+    pub def checked_ilog10 = (value: USize) => Option<U32> :: {
+        if (value == 0) { None } else { Some (ilog10 value) }
+    }
+
+    /// Returns the number of one bits.
+    pub def count_ones = (value: USize) => U32 :: __usize_count_ones value
+
+    /// Returns the number of zero bits.
+    pub def count_zeros = (value: USize) => U32 :: bits () - count_ones value
+
+    /// Returns the number of leading zero bits.
+    pub def leading_zeros = (value: USize) => U32 :: __usize_leading_zeros value
+
+    /// Returns the number of trailing zero bits.
+    pub def trailing_zeros = (value: USize) => U32 :: __usize_trailing_zeros value
+
+    /// Returns the number of leading one bits.
+    pub def leading_ones = (value: USize) => U32 :: leading_zeros (BitNot.bit_not value)
+
+    /// Returns the number of trailing one bits.
+    pub def trailing_ones = (value: USize) => U32 :: trailing_zeros (BitNot.bit_not value)
+
+    /// Rotates the bits left by `count`, reducing the count modulo the width.
+    pub def rotate_left = (value: USize; count: U32) => USize :: __usize_rotate_left (value, count)
+
+    /// Rotates the bits right by `count`, reducing the count modulo the width.
+    pub def rotate_right = (value: USize; count: U32) => USize :: __usize_rotate_right (value, count)
+
+    /// Reverses the byte order.
+    pub def swap_bytes = (value: USize) => USize :: __usize_swap_bytes value
+
+    /// Reverses the bit order.
+    pub def reverse_bits = (value: USize) => USize :: __usize_reverse_bits value
+
+    /// Returns whether `value` is a power of two.
+    pub def is_power_of_two = (value: USize) => Bool :: value != 0 && (BitAnd.bit_and (value; value - 1)) == 0
+
+    /// Returns the smallest power of two greater than or equal to `value`,
+    /// wrapping to zero past the top.
+    pub def next_power_of_two = (value: USize) => USize :: {
+        if (value <= 1) {
+            1
+        } else {
+            let mut result: USize = 1
+            while (result < value && result != 0) {
+                result = ShiftLeft.shift_left (result; 1)
+            }
+            result
+        }
+    }
+
+    /// Returns the smallest power of two greater than or equal to `value`, or
+    /// `None` when it does not fit.
+    pub def checked_next_power_of_two = (value: USize) => Option<USize> :: {
+        let result = next_power_of_two value
+        if (result == 0) { None } else { Some result }
+    }
+
+    /// Adds a signed value, or returns `None` when the result is out of range.
+    pub def checked_add_signed = (left: USize; right: ISize) => Option<USize> :: {
+        if (right >= 0) {
+            let amount: USize = match (TryConvert.try_convert.<ISize, USize> right) {
+                Ok value => value,
+                _ => 0,
+            }
+            checked_add left amount
+        } else {
+            let negated = 0 - right
+            let amount: USize = if (negated < 0) {
+                (max_value () / 2) + 1
+            } else {
+                match (TryConvert.try_convert.<ISize, USize> negated) {
+                    Ok value => value,
+                    _ => 0,
+                }
+            }
+            checked_subtract left amount
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // F32 math
 // ---------------------------------------------------------------------------
 

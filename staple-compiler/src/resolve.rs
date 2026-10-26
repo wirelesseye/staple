@@ -314,12 +314,122 @@ pub enum IntegerCompareOperation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntegerOverflowOperation {
+    Add,
+    Subtract,
+    Multiply,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntegerCountOperation {
+    CountOnes,
+    LeadingZeros,
+    TrailingZeros,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntegerUnaryOperation {
+    SwapBytes,
+    ReverseBits,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntegerRotateDirection {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IntegerBitwiseOperation {
     And,
     Or,
     Xor,
     ShiftLeft,
     ShiftRight,
+}
+
+/// The intrinsics an integer type's companion declares, keyed by the suffix of
+/// their `__i32_`/`__u64_` name. Both name resolution and compile-time
+/// evaluation read this one table.
+pub(crate) fn integer_companion_intrinsics(
+    integer: IntegerType,
+) -> [(&'static str, IntrinsicFunction); 10] {
+    use IntegerCountOperation as Count;
+    use IntegerOverflowOperation as Overflow;
+    use IntegerRotateDirection as Rotate;
+    use IntegerUnaryOperation as Unary;
+    [
+        (
+            "overflowing_add",
+            IntrinsicFunction::IntegerOverflowing {
+                integer,
+                operation: Overflow::Add,
+            },
+        ),
+        (
+            "overflowing_subtract",
+            IntrinsicFunction::IntegerOverflowing {
+                integer,
+                operation: Overflow::Subtract,
+            },
+        ),
+        (
+            "overflowing_multiply",
+            IntrinsicFunction::IntegerOverflowing {
+                integer,
+                operation: Overflow::Multiply,
+            },
+        ),
+        (
+            "count_ones",
+            IntrinsicFunction::IntegerCount {
+                integer,
+                operation: Count::CountOnes,
+            },
+        ),
+        (
+            "leading_zeros",
+            IntrinsicFunction::IntegerCount {
+                integer,
+                operation: Count::LeadingZeros,
+            },
+        ),
+        (
+            "trailing_zeros",
+            IntrinsicFunction::IntegerCount {
+                integer,
+                operation: Count::TrailingZeros,
+            },
+        ),
+        (
+            "swap_bytes",
+            IntrinsicFunction::IntegerUnary {
+                integer,
+                operation: Unary::SwapBytes,
+            },
+        ),
+        (
+            "reverse_bits",
+            IntrinsicFunction::IntegerUnary {
+                integer,
+                operation: Unary::ReverseBits,
+            },
+        ),
+        (
+            "rotate_left",
+            IntrinsicFunction::IntegerRotate {
+                integer,
+                direction: Rotate::Left,
+            },
+        ),
+        (
+            "rotate_right",
+            IntrinsicFunction::IntegerRotate {
+                integer,
+                direction: Rotate::Right,
+            },
+        ),
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -391,6 +501,26 @@ pub enum IntrinsicFunction {
     },
     IntegerNot {
         integer: IntegerType,
+    },
+    /// A wrapping arithmetic result paired with a `U8` overflow status.
+    IntegerOverflowing {
+        integer: IntegerType,
+        operation: IntegerOverflowOperation,
+    },
+    /// A bit count widened to `U32` for every integer width.
+    IntegerCount {
+        integer: IntegerType,
+        operation: IntegerCountOperation,
+    },
+    /// Byte or bit reversal within the integer's own width.
+    IntegerUnary {
+        integer: IntegerType,
+        operation: IntegerUnaryOperation,
+    },
+    /// A rotation whose `U32` count is reduced modulo the integer's width.
+    IntegerRotate {
+        integer: IntegerType,
+        direction: IntegerRotateDirection,
     },
     FloatBinary {
         float: FloatType,
@@ -2555,6 +2685,18 @@ impl NameResolver {
                     "std.number.types".to_owned(),
                     Some(float.name()),
                     format!("__{}_{}", float.intrinsic_name(), suffix),
+                    intrinsic,
+                ));
+            }
+        }
+        // Integer companions declare the operations that cannot be written in
+        // Staple without losing width or relying on undefined LLVM behavior.
+        for integer in IntegerType::ALL {
+            for (suffix, intrinsic) in integer_companion_intrinsics(integer) {
+                declarations.push((
+                    "std.number.types".to_owned(),
+                    Some(integer.name()),
+                    format!("__{}_{}", integer.intrinsic_name(), suffix),
                     intrinsic,
                 ));
             }

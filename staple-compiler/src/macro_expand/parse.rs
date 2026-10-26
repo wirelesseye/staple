@@ -29,6 +29,9 @@ pub(super) enum SyntaxIntrinsic {
     /// so `const` initializers fold them with the results LLVM produces at
     /// run time.
     Float(crate::IntrinsicFunction),
+    /// An integer companion intrinsic (`__i32_overflowing_add`,
+    /// `__u64_count_ones`, ...), folded at the intrinsic's own width.
+    Integer(crate::IntrinsicFunction),
 }
 
 impl SyntaxIntrinsic {
@@ -65,6 +68,18 @@ impl SyntaxIntrinsic {
             .into_iter()
             .find(|(candidate, _)| *candidate == suffix)
             .map(|(_, intrinsic)| Self::Float(intrinsic))
+    }
+
+    /// The integer intrinsic a name in an integer companion declares.
+    pub(super) fn from_integer_name(name: &str) -> Option<Self> {
+        let (integer, suffix) = crate::IntegerType::ALL.into_iter().find_map(|integer| {
+            name.strip_prefix(&format!("__{}_", integer.intrinsic_name()))
+                .map(|suffix| (integer, suffix))
+        })?;
+        crate::integer_companion_intrinsics(integer)
+            .into_iter()
+            .find(|(candidate, _)| *candidate == suffix)
+            .map(|(_, intrinsic)| Self::Integer(intrinsic))
     }
 
     /// Whether the intrinsic's parameter is `mut`: it advances its argument in
@@ -632,6 +647,13 @@ impl MacroExpander {
                 .any(|module| *module == Some(helper.module))
         {
             SyntaxIntrinsic::from_float_name(&helper.binding.name)
+        } else if helper.binding.kind == BindingKind::Extern
+            && self
+                .integer_companion_modules
+                .iter()
+                .any(|module| *module == Some(helper.module))
+        {
+            SyntaxIntrinsic::from_integer_name(&helper.binding.name)
         } else {
             None
         }
@@ -823,6 +845,9 @@ impl MacroExpander {
             }
             SyntaxIntrinsic::Float(intrinsic) => {
                 self.eval_float_intrinsic(intrinsic, argument, span)
+            }
+            SyntaxIntrinsic::Integer(intrinsic) => {
+                self.eval_integer_intrinsic(intrinsic, argument, span)
             }
             SyntaxIntrinsic::ErrorAt => {
                 let Value::Product(mut elements, _) = argument else {
@@ -2011,6 +2036,233 @@ impl MacroExpander {
             _ => unreachable!("handled above"),
         };
         Some(Value::Float(value, Some(float)))
+    }
+
+    /// Folds an integer companion intrinsic at the width the intrinsic names,
+    /// even though compile-time integers otherwise have no width.
+    fn eval_integer_intrinsic(
+        &mut self,
+        intrinsic: crate::IntrinsicFunction,
+        argument: Value,
+        span: Span,
+    ) -> Option<Value> {
+        use crate::IntrinsicFunction as Intrinsic;
+        let (integer, arity) = match intrinsic {
+            Intrinsic::IntegerOverflowing { integer, .. } => (integer, 2),
+            Intrinsic::IntegerCount { integer, .. } => (integer, 1),
+            Intrinsic::IntegerUnary { integer, .. } => (integer, 1),
+            Intrinsic::IntegerRotate { integer, .. } => (integer, 2),
+            _ => unreachable!("integer companions declare only integer intrinsics"),
+        };
+        let Some(width) = integer.fixed_width() else {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                "cannot fold a pointer-width integer operation",
+            ));
+            return None;
+        };
+        // A multi-slot parameter receives its operands as one product.
+        let operands = match argument {
+            Value::Product(fields, _) if arity > 1 => {
+                fields.into_iter().map(|(_, value)| value).collect()
+            }
+            argument => vec![argument],
+        };
+        if operands.len() != arity {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!("integer intrinsic expects {arity} operands"),
+            ));
+            return None;
+        }
+        let mut values = Vec::with_capacity(arity);
+        for operand in operands {
+            let Value::Integer(value) = operand else {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    "integer intrinsic operands must be integers",
+                ));
+                return None;
+            };
+            values.push(value);
+        }
+        match intrinsic {
+            Intrinsic::IntegerOverflowing { operation, .. } => {
+                let (value, overflow) =
+                    fold_integer_overflow(integer, width, operation, values[0], values[1]);
+                Some(Value::Product(
+                    vec![
+                        (None, Value::Integer(i128::from(u8::from(overflow)))),
+                        (None, Value::Integer(value)),
+                    ]
+                    .into(),
+                    false,
+                ))
+            }
+            Intrinsic::IntegerCount { operation, .. } => {
+                let value = fold_integer_count(integer, width, operation, values[0]);
+                Some(Value::Integer(i128::from(value)))
+            }
+            Intrinsic::IntegerUnary { operation, .. } => {
+                let value = fold_integer_unary(integer, width, operation, values[0]);
+                Some(Value::Integer(value))
+            }
+            Intrinsic::IntegerRotate { direction, .. } => {
+                let value = fold_integer_rotate(integer, width, direction, values[0], values[1]);
+                Some(Value::Integer(value))
+            }
+            _ => unreachable!("handled above"),
+        }
+    }
+}
+
+fn fold_integer_overflow(
+    integer: crate::IntegerType,
+    width: u32,
+    operation: crate::IntegerOverflowOperation,
+    left: i128,
+    right: i128,
+) -> (i128, bool) {
+    use crate::IntegerOverflowOperation;
+    let left = truncate_integer(integer, width, left);
+    let right = truncate_integer(integer, width, right);
+    macro_rules! run {
+        ($ty:ty) => {{
+            let left = left as $ty;
+            let right = right as $ty;
+            let (value, overflow) = match operation {
+                IntegerOverflowOperation::Add => left.overflowing_add(right),
+                IntegerOverflowOperation::Subtract => left.overflowing_sub(right),
+                IntegerOverflowOperation::Multiply => left.overflowing_mul(right),
+            };
+            (i128::from(value), overflow)
+        }};
+    }
+    match integer {
+        crate::IntegerType::I8 => run!(i8),
+        crate::IntegerType::I16 => run!(i16),
+        crate::IntegerType::I32 => run!(i32),
+        crate::IntegerType::I64 => run!(i64),
+        crate::IntegerType::U8 => run!(u8),
+        crate::IntegerType::U16 => run!(u16),
+        crate::IntegerType::U32 => run!(u32),
+        crate::IntegerType::U64 => run!(u64),
+        crate::IntegerType::ISize | crate::IntegerType::USize => {
+            unreachable!("pointer-width integers do not fold")
+        }
+    }
+}
+
+fn fold_integer_count(
+    integer: crate::IntegerType,
+    width: u32,
+    operation: crate::IntegerCountOperation,
+    value: i128,
+) -> u32 {
+    use crate::IntegerCountOperation;
+    let value = truncate_integer(integer, width, value);
+    macro_rules! run {
+        ($ty:ty) => {{
+            let value = value as $ty;
+            match operation {
+                IntegerCountOperation::CountOnes => value.count_ones(),
+                IntegerCountOperation::LeadingZeros => value.leading_zeros(),
+                IntegerCountOperation::TrailingZeros => value.trailing_zeros(),
+            }
+        }};
+    }
+    match integer {
+        crate::IntegerType::I8 => run!(i8),
+        crate::IntegerType::I16 => run!(i16),
+        crate::IntegerType::I32 => run!(i32),
+        crate::IntegerType::I64 => run!(i64),
+        crate::IntegerType::U8 => run!(u8),
+        crate::IntegerType::U16 => run!(u16),
+        crate::IntegerType::U32 => run!(u32),
+        crate::IntegerType::U64 => run!(u64),
+        crate::IntegerType::ISize | crate::IntegerType::USize => {
+            unreachable!("pointer-width integers do not fold")
+        }
+    }
+}
+
+fn fold_integer_unary(
+    integer: crate::IntegerType,
+    width: u32,
+    operation: crate::IntegerUnaryOperation,
+    value: i128,
+) -> i128 {
+    use crate::IntegerUnaryOperation;
+    let value = truncate_integer(integer, width, value);
+    macro_rules! run {
+        ($ty:ty) => {{
+            let value = value as $ty;
+            i128::from(match operation {
+                IntegerUnaryOperation::SwapBytes => value.swap_bytes(),
+                IntegerUnaryOperation::ReverseBits => value.reverse_bits(),
+            })
+        }};
+    }
+    match integer {
+        crate::IntegerType::I8 => run!(i8),
+        crate::IntegerType::I16 => run!(i16),
+        crate::IntegerType::I32 => run!(i32),
+        crate::IntegerType::I64 => run!(i64),
+        crate::IntegerType::U8 => run!(u8),
+        crate::IntegerType::U16 => run!(u16),
+        crate::IntegerType::U32 => run!(u32),
+        crate::IntegerType::U64 => run!(u64),
+        crate::IntegerType::ISize | crate::IntegerType::USize => {
+            unreachable!("pointer-width integers do not fold")
+        }
+    }
+}
+
+fn fold_integer_rotate(
+    integer: crate::IntegerType,
+    width: u32,
+    direction: crate::IntegerRotateDirection,
+    value: i128,
+    count: i128,
+) -> i128 {
+    use crate::IntegerRotateDirection;
+    let value = truncate_integer(integer, width, value);
+    let count = count as u32;
+    macro_rules! run {
+        ($ty:ty) => {{
+            let value = value as $ty;
+            i128::from(match direction {
+                IntegerRotateDirection::Left => value.rotate_left(count),
+                IntegerRotateDirection::Right => value.rotate_right(count),
+            })
+        }};
+    }
+    match integer {
+        crate::IntegerType::I8 => run!(i8),
+        crate::IntegerType::I16 => run!(i16),
+        crate::IntegerType::I32 => run!(i32),
+        crate::IntegerType::I64 => run!(i64),
+        crate::IntegerType::U8 => run!(u8),
+        crate::IntegerType::U16 => run!(u16),
+        crate::IntegerType::U32 => run!(u32),
+        crate::IntegerType::U64 => run!(u64),
+        crate::IntegerType::ISize | crate::IntegerType::USize => {
+            unreachable!("pointer-width integers do not fold")
+        }
+    }
+}
+
+fn truncate_integer(integer: crate::IntegerType, width: u32, value: i128) -> i128 {
+    match (integer.is_signed(), width) {
+        (true, 8) => i128::from(value as i8),
+        (true, 16) => i128::from(value as i16),
+        (true, 32) => i128::from(value as i32),
+        (true, 64) => i128::from(value as i64),
+        (false, 8) => i128::from(value as u8),
+        (false, 16) => i128::from(value as u16),
+        (false, 32) => i128::from(value as u32),
+        (false, 64) => i128::from(value as u64),
+        _ => value,
     }
 }
 

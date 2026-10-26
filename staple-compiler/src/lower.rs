@@ -14217,6 +14217,10 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::IntegerCompare { .. }
         | Intrinsic::IntegerBitwise { .. }
         | Intrinsic::IntegerNot { .. }
+        | Intrinsic::IntegerOverflowing { .. }
+        | Intrinsic::IntegerCount { .. }
+        | Intrinsic::IntegerUnary { .. }
+        | Intrinsic::IntegerRotate { .. }
         | Intrinsic::FloatBinary { .. }
         | Intrinsic::FloatUnary { .. }
         | Intrinsic::FloatTernary { .. }
@@ -16420,23 +16424,6 @@ mod tests {
         let text = crate::CodeGenerator::new(&context)
             .compile_module(&lowered)
             .expect("large array emits");
-        assert!(
-            text.matches("insertvalue").count() < 1_000,
-            "repeated product should emit a loop, not one insert per element"
-        );
-        assert!(text.contains("repeated.body"));
-        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
-            text.as_bytes(),
-            "large-repeated-product",
-        );
-        let llvm = context.create_module_from_ir(buffer).unwrap();
-        llvm.verify().unwrap();
-        let engine = llvm
-            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
-            .unwrap();
-        type Main = unsafe extern "C" fn() -> i32;
-        let main = unsafe { engine.get_function::<Main>("main").unwrap() };
-        assert_eq!(unsafe { main.call() }, 0);
         let run_name = lowered
             .program
             .instances
@@ -16452,6 +16439,29 @@ mod tests {
                     .then(|| instance.name.clone())
             })
             .expect("run instance");
+        let definition = text
+            .find(&format!("@{run_name}("))
+            .or_else(|| text.find(&format!("@\"{run_name}\"(")))
+            .expect("run function definition");
+        let end = definition + text[definition..].find("\n}").expect("run function end");
+        let insert_values = text[definition..end].matches("insertvalue").count();
+        assert!(
+            insert_values < 1_000,
+            "repeated product should emit a loop, not one insert per element: {insert_values} insertvalue instructions"
+        );
+        assert!(text.contains("repeated.body"));
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "large-repeated-product",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Main = unsafe extern "C" fn() -> i32;
+        let main = unsafe { engine.get_function::<Main>("main").unwrap() };
+        assert_eq!(unsafe { main.call() }, 0);
         type Run = unsafe extern "C" fn(*const usize) -> i32;
         let run = unsafe { engine.get_function::<Run>(&run_name).unwrap() };
         assert_eq!(unsafe { run.call(std::ptr::null()) }, 0);

@@ -7607,6 +7607,86 @@ impl TypeChecker {
                         result: Box::new(integer),
                     })
                 }
+                crate::IntrinsicFunction::IntegerOverflowing { integer, .. } => {
+                    let integer = CheckedType::integer(*integer);
+                    let pair = |first, second| {
+                        CheckedType::Product(CheckedProductType::from_elements(
+                            false,
+                            Vec::new(),
+                            vec![
+                                CheckedTypeElement {
+                                    name: None,
+                                    value_type: first,
+                                    default: None,
+                                },
+                                CheckedTypeElement {
+                                    name: None,
+                                    value_type: second,
+                                    default: None,
+                                },
+                            ],
+                            false,
+                        ))
+                    };
+                    CheckedType::Function(CheckedFunctionType {
+                        default: None,
+                        parameter: Box::new(pair(integer.clone(), integer.clone())),
+                        mutations: Vec::new(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
+                        result: Box::new(pair(CheckedType::U8, integer)),
+                    })
+                }
+                crate::IntrinsicFunction::IntegerCount { integer, .. } => {
+                    CheckedType::Function(CheckedFunctionType {
+                        default: None,
+                        parameter: Box::new(CheckedType::integer(*integer)),
+                        mutations: Vec::new(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
+                        result: Box::new(CheckedType::U32),
+                    })
+                }
+                crate::IntrinsicFunction::IntegerUnary { integer, .. } => {
+                    let integer = CheckedType::integer(*integer);
+                    CheckedType::Function(CheckedFunctionType {
+                        default: None,
+                        parameter: Box::new(integer.clone()),
+                        mutations: Vec::new(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
+                        result: Box::new(integer),
+                    })
+                }
+                crate::IntrinsicFunction::IntegerRotate { integer, .. } => {
+                    let integer = CheckedType::integer(*integer);
+                    CheckedType::Function(CheckedFunctionType {
+                        default: None,
+                        parameter: Box::new(CheckedType::Product(
+                            CheckedProductType::from_elements(
+                                false,
+                                Vec::new(),
+                                vec![
+                                    CheckedTypeElement {
+                                        name: None,
+                                        value_type: integer.clone(),
+                                        default: None,
+                                    },
+                                    CheckedTypeElement {
+                                        name: None,
+                                        value_type: CheckedType::U32,
+                                        default: None,
+                                    },
+                                ],
+                                false,
+                            ),
+                        )),
+                        mutations: Vec::new(),
+                        moves: Vec::new(),
+                        effects: CheckedEffectSet::default(),
+                        result: Box::new(integer),
+                    })
+                }
                 crate::IntrinsicFunction::IntegerCompare { integer, .. } => {
                     let integer = CheckedType::integer(*integer);
                     let result = self

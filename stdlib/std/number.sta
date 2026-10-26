@@ -3,6 +3,7 @@ pub mod
 use package.ops.*
 use package.cmp.*
 
+use package.alloc.MemLayout
 use package.convert.checked_conversion
 use package.process.(panic)
 
@@ -531,62 +532,162 @@ impl BitAnd I8 { bit_and = (left; right) => __i8_and (left, right) }
 impl BitOr I8 { bit_or = (left; right) => __i8_or (left, right) }
 impl BitXor I8 { bit_xor = (left; right) => __i8_xor (left, right) }
 impl BitNot I8 { bit_not = value => __i8_not value }
-impl ShiftLeft I8 { shift_left = (left; right) => __i8_shift_left (left, right) }
-impl ShiftRight I8 { shift_right = (left; right) => __i8_shift_right (left, right) }
+impl ShiftLeft I8 {
+    shift_left = (left; right) => when {
+        right < 0 || right >= 8 => panic "shift count out of range",
+        else => __i8_shift_left (left, right),
+    }
+}
+impl ShiftRight I8 {
+    shift_right = (left; right) => when {
+        right < 0 || right >= 8 => panic "shift count out of range",
+        else => __i8_shift_right (left, right),
+    }
+}
 impl BitAnd I16 { bit_and = (left; right) => __i16_and (left, right) }
 impl BitOr I16 { bit_or = (left; right) => __i16_or (left, right) }
 impl BitXor I16 { bit_xor = (left; right) => __i16_xor (left, right) }
 impl BitNot I16 { bit_not = value => __i16_not value }
-impl ShiftLeft I16 { shift_left = (left; right) => __i16_shift_left (left, right) }
-impl ShiftRight I16 { shift_right = (left; right) => __i16_shift_right (left, right) }
+impl ShiftLeft I16 {
+    shift_left = (left; right) => when {
+        right < 0 || right >= 16 => panic "shift count out of range",
+        else => __i16_shift_left (left, right),
+    }
+}
+impl ShiftRight I16 {
+    shift_right = (left; right) => when {
+        right < 0 || right >= 16 => panic "shift count out of range",
+        else => __i16_shift_right (left, right),
+    }
+}
 impl BitAnd I32 { bit_and = (left; right) => __i32_and (left, right) }
 impl BitOr I32 { bit_or = (left; right) => __i32_or (left, right) }
 impl BitXor I32 { bit_xor = (left; right) => __i32_xor (left, right) }
 impl BitNot I32 { bit_not = value => __i32_not value }
-impl ShiftLeft I32 { shift_left = (left; right) => __i32_shift_left (left, right) }
-impl ShiftRight I32 { shift_right = (left; right) => __i32_shift_right (left, right) }
+impl ShiftLeft I32 {
+    shift_left = (left; right) => when {
+        right < 0 || right >= 32 => panic "shift count out of range",
+        else => __i32_shift_left (left, right),
+    }
+}
+impl ShiftRight I32 {
+    shift_right = (left; right) => when {
+        right < 0 || right >= 32 => panic "shift count out of range",
+        else => __i32_shift_right (left, right),
+    }
+}
 impl BitAnd I64 { bit_and = (left; right) => __i64_and (left, right) }
 impl BitOr I64 { bit_or = (left; right) => __i64_or (left, right) }
 impl BitXor I64 { bit_xor = (left; right) => __i64_xor (left, right) }
 impl BitNot I64 { bit_not = value => __i64_not value }
-impl ShiftLeft I64 { shift_left = (left; right) => __i64_shift_left (left, right) }
-impl ShiftRight I64 { shift_right = (left; right) => __i64_shift_right (left, right) }
+impl ShiftLeft I64 {
+    shift_left = (left; right) => when {
+        right < 0 || right >= 64 => panic "shift count out of range",
+        else => __i64_shift_left (left, right),
+    }
+}
+impl ShiftRight I64 {
+    shift_right = (left; right) => when {
+        right < 0 || right >= 64 => panic "shift count out of range",
+        else => __i64_shift_right (left, right),
+    }
+}
 impl BitAnd U8 { bit_and = (left; right) => __u8_and (left, right) }
 impl BitOr U8 { bit_or = (left; right) => __u8_or (left, right) }
 impl BitXor U8 { bit_xor = (left; right) => __u8_xor (left, right) }
 impl BitNot U8 { bit_not = value => __u8_not value }
-impl ShiftLeft U8 { shift_left = (left; right) => __u8_shift_left (left, right) }
-impl ShiftRight U8 { shift_right = (left; right) => __u8_shift_right (left, right) }
+impl ShiftLeft U8 {
+    shift_left = (left; right) => when {
+        right >= 8 => panic "shift count out of range",
+        else => __u8_shift_left (left, right),
+    }
+}
+impl ShiftRight U8 {
+    shift_right = (left; right) => when {
+        right >= 8 => panic "shift count out of range",
+        else => __u8_shift_right (left, right),
+    }
+}
 impl BitAnd U16 { bit_and = (left; right) => __u16_and (left, right) }
 impl BitOr U16 { bit_or = (left; right) => __u16_or (left, right) }
 impl BitXor U16 { bit_xor = (left; right) => __u16_xor (left, right) }
 impl BitNot U16 { bit_not = value => __u16_not value }
-impl ShiftLeft U16 { shift_left = (left; right) => __u16_shift_left (left, right) }
-impl ShiftRight U16 { shift_right = (left; right) => __u16_shift_right (left, right) }
+impl ShiftLeft U16 {
+    shift_left = (left; right) => when {
+        right >= 16 => panic "shift count out of range",
+        else => __u16_shift_left (left, right),
+    }
+}
+impl ShiftRight U16 {
+    shift_right = (left; right) => when {
+        right >= 16 => panic "shift count out of range",
+        else => __u16_shift_right (left, right),
+    }
+}
 impl BitAnd U32 { bit_and = (left; right) => __u32_and (left, right) }
 impl BitOr U32 { bit_or = (left; right) => __u32_or (left, right) }
 impl BitXor U32 { bit_xor = (left; right) => __u32_xor (left, right) }
 impl BitNot U32 { bit_not = value => __u32_not value }
-impl ShiftLeft U32 { shift_left = (left; right) => __u32_shift_left (left, right) }
-impl ShiftRight U32 { shift_right = (left; right) => __u32_shift_right (left, right) }
+impl ShiftLeft U32 {
+    shift_left = (left; right) => when {
+        right >= 32 => panic "shift count out of range",
+        else => __u32_shift_left (left, right),
+    }
+}
+impl ShiftRight U32 {
+    shift_right = (left; right) => when {
+        right >= 32 => panic "shift count out of range",
+        else => __u32_shift_right (left, right),
+    }
+}
 impl BitAnd U64 { bit_and = (left; right) => __u64_and (left, right) }
 impl BitOr U64 { bit_or = (left; right) => __u64_or (left, right) }
 impl BitXor U64 { bit_xor = (left; right) => __u64_xor (left, right) }
 impl BitNot U64 { bit_not = value => __u64_not value }
-impl ShiftLeft U64 { shift_left = (left; right) => __u64_shift_left (left, right) }
-impl ShiftRight U64 { shift_right = (left; right) => __u64_shift_right (left, right) }
+impl ShiftLeft U64 {
+    shift_left = (left; right) => when {
+        right >= 64 => panic "shift count out of range",
+        else => __u64_shift_left (left, right),
+    }
+}
+impl ShiftRight U64 {
+    shift_right = (left; right) => when {
+        right >= 64 => panic "shift count out of range",
+        else => __u64_shift_right (left, right),
+    }
+}
 impl BitAnd ISize { bit_and = (left; right) => __isize_and (left, right) }
 impl BitOr ISize { bit_or = (left; right) => __isize_or (left, right) }
 impl BitXor ISize { bit_xor = (left; right) => __isize_xor (left, right) }
 impl BitNot ISize { bit_not = value => __isize_not value }
-impl ShiftLeft ISize { shift_left = (left; right) => __isize_shift_left (left, right) }
-impl ShiftRight ISize { shift_right = (left; right) => __isize_shift_right (left, right) }
+impl ShiftLeft ISize {
+    shift_left = (left; right) => when {
+        right < 0 || (if (MemLayout.stride.<USize> () == 8) { right >= 64 } else { right >= 32 }) => panic "shift count out of range",
+        else => __isize_shift_left (left, right),
+    }
+}
+impl ShiftRight ISize {
+    shift_right = (left; right) => when {
+        right < 0 || (if (MemLayout.stride.<USize> () == 8) { right >= 64 } else { right >= 32 }) => panic "shift count out of range",
+        else => __isize_shift_right (left, right),
+    }
+}
 impl BitAnd USize { bit_and = (left; right) => __usize_and (left, right) }
 impl BitOr USize { bit_or = (left; right) => __usize_or (left, right) }
 impl BitXor USize { bit_xor = (left; right) => __usize_xor (left, right) }
 impl BitNot USize { bit_not = value => __usize_not value }
-impl ShiftLeft USize { shift_left = (left; right) => __usize_shift_left (left, right) }
-impl ShiftRight USize { shift_right = (left; right) => __usize_shift_right (left, right) }
+impl ShiftLeft USize {
+    shift_left = (left; right) => when {
+        (if (MemLayout.stride.<USize> () == 8) { right >= 64 } else { right >= 32 }) => panic "shift count out of range",
+        else => __usize_shift_left (left, right),
+    }
+}
+impl ShiftRight USize {
+    shift_right = (left; right) => when {
+        (if (MemLayout.stride.<USize> () == 8) { right >= 64 } else { right >= 32 }) => panic "shift count out of range",
+        else => __usize_shift_right (left, right),
+    }
+}
 
 impl Eq I8 {
     eq = (left; right) => __i8_equal (left, right)

@@ -3122,6 +3122,13 @@ mod tests {
             .iter()
             .find(|(_, instance)| {
                 !instance.relevant.is_empty()
+                    && !matches!(
+                        &instance.origin.span,
+                        Span::User {
+                            source: Some(source),
+                            ..
+                        } if source.contains("/stdlib/")
+                    )
                     && program
                         .functions
                         .get(instance.template)

@@ -1994,6 +1994,9 @@ struct MacroExpander {
     float_companion_modules: [Option<ModuleId>; 2],
     /// The namespaces of `F32` and `F64`, which their names reach.
     float_namespaces: [Option<ModuleId>; 2],
+    /// The companions of all ten integer types, whose width-aware intrinsics
+    /// fold at compile time.
+    integer_companion_modules: [Option<ModuleId>; 10],
     /// Every implementation of `Parse`, standard and user-written.
     parse_impls: Vec<ParseImpl>,
     trait_registry: traits::Registry,
@@ -2079,6 +2082,16 @@ impl MacroExpander {
                 .find(|block| program.module(*block).parent == Some(module) && *block != namespace)
         };
         let float_companion_modules = [float_companion("F32"), float_companion("F64")];
+        let integer_companion_modules = crate::IntegerType::ALL.map(|integer| {
+            let Some(module) = number_types else {
+                return None;
+            };
+            let namespace = program.child_named(module, integer.name())?;
+            program
+                .companion_blocks(namespace)
+                .into_iter()
+                .find(|block| program.module(*block).parent == Some(module) && *block != namespace)
+        });
         let float_namespaces = [
             number_types.and_then(|module| program.child_named(module, "F32")),
             number_types.and_then(|module| program.child_named(module, "F64")),
@@ -2922,6 +2935,7 @@ impl MacroExpander {
             syntax_module: syntax,
             float_companion_modules,
             float_namespaces,
+            integer_companion_modules,
             parse_impls: Vec::new(),
             trait_registry: traits::Registry::default(),
             call_targets: HashMap::new(),
@@ -8687,20 +8701,46 @@ impl MacroExpander {
             Value::Integer(integer) => {
                 // Literals cannot carry a leading `-`. Keep `0 - |n|` as
                 // operator syntax so desugaring binds the standard trait.
+                // Subtract one from the magnitude first, so even the smallest
+                // value of a narrow type reifies with a literal that fits.
                 let zero = Expression::Integer(staple_syntax::IntegerExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                     literal: "0".to_string(),
                 });
+                // Keep the annotation on the zero so a magnitude too large for
+                // the default literal type is still checked against the
+                // constant's own integer type.
+                let zero = match expected {
+                    Some(ty) => Expression::TypeAscription(Box::new(
+                        staple_syntax::TypeAscriptionExpression {
+                            syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                            value: Box::new(zero),
+                            ty: ty.clone(),
+                        },
+                    )),
+                    None => zero,
+                };
                 let magnitude = Expression::Integer(staple_syntax::IntegerExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                    literal: integer.unsigned_abs().to_string(),
+                    literal: (integer.unsigned_abs() - 1).to_string(),
+                });
+                let negated = Expression::Binary(staple_syntax::BinaryExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                    operator_syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                    operator: BinaryOperator::Subtract,
+                    left: Box::new(zero),
+                    right: Box::new(magnitude),
+                });
+                let one = Expression::Integer(staple_syntax::IntegerExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                    literal: "1".to_string(),
                 });
                 Some(Expression::Binary(staple_syntax::BinaryExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                     operator_syntax: Syntax::synthetic(self.fresh_id(), span),
                     operator: BinaryOperator::Subtract,
-                    left: Box::new(zero),
-                    right: Box::new(magnitude),
+                    left: Box::new(negated),
+                    right: Box::new(one),
                 }))
             }
             // A literal takes its type from context, so it spells an untyped
@@ -8809,6 +8849,25 @@ impl MacroExpander {
                     slotted,
                     syntax: Syntax::synthetic(self.fresh_id(), span),
                     elements,
+                }))
+            }
+            Value::Nominal(name, _) if name == "None" => {
+                Some(Expression::Name(staple_syntax::NameExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span),
+                    name,
+                }))
+            }
+            Value::Nominal(name, payload) if name == "Some" => {
+                let value = self.value_to_expression(*payload, span.clone(), module, None)?;
+                let callee = Expression::Name(staple_syntax::NameExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                    name,
+                });
+                Some(Expression::Call(staple_syntax::CallExpression {
+                    spread: false,
+                    syntax: Syntax::synthetic(self.fresh_id(), span),
+                    callee: Box::new(callee),
+                    argument: Box::new(value),
                 }))
             }
             other => {

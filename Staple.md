@@ -1251,6 +1251,26 @@ NaN operand; `clamp` panics at its caller when `lo > hi` or a bound is NaN. `is_
 items. Rounding returns the float type; converting to an integer is the
 separate checked conversion.
 
+The integer types have companions with the same pipe syntax. `I8`, `I16`,
+`I32`, `I64`, `U8`, `U16`, `U32`, and `U64` provide the constants `Min`,
+`Max`, and `Bits`; `ISize` and `USize` do not yet provide those three constants
+because their width is only known during code generation. Every companion
+provides `min`, `max`, `clamp`, `abs_diff`, checked, wrapping, saturating, and
+overflowing arithmetic, Euclidean division, powers and logarithms, integer
+square root, bit counts and rotations, `swap_bytes`, and `reverse_bits`.
+Signed companions add `abs`, `unsigned_abs`, negation helpers, `signum`, and
+sign tests. Unsigned companions add power-of-two helpers, `divide_ceil`, and
+`checked_add_signed`.
+
+`checked_*` returns `Option<T>`, and `overflowing_*` returns `(T, Bool)`, the
+wrapped result and whether it overflowed. Counts and exponents are `U32`, as
+is `Bits` where a companion defines it. `abs` wraps at the minimum value, just
+like prefix `-`;
+`checked_abs` returns `None` there, while `unsigned_abs` returns the exact
+magnitude in the unsigned type of the same width. `clamp`, Euclidean division,
+`ilog2`, `ilog10`, `isqrt`, and `divide_ceil` panic at their caller on invalid
+input, matching how integer `/` and `%` report a zero divisor.
+
 Pipes associate left and bind below every binary operator. Each stage groups
 its ordinary application arguments before the next pipe:
 
@@ -1775,9 +1795,11 @@ Chaining two non-associative operators at the same precedence (for example
 `1 == 2 == 3`) is a parse error; parenthesize to disambiguate. The standard
 integer implementations of `Add`, `Subtract`, `Multiply`, `Divide`,
 `Remainder`, `Eq`, and `PartialOrd` are backed by private compiler
-intrinsics. `%` is truncated remainder: its result takes the sign of the
-dividend, so `-7 % 3` is `-1` and `a == (a / b) * b + a % b` holds whenever
-both sides are defined. `Divide.divide` and `Remainder.remainder` are
+intrinsics. `+`, `-`, `*`, and prefix `-` wrap on overflow; the integer
+companions provide checked, saturating, and overflowing alternatives when
+overflow must be observed. `%` is truncated remainder: its result takes the
+sign of the dividend, so `-7 % 3` is `-1` and `a == (a / b) * b + a % b` holds
+whenever both sides are defined. `Divide.divide` and `Remainder.remainder` are
 `@track_caller` members: integer division or remainder by zero, and signed
 `MIN / -1`, [panic](#track_caller-and-location) at the operator, while
 `MIN % -1` is `0`. `..`/`..=` are not
@@ -5230,6 +5252,11 @@ Every integer type also implements the bitwise traits from `std.ops`:
 traits, their methods require explicit imports. They are homogeneous: the
 shift amount has the same type as the shifted value. Right shifts are
 arithmetic for signed integers and logical for unsigned integers.
+`ShiftLeft.shift_left` and `ShiftRight.shift_right` are `@track_caller`
+members: a count that is negative or not smaller than the width
+[panics](#track_caller-and-location) at the call. The integer companions'
+`wrapping_shift_left` and `wrapping_shift_right` take a `U32` count and reduce
+it modulo the width instead.
 
 `F32` and `F64` use IEEE-754 single and double precision. Both implement the
 arithmetic traits, `Eq`, and `PartialOrd`, but not `Ord`. A comparison involving
