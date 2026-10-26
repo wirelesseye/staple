@@ -4598,7 +4598,7 @@ impl TypeChecker {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     match structural {
-                        StructuralTraitMethod::Equality => "`Eq` is derived structurally for this product type and cannot be implemented explicitly",
+                        StructuralTraitMethod::Equality => "`Eq` is derived structurally for this product or sum type and cannot be implemented explicitly",
                         StructuralTraitMethod::Display => "`Display` is derived structurally for this product type and cannot be implemented explicitly",
                         StructuralTraitMethod::Debug => "`Debug` is derived structurally for this product or sum type and cannot be implemented explicitly",
                         _ => "indexing and iteration traits are derived structurally for this type and cannot be implemented explicitly",
@@ -24492,6 +24492,16 @@ pub(crate) fn structural_trait_arguments(
     is_debug: impl Fn(&CheckedType) -> bool,
     resolve_obligation: impl Fn(TraitId, &[CheckedType]) -> Option<Vec<CheckedType>>,
 ) -> Option<(Vec<CheckedType>, StructuralTraitMethod)> {
+    if Some(trait_id) == eq_trait
+        && let [target @ CheckedType::Sum(sum)] = arguments
+    {
+        if sum.alternatives.iter().all(|alternative| {
+            resolve_obligation(trait_id, std::slice::from_ref(alternative)).is_some()
+        }) {
+            return Some((vec![target.clone()], StructuralTraitMethod::Equality));
+        }
+        return None;
+    }
     if Some(trait_id) == display_trait || Some(trait_id) == eq_trait {
         let [target] = arguments else { return None };
         let CheckedType::Product(product) = target else {

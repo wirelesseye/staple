@@ -4738,6 +4738,14 @@ but the source-defined stdlib modifier `@derive_debug` generates an
 implementation that prefixes the type name and delegates to the representation.
 Scalar `ToString` implementations delegate to `Display`.
 
+Fixed-arity products and sums likewise have compiler-provided structural `Eq`
+implementations whenever all their elements or alternatives implement `Eq`.
+Products compare their elements in order, stopping at the first unequal pair.
+Two sum values are equal when they hold the same alternative and that
+alternative's `Eq` reports the payloads equal. `Bool` is the sum
+`True | False`, so its equality is derived this way from the singleton
+`Eq True` and `Eq False` implementations.
+
 `String` is an immutable garbage-collected UTF-8 byte sequence. The standard
 library declares it as a nominal type with the private representation
 `SharedBuffer<U8>`. At runtime it is one pointer to a managed header holding
