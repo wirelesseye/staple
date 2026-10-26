@@ -64,7 +64,7 @@ impl Registry {
                     Item::Binding(binding) if binding.companion_target.is_some() => {
                         registry.companions.push(HelperDefinition {
                             module: module.id,
-                            binding: binding.clone(),
+                            binding: Rc::new(binding.clone()),
                         });
                     }
                     _ => {}
@@ -328,7 +328,7 @@ impl MacroExpander {
                 .cloned(),
             None => self.lookup_helper(module, &named.name),
         }?;
-        Some(TraitKey(helper.module, helper.binding.name))
+        Some(TraitKey(helper.module, helper.binding.name.clone()))
     }
 
     pub(super) fn trait_member(
@@ -370,7 +370,7 @@ impl MacroExpander {
                 }
                 _ => None,
             }?;
-            let key = TraitKey(helper.module, helper.binding.name);
+            let key = TraitKey(helper.module, helper.binding.name.clone());
             return self
                 .trait_registry
                 .declarations

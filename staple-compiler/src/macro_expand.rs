@@ -274,7 +274,7 @@ struct ModuleScope {
 #[derive(Clone)]
 struct HelperDefinition {
     module: ModuleId,
-    binding: Binding,
+    binding: Rc<Binding>,
 }
 
 #[derive(Clone)]
@@ -514,7 +514,7 @@ enum Value {
         /// was written, so closures and default members keep their bindings.
         type_env: TypeEnv,
     },
-    Helper(ModuleId, Binding),
+    Helper(ModuleId, Rc<Binding>),
     /// Trait identity, member name, explicit types, and supplied curried slots.
     TraitMember(traits::TraitKey, String, Vec<Type>, Vec<Value>),
     Method(ModuleId, String),
@@ -2257,7 +2257,7 @@ impl MacroExpander {
                             declaration.name.clone(),
                             HelperDefinition {
                                 module: source_module.id,
-                                binding: Binding {
+                                binding: Rc::new(Binding {
                                     syntax: declaration.syntax.clone(),
                                     docs: Vec::new(),
                                     member_modifiers: Vec::new(),
@@ -2271,7 +2271,7 @@ impl MacroExpander {
                                     companion_generics: None,
                                     track_caller: false,
                                     value: None,
-                                },
+                                }),
                             },
                         );
                     }
@@ -2291,7 +2291,7 @@ impl MacroExpander {
                                     binding.name.clone(),
                                     HelperDefinition {
                                         module: source_module.id,
-                                        binding,
+                                        binding: Rc::new(binding),
                                     },
                                 );
                             }
@@ -2303,7 +2303,7 @@ impl MacroExpander {
                                 binding.name.clone(),
                                 HelperDefinition {
                                     module: source_module.id,
-                                    binding: binding.clone(),
+                                    binding: Rc::new(binding.clone()),
                                 },
                             );
                         }
@@ -2323,7 +2323,7 @@ impl MacroExpander {
                                 binding.name.clone(),
                                 HelperDefinition {
                                     module: source_module.id,
-                                    binding: binding.clone(),
+                                    binding: Rc::new(binding.clone()),
                                 },
                             );
                         }
@@ -2958,7 +2958,7 @@ impl MacroExpander {
                 .iter()
                 .flat_map(|scope| scope.helpers.values())
                 .filter(|helper| binding_is_compile_time_helper(&helper.binding))
-                .map(|helper| (helper.module, helper.binding.clone()))
+                .map(|helper| (helper.module, (*helper.binding).clone()))
                 .collect(),
             binding_types: self.compile_binding_types.clone(),
             compile_time_items: self
@@ -5577,7 +5577,13 @@ impl MacroExpander {
     }
 
     fn expand_block(&mut self, module: ModuleId, block: &mut BlockExpression, depth: usize) {
-        let outer = self.scopes[module.0].clone();
+        // Only the block's own submodules and imports change the scope, and
+        // nested blocks restore theirs, so most blocks need no snapshot.
+        let outer = block
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::Submodule(_) | Item::UseDeclaration(_)))
+            .then(|| self.scopes[module.0].clone());
         for item in &block.items {
             match item {
                 Item::Submodule(submodule) => {
@@ -5598,7 +5604,9 @@ impl MacroExpander {
             expanded.extend(self.expand_block_item(module, item, depth));
         }
         block.items = expanded;
-        self.scopes[module.0] = outer;
+        if let Some(outer) = outer {
+            self.scopes[module.0] = outer;
+        }
     }
 
     fn expand_block_item(&mut self, module: ModuleId, item: Item, depth: usize) -> Vec<Item> {
@@ -8234,8 +8242,8 @@ impl MacroExpander {
             .binding
             .annotation_body()
             .and_then(|annotation| self.named_float_type(helper.module, annotation));
-        let value = helper.binding.value?;
-        let value = self.eval_helper_value(helper.module, &value, span.clone())?;
+        let value = helper.binding.value.as_ref()?;
+        let value = self.eval_helper_value(helper.module, value, span.clone())?;
         self.assign_float_type(value, float, span)
     }
 
@@ -8577,11 +8585,11 @@ impl MacroExpander {
                 let expected = binding_signature(&binding)
                     .as_ref()
                     .and_then(function_result_meta_type);
-                let value = binding.value?;
+                let value = binding.value.as_ref()?;
                 let previous_context = expected
                     .map(|expected| self.quote_context.replace(expected))
                     .unwrap_or_else(|| self.quote_context.take());
-                let function = self.eval_helper_value(module, &value, span.clone());
+                let function = self.eval_helper_value(module, value, span.clone());
                 self.quote_context = previous_context;
                 // Unwrapping a helper into the function it names and then
                 // applying that function is one logical call, not two — go

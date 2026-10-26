@@ -14,6 +14,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 
 use crate::{
     BuiltinType, DefinitionId, FloatType, FunctionId, IntegerType, ModuleId, ResolvedFunction,
@@ -2433,6 +2434,8 @@ pub struct TypedModule {
     function_state_accesses: HashMap<FunctionId, StateAccesses>,
     resource_types: HashMap<SyntaxId, CheckedResource>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
+    /// Every function's `Copy` bounds in one list, for `is_copy_in_function`.
+    copy_bounds: Vec<CheckedTraitBound>,
     /// Direct declared bounds, without prerequisite expansion.
     function_declared_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
@@ -2623,6 +2626,13 @@ impl TypedModule {
                     bounds.into_iter().map(strip_trait_bound_aliases).collect(),
                 )
             })
+            .collect();
+        self.copy_bounds = self
+            .function_bounds
+            .values()
+            .flatten()
+            .filter(|bound| Some(bound.trait_id) == self.copy_trait)
+            .cloned()
             .collect();
         self.function_declared_bounds = std::mem::take(&mut self.function_declared_bounds)
             .into_iter()
@@ -3292,11 +3302,6 @@ impl TypedModule {
         // parameters, but store only their own syntactic bounds. Parameter IDs
         // are globally unique, so including all active function bounds also
         // makes the enclosing `Copy T` obligation visible in the closure.
-        let bounds = self
-            .function_bounds
-            .values()
-            .flat_map(|bounds| bounds.iter().cloned())
-            .collect::<Vec<_>>();
         let _ = function;
         let resolved = self.resolve_recursive_payload(value_type);
         let value_type = resolved.as_ref().unwrap_or(value_type);
@@ -3305,7 +3310,7 @@ impl TypedModule {
             self.copy_trait,
             self.drop_trait,
             &self.trait_implementations,
-            &bounds,
+            &self.copy_bounds,
             &|bound| self.drop_bound_holds(bound),
         )
     }
@@ -3675,7 +3680,7 @@ impl TypedModule {
             trait_functional_dependencies: self.trait_functional_dependencies.clone(),
             trait_prerequisites: self.trait_prerequisites.clone(),
             equality_substitutions: self.equality_substitutions.clone(),
-            trait_implementations: self.trait_implementations.clone(),
+            trait_implementations: Arc::new(self.trait_implementations.clone()),
             copy_trait: self.copy_trait,
             debug_trait: self.debug_trait,
             sized_trait: self.resolved.standard_trait("Sized"),
@@ -4126,6 +4131,9 @@ struct DeferredSchemeContract {
     subtype_bounds: Vec<Vec<CheckedSubtypeBound>>,
 }
 
+// Ambiguous calls and pipe stages check each candidate on a clone of the whole
+// checker. Large tables that checking bodies rarely writes are behind `Arc`, so
+// those clones share them and `Arc::make_mut` copies one only when it changes.
 #[derive(Default, Clone)]
 pub struct TypeChecker {
     pipe_targets: HashMap<SyntaxId, PipeTarget>,
@@ -4172,10 +4180,11 @@ pub struct TypeChecker {
     resource_types: HashMap<SyntaxId, CheckedResource>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     /// Direct declared bounds, without prerequisite expansion.
-    function_declared_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
+    function_declared_bounds: Arc<HashMap<FunctionId, Vec<CheckedTraitBound>>>,
     function_subtype_bounds: HashMap<FunctionId, Vec<CheckedSubtypeBound>>,
-    callable_symbol_bounds: HashMap<SymbolId, (Vec<CheckedTraitBound>, Vec<CheckedSubtypeBound>)>,
-    declared_scheme_symbols: HashSet<SymbolId>,
+    callable_symbol_bounds:
+        Arc<HashMap<SymbolId, (Vec<CheckedTraitBound>, Vec<CheckedSubtypeBound>)>>,
+    declared_scheme_symbols: Arc<HashSet<SymbolId>>,
     explicit_application_schemes: HashMap<SyntaxId, CheckedScheme>,
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
     trait_member_schemes: HashMap<TraitMethodId, CheckedScheme>,
@@ -4184,8 +4193,8 @@ pub struct TypeChecker {
     trait_prerequisites: HashMap<TraitId, Vec<CheckedTraitBound>>,
     default_function_traits: HashMap<FunctionId, TraitId>,
     trait_dispatches: HashMap<SyntaxId, CheckedTraitDispatch>,
-    trait_implementations: Vec<CheckedTraitImplementation>,
-    impl_function_types: HashMap<FunctionId, CheckedFunctionType>,
+    trait_implementations: Arc<Vec<CheckedTraitImplementation>>,
+    impl_function_types: Arc<HashMap<FunctionId, CheckedFunctionType>>,
     expression_coercions: HashMap<SyntaxId, CheckedCoercion>,
     propagations: HashMap<SyntaxId, CheckedPropagation>,
     matches: HashMap<SyntaxId, CheckedMatch>,
@@ -4226,12 +4235,12 @@ pub struct TypeChecker {
     /// query already on this stack is treated as unsatisfied (fail closed)
     /// rather than accepted coinductively.
     checking_trait_obligations: RefCell<Vec<(TraitId, Vec<CheckedType>)>>,
-    function_symbols: HashMap<SymbolId, FunctionId>,
+    function_symbols: Arc<HashMap<SymbolId, FunctionId>>,
     /// The inverse of `function_symbols`, for scheme lookups by function.
-    symbols_by_function: HashMap<FunctionId, SymbolId>,
+    symbols_by_function: Arc<HashMap<FunctionId, SymbolId>>,
     /// Trait names recorded in schemes so they display without module context.
     trait_names: HashMap<TraitId, String>,
-    top_level_bindings: HashMap<SymbolId, Binding>,
+    top_level_bindings: Arc<HashMap<SymbolId, Binding>>,
     checking_bindings: HashSet<SymbolId>,
     checked_bindings: HashSet<SymbolId>,
     checking_functions: HashSet<FunctionId>,
@@ -4241,7 +4250,7 @@ pub struct TypeChecker {
     /// Each declaration's `with {…}` entries, resolved on first use with its
     /// type parameters free. Effect-set closing substitutes the actual
     /// arguments.
-    resource_dependency_templates: HashMap<TypeId, Vec<CheckedResourceDependency>>,
+    resource_dependency_templates: Arc<HashMap<TypeId, Vec<CheckedResourceDependency>>>,
     /// Declarations whose `with {…}` entries are being resolved. Resolving an
     /// entry can resolve a representation that closes an effect set naming
     /// one of these, before its templates exist.
@@ -4310,12 +4319,12 @@ pub struct TypeChecker {
     /// as `CheckedMutation::Element` and the source `MutationTargetKind`:
     /// element-wise for a product pattern, otherwise a single "whole
     /// parameter" entry at index 0.
-    parameter_symbols: HashMap<FunctionId, Vec<Option<SymbolId>>>,
+    parameter_symbols: Arc<HashMap<FunctionId, Vec<Option<SymbolId>>>>,
     /// The same explicit set retained for code generation and capture layout.
     mutated_parameter_symbols: HashSet<SymbolId>,
     /// Parameter symbols explicitly marked `move`: they own their value
     /// (may move/drop it) rather than implicitly borrowing it.
-    move_parameter_symbols: HashSet<SymbolId>,
+    move_parameter_symbols: Arc<HashSet<SymbolId>>,
     synthesized_thunks: HashMap<SyntaxId, ResolvedFunction>,
     implicit_function_parents: HashMap<FunctionId, Option<FunctionId>>,
     /// `coro` body thunks checked against an expected `Coroutine{E}<T>`: the
@@ -4600,13 +4609,14 @@ impl TypeChecker {
             function_state_accesses: self.function_state_accesses,
             resource_types: self.resource_types,
             function_bounds: self.function_bounds,
-            function_declared_bounds: self.function_declared_bounds,
+            copy_bounds: Vec::new(),
+            function_declared_bounds: Arc::unwrap_or_clone(self.function_declared_bounds),
             trait_method_types: self.trait_method_types,
             trait_member_schemes: self.trait_member_schemes,
             trait_parameter_arguments: self.trait_parameter_arguments,
             trait_functional_dependencies: self.trait_functional_dependencies,
             trait_dispatches: self.trait_dispatches,
-            trait_implementations: self.trait_implementations,
+            trait_implementations: Arc::unwrap_or_clone(self.trait_implementations),
             expression_coercions: self.expression_coercions,
             propagations: self.propagations,
             matches: self.matches,
@@ -4639,11 +4649,11 @@ impl TypeChecker {
             completion_token_type: self.completion_token_type,
             entry_reactive_required: self.entry_reactive_required,
             mutated_parameter_symbols: self.mutated_parameter_symbols,
-            move_parameter_symbols: self.move_parameter_symbols,
+            move_parameter_symbols: Arc::unwrap_or_clone(self.move_parameter_symbols),
             method_symbols: self.method_symbols,
             symbol_companion_types: self.symbol_companion_types,
             function_result_companion_types: self.function_result_companion_types,
-            function_symbols: self.function_symbols,
+            function_symbols: Arc::unwrap_or_clone(self.function_symbols),
             synthesized_thunks: self.synthesized_thunks,
             implicit_function_parents: self.implicit_function_parents,
             derived_symbols: self.derived_symbols,
@@ -4726,8 +4736,7 @@ impl TypeChecker {
         self.resolving_resource_dependencies.insert(id);
         let templates = self.resolve_resource_dependency_templates(module, id);
         self.resolving_resource_dependencies.remove(&id);
-        self.resource_dependency_templates
-            .insert(id, templates.clone());
+        Arc::make_mut(&mut self.resource_dependency_templates).insert(id, templates.clone());
         self.resource_dependency_window.push(id);
         let Some(cached_named_types) = cached_named_types else {
             return templates;
@@ -4740,7 +4749,7 @@ impl TypeChecker {
             .retain(|id, _| cached_named_types.contains(id));
         for id in window {
             let templates = self.resolve_resource_dependency_templates(module, id);
-            self.resource_dependency_templates.insert(id, templates);
+            Arc::make_mut(&mut self.resource_dependency_templates).insert(id, templates);
         }
         self.resource_dependency_templates[&id].clone()
     }
@@ -5354,7 +5363,7 @@ impl TypeChecker {
                 if let Some(function) = resolved_trait.default_methods.get(method).copied()
                     && let CheckedType::Function(function_type) = value_type.clone()
                 {
-                    self.impl_function_types.insert(function, function_type);
+                    Arc::make_mut(&mut self.impl_function_types).insert(function, function_type);
                     self.function_schemes.insert(function, scheme);
                     self.default_function_traits
                         .insert(function, resolved_trait.id);
@@ -5690,7 +5699,7 @@ impl TypeChecker {
                 let expected =
                     substitute_type(self.trait_method_types[method].clone(), &substitutions);
                 if let CheckedType::Function(function_type) = expected {
-                    self.impl_function_types
+                    Arc::make_mut(&mut self.impl_function_types)
                         .insert(function_id, function_type.clone());
                     if let Type::Forall(_) = &member.annotation {
                         let mut scheme = self.trait_member_schemes[method].clone();
@@ -5716,7 +5725,7 @@ impl TypeChecker {
                             bound.supertype =
                                 substitute_type(bound.supertype.clone(), &member_substitutions);
                         }
-                        self.function_declared_bounds
+                        Arc::make_mut(&mut self.function_declared_bounds)
                             .insert(function_id, scheme.trait_bounds.clone());
                         self.function_bounds.insert(
                             function_id,
@@ -5729,7 +5738,7 @@ impl TypeChecker {
                 }
             }
             canonical_headers.push(canonical_arguments);
-            self.trait_implementations.push(CheckedTraitImplementation {
+            Arc::make_mut(&mut self.trait_implementations).push(CheckedTraitImplementation {
                 span,
                 trait_id: implementation.trait_id,
                 parameters: declared_parameters,
@@ -5773,7 +5782,7 @@ impl TypeChecker {
             }
         }
         let mut index = 0;
-        self.trait_implementations.retain(|_| {
+        Arc::make_mut(&mut self.trait_implementations).retain(|_| {
             let keep = !rejected.contains(&index);
             index += 1;
             keep
@@ -6367,7 +6376,7 @@ impl TypeChecker {
 
     fn validate_trait_implementation_prerequisites(&mut self, module: &ResolvedModule) {
         let mut diagnostics = Vec::new();
-        for implementation in &self.trait_implementations {
+        for implementation in self.trait_implementations.iter() {
             let bounds = self.expand_trait_bounds(vec![CheckedTraitBound {
                 trait_id: implementation.trait_id,
                 arguments: implementation.arguments.clone(),
@@ -6674,13 +6683,13 @@ impl TypeChecker {
         for bounds in self.function_bounds.values_mut() {
             link(bounds);
         }
-        for bounds in self.function_declared_bounds.values_mut() {
+        for bounds in Arc::make_mut(&mut self.function_declared_bounds).values_mut() {
             link(bounds);
         }
         for bounds in self.active_function_bounds.iter_mut() {
             link(bounds);
         }
-        for (bounds, _) in self.callable_symbol_bounds.values_mut() {
+        for (bounds, _) in Arc::make_mut(&mut self.callable_symbol_bounds).values_mut() {
             link(bounds);
         }
         for scheme in self.function_schemes.values_mut() {
@@ -6697,7 +6706,7 @@ impl TypeChecker {
                 link(&mut scheme.trait_bounds);
             }
         }
-        for implementation in &mut self.trait_implementations {
+        for implementation in Arc::make_mut(&mut self.trait_implementations) {
             link(&mut implementation.bounds);
         }
         drop(link);
@@ -7211,7 +7220,7 @@ impl TypeChecker {
             self.symbol_types.insert(symbol, body);
             return;
         }
-        self.declared_scheme_symbols.insert(symbol);
+        Arc::make_mut(&mut self.declared_scheme_symbols).insert(symbol);
         let (trait_bounds, subtype_bounds) = self.symbol_bounds(symbol);
         let trait_bound_names = self.trait_bound_names(&trait_bounds);
         self.symbol_types.insert(
@@ -7328,7 +7337,7 @@ impl TypeChecker {
                     declaration_subtype_bounds.push(bound);
                 }
             }
-            self.callable_symbol_bounds.insert(
+            Arc::make_mut(&mut self.callable_symbol_bounds).insert(
                 *symbol,
                 (
                     declaration_bounds.clone(),
@@ -7457,7 +7466,7 @@ impl TypeChecker {
                 if let Item::Binding(binding) = item
                     && let Some(symbol) = module.symbol_for(binding.syntax.id)
                 {
-                    self.top_level_bindings.insert(symbol, binding.clone());
+                    Arc::make_mut(&mut self.top_level_bindings).insert(symbol, binding.clone());
                 }
             }
         }
@@ -7518,7 +7527,7 @@ impl TypeChecker {
                     .iter()
                     .filter_map(|bound| self.resolve_subtype_bound(module, bound))
                     .collect();
-                self.callable_symbol_bounds
+                Arc::make_mut(&mut self.callable_symbol_bounds)
                     .insert(symbol, (bounds, subtype_bounds));
             }
             if let Some(id) = source_type_id(module, annotation) {
@@ -8121,10 +8130,11 @@ impl TypeChecker {
                     let scheme = self.match_value_scheme(module, generics, &expected);
                     if let CheckedType::Function(ty) = scheme.body.as_ref() {
                         if self.impl_function_types.contains_key(&function.id) {
-                            self.impl_function_types.insert(function.id, ty.clone());
+                            Arc::make_mut(&mut self.impl_function_types)
+                                .insert(function.id, ty.clone());
                         }
                     }
-                    self.function_declared_bounds
+                    Arc::make_mut(&mut self.function_declared_bounds)
                         .insert(function.id, scheme.trait_bounds.clone());
                     self.function_bounds.insert(
                         function.id,
@@ -8188,7 +8198,7 @@ impl TypeChecker {
                     self.function_result_companion_types.insert(function.id, id);
                 }
             }
-            self.parameter_symbols
+            Arc::make_mut(&mut self.parameter_symbols)
                 .insert(function.id, parameter_symbols.clone());
 
             if let Some(expected) = self.impl_function_types.get(&function.id).cloned() {
@@ -8223,7 +8233,7 @@ impl TypeChecker {
                     self.mutated_parameter_symbols.insert(symbol);
                 }
                 for symbol in mutation_parameter_symbols(&parameter_symbols, &expected.moves) {
-                    self.move_parameter_symbols.insert(symbol);
+                    Arc::make_mut(&mut self.move_parameter_symbols).insert(symbol);
                 }
                 self.function_types.insert(function.id, expected);
                 if let Some(trait_id) = self.default_function_traits.get(&function.id).copied() {
@@ -8244,7 +8254,7 @@ impl TypeChecker {
                     if !declared.contains(&owning_trait) {
                         declared.insert(0, owning_trait);
                     }
-                    self.function_declared_bounds
+                    Arc::make_mut(&mut self.function_declared_bounds)
                         .insert(function.id, declared.clone());
                     let bounds = self.expand_trait_bounds(declared);
                     self.function_bounds.insert(function.id, bounds);
@@ -8265,7 +8275,7 @@ impl TypeChecker {
                 );
                 if !bounds.is_empty() {
                     bounds.extend(
-                        self.function_declared_bounds
+                        Arc::make_mut(&mut self.function_declared_bounds)
                             .remove(&function.id)
                             .unwrap_or_default(),
                     );
@@ -8276,7 +8286,7 @@ impl TypeChecker {
                         }
                     }
                     let bounds = unique;
-                    self.function_declared_bounds
+                    Arc::make_mut(&mut self.function_declared_bounds)
                         .insert(function.id, bounds.clone());
                     let bounds = self.expand_trait_bounds(bounds);
                     self.function_bounds.insert(function.id, bounds);
@@ -8402,7 +8412,7 @@ impl TypeChecker {
                 self.mutated_parameter_symbols.insert(symbol);
             }
             for symbol in mutation_parameter_symbols(&parameter_symbols, &moves) {
-                self.move_parameter_symbols.insert(symbol);
+                Arc::make_mut(&mut self.move_parameter_symbols).insert(symbol);
             }
             let mut function_type = CheckedFunctionType {
                 default: None,
@@ -8442,8 +8452,8 @@ impl TypeChecker {
                     .iter()
                     .map(|pattern| self.checked_type_parameter_pattern(module, pattern))
                     .collect();
-                self.function_symbols.insert(symbol, function.id);
-                self.symbols_by_function.insert(function.id, symbol);
+                Arc::make_mut(&mut self.function_symbols).insert(symbol, function.id);
+                Arc::make_mut(&mut self.symbols_by_function).insert(function.id, symbol);
                 self.record_function_symbol_type(
                     symbol,
                     CheckedType::Function(function_type.clone()),
@@ -8457,8 +8467,7 @@ impl TypeChecker {
                 &function.equality_bounds,
                 true,
             );
-            self.function_declared_bounds
-                .insert(function.id, bounds.clone());
+            Arc::make_mut(&mut self.function_declared_bounds).insert(function.id, bounds.clone());
             let bounds = self.expand_trait_bounds(bounds);
             if self.bounds_violate_functional_dependencies(&bounds) {
                 self.diagnostics.push(Diagnostic::new(
@@ -10747,11 +10756,7 @@ impl TypeChecker {
                     original.clone()
                 } else {
                     let declared = self.resolve_source_type(module, &binding.ty);
-                    self.require_compatible(
-                        original.clone(),
-                        declared,
-                        binding.syntax.span.clone(),
-                    )
+                    self.require_compatible(original.clone(), declared, binding.syntax.span.clone())
                 };
                 if let Some(symbol) = module.symbol_for(binding.syntax.id) {
                     self.symbol_types.insert(symbol, value_type);
@@ -12026,7 +12031,7 @@ impl TypeChecker {
                             _ => None,
                         })
                         .unwrap_or_else(|| scheme.trait_bounds.clone());
-                    self.function_declared_bounds.insert(id, declared);
+                    Arc::make_mut(&mut self.function_declared_bounds).insert(id, declared);
                     self.function_schemes.insert(id, scheme.as_ref().clone());
                     // A contextually checked scheme fixes the lambda's effect
                     // ABI just as a written function annotation does. Its body
@@ -18978,10 +18983,9 @@ impl TypeChecker {
             ));
             return CheckedType::Error;
         }
-        let base = self.clone();
         let mut failed = None;
         let mut try_candidate = |target| {
-            let mut trial = base.clone();
+            let mut trial = self.clone();
             let actual = trial.check_pipe_candidate(module, expression, expected, target);
             if actual != CheckedType::Error && trial.diagnostics.len() == diagnostic_start {
                 Some((trial, actual))
