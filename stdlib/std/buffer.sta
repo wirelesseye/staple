@@ -2,6 +2,7 @@ pub mod
 
 use package.alloc.(Finalize, Gc, MemLayout)
 use package.clone.Clone
+use package.cmp.Eq
 use package.ptr.(RawMutPtr, RawOpaqueMutPtr)
 use package.shared_buffer.SharedBuffer
 use package.process.trap
@@ -227,6 +228,35 @@ impl<T where Clone T> Clone Buffer<T> {
             index = index + 1
         }
         copy
+    }
+}
+
+// Compares initialized elements in order, regardless of capacity.
+impl<T where Eq T> Eq Buffer<T> {
+    eq = (left; right) => {
+        let length = Buffer.length left
+        if (length == Buffer.length right) {
+            let mut index: USize = 0
+            let mut equal: Bool = True
+            while (index < length) {
+                let left_element = BufferHeader.element left.* index
+                let right_element = BufferHeader.element right.* index
+                let left_value = RawMutPtr.unsafe_read left_element
+                let right_value = RawMutPtr.unsafe_read right_element
+                let elements_equal = Eq.eq (left_value; right_value)
+                RawMutPtr.store left_element left_value
+                RawMutPtr.store right_element right_value
+                if (elements_equal) {
+                    index = index + 1
+                } else {
+                    equal = False
+                    break
+                }
+            }
+            equal
+        } else {
+            False
+        }
     }
 }
 
