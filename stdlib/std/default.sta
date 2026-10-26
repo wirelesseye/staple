@@ -175,6 +175,12 @@ def derived_singleton_default_implementation = (name: Ident<String>, target: Typ
     }
 }
 
+/// Inspects a declaration without consuming its pending modifiers.
+def derived_default_declaration = item: Item => Item :: match item {
+    ModifiedItem (_, nested) => derived_default_declaration nested,
+    _ => item,
+}
+
 /// Derives `Default` for a `wrap` or `from` type, or a bodyless singleton.
 ///
 /// Each representation field with an explicit `= ...` default uses it, and
@@ -182,6 +188,7 @@ def derived_singleton_default_implementation = (name: Ident<String>, target: Typ
 /// defaults of its own is built field by field the same way, so its defaults
 /// are kept. A generic type's implementation requires `Default` only for the
 /// field types that take `Default.default ()`.
+/// Pending modifiers are preserved, so derive modifiers can be stacked.
 ///
 /// # Example
 ///
@@ -192,7 +199,7 @@ def derived_singleton_default_implementation = (name: Ident<String>, target: Typ
 /// @derive_default
 /// type Enabled
 /// ```
-pub macro @derive_default: Item -> Sequence<Item> = item => match item {
+pub macro @derive_default: Item -> Sequence<Item> = item => match (derived_default_declaration item) {
     TypeDeclarationItem (name, target, parameters, Some (WrapperBody (_, representation)), _) => Sequence (
         first: item,
         rest: Sequence (

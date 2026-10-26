@@ -1,8 +1,10 @@
 pub mod
 
+use package.cmp.(derive_eq)
 use package.try.Try
 
 /// A successful value represented transparently by its payload.
+@derive_eq
 pub type Ok<T> from pub T
 
 /// The outcome of an operation: success as `Ok`, or an error value.

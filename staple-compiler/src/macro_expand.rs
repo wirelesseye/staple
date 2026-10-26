@@ -14160,7 +14160,7 @@ fn type_body_value(body: &staple_syntax::TypeBody) -> Value {
 }
 
 fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> Value {
-    let identifier = |name: &str| {
+    let identifier_syntax = |name: &str| {
         let mut syntax = if name == declaration.name {
             declaration.name_syntax.clone()
         } else {
@@ -14171,9 +14171,18 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
         }) {
             let start = syntax.token_range.start + index;
             syntax.token_range = start..start + 1;
+        } else {
+            // A quoted declaration can still carry template tokens such as
+            // `$variant` after its AST name has been substituted. Raw quotes
+            // must splice the actual identifier, retaining its hygiene.
+            syntax.tokens = staple_syntax::lex(name).into();
+            syntax.token_range = 0..syntax.tokens.len();
         }
+        syntax
+    };
+    let identifier = |name: &str| {
         Value::Syntax(SyntaxValue::Ident(staple_syntax::NameExpression {
-            syntax,
+            syntax: identifier_syntax(name),
             name: name.to_owned(),
         }))
     };
@@ -14184,7 +14193,7 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
         .map(identifier)
         .collect();
     let mut declared_type = Type::Named(staple_syntax::NamedType {
-        syntax: declaration.name_syntax.clone(),
+        syntax: identifier_syntax(&declaration.name),
         namespace: None,
         name: declaration.name.clone(),
     });

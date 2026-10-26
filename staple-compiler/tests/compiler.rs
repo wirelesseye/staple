@@ -6731,7 +6731,7 @@ let original = 0
 #[test]
 fn typegroup_group_modifiers_keep_source_order() {
     // The doc comment precedes `@all`, so it must be applied to the group
-    // before `@derive_debug`, which does not accept pending modifiers.
+    // before the distributed `@derive_debug` modifier.
     let module = type_check(
         r#"
 use std.fmt.*

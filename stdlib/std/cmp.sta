@@ -8,6 +8,8 @@ use package.process.(panic)
 ///
 /// The variants are not re-exported, so refer to them as `Ordering.Less`,
 /// `Ordering.Equal`, and `Ordering.Greater`.
+@derive_eq
+@variants(@derive_eq)
 pub typegroup Ordering {
     /// The left value is smaller than the right value.
     Less,
@@ -148,12 +150,19 @@ def derived_eq_implementation = (
     }
 }
 
+/// Inspects a declaration while preserving pending modifiers on the output.
+def derived_eq_declaration = item: Item => Item :: match item {
+    ModifiedItem (_, nested) => derived_eq_declaration nested,
+    _ => item,
+}
+
 /// Derives `Eq` for a `wrap` or `from` type, or a bodyless singleton.
 ///
 /// Compares the underlying representations using `Eq`. Products compare each
 /// field, including nested products. Generic implementations require `Eq` for
 /// each field type (or the representation itself for other representations).
 /// Singletons always compare equal. `ne` uses its default implementation.
+/// Pending modifiers are preserved, so derive modifiers can be stacked.
 ///
 /// # Example
 ///
@@ -165,7 +174,7 @@ def derived_eq_implementation = (
 /// type Box<T> wrap T
 /// ```
 pub macro @derive_eq: Item -> Sequence<Item> = item => {
-    let implementation = match item {
+    let implementation = match (derived_eq_declaration item) {
         TypeDeclarationItem (name, target, parameters, Some (WrapperBody (_, representation)), _) =>
             derived_eq_implementation (name, target, parameters, representation, False),
         TypeDeclarationItem (name, target, parameters, Some (FromBody (_, representation)), _) =>

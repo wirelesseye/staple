@@ -170,3 +170,141 @@ main ()
 "#);
     assert_eq!(output, "True\nTrue\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn standard_variants_and_ordering_derive_equality() {
+    let output = run(r#"
+use std.io.println
+use std.cmp.Ordering
+def show = value: Bool => println (if value { "True" } else { "False" })
+def main = () => {
+    show (Some.<I32> 1 == Some.<I32> 1)
+    show (Some.<I32> 1 != Some.<I32> 2)
+    show (None == None)
+    let present: Option<I32> = Some 1
+    let absent: Option<I32> = None
+    show (present == present)
+    show (present == absent)
+    show (Ok.<String> "ok" == Ok.<String> "ok")
+    show (Ok.<String> "ok" != Ok.<String> "other")
+    let success: Result<I32, String> = Ok 1
+    let failure: Result<I32, String> = "error"
+    show (success == success)
+    show (success == failure)
+    show (Ordering.Less == Ordering.Less)
+    show (Ordering.Equal == Ordering.Equal)
+    show (Ordering.Greater == Ordering.Greater)
+    let less: Ordering = Ordering.Less
+    let equal: Ordering = Ordering.Equal
+    let greater: Ordering = Ordering.Greater
+    show (less == less)
+    show (less != equal)
+    show (equal != greater)
+    show (True == True)
+    show (False == False)
+    let yes: Bool = True
+    let no: Bool = False
+    show (yes != no)
+}
+main ()
+"#);
+    assert_eq!(
+        output,
+        "True\nTrue\nTrue\nTrue\nFalse\nTrue\nTrue\nTrue\nFalse\nTrue\nTrue\nTrue\nTrue\nTrue\nTrue\nTrue\nTrue\nTrue\n"
+    );
+}
+
+#[test]
+fn standard_generic_variants_require_eq_payloads() {
+    for variant in ["Some", "Ok"] {
+        let messages = check_errors(&format!(
+            "type Local wrap I32\nlet left = {variant}.<Local> (Local 1)\nlet invalid = left == left\n"
+        ));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("no trait implementation")),
+            "{messages:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn derives_compose_in_every_order_and_preserve_docs() {
+    let output = run(r#"
+use std.io.println
+use std.fmt.(derive_debug, Formatter)
+@derive_eq @derive_default @derive_debug @doc("First")
+type First wrap (value: I32 = 2, flag: Bool)
+@derive_eq @derive_debug @derive_default @doc("Second")
+type Second from I32
+@derive_default @derive_eq @derive_debug @doc("Third")
+type Third
+@derive_default @derive_debug @derive_eq @doc("Fourth")
+type Fourth<T> wrap (value: T, count: I32)
+@derive_debug @derive_eq @derive_default @doc("Fifth")
+type Fifth<T> from (value: T, count: I32)
+@derive_debug @derive_default @derive_eq @doc("Sixth")
+type Sixth
+@variants(@derive_default)
+@all(@derive_eq, @derive_debug)
+typegroup Switch {
+    /// Enabled variant.
+    Enabled,
+    /// Disabled variant.
+    Disabled,
+}
+def main = () => {
+    let first: First = default ()
+    let second: Second = default ()
+    let third: Third = default ()
+    let fourth: Fourth<I32> = default ()
+    let fifth: Fifth<I32> = default ()
+    let sixth: Sixth = default ()
+    println (Formatter.debug first)
+    println (Formatter.debug second)
+    println (Formatter.debug third)
+    println (Formatter.debug fourth)
+    println (Formatter.debug fifth)
+    println (Formatter.debug sixth)
+    let same = first == first && second == second && third == third && fourth == fourth && fifth == fifth && sixth == sixth
+    println (if same { "equal" } else { "unequal" })
+    let variant: Switch.Enabled = default ()
+    println (Formatter.debug variant)
+    let enabled: Switch = Switch.Enabled
+    let disabled: Switch = Switch.Disabled
+    println (if (enabled != disabled) { "different" } else { "equal" })
+}
+main ()
+"#);
+    assert_eq!(
+        output,
+        "First (value: 2, flag: False)\nSecond 0\nThird\nFourth (value: 0, count: 0)\nFifth (value: 0, count: 0)\nSixth\nequal\nEnabled\ndifferent\n"
+    );
+
+    let module = check(
+        r#"
+use std.fmt.derive_debug
+@derive_eq @derive_default @derive_debug
+/// Preserved documentation.
+type Documented
+"#,
+    );
+    let docs = module
+        .resolved()
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| match item {
+            staple_syntax::Item::TypeDeclaration(declaration)
+                if declaration.name == "Documented" =>
+            {
+                Some(&declaration.docs)
+            }
+            _ => None,
+        })
+        .expect("derived declaration remains in the module");
+    assert_eq!(docs, &[" Preserved documentation."]);
+}

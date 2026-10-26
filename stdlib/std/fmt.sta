@@ -57,6 +57,12 @@ def derived_debug_implementation = (
     }
 }
 
+/// Inspects a declaration without consuming its pending modifiers.
+def derived_debug_declaration = item: Item => Item :: match item {
+    ModifiedItem (_, nested) => derived_debug_declaration nested,
+    _ => item,
+}
+
 /// Derives `Debug` for a bodyless singleton type, formatting it as its name.
 /// Singleton types cannot carry compile-time parameters, so the implementation
 /// is always unparameterized.
@@ -73,6 +79,7 @@ def derived_singleton_debug_implementation = (name: String, target: Type) => Ite
 ///
 /// A represented type prefixes its name and delegates formatting to its
 /// representation; a bodyless singleton type formats as its name alone.
+/// Pending modifiers are preserved, so derive modifiers can be stacked.
 ///
 /// # Example
 ///
@@ -83,7 +90,7 @@ def derived_singleton_debug_implementation = (name: String, target: Type) => Ite
 /// @derive_debug
 /// type Enabled
 /// ```
-pub macro @derive_debug: Item -> Sequence<Item> = item => match item {
+pub macro @derive_debug: Item -> Sequence<Item> = item => match (derived_debug_declaration item) {
     TypeDeclarationItem (
         name_syntax@(Ident name), target, parameters, Some (WrapperBody (_, representation)), _,
     ) => Sequence (

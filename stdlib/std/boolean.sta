@@ -1,7 +1,7 @@
 pub mod
 
 use package.ops.(Not)
-use package.cmp.(Eq)
+use package.cmp.(derive_eq)
 use package.default.Default
 use package.convert.(Convert)
 use package.string.(String, ToString)
@@ -14,10 +14,12 @@ use package.fmt.derive_debug
 
 /// The logical true value.
 @derive_debug
+@derive_eq
 pub type True
 
 /// The logical false value.
 @derive_debug
+@derive_eq
 pub type False
 
 /// A logical value that is either true or false.
@@ -26,11 +28,6 @@ pub type Bool = True | False
 impl Display Bool {
     fmt = (value, mut formatter) => formatter |> write (if value { "True" } else { "False" })
 }
-
-// `Bool` derives `Eq` structurally from its alternatives.
-impl Eq True { eq = (_; _) => True }
-
-impl Eq False { eq = (_; _) => True }
 
 impl Not Bool {
     not = value => if value { False } else { True }
