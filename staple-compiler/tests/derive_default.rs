@@ -204,6 +204,30 @@ fn derived_defaults_cover_plain_singleton_and_generic_types() {
     assert_eq!(output, "0 0 False\n[] 1\n0 False 0 True\n0 0 7\n");
 }
 
+#[cfg(unix)]
+#[test]
+fn derived_defaults_ignore_a_local_default_trait() {
+    // The generated implementation names `std.default.Default` hygienically,
+    // so a caller's own `Default` neither receives it nor fills its fields.
+    let output = run(concat!(
+        "use std.io.println\n",
+        "use std.default.(derive_default)\n",
+        "trait Default T {\n",
+        "    default: () -> T\n",
+        "}\n",
+        "impl Default I32 { default = () => 42 }\n",
+        "@derive_default\n",
+        "type Point wrap (x: I32 = 5, y: I32)\n",
+        "def main = () => {\n",
+        "    let Point (x, y) = std.default.Default.default.<Point> ()\n",
+        "    let local: I32 = Default.default ()\n",
+        "    println \"${x} ${y} ${local}\"\n",
+        "}\n",
+        "main ()\n",
+    ));
+    assert_eq!(output, "5 0 42\n");
+}
+
 #[test]
 fn derived_defaults_require_default_fields() {
     let messages = check_errors(concat!(

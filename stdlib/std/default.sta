@@ -115,11 +115,6 @@ def derived_default_header = (
     },
 }
 
-def derived_default_parse = syntax: Syntax => Item :: match (Parse.parse_all.<Item> syntax) {
-    Ok item => item,
-    ParseError (message) => panic message,
-}
-
 /// `Default` for a `wrap` type: the constructor applied to the representation's
 /// default value.
 def derived_wrapper_default_implementation = (
@@ -136,11 +131,11 @@ def derived_wrapper_default_implementation = (
         },
         _ => quote { $representation :: Default.default () },
     }
-    derived_default_parse (quote {
+    parse_quote {
         $header {
             default = () => $name ($arguments)
         }
-    })
+    }
 }
 
 /// `Default` for a `from` type: the representation's default value, converted
@@ -163,11 +158,21 @@ def derived_from_default_implementation = (
         },
         _ => quote { $representation :: Default.default () },
     }
-    derived_default_parse (quote {
+    parse_quote {
         $header {
             default = () => $value
         }
-    })
+    }
+}
+
+/// `Default` for a bodyless singleton type: the singleton itself.
+def derived_singleton_default_implementation = (name: Ident<String>, target: Type) => Item :: {
+    let value = quote { $name }
+    parse_quote {
+        impl Default $target {
+            default = () => $value
+        }
+    }
 }
 
 /// Derives `Default` for a `wrap` or `from` type, or a bodyless singleton.
@@ -205,11 +210,7 @@ pub macro @derive_default: Item -> Sequence<Item> = item => match item {
     TypeDeclarationItem (name, target, _, None, _) => Sequence (
         first: item,
         rest: Sequence (
-            first: derived_default_parse (quote {
-                impl Default $target {
-                    default = () => $name
-                }
-            }),
+            first: derived_singleton_default_implementation (name, target),
             rest: Sequence (),
         ),
     ),
