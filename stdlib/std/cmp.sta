@@ -1,6 +1,8 @@
 pub mod
 
 use package.typegroup.(typegroup)
+use package.syntax.*
+use package.process.(panic)
 
 /// The result of comparing two ordered values.
 ///
@@ -57,4 +59,120 @@ pub trait PartialOrd T {
 pub trait Ord T where Eq T, PartialOrd T {
     /// Compares two values with a total ordering.
     cmp: (T; T) -> Ordering
+}
+
+/// Joins type parameter syntax with commas.
+def derived_eq_parameters = parameters: Sequence<Ident<String>> => Syntax :: match parameters {
+    Sequence () => quote {},
+    Sequence (first, rest) => match rest {
+        Sequence () => quote { $first },
+        _ => {
+            let tail = derived_eq_parameters rest
+            quote { $first, $tail }
+        },
+    },
+}
+
+/// Joins fragments with commas.
+def derived_eq_join = fragments: Sequence<Syntax> => Syntax :: match fragments {
+    Sequence () => quote {},
+    Sequence (first, rest) => match rest {
+        Sequence () => first,
+        _ => {
+            let tail = derived_eq_join rest
+            quote { $first, $tail }
+        },
+    },
+}
+
+def derived_eq_concat = (left: Sequence<Syntax>, right: Sequence<Syntax>) => Sequence<Syntax> :: match left {
+    Sequence () => right,
+    Sequence (first, rest) => Sequence (first: first, rest: derived_eq_concat (rest, right)),
+}
+
+def derived_eq_field_bounds = fields: Sequence<ProductTypeField> => Sequence<Syntax> :: match fields {
+    Sequence () => Sequence (),
+    Sequence (first, rest) => match first {
+        ProductTypeField (_, ProductType nested, _) => derived_eq_concat (
+            derived_eq_field_bounds nested,
+            derived_eq_field_bounds rest,
+        ),
+        ProductTypeField (_, field_type, _) => Sequence (
+            first: quote { Eq $field_type },
+            rest: derived_eq_field_bounds rest,
+        ),
+    },
+}
+
+def derived_eq_bounds = ty: Type => Sequence<Syntax> :: match ty {
+    ProductType fields => derived_eq_field_bounds fields,
+    _ => Sequence (first: quote { Eq $ty }, rest: Sequence ()),
+}
+
+def derived_eq_implementation = (
+    name: Ident<String>,
+    target: Type,
+    parameters: Sequence<Ident<String>>,
+    representation: Type,
+    singleton: Bool,
+) => Item :: {
+    let header = match parameters {
+        Sequence () => quote { impl Eq $target },
+        _ => {
+            let names = derived_eq_parameters parameters
+            if singleton {
+                quote { impl<$names> Eq $name<$names> }
+            } else {
+                match (derived_eq_bounds representation) {
+                    Sequence () => quote { impl<$names> Eq $name<$names> },
+                    bounds => {
+                        let bounds = derived_eq_join bounds
+                        quote { impl<$names where $bounds> Eq $name<$names> }
+                    },
+                }
+            }
+        },
+    }
+    if singleton {
+        parse_quote {
+            $header {
+                eq = (_; _) => True
+            }
+        }
+    } else {
+        parse_quote {
+            $header {
+                eq = ($name left; $name right) => left == right
+            }
+        }
+    }
+}
+
+/// Derives `Eq` for a `wrap` or `from` type, or a bodyless singleton.
+///
+/// Compares the underlying representations using `Eq`. Products compare each
+/// field, including nested products. Generic implementations require `Eq` for
+/// each field type (or the representation itself for other representations).
+/// Singletons always compare equal. `ne` uses its default implementation.
+///
+/// # Example
+///
+/// ```staple
+/// @derive_eq
+/// type Point wrap (x: I32, y: I32)
+///
+/// @derive_eq
+/// type Box<T> wrap T
+/// ```
+pub macro @derive_eq: Item -> Sequence<Item> = item => {
+    let implementation = match item {
+        TypeDeclarationItem (name, target, parameters, Some (WrapperBody (_, representation)), _) =>
+            derived_eq_implementation (name, target, parameters, representation, False),
+        TypeDeclarationItem (name, target, parameters, Some (FromBody (_, representation)), _) =>
+            derived_eq_implementation (name, target, parameters, representation, False),
+        TypeDeclarationItem (name, target, parameters, None, _) =>
+            derived_eq_implementation (name, target, parameters, target, True),
+        _ => panic "derive_eq item is unsupported",
+    }
+    Sequence (first: item, rest: Sequence (first: implementation, rest: Sequence ()))
 }

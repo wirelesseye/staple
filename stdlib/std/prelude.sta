@@ -2,6 +2,7 @@ pub mod
 
 pub use package.char.Char
 pub use package.clone.*
+pub use package.cmp.(derive_eq)
 pub use package.convert.*
 pub use package.default.*
 pub use package.iterator.*
