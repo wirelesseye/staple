@@ -1,28 +1,24 @@
 pub mod
 
+use package.buffer.(Buffer)
 use package.char.Char
-use package.ops.(BitAnd, ShiftLeft)
-
-use package.ops.(Add)
 use package.cmp.(Eq, PartialOrd, Ord, Ordering)
-use package.string_builder.StringBuilder
-use package.range.Range
-use package.process.panic
 use package.convert.(ConversionError, TryConvert)
-use package.result.(Ok, Result)
+use package.convert.checked_conversion
+use package.default.Default
 use package.fmt.(Display, Debug, Formatter)
+use package.iterator.(Iterator, IntoIterator, FromIterator)
+use package.iterator.IterStep.(Done, Yield)
+use package.list.List
+use package.ops.(Add, BitAnd, ShiftLeft)
+use package.process.panic
+use package.range.Range
+use package.result.(Ok, Result)
+use package.shared_buffer.(SharedBuffer)
+use package.string_builder.StringBuilder
 
 /// The bytes are not valid UTF-8.
 pub type InvalidUtf8
-
-use package.convert.checked_conversion
-use package.default.Default
-
-use package.shared_buffer.(SharedBuffer)
-use package.buffer.(Buffer)
-use package.list.List
-use package.iterator.(Iterator, IntoIterator, FromIterator)
-use package.iterator.IterStep.(Done, Yield)
 
 /// A UTF-8 byte sequence used as Staple's string type.
 ///
@@ -36,6 +32,7 @@ use package.iterator.IterStep.(Done, Yield)
 /// must never be written, and their buffer must never be released or pinned.
 pub type String wrap SharedBuffer<U8>
 
+// The string's bytes, shared rather than copied.
 pub(package) def string_shared_bytes = value: String => SharedBuffer<U8> :: {
     let String bytes = value
     bytes
@@ -127,6 +124,27 @@ impl IntoIterator StringChars {
     into_iterator = move iterator => iterator
 }
 
+/// An iterator over Unicode scalar values paired with the byte offset where
+/// each one starts.
+pub type StringCharIndices wrap (string: String, index: USize)
+
+impl Iterator StringCharIndices {
+    type Item = (USize, Char)
+    next = move StringCharIndices (string, index) => {
+        if (index < String.length string) {
+            let (c, width) = decode_at (string_shared_bytes string) index
+            Yield ((index, c), StringCharIndices (string: string, index: index + width))
+        } else {
+            Done (StringCharIndices (string: string, index: index))
+        }
+    }
+}
+
+impl IntoIterator StringCharIndices {
+    type Iter = StringCharIndices
+    into_iterator = move iter => iter
+}
+
 companion String {
     /// Iterates Unicode scalar values without copying the string's bytes.
     pub def chars = value: String => StringChars :: StringChars (string: value, index: 0)
@@ -148,7 +166,8 @@ companion String {
     /// Returns an iterator over the UTF-8 bytes of a string without copying them.
     pub def bytes = value: String => StringBytes :: StringBytes (string: value, index: 0)
 
-    /// Constructs a String from bytes, returning InvalidUtf8 on validation failure.
+    /// Constructs a string from bytes, returning `InvalidUtf8` when they are not
+    /// valid UTF-8.
     pub def from_utf8 = move bytes: List<U8> => Result<String, InvalidUtf8> :: {
         let shared = List.into_buffer bytes |> Buffer.into_shared_buffer
         if (__valid_utf8 shared == 1) {
@@ -169,6 +188,32 @@ impl Add String {
 
 impl Eq String {
     eq = (String left; String right) => Eq.eq (left; right)
+}
+
+impl PartialOrd String {
+    partial_cmp = (left; right) => Some (Ord.cmp (left; right))
+}
+
+// Byte-wise order, which for UTF-8 is also the order of the scalar values.
+impl Ord String {
+    cmp = (left; right) => {
+        let mut at: USize = 0
+        let mut result: Ordering = Ordering.Equal
+        loop {
+            if (at == String.length left) {
+                result = Ord.cmp (String.length left; String.length right)
+                break
+            }
+            if (at == String.length right) {
+                result = Ordering.Greater
+                break
+            }
+            result = Ord.cmp (byte_at left at; byte_at right at)
+            if (byte_at left at != byte_at right at) { break }
+            at = at + 1
+        }
+        result
+    }
 }
 
 impl Default String { default = () => "" }
@@ -203,6 +248,7 @@ impl FromIterator String Char {
         StringBuilder.push builder c
         StringBuilder.finish builder
     }
+
     insert_all = <Iter where Iterator Iter, Iterator.Item Iter == Char> (move start; move chars) => {
         let mut builder = StringBuilder.from_string start
         let mut remaining = chars
@@ -226,6 +272,7 @@ impl FromIterator String String {
         StringBuilder.append builder right
         StringBuilder.finish builder
     }
+
     insert_all = <Iter where Iterator Iter, Iterator.Item Iter == String> (move start; move pieces) => {
         let mut builder = StringBuilder.from_string start
         let mut remaining = pieces
@@ -370,23 +417,8 @@ impl TryConvert List<U8> String {
     try_convert = move bytes => String.from_utf8 bytes
 }
 
-/// An iterator over byte offsets and Unicode scalar values.
-pub type StringCharIndices wrap (string: String, index: USize)
-impl Iterator StringCharIndices {
-    type Item = (USize, Char)
-    next = move StringCharIndices (string, index) => {
-        if (index < String.length string) {
-            let (c, width) = decode_at (string_shared_bytes string) index
-            Yield ((index, c), StringCharIndices (string: string, index: index + width))
-        } else { Done (StringCharIndices (string: string, index: index)) }
-    }
-}
-impl IntoIterator StringCharIndices {
-    type Iter = StringCharIndices
-    into_iterator = move iter => iter
-}
-
-def byte_at = (value: String; index: USize) => U8 :: SharedBuffer.get_unchecked (string_shared_bytes value) index
+def byte_at = (value: String; index: USize) => U8 ::
+    SharedBuffer.get_unchecked (string_shared_bytes value) index
 
 def matches_at = (value: String; needle: String; at: USize) => Bool :: {
     let mut index: USize = 0
@@ -430,9 +462,14 @@ def trim_end_offset = (value: String; floor: USize) => USize :: {
 }
 
 companion String {
-    /// Returns the UTF-8 byte length; use char_count to count scalars.
+    /// Returns the UTF-8 byte length; use `char_count` to count scalars.
     pub def length = String bytes => USize :: SharedBuffer.length bytes
+
+    /// Returns whether the string has no bytes.
     pub def is_empty = value: String => Bool :: length value == 0
+
+    /// Returns whether a byte offset starts a Unicode scalar. Zero and the byte
+    /// length are boundaries; offsets past the end are not.
     pub def is_char_boundary = (value: String; at: USize) => Bool :: {
         if (at > length value) { False } else {
             if (at == length value) { True } else {
@@ -441,13 +478,23 @@ companion String {
             }
         }
     }
-    pub def char_indices = value: String => StringCharIndices :: StringCharIndices (string: value, index: 0)
+
+    /// Iterates Unicode scalar values with the byte offset where each starts.
+    pub def char_indices = value: String => StringCharIndices ::
+        StringCharIndices (string: value, index: 0)
+
+    /// Returns whether the string begins with `needle`.
     pub def starts_with = (value: String; needle: String) => Bool :: {
         if (length needle > length value) { False } else { matches_at value needle 0 }
     }
+
+    /// Returns whether the string ends with `needle`.
     pub def ends_with = (value: String; needle: String) => Bool :: {
-        if (length needle > length value) { False } else { matches_at value needle (length value - length needle) }
+        if (length needle > length value) { False } else {
+            matches_at value needle (length value - length needle)
+        }
     }
+
     /// Finds the first match, returning a byte offset. An empty needle matches at zero.
     pub def find = (value: String; needle: String) => Option<USize> :: {
         let mut result: Option<USize> = None
@@ -464,7 +511,9 @@ companion String {
         }
         result
     }
-    /// Finds the last match; an empty needle matches at the byte length.
+
+    /// Finds the last match, returning a byte offset. An empty needle matches at
+    /// the byte length.
     pub def rfind = (value: String; needle: String) => Option<USize> :: {
         let mut result: Option<USize> = None
         if (length needle <= length value) {
@@ -480,11 +529,18 @@ companion String {
         }
         result
     }
+
+    /// Returns whether `needle` occurs anywhere in the string.
     pub def contains = (value: String; needle: String) => Bool :: match find value needle {
         Some _ => True, None => False,
     }
-    pub def find_char = (value: String; needle: Char) => Option<USize> :: find value (Char.to_string needle)
-    /// Copies a byte range, returning None for invalid bounds or scalar boundaries.
+
+    /// Finds the first occurrence of a scalar, returning its byte offset.
+    pub def find_char = (value: String; needle: Char) => Option<USize> ::
+        find value (Char.to_string needle)
+
+    /// Copies a byte range, returning `None` for reversed bounds, offsets past
+    /// the end, or offsets inside a scalar.
     pub def slice = (value: String; (Range (start, end)): Range<USize>) => Option<String> :: {
         if (start > end) { None } else {
             if (is_char_boundary value start) {
@@ -492,30 +548,59 @@ companion String {
             } else { None }
         }
     }
+
+    /// Copies the string without `prefix`, or returns `None` when it does not
+    /// start with it.
     pub def strip_prefix = (value: String; prefix: String) => Option<String> :: {
-        if (starts_with value prefix) { Some (copy_range value (length prefix) (length value)) } else { None }
+        if (starts_with value prefix) {
+            Some (copy_range value (length prefix) (length value))
+        } else { None }
     }
+
+    /// Copies the string without `suffix`, or returns `None` when it does not
+    /// end with it.
     pub def strip_suffix = (value: String; suffix: String) => Option<String> :: {
-        if (ends_with value suffix) { Some (copy_range value 0 (length value - length suffix)) } else { None }
+        if (ends_with value suffix) {
+            Some (copy_range value 0 (length value - length suffix))
+        } else { None }
     }
-    pub def trim_start = value: String => String :: copy_range value (trim_start_offset value) (length value)
+
+    /// Copies the string without leading Unicode White_Space.
+    pub def trim_start = value: String => String ::
+        copy_range value (trim_start_offset value) (length value)
+
+    /// Copies the string without trailing Unicode White_Space.
     pub def trim_end = value: String => String :: copy_range value 0 (trim_end_offset value 0)
+
+    /// Copies the string without leading or trailing Unicode White_Space.
     pub def trim = value: String => String :: {
         let start = trim_start_offset value
         copy_range value start (trim_end_offset value start)
     }
-    /// Lazily splits on a nonempty separator. Panics with "String.split: empty separator" otherwise.
+
+    /// Lazily splits on a nonempty separator. Panics with
+    /// "String.split: empty separator" otherwise.
     pub def split = (value: String; separator: String) => StringSplit :: {
         if (is_empty separator) { panic "String.split: empty separator" }
         StringSplit (source: value, separator: separator, position: 0, finished: False)
     }
-    pub def split_once = (value: String; separator: String) => Option<(String, String)> :: match find value separator {
-        Some at => Some (copy_range value 0 at, copy_range value (at + length separator) (length value)),
-        None => None,
-    }
-    /// Iterates lines, removing LF and an immediately preceding CR; omits a final empty line.
+
+    /// Splits around the first `separator`, returning the text before and after
+    /// it, or `None` when it does not occur.
+    pub def split_once = (value: String; separator: String) => Option<(String, String)> ::
+        match find value separator {
+            Some at => Some (copy_range value 0 at, copy_range value (at + length separator) (length value)),
+            None => None,
+        }
+
+    /// Iterates lines, removing LF and an immediately preceding CR; omits a final
+    /// empty line.
     pub def lines = value: String => StringLines :: StringLines (source: value, position: 0)
-    pub def split_whitespace = value: String => StringSplitWhitespace :: StringSplitWhitespace (source: value, position: 0)
+
+    /// Lazily splits on runs of Unicode White_Space, skipping empty pieces.
+    pub def split_whitespace = value: String => StringSplitWhitespace ::
+        StringSplitWhitespace (source: value, position: 0)
+
     /// Replaces nonoverlapping matches. An empty needle inserts at each scalar boundary.
     pub def replace = (value: String; needle: String; replacement: String) => String :: {
         let mut builder = StringBuilder.with_capacity (length value)
@@ -541,6 +626,9 @@ companion String {
         }
         StringBuilder.finish builder
     }
+
+    /// Concatenates `count` copies of the string. Panics with
+    /// "String.repeat: capacity overflow" when the byte length overflows.
     pub def repeat = (value: String; count: USize) => String :: {
         let size = length value * count
         if (count > 0) { if (size / count != length value) { panic "String.repeat: capacity overflow" } }
@@ -553,16 +641,23 @@ companion String {
         }
         StringBuilder.finish builder
     }
+
+    /// Copies the string with ASCII letters uppercased; other scalars are unchanged.
     pub def to_ascii_uppercase = value: String => String :: {
         let mut builder = StringBuilder.with_capacity (length value)
         for c in (String.chars value) { StringBuilder.push builder (Char.to_ascii_uppercase c) }
         StringBuilder.finish builder
     }
+
+    /// Copies the string with ASCII letters lowercased; other scalars are unchanged.
     pub def to_ascii_lowercase = value: String => String :: {
         let mut builder = StringBuilder.with_capacity (length value)
         for c in (String.chars value) { StringBuilder.push builder (Char.to_ascii_lowercase c) }
         StringBuilder.finish builder
     }
+
+    /// Returns whether two strings are equal when ASCII letters are compared
+    /// without regard to case.
     pub def eq_ignore_ascii_case = (left: String; right: String) => Bool :: {
         let mut equal = length left == length right
         if (equal) {
@@ -581,6 +676,8 @@ companion String {
         }
         equal
     }
+
+    /// Concatenates strings with `separator` between each adjacent pair.
     pub def join = <Iter where IntoIterator Iter, Iterator.Item (IntoIterator.Iter Iter) == String>
         (separator: String; move values: Iter) => String :: {
         let mut builder = StringBuilder.new ()
@@ -593,34 +690,16 @@ companion String {
     }
 }
 
-impl PartialOrd String { partial_cmp = (left; right) => Some (Ord.cmp (left; right)) }
-impl Ord String {
-    cmp = (left; right) => {
-        let mut at: USize = 0
-        let mut result: Ordering = Ordering.Equal
-        loop {
-            if (at == String.length left) {
-                result = Ord.cmp (String.length left; String.length right)
-                break
-            }
-            if (at == String.length right) {
-                result = Ordering.Greater
-                break
-            }
-            result = Ord.cmp (byte_at left at; byte_at right at)
-            if (byte_at left at != byte_at right at) { break }
-            at = at + 1
-        }
-        result
-    }
-}
-
-/// Lazy splitting iterator; each yielded substring owns a fresh byte allocation.
+/// A lazy iterator over the pieces of a string between separator matches.
+/// Each yielded piece owns a fresh byte allocation.
 pub type StringSplit wrap (source: String, separator: String, position: USize, finished: Bool)
+
 impl Iterator StringSplit {
     type Item = String
     next = move StringSplit (source, separator, position, finished) => {
-        if (finished) { Done (StringSplit (source: source, separator: separator, position: position, finished: True)) } else {
+        if (finished) {
+            Done (StringSplit (source: source, separator: separator, position: position, finished: True))
+        } else {
             let mut at = position
             let mut found: Bool = False
             while (String.length separator <= String.length source - at) {
@@ -631,24 +710,40 @@ impl Iterator StringSplit {
                 at = at + 1
             }
             if (found) {
-                Yield (copy_range source position at, StringSplit (source: source, separator: separator, position: at + String.length separator, finished: False))
+                let rest = StringSplit (
+                    source: source,
+                    separator: separator,
+                    position: at + String.length separator,
+                    finished: False,
+                )
+                Yield (copy_range source position at, rest)
             } else {
-                Yield (copy_range source position (String.length source), StringSplit (source: source, separator: separator, position: String.length source, finished: True))
+                let rest = StringSplit (
+                    source: source,
+                    separator: separator,
+                    position: String.length source,
+                    finished: True,
+                )
+                Yield (copy_range source position (String.length source), rest)
             }
         }
     }
 }
+
 impl IntoIterator StringSplit {
     type Iter = StringSplit
     into_iterator = move iter => iter
 }
 
-/// Lazy LF/CRLF line iterator.
+/// A lazy iterator over the lines of a string, ending each at LF or CRLF.
 pub type StringLines wrap (source: String, position: USize)
+
 impl Iterator StringLines {
     type Item = String
     next = move StringLines (source, position) => {
-        if (position == String.length source) { Done (StringLines (source: source, position: position)) } else {
+        if (position == String.length source) {
+            Done (StringLines (source: source, position: position))
+        } else {
             let mut end = position
             while (end < String.length source) {
                 if (byte_at source end == 10) { break }
@@ -664,13 +759,16 @@ impl Iterator StringLines {
         }
     }
 }
+
 impl IntoIterator StringLines {
     type Iter = StringLines
     into_iterator = move iter => iter
 }
 
-/// Lazy Unicode White_Space splitting iterator.
+/// A lazy iterator over the pieces of a string between runs of Unicode
+/// White_Space.
 pub type StringSplitWhitespace wrap (source: String, position: USize)
+
 impl Iterator StringSplitWhitespace {
     type Item = String
     next = move StringSplitWhitespace (source, position) => {
@@ -679,7 +777,9 @@ impl Iterator StringSplitWhitespace {
             let (c, width) = decode_at (string_shared_bytes source) start
             if (Char.is_whitespace c) { start = start + width } else { break }
         }
-        if (start == String.length source) { Done (StringSplitWhitespace (source: source, position: start)) } else {
+        if (start == String.length source) {
+            Done (StringSplitWhitespace (source: source, position: start))
+        } else {
             let mut end = start
             while (end < String.length source) {
                 let (c, width) = decode_at (string_shared_bytes source) end
@@ -690,6 +790,7 @@ impl Iterator StringSplitWhitespace {
         }
     }
 }
+
 impl IntoIterator StringSplitWhitespace {
     type Iter = StringSplitWhitespace
     into_iterator = move iter => iter
