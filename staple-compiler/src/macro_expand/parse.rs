@@ -1076,8 +1076,9 @@ impl MacroExpander {
                     Err(error) => return fail(Some(error.message)),
                 }
             }
-            MetaType::Type => {
+            MetaType::Type | MetaType::ProductType | MetaType::UnstructuredType => {
                 match staple_syntax::parse_type_prefix(&rest, &mut self.next_syntax_id) {
+                    Ok((ty, _)) if !type_category_matches(target, &ty) => return fail(None),
                     Ok((ty, consumed)) => (Value::Syntax(SyntaxValue::Type(ty)), consumed),
                     Err(error) => return fail(Some(error.message)),
                 }

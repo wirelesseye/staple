@@ -124,6 +124,13 @@ pub(super) fn expand_structural_method(
                 Err(diagnostic) => return Err(vec![diagnostic]),
             }
         }
+        StructuralTraitMethod::Default => match structural_default_body(program, &plan, &origin) {
+            Ok((body, selected_requests)) => {
+                requests.extend(selected_requests);
+                body
+            }
+            Err(diagnostic) => return Err(vec![diagnostic]),
+        },
         StructuralTraitMethod::Index => match structural_index_body(&plan, &origin) {
             Ok(body) => body,
             Err(diagnostic) => return Err(vec![diagnostic]),
@@ -571,6 +578,46 @@ fn structural_equality_body(
         }
     };
     Ok((body, requests))
+}
+
+/// `Default` for a product: one `Default.default` delegate per position in
+/// product order.
+fn structural_default_body(
+    program: &LoweredProgram,
+    plan: &StructuralMethodPlan,
+    origin: &Origin,
+) -> Result<(StructuralBody, Vec<ClosureRequest>), Diagnostic> {
+    let (trait_id, method) = standard_trait_method(
+        program,
+        program.semantic_ids.default_trait,
+        origin,
+        "Default",
+    )?;
+    let target = structural_argument(plan, 0, origin)?;
+    let CheckedType::Product(product) = &target else {
+        return Err(Diagnostic::new(
+            origin.span.clone(),
+            "structural Default target is not a product",
+        ));
+    };
+    let mut requests = Vec::new();
+    let mut elements = Vec::new();
+    for element in product.iter_positions() {
+        let selected = select_concrete_trait_method(
+            program,
+            origin,
+            trait_id,
+            method,
+            std::slice::from_ref(&element.value_type),
+        )?;
+        requests.push(selected.request);
+        elements.push(DebugDelegate {
+            value_type: element.value_type.clone(),
+            callee: selected.callee,
+            callee_type: selected.callee_type,
+        });
+    }
+    Ok((StructuralBody::ProductDefault { elements }, requests))
 }
 
 /// `Debug` for a product (ordered literal/element steps plus the shared

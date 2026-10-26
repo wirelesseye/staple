@@ -74,7 +74,14 @@ the three delimited syntax types. `Expr` is currently the sum of `Ident<String>`
 `CallExpr`, and `UnstructuredExpr`.
 `CallExpr` exposes `callee: Expr` and
 `argument: Expr`; `UnstructuredExpr` preserves every other expression form
-without exposing its fields yet. A macro body is a compile-time Staple function
+without exposing its fields yet. `Type` is likewise the sum of `ProductType`
+and `UnstructuredType`. `ProductType` wraps the `Sequence<ProductTypeField>` of
+a plain comma-separated product type such as `(x: I32 = 0, String)`; each
+`ProductTypeField (name, field_type, default)` holds an `Option<Ident<String>>`,
+the field's `Type`, and its `= ...` default as an `Option<Expr>`. Slotted and
+variadic products, spreads, and products with `mut` or `move` elements are
+`UnstructuredType`, like every other type form. Both are exposed for
+inspection only: a `Type` value is spliced as written. A macro body is a compile-time Staple function
 whose parameters use a slotted list, followed by a single `=>` before the
 body — never a curried `a => b => body` chain. Every parameter consumes one
 atomic syntax unit; an omitted parameter type means `SyntaxNode`, not opaque
@@ -251,7 +258,7 @@ pair when its contents alone are not a complete type or pattern.
 
 Consequently, `inspect_type Result I32` is an invocation with separate
 arguments, not one applied type. Type and pattern values have no structural
-fields yet, but may be stored, passed through compile-time helpers, and spliced
+fields beyond `ProductType` yet, but may be stored, passed through compile-time helpers, and spliced
 into matching positions in a quotation. For example, `$ty` may appear in a
 type annotation and `$pattern` may appear as a binding, function, or match
 pattern. A category-mismatched splice is rejected during expansion.
@@ -380,7 +387,8 @@ parse their *bare* contents: `(A; B)` reads `A` then `B`, juxtaposed, and
 The built-in nodes implement `Parse` with ordinary `impl` items in
 `std/syntax.sta`:
 
-- `Expr`, `CallExpr`, `StringExpr`, `UnstructuredExpr`, `Type`, `Pattern`,
+- `Expr`, `CallExpr`, `StringExpr`, `UnstructuredExpr`, `Type`, `ProductType`,
+  `UnstructuredType`, `Pattern`,
   `BindingPattern`, `NominalPattern`, `Item`, `ModifiedItem`,
   `TypeDeclarationItem`, `UnstructuredItem`, `Modifier`, `ModifierCall`,
   `UnstructuredModifier`, and `TypeBody` read the
@@ -1959,6 +1967,18 @@ Defaults are construction metadata of the named type, not part of the
 representation's structural type identity or runtime representation; a
 constructed value always holds every field.
 
+The `@derive_default` modifier from `std.default` implements `Default` for a
+`wrap` or `from` type using these defaults: each field with a default uses it,
+a nested product with defaults of its own is built field by field, and every
+other field uses `Default.default ()`:
+
+```staple
+@derive_default
+type Config from (window: (width: I32 = 800, height: I32), title: String = "app")
+
+let config: Config = default () // ((800, 0), "app")
+```
+
 Defaults must be pure and portable: they may use literals, global names, and
 compile-time parameters, but may not capture local runtime values or refer to
 sibling fields. Unnamed fields, variadic markers, repeated or spread elements,
@@ -2139,27 +2159,26 @@ under "Functions"), so a by-value target's root binding must be declared
 be overridden. Other types may define ordinary explicit implementations of
 both traits.
 
-Products do not receive an implicit `Default` implementation, even when every
-element type implements `Default`. A downstream package cannot add one: both
-`Default` and a product of standard-library types are external to that package,
-so the trait implementation orphan rule rejects it. A package can define its
-own product-construction trait instead:
+Fixed products have a compiler-provided structural `Default` implementation
+whenever every element type implements `Default`. The default value holds each
+element's `Default.default ()`, evaluated in element order. This applies to
+heterogeneous, named, nested, and repeated products, and to the empty product
+`()`, so `Default T` implies `Default (T ^ N)`:
 
 ```staple
-trait ProductDefault T { product_default: () -> T }
-
-impl ProductDefault (I32, Bool) {
-    product_default = () => (0, False)
-}
-
-let pair: (I32, Bool) = product_default ()
+let pair: (I32, Bool) = default ()     // (0, False)
+let named: (x: I32, label: String) = default ()
+let unit: () = default ()
 ```
 
-This applies to heterogeneous, named, nested, and empty products. In
-particular, `()` is not default-constructible unless a legal implementation is
-provided by the package that owns `Default`. Because `(T ^ 1)` is normalized to
-`T`, it continues to use the `Default` implementation of `T`. `Shared<T>` does not
-implement `Default` merely because `T` does.
+A product whose fields declare defaults, which only the representation of a
+`wrap` or `from` type can (see [Default field values](#default-field-values)),
+has no structural `Default`: filling it structurally would ignore those
+defaults. Use `@derive_default` on the named type instead. Because the
+structural implementation exists, a product cannot implement `Default`
+explicitly. Because `(T ^ 1)` is normalized to `T`, it continues to use the
+`Default` implementation of `T`. Variadic products, sums, and `Shared<T>` do not
+implement `Default` structurally.
 
 ## Functions
 
@@ -4737,6 +4756,14 @@ alternative. Nominal types do not inherit `Debug` from their representation,
 but the source-defined stdlib modifier `@derive_debug` generates an
 implementation that prefixes the type name and delegates to the representation.
 Scalar `ToString` implementations delegate to `Display`.
+
+Fixed products likewise have a compiler-provided structural `Default`
+implementation; see [Element access](#element-access). Nominal types do not
+inherit it, but `@derive_default` in `std.default` generates one from the
+representation, using its [default field values](#default-field-values). A
+bodyless singleton type's default is the singleton itself. A generic type's
+implementation requires `Default` only for the field types that use
+`Default.default ()`.
 
 Fixed-arity products and sums likewise have compiler-provided structural `Eq`
 implementations whenever all their elements or alternatives implement `Eq`.

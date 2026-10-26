@@ -98,11 +98,28 @@ impl !Copy UnstructuredExpr {}
 /// The syntax category for expressions.
 pub type Expr = Ident<String> | CallExpr | StringExpr | CharExpr | UnstructuredExpr
 
-/// The syntax category for types.
-@sized_opaque
-pub type Type opaque
+/// One field of a structured product type. `default` is the field's `= ...`
+/// expression, which the language allows only in a `wrap` or `from`
+/// representation and the products nested in it. Exposed for inspection only.
+pub type ProductTypeField wrap pub (
+    name: Option<Ident<String>>,
+    field_type: Type,
+    default: Option<Expr>,
+)
 
-impl !Copy Type {}
+/// A plain comma-separated product type such as `(x: I32, String)`. Slotted
+/// and variadic products, spreads, and `mut`/`move` elements are unstructured.
+/// Exposed for inspection only.
+pub type ProductType wrap pub Sequence<ProductTypeField>
+
+/// A type syntax node whose structure is not exposed yet.
+@sized_opaque
+pub type UnstructuredType opaque
+
+impl !Copy UnstructuredType {}
+
+/// The syntax category for types.
+pub type Type = ProductType | UnstructuredType
 
 /// A binding pattern constructed from an identifier.
 @recursive_constructor
@@ -298,6 +315,8 @@ impl Parse CharExpr { parse = mut input => __parse_primitive.<CharExpr> input }
 impl Parse StringExpr { parse = mut input => __parse_primitive.<StringExpr> input }
 impl Parse UnstructuredExpr { parse = mut input => __parse_primitive.<UnstructuredExpr> input }
 impl Parse Type { parse = mut input => __parse_primitive.<Type> input }
+impl Parse ProductType { parse = mut input => __parse_primitive.<ProductType> input }
+impl Parse UnstructuredType { parse = mut input => __parse_primitive.<UnstructuredType> input }
 impl Parse Pattern { parse = mut input => __parse_primitive.<Pattern> input }
 impl Parse BindingPattern { parse = mut input => __parse_primitive.<BindingPattern> input }
 impl Parse NominalPattern { parse = mut input => __parse_primitive.<NominalPattern> input }

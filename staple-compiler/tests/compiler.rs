@@ -4108,22 +4108,23 @@ fn enforces_trait_implementation_orphan_rules_without_a_manifest() {
 }
 
 #[test]
-fn rejects_default_for_products_without_explicit_implementations() {
-    let diagnostics = TypeChecker::new()
-        .check(resolve("let invalid: (I32, Bool) = default ()\n"))
-        .expect_err_diagnostics("products have no implicit Default implementation");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("no trait implementation"))
-    );
+fn derives_default_structurally_for_products_of_default_elements() {
+    type_check(concat!(
+        "let pair: (I32, Bool) = default ()\n",
+        "let named: (x: I32, label: String) = default ()\n",
+        "let nested: ((I32, Bool), String) = default ()\n",
+        "let unit: () = default ()\n",
+    ));
 }
 
 #[test]
-fn rejects_default_for_the_empty_product_without_an_explicit_implementation() {
+fn rejects_default_for_products_with_a_non_default_element() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("let invalid: () = default ()\n"))
-        .expect_err_diagnostics("the empty product has no implicit Default implementation");
+        .check(resolve(concat!(
+            "type Local wrap I32\n",
+            "let invalid: (I32, Local) = default ()\n",
+        )))
+        .expect_err_diagnostics("a product needs Default for every element");
     assert!(
         diagnostics
             .iter()
@@ -11826,20 +11827,13 @@ fn monomorphizes_curried_generic_function_layers() {
 }
 
 #[test]
-fn a_default_bound_does_not_imply_default_for_a_product() {
-    let diagnostics = TypeChecker::new()
-        .check(resolve(concat!(
-            "def make_list: <T where Default T> () -> (T ^ 32) = <T where Default T> () => {\n",
-            "  let list: (T ^ 32) = default ()\n",
-            "  list\n",
-            "}\n",
-        )))
-        .expect_err_diagnostics("Default T does not imply Default (T ^ 32)");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("no trait implementation"))
-    );
+fn a_default_bound_implies_default_for_a_product() {
+    type_check(concat!(
+        "def make_list: <T where Default T> () -> (T ^ 32) = <T where Default T> () => {\n",
+        "  let list: (T ^ 32) = default ()\n",
+        "  list\n",
+        "}\n",
+    ));
 }
 
 #[test]

@@ -221,6 +221,8 @@ pub struct CheckedTraitDispatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StructuralTraitMethod {
     Equality,
+    /// `Default` for a product whose elements all implement `Default`.
+    Default,
     Debug,
     Display,
     Index,
@@ -3458,6 +3460,7 @@ impl TypedModule {
             self.debug_trait,
             self.resolved.standard_trait("Display"),
             self.resolved.standard_trait("Eq"),
+            self.resolved.standard_trait("Default"),
             |value_type| self.is_copy_type(value_type),
             |value_type| self.is_debug_type(value_type),
             |trait_id, arguments| self.resolve_trait_obligation(trait_id, arguments),
@@ -3484,6 +3487,7 @@ impl TypedModule {
             self.debug_trait,
             self.resolved.standard_trait("Display"),
             self.resolved.standard_trait("Eq"),
+            self.resolved.standard_trait("Default"),
             |value_type| self.is_copy_type(value_type),
             |value_type| self.is_debug_type(value_type),
             |trait_id, arguments| self.resolve_trait_obligation(trait_id, arguments),
@@ -3979,6 +3983,7 @@ impl TypedModule {
             self.debug_trait,
             self.resolved.standard_trait("Display"),
             self.resolved.standard_trait("Eq"),
+            self.resolved.standard_trait("Default"),
             |value_type| self.is_copy_type(value_type),
             |value_type| self.is_debug_type(value_type),
             |trait_id, arguments| self.resolve_trait_obligation(trait_id, arguments),
@@ -5497,6 +5502,7 @@ impl TypeChecker {
                 self.debug_trait,
                 self.display_trait,
                 self.eq_trait,
+                self.default_trait,
                 |value_type| self.is_copy_with(value_type, &[]),
                 |value_type| {
                     self.debug_trait.is_some_and(|trait_id| {
@@ -5511,6 +5517,7 @@ impl TypeChecker {
                         StructuralTraitMethod::Equality => "`Eq` is derived structurally for this product or sum type and cannot be implemented explicitly",
                         StructuralTraitMethod::Display => "`Display` is derived structurally for this product type and cannot be implemented explicitly",
                         StructuralTraitMethod::Debug => "`Debug` is derived structurally for this product or sum type and cannot be implemented explicitly",
+                        StructuralTraitMethod::Default => "`Default` is derived structurally for this product type and cannot be implemented explicitly",
                         _ => "indexing and iteration traits are derived structurally for this type and cannot be implemented explicitly",
                     },
                 ));
@@ -17195,6 +17202,7 @@ impl TypeChecker {
             self.debug_trait,
             self.display_trait,
             self.eq_trait,
+            self.default_trait,
             |value_type| self.is_copy_with(value_type, &bounds),
             |value_type| {
                 self.debug_trait.is_some_and(|trait_id| {
@@ -17348,6 +17356,7 @@ impl TypeChecker {
             self.debug_trait,
             self.display_trait,
             self.eq_trait,
+            self.default_trait,
             |value_type| self.is_copy_with(value_type, &bounds),
             |value_type| {
                 self.debug_trait.is_some_and(|trait_id| {
@@ -25583,6 +25592,7 @@ pub(crate) fn structural_trait_arguments(
     debug_trait: Option<TraitId>,
     display_trait: Option<TraitId>,
     eq_trait: Option<TraitId>,
+    default_trait: Option<TraitId>,
     is_copy: impl Fn(&CheckedType) -> bool,
     is_debug: impl Fn(&CheckedType) -> bool,
     resolve_obligation: impl Fn(TraitId, &[CheckedType]) -> Option<Vec<CheckedType>>,
@@ -25600,6 +25610,25 @@ pub(crate) fn structural_trait_arguments(
             resolve_obligation(trait_id, std::slice::from_ref(alternative)).is_some()
         }) {
             return Some((vec![target.clone()], StructuralTraitMethod::Equality));
+        }
+        return None;
+    }
+    if Some(trait_id) == default_trait {
+        let [target] = arguments else { return None };
+        let CheckedType::Product(product) = target else {
+            return None;
+        };
+        // A product carrying field defaults is the representation of a `wrap`
+        // or `from` type; filling it structurally would ignore those defaults.
+        if !product.variadic
+            && product.spreads.is_empty()
+            && product.runs.iter().all(|run| {
+                run.element.default.is_none()
+                    && resolve_obligation(trait_id, std::slice::from_ref(&run.element.value_type))
+                        .is_some()
+            })
+        {
+            return Some((vec![target.clone()], StructuralTraitMethod::Default));
         }
         return None;
     }
@@ -26167,14 +26196,13 @@ pub(crate) fn is_default_type(
     }) {
         return true;
     }
-    match value_type.desugared() {
-        CheckedType::Parameter { .. } => bounds.iter().any(|bound| {
-            bound.trait_id == default_trait
-                && bound.arguments.len() == 1
-                && types_equivalent(&bound.arguments[0], value_type)
-        }),
-        _ => false,
-    }
+    // A bound may name any type, such as `Default (T ^ 3)` from a derived
+    // implementation, not only a bare parameter.
+    bounds.iter().any(|bound| {
+        bound.trait_id == default_trait
+            && bound.arguments.len() == 1
+            && types_equivalent(&bound.arguments[0], value_type)
+    })
 }
 
 /// The unsigned integer type whose bit pattern represents `float`.

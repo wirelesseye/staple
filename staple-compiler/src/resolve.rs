@@ -2380,6 +2380,7 @@ impl NameResolver {
             "Braced",
             "UnstructuredExpr",
             "Expr",
+            "UnstructuredType",
             "Type",
             "Pattern",
             "BindingPattern",
@@ -8045,6 +8046,10 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
             "(name: Ident<String>, declared_type: Type, type_parameters: Sequence<Ident<String>>, body: Option<TypeBody>, resource_dependencies: Sequence<ResourceDependency>) -> TypeDeclarationItem",
         ),
         "ResourceDependency" => Some("(resource_type: Type, mutable: Bool) -> ResourceDependency"),
+        "ProductTypeField" => Some(
+            "(name: Option<Ident<String>>, field_type: Type, default: Option<Expr>) -> ProductTypeField",
+        ),
+        "ProductType" => Some("Sequence<ProductTypeField> -> ProductType"),
         "AliasBody" => Some("Type -> AliasBody<Type>"),
         "WrapperBody" => Some("(Visibility, Type) -> WrapperBody<Visibility, Type>"),
         "FromBody" => Some("(Visibility, Type) -> FromBody<Visibility, Type>"),
@@ -8059,6 +8064,7 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         | "Expr"
         | "UnstructuredExpr"
         | "Type"
+        | "UnstructuredType"
         | "Pattern"
         | "Item"
         | "TypeBody"
@@ -8126,6 +8132,8 @@ fn compile_expression_type(expression: &Expression, scope: &CompileTimeScope) ->
                     | "StringExpr"
                     | "UnstructuredExpr"
                     | "Type"
+                    | "ProductType"
+                    | "UnstructuredType"
                     | "Pattern"
                     | "BindingPattern"
                     | "NominalPattern"
