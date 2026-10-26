@@ -8858,7 +8858,10 @@ impl MacroExpander {
                 }))
             }
             Value::Nominal(name, payload) if name == "Some" => {
-                let value = self.value_to_expression(*payload, span.clone(), module, None)?;
+                // The payload takes its type from the annotation's `Option<T>`,
+                // so a negative or wide integer is checked as `T`, not `I32`.
+                let payload_type = expected.and_then(option_payload_type);
+                let value = self.value_to_expression(*payload, span.clone(), module, payload_type)?;
                 let callee = Expression::Name(staple_syntax::NameExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                     name,
@@ -10058,6 +10061,20 @@ fn unwrap_singleton_product(mut ty: &Type) -> &Type {
         ty = &element.ty;
     }
     ty
+}
+
+/// The `T` of an `Option<T>` annotation.
+fn option_payload_type(ty: &Type) -> Option<&Type> {
+    let Type::Application(application) = ty else {
+        return None;
+    };
+    let Type::Named(name) = application.callee.as_ref() else {
+        return None;
+    };
+    if name.namespace.is_some() || name.name != "Option" {
+        return None;
+    }
+    Some(unwrap_singleton_product(&application.argument))
 }
 
 /// Reads `Sequence<T>` as a repeated syntax element of type `T`.

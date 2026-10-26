@@ -461,6 +461,26 @@ fn integer_companion_constants_fold_at_their_declared_width() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn folded_options_check_negative_payloads_at_the_annotated_type() {
+    // A negative payload reifies as `0 - (n - 1) - 1`; without the
+    // annotation's `T` it would default to `I32`, and `I64.Min`'s magnitude
+    // would not fit at all.
+    assert_eq!(
+        run_lines(concat!(
+            "use std.io.println\n",
+            "const narrow: Option<I8> = I8.checked_subtract I8.Min 0\n",
+            "const wide: Option<I64> = I64.checked_add I64.Min 0\n",
+            "const negative: Option<I16> = I16.checked_add (0 - 5) 0\n",
+            "match narrow { Some value => println \"${value}\", None => println \"None\", }\n",
+            "match wide { Some value => println \"${value}\", None => println \"None\", }\n",
+            "match negative { Some value => println \"${value}\", None => println \"None\", }\n",
+        )),
+        ["-128", "-9223372036854775808", "-5"]
+    );
+}
+
 #[test]
 fn pointer_width_constants_report_a_folding_diagnostic() {
     let diagnostics = check("const ones: U32 = USize.count_ones 255\n")
