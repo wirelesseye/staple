@@ -4139,6 +4139,13 @@ pub struct TypeChecker {
     juxtaposed_call_plans: HashMap<SyntaxId, CheckedJuxtaposedCallPlan>,
     continued_juxtaposed_calls: HashSet<SyntaxId>,
     checked_product_defaults: HashSet<SyntaxId>,
+    /// Field defaults met while top-level bindings were still unseeded, with
+    /// their field types. A default may name a global, which has no type
+    /// until then, so these are checked once seeding finishes.
+    pending_product_defaults: Vec<(Expression, CheckedType)>,
+    /// Whether top-level bindings and function types are seeded, so a field
+    /// default can be checked where its product type is resolved.
+    product_defaults_checkable: bool,
     product_default_expressions: HashMap<SyntaxId, Expression>,
     curried_default_expressions: HashSet<SyntaxId>,
     symbol_types: HashMap<SymbolId, CheckedType>,
@@ -4441,7 +4448,8 @@ impl TypeChecker {
         self.validate_trait_implementation_prerequisites(&module);
         self.collect_resource_dependencies(&module);
         // Singleton values first: constructor representations may name them
-        // in field defaults, which are checked when the representation is.
+        // in field defaults. Defaults naming other globals are checked once
+        // top-level bindings are seeded, below.
         self.seed_singleton_values(&module);
         self.seed_constructors(&module);
         self.collect_top_level_bindings(&module);
@@ -4453,6 +4461,7 @@ impl TypeChecker {
         self.refresh_scheme_bounds();
         self.reject_blanket_companion_overlaps(&module);
         self.check_structural_companions(&module);
+        self.check_pending_product_defaults(&module);
 
         let module_order = module.program().initialization_order().to_vec();
         for module_id in module_order {
@@ -19498,6 +19507,25 @@ impl TypeChecker {
         ty
     }
 
+    fn check_product_default(
+        &mut self,
+        module: &ResolvedModule,
+        default: &Expression,
+        value_type: &CheckedType,
+    ) {
+        let actual = self.check_expression_expected(module, default, Some(value_type));
+        self.require_compatible(actual, value_type.clone(), default.syntax().span.clone());
+    }
+
+    /// Checks the field defaults deferred while top-level bindings were
+    /// unseeded; later ones are checked where their product type is resolved.
+    fn check_pending_product_defaults(&mut self, module: &ResolvedModule) {
+        self.product_defaults_checkable = true;
+        for (default, value_type) in std::mem::take(&mut self.pending_product_defaults) {
+            self.check_product_default(module, &default, &value_type);
+        }
+    }
+
     fn resolve_source_type_inner(
         &mut self,
         module: &ResolvedModule,
@@ -20660,13 +20688,12 @@ impl TypeChecker {
                         ));
                     }
                     if !contains_type_parameter(&value_type) {
-                        let actual =
-                            self.check_expression_expected(module, default, Some(&value_type));
-                        self.require_compatible(
-                            actual,
-                            value_type.clone(),
-                            default.syntax().span.clone(),
-                        );
+                        if self.product_defaults_checkable {
+                            self.check_product_default(module, default, &value_type);
+                        } else {
+                            self.pending_product_defaults
+                                .push((default.clone(), value_type.clone()));
+                        }
                     }
                     self.product_default_expressions
                         .insert(default.syntax().id, default.clone());

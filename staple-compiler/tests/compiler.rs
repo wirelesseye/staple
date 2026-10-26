@@ -2539,6 +2539,37 @@ fn field_defaults_may_name_singleton_values() {
 }
 
 #[test]
+fn field_defaults_may_name_global_values() {
+    // Representations are resolved before top-level bindings are seeded, so
+    // a default naming a global, declared before or after the type, is
+    // checked once the global has a type.
+    let module = type_check(concat!(
+        "def depth = 4\n",
+        "let scale: I32 = 2\n",
+        "type Options wrap (verbose: Bool = False, depth: I32 = depth, scale: I32 = scale, step: I32 = step)\n",
+        "def step = 1\n",
+        "let options = Options (.verbose: True)\n",
+        "let total: I32 = options.depth + options.scale + options.step\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("global defaults should generate LLVM");
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def label = \"x\"\n",
+            "type Options wrap (verbose: Bool, depth: I32 = label)\n",
+        )))
+        .expect_err_diagnostics("a mistyped global default is still rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("expected `I32`, found `String`")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
 fn named_type_field_defaults_combine_with_spread_fields() {
     let source = concat!(
         "type Base = (x: I32, y: I32)\n",
