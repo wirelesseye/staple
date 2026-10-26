@@ -447,6 +447,7 @@ pub(super) fn collect_referenced_parameters(
         | CheckedType::RawOpaqueMutPtr
         | CheckedType::RawOpaquePtr
         | CheckedType::CChar => {}
+        CheckedType::Alias { .. } => unreachable!("aliases are erased before lowering"),
     }
 }
 
@@ -3133,6 +3134,7 @@ impl<'a> ParameterCollector<'a> {
                     self.collect_type(argument);
                 }
             }
+            CheckedType::Alias { .. } => unreachable!("aliases are erased before lowering"),
         }
     }
 

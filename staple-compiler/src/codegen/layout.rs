@@ -348,6 +348,9 @@ impl<'program, 'context> Backend<'program, 'context> {
             CheckedType::F32 => Ok(self.compile_float_type(FloatType::F32).into()),
             CheckedType::F64 => Ok(self.compile_float_type(FloatType::F64).into()),
             CheckedType::Wrapper { representation, .. } => self.compile_type(representation),
+            CheckedType::Alias { .. } => {
+                unreachable!("aliases are erased before layout")
+            }
         }
     }
 

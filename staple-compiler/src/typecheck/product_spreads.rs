@@ -43,7 +43,9 @@ fn invalid_spread_substitution(
                 }
                 if product.spreads.contains(&index) {
                     count = count.saturating_add(
-                        match substitute_type(run.element.value_type.clone(), substitutions) {
+                        match substitute_type(run.element.value_type.clone(), substitutions)
+                            .into_desugared()
+                        {
                             CheckedType::Product(spread) if !spread.variadic => {
                                 spread.position_count()
                             }
@@ -77,6 +79,7 @@ fn invalid_spread_substitution(
             arguments.iter().find_map(visit)
         }
         CheckedType::RawMutPtr { pointee: ty } | CheckedType::RawPtr { pointee: ty } => visit(ty),
+        CheckedType::Alias { target, .. } => visit(target),
         _ => None,
     }
 }

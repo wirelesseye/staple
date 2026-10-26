@@ -407,6 +407,7 @@ impl CanonicalType {
                 id: *id,
                 arguments: Self::convert_arguments(arguments, origin, runtime, binders)?,
             },
+            CheckedType::Alias { .. } => unreachable!("aliases are erased before specialization"),
         };
         Ok(key)
     }

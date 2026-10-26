@@ -659,7 +659,7 @@ impl Collector<'_> {
                 for member in &implementation.members {
                     let value_type = self
                         .typed
-                        .type_of_expression(member.value.syntax().id)
+                        .display_type_of_expression(member.value.syntax().id)
                         .map(|value_type| self.display_type(value_type))
                         .or_else(|| self.implementation_member_type(implementation, member));
                     if let Some(value_type) = value_type {
@@ -1017,7 +1017,7 @@ impl Collector<'_> {
             DefinitionId::Symbol(symbol) => {
                 let value_type = self
                     .typed
-                    .type_of_symbol(symbol)
+                    .display_type_of_symbol(symbol)
                     .map(|ty| self.display_type(ty))?;
                 let declaration = self.declarations.get(&symbol);
                 let signature = declaration
@@ -1377,7 +1377,7 @@ impl Collector<'_> {
                 .is_some_and(|declaration| declaration.name == member.name)
         })?;
         self.typed
-            .type_of_function(*function)
+            .display_type_of_function(*function)
             .cloned()
             .map(CheckedType::Function)
             .map(|value_type| self.display_type(&value_type))
@@ -1413,12 +1413,12 @@ impl Collector<'_> {
         let value_type = self
             .typed
             .symbol_for(binding.syntax.id)
-            .and_then(|symbol| self.typed.type_of_symbol(symbol))
+            .and_then(|symbol| self.typed.display_type_of_symbol(symbol))
             .or_else(|| {
                 binding
                     .value
                     .as_ref()
-                    .and_then(|value| self.typed.type_of_expression(value.syntax().id))
+                    .and_then(|value| self.typed.display_type_of_expression(value.syntax().id))
             })
             .map(|value_type| self.display_type(value_type));
         if let Some(value_type) = value_type {
@@ -1541,12 +1541,17 @@ impl Collector<'_> {
             });
         let expression_type = self
             .typed
-            .type_of_expression(expression.syntax().id)
+            .display_type_of_expression(expression.syntax().id)
             .cloned()
             .or_else(|| {
                 self.typed
                     .symbol_for(expression.syntax().id)
-                    .and_then(|symbol| self.typed.declared_type_of_symbol(symbol))
+                    .and_then(|symbol| {
+                        self.typed
+                            .display_type_of_symbol(symbol)
+                            .cloned()
+                            .or_else(|| self.typed.declared_type_of_symbol(symbol))
+                    })
             })
             .or_else(|| {
                 selected_method
@@ -1569,7 +1574,7 @@ impl Collector<'_> {
             // signature with the instantiation noted below it rather than
             // only the instantiated type.
             let declared_type = symbol
-                .and_then(|symbol| self.typed.type_of_symbol(symbol))
+                .and_then(|symbol| self.typed.display_type_of_symbol(symbol))
                 .map(|ty| self.display_type(ty));
             let trait_member = selected_method.and_then(|method| {
                 self.typed
@@ -1694,8 +1699,9 @@ impl Collector<'_> {
                 for element in &product.elements {
                     self.expression(&element.value);
                     if let Some(name) = &element.name
-                        && let Some(value_type) =
-                            self.typed.type_of_expression(element.value.syntax().id)
+                        && let Some(value_type) = self
+                            .typed
+                            .display_type_of_expression(element.value.syntax().id)
                     {
                         self.named(&element.syntax, name, self.display_type(value_type));
                     }
@@ -1718,7 +1724,8 @@ impl Collector<'_> {
             }
             Expression::Access(access) => {
                 if let Accessor::Method(name) = &access.accessor
-                    && let Some(value_type) = self.typed.type_of_expression(access.syntax.id)
+                    && let Some(value_type) =
+                        self.typed.display_type_of_expression(access.syntax.id)
                 {
                     self.named_last(&access.syntax, name, self.display_type(value_type));
                 } else if !self
@@ -1809,7 +1816,7 @@ impl Collector<'_> {
                 _ => {}
             }
         }
-        if let Some(value_type) = self.typed.type_of_pattern(pattern.syntax().id) {
+        if let Some(value_type) = self.typed.display_type_of_pattern(pattern.syntax().id) {
             let value_type = self.display_type(value_type);
             self.syntax(pattern.syntax(), value_type.clone());
             if let Pattern::Binding(binding) = pattern {
@@ -4537,6 +4544,108 @@ let result: String = Box.choose.<I32, String> (Box 1, "yes")
             }),
             "entries: {entries:?}"
         );
+    }
+
+    fn checked_entries_for(source: &str, name: &str) -> Vec<HoverEntry> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_owned();
+        let path =
+            std::env::temp_dir().join(format!("staple-hover-{name}-{}.sta", std::process::id()));
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let typed = TypeChecker::new()
+            .check(NameResolver::new().resolve_program(program).unwrap())
+            .unwrap();
+        let module = parse(source).unwrap();
+        entries(&module, &typed)
+    }
+
+    #[test]
+    fn hover_preserves_transparent_alias_names() {
+        let source = concat!(
+            "type Flag = Bool\n",
+            "type Pair<T> = (T, T)\n",
+            "let x: Bool = True\n",
+            "let y = x\n",
+            "let flag: Flag = True\n",
+            "let pair: Pair<I32> = (1, 2)\n",
+            "let option: Option<Bool> = Some True\n",
+        );
+        let hovers = checked_entries_for(source, "alias-bindings");
+        let signature = |needle: &str| {
+            let start = source.find(needle).unwrap();
+            hovers
+                .iter()
+                .find(|entry| entry.range.start == start)
+                .unwrap_or_else(|| panic!("no hover for `{needle}`: {hovers:?}"))
+                .signature
+                .as_str()
+        };
+        assert_eq!(signature("x: Bool"), "let x: Bool");
+        assert_eq!(signature("y = x"), "let y: Bool");
+        assert_eq!(signature("flag: Flag"), "let flag: Flag");
+        assert_eq!(signature("pair: Pair<I32>"), "let pair: Pair<I32>");
+        assert_eq!(
+            signature("option: Option<Bool>"),
+            "let option: Option<Bool>"
+        );
+    }
+
+    #[test]
+    fn hover_preserves_alias_names_in_function_signatures() {
+        let source = "def flip: Bool -> Bool = b => !b\n";
+        let hovers = checked_entries_for(source, "alias-signature");
+        let start = source.find("flip").unwrap();
+        let hover = hovers
+            .iter()
+            .find(|entry| entry.range.start == start)
+            .unwrap_or_else(|| panic!("no flip hover: {hovers:?}"));
+        assert_eq!(hover.signature, "def flip: Bool -> Bool");
+    }
+
+    #[test]
+    fn hover_shows_an_imported_alias_by_its_source_name() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-hover-imported-alias-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("types")).unwrap();
+        std::fs::write(root.join("root.sta"), "pub mod\n").unwrap();
+        std::fs::write(
+            root.join("types/flags.sta"),
+            "pub mod\npub type Flag = Bool\n",
+        )
+        .unwrap();
+        let source = "use types.flags.Flag\nlet value: Flag = True\n";
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_module_root(&root)
+            .with_package_root(&root.join("root.sta"))
+            .with_package_name("example")
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let typed = TypeChecker::new()
+            .check(NameResolver::new().resolve_program(program).unwrap())
+            .unwrap();
+        let module = parse(source).unwrap();
+        let hovers = entries(&module, &typed);
+        let start = source.find("value: Flag").unwrap();
+        let hover = hovers
+            .iter()
+            .find(|entry| entry.range.start == start)
+            .unwrap_or_else(|| panic!("no imported alias hover: {hovers:?}"));
+        assert_eq!(hover.signature, "let value: Flag");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

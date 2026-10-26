@@ -14648,6 +14648,7 @@ fn checked_type_holds_gc_pointer(value_type: &CheckedType) -> bool {
             arguments.iter().any(checked_type_holds_gc_pointer)
         }
         CheckedType::RawPtr { .. } | CheckedType::RawMutPtr { .. } => true,
+        CheckedType::Alias { .. } => unreachable!("aliases are erased before lowering"),
     }
 }
 

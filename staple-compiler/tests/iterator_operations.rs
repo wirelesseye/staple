@@ -259,7 +259,7 @@ fn collect_rejects_targets_that_cannot_hold_the_items() {
     assert!(
         errors
             .iter()
-            .any(|error| error.contains("(False | True, I32)")),
+            .any(|error| error.contains("(Bool, I32)")),
         "{errors:?}"
     );
     let errors = errors_of(

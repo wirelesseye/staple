@@ -1251,7 +1251,12 @@ impl Collector<'_> {
                 } else {
                     CompletionItemKind::VARIABLE
                 };
-                (Namespace::Value, kind, Some(display_type(self.typed, &ty)))
+                let display = self.typed.display_type_of_symbol(symbol).unwrap_or(&ty);
+                (
+                    Namespace::Value,
+                    kind,
+                    Some(display_type(self.typed, display)),
+                )
             }
             DefinitionId::Type(id) => {
                 let declaration = resolved.type_declarations().get(&id)?;
