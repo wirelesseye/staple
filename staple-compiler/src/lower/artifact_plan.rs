@@ -671,7 +671,8 @@ impl LoweredArtifactPlan {
                     | StructuralBody::ProductEquality {
                         elements: alternatives,
                         ..
-                    } => {
+                    }
+                    | StructuralBody::SumEquality { alternatives, .. } => {
                         for delegate in alternatives {
                             debug(delegate, visit);
                         }
@@ -1225,6 +1226,14 @@ pub(crate) enum StructuralBody {
         /// `Eq.ne` negates the conjunction of element-level `Eq.eq` results.
         negate: bool,
     },
+    /// Sum equality: unequal tags compare unequal; equal tags delegate the
+    /// two payloads to the alternative's `Eq.eq`.
+    SumEquality {
+        /// The per-alternative delegates in tag order.
+        alternatives: Vec<DebugDelegate>,
+        /// `Eq.ne` negates the result.
+        negate: bool,
+    },
     /// Product `Debug`: write the recorded literal steps and delegate each
     /// element to `Debug.fmt`.
     ProductDebug {
@@ -1348,7 +1357,8 @@ impl StructuralMethodPlan {
             | StructuralBody::ProductEquality {
                 elements: alternatives,
                 ..
-            } => {
+            }
+            | StructuralBody::SumEquality { alternatives, .. } => {
                 for delegate in alternatives {
                     visit_planned(&delegate.callee, visit);
                 }
@@ -1384,7 +1394,8 @@ impl StructuralMethodPlan {
             | StructuralBody::ProductEquality {
                 elements: alternatives,
                 ..
-            } => {
+            }
+            | StructuralBody::SumEquality { alternatives, .. } => {
                 for delegate in alternatives {
                     visit_planned_mut(&mut delegate.callee, visit);
                 }

@@ -4746,6 +4746,7 @@ mod tests {
                         use crate::StructuralBody;
                         structural_bodies.insert(match &plan.body {
                             StructuralBody::ProductEquality { .. } => "ProductEquality",
+                            StructuralBody::SumEquality { .. } => "SumEquality",
                             StructuralBody::ProductDebug { .. } => "ProductDebug",
                             StructuralBody::SumDebug { .. } => "SumDebug",
                             StructuralBody::IndexSwitch { .. } => "IndexSwitch",

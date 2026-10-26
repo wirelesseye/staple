@@ -5281,8 +5281,8 @@ fn compares_library_defined_bool_values() {
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_root(&lower(&module))
-        .expect("Bool equality should dispatch through its standard-library implementation");
-    assert!(llvm.contains("match.tag.matches"));
+        .expect("Bool equality should derive structurally from `True | False`");
+    assert!(llvm.contains("equality.same_tag"));
 }
 
 #[test]

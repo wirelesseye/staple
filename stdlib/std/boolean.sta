@@ -27,13 +27,10 @@ impl Display Bool {
     fmt = (value, mut formatter) => formatter |> write (if value { "True" } else { "False" })
 }
 
-impl Eq Bool {
-    eq = (left; right) => match (left, right) {
-        (True, True) => True,
-        (False, False) => True,
-        _ => False,
-    }
-}
+// `Bool` derives `Eq` structurally from its alternatives.
+impl Eq True { eq = (_; _) => True }
+
+impl Eq False { eq = (_; _) => True }
 
 impl Not Bool {
     not = value => if value { False } else { True }

@@ -67,6 +67,69 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_debug_delegate(function, value, formatter, name)
     }
 
+    /// Calls one element's or alternative's `Eq.eq` delegate and reads its
+    /// `Bool` result as an `i1`.
+    fn emit_equality_delegate(
+        &self,
+        delegate: &DebugDelegate,
+        left: BasicValueEnum<'context>,
+        right: BasicValueEnum<'context>,
+        name: &str,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        let arguments = self.backend.build_trait_arguments(
+            &delegate.callee_type,
+            &[left, right],
+            span.clone(),
+        )?;
+        let callee = self.planned_function(&delegate.callee, span)?;
+        let compared = self
+            .backend
+            .builder
+            .build_direct_call(callee, &arguments, name)
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "equality delegate has no result"))?;
+        let BasicValueEnum::StructValue(compared) = compared else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "equality delegate has an invalid Bool representation",
+            ));
+        };
+        let tag = self.backend.build_sum_tag(compared, "equality.tag")?;
+        self.backend
+            .build_sum_tag_compare(tag, crate::codegen::ir::BOOL_TRUE_TAG, "equality.equal")
+    }
+
+    /// Wraps a structural equality's `i1` outcome as the method's `Bool`
+    /// result, negating it for `Eq.ne`.
+    fn emit_equality_result(
+        &self,
+        mut equal: inkwell::values::IntValue<'context>,
+        negate: bool,
+        plan: &StructuralMethodPlan,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        if negate {
+            equal = self
+                .backend
+                .builder
+                .build_not(equal, "equality.negated")
+                .map_err(compiler_diagnostic)?;
+        }
+        value_as_basic(
+            self.backend.build_bool_value(
+                equal,
+                self.backend
+                    .compile_type(&plan.callable_type.result)?
+                    .into_struct_type(),
+                span.clone(),
+            )?,
+        )
+        .ok_or_else(|| Diagnostic::new(span.clone(), "equality result is not first-class"))
+    }
+
     /// Inject through the alternative's recorded coercion plan; the emitter
     /// never plans the injection itself.
     fn emit_structural_alternative(
@@ -130,33 +193,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let right_field =
                         self.backend
                             .extract_product_element(*right, index, "equality.right")?;
-                    let arguments = self.backend.build_trait_arguments(
-                        &delegate.callee_type,
-                        &[left_field, right_field],
-                        span.clone(),
-                    )?;
-                    let callee = self.planned_function(&delegate.callee, span)?;
-                    let compared = self
-                        .backend
-                        .builder
-                        .build_direct_call(callee, &arguments, "equality.element")
-                        .map_err(compiler_diagnostic)?
-                        .try_as_basic_value()
-                        .basic()
-                        .ok_or_else(|| {
-                            Diagnostic::new(span.clone(), "equality delegate has no result")
-                        })?;
-                    let BasicValueEnum::StructValue(compared) = compared else {
-                        return Err(Diagnostic::new(
-                            span.clone(),
-                            "equality delegate has an invalid Bool representation",
-                        ));
-                    };
-                    let tag = self.backend.build_sum_tag(compared, "equality.tag")?;
-                    let equal = self.backend.build_sum_tag_compare(
-                        tag,
-                        crate::codegen::ir::BOOL_TRUE_TAG,
-                        "equality.equal",
+                    let equal = self.emit_equality_delegate(
+                        delegate,
+                        left_field,
+                        right_field,
+                        "equality.element",
+                        span,
                     )?;
                     let next = self
                         .backend
@@ -195,26 +237,113 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     ),
                     (&self.backend.context.bool_type().const_zero(), failed),
                 ]);
-                let mut equal = condition.as_basic_value().into_int_value();
-                if *negate {
-                    equal = self
+                self.emit_equality_result(
+                    condition.as_basic_value().into_int_value(),
+                    *negate,
+                    plan,
+                    span,
+                )?
+            }
+            StructuralBody::SumEquality {
+                alternatives,
+                negate,
+            } => {
+                let [
+                    BasicValueEnum::StructValue(left),
+                    BasicValueEnum::StructValue(right),
+                ] = values.as_slice()
+                else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "invalid structural equality arguments",
+                    ));
+                };
+                let Some(CheckedType::Sum(sum)) = plan.arguments.first() else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "invalid structural equality sum",
+                    ));
+                };
+                let left_tag = self.backend.build_sum_tag(*left, "equality.left.tag")?;
+                let right_tag = self.backend.build_sum_tag(*right, "equality.right.tag")?;
+                let same_tag = self
+                    .backend
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        left_tag,
+                        right_tag,
+                        "equality.same_tag",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let differing = self
+                    .backend
+                    .builder
+                    .get_insert_block()
+                    .expect("equality body has a block");
+                let dispatch = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "equality.dispatch");
+                let merge = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "equality.merge");
+                self.backend
+                    .builder
+                    .build_conditional_branch(same_tag, dispatch, merge)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(dispatch);
+                let (unknown_tag, cases) =
+                    self.backend
+                        .begin_debug_sum(*left, alternatives.len(), span.clone())?;
+                let mut incoming = vec![(self.backend.context.bool_type().const_zero(), differing)];
+                for (index, delegate) in alternatives.iter().enumerate() {
+                    self.backend.builder.position_at_end(cases[index]);
+                    let left_payload =
+                        self.backend
+                            .extract_sum_alternative(*left, sum, index, span.clone())?;
+                    let right_payload =
+                        self.backend
+                            .extract_sum_alternative(*right, sum, index, span.clone())?;
+                    let equal = self.emit_equality_delegate(
+                        delegate,
+                        left_payload,
+                        right_payload,
+                        "equality.alternative",
+                        span,
+                    )?;
+                    let compared = self
                         .backend
                         .builder
-                        .build_not(equal, "equality.negated")
+                        .get_insert_block()
+                        .expect("equality case has a block");
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(merge)
                         .map_err(compiler_diagnostic)?;
+                    incoming.push((equal, compared));
                 }
-                value_as_basic(
-                    self.backend.build_bool_value(
-                        equal,
-                        self.backend
-                            .compile_type(&plan.callable_type.result)?
-                            .into_struct_type(),
-                        span.clone(),
-                    )?,
-                )
-                .ok_or_else(|| {
-                    Diagnostic::new(span.clone(), "equality result is not first-class")
-                })?
+                self.backend.builder.position_at_end(unknown_tag);
+                self.backend
+                    .builder
+                    .build_unreachable()
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(merge);
+                let condition = self
+                    .backend
+                    .builder
+                    .build_phi(self.backend.context.bool_type(), "equality.result")
+                    .map_err(compiler_diagnostic)?;
+                for (value, block) in &incoming {
+                    condition.add_incoming(&[(value, *block)]);
+                }
+                self.emit_equality_result(
+                    condition.as_basic_value().into_int_value(),
+                    *negate,
+                    plan,
+                    span,
+                )?
             }
             StructuralBody::ProductDebug { steps, write } => {
                 let [BasicValueEnum::StructValue(value), formatter] = values.as_slice() else {

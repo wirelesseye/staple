@@ -515,9 +515,8 @@ fn structural_deref_mutate_body(
     ))
 }
 
-/// `Debug` for a product (ordered literal/element steps plus the shared
-/// `Formatter.write` instance) or a sum (one delegate per alternative in tag
-/// order, no literals).
+/// `Eq` for a product (one delegate per element in order) or a sum (one
+/// delegate per alternative in tag order).
 fn structural_equality_body(
     program: &LoweredProgram,
     plan: &StructuralMethodPlan,
@@ -526,39 +525,57 @@ fn structural_equality_body(
     let (trait_id, method) =
         standard_trait_method(program, program.semantic_ids.eq_trait, origin, "Eq")?;
     let target = structural_argument(plan, 0, origin)?;
-    let CheckedType::Product(product) = target else {
-        return Err(Diagnostic::new(
-            origin.span.clone(),
-            "structural Eq target is not a product",
-        ));
+    let value_types: Vec<CheckedType> = match &target {
+        CheckedType::Product(product) => product
+            .iter_positions()
+            .map(|element| element.value_type.clone())
+            .collect(),
+        CheckedType::Sum(sum) => sum.alternatives.clone(),
+        _ => {
+            return Err(Diagnostic::new(
+                origin.span.clone(),
+                "structural Eq target is not a product or sum",
+            ));
+        }
     };
     let negate = program
         .trait_methods
         .get(plan.method)
         .is_some_and(|method| method.name == "ne");
     let mut requests = Vec::new();
-    let mut elements = Vec::new();
-    for element in product.iter_positions() {
+    let mut delegates = Vec::new();
+    for value_type in value_types {
         let selected = select_concrete_trait_method(
             program,
             origin,
             trait_id,
             method,
-            std::slice::from_ref(&element.value_type),
+            std::slice::from_ref(&value_type),
         )?;
         requests.push(selected.request);
-        elements.push(DebugDelegate {
-            value_type: element.value_type.clone(),
+        delegates.push(DebugDelegate {
+            value_type,
             callee: selected.callee,
             callee_type: selected.callee_type,
         });
     }
-    Ok((
-        StructuralBody::ProductEquality { elements, negate },
-        requests,
-    ))
+    let body = if matches!(target, CheckedType::Sum(_)) {
+        StructuralBody::SumEquality {
+            alternatives: delegates,
+            negate,
+        }
+    } else {
+        StructuralBody::ProductEquality {
+            elements: delegates,
+            negate,
+        }
+    };
+    Ok((body, requests))
 }
 
+/// `Debug` for a product (ordered literal/element steps plus the shared
+/// `Formatter.write` instance) or a sum (one delegate per alternative in tag
+/// order, no literals).
 fn structural_debug_body(
     program: &LoweredProgram,
     plan: &StructuralMethodPlan,
