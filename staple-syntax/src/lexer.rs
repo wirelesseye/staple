@@ -101,6 +101,7 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
             text: text.to_owned(),
             span: start..end,
             origin: None,
+            hygiene: None,
         });
         offset = end;
     }

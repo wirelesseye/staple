@@ -2126,6 +2126,84 @@ fn generated_items_keep_definition_and_splice_hygiene() {
         .expect("generated item names and splices should retain their hygiene contexts");
 }
 
+/// A caller module whose `private_identity`, `private_value`, and `Shadow`
+/// share names, but not types, with those in the macro's module.
+const SHADOWING_CALLER: &str = concat!(
+    "use helpers.define_generated\n",
+    "def private_identity: String -> String = value => value\n",
+    "let private_value: String = \"caller\"\n",
+    "@define_generated\n",
+    "type Shadow wrap I32\n",
+    "let result: I32 = generated (Shadow 1)\n",
+);
+
+#[test]
+fn items_parsed_from_quotations_keep_definition_and_splice_hygiene() {
+    // Quoted names resolve in the macro's module, so `private_identity
+    // private_value` is the `I32` pair; the spliced `$target` is the caller's
+    // `Shadow`, not the macro module's.
+    let fixture = Fixture::new();
+    fixture.write("main.sta", SHADOWING_CALLER);
+    fixture.write(
+        "helpers.sta",
+        concat!(
+            "use std.syntax.*\n",
+            "use std.process.(panic)\n",
+            "def private_identity: I32 -> I32 = value => value\n",
+            "let private_value: I32 = 40\n",
+            "type Shadow wrap String\n",
+            "pub macro @define_generated: Item -> Sequence<Item> = item => match item {\n",
+            "    TypeDeclarationItem (_, target, _, _, _) => {\n",
+            "        let source = quote { pub def generated = (value: $target) => I32 :: private_identity private_value }\n",
+            "        let generated = match (Parse.parse_all.<Item> source) {\n",
+            "            Ok generated => generated,\n",
+            "            _ => panic \"invalid generated item\",\n",
+            "        }\n",
+            "        Sequence (first: item, rest: Sequence (first: generated, rest: Sequence ()))\n",
+            "    },\n",
+            "    _ => panic \"unsupported item\",\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("parsed quotations should keep definition and splice hygiene");
+}
+
+#[test]
+fn parse_quote_with_raw_splices_keeps_splice_hygiene() {
+    // A raw splice makes `parse_quote` reparse substituted tokens; the
+    // caller's tokens inside it still resolve at the call site.
+    let fixture = Fixture::new();
+    fixture.write("main.sta", SHADOWING_CALLER);
+    fixture.write(
+        "helpers.sta",
+        concat!(
+            "use std.syntax.*\n",
+            "use std.process.(panic)\n",
+            "def private_identity: I32 -> I32 = value => value\n",
+            "let private_value: I32 = 40\n",
+            "type Shadow wrap String\n",
+            "def generated_item = target: Type => Item :: {\n",
+            "    let parameter = quote { value: $target }\n",
+            "    parse_quote { pub def generated = ($parameter) => I32 :: private_identity private_value }\n",
+            "}\n",
+            "pub macro @define_generated: Item -> Sequence<Item> = item => match item {\n",
+            "    TypeDeclarationItem (_, target, _, _, _) => Sequence (\n",
+            "        first: item,\n",
+            "        rest: Sequence (first: generated_item target, rest: Sequence ()),\n",
+            "    ),\n",
+            "    _ => panic \"unsupported item\",\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("reparsed caller tokens should resolve at the call site");
+}
+
 #[test]
 fn imports_function_and_modifier_macros_with_the_same_name() {
     let fixture = Fixture::new();

@@ -221,6 +221,8 @@ pub struct CheckedTraitDispatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StructuralTraitMethod {
     Equality,
+    /// `Default` for a product whose elements all implement `Default`.
+    Default,
     Debug,
     Display,
     Index,
@@ -3460,6 +3462,7 @@ impl TypedModule {
             self.debug_trait,
             self.resolved.standard_trait("Display"),
             self.resolved.standard_trait("Eq"),
+            self.resolved.standard_trait("Default"),
             |value_type| self.is_copy_type(value_type),
             |value_type| self.is_debug_type(value_type),
             |trait_id, arguments| self.resolve_trait_obligation(trait_id, arguments),
@@ -3486,6 +3489,7 @@ impl TypedModule {
             self.debug_trait,
             self.resolved.standard_trait("Display"),
             self.resolved.standard_trait("Eq"),
+            self.resolved.standard_trait("Default"),
             |value_type| self.is_copy_type(value_type),
             |value_type| self.is_debug_type(value_type),
             |trait_id, arguments| self.resolve_trait_obligation(trait_id, arguments),
@@ -3981,6 +3985,7 @@ impl TypedModule {
             self.debug_trait,
             self.resolved.standard_trait("Display"),
             self.resolved.standard_trait("Eq"),
+            self.resolved.standard_trait("Default"),
             |value_type| self.is_copy_type(value_type),
             |value_type| self.is_debug_type(value_type),
             |trait_id, arguments| self.resolve_trait_obligation(trait_id, arguments),
@@ -4136,6 +4141,13 @@ pub struct TypeChecker {
     juxtaposed_call_plans: HashMap<SyntaxId, CheckedJuxtaposedCallPlan>,
     continued_juxtaposed_calls: HashSet<SyntaxId>,
     checked_product_defaults: HashSet<SyntaxId>,
+    /// Field defaults met while top-level bindings were still unseeded, with
+    /// their field types. A default may name a global, which has no type
+    /// until then, so these are checked once seeding finishes.
+    pending_product_defaults: Vec<(Expression, CheckedType)>,
+    /// Whether top-level bindings and function types are seeded, so a field
+    /// default can be checked where its product type is resolved.
+    product_defaults_checkable: bool,
     product_default_expressions: HashMap<SyntaxId, Expression>,
     curried_default_expressions: HashSet<SyntaxId>,
     symbol_types: HashMap<SymbolId, CheckedType>,
@@ -4438,7 +4450,8 @@ impl TypeChecker {
         self.validate_trait_implementation_prerequisites(&module);
         self.collect_resource_dependencies(&module);
         // Singleton values first: constructor representations may name them
-        // in field defaults, which are checked when the representation is.
+        // in field defaults. Defaults naming other globals are checked once
+        // top-level bindings are seeded, below.
         self.seed_singleton_values(&module);
         self.seed_constructors(&module);
         self.collect_top_level_bindings(&module);
@@ -4450,6 +4463,7 @@ impl TypeChecker {
         self.refresh_scheme_bounds();
         self.reject_blanket_companion_overlaps(&module);
         self.check_structural_companions(&module);
+        self.check_pending_product_defaults(&module);
 
         let module_order = module.program().initialization_order().to_vec();
         for module_id in module_order {
@@ -5499,6 +5513,7 @@ impl TypeChecker {
                 self.debug_trait,
                 self.display_trait,
                 self.eq_trait,
+                self.default_trait,
                 |value_type| self.is_copy_with(value_type, &[]),
                 |value_type| {
                     self.debug_trait.is_some_and(|trait_id| {
@@ -5513,6 +5528,7 @@ impl TypeChecker {
                         StructuralTraitMethod::Equality => "`Eq` is derived structurally for this product or sum type and cannot be implemented explicitly",
                         StructuralTraitMethod::Display => "`Display` is derived structurally for this product type and cannot be implemented explicitly",
                         StructuralTraitMethod::Debug => "`Debug` is derived structurally for this product or sum type and cannot be implemented explicitly",
+                        StructuralTraitMethod::Default => "`Default` is derived structurally for this product type and cannot be implemented explicitly",
                         _ => "indexing and iteration traits are derived structurally for this type and cannot be implemented explicitly",
                     },
                 ));
@@ -17205,6 +17221,7 @@ impl TypeChecker {
             self.debug_trait,
             self.display_trait,
             self.eq_trait,
+            self.default_trait,
             |value_type| self.is_copy_with(value_type, &bounds),
             |value_type| {
                 self.debug_trait.is_some_and(|trait_id| {
@@ -17358,6 +17375,7 @@ impl TypeChecker {
             self.debug_trait,
             self.display_trait,
             self.eq_trait,
+            self.default_trait,
             |value_type| self.is_copy_with(value_type, &bounds),
             |value_type| {
                 self.debug_trait.is_some_and(|trait_id| {
@@ -19503,6 +19521,25 @@ impl TypeChecker {
         ty
     }
 
+    fn check_product_default(
+        &mut self,
+        module: &ResolvedModule,
+        default: &Expression,
+        value_type: &CheckedType,
+    ) {
+        let actual = self.check_expression_expected(module, default, Some(value_type));
+        self.require_compatible(actual, value_type.clone(), default.syntax().span.clone());
+    }
+
+    /// Checks the field defaults deferred while top-level bindings were
+    /// unseeded; later ones are checked where their product type is resolved.
+    fn check_pending_product_defaults(&mut self, module: &ResolvedModule) {
+        self.product_defaults_checkable = true;
+        for (default, value_type) in std::mem::take(&mut self.pending_product_defaults) {
+            self.check_product_default(module, &default, &value_type);
+        }
+    }
+
     fn resolve_source_type_inner(
         &mut self,
         module: &ResolvedModule,
@@ -20665,13 +20702,12 @@ impl TypeChecker {
                         ));
                     }
                     if !contains_type_parameter(&value_type) {
-                        let actual =
-                            self.check_expression_expected(module, default, Some(&value_type));
-                        self.require_compatible(
-                            actual,
-                            value_type.clone(),
-                            default.syntax().span.clone(),
-                        );
+                        if self.product_defaults_checkable {
+                            self.check_product_default(module, default, &value_type);
+                        } else {
+                            self.pending_product_defaults
+                                .push((default.clone(), value_type.clone()));
+                        }
                     }
                     self.product_default_expressions
                         .insert(default.syntax().id, default.clone());
@@ -25597,6 +25633,7 @@ pub(crate) fn structural_trait_arguments(
     debug_trait: Option<TraitId>,
     display_trait: Option<TraitId>,
     eq_trait: Option<TraitId>,
+    default_trait: Option<TraitId>,
     is_copy: impl Fn(&CheckedType) -> bool,
     is_debug: impl Fn(&CheckedType) -> bool,
     resolve_obligation: impl Fn(TraitId, &[CheckedType]) -> Option<Vec<CheckedType>>,
@@ -25614,6 +25651,25 @@ pub(crate) fn structural_trait_arguments(
             resolve_obligation(trait_id, std::slice::from_ref(alternative)).is_some()
         }) {
             return Some((vec![target.clone()], StructuralTraitMethod::Equality));
+        }
+        return None;
+    }
+    if Some(trait_id) == default_trait {
+        let [target] = arguments else { return None };
+        let CheckedType::Product(product) = target else {
+            return None;
+        };
+        // A product carrying field defaults is the representation of a `wrap`
+        // or `from` type; filling it structurally would ignore those defaults.
+        if !product.variadic
+            && product.spreads.is_empty()
+            && product.runs.iter().all(|run| {
+                run.element.default.is_none()
+                    && resolve_obligation(trait_id, std::slice::from_ref(&run.element.value_type))
+                        .is_some()
+            })
+        {
+            return Some((vec![target.clone()], StructuralTraitMethod::Default));
         }
         return None;
     }
@@ -26181,14 +26237,13 @@ pub(crate) fn is_default_type(
     }) {
         return true;
     }
-    match value_type.desugared() {
-        CheckedType::Parameter { .. } => bounds.iter().any(|bound| {
-            bound.trait_id == default_trait
-                && bound.arguments.len() == 1
-                && types_equivalent(&bound.arguments[0], value_type)
-        }),
-        _ => false,
-    }
+    // A bound may name any type, such as `Default (T ^ 3)` from a derived
+    // implementation, not only a bare parameter.
+    bounds.iter().any(|bound| {
+        bound.trait_id == default_trait
+            && bound.arguments.len() == 1
+            && types_equivalent(&bound.arguments[0], value_type)
+    })
 }
 
 /// The unsigned integer type whose bit pattern represents `float`.

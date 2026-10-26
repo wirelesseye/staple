@@ -1,7 +1,218 @@
 pub mod
 
+use package.syntax.*
+use package.process.(panic)
+
 /// Marks types that have a default value.
 pub trait Default T {
     /// Creates the default value.
     default: () -> T
+}
+
+/// Joins fragments with commas.
+def derived_default_join = fragments: Sequence<Syntax> => Syntax :: match fragments {
+    Sequence () => quote {},
+    Sequence (first, rest) => match rest {
+        Sequence () => first,
+        _ => {
+            let tail = derived_default_join rest
+            quote { $first, $tail }
+        },
+    },
+}
+
+def derived_default_concat = (left: Sequence<Syntax>, right: Sequence<Syntax>) => Sequence<Syntax> :: match left {
+    Sequence () => right,
+    Sequence (first, rest) => Sequence (first: first, rest: derived_default_concat (rest, right)),
+}
+
+/// Whether any field, or any field of a nested product, declares a default.
+def derived_default_has_defaults = fields: Sequence<ProductTypeField> => Bool :: match fields {
+    Sequence () => False,
+    Sequence (first, rest) => match first {
+        ProductTypeField (_, _, Some _) => True,
+        ProductTypeField (_, ProductType nested, None) => match (derived_default_has_defaults nested) {
+            True => True,
+            False => derived_default_has_defaults rest,
+        },
+        _ => derived_default_has_defaults rest,
+    },
+}
+
+/// The value of each field, in field order: its explicit default, a nested
+/// product built field by field when it declares defaults, or
+/// `Default.default ()` ascribed to the field type, which a generic
+/// constructor cannot infer from its expected type.
+def derived_default_values = fields: Sequence<ProductTypeField> => Sequence<Syntax> :: match fields {
+    Sequence () => Sequence (),
+    Sequence (first, rest) => {
+        let value = match first {
+            ProductTypeField (_, _, Some default) => quote { $default },
+            ProductTypeField (_, field_type@(ProductType nested), None) => match (derived_default_has_defaults nested) {
+                True => {
+                    let arguments = derived_default_join (derived_default_values nested)
+                    quote { ($arguments) }
+                },
+                False => quote { $field_type :: Default.default () },
+            },
+            ProductTypeField (_, field_type, None) => quote { $field_type :: Default.default () },
+        }
+        Sequence (first: value, rest: derived_default_values rest)
+    },
+}
+
+/// The `Default` bounds the fields need: one per field that takes
+/// `Default.default ()`, looking through nested products. A product's own
+/// structural `Default` follows from its elements' bounds.
+def derived_default_field_bounds = fields: Sequence<ProductTypeField> => Sequence<Syntax> :: match fields {
+    Sequence () => Sequence (),
+    Sequence (first, rest) => match first {
+        ProductTypeField (_, _, Some _) => derived_default_field_bounds rest,
+        ProductTypeField (_, ProductType nested, None) => derived_default_concat (
+            derived_default_field_bounds nested,
+            derived_default_field_bounds rest,
+        ),
+        ProductTypeField (_, field_type, None) => Sequence (
+            first: quote { Default $field_type },
+            rest: derived_default_field_bounds rest,
+        ),
+    },
+}
+
+def derived_default_bounds = ty: Type => Sequence<Syntax> :: match ty {
+    ProductType fields => derived_default_field_bounds fields,
+    _ => Sequence (first: quote { Default $ty }, rest: Sequence ()),
+}
+
+def derived_default_parameters = parameters: Sequence<Ident<String>> => Sequence<Syntax> :: match parameters {
+    Sequence () => Sequence (),
+    Sequence (first, rest) => Sequence (
+        first: quote { $first },
+        rest: derived_default_parameters rest,
+    ),
+}
+
+/// The implementation header up to its body. A generic type's header takes
+/// the type's parameters and the bounds its defaulted fields need; its target
+/// is rebuilt from the name, since the declared type's syntax spans the whole
+/// declaration.
+def derived_default_header = (
+    name: Ident<String>,
+    target: Type,
+    parameters: Sequence<Ident<String>>,
+    representation: Type,
+) => Syntax :: match parameters {
+    Sequence () => quote { impl Default $target },
+    _ => {
+        let names = derived_default_join (derived_default_parameters parameters)
+        match (derived_default_bounds representation) {
+            Sequence () => quote { impl<$names> Default $name<$names> },
+            bounds => {
+                let bounds = derived_default_join bounds
+                quote { impl<$names where $bounds> Default $name<$names> }
+            },
+        }
+    },
+}
+
+/// `Default` for a `wrap` type: the constructor applied to the representation's
+/// default value.
+def derived_wrapper_default_implementation = (
+    name: Ident<String>,
+    target: Type,
+    parameters: Sequence<Ident<String>>,
+    representation: Type,
+) => Item :: {
+    let header = derived_default_header (name, target, parameters, representation)
+    let arguments = match representation {
+        ProductType fields => match (derived_default_has_defaults fields) {
+            True => derived_default_join (derived_default_values fields),
+            False => quote { $representation :: Default.default () },
+        },
+        _ => quote { $representation :: Default.default () },
+    }
+    parse_quote {
+        $header {
+            default = () => $name ($arguments)
+        }
+    }
+}
+
+/// `Default` for a `from` type: the representation's default value, converted
+/// implicitly. A representation without field defaults is ascribed so its own
+/// `Default` is selected rather than the target's.
+def derived_from_default_implementation = (
+    name: Ident<String>,
+    target: Type,
+    parameters: Sequence<Ident<String>>,
+    representation: Type,
+) => Item :: {
+    let header = derived_default_header (name, target, parameters, representation)
+    let value = match representation {
+        ProductType fields => match (derived_default_has_defaults fields) {
+            True => {
+                let arguments = derived_default_join (derived_default_values fields)
+                quote { ($arguments) }
+            },
+            False => quote { $representation :: Default.default () },
+        },
+        _ => quote { $representation :: Default.default () },
+    }
+    parse_quote {
+        $header {
+            default = () => $value
+        }
+    }
+}
+
+/// `Default` for a bodyless singleton type: the singleton itself.
+def derived_singleton_default_implementation = (name: Ident<String>, target: Type) => Item :: {
+    let value = quote { $name }
+    parse_quote {
+        impl Default $target {
+            default = () => $value
+        }
+    }
+}
+
+/// Derives `Default` for a `wrap` or `from` type, or a bodyless singleton.
+///
+/// Each representation field with an explicit `= ...` default uses it, and
+/// every other field uses `Default.default ()`. A nested product that declares
+/// defaults of its own is built field by field the same way, so its defaults
+/// are kept. A generic type's implementation requires `Default` only for the
+/// field types that take `Default.default ()`.
+///
+/// # Example
+///
+/// ```staple
+/// @derive_default
+/// type Config from (window: (width: I32 = 800, height: I32), title: String = "app")
+///
+/// @derive_default
+/// type Enabled
+/// ```
+pub macro @derive_default: Item -> Sequence<Item> = item => match item {
+    TypeDeclarationItem (name, target, parameters, Some (WrapperBody (_, representation)), _) => Sequence (
+        first: item,
+        rest: Sequence (
+            first: derived_wrapper_default_implementation (name, target, parameters, representation),
+            rest: Sequence (),
+        ),
+    ),
+    TypeDeclarationItem (name, target, parameters, Some (FromBody (_, representation)), _) => Sequence (
+        first: item,
+        rest: Sequence (
+            first: derived_from_default_implementation (name, target, parameters, representation),
+            rest: Sequence (),
+        ),
+    ),
+    TypeDeclarationItem (name, target, _, None, _) => Sequence (
+        first: item,
+        rest: Sequence (
+            first: derived_singleton_default_implementation (name, target),
+            rest: Sequence (),
+        ),
+    ),
+    _ => panic "derive_default item is unsupported",
 }

@@ -4747,6 +4747,7 @@ mod tests {
                         structural_bodies.insert(match &plan.body {
                             StructuralBody::ProductEquality { .. } => "ProductEquality",
                             StructuralBody::SumEquality { .. } => "SumEquality",
+                            StructuralBody::ProductDefault { .. } => "ProductDefault",
                             StructuralBody::ProductDebug { .. } => "ProductDebug",
                             StructuralBody::SumDebug { .. } => "SumDebug",
                             StructuralBody::IndexSwitch { .. } => "IndexSwitch",

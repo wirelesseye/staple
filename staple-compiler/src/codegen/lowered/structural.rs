@@ -345,6 +345,41 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     span,
                 )?
             }
+            StructuralBody::ProductDefault { elements } => {
+                let mut fields = Vec::with_capacity(elements.len());
+                for delegate in elements {
+                    let arguments = self.backend.build_trait_arguments(
+                        &delegate.callee_type,
+                        &[],
+                        span.clone(),
+                    )?;
+                    let callee = self.planned_function(&delegate.callee, span)?;
+                    fields.push(
+                        self.backend
+                            .builder
+                            .build_direct_call(callee, &arguments, "default.element")
+                            .map_err(compiler_diagnostic)?
+                            .try_as_basic_value()
+                            .basic()
+                            .ok_or_else(|| {
+                                Diagnostic::new(span.clone(), "default delegate has no result")
+                            })?,
+                    );
+                }
+                match crate::product_representation(structural_argument(plan, span)?) {
+                    _ if fields.is_empty() => self.structural_unit(span)?,
+                    Some(product) => {
+                        self.backend
+                            .build_checked_product_value(product, &fields, span.clone())?
+                    }
+                    None => {
+                        return Err(Diagnostic::new(
+                            span.clone(),
+                            "structural Default target is not a product",
+                        ));
+                    }
+                }
+            }
             StructuralBody::ProductDebug { steps, write } => {
                 let [BasicValueEnum::StructValue(value), formatter] = values.as_slice() else {
                     return Err(Diagnostic::new(
@@ -588,6 +623,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         (Some(reference), "mutate_index.deref")
                     }
                     other @ (crate::StructuralTraitMethod::Equality
+                    | crate::StructuralTraitMethod::Default
                     | crate::StructuralTraitMethod::Display
                     | crate::StructuralTraitMethod::Debug
                     | crate::StructuralTraitMethod::Index

@@ -1193,6 +1193,7 @@ impl<'a> TraitSelectionContext<'a> {
             self.program.semantic_ids.debug_trait,
             self.program.semantic_ids.display_trait,
             self.program.semantic_ids.eq_trait,
+            self.program.semantic_ids.default_trait,
             |value_type| self.is_copy(value_type),
             |value_type| {
                 self.program.semantic_ids.debug_trait.is_some_and(|debug| {

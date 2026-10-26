@@ -1479,6 +1479,7 @@ fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
 fn structural_name(structural: StructuralTraitMethod) -> &'static str {
     match structural {
         StructuralTraitMethod::Equality => "equality",
+        StructuralTraitMethod::Default => "default",
         StructuralTraitMethod::Debug => "debug",
         StructuralTraitMethod::Display => "display",
         StructuralTraitMethod::Index => "index",

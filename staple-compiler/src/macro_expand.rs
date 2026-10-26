@@ -139,6 +139,13 @@ pub(crate) enum MetaType {
     CharExpr,
     UnstructuredExpr,
     Type,
+    /// A plain comma product type whose fields are exposed; see
+    /// [`is_structured_product_type`].
+    ProductType,
+    /// One field of a [`MetaType::ProductType`]. Exposed for inspection only;
+    /// it has no syntax of its own.
+    ProductTypeField,
+    UnstructuredType,
     Pattern,
     BindingPattern,
     NominalPattern,
@@ -864,10 +871,35 @@ fn quote_contains_raw_splice(contents: &Syntax, environment: &Environment) -> bo
     })
 }
 
-fn append_syntax_tokens(output: &mut Vec<staple_syntax::SyntaxToken>, syntax: &Syntax) {
+/// The hygiene to give a spliced value's tokens that carry none of their own.
+/// Tokens that went through a quotation already record where each was
+/// written, so a raw fragment, or a value with any such token, keeps them;
+/// a value built only from its syntax tree inherits its root's context.
+fn splice_hygiene(value: &SyntaxValue, syntax: &Syntax) -> Option<(usize, u64)> {
+    if matches!(value, SyntaxValue::Raw(_)) {
+        return None;
+    }
+    root_hygiene(syntax)
+}
+
+fn root_hygiene(syntax: &Syntax) -> Option<(usize, u64)> {
+    if syntax.tokens().iter().any(|token| token.hygiene.is_some()) {
+        return None;
+    }
+    syntax.definition_module().zip(syntax.expansion_mark)
+}
+
+fn append_syntax_tokens(
+    output: &mut Vec<staple_syntax::SyntaxToken>,
+    syntax: &Syntax,
+    hygiene: Option<(usize, u64)>,
+) {
     let mut occurrences = HashMap::<String, usize>::new();
     for token in syntax.tokens() {
         let mut token = token.clone();
+        if token.hygiene.is_none() && !token.kind.is_trivia() {
+            token.hygiene = hygiene;
+        }
         if token.origin.is_none() && !token.kind.is_trivia() {
             let occurrence = occurrences.entry(token.text.clone()).or_default();
             token.origin = syntax
@@ -1896,6 +1928,10 @@ struct MacroExpander {
     diagnostics: Vec<Diagnostic>,
     next_syntax_id: usize,
     next_annotation_id: usize,
+    /// While set, freshening takes each node's hygiene from its first
+    /// token instead of the module and mark it is given; see
+    /// [`staple_syntax::SyntaxToken::hygiene`].
+    token_hygiene: bool,
     next_mark: u64,
     steps: usize,
     expansion_stack: Vec<MacroKey>,
@@ -2842,6 +2878,7 @@ impl MacroExpander {
             diagnostics: Vec::new(),
             next_syntax_id,
             next_annotation_id: 0,
+            token_hygiene: false,
             next_mark: 1,
             steps: 0,
             expansion_stack: Vec::new(),
@@ -6496,8 +6533,10 @@ impl MacroExpander {
                 };
                 Some(value)
             }
-            MetaType::Type => {
-                parse_type_argument(argument, &mut self.next_syntax_id).map(SyntaxValue::Type)
+            MetaType::Type | MetaType::ProductType | MetaType::UnstructuredType => {
+                parse_type_argument(argument, &mut self.next_syntax_id)
+                    .filter(|ty| type_category_matches(expected, ty))
+                    .map(SyntaxValue::Type)
             }
             MetaType::Pattern => {
                 parse_pattern_argument(argument, &mut self.next_syntax_id).map(SyntaxValue::Pattern)
@@ -6541,6 +6580,9 @@ impl MacroExpander {
                     MetaType::StringExpr => "a string-literal expression".to_owned(),
                     MetaType::UnstructuredExpr => "an unstructured expression".to_owned(),
                     MetaType::Type => "a type".to_owned(),
+                    MetaType::ProductType => "a product type".to_owned(),
+                    MetaType::ProductTypeField => "a product type field".to_owned(),
+                    MetaType::UnstructuredType => "an unstructured type".to_owned(),
                     MetaType::Pattern => "a pattern".to_owned(),
                     MetaType::BindingPattern => "a binding pattern".to_owned(),
                     MetaType::NominalPattern => "a nominal pattern".to_owned(),
@@ -7690,7 +7732,11 @@ impl MacroExpander {
                             return None;
                         };
                         tokens.extend(staple_syntax::lex("("));
-                        append_syntax_tokens(&mut tokens, &syntax);
+                        let hygiene = match value.as_ref() {
+                            Value::Syntax(value) => splice_hygiene(value, &syntax),
+                            _ => None,
+                        };
+                        append_syntax_tokens(&mut tokens, &syntax, hygiene);
                         tokens.extend(staple_syntax::lex(")"));
                     },
                     _ => {
@@ -9199,28 +9245,25 @@ impl MacroExpander {
                     staple_syntax::parse_expression_fragment(syntax, &mut self.next_syntax_id)
                         .ok()?;
                 alpha_rename_expression(&mut expression, mark, &mut Vec::new());
-                self.freshen_expression(&mut expression, module, mark);
                 SyntaxValue::from_expression(expression)
             }
-            MetaType::Type => {
-                let mut ty =
+            MetaType::Type | MetaType::ProductType | MetaType::UnstructuredType => {
+                let ty =
                     staple_syntax::parse_type_fragment(syntax, false, &mut self.next_syntax_id)
-                        .ok()?;
-                freshen_type(self, &mut ty, module, mark);
+                        .ok()
+                        .filter(|ty| type_category_matches(expected, ty))?;
                 SyntaxValue::Type(ty)
             }
             MetaType::Pattern => {
-                let mut pattern =
+                let pattern =
                     staple_syntax::parse_pattern_fragment(syntax, false, &mut self.next_syntax_id)
                         .ok()?;
-                freshen_pattern(self, &mut pattern, module, mark);
                 SyntaxValue::Pattern(pattern)
             }
             MetaType::Item => {
                 let mut item =
                     staple_syntax::parse_item_fragment(syntax, &mut self.next_syntax_id).ok()?;
                 alpha_rename_item(&mut item, mark);
-                freshen_item(self, &mut item, module, mark);
                 SyntaxValue::Item(Box::new(item))
             }
             MetaType::Sequence(element) if **element == MetaType::Item => {
@@ -9229,12 +9272,13 @@ impl MacroExpander {
                         .ok()?;
                 for item in &mut items {
                     alpha_rename_item(item, mark);
-                    freshen_item(self, item, module, mark);
                 }
                 SyntaxValue::Items(items)
             }
             _ => return None,
         };
+        let mut value = value;
+        self.freshen_by_tokens(&mut value, module, mark);
         Some(Value::Syntax(value))
     }
 
@@ -9263,10 +9307,15 @@ impl MacroExpander {
             }),
             _ => None,
         };
+        let mark = self.next_mark;
+        self.next_mark += 1;
         let push_template = |output: &mut Vec<staple_syntax::SyntaxToken>, index: usize| {
             let mut token = input[index].clone();
             if token.origin.is_none() {
                 token.origin = template_origin(&token);
+            }
+            if !token.kind.is_trivia() {
+                token.hygiene = Some((module.0, mark));
             }
             output.push(token);
         };
@@ -9305,7 +9354,8 @@ impl MacroExpander {
             match value {
                 Value::Syntax(SyntaxValue::Items(items)) if repeated => {
                     for item in items {
-                        append_syntax_tokens(&mut output, item_syntax(&item));
+                        let syntax = item_syntax(&item);
+                        append_syntax_tokens(&mut output, syntax, root_hygiene(syntax));
                     }
                 }
                 Value::Sequence(values) if repeated => {
@@ -9318,7 +9368,7 @@ impl MacroExpander {
                             return None;
                         };
                         let syntax = value.syntax()?;
-                        append_syntax_tokens(&mut output, syntax);
+                        append_syntax_tokens(&mut output, syntax, splice_hygiene(&value, syntax));
                     }
                 }
                 Value::Syntax(value) if !repeated => {
@@ -9329,7 +9379,7 @@ impl MacroExpander {
                         ));
                         return None;
                     };
-                    append_syntax_tokens(&mut output, syntax);
+                    append_syntax_tokens(&mut output, syntax, splice_hygiene(&value, syntax));
                 }
                 _ => {
                     self.diagnostics.push(Diagnostic::new(
@@ -9363,8 +9413,6 @@ impl MacroExpander {
             range: 0..offset,
             location: None,
         };
-        let mark = self.next_mark;
-        self.next_mark += 1;
         Some(syntax.generated(module.0, mark))
     }
 
@@ -9405,7 +9453,44 @@ impl MacroExpander {
         } else {
             self.fresh_id()
         };
+        if self.token_hygiene {
+            // A node written in a quotation resolves where it was written,
+            // and one spliced in from a caller keeps the caller's context.
+            let hygiene = syntax
+                .tokens()
+                .iter()
+                .find(|token| !token.kind.is_trivia())
+                .and_then(|token| token.hygiene);
+            if let Some((module, mark)) = hygiene {
+                *syntax = syntax.clone().generated(module, mark);
+            }
+            return;
+        }
         *syntax = syntax.clone().generated(module.0, mark);
+    }
+
+    /// Freshens syntax reparsed from spliced tokens, each node taking the
+    /// hygiene its tokens recorded.
+    fn freshen_by_tokens(&mut self, value: &mut SyntaxValue, module: ModuleId, mark: u64) {
+        let previous = std::mem::replace(&mut self.token_hygiene, true);
+        match value {
+            SyntaxValue::Ident(_) | SyntaxValue::Call(_) | SyntaxValue::Unstructured(_) => {
+                if let Some(mut expression) = value.to_expression() {
+                    self.freshen_expression(&mut expression, module, mark);
+                    *value = SyntaxValue::from_expression(expression);
+                }
+            }
+            SyntaxValue::Type(ty) => freshen_type(self, ty, module, mark),
+            SyntaxValue::Pattern(pattern) => freshen_pattern(self, pattern, module, mark),
+            SyntaxValue::Item(item) => freshen_item(self, item, module, mark),
+            SyntaxValue::Items(items) => {
+                for item in items {
+                    freshen_item(self, item, module, mark);
+                }
+            }
+            _ => {}
+        }
+        self.token_hygiene = previous;
     }
 
     fn freshen_expression(&mut self, expression: &mut Expression, module: ModuleId, mark: u64) {
@@ -9719,6 +9804,9 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
             "StringExpr" => Some(MetaType::StringExpr),
             "UnstructuredExpr" => Some(MetaType::UnstructuredExpr),
             "Type" => Some(MetaType::Type),
+            "ProductType" => Some(MetaType::ProductType),
+            "UnstructuredType" => Some(MetaType::UnstructuredType),
+            "ProductTypeField" => Some(MetaType::ProductTypeField),
             "Pattern" => Some(MetaType::Pattern),
             "BindingPattern" => Some(MetaType::BindingPattern),
             "NominalPattern" => Some(MetaType::NominalPattern),
@@ -9958,9 +10046,10 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
             let mut next_syntax_id = 0;
             match_syntax_fragment(expected, argument.syntax(), &mut next_syntax_id).is_some()
         }
-        MetaType::Type => {
+        MetaType::Type | MetaType::ProductType | MetaType::UnstructuredType => {
             let mut next_syntax_id = 0;
-            parse_type_argument(argument, &mut next_syntax_id).is_some()
+            parse_type_argument(argument, &mut next_syntax_id)
+                .is_some_and(|ty| type_category_matches(expected, &ty))
         }
         MetaType::Pattern | MetaType::BindingPattern | MetaType::NominalPattern => {
             let mut next_syntax_id = 0;
@@ -9973,7 +10062,9 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
             })
         }
         MetaType::Visibility => matches!(argument, Expression::VisibilityArgument(_)),
-        MetaType::MacroCallMetadata | MetaType::ResourceDependency => false,
+        MetaType::MacroCallMetadata | MetaType::ResourceDependency | MetaType::ProductTypeField => {
+            false
+        }
         MetaType::Syntax => true,
         MetaType::SyntaxNode => !matches!(argument, Expression::SyntaxArgument(_)),
         MetaType::Expr => !matches!(
@@ -10551,9 +10642,13 @@ fn match_syntax_fragment(
             *next_syntax_id = ids;
             value
         }
-        MetaType::Type => SyntaxValue::Type(
-            staple_syntax::parse_type_fragment(syntax, false, next_syntax_id).ok()?,
-        ),
+        MetaType::Type | MetaType::ProductType | MetaType::UnstructuredType => {
+            let ty = staple_syntax::parse_type_fragment(syntax, false, next_syntax_id).ok()?;
+            if !type_category_matches(expected, &ty) {
+                return None;
+            }
+            SyntaxValue::Type(ty)
+        }
         MetaType::Pattern | MetaType::BindingPattern | MetaType::NominalPattern => {
             let pattern =
                 staple_syntax::parse_pattern_fragment(syntax, false, next_syntax_id).ok()?;
@@ -10612,10 +10707,95 @@ fn match_syntax_fragment(
             unreachable!("declaration syntax is matched before expression parsing")
         }
         MetaType::MacroCallMetadata => unreachable!(),
-        // Only built from a declaration's clause; it has no syntax to parse.
-        MetaType::ResourceDependency => return None,
+        // Only built from a declaration's clause or a product type's fields;
+        // they have no syntax to parse.
+        MetaType::ResourceDependency | MetaType::ProductTypeField => return None,
     };
     Some(Value::Syntax(syntax_value))
+}
+
+/// Whether `ty` is exposed as a structured `ProductType`: a plain comma
+/// product without spreads, a variadic marker, or `mut`/`move` elements. Every
+/// other type is an `UnstructuredType`.
+fn is_structured_product_type(ty: &Type) -> bool {
+    matches!(ty, Type::Product(product)
+        if !product.slotted
+            && !product.variadic
+            && product
+                .elements
+                .iter()
+                .all(|element| !element.spread && !element.mutable && !element.moved))
+}
+
+/// Whether a parsed type belongs to the `Type` subcategory `expected`.
+fn type_category_matches(expected: &MetaType, ty: &Type) -> bool {
+    match expected {
+        MetaType::ProductType => is_structured_product_type(ty),
+        MetaType::UnstructuredType => !is_structured_product_type(ty),
+        _ => true,
+    }
+}
+
+/// The `Sequence<ProductTypeField>` exposed by a structured product type.
+fn product_type_fields_value(product: &staple_syntax::ProductType) -> Value {
+    let fields = product
+        .elements
+        .iter()
+        .map(|element| {
+            let name = match &element.name {
+                Some(name) => {
+                    let mut syntax = element.syntax.clone();
+                    if let Some(index) = syntax.tokens().iter().position(|token| {
+                        token.kind == staple_syntax::TokenKind::Identifier && &token.text == name
+                    }) {
+                        let start = syntax.token_range.start + index;
+                        syntax.token_range = start..start + 1;
+                    }
+                    Value::Nominal(
+                        "Some".to_owned(),
+                        Box::new(Value::Syntax(SyntaxValue::Ident(
+                            staple_syntax::NameExpression {
+                                syntax,
+                                name: name.clone(),
+                            },
+                        ))),
+                    )
+                }
+                None => Value::Nominal(
+                    "None".to_owned(),
+                    Box::new(Value::Product(Vec::new().into(), false)),
+                ),
+            };
+            let default = match &element.default {
+                Some(default) => Value::Nominal(
+                    "Some".to_owned(),
+                    Box::new(Value::Syntax(SyntaxValue::from_expression(
+                        default.as_ref().clone(),
+                    ))),
+                ),
+                None => Value::Nominal(
+                    "None".to_owned(),
+                    Box::new(Value::Product(Vec::new().into(), false)),
+                ),
+            };
+            Value::Nominal(
+                "ProductTypeField".to_owned(),
+                Box::new(Value::Product(
+                    vec![
+                        (Some("name".to_owned()), name),
+                        (
+                            Some("field_type".to_owned()),
+                            Value::Syntax(SyntaxValue::Type(element.ty.clone())),
+                        ),
+                        (Some("default".to_owned()), default),
+                    ]
+                    .into(),
+                    false,
+                )),
+            )
+        })
+        .collect::<Vec<_>>();
+    Value::Sequence(fields.into())
 }
 
 fn matches_single_token(syntax: &Syntax, expected: staple_syntax::TokenKind) -> bool {
@@ -10959,6 +11139,8 @@ fn valid_modifier_argument(expected: &MetaType) -> bool {
             | MetaType::CallExpr
             | MetaType::UnstructuredExpr
             | MetaType::Type
+            | MetaType::ProductType
+            | MetaType::UnstructuredType
             | MetaType::Pattern
             | MetaType::Modifier
     ) || matches!(expected, MetaType::Delimited(DelimiterKind::Parenthesized, DelimitedMetaContents::Separated { element, separator }) if **element == MetaType::Modifier && **separator == MetaType::Comma)
@@ -10970,9 +11152,12 @@ fn parse_modifier_argument_value(
     ids: &mut usize,
 ) -> Option<Value> {
     match expected {
-        MetaType::Type => staple_syntax::parse_type_fragment(&argument.syntax, true, ids)
-            .ok()
-            .map(|value| Value::Syntax(SyntaxValue::Type(value))),
+        MetaType::Type | MetaType::ProductType | MetaType::UnstructuredType => {
+            staple_syntax::parse_type_fragment(&argument.syntax, true, ids)
+                .ok()
+                .filter(|value| type_category_matches(expected, value))
+                .map(|value| Value::Syntax(SyntaxValue::Type(value)))
+        }
         MetaType::Pattern => staple_syntax::parse_pattern_fragment(&argument.syntax, true, ids)
             .ok()
             .map(|value| Value::Syntax(SyntaxValue::Pattern(value))),
@@ -11110,6 +11295,8 @@ fn meta_type_at_least_as_specific(left: &MetaType, right: &MetaType) -> bool {
             (MetaType::Ident(_), MetaType::Expr)
                 | (MetaType::CallExpr, MetaType::Expr)
                 | (MetaType::UnstructuredExpr, MetaType::Expr)
+                | (MetaType::ProductType, MetaType::Type)
+                | (MetaType::UnstructuredType, MetaType::Type)
                 | (MetaType::Ident(Some(_)), MetaType::Ident(None))
         )
 }
@@ -11217,6 +11404,9 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::StringExpr => "StringExpr".to_owned(),
             MetaType::UnstructuredExpr => "UnstructuredExpr".to_owned(),
             MetaType::Type => "Type".to_owned(),
+            MetaType::ProductType => "ProductType".to_owned(),
+            MetaType::ProductTypeField => "ProductTypeField".to_owned(),
+            MetaType::UnstructuredType => "UnstructuredType".to_owned(),
             MetaType::Pattern => "Pattern".to_owned(),
             MetaType::BindingPattern => "BindingPattern".to_owned(),
             MetaType::NominalPattern => "NominalPattern".to_owned(),
@@ -11325,6 +11515,9 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
         MetaType::StringExpr => "StringExpr".to_owned(),
         MetaType::UnstructuredExpr => "UnstructuredExpr".to_owned(),
         MetaType::Type => "Type".to_owned(),
+        MetaType::ProductType => "ProductType".to_owned(),
+        MetaType::ProductTypeField => "ProductTypeField".to_owned(),
+        MetaType::UnstructuredType => "UnstructuredType".to_owned(),
         MetaType::Pattern => "Pattern".to_owned(),
         MetaType::BindingPattern => "BindingPattern".to_owned(),
         MetaType::NominalPattern => "NominalPattern".to_owned(),
@@ -11580,6 +11773,7 @@ fn compile_constructor_type(name: &str, argument: CompileType) -> CompileType {
         "TypeParameter" => CompileType::Meta(MetaType::TypeParameter),
         "TypeParameters" => CompileType::Meta(MetaType::TypeParameters),
         "ResourceDependency" => CompileType::Meta(MetaType::ResourceDependency),
+        "ProductTypeField" => CompileType::Meta(MetaType::ProductTypeField),
         "UnstructuredItem" => CompileType::Meta(MetaType::UnstructuredItem),
         "Parenthesized" => CompileType::Meta(MetaType::Delimited(
             DelimiterKind::Parenthesized,
@@ -11970,6 +12164,15 @@ fn compile_field_type(ty: &CompileType, accessor: &Accessor) -> Option<CompileTy
             Some(CompileType::Meta(MetaType::Type))
         }
         (CompileType::Meta(MetaType::ResourceDependency), "mutable") => Some(CompileType::Bool),
+        (CompileType::Meta(MetaType::ProductTypeField), "name") => Some(CompileType::Meta(
+            MetaType::Optional(Box::new(MetaType::Ident(None))),
+        )),
+        (CompileType::Meta(MetaType::ProductTypeField), "field_type") => {
+            Some(CompileType::Meta(MetaType::Type))
+        }
+        (CompileType::Meta(MetaType::ProductTypeField), "default") => Some(CompileType::Meta(
+            MetaType::Optional(Box::new(MetaType::Expr)),
+        )),
         (CompileType::Meta(MetaType::TypeParameter | MetaType::TypeParameters), "declaration")
         | (CompileType::Meta(MetaType::TypeParameters), "arguments" | "bounds") => {
             Some(CompileType::Meta(MetaType::Syntax))
@@ -12031,6 +12234,15 @@ fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<Co
         (CompileType::Meta(MetaType::ResourceDependency), "ResourceDependency") => Some(
             CompileType::Product(vec![CompileType::Meta(MetaType::Type), CompileType::Bool]),
         ),
+        (CompileType::Meta(MetaType::ProductTypeField), "ProductTypeField") => {
+            Some(CompileType::Product(product_type_field_types()))
+        }
+        (CompileType::Meta(MetaType::Type | MetaType::ProductType), "ProductType") => Some(
+            CompileType::Meta(MetaType::Sequence(Box::new(MetaType::ProductTypeField))),
+        ),
+        (CompileType::Meta(MetaType::Type | MetaType::UnstructuredType), "UnstructuredType") => {
+            Some(CompileType::Product(Vec::new()))
+        }
         (CompileType::Meta(MetaType::TypeParameters), "TypeParameters") => {
             Some(CompileType::Product(vec![
                 CompileType::Meta(MetaType::Sequence(Box::new(MetaType::TypeParameter))),
@@ -12103,6 +12315,14 @@ fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<Co
         ])),
         _ => None,
     }
+}
+
+fn product_type_field_types() -> Vec<CompileType> {
+    vec![
+        CompileType::Meta(MetaType::Optional(Box::new(MetaType::Ident(None)))),
+        CompileType::Meta(MetaType::Type),
+        CompileType::Meta(MetaType::Optional(Box::new(MetaType::Expr))),
+    ]
 }
 
 fn compile_coverage_pattern(pattern: &Pattern, ty: &CompileType) -> CompileCoveragePattern {
@@ -12238,6 +12458,11 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
         CompileType::Meta(MetaType::Expr) => ["Ident", "CallExpr", "CharExpr", "StringExpr", "UnstructuredExpr"]
             .iter()
             .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
+        CompileType::Meta(MetaType::Type) => ["ProductType", "UnstructuredType"]
+            .iter()
+            .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
+        CompileType::Meta(MetaType::ProductType) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("ProductType")),
+        CompileType::Meta(MetaType::UnstructuredType) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("UnstructuredType")),
         CompileType::Meta(MetaType::Pattern) => ["BindingPattern", "NominalPattern", "UnstructuredPattern"]
             .iter()
             .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
@@ -12268,7 +12493,7 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
             nominal.name == "Ident" && matches!(nominal.argument.as_ref(), Pattern::StringLiteral(value) if staple_syntax::string_literal::decode(&value.literal).is_ok_and(|value| &value == spelling))
         }),
         CompileType::Meta(MetaType::ModifiedItem) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("ModifiedItem")),
-        CompileType::Meta(MetaType::TypeParameter | MetaType::TypeParameters | MetaType::ResourceDependency) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(format_compile_type(ty).as_str())),
+        CompileType::Meta(MetaType::TypeParameter | MetaType::TypeParameters | MetaType::ResourceDependency | MetaType::ProductTypeField) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(format_compile_type(ty).as_str())),
         CompileType::Meta(MetaType::TypeDeclarationItem) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("TypeDeclarationItem")),
         CompileType::Meta(MetaType::TypeBody) => ["AliasBody", "WrapperBody", "FromBody", "OpaqueBody"]
             .iter()
@@ -12435,7 +12660,10 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
             vec![(name.clone(), fields)]
         },
         CompileType::Meta(
-            MetaType::TypeParameter | MetaType::TypeParameters | MetaType::ResourceDependency,
+            MetaType::TypeParameter
+            | MetaType::TypeParameters
+            | MetaType::ResourceDependency
+            | MetaType::ProductTypeField,
         ) => {
             let name = format_compile_type(ty);
             let CompileType::Product(fields) = compile_constructor_representation(ty, &name)?
@@ -12582,6 +12810,24 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
             ("StringExpr".to_owned(), vec![CompileType::String]),
             ("UnstructuredExpr".to_owned(), Vec::new()),
         ],
+        CompileType::Meta(MetaType::Type) => vec![
+            (
+                "ProductType".to_owned(),
+                vec![CompileType::Meta(MetaType::Sequence(Box::new(
+                    MetaType::ProductTypeField,
+                )))],
+            ),
+            ("UnstructuredType".to_owned(), Vec::new()),
+        ],
+        CompileType::Meta(MetaType::ProductType) => vec![(
+            "ProductType".to_owned(),
+            vec![CompileType::Meta(MetaType::Sequence(Box::new(
+                MetaType::ProductTypeField,
+            )))],
+        )],
+        CompileType::Meta(MetaType::UnstructuredType) => {
+            vec![("UnstructuredType".to_owned(), Vec::new())]
+        }
         CompileType::Meta(MetaType::Pattern) => vec![
             (
                 "BindingPattern".to_owned(),
@@ -12959,6 +13205,8 @@ fn type_contains_syntax(ty: &Type) -> bool {
                 | "Braced"
                 | "UnstructuredExpr"
                 | "Type"
+                | "ProductType"
+                | "UnstructuredType"
                 | "Pattern"
                 | "Item"
                 | "Modifier"
@@ -13531,6 +13779,25 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                     Value::String(name.name.clone()),
                     environment,
                 );
+            }
+            if pattern.namespace.is_none()
+                && let Value::Syntax(SyntaxValue::Type(ty)) = &value
+            {
+                return match (pattern.name.as_str(), ty) {
+                    ("ProductType", Type::Product(product)) if is_structured_product_type(ty) => {
+                        bind_pattern(
+                            &pattern.argument,
+                            product_type_fields_value(product),
+                            environment,
+                        )
+                    }
+                    ("UnstructuredType", ty) if !is_structured_product_type(ty) => bind_pattern(
+                        &pattern.argument,
+                        Value::Product(Vec::new().into(), false),
+                        environment,
+                    ),
+                    _ => false,
+                };
             }
             if pattern.namespace.is_none()
                 && pattern.name == "CallExpr"
@@ -14175,7 +14442,11 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
             true
         }
         (MetaType::UnstructuredExpr, Value::Syntax(SyntaxValue::Unstructured(_))) => true,
-        (MetaType::Type, Value::Syntax(SyntaxValue::Type(_))) => true,
+        (
+            MetaType::Type | MetaType::ProductType | MetaType::UnstructuredType,
+            Value::Syntax(SyntaxValue::Type(ty)),
+        ) => type_category_matches(expected, ty),
+        (MetaType::ProductTypeField, Value::Nominal(name, _)) => name == "ProductTypeField",
         (MetaType::Pattern, Value::Syntax(SyntaxValue::Pattern(_))) => true,
         (MetaType::BindingPattern, Value::Syntax(SyntaxValue::Pattern(Pattern::Binding(_)))) => {
             true

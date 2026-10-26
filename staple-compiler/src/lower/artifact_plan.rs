@@ -672,7 +672,10 @@ impl LoweredArtifactPlan {
                         elements: alternatives,
                         ..
                     }
-                    | StructuralBody::SumEquality { alternatives, .. } => {
+                    | StructuralBody::SumEquality { alternatives, .. }
+                    | StructuralBody::ProductDefault {
+                        elements: alternatives,
+                    } => {
                         for delegate in alternatives {
                             debug(delegate, visit);
                         }
@@ -1234,6 +1237,12 @@ pub(crate) enum StructuralBody {
         /// `Eq.ne` negates the result.
         negate: bool,
     },
+    /// Product `Default`: call each element's `Default.default` in order and
+    /// assemble the results.
+    ProductDefault {
+        /// The per-position delegates in product order.
+        elements: Vec<DebugDelegate>,
+    },
     /// Product `Debug`: write the recorded literal steps and delegate each
     /// element to `Debug.fmt`.
     ProductDebug {
@@ -1358,7 +1367,10 @@ impl StructuralMethodPlan {
                 elements: alternatives,
                 ..
             }
-            | StructuralBody::SumEquality { alternatives, .. } => {
+            | StructuralBody::SumEquality { alternatives, .. }
+            | StructuralBody::ProductDefault {
+                elements: alternatives,
+            } => {
                 for delegate in alternatives {
                     visit_planned(&delegate.callee, visit);
                 }
@@ -1395,7 +1407,10 @@ impl StructuralMethodPlan {
                 elements: alternatives,
                 ..
             }
-            | StructuralBody::SumEquality { alternatives, .. } => {
+            | StructuralBody::SumEquality { alternatives, .. }
+            | StructuralBody::ProductDefault {
+                elements: alternatives,
+            } => {
                 for delegate in alternatives {
                     visit_planned_mut(&mut delegate.callee, visit);
                 }
