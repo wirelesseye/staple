@@ -4062,7 +4062,6 @@ fn allows_local_trait_implementations_for_products() {
 fn enforces_trait_implementation_orphan_rules_without_a_manifest() {
     for source in [
         "impl Default (I32, String) { default = () => (0, \"\") }\n",
-        "impl Default () { default = () => () }\n",
         concat!(
             "type Local wrap I32\n",
             "impl Default (Local, I32) { default = () => (Local 0, 0) }\n",
@@ -4088,6 +4087,17 @@ fn enforces_trait_implementation_orphan_rules_without_a_manifest() {
                 .contains("cannot implement an external trait for external types")
         }));
     }
+
+    // `()` qualifies for the structural implementation, so that conflict is
+    // reported instead.
+    let diagnostics = TypeChecker::new()
+        .check(resolve("impl Default () { default = () => () }\n"))
+        .expect_err_diagnostics("the empty product's Default is structural");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("`Default` is derived structurally for this product type")
+    }));
 
     type_check(concat!(
         "type Local wrap I32\n",
