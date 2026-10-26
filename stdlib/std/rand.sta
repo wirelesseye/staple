@@ -1,0 +1,1093 @@
+/// Random numbers, distributions and shuffling. Not for cryptography.
+pub mod
+
+use package.list.List
+use package.clone.Clone
+use package.convert.TryConvert
+use package.io.IO
+use package.option.(Option, Some, None)
+use package.ops.(BitAnd, BitXor)
+use package.process.(panic, trap)
+use package.ptr.(RawMutPtr, RawOpaqueMutPtr)
+use package.range.(Range, RangeInclusive)
+use package.result.(Result, Ok)
+use package.source.track_caller
+use package.typegroup.typegroup
+
+extern "c" {
+    getentropy: (RawOpaqueMutPtr, USize) -> I32
+    __staple_fs_errno: () -> I32
+}
+
+/// A seedable pseudo-random generator (xoshiro256**).
+/// Not cryptographically secure.
+pub type Rng wrap (s0: U64, s1: U64, s2: U64, s3: U64)
+
+impl !Copy Rng {}
+
+impl Clone Rng {
+    clone = rng => Rng (s0: rng.*.s0, s1: rng.*.s1, s2: rng.*.s2, s3: rng.*.s3)
+}
+
+/// The operating system could not supply randomness.
+pub type EntropyError wrap pub (code: I32)
+
+/// A type with a canonical uniform distribution.
+pub trait Random T {
+    random: mut Rng -> T
+}
+
+/// A range that can be sampled without bias.
+pub trait SampleRange R {
+    type Item
+    @track_caller
+    sample_range: (R, mut Rng) -> Item
+    bounds: R -> (start: Item, end: Item, inclusive: Bool) =
+        _ => panic "Uniform.new: range does not expose bounds"
+}
+
+/// Something that produces values of `Output` from a generator.
+pub trait Distribution D {
+    type Output
+    sample: (D, mut Rng) -> Output
+}
+
+/// The reason a distribution could not be constructed.
+pub typegroup DistributionError {
+    InvalidParameter,
+    NoPositiveWeight,
+}
+
+// ---------------------------------------------------------------------------
+// xoshiro256** and SplitMix64
+// ---------------------------------------------------------------------------
+
+def splitmix_next = state: U64 => (U64, U64) :: {
+    let next = state + 11400714819323198485
+    let mut z = next
+    z = BitXor.bit_xor (z; U64.wrapping_shift_right z 30)
+    z = z * 13787848793156543929
+    z = BitXor.bit_xor (z; U64.wrapping_shift_right z 27)
+    z = z * 10723151780598845931
+    (next, BitXor.bit_xor (z; U64.wrapping_shift_right z 31))
+}
+
+companion Rng {
+    use package.source.track_caller
+
+    /// Seeds from a single integer through SplitMix64. Same seed, same stream.
+    pub def seeded = seed: U64 => Rng :: {
+        let (state, s0) = splitmix_next seed
+        let (state, s1) = splitmix_next state
+        let (state, s2) = splitmix_next state
+        let (state, s3) = splitmix_next state
+        Rng (s0: s0, s1: s1, s2: s2, s3: s3)
+    }
+
+    /// Seeds from 32 bytes. An all-zero state is replaced, never kept.
+    pub def from_seed = seed: (U64, U64, U64, U64) => Rng :: {
+        let (s0, s1, s2, s3) = seed
+        if (s0 == 0 && s1 == 0 && s2 == 0 && s3 == 0) {
+            seeded 1
+        } else {
+            Rng (s0: s0, s1: s1, s2: s2, s3: s3)
+        }
+    }
+
+    /// Seeds from the operating system.
+    pub def from_entropy = () =>{IO} Result<Rng, EntropyError> :: {
+        let mut bytes: List<U8> = List.of (0u8 ^ 32)
+        fill_entropy bytes ?
+        Ok (from_seed (
+            read_u64_le bytes 0,
+            read_u64_le bytes 8,
+            read_u64_le bytes 16,
+            read_u64_le bytes 24,
+        ))
+    }
+
+    /// Returns the next 64 bits.
+    pub def next_u64 = mut rng: Rng => U64 :: {
+        let mut s0 = rng.*.s0
+        let mut s1 = rng.*.s1
+        let mut s2 = rng.*.s2
+        let mut s3 = rng.*.s3
+        let result = U64.wrapping_multiply (U64.rotate_left (U64.wrapping_multiply s1 5) 7) 9
+        let t = U64.wrapping_shift_left s1 17
+        s2 = BitXor.bit_xor (s2; s0)
+        s3 = BitXor.bit_xor (s3; s1)
+        s1 = BitXor.bit_xor (s1; s2)
+        s0 = BitXor.bit_xor (s0; s3)
+        s2 = BitXor.bit_xor (s2; t)
+        s3 = U64.rotate_left s3 45
+        rng.*.s0 = s0
+        rng.*.s1 = s1
+        rng.*.s2 = s2
+        rng.*.s3 = s3
+        result
+    }
+
+    /// Returns the next 32 bits, taken from the high half of one draw.
+    pub def next_u32 = mut rng: Rng => U32 :: narrow_u32 (U64.wrapping_shift_right (next_u64 rng) 32)
+
+    /// Fills every byte of `buffer` with generator output. The length is
+    /// unchanged.
+    pub def fill_bytes = (mut rng: Rng; mut buffer: List<U8>) => () :: {
+        let length = List.length buffer
+        let data = List.unsafe_data buffer
+        let mut index: USize = 0
+        while (index < length) {
+            let word = next_u64 rng
+            let remaining = length - index
+            let chunk: USize = if (remaining < 8) { remaining } else { 8 }
+            let mut byte_index: USize = 0
+            while (byte_index < chunk) {
+                let shift: U32 = usize_to_u32 (byte_index * 8)
+                let byte = narrow_u8 (U64.wrapping_shift_right word shift)
+                RawMutPtr.store (RawMutPtr.add data (index + byte_index)) byte
+                byte_index = byte_index + 1
+            }
+            index = index + chunk
+        }
+    }
+
+    /// Advances by 2^128 steps (the published xoshiro256** jump).
+    pub def jump = mut rng: Rng => () :: {
+        let (s0, s1, s2, s3) = jump_bits rng 1733541517147835066 0 0 0 0
+        let (s0, s1, s2, s3) = jump_bits rng 15395012609548302636 s0 s1 s2 s3
+        let (s0, s1, s2, s3) = jump_bits rng 12202545078643706282 s0 s1 s2 s3
+        let (s0, s1, s2, s3) = jump_bits rng 4155657270789760540 s0 s1 s2 s3
+        rng.*.s0 = s0
+        rng.*.s1 = s1
+        rng.*.s2 = s2
+        rng.*.s3 = s3
+    }
+
+    /// Returns a clone and then jumps the original, giving each caller an
+    /// independent stream.
+    pub def fork = mut rng: Rng => Rng :: {
+        let child = Rng (s0: rng.*.s0, s1: rng.*.s1, s2: rng.*.s2, s3: rng.*.s3)
+        jump rng
+        child
+    }
+
+    /// Samples a uniformly distributed value of a type.
+    pub def random = <T where Random T> mut rng: Rng => T :: Random.random rng
+
+    /// Samples a value from a range without modulo bias. Panics at the caller
+    /// when the range is empty.
+    @track_caller
+    pub def between = <R where SampleRange R> (mut rng: Rng; range: R) =>
+        SampleRange.Item R :: SampleRange.sample_range (range, rng)
+
+    /// Returns true with the given probability. Values outside `[0, 1]` are
+    /// clamped; NaN is treated as zero.
+    pub def chance = (mut rng: Rng; probability: F64) => Bool :: {
+        let threshold = probability_threshold probability
+        if (threshold == U64.Max) {
+            True
+        } else {
+            next_u64 rng < threshold
+        }
+    }
+
+    /// Shuffles a list in place with Fisher-Yates.
+    pub def shuffle = <T> (mut rng: Rng; mut list: List<T>) => () :: {
+        let mut index = List.length list
+        while (index > 1) {
+            index = index - 1
+            let other = Rng.between rng ((0usize)..=index)
+            List.swap list index other
+        }
+    }
+
+    /// Copies one uniformly chosen element, or `None` for an empty list.
+    pub def choose = <T where Copy T> (mut rng: Rng; list: List<T>) => Option<T> :: {
+        let length = List.length list
+        if (length == 0) {
+            None
+        } else {
+            let index = Rng.between rng ((0usize)..length)
+            Some (List.get_unchecked list index)
+        }
+    }
+
+    /// Copies up to `count` distinct elements in selection order.
+    pub def choose_multiple = <T where Clone T> (mut rng: Rng; list: List<T>; count: USize) =>
+        List<T> :: {
+        let length = List.length list
+        let wanted: USize = if (count < length) { count } else { length }
+        let mut pool = Clone.clone list
+        let mut result: List<T> = List.with_capacity wanted
+        let mut remaining = length
+        while (List.length result < wanted) {
+            let index = Rng.between rng ((0usize)..remaining)
+            List.swap pool index (remaining - 1)
+            let item = match (List.pop pool) {
+                Some value => value,
+                None => trap (),
+            }
+            List.push result item
+            remaining = remaining - 1
+        }
+        result
+    }
+
+    /// Samples `count` independent values from a distribution.
+    pub def sample_n = <D where Distribution D>
+        (mut rng: Rng; distribution: D; count: USize) =>
+        List<Distribution.Output D> :: {
+        let mut result: List<Distribution.Output D> = List.with_capacity count
+        let mut index: USize = 0
+        while (index < count) {
+            List.push result (Distribution.sample (distribution, rng))
+            index = index + 1
+        }
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unsigned sampling helpers
+// ---------------------------------------------------------------------------
+
+def narrow_u8 = value: U64 => U8 :: match (TryConvert.try_convert.<U64, U8> (value % 256)) {
+    Ok result => result,
+    _ => 0,
+}
+
+def narrow_u16 = value: U64 => U16 :: match (TryConvert.try_convert.<U64, U16> (value % 65536)) {
+    Ok result => result,
+    _ => 0,
+}
+
+def narrow_u32 = value: U64 => U32 :: match (TryConvert.try_convert.<U64, U32> (value % 4294967296)) {
+    Ok result => result,
+    _ => 0,
+}
+
+def narrow_usize = value: U64 => USize :: match (TryConvert.try_convert.<U64, USize> value) {
+    Ok result => result,
+    _ => 0,
+}
+
+def usize_to_u32 = value: USize => U32 :: match (TryConvert.try_convert.<USize, U32> value) {
+    Ok result => result,
+    _ => 0,
+}
+
+def narrow_i8 = value: U64 => I8 :: U8.cast_signed (narrow_u8 value)
+def narrow_i16 = value: U64 => I16 :: U16.cast_signed (narrow_u16 value)
+def narrow_i32 = value: U64 => I32 :: U32.cast_signed (narrow_u32 value)
+def narrow_i64 = value: U64 => I64 :: U64.cast_signed value
+def narrow_isize = value: U64 => ISize :: USize.cast_signed (narrow_usize value)
+
+def u64_to_f64 = value: U64 => F64 :: match (TryConvert.try_convert.<U64, F64> value) {
+    Ok result => result,
+    _ => 0.0,
+}
+
+def u32_to_f32 = value: U32 => F32 :: match (TryConvert.try_convert.<U32, F32> value) {
+    Ok result => result,
+    _ => 0.0,
+}
+
+def unit_f64 = mut rng: Rng => F64 :: {
+    let value = U64.wrapping_shift_right (Rng.next_u64 rng) 11
+    u64_to_f64 value * 1.1102230246251565e-16
+}
+
+def unit_f32 = mut rng: Rng => F32 :: {
+    let value = narrow_u32 (U64.wrapping_shift_right (Rng.next_u64 rng) 40)
+    u32_to_f32 value * 5.960464477539063e-8
+}
+
+// Lemire's nearly-divisionless bounded sampler. `span == 0` means the full
+// 2^64 range.
+@track_caller
+def sample_bounded = (mut rng: Rng; span: U64) => U64 :: {
+    if (span == 0) {
+        return Rng.next_u64 rng
+    }
+    let mut x = Rng.next_u64 rng
+    let (mut low, mut high) = U64.widening_multiply x span
+    if (low < span) {
+        let threshold = (0 - span) % span
+        while (low < threshold) {
+            x = Rng.next_u64 rng
+            let (next_low, next_high) = U64.widening_multiply x span
+            low = next_low
+            high = next_high
+        }
+    }
+    high
+}
+
+@track_caller
+def sample_u8 = (mut rng: Rng; start: U8; end: U8; inclusive: Bool) => U8 :: {
+    let start_bits = start as U64
+    let end_bits = end as U64
+    let count = if (inclusive) {
+        if (end < start) { panic "between: empty range" }
+        (end_bits - start_bits) + 1
+    } else {
+        if (end <= start) { panic "between: empty range" }
+        end_bits - start_bits
+    }
+    narrow_u8 (start_bits + sample_bounded rng count)
+}
+
+@track_caller
+def sample_u16 = (mut rng: Rng; start: U16; end: U16; inclusive: Bool) => U16 :: {
+    let start_bits = start as U64
+    let end_bits = end as U64
+    let count = if (inclusive) {
+        if (end < start) { panic "between: empty range" }
+        (end_bits - start_bits) + 1
+    } else {
+        if (end <= start) { panic "between: empty range" }
+        end_bits - start_bits
+    }
+    narrow_u16 (start_bits + sample_bounded rng count)
+}
+
+@track_caller
+def sample_u32 = (mut rng: Rng; start: U32; end: U32; inclusive: Bool) => U32 :: {
+    let start_bits = start as U64
+    let end_bits = end as U64
+    let count = if (inclusive) {
+        if (end < start) { panic "between: empty range" }
+        (end_bits - start_bits) + 1
+    } else {
+        if (end <= start) { panic "between: empty range" }
+        end_bits - start_bits
+    }
+    narrow_u32 (start_bits + sample_bounded rng count)
+}
+
+@track_caller
+def sample_u64 = (mut rng: Rng; start: U64; end: U64; inclusive: Bool) => U64 :: {
+    let count = if (inclusive) {
+        if (end < start) { panic "between: empty range" }
+        (end - start) + 1
+    } else {
+        if (end <= start) { panic "between: empty range" }
+        end - start
+    }
+    start + sample_bounded rng count
+}
+
+@track_caller
+def sample_usize = (mut rng: Rng; start: USize; end: USize; inclusive: Bool) => USize :: {
+    let start_bits = start as U64
+    let end_bits = end as U64
+    let count = if (inclusive) {
+        if (end < start) { panic "between: empty range" }
+        (end_bits - start_bits) + 1
+    } else {
+        if (end <= start) { panic "between: empty range" }
+        end_bits - start_bits
+    }
+    narrow_usize (start_bits + sample_bounded rng count)
+}
+
+@track_caller
+def sample_i8 = (mut rng: Rng; start: I8; end: I8; inclusive: Bool) => I8 :: {
+    let start_bits = I64.cast_unsigned (start as I64)
+    let end_bits = I64.cast_unsigned (end as I64)
+    let count = if (inclusive) {
+        if (end < start) { panic "between: empty range" }
+        (end_bits - start_bits) + 1
+    } else {
+        if (end <= start) { panic "between: empty range" }
+        end_bits - start_bits
+    }
+    narrow_i8 (start_bits + sample_bounded rng count)
+}
+
+@track_caller
+def sample_i16 = (mut rng: Rng; start: I16; end: I16; inclusive: Bool) => I16 :: {
+    let start_bits = I64.cast_unsigned (start as I64)
+    let end_bits = I64.cast_unsigned (end as I64)
+    let count = if (inclusive) {
+        if (end < start) { panic "between: empty range" }
+        (end_bits - start_bits) + 1
+    } else {
+        if (end <= start) { panic "between: empty range" }
+        end_bits - start_bits
+    }
+    narrow_i16 (start_bits + sample_bounded rng count)
+}
+
+@track_caller
+def sample_i32 = (mut rng: Rng; start: I32; end: I32; inclusive: Bool) => I32 :: {
+    let start_bits = I64.cast_unsigned (start as I64)
+    let end_bits = I64.cast_unsigned (end as I64)
+    let count = if (inclusive) {
+        if (end < start) { panic "between: empty range" }
+        (end_bits - start_bits) + 1
+    } else {
+        if (end <= start) { panic "between: empty range" }
+        end_bits - start_bits
+    }
+    narrow_i32 (start_bits + sample_bounded rng count)
+}
+
+@track_caller
+def sample_i64 = (mut rng: Rng; start: I64; end: I64; inclusive: Bool) => I64 :: {
+    let start_bits = I64.cast_unsigned start
+    let end_bits = I64.cast_unsigned end
+    let count = if (inclusive) {
+        if (end < start) { panic "between: empty range" }
+        (end_bits - start_bits) + 1
+    } else {
+        if (end <= start) { panic "between: empty range" }
+        end_bits - start_bits
+    }
+    narrow_i64 (start_bits + sample_bounded rng count)
+}
+
+@track_caller
+def sample_isize = (mut rng: Rng; start: ISize; end: ISize; inclusive: Bool) => ISize :: {
+    let start_bits = ISize.cast_unsigned start as U64
+    let end_bits = ISize.cast_unsigned end as U64
+    let count = if (inclusive) {
+        if (end < start) { panic "between: empty range" }
+        (end_bits - start_bits) + 1
+    } else {
+        if (end <= start) { panic "between: empty range" }
+        end_bits - start_bits
+    }
+    narrow_isize (start_bits + sample_bounded rng count)
+}
+
+@track_caller
+def sample_f32_range = (mut rng: Rng; start: F32; end: F32) => F32 :: {
+    if (!(start < end)) {
+        panic "between: empty range"
+    }
+    let mut value = start + (end - start) * unit_f32 rng
+    while (value == end) {
+        value = start + (end - start) * unit_f32 rng
+    }
+    value
+}
+
+@track_caller
+def sample_f64_range = (mut rng: Rng; start: F64; end: F64) => F64 :: {
+    if (!(start < end)) {
+        panic "between: empty range"
+    }
+    let mut value = start + (end - start) * unit_f64 rng
+    while (value == end) {
+        value = start + (end - start) * unit_f64 rng
+    }
+    value
+}
+
+// ---------------------------------------------------------------------------
+// Integer ranges
+// ---------------------------------------------------------------------------
+
+impl SampleRange Range<U8> {
+    type Item = U8
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    sample_range = (range, mut rng) => U8 ::
+        sample_u8 rng range.*.current range.*.end False
+}
+
+impl SampleRange RangeInclusive<U8> {
+    type Item = U8
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    sample_range = (range, mut rng) => U8 :: {
+        if (range.*.finished) { panic "between: empty range" }
+        sample_u8 rng range.*.current range.*.end True
+    }
+}
+
+impl SampleRange Range<U16> {
+    type Item = U16
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    sample_range = (range, mut rng) => U16 ::
+        sample_u16 rng range.*.current range.*.end False
+}
+
+impl SampleRange RangeInclusive<U16> {
+    type Item = U16
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    sample_range = (range, mut rng) => U16 :: {
+        if (range.*.finished) { panic "between: empty range" }
+        sample_u16 rng range.*.current range.*.end True
+    }
+}
+
+impl SampleRange Range<U32> {
+    type Item = U32
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    sample_range = (range, mut rng) => U32 ::
+        sample_u32 rng range.*.current range.*.end False
+}
+
+impl SampleRange RangeInclusive<U32> {
+    type Item = U32
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    sample_range = (range, mut rng) => U32 :: {
+        if (range.*.finished) { panic "between: empty range" }
+        sample_u32 rng range.*.current range.*.end True
+    }
+}
+
+impl SampleRange Range<U64> {
+    type Item = U64
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    sample_range = (range, mut rng) => U64 ::
+        sample_u64 rng range.*.current range.*.end False
+}
+
+impl SampleRange RangeInclusive<U64> {
+    type Item = U64
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    sample_range = (range, mut rng) => U64 :: {
+        if (range.*.finished) { panic "between: empty range" }
+        sample_u64 rng range.*.current range.*.end True
+    }
+}
+
+impl SampleRange Range<USize> {
+    type Item = USize
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    sample_range = (range, mut rng) => USize ::
+        sample_usize rng range.*.current range.*.end False
+}
+
+impl SampleRange RangeInclusive<USize> {
+    type Item = USize
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    sample_range = (range, mut rng) => USize :: {
+        if (range.*.finished) { panic "between: empty range" }
+        sample_usize rng range.*.current range.*.end True
+    }
+}
+
+impl SampleRange Range<I8> {
+    type Item = I8
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    sample_range = (range, mut rng) => I8 ::
+        sample_i8 rng range.*.current range.*.end False
+}
+
+impl SampleRange RangeInclusive<I8> {
+    type Item = I8
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    sample_range = (range, mut rng) => I8 :: {
+        if (range.*.finished) { panic "between: empty range" }
+        sample_i8 rng range.*.current range.*.end True
+    }
+}
+
+impl SampleRange Range<I16> {
+    type Item = I16
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    sample_range = (range, mut rng) => I16 ::
+        sample_i16 rng range.*.current range.*.end False
+}
+
+impl SampleRange RangeInclusive<I16> {
+    type Item = I16
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    sample_range = (range, mut rng) => I16 :: {
+        if (range.*.finished) { panic "between: empty range" }
+        sample_i16 rng range.*.current range.*.end True
+    }
+}
+
+impl SampleRange Range<I32> {
+    type Item = I32
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    sample_range = (range, mut rng) => I32 ::
+        sample_i32 rng range.*.current range.*.end False
+}
+
+impl SampleRange RangeInclusive<I32> {
+    type Item = I32
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    sample_range = (range, mut rng) => I32 :: {
+        if (range.*.finished) { panic "between: empty range" }
+        sample_i32 rng range.*.current range.*.end True
+    }
+}
+
+impl SampleRange Range<I64> {
+    type Item = I64
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    sample_range = (range, mut rng) => I64 ::
+        sample_i64 rng range.*.current range.*.end False
+}
+
+impl SampleRange RangeInclusive<I64> {
+    type Item = I64
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    sample_range = (range, mut rng) => I64 :: {
+        if (range.*.finished) { panic "between: empty range" }
+        sample_i64 rng range.*.current range.*.end True
+    }
+}
+
+impl SampleRange Range<ISize> {
+    type Item = ISize
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    sample_range = (range, mut rng) => ISize ::
+        sample_isize rng range.*.current range.*.end False
+}
+
+impl SampleRange RangeInclusive<ISize> {
+    type Item = ISize
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    sample_range = (range, mut rng) => ISize :: {
+        if (range.*.finished) { panic "between: empty range" }
+        sample_isize rng range.*.current range.*.end True
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Float ranges
+// ---------------------------------------------------------------------------
+
+impl SampleRange Range<F32> {
+    type Item = F32
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    sample_range = (range, mut rng) => F32 ::
+        sample_f32_range rng range.*.current range.*.end
+}
+
+impl SampleRange Range<F64> {
+    type Item = F64
+    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    sample_range = (range, mut rng) => F64 ::
+        sample_f64_range rng range.*.current range.*.end
+}
+
+// ---------------------------------------------------------------------------
+// Random implementations
+// ---------------------------------------------------------------------------
+
+impl Random U8 {
+    random = mut rng => U8 :: narrow_u8 (Rng.next_u64 rng)
+}
+
+impl Random U16 {
+    random = mut rng => U16 :: narrow_u16 (Rng.next_u64 rng)
+}
+
+impl Random U32 {
+    random = mut rng => U32 :: narrow_u32 (Rng.next_u64 rng)
+}
+
+impl Random U64 {
+    random = mut rng => U64 :: Rng.next_u64 rng
+}
+
+impl Random USize {
+    random = mut rng => USize :: narrow_usize (Rng.next_u64 rng)
+}
+
+impl Random I8 {
+    random = mut rng => I8 :: narrow_i8 (Rng.next_u64 rng)
+}
+
+impl Random I16 {
+    random = mut rng => I16 :: narrow_i16 (Rng.next_u64 rng)
+}
+
+impl Random I32 {
+    random = mut rng => I32 :: narrow_i32 (Rng.next_u64 rng)
+}
+
+impl Random I64 {
+    random = mut rng => I64 :: narrow_i64 (Rng.next_u64 rng)
+}
+
+impl Random ISize {
+    random = mut rng => ISize :: narrow_isize (Rng.next_u64 rng)
+}
+
+impl Random Bool {
+    random = mut rng => Bool :: if (Rng.next_u64 rng % 2 == 1) { True } else { False }
+}
+
+impl Random F32 {
+    random = mut rng => F32 :: unit_f32 rng
+}
+
+impl Random F64 {
+    random = mut rng => F64 :: unit_f64 rng
+}
+
+impl Random () {
+    random = mut rng => () :: ()
+}
+
+impl<A, B where Random A, Random B> Random (A, B) {
+    random = mut rng => (A, B) :: {
+        let first: A = Random.random rng
+        let second: B = Random.random rng
+        (first, second)
+    }
+}
+
+impl<A, B, C where Random A, Random B, Random C> Random (A, B, C) {
+    random = mut rng => (A, B, C) :: {
+        let first: A = Random.random rng
+        let second: B = Random.random rng
+        let third: C = Random.random rng
+        (first, second, third)
+    }
+}
+
+impl<A, B, C, D where Random A, Random B, Random C, Random D> Random (A, B, C, D) {
+    random = mut rng => (A, B, C, D) :: {
+        let first: A = Random.random rng
+        let second: B = Random.random rng
+        let third: C = Random.random rng
+        let fourth: D = Random.random rng
+        (first, second, third, fourth)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OS entropy
+// ---------------------------------------------------------------------------
+
+/// Fills `buffer` with operating-system randomness, suitable for keys. The
+/// length is unchanged.
+pub def fill_entropy = mut buffer: List<U8> =>{IO} Result<(), EntropyError> :: {
+    let length = List.length buffer
+    if (length == 0) {
+        return Ok ()
+    }
+    let data = List.unsafe_data buffer
+    let mut offset: USize = 0
+    while (offset < length) {
+        let remaining = length - offset
+        let chunk: USize = if (remaining < 256) { remaining } else { 256 }
+        let pointer = RawMutPtr.add data offset
+        if (getentropy (pointer as RawOpaqueMutPtr, chunk) != 0) {
+            return EntropyError (code: __staple_fs_errno ())
+        }
+        offset = offset + chunk
+    }
+    Ok ()
+}
+
+def read_u64_le = (bytes: List<U8>; offset: USize) => U64 :: {
+    let mut result: U64 = 0
+    let mut index: USize = 0
+    while (index < 8) {
+        let byte = List.get_unchecked bytes (offset + index)
+        let shift: U32 = usize_to_u32 (index * 8)
+        result = result + U64.wrapping_shift_left (byte as U64) shift
+        index = index + 1
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Distributions
+// ---------------------------------------------------------------------------
+
+/// A precomputed uniform range. Construct with `Uniform.new`.
+pub type Uniform<T> wrap (start: T, end: T, inclusive: Bool)
+
+companion<T> Uniform<T> {
+    /// Precomputes the sampling rule for a range.
+    pub def new = <R where SampleRange R> range: R => Uniform<SampleRange.Item R> :: {
+        let (start, end, inclusive) = SampleRange.bounds range
+        Uniform.<SampleRange.Item R> (start: start, end: end, inclusive: inclusive)
+    }
+}
+
+trait UniformSample T {
+    sample_uniform: (T, T, Bool, mut Rng) -> T
+}
+
+impl UniformSample U8 {
+    sample_uniform = (start, end, inclusive, mut rng) => U8 ::
+        sample_u8 rng start end inclusive
+}
+
+impl UniformSample U16 {
+    sample_uniform = (start, end, inclusive, mut rng) => U16 ::
+        sample_u16 rng start end inclusive
+}
+
+impl UniformSample U32 {
+    sample_uniform = (start, end, inclusive, mut rng) => U32 ::
+        sample_u32 rng start end inclusive
+}
+
+impl UniformSample U64 {
+    sample_uniform = (start, end, inclusive, mut rng) => U64 ::
+        sample_u64 rng start end inclusive
+}
+
+impl UniformSample USize {
+    sample_uniform = (start, end, inclusive, mut rng) => USize ::
+        sample_usize rng start end inclusive
+}
+
+impl UniformSample I8 {
+    sample_uniform = (start, end, inclusive, mut rng) => I8 ::
+        sample_i8 rng start end inclusive
+}
+
+impl UniformSample I16 {
+    sample_uniform = (start, end, inclusive, mut rng) => I16 ::
+        sample_i16 rng start end inclusive
+}
+
+impl UniformSample I32 {
+    sample_uniform = (start, end, inclusive, mut rng) => I32 ::
+        sample_i32 rng start end inclusive
+}
+
+impl UniformSample I64 {
+    sample_uniform = (start, end, inclusive, mut rng) => I64 ::
+        sample_i64 rng start end inclusive
+}
+
+impl UniformSample ISize {
+    sample_uniform = (start, end, inclusive, mut rng) => ISize ::
+        sample_isize rng start end inclusive
+}
+
+impl UniformSample F32 {
+    sample_uniform = (start, end, _, mut rng) => F32 ::
+        sample_f32_range rng start end
+}
+
+impl UniformSample F64 {
+    sample_uniform = (start, end, _, mut rng) => F64 ::
+        sample_f64_range rng start end
+}
+
+impl<T where UniformSample T, Copy T> Distribution Uniform<T> {
+    type Output = T
+    sample = (uniform, mut rng) => T ::
+        UniformSample.sample_uniform (uniform.*.start, uniform.*.end, uniform.*.inclusive, rng)
+}
+
+/// A coin flip whose probability is stored as an exact 64-bit threshold.
+pub type Bernoulli wrap (threshold: U64)
+
+companion Bernoulli {
+    /// Creates a distribution that returns true with probability `p`.
+    pub def new = probability: F64 => Bernoulli ::
+        Bernoulli (threshold: probability_threshold probability)
+
+    /// Always returns true.
+    pub def always = () => Bernoulli :: Bernoulli (threshold: U64.Max)
+
+    /// Always returns false.
+    pub def never = () => Bernoulli :: Bernoulli (threshold: 0)
+}
+
+impl Distribution Bernoulli {
+    type Output = Bool
+    sample = (bernoulli, mut rng) => Bool :: {
+        let threshold = bernoulli.*
+        if (threshold == U64.Max) {
+            True
+        } else {
+            Rng.next_u64 rng < threshold
+        }
+    }
+}
+
+/// A cumulative weight table. Construct with `WeightedIndex.new`.
+pub type WeightedIndex wrap (cumulative: List<F64>)
+
+companion WeightedIndex {
+    /// Builds a cumulative table. At least one weight must be positive and all
+    /// weights must be finite and non-negative.
+    pub def new = weights: List<F64> => Result<WeightedIndex, DistributionError> :: {
+        let length = List.length weights
+        let mut cumulative: List<F64> = List.with_capacity length
+        let mut total = 0.0
+        let mut index: USize = 0
+        while (index < length) {
+            let weight = List.get_unchecked weights index
+            if (!(weight >= 0.0) || F64.is_infinite weight) {
+                return DistributionError.InvalidParameter
+            }
+            total = total + weight
+            List.push cumulative total
+            index = index + 1
+        }
+        if (!(total > 0.0)) {
+            return DistributionError.NoPositiveWeight
+        }
+        Ok (WeightedIndex (cumulative: cumulative))
+    }
+}
+
+impl Distribution WeightedIndex {
+    type Output = USize
+    sample = (weighted, mut rng) => USize :: {
+        let length = List.length weighted.*
+        let total = List.get_unchecked weighted.* (length - 1)
+        let target = unit_f64 rng * total
+        let mut index: USize = 0
+        while (index < length) {
+            if (target < List.get_unchecked weighted.* index) {
+                return index
+            }
+            index = index + 1
+        }
+        length - 1
+    }
+}
+
+/// A normal (Gaussian) distribution.
+pub type Normal wrap pub (mean: F64, std_dev: F64)
+
+companion Normal {
+    /// Creates a normal distribution with a non-negative finite standard
+    /// deviation.
+    pub def new = (mean: F64; std_dev: F64) => Result<Normal, DistributionError> :: {
+        if (!(std_dev >= 0.0) || F64.is_infinite std_dev) {
+            return DistributionError.InvalidParameter
+        }
+        Ok (Normal (mean: mean, std_dev: std_dev))
+    }
+}
+
+impl Distribution Normal {
+    type Output = F64
+    sample = (normal, mut rng) => F64 :: {
+        let mean = normal.*.mean
+        let std_dev = normal.*.std_dev
+        if (std_dev == 0.0) {
+            return mean
+        }
+        // Marsaglia's polar form of the Box-Muller transform.
+        let mut u = 0.0
+        let mut v = 0.0
+        let mut radius = 2.0
+        while (radius >= 1.0 || radius == 0.0) {
+            u = unit_f64 rng * 2.0 - 1.0
+            v = unit_f64 rng * 2.0 - 1.0
+            radius = u * u + v * v
+        }
+        mean + std_dev * u * F64.sqrt ((-2.0 * F64.ln radius) / radius)
+    }
+}
+
+/// An exponential distribution parameterized by its rate.
+pub type Exponential wrap pub (rate: F64)
+
+companion Exponential {
+    /// Creates an exponential distribution with a positive finite rate.
+    pub def new = rate: F64 => Result<Exponential, DistributionError> :: {
+        if (!(rate > 0.0) || F64.is_infinite rate) {
+            return DistributionError.InvalidParameter
+        }
+        Ok (Exponential (rate: rate))
+    }
+}
+
+impl Distribution Exponential {
+    type Output = F64
+    sample = (exponential, mut rng) => F64 :: {
+        let rate = exponential.*
+        if (!(rate > 0.0)) {
+            return 0.0
+        }
+        let unit = unit_f64 rng
+        (0.0 - F64.ln (1.0 - unit)) / rate
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// The number of 64-bit outcomes below `p`, or `U64.Max` to mean "always".
+def probability_threshold = p: F64 => U64 :: {
+    if (!(p > 0.0)) {
+        return 0
+    }
+    if (p >= 1.0) {
+        return U64.Max
+    }
+    let bits = F64.to_bits p
+    let exponent_bits = (U64.wrapping_shift_right bits 52) % 2048
+    if (exponent_bits == 0) {
+        // Subnormal values are far below 2^-64.
+        return 0
+    }
+    let exponent = U64.cast_signed exponent_bits - 1023
+    let mantissa = bits % 4503599627370496 + 4503599627370496
+    let shift = exponent + 12
+    if (shift >= 0) {
+        U64.wrapping_shift_left mantissa (i64_to_u32 shift)
+    } else {
+        let right = 0 - shift
+        if (right >= 64) {
+            0
+        } else {
+            U64.wrapping_shift_right mantissa (i64_to_u32 right)
+        }
+    }
+}
+
+def i64_to_u32 = value: I64 => U32 :: match (TryConvert.try_convert.<I64, U32> value) {
+    Ok result => result,
+    _ => 0,
+}
+
+def jump_bits = (mut rng: Rng; word: U64; s0: U64; s1: U64; s2: U64; s3: U64) =>
+    (U64, U64, U64, U64) :: {
+    let mut a0 = s0
+    let mut a1 = s1
+    let mut a2 = s2
+    let mut a3 = s3
+    let mut bit: U32 = 0
+    while (bit < 64) {
+        let mask = U64.wrapping_shift_left 1 bit
+        if (BitAnd.bit_and (word; mask) != 0) {
+            a0 = BitXor.bit_xor (a0; rng.*.s0)
+            a1 = BitXor.bit_xor (a1; rng.*.s1)
+            a2 = BitXor.bit_xor (a2; rng.*.s2)
+            a3 = BitXor.bit_xor (a3; rng.*.s3)
+        }
+        let _ = Rng.next_u64 rng
+        bit = bit + 1
+    }
+    (a0, a1, a2, a3)
+}
+
+// ---------------------------------------------------------------------------
+// Ambient wrappers
+// ---------------------------------------------------------------------------
+
+pub def next_u32 = () =>{mut rng: Rng} U32 :: Rng.next_u32 rng
+pub def next_u64 = () =>{mut rng: Rng} U64 :: Rng.next_u64 rng
+pub def fill_bytes = mut buffer: List<U8> =>{mut rng: Rng} () :: Rng.fill_bytes rng buffer
+pub def random = <T where Random T> () =>{mut rng: Rng} T :: Random.random rng
+
+@track_caller
+pub def between = <R where SampleRange R> range: R =>{mut rng: Rng} SampleRange.Item R ::
+    Rng.between rng range
+
+pub def chance = probability: F64 =>{mut rng: Rng} Bool :: Rng.chance rng probability
+pub def shuffle = <T> mut list: List<T> =>{mut rng: Rng} () :: Rng.shuffle rng list
+pub def choose = <T where Copy T> list: List<T> =>{mut rng: Rng} Option<T> :: Rng.choose rng list
+
+pub def choose_multiple = <T where Clone T> (list: List<T>; count: USize) =>{mut rng: Rng}
+    List<T> :: Rng.choose_multiple rng list count
+
+pub def sample = <D where Distribution D> distribution: D =>{mut rng: Rng} Distribution.Output D ::
+    Distribution.sample (distribution, rng)
+
+pub def sample_n = <D where Distribution D> (distribution: D; count: USize) =>{mut rng: Rng}
+    List<Distribution.Output D> :: Rng.sample_n rng distribution count

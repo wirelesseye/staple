@@ -97,6 +97,11 @@ companion<T> List<T> {
     /// Replaces the value at an index and returns the old value, trapping when out of bounds.
     pub def set_unchecked = (mut list: List<T>; index: USize; move value: T) => T ::
         Buffer.set_unchecked list.* index value
+
+    /// Exchanges the values at two indices, trapping when either is out of
+    /// bounds.
+    pub def swap = (mut list: List<T>; left: USize; right: USize) => () ::
+        Buffer.swap list.* left right
 }
 
 companion<T> List<T> {
@@ -206,6 +211,10 @@ impl<T> IntoIterator List<T> {
 
 // The source must not overlap this uniquely owned list's storage.
 companion List<U8> {
+    /// Borrows the contiguous byte storage. The list must remain alive.
+    pub(package) def unsafe_data = list: List<U8> => RawMutPtr<U8> ::
+        Buffer.unsafe_data list.*
+
     // Copies `count` bytes starting at `start`; the caller checks the bounds.
     pub(package) def append_shared_range = (mut list: List<U8>; bytes: SharedBuffer<U8>; start: USize; count: USize) => () :: {
         List.reserve list count

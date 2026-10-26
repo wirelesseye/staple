@@ -159,6 +159,23 @@ companion<T> Buffer<T> {
         previous
     }
 
+    /// Exchanges two initialized elements in place, trapping if either index is
+    /// out of bounds.
+    pub def swap = (mut buffer: Buffer<T>; left: USize; right: USize) => () :: {
+        if (left >= Buffer.length buffer || right >= Buffer.length buffer) {
+            trap ()
+        }
+        if (left != right) {
+            let header = buffer.*
+            let left_element = BufferHeader.element header left
+            let right_element = BufferHeader.element header right
+            let left_value = RawMutPtr.unsafe_read left_element
+            let right_value = RawMutPtr.unsafe_read right_element
+            RawMutPtr.store left_element right_value
+            RawMutPtr.store right_element left_value
+        }
+    }
+
     /// Moves the elements of a fixed array into a new buffer whose capacity is the array length.
     pub def from_array = <N where Natural N> move value: (T ^ N) => Buffer<T> :: __buffer_from_array value
 

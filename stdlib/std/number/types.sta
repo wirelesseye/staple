@@ -41,6 +41,17 @@ pub type F32 opaque
 @sized_opaque
 pub type F64 opaque
 
+mod raw_math {
+    pub(package) extern "c" {
+        log: F64 -> F64
+        exp: F64 -> F64
+        logf: F32 -> F32
+        expf: F32 -> F32
+    }
+}
+
+use raw_math.(log as c_log, exp as c_exp, logf as c_logf, expf as c_expf)
+
 // ---------------------------------------------------------------------------
 // I8 math
 // ---------------------------------------------------------------------------
@@ -1806,6 +1817,20 @@ companion U8 {
     /// Returns `left * right`, wrapping on overflow.
     pub def wrapping_multiply = (left: U8; right: U8) => U8 :: left * right
 
+    /// Returns the low and high halves of the exact product.
+    pub def widening_multiply = (left: U8; right: U8) => (low: U8, high: U8) :: {
+        let product = (left as U64) * (right as U64)
+        let low: U8 = match (TryConvert.try_convert.<U64, U8> (product % 256)) {
+            Ok value => value,
+            _ => 0,
+        }
+        let high: U8 = match (TryConvert.try_convert.<U64, U8> (product / 256)) {
+            Ok value => value,
+            _ => 0,
+        }
+        (low: low, high: high)
+    }
+
     /// Returns `value` shifted left by `count`, reducing the count modulo the
     /// width.
     pub def wrapping_shift_left = (value: U8; count: U32) => U8 :: {
@@ -2176,6 +2201,20 @@ companion U16 {
 
     /// Returns `left * right`, wrapping on overflow.
     pub def wrapping_multiply = (left: U16; right: U16) => U16 :: left * right
+
+    /// Returns the low and high halves of the exact product.
+    pub def widening_multiply = (left: U16; right: U16) => (low: U16, high: U16) :: {
+        let product = (left as U64) * (right as U64)
+        let low: U16 = match (TryConvert.try_convert.<U64, U16> (product % 65536)) {
+            Ok value => value,
+            _ => 0,
+        }
+        let high: U16 = match (TryConvert.try_convert.<U64, U16> (product / 65536)) {
+            Ok value => value,
+            _ => 0,
+        }
+        (low: low, high: high)
+    }
 
     /// Returns `value` shifted left by `count`, reducing the count modulo the
     /// width.
@@ -2548,6 +2587,20 @@ companion U32 {
     /// Returns `left * right`, wrapping on overflow.
     pub def wrapping_multiply = (left: U32; right: U32) => U32 :: left * right
 
+    /// Returns the low and high halves of the exact product.
+    pub def widening_multiply = (left: U32; right: U32) => (low: U32, high: U32) :: {
+        let product = (left as U64) * (right as U64)
+        let low: U32 = match (TryConvert.try_convert.<U64, U32> (product % 4294967296)) {
+            Ok value => value,
+            _ => 0,
+        }
+        let high: U32 = match (TryConvert.try_convert.<U64, U32> (product / 4294967296)) {
+            Ok value => value,
+            _ => 0,
+        }
+        (low: low, high: high)
+    }
+
     /// Returns `value` shifted left by `count`, reducing the count modulo the
     /// width.
     pub def wrapping_shift_left = (value: U32; count: U32) => U32 :: {
@@ -2912,6 +2965,22 @@ companion U64 {
 
     /// Returns `left * right`, wrapping on overflow.
     pub def wrapping_multiply = (left: U64; right: U64) => U64 :: left * right
+
+    /// Returns the low and high halves of the exact product.
+    pub def widening_multiply = (left: U64; right: U64) => (low: U64, high: U64) :: {
+        let left_low = left % 4294967296
+        let left_high = left / 4294967296
+        let right_low = right % 4294967296
+        let right_high = right / 4294967296
+        let low_product = left_low * right_low
+        let middle = left_high * right_low + low_product / 4294967296
+        let middle_low = middle % 4294967296
+        let middle_high = middle / 4294967296
+        let upper = left_low * right_high + middle_low
+        let low = (upper % 4294967296) * 4294967296 + (low_product % 4294967296)
+        let high = left_high * right_high + middle_high + upper / 4294967296
+        (low: low, high: high)
+    }
 
     /// Returns `value` shifted left by `count`, reducing the count modulo the
     /// width.
@@ -3698,6 +3767,20 @@ companion USize {
     /// Returns `left * right`, wrapping on overflow.
     pub def wrapping_multiply = (left: USize; right: USize) => USize :: left * right
 
+    /// Returns the low and high halves of the exact product.
+    pub def widening_multiply = (left: USize; right: USize) => (low: USize, high: USize) :: {
+        let (low, high) = U64.widening_multiply (left as U64) (right as U64)
+        let low: USize = match (TryConvert.try_convert.<U64, USize> low) {
+            Ok value => value,
+            _ => 0,
+        }
+        let high: USize = match (TryConvert.try_convert.<U64, USize> high) {
+            Ok value => value,
+            _ => 0,
+        }
+        (low: low, high: high)
+    }
+
     /// Returns `value` shifted left by `count`, or `None` when the count is not
     /// smaller than the width.
     pub def checked_shift_left = (value: USize; count: U32) => Option<USize> :: {
@@ -4030,6 +4113,13 @@ companion F32 {
     /// Returns the square root of `value`; negative inputs produce NaN.
     pub def sqrt = value: F32 => F32 :: __f32_sqrt value
 
+    /// Returns the natural logarithm of `value`; non-positive inputs produce
+    /// negative infinity or NaN.
+    pub def ln = value: F32 => F32 :: c_logf value
+
+    /// Returns Euler's number raised to `value`.
+    pub def exp = value: F32 => F32 :: c_expf value
+
     /// Returns the fractional part of `value` (`value - trunc value`).
     pub def fract = value: F32 => F32 :: value - trunc value
 
@@ -4171,6 +4261,13 @@ companion F64 {
 
     /// Returns the square root of `value`; negative inputs produce NaN.
     pub def sqrt = value: F64 => F64 :: __f64_sqrt value
+
+    /// Returns the natural logarithm of `value`; non-positive inputs produce
+    /// negative infinity or NaN.
+    pub def ln = value: F64 => F64 :: c_log value
+
+    /// Returns Euler's number raised to `value`.
+    pub def exp = value: F64 => F64 :: c_exp value
 
     /// Returns the fractional part of `value` (`value - trunc value`).
     pub def fract = value: F64 => F64 :: value - trunc value
