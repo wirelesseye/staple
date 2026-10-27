@@ -1000,7 +1000,7 @@ impl Drop for TemporaryArtifact {
     }
 }
 
-fn link_executable(objects: &[PathBuf], output: &Path, options: &Options) -> Result<(), String> {
+fn executable_link_command(objects: &[PathBuf], output: &Path, options: &Options) -> Command {
     let linker = options
         .linker
         .clone()
@@ -1017,6 +1017,21 @@ fn link_executable(objects: &[PathBuf], output: &Path, options: &Options) -> Res
     for library in &options.libraries {
         command.arg("-l").arg(library);
     }
+    // The standard library emits calls to libm even when its cached object is
+    // linked into a program that does not itself use floating-point math.
+    // Select by compilation target, rather than the host running the compiler.
+    if cache::target_triple(options.target.as_deref())
+        .split('-')
+        .any(|component| component == "linux")
+    {
+        command.arg("-lm");
+    }
+    command
+}
+
+fn link_executable(objects: &[PathBuf], output: &Path, options: &Options) -> Result<(), String> {
+    let mut command = executable_link_command(objects, output, options);
+    let linker = command.get_program().to_owned();
     let result = command.output().map_err(|error| {
         format!(
             "could not run linker `{}`: {error}",
@@ -1178,7 +1193,7 @@ pub(crate) fn fmt_usage() -> String {
 mod tests {
     use super::{
         EmitKind, Mode, Options, Outcome, TemporaryArtifact, compile, executable_extension,
-        format_diagnostics, link_executable, parse_options, run,
+        executable_link_command, format_diagnostics, link_executable, parse_options, run,
     };
     use std::ffi::{OsStr, OsString};
     use std::path::{Path, PathBuf};
@@ -1873,6 +1888,44 @@ mod tests {
         let _ = std::fs::remove_file(source);
 
         assert!(error.contains("unknown name `missing`"));
+    }
+
+    #[test]
+    fn math_library_linking_follows_the_target_and_follows_objects() {
+        for (target, needs_libm) in [
+            ("x86_64-unknown-linux-gnu", true),
+            ("aarch64-unknown-linux-musl", true),
+            ("aarch64-apple-darwin", false),
+            ("x86_64-pc-windows-msvc", false),
+        ] {
+            let options = parse_options([
+                "--target".into(),
+                target.into(),
+                "-lcustom".into(),
+                "input.sta".into(),
+            ])
+            .unwrap();
+            let command = executable_link_command(
+                &[PathBuf::from("input.o")],
+                Path::new("program"),
+                &options,
+            );
+            let mut expected = vec![
+                "input.o".to_owned(),
+                "-o".to_owned(),
+                "program".to_owned(),
+                format!("--target={target}"),
+                "-l".to_owned(),
+                "custom".to_owned(),
+            ];
+            if needs_libm {
+                expected.push("-lm".to_owned());
+            }
+            let actual: Vec<_> = command.get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(actual, expected, "{target}");
+        }
     }
 
     #[test]

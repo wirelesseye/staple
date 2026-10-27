@@ -2,6 +2,8 @@
 //! root package are emitted as independent objects that must link into the
 //! same executable the single-module build produces.
 
+mod common;
+
 // Test binaries compile the standard library many times over; mimalloc keeps
 // the compiler's small allocations from dominating the suite.
 #[global_allocator]
@@ -301,10 +303,7 @@ fn the_standard_library_unit_has_no_foreign_definitions() {
 }
 
 fn link(objects: &[&Path], output: &Path) {
-    let result = Command::new("cc")
-        .args(objects)
-        .arg("-o")
-        .arg(output)
+    let result = common::linker(objects, output)
         .output()
         .expect("a C compiler is available");
     assert!(

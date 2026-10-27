@@ -2,6 +2,8 @@
 //! typed wildcards select one alternative, and a match that binds nothing
 //! non-`Copy` borrows a named subject instead of consuming it.
 
+mod common;
+
 // Test binaries compile the standard library many times over; mimalloc keeps
 // the compiler's small allocations from dominating the suite.
 #[global_allocator]
@@ -58,12 +60,7 @@ fn run(source: &str) -> String {
     CodeGenerator::new(&context)
         .emit_object(&lowered, &object, None)
         .unwrap_or_else(|errors| panic!("emit: {errors:?}"));
-    let link = Command::new("cc")
-        .arg(&object)
-        .arg("-o")
-        .arg(&base)
-        .output()
-        .unwrap();
+    let link = common::linker(&[&object], &base).output().unwrap();
     assert!(
         link.status.success(),
         "link: {}",
