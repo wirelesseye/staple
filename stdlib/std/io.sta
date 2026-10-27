@@ -28,6 +28,8 @@ pub(package) extern "c" {
     __staple_io_flush: RawOpaqueMutPtr -> I32
     /// Returns a byte as a nonnegative integer, -1 at EOF, or -2 on failure.
     __staple_io_read_byte: RawOpaqueMutPtr -> I32
+    /// Returns the calling thread's current C `errno` value.
+    __staple_io_errno: () -> I32
 }
 
 /// A source of bytes. EOF is represented by None, separately from errors.

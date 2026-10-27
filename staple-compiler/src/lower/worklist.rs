@@ -2813,6 +2813,7 @@ pub(crate) fn runtime_module_symbols() -> &'static HashSet<String> {
             "readdir$INODE64",
             "__error",
             "__errno_location",
+            "_errno",
             "__staple_fs_errno",
             "__staple_fs_errno_value",
             "__staple_fs_open",

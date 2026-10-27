@@ -163,6 +163,12 @@ companion<T where Copy T> List<T> {
         Buffer.get_unchecked buffer index
 }
 
+companion<T where Clone T> List<T> {
+    /// Clones the value at an index, trapping when out of bounds.
+    pub(package) def clone_at = (list: List<T>; index: USize) => T ::
+        Buffer.clone_at list.* index
+}
+
 impl<T where Copy T> Index List<T> USize {
     type Output = T
     index = (list, position) => List.get_unchecked list position

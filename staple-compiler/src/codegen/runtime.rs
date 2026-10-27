@@ -689,12 +689,20 @@ define ptr @__staple_io_stream(i32 %which) {{
             names[0], names[1], names[2]
         )
     };
+    let errno = if triple.contains("apple") || triple.contains("freebsd") {
+        "__error"
+    } else if triple.contains("windows") {
+        "_errno"
+    } else {
+        "__errno_location"
+    };
     let source = include_str!("../io.ll")
         .replace(
             "{{SIZE}}",
             &format!("i{}", target_data.get_pointer_byte_size(None) * 8),
         )
-        .replace("{{STREAMS}}", &streams);
+        .replace("{{STREAMS}}", &streams)
+        .replace("{{ERRNO}}", errno);
     link_runtime_source(context, module, &source, "I/O", "staple-io")
 }
 

@@ -3769,7 +3769,14 @@ companion USize {
 
     /// Returns the low and high halves of the exact product.
     pub def widening_multiply = (left: USize; right: USize) => (low: USize, high: USize) :: {
-        let (low, high) = U64.widening_multiply (left as U64) (right as U64)
+        let (low, high) = if (bits () == 64) {
+            U64.widening_multiply (left as U64) (right as U64)
+        } else {
+            // A narrower product is exact in U64; split it at the USize width.
+            let product = (left as U64) * (right as U64)
+            let width = U64.wrapping_shift_left 1 (bits ())
+            (low: product % width, high: product / width)
+        }
         let low: USize = match (TryConvert.try_convert.<U64, USize> low) {
             Ok value => value,
             _ => 0,

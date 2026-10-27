@@ -230,6 +230,20 @@ companion<T where Copy T> Buffer<T> {
     }
 }
 
+companion<T where Clone T> Buffer<T> {
+    /// Clones the element at a position, trapping when it is out of bounds.
+    pub(package) def clone_at = (buffer: Buffer<T>; position: USize) => T :: {
+        if (position >= Buffer.length buffer) {
+            trap ()
+        }
+        let element = BufferHeader.element buffer.* position
+        let value = RawMutPtr.unsafe_read element
+        let duplicated = Clone.clone value
+        RawMutPtr.store element value
+        duplicated
+    }
+}
+
 impl<T where Clone T> Clone Buffer<T> {
     clone = buffer => {
         let length = Buffer.length buffer

@@ -4,6 +4,7 @@ declare {{SIZE}} @fwrite(ptr, {{SIZE}}, {{SIZE}}, ptr)
 declare i32 @fflush(ptr)
 declare i32 @fgetc(ptr)
 declare i32 @ferror(ptr)
+declare ptr @{{ERRNO}}()
 
 define i32 @__staple_io_write(ptr %stream, ptr %bytes, {{SIZE}} %length) {
 entry:
@@ -31,4 +32,11 @@ check:
   ret i32 %result
 done:
   ret i32 %byte
+}
+
+; The calling thread's current C `errno` value.
+define i32 @__staple_io_errno() {
+  %p = call ptr @{{ERRNO}}()
+  %n = load i32, ptr %p
+  ret i32 %n
 }

@@ -4,10 +4,10 @@ pub mod
 use package.list.List
 use package.clone.Clone
 use package.convert.TryConvert
-use package.io.IO
+use package.io.(IO, __staple_io_errno)
 use package.option.(Option, Some, None)
-use package.ops.(BitAnd, BitXor)
-use package.process.(panic, trap)
+use package.ops.(BitAnd, BitNot, BitXor)
+use package.process.panic
 use package.ptr.(RawMutPtr, RawOpaqueMutPtr)
 use package.range.(Range, RangeInclusive)
 use package.result.(Result, Ok)
@@ -16,7 +16,6 @@ use package.typegroup.typegroup
 
 extern "c" {
     getentropy: (RawOpaqueMutPtr, USize) -> I32
-    __staple_fs_errno: () -> I32
 }
 
 /// A seedable pseudo-random generator (xoshiro256**).
@@ -40,10 +39,11 @@ pub trait Random T {
 /// A range that can be sampled without bias.
 pub trait SampleRange R {
     type Item
+    /// Returns true when the range holds at least one value that can be
+    /// sampled. Float ranges also need a finite span.
+    can_sample: R -> Bool
     @track_caller
     sample_range: (R, mut Rng) -> Item
-    bounds: R -> (start: Item, end: Item, inclusive: Bool) =
-        _ => panic "Uniform.new: range does not expose bounds"
 }
 
 /// Something that produces values of `Output` from a generator.
@@ -217,18 +217,20 @@ companion Rng {
         List<T> :: {
         let length = List.length list
         let wanted: USize = if (count < length) { count } else { length }
-        let mut pool = Clone.clone list
+        // Partial Fisher-Yates over indices, so only chosen elements are cloned.
+        let mut indices: List<USize> = List.with_capacity length
+        let mut index: USize = 0
+        while (index < length) {
+            List.push indices index
+            index = index + 1
+        }
         let mut result: List<T> = List.with_capacity wanted
-        let mut remaining = length
-        while (List.length result < wanted) {
-            let index = Rng.between rng ((0usize)..remaining)
-            List.swap pool index (remaining - 1)
-            let item = match (List.pop pool) {
-                Some value => value,
-                None => trap (),
-            }
-            List.push result item
-            remaining = remaining - 1
+        let mut position: USize = 0
+        while (position < wanted) {
+            let other = Rng.between rng (position..length)
+            List.swap indices position other
+            List.push result (List.clone_at list (List.get_unchecked indices position))
+            position = position + 1
         }
         result
     }
@@ -266,9 +268,15 @@ def narrow_u32 = value: U64 => U32 :: match (TryConvert.try_convert.<U64, U32> (
     _ => 0,
 }
 
-def narrow_usize = value: U64 => USize :: match (TryConvert.try_convert.<U64, USize> value) {
-    Ok result => result,
-    _ => 0,
+// Keeps the low USize-width bits, so sign-extended ISize samples narrow
+// correctly on targets where USize is narrower than 64 bits.
+def narrow_usize = value: U64 => USize :: {
+    let max = BitNot.bit_not (USize :: 0) as U64
+    let truncated = if (max == U64.Max) { value } else { value % (max + 1) }
+    match (TryConvert.try_convert.<U64, USize> truncated) {
+        Ok result => result,
+        _ => 0,
+    }
 }
 
 def usize_to_u32 = value: USize => U32 :: match (TryConvert.try_convert.<USize, U32> value) {
@@ -323,152 +331,37 @@ def sample_bounded = (mut rng: Rng; span: U64) => U64 :: {
     high
 }
 
+// Samples `start..end` (or `start..=end`) over 64-bit encodings whose
+// unsigned order matches the order of the original values.
 @track_caller
-def sample_u8 = (mut rng: Rng; start: U8; end: U8; inclusive: Bool) => U8 :: {
-    let start_bits = start as U64
-    let end_bits = end as U64
-    let count = if (inclusive) {
-        if (end < start) { panic "between: empty range" }
-        (end_bits - start_bits) + 1
-    } else {
-        if (end <= start) { panic "between: empty range" }
-        end_bits - start_bits
-    }
-    narrow_u8 (start_bits + sample_bounded rng count)
-}
-
-@track_caller
-def sample_u16 = (mut rng: Rng; start: U16; end: U16; inclusive: Bool) => U16 :: {
-    let start_bits = start as U64
-    let end_bits = end as U64
-    let count = if (inclusive) {
-        if (end < start) { panic "between: empty range" }
-        (end_bits - start_bits) + 1
-    } else {
-        if (end <= start) { panic "between: empty range" }
-        end_bits - start_bits
-    }
-    narrow_u16 (start_bits + sample_bounded rng count)
-}
-
-@track_caller
-def sample_u32 = (mut rng: Rng; start: U32; end: U32; inclusive: Bool) => U32 :: {
-    let start_bits = start as U64
-    let end_bits = end as U64
-    let count = if (inclusive) {
-        if (end < start) { panic "between: empty range" }
-        (end_bits - start_bits) + 1
-    } else {
-        if (end <= start) { panic "between: empty range" }
-        end_bits - start_bits
-    }
-    narrow_u32 (start_bits + sample_bounded rng count)
-}
-
-@track_caller
-def sample_u64 = (mut rng: Rng; start: U64; end: U64; inclusive: Bool) => U64 :: {
-    let count = if (inclusive) {
+def sample_bits = (mut rng: Rng; start: U64; end: U64; inclusive: Bool) => U64 :: {
+    let span = if (inclusive) {
         if (end < start) { panic "between: empty range" }
         (end - start) + 1
     } else {
         if (end <= start) { panic "between: empty range" }
         end - start
     }
-    start + sample_bounded rng count
+    start + sample_bounded rng span
 }
 
-@track_caller
-def sample_usize = (mut rng: Rng; start: USize; end: USize; inclusive: Bool) => USize :: {
-    let start_bits = start as U64
-    let end_bits = end as U64
-    let count = if (inclusive) {
-        if (end < start) { panic "between: empty range" }
-        (end_bits - start_bits) + 1
-    } else {
-        if (end <= start) { panic "between: empty range" }
-        end_bits - start_bits
-    }
-    narrow_usize (start_bits + sample_bounded rng count)
-}
-
-@track_caller
-def sample_i8 = (mut rng: Rng; start: I8; end: I8; inclusive: Bool) => I8 :: {
-    let start_bits = I64.cast_unsigned (start as I64)
-    let end_bits = I64.cast_unsigned (end as I64)
-    let count = if (inclusive) {
-        if (end < start) { panic "between: empty range" }
-        (end_bits - start_bits) + 1
-    } else {
-        if (end <= start) { panic "between: empty range" }
-        end_bits - start_bits
-    }
-    narrow_i8 (start_bits + sample_bounded rng count)
-}
-
-@track_caller
-def sample_i16 = (mut rng: Rng; start: I16; end: I16; inclusive: Bool) => I16 :: {
-    let start_bits = I64.cast_unsigned (start as I64)
-    let end_bits = I64.cast_unsigned (end as I64)
-    let count = if (inclusive) {
-        if (end < start) { panic "between: empty range" }
-        (end_bits - start_bits) + 1
-    } else {
-        if (end <= start) { panic "between: empty range" }
-        end_bits - start_bits
-    }
-    narrow_i16 (start_bits + sample_bounded rng count)
-}
-
-@track_caller
-def sample_i32 = (mut rng: Rng; start: I32; end: I32; inclusive: Bool) => I32 :: {
-    let start_bits = I64.cast_unsigned (start as I64)
-    let end_bits = I64.cast_unsigned (end as I64)
-    let count = if (inclusive) {
-        if (end < start) { panic "between: empty range" }
-        (end_bits - start_bits) + 1
-    } else {
-        if (end <= start) { panic "between: empty range" }
-        end_bits - start_bits
-    }
-    narrow_i32 (start_bits + sample_bounded rng count)
-}
-
-@track_caller
-def sample_i64 = (mut rng: Rng; start: I64; end: I64; inclusive: Bool) => I64 :: {
-    let start_bits = I64.cast_unsigned start
-    let end_bits = I64.cast_unsigned end
-    let count = if (inclusive) {
-        if (end < start) { panic "between: empty range" }
-        (end_bits - start_bits) + 1
-    } else {
-        if (end <= start) { panic "between: empty range" }
-        end_bits - start_bits
-    }
-    narrow_i64 (start_bits + sample_bounded rng count)
-}
-
-@track_caller
-def sample_isize = (mut rng: Rng; start: ISize; end: ISize; inclusive: Bool) => ISize :: {
-    let start_bits = ISize.cast_unsigned start as U64
-    let end_bits = ISize.cast_unsigned end as U64
-    let count = if (inclusive) {
-        if (end < start) { panic "between: empty range" }
-        (end_bits - start_bits) + 1
-    } else {
-        if (end <= start) { panic "between: empty range" }
-        end_bits - start_bits
-    }
-    narrow_isize (start_bits + sample_bounded rng count)
-}
+// Flipping the sign bit maps signed order onto unsigned order; applying it
+// again maps a sample back.
+def signed_bits = value: I64 => U64 :: BitXor.bit_xor (I64.cast_unsigned value; 9223372036854775808)
+def unsigned_bits = bits: U64 => U64 :: BitXor.bit_xor (bits; 9223372036854775808)
 
 @track_caller
 def sample_f32_range = (mut rng: Rng; start: F32; end: F32) => F32 :: {
     if (!(start < end)) {
         panic "between: empty range"
     }
-    let mut value = start + (end - start) * unit_f32 rng
+    let span = end - start
+    if (!F32.is_finite span) {
+        panic "between: float range must have a finite span"
+    }
+    let mut value = start + span * unit_f32 rng
     while (value == end) {
-        value = start + (end - start) * unit_f32 rng
+        value = start + span * unit_f32 rng
     }
     value
 }
@@ -478,9 +371,13 @@ def sample_f64_range = (mut rng: Rng; start: F64; end: F64) => F64 :: {
     if (!(start < end)) {
         panic "between: empty range"
     }
-    let mut value = start + (end - start) * unit_f64 rng
+    let span = end - start
+    if (!F64.is_finite span) {
+        panic "between: float range must have a finite span"
+    }
+    let mut value = start + span * unit_f64 rng
     while (value == end) {
-        value = start + (end - start) * unit_f64 rng
+        value = start + span * unit_f64 rng
     }
     value
 }
@@ -491,161 +388,161 @@ def sample_f64_range = (mut rng: Rng; start: F64; end: F64) => F64 :: {
 
 impl SampleRange Range<U8> {
     type Item = U8
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    can_sample = range => range.*.current < range.*.end
     sample_range = (range, mut rng) => U8 ::
-        sample_u8 rng range.*.current range.*.end False
+        narrow_u8 (sample_bits rng (range.*.current as U64) (range.*.end as U64) False)
 }
 
 impl SampleRange RangeInclusive<U8> {
     type Item = U8
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    can_sample = range => !range.*.finished && range.*.current <= range.*.end
     sample_range = (range, mut rng) => U8 :: {
         if (range.*.finished) { panic "between: empty range" }
-        sample_u8 rng range.*.current range.*.end True
+        narrow_u8 (sample_bits rng (range.*.current as U64) (range.*.end as U64) True)
     }
 }
 
 impl SampleRange Range<U16> {
     type Item = U16
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    can_sample = range => range.*.current < range.*.end
     sample_range = (range, mut rng) => U16 ::
-        sample_u16 rng range.*.current range.*.end False
+        narrow_u16 (sample_bits rng (range.*.current as U64) (range.*.end as U64) False)
 }
 
 impl SampleRange RangeInclusive<U16> {
     type Item = U16
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    can_sample = range => !range.*.finished && range.*.current <= range.*.end
     sample_range = (range, mut rng) => U16 :: {
         if (range.*.finished) { panic "between: empty range" }
-        sample_u16 rng range.*.current range.*.end True
+        narrow_u16 (sample_bits rng (range.*.current as U64) (range.*.end as U64) True)
     }
 }
 
 impl SampleRange Range<U32> {
     type Item = U32
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    can_sample = range => range.*.current < range.*.end
     sample_range = (range, mut rng) => U32 ::
-        sample_u32 rng range.*.current range.*.end False
+        narrow_u32 (sample_bits rng (range.*.current as U64) (range.*.end as U64) False)
 }
 
 impl SampleRange RangeInclusive<U32> {
     type Item = U32
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    can_sample = range => !range.*.finished && range.*.current <= range.*.end
     sample_range = (range, mut rng) => U32 :: {
         if (range.*.finished) { panic "between: empty range" }
-        sample_u32 rng range.*.current range.*.end True
+        narrow_u32 (sample_bits rng (range.*.current as U64) (range.*.end as U64) True)
     }
 }
 
 impl SampleRange Range<U64> {
     type Item = U64
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    can_sample = range => range.*.current < range.*.end
     sample_range = (range, mut rng) => U64 ::
-        sample_u64 rng range.*.current range.*.end False
+        sample_bits rng (range.*.current) (range.*.end) False
 }
 
 impl SampleRange RangeInclusive<U64> {
     type Item = U64
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    can_sample = range => !range.*.finished && range.*.current <= range.*.end
     sample_range = (range, mut rng) => U64 :: {
         if (range.*.finished) { panic "between: empty range" }
-        sample_u64 rng range.*.current range.*.end True
+        sample_bits rng (range.*.current) (range.*.end) True
     }
 }
 
 impl SampleRange Range<USize> {
     type Item = USize
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    can_sample = range => range.*.current < range.*.end
     sample_range = (range, mut rng) => USize ::
-        sample_usize rng range.*.current range.*.end False
+        narrow_usize (sample_bits rng (range.*.current as U64) (range.*.end as U64) False)
 }
 
 impl SampleRange RangeInclusive<USize> {
     type Item = USize
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    can_sample = range => !range.*.finished && range.*.current <= range.*.end
     sample_range = (range, mut rng) => USize :: {
         if (range.*.finished) { panic "between: empty range" }
-        sample_usize rng range.*.current range.*.end True
+        narrow_usize (sample_bits rng (range.*.current as U64) (range.*.end as U64) True)
     }
 }
 
 impl SampleRange Range<I8> {
     type Item = I8
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    can_sample = range => range.*.current < range.*.end
     sample_range = (range, mut rng) => I8 ::
-        sample_i8 rng range.*.current range.*.end False
+        narrow_i8 (unsigned_bits (sample_bits rng (signed_bits (range.*.current as I64)) (signed_bits (range.*.end as I64)) False))
 }
 
 impl SampleRange RangeInclusive<I8> {
     type Item = I8
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    can_sample = range => !range.*.finished && range.*.current <= range.*.end
     sample_range = (range, mut rng) => I8 :: {
         if (range.*.finished) { panic "between: empty range" }
-        sample_i8 rng range.*.current range.*.end True
+        narrow_i8 (unsigned_bits (sample_bits rng (signed_bits (range.*.current as I64)) (signed_bits (range.*.end as I64)) True))
     }
 }
 
 impl SampleRange Range<I16> {
     type Item = I16
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    can_sample = range => range.*.current < range.*.end
     sample_range = (range, mut rng) => I16 ::
-        sample_i16 rng range.*.current range.*.end False
+        narrow_i16 (unsigned_bits (sample_bits rng (signed_bits (range.*.current as I64)) (signed_bits (range.*.end as I64)) False))
 }
 
 impl SampleRange RangeInclusive<I16> {
     type Item = I16
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    can_sample = range => !range.*.finished && range.*.current <= range.*.end
     sample_range = (range, mut rng) => I16 :: {
         if (range.*.finished) { panic "between: empty range" }
-        sample_i16 rng range.*.current range.*.end True
+        narrow_i16 (unsigned_bits (sample_bits rng (signed_bits (range.*.current as I64)) (signed_bits (range.*.end as I64)) True))
     }
 }
 
 impl SampleRange Range<I32> {
     type Item = I32
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    can_sample = range => range.*.current < range.*.end
     sample_range = (range, mut rng) => I32 ::
-        sample_i32 rng range.*.current range.*.end False
+        narrow_i32 (unsigned_bits (sample_bits rng (signed_bits (range.*.current as I64)) (signed_bits (range.*.end as I64)) False))
 }
 
 impl SampleRange RangeInclusive<I32> {
     type Item = I32
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    can_sample = range => !range.*.finished && range.*.current <= range.*.end
     sample_range = (range, mut rng) => I32 :: {
         if (range.*.finished) { panic "between: empty range" }
-        sample_i32 rng range.*.current range.*.end True
+        narrow_i32 (unsigned_bits (sample_bits rng (signed_bits (range.*.current as I64)) (signed_bits (range.*.end as I64)) True))
     }
 }
 
 impl SampleRange Range<I64> {
     type Item = I64
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    can_sample = range => range.*.current < range.*.end
     sample_range = (range, mut rng) => I64 ::
-        sample_i64 rng range.*.current range.*.end False
+        narrow_i64 (unsigned_bits (sample_bits rng (signed_bits range.*.current) (signed_bits range.*.end) False))
 }
 
 impl SampleRange RangeInclusive<I64> {
     type Item = I64
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    can_sample = range => !range.*.finished && range.*.current <= range.*.end
     sample_range = (range, mut rng) => I64 :: {
         if (range.*.finished) { panic "between: empty range" }
-        sample_i64 rng range.*.current range.*.end True
+        narrow_i64 (unsigned_bits (sample_bits rng (signed_bits range.*.current) (signed_bits range.*.end) True))
     }
 }
 
 impl SampleRange Range<ISize> {
     type Item = ISize
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    can_sample = range => range.*.current < range.*.end
     sample_range = (range, mut rng) => ISize ::
-        sample_isize rng range.*.current range.*.end False
+        narrow_isize (unsigned_bits (sample_bits rng (signed_bits (range.*.current as I64)) (signed_bits (range.*.end as I64)) False))
 }
 
 impl SampleRange RangeInclusive<ISize> {
     type Item = ISize
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: True)
+    can_sample = range => !range.*.finished && range.*.current <= range.*.end
     sample_range = (range, mut rng) => ISize :: {
         if (range.*.finished) { panic "between: empty range" }
-        sample_isize rng range.*.current range.*.end True
+        narrow_isize (unsigned_bits (sample_bits rng (signed_bits (range.*.current as I64)) (signed_bits (range.*.end as I64)) True))
     }
 }
 
@@ -655,14 +552,14 @@ impl SampleRange RangeInclusive<ISize> {
 
 impl SampleRange Range<F32> {
     type Item = F32
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    can_sample = range => range.*.current < range.*.end && F32.is_finite (range.*.end - range.*.current)
     sample_range = (range, mut rng) => F32 ::
         sample_f32_range rng range.*.current range.*.end
 }
 
 impl SampleRange Range<F64> {
     type Item = F64
-    bounds = range => (start: range.*.current, end: range.*.end, inclusive: False)
+    can_sample = range => range.*.current < range.*.end && F64.is_finite (range.*.end - range.*.current)
     sample_range = (range, mut rng) => F64 ::
         sample_f64_range rng range.*.current range.*.end
 }
@@ -772,7 +669,7 @@ pub def fill_entropy = mut buffer: List<U8> =>{IO} Result<(), EntropyError> :: {
         let chunk: USize = if (remaining < 256) { remaining } else { 256 }
         let pointer = RawMutPtr.add data offset
         if (getentropy (pointer as RawOpaqueMutPtr, chunk) != 0) {
-            return EntropyError (code: __staple_fs_errno ())
+            return EntropyError (code: __staple_io_errno ())
         }
         offset = offset + chunk
     }
@@ -795,85 +692,28 @@ def read_u64_le = (bytes: List<U8>; offset: USize) => U64 :: {
 // Distributions
 // ---------------------------------------------------------------------------
 
-/// A precomputed uniform range. Construct with `Uniform.new`.
-pub type Uniform<T> wrap (start: T, end: T, inclusive: Bool)
+/// A range checked once and then sampled like `between`. `T` is the range's
+/// item type, carried so the distribution's output is concrete. Construct with
+/// `Uniform.new`.
+pub type Uniform<R, T> wrap R
 
-companion<T> Uniform<T> {
-    /// Precomputes the sampling rule for a range.
-    pub def new = <R where SampleRange R> range: R => Uniform<SampleRange.Item R> :: {
-        let (start, end, inclusive) = SampleRange.bounds range
-        Uniform.<SampleRange.Item R> (start: start, end: end, inclusive: inclusive)
+companion<R, T> Uniform<R, T> {
+    use package.source.track_caller
+
+    /// Wraps a range, panicking at the caller when it cannot be sampled.
+    @track_caller
+    pub def new = <S where SampleRange S> move range: S => Uniform<S, SampleRange.Item S> :: {
+        if (!SampleRange.can_sample range) {
+            panic "Uniform.new: range cannot be sampled"
+        }
+        Uniform.<S, SampleRange.Item S> range
     }
 }
 
-trait UniformSample T {
-    sample_uniform: (T, T, Bool, mut Rng) -> T
-}
-
-impl UniformSample U8 {
-    sample_uniform = (start, end, inclusive, mut rng) => U8 ::
-        sample_u8 rng start end inclusive
-}
-
-impl UniformSample U16 {
-    sample_uniform = (start, end, inclusive, mut rng) => U16 ::
-        sample_u16 rng start end inclusive
-}
-
-impl UniformSample U32 {
-    sample_uniform = (start, end, inclusive, mut rng) => U32 ::
-        sample_u32 rng start end inclusive
-}
-
-impl UniformSample U64 {
-    sample_uniform = (start, end, inclusive, mut rng) => U64 ::
-        sample_u64 rng start end inclusive
-}
-
-impl UniformSample USize {
-    sample_uniform = (start, end, inclusive, mut rng) => USize ::
-        sample_usize rng start end inclusive
-}
-
-impl UniformSample I8 {
-    sample_uniform = (start, end, inclusive, mut rng) => I8 ::
-        sample_i8 rng start end inclusive
-}
-
-impl UniformSample I16 {
-    sample_uniform = (start, end, inclusive, mut rng) => I16 ::
-        sample_i16 rng start end inclusive
-}
-
-impl UniformSample I32 {
-    sample_uniform = (start, end, inclusive, mut rng) => I32 ::
-        sample_i32 rng start end inclusive
-}
-
-impl UniformSample I64 {
-    sample_uniform = (start, end, inclusive, mut rng) => I64 ::
-        sample_i64 rng start end inclusive
-}
-
-impl UniformSample ISize {
-    sample_uniform = (start, end, inclusive, mut rng) => ISize ::
-        sample_isize rng start end inclusive
-}
-
-impl UniformSample F32 {
-    sample_uniform = (start, end, _, mut rng) => F32 ::
-        sample_f32_range rng start end
-}
-
-impl UniformSample F64 {
-    sample_uniform = (start, end, _, mut rng) => F64 ::
-        sample_f64_range rng start end
-}
-
-impl<T where UniformSample T, Copy T> Distribution Uniform<T> {
+impl<R, T where SampleRange R, SampleRange.Item R == T> Distribution Uniform<R, T> {
     type Output = T
     sample = (uniform, mut rng) => T ::
-        UniformSample.sample_uniform (uniform.*.start, uniform.*.end, uniform.*.inclusive, rng)
+        SampleRange.sample_range (uniform.*, rng)
 }
 
 /// A coin flip whose probability is stored as an exact 64-bit threshold.
@@ -907,8 +747,8 @@ impl Distribution Bernoulli {
 pub type WeightedIndex wrap (cumulative: List<F64>)
 
 companion WeightedIndex {
-    /// Builds a cumulative table. At least one weight must be positive and all
-    /// weights must be finite and non-negative.
+    /// Builds a cumulative table. At least one weight must be positive, all
+    /// weights must be finite and non-negative, and their sum must be finite.
     pub def new = weights: List<F64> => Result<WeightedIndex, DistributionError> :: {
         let length = List.length weights
         let mut cumulative: List<F64> = List.with_capacity length
@@ -923,6 +763,10 @@ companion WeightedIndex {
             List.push cumulative total
             index = index + 1
         }
+        if (F64.is_infinite total) {
+            // Every weight was finite, but their sum overflowed.
+            return DistributionError.InvalidParameter
+        }
         if (!(total > 0.0)) {
             return DistributionError.NoPositiveWeight
         }
@@ -936,19 +780,26 @@ impl Distribution WeightedIndex {
         let length = List.length weighted.*
         let total = List.get_unchecked weighted.* (length - 1)
         let target = unit_f64 rng * total
-        let mut index: USize = 0
-        while (index < length) {
-            if (target < List.get_unchecked weighted.* index) {
-                return index
+        // Binary search for the first entry above `target`. Rounding can make
+        // `target` equal `total`; the first entry that reaches `total` is the
+        // last positive weight, so trailing zero weights are never chosen.
+        let mut low: USize = 0
+        let mut high = length - 1
+        while (low < high) {
+            let middle = low + (high - low) / 2
+            let bound = List.get_unchecked weighted.* middle
+            if (target < bound || bound >= total) {
+                high = middle
+            } else {
+                low = middle + 1
             }
-            index = index + 1
         }
-        length - 1
+        low
     }
 }
 
-/// A normal (Gaussian) distribution.
-pub type Normal wrap pub (mean: F64, std_dev: F64)
+/// A normal (Gaussian) distribution. Construct with `Normal.new`.
+pub type Normal wrap (mean: F64, std_dev: F64)
 
 companion Normal {
     /// Creates a normal distribution with a non-negative finite standard
@@ -959,6 +810,12 @@ companion Normal {
         }
         Ok (Normal (mean: mean, std_dev: std_dev))
     }
+
+    /// Returns the mean.
+    pub def mean = normal: Normal => F64 :: normal.*.mean
+
+    /// Returns the standard deviation.
+    pub def std_dev = normal: Normal => F64 :: normal.*.std_dev
 }
 
 impl Distribution Normal {
@@ -982,8 +839,9 @@ impl Distribution Normal {
     }
 }
 
-/// An exponential distribution parameterized by its rate.
-pub type Exponential wrap pub (rate: F64)
+/// An exponential distribution parameterized by its rate. Construct with
+/// `Exponential.new`.
+pub type Exponential wrap (rate: F64)
 
 companion Exponential {
     /// Creates an exponential distribution with a positive finite rate.
@@ -993,15 +851,15 @@ companion Exponential {
         }
         Ok (Exponential (rate: rate))
     }
+
+    /// Returns the rate.
+    pub def rate = exponential: Exponential => F64 :: exponential.*
 }
 
 impl Distribution Exponential {
     type Output = F64
     sample = (exponential, mut rng) => F64 :: {
         let rate = exponential.*
-        if (!(rate > 0.0)) {
-            return 0.0
-        }
         let unit = unit_f64 rng
         (0.0 - F64.ln (1.0 - unit)) / rate
     }
