@@ -336,3 +336,27 @@ fn the_install_script_prebuilds_the_stdlib_and_replaces_stale_objects() {
     assert_eq!(String::from_utf8_lossy(&run.stdout), "Hello, world!\n");
     assert!(objects(&scratch.cache()).is_empty());
 }
+
+#[test]
+fn floating_point_math_links_without_explicit_libraries() {
+    let scratch = Scratch::new("math-linking");
+    let stdlib = repo_root().join("stdlib");
+    scratch.write("staple.kdl", "package \"math_linking\"\n");
+    scratch.write("src/main.sta", r#"
+use std.io.println
+use std.process.panic
+let value: F64 = 2.75
+if ((F64.floor value) != 2.0) { panic "floor" }
+if ((F64.ln value) <= 0.0) { panic "ln" }
+println "math ok"
+"#);
+    for arguments in [
+        vec!["run"],
+        vec!["run"], // Reuse the cached standard-library object.
+        vec!["run", "--no-incremental"],
+    ] {
+        let output = staple(&scratch, &stdlib, &scratch.0, &arguments);
+        succeeded(&output);
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "math ok\n");
+    }
+}

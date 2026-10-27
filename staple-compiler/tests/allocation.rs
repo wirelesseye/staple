@@ -1,6 +1,8 @@
 //! Exercises the low-level `std.alloc` surface and the consuming `List`
 //! iterator directly.
 
+mod common;
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -51,12 +53,7 @@ fn run_mode(source: &str, dynamic: bool) -> String {
     CodeGenerator::new(&context)
         .emit_object(&lowered, &object, None)
         .unwrap_or_else(|errors| panic!("emit: {errors:?}"));
-    let link = Command::new("cc")
-        .arg(&object)
-        .arg("-o")
-        .arg(&base)
-        .output()
-        .unwrap();
+    let link = common::linker(&[&object], &base).output().unwrap();
     assert!(
         link.status.success(),
         "link: {}",
