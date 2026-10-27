@@ -8,8 +8,7 @@ use package.process.(panic)
 ///
 /// The variants are not re-exported, so refer to them as `Ordering.Less`,
 /// `Ordering.Equal`, and `Ordering.Greater`.
-@derive_eq
-@variants(@derive_eq)
+@all(@derive_eq)
 pub typegroup Ordering {
     /// The left value is smaller than the right value.
     Less,
