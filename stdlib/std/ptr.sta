@@ -2,6 +2,7 @@ pub mod
 
 use package.cmp.(Eq)
 use package.convert.(Convert)
+use package.hash.(Hash, Hasher)
 use package.alloc.(__pointer_read, __pointer_drop_in_place, __pointer_add, __pointer_copy_nonoverlapping)
 
 /// A non-owning, low-level pointer that permits reads of a `Pointee`.
@@ -138,16 +139,32 @@ impl<T where ?Sized T> Eq RawPtr<T> {
     eq = (left; right) => ((left as USize) == (right as USize))
 }
 
+impl<T where ?Sized T> Hash RawPtr<T> {
+    hash = (value, mut hasher) => Hasher.write_usize hasher (value as USize)
+}
+
 impl<T where ?Sized T> Eq RawMutPtr<T> {
     eq = (left; right) => ((left as USize) == (right as USize))
+}
+
+impl<T where ?Sized T> Hash RawMutPtr<T> {
+    hash = (value, mut hasher) => Hasher.write_usize hasher (value as USize)
 }
 
 impl Eq RawOpaquePtr {
     eq = (left; right) => ((left as USize) == (right as USize))
 }
 
+impl Hash RawOpaquePtr {
+    hash = (value, mut hasher) => Hasher.write_usize hasher (value as USize)
+}
+
 impl Eq RawOpaqueMutPtr {
     eq = (left; right) => ((left as USize) == (right as USize))
+}
+
+impl Hash RawOpaqueMutPtr {
+    hash = (value, mut hasher) => Hasher.write_usize hasher (value as USize)
 }
 
 companion<T where ?Sized T> RawPtr<T> {

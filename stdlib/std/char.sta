@@ -2,6 +2,7 @@ pub mod
 
 use package.cmp.(Eq, PartialOrd, Ord)
 use package.convert.(Convert, TryConvert, ConversionError)
+use package.hash.(Hash, Hasher)
 use package.result.Ok
 use package.fmt.(Display, Debug, Formatter)
 use package.string.String
@@ -80,6 +81,7 @@ companion Char {
 
 // Copy is inherited structurally from U32.
 impl Eq Char { eq = (Char left; Char right) => left == right }
+impl Hash Char { hash = (Char value, mut hasher) => Hasher.write_u32 hasher value }
 impl PartialOrd Char { partial_cmp = (Char left; Char right) => PartialOrd.partial_cmp (left; right) }
 impl Ord Char { cmp = (Char left; Char right) => Ord.cmp (left; right) }
 impl Convert Char U32 { convert = move Char value => value }

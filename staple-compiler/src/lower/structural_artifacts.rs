@@ -124,6 +124,13 @@ pub(super) fn expand_structural_method(
                 Err(diagnostic) => return Err(vec![diagnostic]),
             }
         }
+        StructuralTraitMethod::Hash => match structural_hash_body(program, &plan, &origin) {
+            Ok((body, selected_requests)) => {
+                requests.extend(selected_requests);
+                body
+            }
+            Err(diagnostic) => return Err(vec![diagnostic]),
+        },
         StructuralTraitMethod::Default => match structural_default_body(program, &plan, &origin) {
             Ok((body, selected_requests)) => {
                 requests.extend(selected_requests);
@@ -578,6 +585,105 @@ fn structural_equality_body(
         }
     };
     Ok((body, requests))
+}
+
+/// `Hash` for a product (one delegate per element in order) or a sum (the tag
+/// as a `USize`, then one delegate per alternative in tag order).
+fn structural_hash_body(
+    program: &LoweredProgram,
+    plan: &StructuralMethodPlan,
+    origin: &Origin,
+) -> Result<(StructuralBody, Vec<ClosureRequest>), Diagnostic> {
+    let (trait_id, method) =
+        standard_trait_method(program, program.semantic_ids.hash_trait, origin, "Hash")?;
+    let target = structural_argument(plan, 0, origin)?;
+    let (value_types, is_sum): (Vec<CheckedType>, bool) = match &target {
+        CheckedType::Product(product) => (
+            product
+                .iter_positions()
+                .map(|element| element.value_type.clone())
+                .collect(),
+            false,
+        ),
+        CheckedType::Sum(sum) => (sum.alternatives.clone(), true),
+        _ => {
+            return Err(Diagnostic::new(
+                origin.span.clone(),
+                "structural Hash target is not a product or sum",
+            ));
+        }
+    };
+    let mut requests = Vec::new();
+    let mut delegates = Vec::new();
+    for value_type in value_types {
+        let selected = select_concrete_trait_method(
+            program,
+            origin,
+            trait_id,
+            method,
+            std::slice::from_ref(&value_type),
+        )?;
+        requests.push(selected.request);
+        delegates.push(DebugDelegate {
+            value_type,
+            callee: selected.callee,
+            callee_type: selected.callee_type,
+        });
+    }
+    if !is_sum {
+        return Ok((
+            StructuralBody::ProductHash {
+                elements: delegates,
+            },
+            requests,
+        ));
+    }
+    let Some(write_tag_function) = program.semantic_ids.hash_write_usize else {
+        return Err(Diagnostic::new(
+            origin.span.clone(),
+            "standard `Hasher.write_usize` is missing from the lowered catalog",
+        ));
+    };
+    let write_tag_type = program
+        .functions
+        .get(write_tag_function)
+        .map(|function| function.signature.clone())
+        .ok_or_else(|| {
+            Diagnostic::new(
+                origin.span.clone(),
+                format!(
+                    "Hasher.write_usize function {} has no lowered template",
+                    write_tag_function.0
+                ),
+            )
+        })?;
+    let resolved_write = program.resolve_instance_request(&InstanceResolutionRequest {
+        function: write_tag_function,
+        origin: origin.clone(),
+        function_type: write_tag_type.clone(),
+        substitutions: CallSubstitutions::default(),
+        evidence: None,
+        target: InstanceResolutionTarget::Root,
+    })?;
+    let write_tag = PlannedInstance {
+        key: resolved_write.key.clone(),
+        instance: None,
+        kind: LoweredInstanceDependencyKind::DirectCall,
+    };
+    requests.push(ClosureRequest::Instance {
+        resolved: resolved_write,
+        kind: LoweredInstanceDependencyKind::DirectCall,
+        origin: origin.clone(),
+        use_site: None,
+    });
+    Ok((
+        StructuralBody::SumHash {
+            alternatives: delegates,
+            write_tag,
+            write_tag_type,
+        },
+        requests,
+    ))
 }
 
 /// `Default` for a product: one `Default.default` delegate per position in

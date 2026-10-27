@@ -10,6 +10,7 @@ use package.shared_buffer.SharedBuffer
 use package.cmp.Eq
 use package.clone.Clone
 use package.default.Default
+use package.hash.Hash
 use package.index.(Index, MutateIndex)
 
 /// A growable sequence backed by a mutable buffer.
@@ -33,6 +34,10 @@ impl<T where Clone T> Clone (List<T>) {
 
 impl<T where Eq T> Eq List<T> {
     eq = (List left; List right) => Eq.eq (left; right)
+}
+
+impl<T where Hash T> Hash List<T> {
+    hash = (List buffer, mut hasher) => Hash.hash (buffer, hasher)
 }
 
 // Doubles capacity (minimum 4 on first growth) and moves every element

@@ -4858,6 +4858,17 @@ alternative's `Eq` reports the payloads equal. `Bool` is the sum
 `True | False`, so its equality is derived this way from the singleton
 `Eq True` and `Eq False` implementations.
 
+Products and sums likewise have compiler-provided structural `Hash`
+implementations whenever all their elements or alternatives implement `Hash`.
+Products feed each element to the hasher in order. Sums write the active
+alternative's tag as a `USize` before feeding the payload, so values in
+different alternatives cannot collide by making the same writes. Nominal types
+do not inherit `Hash` from their representation; `@derive_hash` in `std.hash`
+generates one that hashes the representation, or writes nothing for a bodyless
+singleton. `Hash` requires `Eq`. Floats are not `Hash`: IEEE equality is not an
+equivalence relation (`NaN` is unequal to itself, while `0.0` equals `-0.0`
+despite different bits).
+
 `String` is an immutable garbage-collected UTF-8 byte sequence. The standard
 library declares it as a nominal type with the private representation
 `SharedBuffer<U8>`. At runtime it is one pointer to a managed header holding
@@ -4940,6 +4951,45 @@ ASCII letters only; non-ASCII scalars remain unchanged. `Char` has matching
 ASCII case operations, `to_string`, and the predicates `is_ascii_digit`,
 `is_ascii_alphabetic`, `is_ascii_alphanumeric`, `is_ascii_uppercase`, and
 `is_ascii_lowercase`.
+
+### Hashing with `std.hash`
+
+`std.hash` declares the `Hash` trait, the `Hasher` it feeds, and the
+`hash_of`/`hash_with` helpers. The prelude re-exports `Hash`, `Hasher`,
+`hash_of`, and `@derive_hash`; `HashKey` and `hash_with` are imported from
+`std.hash` when a collection author needs an explicit key.
+
+`Hasher.new ()` and `hash_of value` use `HashKey.fixed ()`, a constant key, so
+they stay pure. `HashKey.from_rng rng` draws a reproducible key for tests.
+`HashKey.from_entropy ()` draws a key from the operating system and therefore
+requires `IO`. A collection whose keys may be chosen by an adversary should
+draw one key with `from_entropy` and reuse it. Hash values themselves are
+unspecified: the same key and writes produce the same hash within one run of
+one program, but hashes must not be persisted, sent between processes, or
+asserted against as stable values.
+
+Every variable-length implementation writes its length before its contents, so
+concatenating fields is prefix-free: `("ab", "c")` and `("a", "bc")` do not make
+the same writes. Integers write one widened block; `Hasher.write_bytes` packs
+bytes little-endian eight at a time without writing a length of its own. Sums
+write their tag first. Fixed products, including `()`, write their elements in
+order and need no separator.
+
+`@derive_hash` accepts the same items as `@derive_eq`: a `wrap` or `from` type,
+or a bodyless singleton. A represented type requires `Hash` for its field types
+and hashes its representation; a singleton writes nothing. The modifier does
+not derive `Eq`, so write both:
+
+```staple
+@derive_eq
+@derive_hash
+type Point wrap (x: I32, y: I32)
+
+let key = hash_of (Point (x: 1, y: 2))
+```
+
+A product, sum, or derived type containing a float is not `Hash`, because `F32`
+and `F64` do not implement it.
 
 `Shared<T>` is a garbage-collected reference to a value of type `T`, declared in
 `std.shared` and imported with `use std.shared.(Shared)`. Its standard

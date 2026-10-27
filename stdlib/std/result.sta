@@ -1,10 +1,12 @@
 pub mod
 
 use package.cmp.(derive_eq)
+use package.hash.derive_hash
 use package.try.Try
 
 /// A successful value represented transparently by its payload.
 @derive_eq
+@derive_hash
 pub type Ok<T> from pub T
 
 /// The outcome of an operation: success as `Ok`, or an error value.

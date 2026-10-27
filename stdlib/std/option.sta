@@ -1,15 +1,18 @@
 pub mod
 
 use package.cmp.(derive_eq)
+use package.hash.derive_hash
 use package.try.Try
 use package.result.Ok
 
 /// Represents the absence of a value.
 @derive_eq
+@derive_hash
 pub type None
 
 /// Contains a present value.
 @derive_eq
+@derive_hash
 pub type Some<T> from pub T
 
 /// A value that may be absent.

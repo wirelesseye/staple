@@ -67,6 +67,29 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_debug_delegate(function, value, formatter, name)
     }
 
+    /// Calls one element's or alternative's `Hash.hash` delegate with the
+    /// hasher pointer already in its mutable ABI form.
+    fn emit_hash_delegate(
+        &self,
+        delegate: &DebugDelegate,
+        value: BasicValueEnum<'context>,
+        hasher: BasicValueEnum<'context>,
+        name: &str,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let arguments = self.backend.build_trait_arguments(
+            &delegate.callee_type,
+            &[value, hasher],
+            span.clone(),
+        )?;
+        let callee = self.planned_function(&delegate.callee, span)?;
+        self.backend
+            .builder
+            .build_direct_call(callee, &arguments, name)
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
     /// Calls one element's or alternative's `Eq.eq` delegate and reads its
     /// `Bool` result as an `i1`.
     fn emit_equality_delegate(
@@ -243,6 +266,74 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     plan,
                     span,
                 )?
+            }
+            StructuralBody::ProductHash { elements } => {
+                let [BasicValueEnum::StructValue(value), hasher] = values.as_slice() else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "invalid structural Hash arguments",
+                    ));
+                };
+                for (index, delegate) in elements.iter().enumerate() {
+                    let field =
+                        self.backend
+                            .extract_product_element(*value, index, "hash.element")?;
+                    self.emit_hash_delegate(delegate, field, *hasher, "hash.element", span)?;
+                }
+                self.structural_unit(span)?
+            }
+            StructuralBody::SumHash {
+                alternatives,
+                write_tag,
+                write_tag_type,
+            } => {
+                let [BasicValueEnum::StructValue(value), hasher] = values.as_slice() else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "invalid structural Hash arguments",
+                    ));
+                };
+                let Some(CheckedType::Sum(sum)) = plan.arguments.first() else {
+                    return Err(Diagnostic::new(span.clone(), "invalid structural Hash sum"));
+                };
+                let write = write_tag
+                    .instance
+                    .and_then(|id| self.instances.get(&id))
+                    .copied()
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "missing Hasher.write_usize declaration")
+                    })?;
+                let tag = self.backend.build_sum_tag(*value, "hash.tag")?;
+                let tag = self
+                    .backend
+                    .builder
+                    .build_int_z_extend(tag, self.backend.size_type, "hash.tag.usize")
+                    .map_err(compiler_diagnostic)?;
+                let arguments = self.backend.build_trait_arguments(
+                    write_tag_type,
+                    &[*hasher, BasicValueEnum::IntValue(tag)],
+                    span.clone(),
+                )?;
+                self.backend
+                    .builder
+                    .build_direct_call(write, &arguments, "hash.tag.write")
+                    .map_err(compiler_diagnostic)?;
+                let (merge, cases) =
+                    self.backend
+                        .begin_debug_sum(*value, alternatives.len(), span.clone())?;
+                for (index, delegate) in alternatives.iter().enumerate() {
+                    self.backend.builder.position_at_end(cases[index]);
+                    let payload =
+                        self.backend
+                            .extract_sum_alternative(*value, sum, index, span.clone())?;
+                    self.emit_hash_delegate(delegate, payload, *hasher, "hash.alternative", span)?;
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(merge)
+                        .map_err(compiler_diagnostic)?;
+                }
+                self.backend.builder.position_at_end(merge);
+                self.structural_unit(span)?
             }
             StructuralBody::SumEquality {
                 alternatives,
@@ -623,6 +714,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         (Some(reference), "mutate_index.deref")
                     }
                     other @ (crate::StructuralTraitMethod::Equality
+                    | crate::StructuralTraitMethod::Hash
                     | crate::StructuralTraitMethod::Default
                     | crate::StructuralTraitMethod::Display
                     | crate::StructuralTraitMethod::Debug

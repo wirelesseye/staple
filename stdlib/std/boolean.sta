@@ -2,6 +2,7 @@ pub mod
 
 use package.ops.(Not)
 use package.cmp.(derive_eq)
+use package.hash.derive_hash
 use package.default.Default
 use package.convert.(Convert)
 use package.string.(String, ToString)
@@ -15,11 +16,13 @@ use package.fmt.derive_debug
 /// The logical true value.
 @derive_debug
 @derive_eq
+@derive_hash
 pub type True
 
 /// The logical false value.
 @derive_debug
 @derive_eq
+@derive_hash
 pub type False
 
 /// A logical value that is either true or false.

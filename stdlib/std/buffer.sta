@@ -3,6 +3,7 @@ pub mod
 use package.alloc.(Finalize, Gc, MemLayout)
 use package.clone.Clone
 use package.cmp.Eq
+use package.hash.(Hash, Hasher)
 use package.ptr.(RawMutPtr, RawOpaqueMutPtr)
 use package.shared_buffer.SharedBuffer
 use package.process.trap
@@ -287,6 +288,21 @@ impl<T where Eq T> Eq Buffer<T> {
             equal
         } else {
             False
+        }
+    }
+}
+
+impl<T where Hash T> Hash Buffer<T> {
+    hash = (buffer, mut hasher) => {
+        let length = Buffer.length buffer
+        Hasher.write_usize hasher length
+        let mut index: USize = 0
+        while (index < length) {
+            let element = BufferHeader.element buffer.* index
+            let value = RawMutPtr.unsafe_read element
+            Hash.hash (value, hasher)
+            RawMutPtr.store element value
+            index = index + 1
         }
     }
 }

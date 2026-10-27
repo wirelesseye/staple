@@ -1,0 +1,337 @@
+/// Hashing for values that can be keys in a hash-based collection.
+///
+/// Hash values are unspecified: the same key and the same writes give the same
+/// hash within one run of one program. Do not persist hashes, send them across
+/// processes, or write tests against specific values.
+pub mod
+
+use package.cmp.Eq
+use package.convert.TryConvert
+use package.io.IO
+use package.list.List
+use package.ops.BitXor
+use package.result.(Result, Ok)
+use package.rand.(Rng, EntropyError, fill_entropy)
+use package.shared_buffer.SharedBuffer
+use package.syntax.*
+use package.process.panic
+
+/// A 128-bit key for `Hasher`.
+pub type HashKey wrap (k0: U64, k1: U64)
+
+companion HashKey {
+    /// A constant key. Hashes made with it are predictable, so use it only
+    /// where keys are not chosen by an adversary.
+    pub def fixed = () => HashKey :: HashKey (k0: 0, k1: 0)
+
+    /// Draws a key from operating-system randomness.
+    pub def from_entropy = () =>{IO} Result<HashKey, EntropyError> :: {
+        let mut bytes: List<U8> = List.of (0u8 ^ 16)
+        fill_entropy bytes ?
+        Ok (HashKey (k0: read_u64_le bytes 0, k1: read_u64_le bytes 8))
+    }
+
+    /// Draws a key from a generator, for reproducible tests.
+    pub def from_rng = mut rng: Rng => HashKey ::
+        HashKey (k0: Rng.next_u64 rng, k1: Rng.next_u64 rng)
+}
+
+/// Incremental SipHash-1-3 state. Hash values are unspecified: the same key
+/// and writes give the same hash within one run of one program.
+pub type Hasher wrap (v0: U64, v1: U64, v2: U64, v3: U64, length: U64)
+
+/// Feeds one 64-bit block into `hasher` with one SipRound and records `count`
+/// bytes. The caller has already packed or widened the block little-endian.
+def write_block = (mut hasher: Hasher; block: U64; count: U64) => () :: {
+    let mut v0 = hasher.v0
+    let mut v1 = hasher.v1
+    let mut v2 = hasher.v2
+    let mut v3 = hasher.v3
+    v3 = BitXor.bit_xor (v3; block)
+    v0 = v0 + v1
+    v1 = U64.rotate_left v1 13
+    v1 = BitXor.bit_xor (v1; v0)
+    v0 = U64.rotate_left v0 32
+    v2 = v2 + v3
+    v3 = U64.rotate_left v3 16
+    v3 = BitXor.bit_xor (v3; v2)
+    v0 = v0 + v3
+    v3 = U64.rotate_left v3 21
+    v3 = BitXor.bit_xor (v3; v0)
+    v2 = v2 + v1
+    v1 = U64.rotate_left v1 17
+    v1 = BitXor.bit_xor (v1; v2)
+    v2 = U64.rotate_left v2 32
+    v0 = BitXor.bit_xor (v0; block)
+    hasher.v0 = v0
+    hasher.v1 = v1
+    hasher.v2 = v2
+    hasher.v3 = v3
+    hasher.length = hasher.length + count
+}
+
+/// Rounds an index scale into the shift count type; every caller is below 64.
+def usize_to_u32 = value: USize => U32 :: match (TryConvert.try_convert.<USize, U32> value) {
+    Ok result => result,
+    _ => 0,
+}
+
+/// Runs one SipRound over four state words.
+def sip_round = (v0: U64, v1: U64, v2: U64, v3: U64) => (U64, U64, U64, U64) :: {
+    let mut a = v0
+    let mut b = v1
+    let mut c = v2
+    let mut d = v3
+    a = a + b
+    b = U64.rotate_left b 13
+    b = BitXor.bit_xor (b; a)
+    a = U64.rotate_left a 32
+    c = c + d
+    d = U64.rotate_left d 16
+    d = BitXor.bit_xor (d; c)
+    a = a + d
+    d = U64.rotate_left d 21
+    d = BitXor.bit_xor (d; a)
+    c = c + b
+    b = U64.rotate_left b 17
+    b = BitXor.bit_xor (b; c)
+    c = U64.rotate_left c 32
+    (a, b, c, d)
+}
+
+companion Hasher {
+    /// Creates a hasher with `HashKey.fixed ()`.
+    pub def new = () => Hasher :: with_key (HashKey.fixed ())
+
+    /// Creates a hasher with a chosen key.
+    pub def with_key = key: HashKey => Hasher :: Hasher (
+        v0: BitXor.bit_xor (key.k0; 0x736f_6d65_7073_6575),
+        v1: BitXor.bit_xor (key.k1; 0x646f_7261_6e64_6f6d),
+        v2: BitXor.bit_xor (key.k0; 0x6c79_6765_6e65_7261),
+        v3: BitXor.bit_xor (key.k1; 0x7465_6462_7974_6573),
+        length: 0,
+    )
+
+    /// Mixes one 64-bit block into the state with one SipRound.
+    pub def write_u64 = (mut hasher: Hasher; block: U64) => () :: write_block hasher block 8
+
+    /// Mixes the low eight bits of `value`.
+    pub def write_u8 = (mut hasher: Hasher; value: U8) => () :: write_u64 hasher (value as U64)
+
+    /// Mixes the low sixteen bits of `value`.
+    pub def write_u16 = (mut hasher: Hasher; value: U16) => () :: write_u64 hasher (value as U64)
+
+    /// Mixes the low thirty-two bits of `value`.
+    pub def write_u32 = (mut hasher: Hasher; value: U32) => () :: write_u64 hasher (value as U64)
+
+    /// Mixes the pointer-width bits of `value`.
+    pub def write_usize = (mut hasher: Hasher; value: USize) => () :: write_u64 hasher (value as U64)
+
+    /// Mixes bytes in eight at a time, little-endian, with the tail
+    /// zero-padded into one final block. Writes no length: callers that need
+    /// a prefix-free encoding write it first.
+    pub def write_bytes = (mut hasher: Hasher; bytes: SharedBuffer<U8>) => () :: {
+        let length = SharedBuffer.length bytes
+        let mut index: USize = 0
+        while (index < length) {
+            let mut block: U64 = 0
+            let mut offset: USize = 0
+            while (offset < 8 && index + offset < length) {
+                let byte = SharedBuffer.get_unchecked bytes (index + offset)
+                let shift: U32 = usize_to_u32 (offset * 8)
+                block = block + U64.wrapping_shift_left (byte as U64) shift
+                offset = offset + 1
+            }
+            write_block hasher block (offset as U64)
+            index = index + 8
+        }
+    }
+
+    /// Returns the hash of everything written so far. Does not reset.
+    pub def finish = hasher: Hasher => U64 :: {
+        let mut v0 = hasher.v0
+        let mut v1 = hasher.v1
+        let mut v2 = hasher.v2
+        let mut v3 = hasher.v3
+        v3 = BitXor.bit_xor (v3; U64.wrapping_shift_left hasher.length 56)
+        v2 = BitXor.bit_xor (v2; 0xff)
+        let (w0, w1, w2, w3) = sip_round (v0, v1, v2, v3)
+        let (w0, w1, w2, w3) = sip_round (w0, w1, w2, w3)
+        let (w0, w1, w2, w3) = sip_round (w0, w1, w2, w3)
+        BitXor.bit_xor (
+            BitXor.bit_xor (w0; w1);
+            BitXor.bit_xor (w2; w3),
+        )
+    }
+}
+
+/// Feeds a value into a `Hasher`.
+///
+/// Values that are equal by `Eq` must make the same writes, so that they
+/// produce the same hash.
+pub trait Hash T where Eq T {
+    /// Writes the value into the hasher.
+    hash: (T, mut Hasher) -> ()
+}
+
+/// Hashes one value with `HashKey.fixed ()`.
+pub def hash_of = <T where Hash T> value: T => U64 :: hash_with (HashKey.fixed ()) value
+
+/// Hashes one value with a chosen key.
+pub def hash_with = <T where Hash T> (key: HashKey; value: T) => U64 :: {
+    let mut hasher = Hasher.with_key key
+    Hash.hash (value, hasher)
+    Hasher.finish hasher
+}
+
+/// Joins type parameter syntax with commas.
+def derived_hash_parameters = parameters: Sequence<Ident<String>> => Syntax :: match parameters {
+    Sequence () => quote {},
+    Sequence (first, rest) => match rest {
+        Sequence () => quote { $first },
+        _ => {
+            let tail = derived_hash_parameters rest
+            quote { $first, $tail }
+        },
+    },
+}
+
+/// Joins fragments with commas.
+def derived_hash_join = fragments: Sequence<Syntax> => Syntax :: match fragments {
+    Sequence () => quote {},
+    Sequence (first, rest) => match rest {
+        Sequence () => first,
+        _ => {
+            let tail = derived_hash_join rest
+            quote { $first, $tail }
+        },
+    },
+}
+
+def derived_hash_concat = (left: Sequence<Syntax>, right: Sequence<Syntax>) => Sequence<Syntax> :: match left {
+    Sequence () => right,
+    Sequence (first, rest) => Sequence (first: first, rest: derived_hash_concat (rest, right)),
+}
+
+def derived_hash_field_bounds = fields: Sequence<ProductTypeField> => Sequence<Syntax> :: match fields {
+    Sequence () => Sequence (),
+    Sequence (first, rest) => match first {
+        ProductTypeField (_, ProductType nested, _) => derived_hash_concat (
+            derived_hash_field_bounds nested,
+            derived_hash_field_bounds rest,
+        ),
+        ProductTypeField (_, field_type, _) => Sequence (
+            first: quote { Hash $field_type },
+            rest: derived_hash_field_bounds rest,
+        ),
+    },
+}
+
+def derived_hash_bounds = ty: Type => Sequence<Syntax> :: match ty {
+    ProductType fields => derived_hash_field_bounds fields,
+    _ => Sequence (first: quote { Hash $ty }, rest: Sequence ()),
+}
+
+def derived_hash_implementation = (
+    name: Ident<String>,
+    target: Type,
+    parameters: Sequence<Ident<String>>,
+    representation: Type,
+    singleton: Bool,
+) => Item :: {
+    let header = match parameters {
+        Sequence () => quote { impl Hash $target },
+        _ => {
+            let names = derived_hash_parameters parameters
+            if singleton {
+                quote { impl<$names> Hash $name<$names> }
+            } else {
+                match (derived_hash_bounds representation) {
+                    Sequence () => quote { impl<$names> Hash $name<$names> },
+                    bounds => {
+                        let bounds = derived_hash_join bounds
+                        quote { impl<$names where $bounds> Hash $name<$names> }
+                    },
+                }
+            }
+        },
+    }
+    if singleton {
+        parse_quote {
+            $header {
+                hash = (_, mut hasher) => ()
+            }
+        }
+    } else {
+        parse_quote {
+            $header {
+                hash = ($name inner, mut hasher) => Hash.hash (inner, hasher)
+            }
+        }
+    }
+}
+
+/// Inspects a declaration while preserving pending modifiers on the output.
+def derived_hash_declaration = item: Item => Item :: match item {
+    ModifiedItem (_, nested) => derived_hash_declaration nested,
+    _ => item,
+}
+
+/// Derives `Hash` for a `wrap` or `from` type, or a bodyless singleton.
+///
+/// A represented type hashes its representation. Generic implementations
+/// require `Hash` for each field type (or the representation itself for other
+/// representations). Singletons write nothing. Pending modifiers are
+/// preserved, so derive modifiers can be stacked.
+///
+/// `Hash` requires `Eq`, but this modifier does not derive `Eq`; write
+/// `@derive_eq @derive_hash`.
+///
+/// # Example
+///
+/// ```staple
+/// @derive_eq
+/// @derive_hash
+/// type Point wrap (x: I32, y: I32)
+///
+/// @derive_eq
+/// @derive_hash
+/// type Box<T> wrap T
+/// ```
+pub macro @derive_hash: Item -> Sequence<Item> = item => {
+    let implementation = match (derived_hash_declaration item) {
+        TypeDeclarationItem (name, target, parameters, Some (WrapperBody (_, representation)), _) =>
+            derived_hash_implementation (name, target, parameters, representation, False),
+        TypeDeclarationItem (name, target, parameters, Some (FromBody (_, representation)), _) =>
+            derived_hash_implementation (name, target, parameters, representation, False),
+        TypeDeclarationItem (name, target, parameters, None, _) =>
+            derived_hash_implementation (name, target, parameters, target, True),
+        _ => panic "derive_hash item is unsupported",
+    }
+    Sequence (first: item, rest: Sequence (first: implementation, rest: Sequence ()))
+}
+
+/// Reads eight little-endian bytes from the list.
+def read_u64_le = (bytes: List<U8>; offset: USize) => U64 :: {
+    let mut result: U64 = 0
+    let mut index: USize = 0
+    while (index < 8) {
+        let byte = List.get_unchecked bytes (offset + index)
+        let shift: U32 = usize_to_u32 (index * 8)
+        result = result + U64.wrapping_shift_left (byte as U64) shift
+        index = index + 1
+    }
+    result
+}
+
+impl Hash U8 { hash = (value, mut hasher) => Hasher.write_u8 hasher value }
+impl Hash U16 { hash = (value, mut hasher) => Hasher.write_u16 hasher value }
+impl Hash U32 { hash = (value, mut hasher) => Hasher.write_u32 hasher value }
+impl Hash U64 { hash = (value, mut hasher) => Hasher.write_u64 hasher value }
+impl Hash USize { hash = (value, mut hasher) => Hasher.write_usize hasher value }
+
+impl Hash I8 { hash = (value, mut hasher) => Hasher.write_u8 hasher (I8.cast_unsigned value) }
+impl Hash I16 { hash = (value, mut hasher) => Hasher.write_u16 hasher (I16.cast_unsigned value) }
+impl Hash I32 { hash = (value, mut hasher) => Hasher.write_u32 hasher (I32.cast_unsigned value) }
+impl Hash I64 { hash = (value, mut hasher) => Hasher.write_u64 hasher (I64.cast_unsigned value) }
+impl Hash ISize { hash = (value, mut hasher) => Hasher.write_usize hasher (ISize.cast_unsigned value) }

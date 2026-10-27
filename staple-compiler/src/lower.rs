@@ -3171,6 +3171,10 @@ pub(crate) struct LoweredSemanticIds {
     pub debug_trait: Option<TraitId>,
     pub display_trait: Option<TraitId>,
     pub eq_trait: Option<TraitId>,
+    pub hash_trait: Option<TraitId>,
+    /// The standard `Hasher.write_usize` companion, used to prefix a structural
+    /// sum hash with its tag.
+    pub hash_write_usize: Option<FunctionId>,
     pub index_trait: Option<TraitId>,
     pub mutate_index_trait: Option<TraitId>,
     pub into_iterator_trait: Option<TraitId>,
@@ -3407,6 +3411,8 @@ impl LoweredProgram {
             debug_trait: ids.debug_trait,
             display_trait: ids.display_trait,
             eq_trait: ids.eq_trait,
+            hash_trait: ids.hash_trait,
+            hash_write_usize: ids.hash_write_usize,
             index_trait: ids.index_trait,
             mutate_index_trait: ids.mutate_index_trait,
             into_iterator_trait: ids.into_iterator_trait,

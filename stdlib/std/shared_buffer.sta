@@ -3,6 +3,7 @@ pub mod
 use package.alloc.Gc
 use package.buffer.(Buffer, BufferHeader)
 use package.cmp.(Eq)
+use package.hash.(Hash, Hasher)
 use package.index.(Index, MutateIndex)
 use package.iterator.(IntoIterator, Iterator)
 use package.iterator.IterStep.(Done, Yield)
@@ -144,6 +145,18 @@ impl<T where Eq T> Eq SharedBuffer<T> {
             equal
         } else {
             False
+        }
+    }
+}
+
+impl<T where Hash T> Hash SharedBuffer<T> {
+    hash = (buffer, mut hasher) => {
+        let length = SharedBuffer.length buffer
+        Hasher.write_usize hasher length
+        let mut index: USize = 0
+        while (index < length) {
+            Hash.hash (SharedBuffer.get_shared_unchecked buffer index, hasher)
+            index = index + 1
         }
     }
 }

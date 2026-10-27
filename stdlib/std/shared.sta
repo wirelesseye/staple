@@ -1,6 +1,7 @@
 pub mod
 
 use package.cmp.(Eq)
+use package.hash.Hash
 use package.ptr.(RawMutPtr, RawOpaqueMutPtr)
 use package.alloc.(Gc, MemLayout, Finalize)
 
@@ -58,6 +59,10 @@ impl<T where Eq T> Eq Shared<T> {
     eq = (left; right) => match left { left_value: T => match right {
         right_value: T => Eq.eq (left_value; right_value)
     } }
+}
+
+impl<T where Hash T> Hash Shared<T> {
+    hash = (value, mut hasher) => match value { payload: T => Hash.hash (payload, hasher) }
 }
 
 companion<T where Copy T> Shared<T> {

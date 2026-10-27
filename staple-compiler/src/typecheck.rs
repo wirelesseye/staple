@@ -222,6 +222,9 @@ pub struct CheckedTraitDispatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StructuralTraitMethod {
     Equality,
+    /// `Hash` for a product whose elements all implement `Hash`, or a sum
+    /// whose alternatives all implement it.
+    Hash,
     /// `Default` for a product whose elements all implement `Default`.
     Default,
     Debug,
@@ -1013,6 +1016,34 @@ fn standard_formatter_type(module: &ResolvedModule) -> Option<TypeId> {
 /// A public companion function of the standard `Formatter`.
 fn standard_formatter_function(module: &ResolvedModule, member: &str) -> Option<FunctionId> {
     let symbol = module.companion_member(standard_formatter_type(module)?, member, None)?;
+    module.function_for_symbol(symbol)
+}
+
+/// The standard `Hasher`: the second parameter of the standard
+/// `Hash.hash: (T, mut Hasher) -> ()`. Anchoring on the trait keeps a
+/// program's own type named `Hasher` from being selected.
+fn standard_hash_hasher_type(module: &ResolvedModule) -> Option<TypeId> {
+    let hash = module.traits().get(&module.standard_trait("Hash")?)?;
+    let member = hash
+        .declaration
+        .members
+        .iter()
+        .find(|member| member.name == "hash")?;
+    let staple_syntax::Type::Function(function) = &member.annotation else {
+        return None;
+    };
+    let staple_syntax::Type::Product(parameter) = function.parameter.as_ref() else {
+        return None;
+    };
+    let staple_syntax::Type::Named(hasher) = &parameter.elements.get(1)?.ty else {
+        return None;
+    };
+    module.type_for(hasher.syntax.id)
+}
+
+/// A public companion function of the standard `Hasher`.
+fn standard_hash_function(module: &ResolvedModule, member: &str) -> Option<FunctionId> {
+    let symbol = module.companion_member(standard_hash_hasher_type(module)?, member, None)?;
     module.function_for_symbol(symbol)
 }
 
@@ -2304,6 +2335,10 @@ pub(crate) struct CheckedSemanticIds {
     pub debug_trait: Option<TraitId>,
     pub display_trait: Option<TraitId>,
     pub eq_trait: Option<TraitId>,
+    pub hash_trait: Option<TraitId>,
+    /// The standard `Hasher.write_usize` companion, used to prefix a structural
+    /// sum hash with its tag.
+    pub hash_write_usize: Option<FunctionId>,
     pub index_trait: Option<TraitId>,
     pub mutate_index_trait: Option<TraitId>,
     pub into_iterator_trait: Option<TraitId>,
@@ -2464,6 +2499,7 @@ pub struct TypedModule {
     mutate_index_trait: Option<TraitId>,
     into_iterator_trait: Option<TraitId>,
     iterator_trait: Option<TraitId>,
+    hash_write_usize: Option<FunctionId>,
     io_type: Option<TypeId>,
     reactive_type: Option<TypeId>,
     coroutine_type: Option<TypeId>,
@@ -3045,6 +3081,8 @@ impl TypedModule {
             debug_trait: self.debug_trait,
             display_trait: self.resolved.standard_trait("Display"),
             eq_trait: self.resolved.standard_trait("Eq"),
+            hash_trait: self.resolved.standard_trait("Hash"),
+            hash_write_usize: self.hash_write_usize,
             index_trait: self.index_trait,
             mutate_index_trait: self.mutate_index_trait,
             into_iterator_trait: self.into_iterator_trait,
@@ -3467,6 +3505,7 @@ impl TypedModule {
             self.debug_trait,
             self.resolved.standard_trait("Display"),
             self.resolved.standard_trait("Eq"),
+            self.resolved.standard_trait("Hash"),
             self.resolved.standard_trait("Default"),
             |value_type| self.is_copy_type(value_type),
             |value_type| self.is_debug_type(value_type),
@@ -3494,6 +3533,7 @@ impl TypedModule {
             self.debug_trait,
             self.resolved.standard_trait("Display"),
             self.resolved.standard_trait("Eq"),
+            self.resolved.standard_trait("Hash"),
             self.resolved.standard_trait("Default"),
             |value_type| self.is_copy_type(value_type),
             |value_type| self.is_debug_type(value_type),
@@ -3990,6 +4030,7 @@ impl TypedModule {
             self.debug_trait,
             self.resolved.standard_trait("Display"),
             self.resolved.standard_trait("Eq"),
+            self.resolved.standard_trait("Hash"),
             self.resolved.standard_trait("Default"),
             |value_type| self.is_copy_type(value_type),
             |value_type| self.is_debug_type(value_type),
@@ -4218,6 +4259,8 @@ pub struct TypeChecker {
     debug_trait: Option<TraitId>,
     display_trait: Option<TraitId>,
     eq_trait: Option<TraitId>,
+    hash_trait: Option<TraitId>,
+    hash_write_usize: Option<FunctionId>,
     index_trait: Option<TraitId>,
     mutate_index_trait: Option<TraitId>,
     into_iterator_trait: Option<TraitId>,
@@ -4439,6 +4482,8 @@ impl TypeChecker {
         self.debug_trait = module.standard_trait("Debug");
         self.display_trait = module.standard_trait("Display");
         self.eq_trait = module.standard_trait("Eq");
+        self.hash_trait = module.standard_trait("Hash");
+        self.hash_write_usize = standard_hash_function(&module, "write_usize");
         self.index_trait = module.standard_trait("Index");
         self.mutate_index_trait = module.standard_trait("MutateIndex");
         self.into_iterator_trait = module.standard_trait("IntoIterator");
@@ -4636,6 +4681,7 @@ impl TypeChecker {
             mutate_index_trait: self.mutate_index_trait,
             into_iterator_trait: self.into_iterator_trait,
             iterator_trait: self.iterator_trait,
+            hash_write_usize: self.hash_write_usize,
             io_type: self.io_type,
             reactive_type: self.reactive_type,
             coroutine_type: self.coroutine_type,
@@ -5522,6 +5568,7 @@ impl TypeChecker {
                 self.debug_trait,
                 self.display_trait,
                 self.eq_trait,
+                self.hash_trait,
                 self.default_trait,
                 |value_type| self.is_copy_with(value_type, &[]),
                 |value_type| {
@@ -5535,6 +5582,7 @@ impl TypeChecker {
                     span,
                     match structural {
                         StructuralTraitMethod::Equality => "`Eq` is derived structurally for this product or sum type and cannot be implemented explicitly",
+                        StructuralTraitMethod::Hash => "`Hash` is derived structurally for this product or sum type and cannot be implemented explicitly",
                         StructuralTraitMethod::Display => "`Display` is derived structurally for this product type and cannot be implemented explicitly",
                         StructuralTraitMethod::Debug => "`Debug` is derived structurally for this product or sum type and cannot be implemented explicitly",
                         StructuralTraitMethod::Default => "`Default` is derived structurally for this product type and cannot be implemented explicitly",
@@ -6376,11 +6424,25 @@ impl TypeChecker {
 
     fn validate_trait_implementation_prerequisites(&mut self, module: &ResolvedModule) {
         let mut diagnostics = Vec::new();
-        for implementation in self.trait_implementations.iter() {
+        for index in 0..self.trait_implementations.len() {
+            let (span, arguments, own_bounds) = {
+                let implementation = &self.trait_implementations[index];
+                (
+                    implementation.span.clone(),
+                    implementation.arguments.clone(),
+                    implementation.bounds.clone(),
+                )
+            };
             let bounds = self.expand_trait_bounds(vec![CheckedTraitBound {
-                trait_id: implementation.trait_id,
-                arguments: implementation.arguments.clone(),
+                trait_id: self.trait_implementations[index].trait_id,
+                arguments,
             }]);
+            // An implementation's own bounds are in scope while it is checked,
+            // including the prerequisites those bounds expand to. Without them,
+            // a conditional prerequisite such as `Eq Ok<T>` could not use the
+            // implementation's `Hash T` bound to discharge `Eq T`.
+            self.active_function_bounds
+                .push(self.expand_trait_bounds(own_bounds));
             for prerequisite in bounds.into_iter().skip(1) {
                 if self.trait_obligation_available(prerequisite.trait_id, &prerequisite.arguments) {
                     continue;
@@ -6393,10 +6455,11 @@ impl TypeChecker {
                     .collect::<Vec<_>>()
                     .join(", ");
                 diagnostics.push(Diagnostic::new(
-                    implementation.span.clone(),
+                    span.clone(),
                     format!("trait prerequisite `{trait_name} {arguments}` is not satisfied"),
                 ));
             }
+            self.active_function_bounds.pop();
         }
         self.diagnostics.extend(diagnostics);
     }
@@ -17351,6 +17414,7 @@ impl TypeChecker {
             self.debug_trait,
             self.display_trait,
             self.eq_trait,
+            self.hash_trait,
             self.default_trait,
             |value_type| self.is_copy_with(value_type, &bounds),
             |value_type| {
@@ -17505,6 +17569,7 @@ impl TypeChecker {
             self.debug_trait,
             self.display_trait,
             self.eq_trait,
+            self.hash_trait,
             self.default_trait,
             |value_type| self.is_copy_with(value_type, &bounds),
             |value_type| {
@@ -25778,6 +25843,7 @@ pub(crate) fn structural_trait_arguments(
     debug_trait: Option<TraitId>,
     display_trait: Option<TraitId>,
     eq_trait: Option<TraitId>,
+    hash_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
     is_copy: impl Fn(&CheckedType) -> bool,
     is_debug: impl Fn(&CheckedType) -> bool,
@@ -25796,6 +25862,27 @@ pub(crate) fn structural_trait_arguments(
             resolve_obligation(trait_id, std::slice::from_ref(alternative)).is_some()
         }) {
             return Some((vec![target.clone()], StructuralTraitMethod::Equality));
+        }
+        return None;
+    }
+    if Some(trait_id) == hash_trait {
+        let [target] = arguments else { return None };
+        let available = match target {
+            CheckedType::Sum(sum) => sum.alternatives.iter().all(|alternative| {
+                resolve_obligation(trait_id, std::slice::from_ref(alternative)).is_some()
+            }),
+            CheckedType::Product(product) => {
+                !product.variadic
+                    && product.spreads.is_empty()
+                    && product.runs.iter().all(|run| {
+                        resolve_obligation(trait_id, std::slice::from_ref(&run.element.value_type))
+                            .is_some()
+                    })
+            }
+            _ => false,
+        };
+        if available {
+            return Some((vec![target.clone()], StructuralTraitMethod::Hash));
         }
         return None;
     }

@@ -7,6 +7,7 @@ use package.convert.(ConversionError, TryConvert)
 use package.convert.checked_conversion
 use package.default.Default
 use package.fmt.(Display, Debug, Formatter)
+use package.hash.(Hash, Hasher)
 use package.iterator.(Iterator, IntoIterator, FromIterator)
 use package.iterator.IterStep.(Done, Yield)
 use package.list.List
@@ -188,6 +189,13 @@ impl Add String {
 
 impl Eq String {
     eq = (String left; String right) => Eq.eq (left; right)
+}
+
+impl Hash String {
+    hash = (String bytes, mut hasher) => {
+        Hasher.write_usize hasher (SharedBuffer.length bytes)
+        Hasher.write_bytes hasher bytes
+    }
 }
 
 impl PartialOrd String {

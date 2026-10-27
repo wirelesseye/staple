@@ -668,6 +668,10 @@ impl LoweredArtifactPlan {
                         }
                     }
                     StructuralBody::SumDebug { alternatives }
+                    | StructuralBody::ProductHash {
+                        elements: alternatives,
+                    }
+                    | StructuralBody::SumHash { alternatives, .. }
                     | StructuralBody::ProductEquality {
                         elements: alternatives,
                         ..
@@ -1237,6 +1241,20 @@ pub(crate) enum StructuralBody {
         /// `Eq.ne` negates the result.
         negate: bool,
     },
+    /// Product `Hash`: feed each element to its `Hash.hash` delegate in order.
+    ProductHash {
+        /// The per-position delegates in product order.
+        elements: Vec<DebugDelegate>,
+    },
+    /// Sum `Hash`: write the tag as a `USize`, then delegate the payload.
+    SumHash {
+        /// The per-alternative delegates in tag order.
+        alternatives: Vec<DebugDelegate>,
+        /// The `Hasher.write_usize` instance every tag write calls.
+        write_tag: PlannedInstance,
+        /// The concrete `Hasher.write_usize` method type.
+        write_tag_type: CheckedFunctionType,
+    },
     /// Product `Default`: call each element's `Default.default` in order and
     /// assemble the results.
     ProductDefault {
@@ -1363,6 +1381,9 @@ impl StructuralMethodPlan {
                 }
             }
             StructuralBody::SumDebug { alternatives }
+            | StructuralBody::ProductHash {
+                elements: alternatives,
+            }
             | StructuralBody::ProductEquality {
                 elements: alternatives,
                 ..
@@ -1374,6 +1395,16 @@ impl StructuralMethodPlan {
                 for delegate in alternatives {
                     visit_planned(&delegate.callee, visit);
                 }
+            }
+            StructuralBody::SumHash {
+                alternatives,
+                write_tag,
+                ..
+            } => {
+                for delegate in alternatives {
+                    visit_planned(&delegate.callee, visit);
+                }
+                visit(PlannedCalleeRef::Instance(write_tag));
             }
             StructuralBody::MutateReplace { drop_previous, .. } => {
                 if let Some(drop_previous) = drop_previous {
@@ -1403,6 +1434,9 @@ impl StructuralMethodPlan {
                 }
             }
             StructuralBody::SumDebug { alternatives }
+            | StructuralBody::ProductHash {
+                elements: alternatives,
+            }
             | StructuralBody::ProductEquality {
                 elements: alternatives,
                 ..
@@ -1414,6 +1448,16 @@ impl StructuralMethodPlan {
                 for delegate in alternatives {
                     visit_planned_mut(&mut delegate.callee, visit);
                 }
+            }
+            StructuralBody::SumHash {
+                alternatives,
+                write_tag,
+                ..
+            } => {
+                for delegate in alternatives {
+                    visit_planned_mut(&mut delegate.callee, visit);
+                }
+                visit(PlannedCalleeRefMut::Instance(write_tag));
             }
             StructuralBody::MutateReplace { drop_previous, .. } => {
                 if let Some(drop_previous) = drop_previous {
