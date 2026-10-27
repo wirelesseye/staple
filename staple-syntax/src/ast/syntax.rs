@@ -1,3 +1,4 @@
+use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -147,7 +148,7 @@ impl SyntaxToken {
 }
 
 /// The exact source covered by an AST node.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Syntax {
     /// Marks the callable head of a desugared pipe stage. Desugaring sets this
     /// when it rewrites a `PipeExpression`; the parser never does.
@@ -163,6 +164,26 @@ pub struct Syntax {
     pub definition_module: Option<usize>,
     pub expansion_mark: Option<u64>,
     pub identifier_origins: Vec<(String, Span)>,
+}
+
+/// `tokens` is shared by every node of a file, so a derived `Debug` would
+/// print the whole file's tokens once per node. Print the node's own text;
+/// nested nodes repeat it, so full tokens would still be too large.
+impl fmt::Debug for Syntax {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Syntax")
+            .field("pipe_stage", &self.pipe_stage)
+            .field("implied", &self.implied)
+            .field("id", &self.id)
+            .field("span", &self.span)
+            .field("text", &self.text())
+            .field("token_range", &self.token_range)
+            .field("definition_module", &self.definition_module)
+            .field("expansion_mark", &self.expansion_mark)
+            .field("identifier_origins", &self.identifier_origins)
+            .finish()
+    }
 }
 
 impl Syntax {

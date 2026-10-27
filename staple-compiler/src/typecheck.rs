@@ -2442,7 +2442,7 @@ fn product_contains_alias(product: &CheckedProductType) -> bool {
     })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TypedModule {
     type_representations: HashMap<TypeId, CheckedType>,
     structural_companion_targets: HashMap<SymbolId, CheckedType>,
@@ -2523,6 +2523,22 @@ pub struct TypedModule {
     derived_symbols: HashSet<SymbolId>,
     derived_evaluators: HashMap<SymbolId, SyntaxId>,
     coroutine_plans: HashMap<SyntaxId, crate::coroutine_lower::CoroutinePlan>,
+}
+
+/// A full dump covers the whole standard library and is too large to print,
+/// so `Debug` summarizes the tables instead. Inspect a table directly when
+/// debugging.
+impl fmt::Debug for TypedModule {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TypedModule")
+            .field("modules", &self.resolved.program().modules().len())
+            .field("functions", &self.function_types.len())
+            .field("symbols", &self.symbol_types.len())
+            .field("expressions", &self.expression_types.len())
+            .field("trait_implementations", &self.trait_implementations.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl TypedModule {
