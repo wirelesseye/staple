@@ -191,10 +191,13 @@ def main = () =>{IO} () :: {
     let empty_hash = Hasher.finish empty_hasher
     show (hash_of () == empty_hash)
 
-    // SipHash-1-3 over one zero block and an 8-byte length with the fixed key.
+    // One `write_u64` is one 8-byte SipHash block, so this is SipHash-1-3 of
+    // eight zero bytes under the zero key. The expected value comes from a
+    // byte-level SipHash checked against the paper's SipHash-2-4 vector, not
+    // from this implementation; it pins the algorithm, not `hash_of`.
     let mut reference = Hasher.new ()
     Hasher.write_u64 reference 0
-    show (Hasher.finish reference == 2360399714353584901)
+    show (Hasher.finish reference == 13646096770106105413)
 
     // Keys are reproducible or come from OS entropy.
     let mut first_rng = Rng.seeded 42
@@ -334,6 +337,7 @@ fn hash_rejections_cover_unhashable_values_derives_and_structural_impls() {
     // Entropy needs `IO`; an explicitly pure function cannot read it.
     let messages = check_errors(
         "use std.hash.HashKey\n\
+         use std.rand.Rng\n\
          def key: () -> HashKey = () => HashKey :: match (HashKey.from_entropy ()) {\n\
              Ok key => key,\n\
              _ => HashKey.fixed (),\n\

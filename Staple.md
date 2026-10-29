@@ -4960,9 +4960,12 @@ ASCII case operations, `to_string`, and the predicates `is_ascii_digit`,
 `std.hash` when a collection author needs an explicit key.
 
 `Hasher.new ()` and `hash_of value` use `HashKey.fixed ()`, a constant key, so
-they stay pure. `HashKey.from_rng rng` draws a reproducible key for tests.
-`HashKey.from_entropy ()` draws a key from the operating system and therefore
-requires `IO`. A collection whose keys may be chosen by an adversary should
+they stay pure. `std.rand` adds two constructors to `HashKey`, so they are
+available once a program imports from `std.rand`: `HashKey.from_rng rng` draws
+a reproducible key for tests, and `HashKey.from_entropy ()` draws a key from the
+operating system and therefore requires `IO`. They live in `std.rand` so that
+the prelude's re-export of `std.hash` does not load the random number library
+into every program. A collection whose keys may be chosen by an adversary should
 draw one key with `from_entropy` and reuse it. Hash values themselves are
 unspecified: the same key and writes produce the same hash within one run of
 one program, but hashes must not be persisted, sent between processes, or

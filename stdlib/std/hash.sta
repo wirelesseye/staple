@@ -6,75 +6,27 @@
 pub mod
 
 use package.cmp.Eq
-use package.convert.TryConvert
-use package.io.IO
-use package.list.List
 use package.ops.BitXor
-use package.result.(Result, Ok)
-use package.rand.(Rng, EntropyError, fill_entropy)
 use package.shared_buffer.SharedBuffer
 use package.syntax.*
 use package.process.panic
 
 /// A 128-bit key for `Hasher`.
-pub type HashKey wrap (k0: U64, k1: U64)
+///
+/// `std.rand` adds `HashKey.from_entropy` and `HashKey.from_rng`. They live
+/// there so that the prelude, which re-exports this module, does not load the
+/// random number library into every program.
+pub type HashKey wrap pub(package) (k0: U64, k1: U64)
 
 companion HashKey {
     /// A constant key. Hashes made with it are predictable, so use it only
     /// where keys are not chosen by an adversary.
     pub def fixed = () => HashKey :: HashKey (k0: 0, k1: 0)
-
-    /// Draws a key from operating-system randomness.
-    pub def from_entropy = () =>{IO} Result<HashKey, EntropyError> :: {
-        let mut bytes: List<U8> = List.of (0u8 ^ 16)
-        fill_entropy bytes ?
-        Ok (HashKey (k0: read_u64_le bytes 0, k1: read_u64_le bytes 8))
-    }
-
-    /// Draws a key from a generator, for reproducible tests.
-    pub def from_rng = mut rng: Rng => HashKey ::
-        HashKey (k0: Rng.next_u64 rng, k1: Rng.next_u64 rng)
 }
 
 /// Incremental SipHash-1-3 state. Hash values are unspecified: the same key
 /// and writes give the same hash within one run of one program.
 pub type Hasher wrap (v0: U64, v1: U64, v2: U64, v3: U64, length: U64)
-
-/// Feeds one 64-bit block into `hasher` with one SipRound and records `count`
-/// bytes. The caller has already packed or widened the block little-endian.
-def write_block = (mut hasher: Hasher; block: U64; count: U64) => () :: {
-    let mut v0 = hasher.v0
-    let mut v1 = hasher.v1
-    let mut v2 = hasher.v2
-    let mut v3 = hasher.v3
-    v3 = BitXor.bit_xor (v3; block)
-    v0 = v0 + v1
-    v1 = U64.rotate_left v1 13
-    v1 = BitXor.bit_xor (v1; v0)
-    v0 = U64.rotate_left v0 32
-    v2 = v2 + v3
-    v3 = U64.rotate_left v3 16
-    v3 = BitXor.bit_xor (v3; v2)
-    v0 = v0 + v3
-    v3 = U64.rotate_left v3 21
-    v3 = BitXor.bit_xor (v3; v0)
-    v2 = v2 + v1
-    v1 = U64.rotate_left v1 17
-    v1 = BitXor.bit_xor (v1; v2)
-    v2 = U64.rotate_left v2 32
-    v0 = BitXor.bit_xor (v0; block)
-    hasher.v0 = v0
-    hasher.v1 = v1
-    hasher.v2 = v2
-    hasher.v3 = v3
-    hasher.length = hasher.length + count
-}
-
-/// Rounds an index scale into the shift count type; every caller is below 64.
-def usize_to_u32 = value: USize => U32 :: match (TryConvert.try_convert.<USize, U32> value) {
-    Ok result => result,
-    _ => 0,
-}
 
 /// Runs one SipRound over four state words.
 def sip_round = (v0: U64, v1: U64, v2: U64, v3: U64) => (U64, U64, U64, U64) :: {
@@ -97,6 +49,17 @@ def sip_round = (v0: U64, v1: U64, v2: U64, v3: U64) => (U64, U64, U64, U64) :: 
     b = BitXor.bit_xor (b; c)
     c = U64.rotate_left c 32
     (a, b, c, d)
+}
+
+/// Feeds one 64-bit block into `hasher` with one SipRound and records `count`
+/// bytes. The caller has already packed or widened the block little-endian.
+def write_block = (mut hasher: Hasher; block: U64; count: U64) => () :: {
+    let (v0, v1, v2, v3) = sip_round (hasher.v0, hasher.v1, hasher.v2, BitXor.bit_xor (hasher.v3; block))
+    hasher.v0 = BitXor.bit_xor (v0; block)
+    hasher.v1 = v1
+    hasher.v2 = v2
+    hasher.v3 = v3
+    hasher.length = hasher.length + count
 }
 
 companion Hasher {
@@ -136,11 +99,12 @@ companion Hasher {
         while (index < length) {
             let mut block: U64 = 0
             let mut offset: USize = 0
+            let mut shift: U32 = 0
             while (offset < 8 && index + offset < length) {
                 let byte = SharedBuffer.get_unchecked bytes (index + offset)
-                let shift: U32 = usize_to_u32 (offset * 8)
                 block = block + U64.wrapping_shift_left (byte as U64) shift
                 offset = offset + 1
+                shift = shift + 8
             }
             write_block hasher block (offset as U64)
             index = index + 8
@@ -148,14 +112,14 @@ companion Hasher {
     }
 
     /// Returns the hash of everything written so far. Does not reset.
+    ///
+    /// Finalizes as SipHash-1-3 does: the low byte of the length becomes a
+    /// final block, which gets one compression round, then `v2` is flipped
+    /// and three finalization rounds run.
     pub def finish = hasher: Hasher => U64 :: {
-        let mut v0 = hasher.v0
-        let mut v1 = hasher.v1
-        let mut v2 = hasher.v2
-        let mut v3 = hasher.v3
-        v3 = BitXor.bit_xor (v3; U64.wrapping_shift_left hasher.length 56)
-        v2 = BitXor.bit_xor (v2; 0xff)
-        let (w0, w1, w2, w3) = sip_round (v0, v1, v2, v3)
+        let last = U64.wrapping_shift_left hasher.length 56
+        let (w0, w1, w2, w3) = sip_round (hasher.v0, hasher.v1, hasher.v2, BitXor.bit_xor (hasher.v3; last))
+        let (w0, w1, w2, w3) = sip_round (BitXor.bit_xor (w0; last), w1, BitXor.bit_xor (w2; 0xff), w3)
         let (w0, w1, w2, w3) = sip_round (w0, w1, w2, w3)
         let (w0, w1, w2, w3) = sip_round (w0, w1, w2, w3)
         BitXor.bit_xor (
@@ -309,19 +273,6 @@ pub macro @derive_hash: Item -> Sequence<Item> = item => {
         _ => panic "derive_hash item is unsupported",
     }
     Sequence (first: item, rest: Sequence (first: implementation, rest: Sequence ()))
-}
-
-/// Reads eight little-endian bytes from the list.
-def read_u64_le = (bytes: List<U8>; offset: USize) => U64 :: {
-    let mut result: U64 = 0
-    let mut index: USize = 0
-    while (index < 8) {
-        let byte = List.get_unchecked bytes (offset + index)
-        let shift: U32 = usize_to_u32 (index * 8)
-        result = result + U64.wrapping_shift_left (byte as U64) shift
-        index = index + 1
-    }
-    result
 }
 
 impl Hash U8 { hash = (value, mut hasher) => Hasher.write_u8 hasher value }

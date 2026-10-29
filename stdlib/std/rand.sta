@@ -4,6 +4,7 @@ pub mod
 use package.list.List
 use package.clone.Clone
 use package.convert.TryConvert
+use package.hash.HashKey
 use package.io.(IO, __staple_io_errno)
 use package.option.(Option, Some, None)
 use package.ops.(BitAnd, BitNot, BitXor)
@@ -686,6 +687,22 @@ def read_u64_le = (bytes: List<U8>; offset: USize) => U64 :: {
         index = index + 1
     }
     result
+}
+
+// `HashKey`'s random constructors live here rather than in `std.hash`, which
+// the prelude re-exports, so that hashing does not load this module into every
+// program.
+companion HashKey {
+    /// Draws a key from operating-system randomness.
+    pub def from_entropy = () =>{IO} Result<HashKey, EntropyError> :: {
+        let mut bytes: List<U8> = List.of (0u8 ^ 16)
+        fill_entropy bytes ?
+        Ok (HashKey (k0: read_u64_le bytes 0, k1: read_u64_le bytes 8))
+    }
+
+    /// Draws a key from a generator, for reproducible tests.
+    pub def from_rng = mut rng: Rng => HashKey ::
+        HashKey (k0: Rng.next_u64 rng, k1: Rng.next_u64 rng)
 }
 
 // ---------------------------------------------------------------------------

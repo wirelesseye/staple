@@ -310,7 +310,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         target_machine: &TargetMachine,
     ) -> CodeGenerationResult<HashMap<String, (String, bool)>> {
         self.declare_program(target_machine)?;
-        let mut types = HashMap::new();
+        let mut names = Vec::new();
         for function in self
             .instances
             .values()
@@ -319,20 +319,39 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let name = function.get_name().to_str().map_err(|_| {
                 internal_invariant(staple_syntax::Span::Compiler, "planned names are UTF-8")
             })?;
-            types.insert(
-                name.to_owned(),
-                (
-                    function.get_type().print_to_string().to_string(),
-                    function.get_linkage() == Linkage::Internal,
-                ),
-            );
+            names.push(name.to_owned());
         }
         for function in self.initializers.values() {
             let name = function.get_name().to_str().map_err(|_| {
                 internal_invariant(staple_syntax::Span::Compiler, "initializer names are UTF-8")
             })?;
+            names.push(name.to_owned());
+        }
+        // Emission legalizes large aggregates after the bodies are written,
+        // which packs long runs of identical parameters and large values behind
+        // pointers. Apply the same pass to the declarations so the catalog
+        // reports the signatures the emitted module ends up with. The pass may
+        // replace a function, so look each one up again by name.
+        let native = self
+            .externs
+            .values()
+            .filter_map(|function| function.get_name().to_str().ok().map(str::to_owned))
+            .collect();
+        super::aggregates::legalize_large_aggregates(&self.backend.llvm_module, &native);
+        let mut types = HashMap::new();
+        for name in names {
+            let function = self
+                .backend
+                .llvm_module
+                .get_function(&name)
+                .ok_or_else(|| {
+                    internal_invariant(
+                        staple_syntax::Span::Compiler,
+                        "a catalog declaration survives legalization",
+                    )
+                })?;
             types.insert(
-                name.to_owned(),
+                name,
                 (
                     function.get_type().print_to_string().to_string(),
                     function.get_linkage() == Linkage::Internal,

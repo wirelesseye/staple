@@ -4717,6 +4717,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn catalog_census_reports_legalized_signatures() {
+        // `List.of (0u8 ^ N)` takes N identical byte parameters. From 16 on,
+        // aggregate legalization packs them behind one pointer, and the
+        // catalog must report that signature, not the pre-legalization one.
+        for count in [15, 16, 32] {
+            let source = format!(
+                "use std.list.List\nuse std.io.(IO, println)\n\
+                 def main = () =>{{IO}} () :: {{\n\
+                 \x20   let bytes: List<U8> = List.of (0u8 ^ {count})\n\
+                 \x20   println \"${{List.length bytes}}\"\n\
+                 }}\n"
+            );
+            let lowered = lower(&source, workspace_root());
+            let context = inkwell::context::Context::create();
+            let emitted = crate::codegen::lowered_emissions(&context, &lowered)
+                .unwrap_or_else(|diagnostics| panic!("emission: {diagnostics:?}\n{source}"));
+            crate::lower::census::assert_catalog_census("legalized signatures", &lowered, &emitted);
+        }
+    }
+
     /// Strictly emit the full corpus and check catalog definitions, focus instances,
     /// structural coverage, and distinct generic artifacts.
     #[test]
