@@ -4994,6 +4994,49 @@ let key = hash_of (Point (x: 1, y: 2))
 A product, sum, or derived type containing a float is not `Hash`, because `F32`
 and `F64` do not implement it.
 
+### Hash maps with `std.dict`
+
+`Dict<K, V>` maps keys to values and is declared in `std.dict`. The prelude
+re-exports it. Lookups require `Hash K`, which implies `Eq K`.
+
+`Dict.new ()` and `Dict.with_capacity n` hash with `HashKey.fixed ()`, so they
+stay pure, and the same keys produce the same table layout. A dict whose keys
+may be chosen by an adversary should take a key from the operating system
+through `Dict.with_key` or `Dict.with_capacity_and_key`:
+
+```staple
+use std.hash.HashKey
+use std.rand.Rng
+
+def main = () =>{IO} () :: {
+    let key = match (HashKey.from_entropy ()) {
+        Ok key => key,
+        _ => HashKey.fixed (),
+    }
+    let mut visits: Dict<String, I32> = Dict.with_key key
+    let _ = Dict.insert visits "home" 1
+    visits["home"] = visits["home"] + 1
+}
+```
+
+`insert` moves a key and a value in, and returns the value it replaced. On
+replacement, it keeps the original key. `remove` and `remove_entry` move the
+value, or the key and value, back out. `contains_key`, `length`, `is_empty`,
+`capacity`, `reserve`, and `clear` behave as they do for `List`. `get` copies a
+value out and needs `Copy V`. `get_cloned` needs `Clone V`. `dict[key]` reads
+like `get` and panics when the key is missing. `dict[key] = value` inserts or
+replaces, and clones the borrowed key when it inserts.
+
+`Dict` implements `Default`, `Clone`, `IntoIterator` (consuming, yielding
+`(K, V)`), and `FromIterator` over `(K, V)`, where a later duplicate key
+replaces an earlier one. It also implements `Eq`: two dicts are equal when they
+map the same keys to equal values, whatever their order or hash keys. `Dict` is
+not `Hash`.
+
+Iteration order is unspecified. Entries are stored densely and indexed by a
+linear-probing table that is at most three quarters full. Removing an entry
+moves the last entry into its place.
+
 `Shared<T>` is a garbage-collected reference to a value of type `T`, declared in
 `std.shared` and imported with `use std.shared.(Shared)`. Its standard
 declaration is `@sized_opaque pub type Shared<T where ?Sized T> opaque`:

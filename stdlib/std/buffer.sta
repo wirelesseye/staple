@@ -211,6 +211,14 @@ companion<T> Buffer<T> {
     }
 }
 
+companion<T> Buffer<T> {
+    /// The address of the element at a position, without a bounds check. Its
+    /// value may be moved out with `RawMutPtr.unsafe_read` only if it is
+    /// stored back before the buffer is used again.
+    pub(package) def unsafe_element = (buffer: Buffer<T>; position: USize) => RawMutPtr<T> ::
+        BufferHeader.element buffer.* position
+}
+
 companion<T where Copy T> Buffer<T> {
     /// Copies the element at a position, or `None` if out of bounds.
     pub def get = (buffer: Buffer<T>; position: USize) => Option<T> :: {

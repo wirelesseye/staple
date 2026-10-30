@@ -115,6 +115,9 @@ companion<T> List<T> {
         let List buffer = list
         buffer
     }
+
+    /// Wraps a buffer whose initialised elements become the list.
+    pub(package) def from_buffer = move buffer: Buffer<T> => List<T> :: List buffer
 }
 
 companion<T> List<T> {

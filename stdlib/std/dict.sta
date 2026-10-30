@@ -1,0 +1,410 @@
+/// A hash map from keys to values.
+///
+/// Entries live densely in one buffer; a separate, power-of-two table of slots
+/// indexes them by hash with linear probing. Removal moves the last entry into
+/// the gap, so iteration order is unspecified.
+pub mod
+
+use package.buffer.Buffer
+use package.clone.Clone
+use package.cmp.Eq
+use package.convert.TryConvert
+use package.default.Default
+use package.hash.(Hash, HashKey, hash_with)
+use package.index.(Index, MutateIndex)
+use package.iterator.(IntoIterator, FromIterator)
+use package.list.(List, ListIntoIter)
+use package.process.panic
+use package.ptr.RawMutPtr
+
+/// A hash map from keys of type `K` to values of type `V`.
+///
+/// `Dict.new ()` hashes with `HashKey.fixed ()`, so its layout is predictable.
+/// When keys may be chosen by an adversary, draw a key once with
+/// `HashKey.from_entropy ()` from `std.rand` and pass it to `Dict.with_key`.
+///
+/// Iteration order is unspecified and may change when entries are removed.
+///
+/// # Example
+///
+/// ```staple
+/// let mut ages: Dict<String, I32> = Dict.new ()
+/// let _ = Dict.insert ages "ada" 36
+/// let age = Dict.get ages "ada" // Some 36
+/// ```
+// `slots` holds 0 for an empty slot and `i + 1` for `entries[i]`. Its length
+// is 0 or a power of two at least 8, and at most three quarters of it is
+// occupied, so every probe meets an empty slot.
+pub type Dict<K, V> wrap (entries: Buffer<(K, V)>, slots: Buffer<USize>, key: HashKey)
+
+// The smallest slot count that keeps `count` entries at most three quarters
+// full; 0 for no entries.
+def slot_count_for = count: USize => USize :: {
+    if (count * 4 / 4 != count) { panic "Dict capacity overflow" }
+    if (count == 0) {
+        0
+    } else {
+        let mut slot_count: USize = 8
+        while (count * 4 > slot_count * 3) {
+            slot_count = slot_count * 2
+        }
+        slot_count
+    }
+}
+
+// A slot table with every slot empty.
+def empty_slots = slot_count: USize => Buffer<USize> :: {
+    let mut slots: Buffer<USize> = Buffer.with_capacity slot_count
+    while (Buffer.length slots < slot_count) {
+        Buffer.push slots 0
+    }
+    slots
+}
+
+// The slot where a probe for `key` starts.
+def home_slot = <K where Hash K> (hash_key: HashKey; key: K; slot_count: USize) => USize :: {
+    // The remainder is below `slot_count`, so narrowing it back cannot fail.
+    let slot = hash_with hash_key key % (slot_count as U64)
+    (TryConvert.try_convert.<U64, USize> slot) |> unwrap
+}
+
+// The home slot of the entry at `index`, read without moving it out.
+def entry_home_slot = <K, V where Hash K> (entries: Buffer<(K, V)>; hash_key: HashKey; index: USize; slot_count: USize) => USize :: {
+    let element = Buffer.unsafe_element entries index
+    let entry = RawMutPtr.unsafe_read element
+    let slot = home_slot hash_key (entry.0) slot_count
+    RawMutPtr.store element entry
+    slot
+}
+
+// Whether the entry at `index` has `key`, read without moving it out.
+def entry_has_key = <K, V where Hash K> (entries: Buffer<(K, V)>; index: USize; key: K) => Bool :: {
+    let element = Buffer.unsafe_element entries index
+    let entry = RawMutPtr.unsafe_read element
+    let equal = Eq.eq (entry.0; key)
+    RawMutPtr.store element entry
+    equal
+}
+
+// Probes for `key`. Returns the slot the probe stopped at and, when the key is
+// present, the index of its entry; otherwise the slot is the empty one where
+// it would be inserted. The slot is meaningless for an unallocated table.
+def probe = <K, V where Hash K> (dict: Dict<K, V>; key: K) => (USize, Option<USize>) :: {
+    let slot_count = Buffer.length dict.slots
+    if (slot_count == 0) {
+        (0, None)
+    } else {
+        let mut slot = home_slot dict.key key slot_count
+        let mut found: Option<USize> = None
+        loop {
+            let occupant = Buffer.get_unchecked dict.slots slot
+            if (occupant == 0) { break }
+            if (entry_has_key dict.entries (occupant - 1) key) {
+                found = Some (occupant - 1)
+                break
+            }
+            slot = (slot + 1) % slot_count
+        }
+        (slot, found)
+    }
+}
+
+// Replaces the slot table with `slot_count` empty slots and indexes every
+// entry into it.
+def rebuild_slots = <K, V where Hash K> (mut dict: Dict<K, V>; slot_count: USize) => () :: {
+    let mut slots = empty_slots slot_count
+    let length = Buffer.length dict.entries
+    let mut index: USize = 0
+    while (index < length) {
+        let mut slot = entry_home_slot dict.entries dict.key index slot_count
+        while (Buffer.get_unchecked slots slot != 0) {
+            slot = (slot + 1) % slot_count
+        }
+        let _ = Buffer.set_unchecked slots slot (index + 1)
+        index = index + 1
+    }
+    dict.slots = slots
+}
+
+// Empties `slot` and shifts later members of its probe run back over the
+// hole, so lookups never stop early and no tombstones are needed.
+def clear_slot = <K, V where Hash K> (mut dict: Dict<K, V>; slot: USize) => () :: {
+    let slot_count = Buffer.length dict.slots
+    let mut hole = slot
+    let mut next = (slot + 1) % slot_count
+    loop {
+        let occupant = Buffer.get_unchecked dict.slots next
+        if (occupant == 0) { break }
+        let home = entry_home_slot dict.entries dict.key (occupant - 1) slot_count
+        // The occupant may fill the hole only when its home is not cyclically
+        // after the hole, or it would become unreachable from its home.
+        let from_home = (next + slot_count - home) % slot_count
+        let from_hole = (next + slot_count - hole) % slot_count
+        if (from_home >= from_hole) {
+            let _ = Buffer.set_unchecked dict.slots hole occupant
+            hole = next
+        }
+        next = (next + 1) % slot_count
+    }
+    let _ = Buffer.set_unchecked dict.slots hole 0
+}
+
+// Moves the entry at `index` out, filling the gap with the last entry and
+// repointing its slot. The removed entry's slot must already be cleared.
+def swap_remove_entry = <K, V where Hash K> (mut dict: Dict<K, V>; index: USize) => (K, V) :: {
+    let last = Buffer.length dict.entries - 1
+    if (index != last) {
+        let slot_count = Buffer.length dict.slots
+        let mut slot = entry_home_slot dict.entries dict.key last slot_count
+        while (Buffer.get_unchecked dict.slots slot != last + 1) {
+            slot = (slot + 1) % slot_count
+        }
+        let _ = Buffer.set_unchecked dict.slots slot (index + 1)
+        Buffer.swap dict.entries index last
+    }
+    match (Buffer.pop dict.entries) {
+        Some entry => entry,
+        None => panic "Dict entries are empty",
+    }
+}
+
+companion<K, V> Dict<K, V> {
+    /// Creates an empty dict that hashes with `HashKey.fixed ()`.
+    pub def new = () => Dict<K, V> :: with_key (HashKey.fixed ())
+
+    /// Creates an empty dict that hashes with `key`.
+    pub def with_key = key: HashKey => Dict<K, V> :: {
+        let entries: Buffer<(K, V)> = Buffer.with_capacity 0
+        Dict (entries: entries, slots: empty_slots 0, key: key)
+    }
+
+    /// Creates an empty dict, hashing with `HashKey.fixed ()`, that holds at
+    /// least `capacity` entries without growing.
+    pub def with_capacity = capacity: USize => Dict<K, V> ::
+        with_capacity_and_key capacity (HashKey.fixed ())
+
+    /// Creates an empty dict, hashing with `key`, that holds at least
+    /// `capacity` entries without growing.
+    pub def with_capacity_and_key = (capacity: USize; key: HashKey) => Dict<K, V> :: {
+        let slot_count = slot_count_for capacity
+        let entries: Buffer<(K, V)> = Buffer.with_capacity (slot_count / 4 * 3)
+        Dict (entries: entries, slots: empty_slots slot_count, key: key)
+    }
+
+    /// Returns the number of entries.
+    pub def length = dict: Dict<K, V> => USize :: Buffer.length dict.entries
+
+    /// Returns whether the dict has no entries.
+    pub def is_empty = dict: Dict<K, V> => Bool :: length dict == 0
+
+    /// Returns the number of entries the dict can hold without growing.
+    pub def capacity = dict: Dict<K, V> => USize :: Buffer.length dict.slots / 4 * 3
+
+    /// Removes every entry, retaining capacity.
+    pub def clear = mut dict: Dict<K, V> => () :: {
+        while (Buffer.length dict.entries > 0) {
+            let removed = Buffer.pop dict.entries
+            drop removed
+        }
+        let slot_count = Buffer.length dict.slots
+        let mut slot: USize = 0
+        while (slot < slot_count) {
+            let _ = Buffer.set_unchecked dict.slots slot 0
+            slot = slot + 1
+        }
+    }
+}
+
+companion<K, V where Hash K> Dict<K, V> {
+    /// Reserves room for at least `additional` more entries.
+    pub def reserve = (mut dict: Dict<K, V>; additional: USize) => () :: {
+        let length = Buffer.length dict.entries
+        let required = length + additional
+        if (required < length) { panic "Dict capacity overflow" }
+        let slot_count = slot_count_for required
+        if (slot_count > Buffer.length dict.slots) {
+            let mut entries: Buffer<(K, V)> = Buffer.with_capacity (slot_count / 4 * 3)
+            Buffer.transfer dict.entries entries
+            dict.entries = entries
+            rebuild_slots dict slot_count
+        }
+    }
+
+    /// Returns whether the dict has an entry for `key`.
+    pub def contains_key = (dict: Dict<K, V>; key: K) => Bool :: match probe dict key {
+        (_, Some _) => True,
+        _ => False,
+    }
+
+    /// Associates `value` with `key` and returns the value it replaced, or
+    /// `None` when the key is new. Replacing keeps the original key.
+    pub def insert = (mut dict: Dict<K, V>; move key: K; move value: V) => Option<V> :: {
+        match probe dict key {
+            (_, Some index) => {
+                let element = Buffer.unsafe_element dict.entries index
+                let (stored, previous) = RawMutPtr.unsafe_read element
+                RawMutPtr.store element (stored, value)
+                Some previous
+            },
+            (vacant, None) => {
+                let slot = if (Buffer.length dict.entries < Dict.capacity dict) {
+                    vacant
+                } else {
+                    reserve dict 1
+                    let (slot, _) = probe dict key
+                    slot
+                }
+                let index = Buffer.length dict.entries
+                Buffer.push dict.entries (key, value)
+                let _ = Buffer.set_unchecked dict.slots slot (index + 1)
+                None
+            },
+        }
+    }
+
+    /// Removes the entry for `key` and returns its key and value, or `None`
+    /// when there is no entry.
+    pub def remove_entry = (mut dict: Dict<K, V>; key: K) => Option<(K, V)> :: {
+        match probe dict key {
+            (slot, Some index) => {
+                clear_slot dict slot
+                let entry = swap_remove_entry dict index
+                Some entry
+            },
+            _ => None,
+        }
+    }
+
+    /// Removes the entry for `key` and returns its value, or `None` when there
+    /// is no entry.
+    pub def remove = (mut dict: Dict<K, V>; key: K) => Option<V> :: {
+        match (remove_entry dict key) {
+            Some (_, value) => Some value,
+            None => None,
+        }
+    }
+}
+
+// Copy-V-gated companion: `get` reads a value out by copy.
+companion<K, V where Hash K, Copy V> Dict<K, V> {
+    /// Returns a copy of the value for `key`, or `None` when there is no
+    /// entry.
+    pub def get = (dict: Dict<K, V>; key: K) => Option<V> :: match probe dict key {
+        (_, Some index) => {
+            let element = Buffer.unsafe_element dict.entries index
+            let entry = RawMutPtr.unsafe_read element
+            let value = entry.1
+            RawMutPtr.store element entry
+            Some value
+        },
+        _ => None,
+    }
+}
+
+companion<K, V where Hash K, Clone V> Dict<K, V> {
+    /// Returns a clone of the value for `key`, or `None` when there is no
+    /// entry.
+    pub def get_cloned = (dict: Dict<K, V>; key: K) => Option<V> :: match probe dict key {
+        (_, Some index) => {
+            let element = Buffer.unsafe_element dict.entries index
+            let entry = RawMutPtr.unsafe_read element
+            let value = Clone.clone (entry.1)
+            RawMutPtr.store element entry
+            Some value
+        },
+        _ => None,
+    }
+}
+
+impl<K, V> Default (Dict<K, V>) {
+    default = () => Dict.new ()
+}
+
+impl<K, V where Hash K> FromIterator Dict<K, V> (K, V) {
+    insert = (move dict: Dict<K, V>; move entry: (K, V)) => Dict<K, V> :: {
+        let mut extended: Dict<K, V> = dict
+        let (key, value) = entry
+        let _ = Dict.insert extended key value
+        extended
+    }
+}
+
+impl<K, V> IntoIterator Dict<K, V> {
+    type Iter = ListIntoIter<(K, V)>
+    into_iterator = move dict => {
+        let Dict (entries, _, _) = dict
+        IntoIterator.into_iterator (List.from_buffer entries)
+    }
+}
+
+impl<K, V where Clone K, Clone V> Clone (Dict<K, V>) {
+    clone = dict => {
+        let length = Buffer.length dict.entries
+        let mut entries: Buffer<(K, V)> = Buffer.with_capacity (Buffer.capacity dict.entries)
+        let mut index: USize = 0
+        while (index < length) {
+            let element = Buffer.unsafe_element dict.entries index
+            let entry = RawMutPtr.unsafe_read element
+            let duplicated = (Clone.clone (entry.0), Clone.clone (entry.1))
+            RawMutPtr.store element entry
+            Buffer.push entries duplicated
+            index = index + 1
+        }
+        Dict (entries: entries, slots: Clone.clone dict.slots, key: dict.key)
+    }
+}
+
+// Whether `dict` maps `key` to a value equal to `value`.
+def maps_to = <K, V where Hash K, Eq V> (dict: Dict<K, V>; key: K; value: V) => Bool :: match probe dict key {
+    (_, Some index) => {
+        let element = Buffer.unsafe_element dict.entries index
+        let entry = RawMutPtr.unsafe_read element
+        let equal = Eq.eq (entry.1; value)
+        RawMutPtr.store element entry
+        equal
+    },
+    _ => False,
+}
+
+// Equal dicts have the same keys mapped to equal values, in any order and
+// regardless of their hash keys.
+impl<K, V where Hash K, Eq V> Eq Dict<K, V> {
+    eq = (left; right) => {
+        let length = Buffer.length left.entries
+        if (length == Buffer.length right.entries) {
+            let mut index: USize = 0
+            let mut equal: Bool = True
+            while (index < length) {
+                let element = Buffer.unsafe_element left.entries index
+                let entry = RawMutPtr.unsafe_read element
+                let matched = maps_to right (entry.0) (entry.1)
+                RawMutPtr.store element entry
+                if (matched) {
+                    index = index + 1
+                } else {
+                    equal = False
+                    break
+                }
+            }
+            equal
+        } else {
+            False
+        }
+    }
+}
+
+impl<K, V where Hash K, Copy V> Index Dict<K, V> K {
+    type Output = V
+    index = (dict, key) => match (Dict.get dict key) {
+        Some value => value,
+        None => panic "Dict: missing key",
+    }
+}
+
+impl<K, V where Hash K, Clone K> MutateIndex Dict<K, V> K {
+    type Value = V
+    mutate_index = (mut dict, key, move value) => {
+        let _ = Dict.insert dict (Clone.clone key) value
+        ()
+    }
+}
