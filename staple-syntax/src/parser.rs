@@ -4524,6 +4524,23 @@ impl Grammar {
     fn parse_block_expression(&mut self) -> Result<BlockExpression, ParseError> {
         let start = self.position;
         self.expect(TokenKind::LBrace, "expected `{`")?;
+        // A line break ends a block's statements wherever the block appears.
+        // A source file turns this on for every item, but a macro argument
+        // fragment (such as a `when` arm) starts with it off.
+        let previous = self.newline_terminates_expression;
+        self.newline_terminates_expression = true;
+        let items = self.parse_block_items();
+        self.newline_terminates_expression = previous;
+        let items = items?;
+        self.expect(TokenKind::RBrace, "expected `}`")?;
+        Ok(BlockExpression {
+            syntax: self.syntax(start),
+            items,
+        })
+    }
+
+    /// Parses a block's items up to, but not including, its closing `}`.
+    fn parse_block_items(&mut self) -> Result<Vec<Item>, ParseError> {
         let mut items = Vec::new();
         while !self.at(TokenKind::RBrace) {
             if self.peek().is_none() {
@@ -4532,11 +4549,7 @@ impl Grammar {
             items.push(self.parse_block_item()?);
             self.eat(TokenKind::Semicolon);
         }
-        self.expect(TokenKind::RBrace, "expected `}`")?;
-        Ok(BlockExpression {
-            syntax: self.syntax(start),
-            items,
-        })
+        Ok(items)
     }
 
     /// Parses a parenthesized product expression with optional element names,

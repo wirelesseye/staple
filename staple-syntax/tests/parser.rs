@@ -4269,6 +4269,19 @@ fn prefix_parses_stop_where_the_grammar_stops() {
 }
 
 #[test]
+fn prefix_parsed_blocks_end_statements_at_line_breaks() {
+    // A macro argument fragment starts without the source file's statement
+    // context; a block inside it still ends a statement at a line break.
+    let mut ids = 1_000_000;
+    let syntax = delimited_fragment("let x = ({\n    f a\n    g b\n}, rest)\n", 0);
+    let (expression, _) = parse_expression_prefix(&syntax, &mut ids).unwrap();
+    let Expression::Block(block) = expression else {
+        panic!("expected a block");
+    };
+    assert_eq!(block.items.len(), 2);
+}
+
+#[test]
 fn prefix_parses_reject_input_that_does_not_start_the_construct() {
     let mut ids = 1_000_000;
     let syntax = delimited_fragment("let x = (b, a)\n", 1);

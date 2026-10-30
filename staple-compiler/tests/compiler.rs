@@ -9216,6 +9216,31 @@ fn expands_standard_braced_when_clauses() {
 }
 
 #[test]
+fn braced_when_arm_blocks_end_statements_at_line_breaks() {
+    // Each arm is parsed as a macro argument fragment; its block must still
+    // end a statement at a line break, as a block in source does, rather
+    // than reading the next line as more arguments of a call.
+    type_check(concat!(
+        "def step = (value: I32) => Option<I32> :: Some (value + 1)\n",
+        "def record = (value: I32) => () :: ()\n",
+        "def run = (flag: Bool) => Option<I32> :: {\n",
+        "    let mut total: I32 = 0\n",
+        "    when {\n",
+        "        flag => {\n",
+        "            record total\n",
+        "            record 1\n",
+        "            let next = step total ?\n",
+        "            if (next > 3) { record next }\n",
+        "            total = next\n",
+        "        },\n",
+        "        else => (),\n",
+        "    }\n",
+        "    Some total\n",
+        "}\n",
+    ));
+}
+
+#[test]
 fn requires_else_to_be_the_last_braced_when_clause() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
