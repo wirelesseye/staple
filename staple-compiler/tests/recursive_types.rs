@@ -208,3 +208,33 @@ fn mutually_recursive_types_without_an_indirection_are_still_cyclic() {
         "unexpected diagnostics: {errors:#?}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn recursive_product_with_a_singleton_sum_field_runs_when_walked_in_a_loop() {
+    // Walking `items` recursively specializes `write` over a compacted
+    // template in which `Bool`'s `True` and `False` appear as `Opaque`
+    // placeholders; emission must expand them to their `()` representation.
+    let output = run(r#"
+use std.io.(IO, println)
+
+type Node wrap (flag: Bool, items: List<Node>)
+
+def write = move node: Node =>{IO} () :: {
+    let Node (flag, items) = node
+    println (if flag { "yes" } else { "no" })
+    for item in items {
+        write item
+    }
+}
+
+def main = () =>{IO} () :: {
+    let mut items: List<Node> = List.new ()
+    List.push items (Node (flag: True, items: List.new ()))
+    write (Node (flag: False, items: items))
+}
+
+main ()
+"#);
+    assert_eq!(output, "no\nyes\n");
+}

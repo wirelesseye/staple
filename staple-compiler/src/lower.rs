@@ -23,7 +23,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
-use staple_syntax::{Diagnostic, Expression, Item, Pattern, Span, SyntaxId};
+use staple_syntax::{Diagnostic, Expression, Item, Pattern, Span, SyntaxId, TypeDeclarationKind};
 
 use crate::specialization::SpecializationCatalog;
 use crate::types_equivalent;
@@ -3462,12 +3462,16 @@ impl LoweredProgram {
                 ));
                 continue;
             };
+            // A singleton is a wrapper over `()` too: a compacted template
+            // can refer to `True` as `Opaque { id }`, which emission expands
+            // through this representation like any other recursive stand-in.
+            let representation = match declaration.kind() {
+                TypeDeclarationKind::Singleton => Some(CheckedType::empty_product()),
+                kind if kind.is_wrapper() => module.type_representation(id).cloned(),
+                _ => None,
+            };
             let value = LoweredTypeMetadata {
-                representation: declaration
-                    .kind()
-                    .is_wrapper()
-                    .then(|| module.type_representation(id).cloned())
-                    .flatten(),
+                representation,
                 parameters: declaration
                     .type_parameters
                     .iter()
