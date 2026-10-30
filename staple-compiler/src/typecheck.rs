@@ -12466,6 +12466,28 @@ impl TypeChecker {
                 {
                     self.function_types.insert(function_id, merged);
                 }
+                // A lambda without `move` markers takes them from the
+                // expected function type. Its caller transfers ownership
+                // through that type, so the lambda must own those positions
+                // too; otherwise it would borrow a value passed by ownership,
+                // reading the value as an address.
+                if !self.checked_functions.contains(&function_id)
+                    && pattern_parameter_moves(&function.pattern).is_empty()
+                    && let Some(CheckedType::Function(expected)) = &merge_expected
+                    && !expected.moves.is_empty()
+                    && let Some(current) = self.function_types.get_mut(&function_id)
+                    && current.moves.is_empty()
+                {
+                    current.moves = expected.moves.clone();
+                    let symbols = self
+                        .parameter_symbols
+                        .get(&function_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    for symbol in mutation_parameter_symbols(&symbols, &expected.moves) {
+                        Arc::make_mut(&mut self.move_parameter_symbols).insert(symbol);
+                    }
+                }
                 self.ensure_function_checked(module, function_id);
                 self.function_types
                     .get(&function_id)

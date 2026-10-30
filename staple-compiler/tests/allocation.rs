@@ -136,6 +136,48 @@ fn list_into_iter_drops_only_unyielded_elements_on_early_break() {
 
 #[cfg(unix)]
 #[test]
+fn unmarked_lambdas_own_parameters_their_expected_type_moves() {
+    // Each lambda omits `move` but is passed where the callee's type moves
+    // its argument in. It must own that argument, as `move` would declare:
+    // borrowing it read the moved value as an address and crashed.
+    let source = concat!(
+        "use std.list.List\n",
+        "use std.iterator.IntoIterator\n",
+        "use std.cinterop.*\n",
+        "use std.ptr.*\n",
+        "extern \"c\" { printf: (RawPtr<CChar>, ...) -> I32 }\n",
+        "type Tag wrap I32\n",
+        "impl ! Copy Tag {}\n",
+        "impl Drop Tag { cleanup = Tag id => { printf (c_string \"drop %d\\n\", id); () } }\n",
+        "def id = tag: Tag => I32 :: match tag { Tag id => id }\n",
+        "def apply = (f: move Tag -> I32; move tag: Tag) => I32 :: f tag\n",
+        "def apply_pair = (f: (move I32, move (I32, Tag)) -> I32; move pair: (I32, Tag)) => I32 ::\n",
+        "  f (0, pair)\n",
+        "def main = () => () :: {\n",
+        "  printf (c_string \"used %d\\n\", apply (tag => id tag) (Tag 1))\n",
+        "  printf (c_string \"dropped %d\\n\", apply (tag => { drop tag; 0 }) (Tag 2))\n",
+        "  printf (c_string \"nested %d\\n\", apply_pair ((sum, (n, tag)) => sum + n + id tag) (5, Tag 3))\n",
+        "  let tags: List<Tag> = List.of (Tag 4, Tag 5)\n",
+        "  let total = IntoIterator.into_iterator tags |> fold 0 ((sum, tag) => sum + id tag)\n",
+        "  printf (c_string \"total %d\\n\", total)\n",
+        "  let one: List<Tag> = List.of (Tag 6)\n",
+        "  let none: List<Tag> = List.new ()\n",
+        "  let lists: List<(I32, List<Tag>)> = List.of ((1, one), (2, none))\n",
+        "  let count = IntoIterator.into_iterator lists |> fold (USize :: 0) ((sum, (_, list)) => sum + List.length list)\n",
+        "  printf (c_string \"count %d\\n\", count)\n",
+        "  ()\n",
+        "}\n",
+        "main ()\n",
+    );
+    // Every value drops once, inside the lambda that owns it.
+    let expected = "drop 1\nused 1\ndrop 2\ndropped 0\ndrop 3\nnested 8\n\
+                    drop 4\ndrop 5\ntotal 9\ndrop 6\ncount 1\n";
+    assert_eq!(run_mode(source, false), expected);
+    assert_eq!(run_mode(source, true), expected);
+}
+
+#[cfg(unix)]
+#[test]
 fn library_handles_move_replace_extract_and_drop_payloads_once() {
     let source = concat!(
         "use std.unique.Unique\n",
