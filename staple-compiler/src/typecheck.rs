@@ -726,24 +726,29 @@ impl PartialEq for CheckedType {
             Self::Forall(scheme) => {
                 matches!(right, Self::Forall(other) if scheme == other)
             }
+            // A wrapper is nominal: its `id` and `arguments` determine its
+            // representation. Comparing representations would set a recursive
+            // type's self-reference stand-in (whose representation is an
+            // `Opaque` placeholder, see `recursive_self_reference`) apart from
+            // the type itself, so `List<Tree>` inside `Tree`'s own
+            // representation would differ from `List<Tree>` written elsewhere.
             Self::Wrapper {
                 id,
                 name,
                 arguments,
-                representation,
                 introduction,
+                ..
             } => matches!(
                 right,
                 Self::Wrapper {
                     id: other_id,
                     name: other_name,
                     arguments: other_arguments,
-                    representation: other_representation,
                     introduction: other_introduction,
+                    ..
                 } if id == other_id
                     && name == other_name
                     && arguments == other_arguments
-                    && representation == other_representation
                     && introduction == other_introduction
             ),
             Self::Alias { .. } => unreachable!("aliases are removed before comparison"),
@@ -4322,13 +4327,24 @@ pub struct TypeChecker {
     /// the dependencies its `with` providers left unsatisfied.
     dependency_discharges: Option<Vec<DependencyDischarge>>,
     resolved_named_types: HashMap<TypeId, CheckedType>,
-    resolving_named_types: HashSet<TypeId>,
+    /// Types whose representation is being resolved, each with the
+    /// `recursive_construction_depth` at which its resolution began.
+    resolving_named_types: HashMap<TypeId, usize>,
     /// Nesting depth of type-argument positions whose enclosing constructor is
-    /// a `@recursive_constructor` (`Shared`, `SharedBuffer`, `Syntax`). A self-reference
-    /// reached while this is non-zero passes through a construction that does
-    /// not need its argument's representation to be laid out, so it breaks an
-    /// otherwise-cyclic type definition instead of being rejected.
+    /// a `@recursive_constructor` (`Shared`, `SharedBuffer`, `Syntax`) or a
+    /// type whose parameters are all indirect (`List`, `Dict`). A reference to
+    /// a type still being resolved, reached at a greater depth than the one its
+    /// resolution began at, passes through a construction that does not need
+    /// the referent's layout, so it breaks an otherwise-cyclic type definition
+    /// instead of being rejected. This holds for mutual recursion too: in
+    /// `Tree from Leaf | Node` with `Node wrap List<Tree>`, the reference back
+    /// to whichever type started is behind `List`.
     recursive_construction_depth: usize,
+    /// Types a self-reference stand-in has been issued for, in order, while
+    /// they were still being resolved. A type resolved while a stand-in for
+    /// some *other* unfinished type remains open embeds that placeholder, so
+    /// it is not cached: resolved again later, it gets the real type instead.
+    open_self_references: Vec<TypeId>,
     /// Memoized `type_parameters_are_indirect` answers: whether every type
     /// parameter of a represented type occurs in its representation only
     /// behind an out-of-line indirection, so an application of that type
@@ -4977,7 +4993,7 @@ impl TypeChecker {
                 // itself in an effect set, which is cyclic even when only a
                 // dependency spells it.
                 if let Some(id) = checked_type_id(&dependency.value_type)
-                    && self.resolving_named_types.contains(&id)
+                    && self.resolving_named_types.contains_key(&id)
                 {
                     self.diagnostics.push(Diagnostic::new(
                         self.type_declarations[&id].syntax.span.clone(),
@@ -20536,7 +20552,7 @@ impl TypeChecker {
         let declaration = self.type_declarations[&id].clone();
         if !declaration.kind().is_wrapper()
             || declaration.type_parameters.is_empty()
-            || self.resolving_named_types.contains(&id)
+            || self.resolving_named_types.contains_key(&id)
         {
             return false;
         }
@@ -20576,25 +20592,31 @@ impl TypeChecker {
         indirect
     }
 
-    /// When a type declaration refers to itself while its own representation is
-    /// still being resolved, but the reference is reached through a
-    /// `@recursive_constructor` (`recursive_construction_depth > 0`), the
-    /// enclosing construction (`Shared`, `SharedBuffer`, `Syntax`) does not need the
-    /// referent's layout, so the definition is well-founded. Yields a nominal
-    /// stand-in whose representation is left opaque rather than expanded a
-    /// second time; `None` means this is a genuine cyclic definition.
+    /// When a type declaration refers to itself, directly or through other
+    /// declarations, while its own representation is still being resolved, but
+    /// the reference is reached through an indirection entered since that
+    /// resolution began (`recursive_construction_depth > started_at`), the
+    /// enclosing construction (`Shared`, `Buffer`, `List`, ...) does not need
+    /// the referent's layout, so the definition is well-founded. An indirection
+    /// open in the caller's context does not count, because it encloses the
+    /// whole type rather than the back-edge. Yields a nominal stand-in whose
+    /// representation is left opaque rather than expanded a second time; `None`
+    /// means this is a genuine cyclic definition.
     fn recursive_self_reference(
-        &self,
+        &mut self,
         declaration: &TypeDeclaration,
         id: TypeId,
         display_name: &str,
         arguments: &[CheckedType],
+        started_at: usize,
     ) -> Option<CheckedType> {
-        if self.recursive_construction_depth == 0
-            || declaration.kind() != TypeDeclarationKind::Wrapper
+        let kind = declaration.kind();
+        if self.recursive_construction_depth <= started_at
+            || !matches!(kind, TypeDeclarationKind::Wrapper | TypeDeclarationKind::From)
         {
             return None;
         }
+        self.open_self_references.push(id);
         Some(CheckedType::Wrapper {
             id,
             name: display_name.to_owned(),
@@ -20605,8 +20627,24 @@ impl TypeChecker {
                 name: display_name.to_owned(),
                 arguments: arguments.to_vec(),
             }),
-            introduction: WrapperIntroduction::Explicit,
+            introduction: WrapperIntroduction::of(kind),
         })
+    }
+
+    /// Closes the stand-ins issued for `id` since `start`, now that its
+    /// representation is finished. Returns whether none issued since `start`
+    /// remains open, so the finished type embeds no placeholder for a type
+    /// still being resolved and may be cached.
+    fn close_self_references(&mut self, id: TypeId, start: usize) -> bool {
+        let mut index = start;
+        while index < self.open_self_references.len() {
+            if self.open_self_references[index] == id {
+                self.open_self_references.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+        self.open_self_references.len() == start
     }
 
     /// Finishes a possibly-partial `TypeConstructor` by filling in defaults
@@ -20729,10 +20767,14 @@ impl TypeChecker {
                 introduction: WrapperIntroduction::Explicit,
             };
         }
-        if !self.resolving_named_types.insert(id) {
-            if let Some(reference) =
-                self.recursive_self_reference(&declaration, id, &display_name, &arguments)
-            {
+        if let Some(&started_at) = self.resolving_named_types.get(&id) {
+            if let Some(reference) = self.recursive_self_reference(
+                &declaration,
+                id,
+                &display_name,
+                &arguments,
+                started_at,
+            ) {
                 return reference;
             }
             self.diagnostics.push(Diagnostic::new(
@@ -20741,6 +20783,8 @@ impl TypeChecker {
             ));
             return CheckedType::Error;
         }
+        self.resolving_named_types
+            .insert(id, self.recursive_construction_depth);
         let declaration_bounds = self.resolve_bound_clause(
             module,
             &declaration.trait_bounds,
@@ -20762,16 +20806,13 @@ impl TypeChecker {
         }
         self.active_function_bounds.push(declaration_bounds);
         self.active_subtype_bounds.push(declaration_subtype_bounds);
-        // A recursive constructor open in the caller's context does not guard
-        // *this* type's own self-reference; only one entered while resolving
-        // this representation does.
-        let outer_recursive_depth = std::mem::take(&mut self.recursive_construction_depth);
+        let open_self_references = self.open_self_references.len();
         let template =
             self.resolve_source_type(module, declaration.underlying().expect("represented type"));
-        self.recursive_construction_depth = outer_recursive_depth;
         self.active_function_bounds.pop();
         self.active_subtype_bounds.pop();
         self.resolving_named_types.remove(&id);
+        self.close_self_references(id, open_self_references);
         let representation = self.substitute_product_spreads(
             template,
             &substitutions,
@@ -21220,9 +21261,9 @@ impl TypeChecker {
             self.resolved_named_types.insert(id, value_type.clone());
             return value_type;
         }
-        if !self.resolving_named_types.insert(id) {
+        if let Some(&started_at) = self.resolving_named_types.get(&id) {
             if let Some(reference) =
-                self.recursive_self_reference(&declaration, id, &display_name, &[])
+                self.recursive_self_reference(&declaration, id, &display_name, &[], started_at)
             {
                 return reference;
             }
@@ -21232,15 +21273,17 @@ impl TypeChecker {
             ));
             return CheckedType::Error;
         }
-        let outer_recursive_depth = std::mem::take(&mut self.recursive_construction_depth);
+        self.resolving_named_types
+            .insert(id, self.recursive_construction_depth);
+        let open_self_references = self.open_self_references.len();
         let representation = self.resolve_source_type(
             module,
             declaration
                 .underlying()
                 .expect("non-opaque type declaration has an underlying type"),
         );
-        self.recursive_construction_depth = outer_recursive_depth;
         self.resolving_named_types.remove(&id);
+        let cacheable = self.close_self_references(id, open_self_references);
         if declaration.kind().is_wrapper() && !representation.is_sized() {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
@@ -21264,7 +21307,9 @@ impl TypeChecker {
             TypeDeclarationKind::Singleton => unreachable!(),
             TypeDeclarationKind::Opaque => unreachable!(),
         };
-        self.resolved_named_types.insert(id, value_type.clone());
+        if cacheable {
+            self.resolved_named_types.insert(id, value_type.clone());
+        }
         value_type
     }
 }
@@ -21486,22 +21531,22 @@ pub(crate) fn types_equivalent(actual: &CheckedType, expected: &CheckedType) -> 
                 && a.variadic == b.variadic
                 && runs(&a.runs, &b.runs)
         }
+        // Nominal, as in `CheckedType`'s `PartialEq`: a recursive type can be
+        // unfolded to different depths, each ending in a stand-in.
         (
             CheckedType::Wrapper {
                 id: a,
                 arguments: aa,
-                representation: ar,
                 introduction: ai,
                 ..
             },
             CheckedType::Wrapper {
                 id: b,
                 arguments: ba,
-                representation: br,
                 introduction: bi,
                 ..
             },
-        ) => a == b && ai == bi && types_equivalent_list(aa, ba) && types_equivalent(ar, br),
+        ) => a == b && ai == bi && types_equivalent_list(aa, ba),
         (
             CheckedType::Opaque {
                 id: a,
