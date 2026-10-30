@@ -3155,11 +3155,33 @@ def f3 = (a: A, mut b: B) => { ... }          // (A, mut B) -> ...
 ```
 
 Markers are allowed only on a whole parameter binding or a direct binding in
-the top-level parameter product. When a function has an explicit type
-annotation, its parameter markers are not optional: the pattern must repeat a
-`mut` for every position the annotation declares mutable, and their mutation
-targets must match exactly. The marker does not introduce an ordinary mutable
-local; it declares the function parameter position that is passed by address.
+the top-level parameter product. When a `def` or a trait implementation has an
+explicit type annotation, its parameter markers are not optional: the pattern
+must repeat a `mut` for every position the annotation declares mutable, and
+their mutation targets must match exactly. The marker does not introduce an
+ordinary mutable local; it declares the function parameter position that is
+passed by address.
+
+Markers are part of a parameter's type, so a function whose type comes from
+its context may omit them, just as it omits its parameter types. A lambda
+checked against an expected function type takes that type's `mut` and `move`
+markers when its pattern writes none. Its expected type may come from a call
+argument or from a `let` annotation, including each curried stage. A lambda
+that writes any marker must write all of them: its markers must mark the same
+positions as the expected type's.
+
+```staple
+def update = (f: mut I32 -> ()) => I32 :: {
+    let mut value: I32 = 1
+    f value
+    value
+}
+
+update (value => { value = 2 })          // `value` is `mut`, from `update`
+let bump: mut I32 -> () = value => { value = value + 1 }
+(1 .. 4) |> fold 0 ((total, x) => total + x) // `total` and `x` are `move`, from `fold`
+def reset: mut I32 -> () = value => { value = 0 } // error: `def` repeats `mut`
+```
 
 Inside parentheses, a marker followed by a type and then `->` belongs to that
 function type, not to the enclosing element or slot. This is how a
@@ -3217,7 +3239,8 @@ replace fixed_answer // error: the named binding is not `mut`
 ```
 
 Mutable parameter permissions are never inferred from a function body and
-never propagate from a callee into its caller. A function that assigns through a parameter,
+never propagate from a callee into its caller; only a lambda's expected type
+can supply them, as above. A function that assigns through a parameter,
 captures it for mutation, or forwards it to a mutating callee must declare the
 corresponding parameter marker or mutable parameter type. Runtime resource
 effects continue to infer and propagate independently. Mutation permissions carry no
@@ -3282,9 +3305,10 @@ def f2: (A, move B) -> () = (a, move b) => { ... }     // owns parameter 1 only
 def f3 = (a: A, move b: B) => { ... }                  // same, from the binding
 ```
 
-When a function has an explicit annotation, its parameter markers must
-repeat and match the annotation's `move` targets exactly, the same as for
-`mut`. A trait implementation's method is checked the same way against the
+When a `def` has an explicit annotation, its parameter markers must repeat
+and match the annotation's `move` targets exactly, the same as for `mut`. A
+lambda checked against an expected function type follows the same rule as for
+`mut`: it takes that type's `move` markers when it writes none. A trait implementation's method is checked the same way against the
 trait's method declaration, even when the parameter's type is `Copy`. A
 parameter cannot be marked both `mut` and `move`: a mutable borrow and an
 ownership transfer are different effects. `move` and `mut` never change the

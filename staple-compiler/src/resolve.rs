@@ -703,6 +703,10 @@ pub struct ResolvedFunction {
     pub effect_lower_bound: Option<staple_syntax::EffectSet>,
     pub result_annotation: Option<Type>,
     pub binding_annotation: Option<Type>,
+    /// Whether `binding_annotation` supplies parameter markers the pattern
+    /// omits, as for a `let`-bound function. A `def` or trait member must
+    /// repeat its annotation's markers.
+    pub markers_from_annotation: bool,
     pub companion_target: Option<Type>,
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<staple_syntax::TraitBound>,
@@ -1750,6 +1754,12 @@ pub struct NameResolver {
     function_captures: HashMap<FunctionId, Vec<SymbolId>>,
     /// Module-level bindings marked `@track_caller`.
     track_caller_bindings: HashSet<SyntaxId>,
+    /// `let` bindings. A function bound by one takes omitted parameter
+    /// markers from the binding's annotation.
+    let_bindings: HashSet<SyntaxId>,
+    /// Set while resolving the curried body of a function that may omit
+    /// markers, so that stage may too.
+    curried_markers_from_annotation: bool,
     /// Functions that are the outermost stage of a `@track_caller` binding.
     track_caller_functions: HashSet<FunctionId>,
     function_stack: Vec<FunctionId>,
@@ -5506,6 +5516,9 @@ impl NameResolver {
     }
 
     fn resolve_binding(&mut self, binding: &Binding) {
+        if binding.kind == BindingKind::Let {
+            self.let_bindings.insert(binding.syntax.id);
+        }
         if binding.track_caller {
             if self.block_types.is_empty() {
                 self.track_caller_bindings.insert(binding.syntax.id);
@@ -6312,6 +6325,10 @@ impl NameResolver {
             .insert(expression.syntax().id, self.function_stack.last().copied());
         match expression {
             Expression::Function(function) => {
+                // A curried stage of a `let`-bound function inherits the
+                // outer stage's leave to omit markers.
+                let markers_from_annotation = std::mem::take(&mut self.curried_markers_from_annotation)
+                    || suggested_function.is_some_and(|(_, syntax)| self.let_bindings.contains(&syntax));
                 self.push_type_parameter_scope();
                 if let Some(generics) = &function.generics {
                     self.resolve_value_generics(generics, true);
@@ -6397,7 +6414,10 @@ impl NameResolver {
                     };
                     Some(function_type.result.as_ref())
                 })();
+                self.curried_markers_from_annotation = markers_from_annotation
+                    && matches!(function.body.as_ref(), Expression::Function(_));
                 self.resolve_expression(&function.body, expected_result, None);
+                self.curried_markers_from_annotation = false;
                 self.pop_scope();
                 self.loop_depth = outer_loop_depth;
                 self.function_stack.pop();
@@ -6445,6 +6465,7 @@ impl NameResolver {
                         _ => None,
                     },
                     binding_annotation: expected_type.cloned(),
+                    markers_from_annotation,
                     companion_target: suggested_function.and_then(|(_, syntax)| {
                         self.binding_companion_targets.get(&syntax).cloned()
                     }),

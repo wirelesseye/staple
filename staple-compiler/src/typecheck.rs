@@ -8540,11 +8540,16 @@ impl TypeChecker {
                 .map(|function| function.effects.clone())
                 .or_else(|| self.function_effect_lower_bounds.get(&function.id).cloned())
                 .unwrap_or_default();
+            // A `let`-bound function with no markers takes them from its
+            // annotation, as a lambda takes them from its expected type.
+            let markers_inferred = function.markers_from_annotation
+                && parameter_mutations.is_empty()
+                && parameter_moves.is_empty();
             let mut mutations = annotated_function
                 .as_ref()
                 .map(|function| function.mutations.clone())
                 .unwrap_or_default();
-            if function.binding_annotation.is_some() {
+            if function.binding_annotation.is_some() && !markers_inferred {
                 if parameter_mutations != mutations {
                     self.diagnostics.push(Diagnostic::new(
                         function.pattern.syntax().span.clone(),
@@ -8555,14 +8560,14 @@ impl TypeChecker {
                         ),
                     ));
                 }
-            } else {
+            } else if !markers_inferred {
                 mutations = parameter_mutations.clone();
             }
             let mut moves = annotated_function
                 .as_ref()
                 .map(|function| function.moves.clone())
                 .unwrap_or_default();
-            if function.binding_annotation.is_some() {
+            if function.binding_annotation.is_some() && !markers_inferred {
                 if parameter_moves != moves {
                     self.diagnostics.push(Diagnostic::new(
                         function.pattern.syntax().span.clone(),
@@ -8573,7 +8578,7 @@ impl TypeChecker {
                         ),
                     ));
                 }
-            } else {
+            } else if !markers_inferred {
                 moves = parameter_moves.clone();
             }
             for symbol in mutation_parameter_symbols(&parameter_symbols, &mutations) {
@@ -8678,16 +8683,50 @@ impl TypeChecker {
                 }
                 let mutations = pattern_parameter_mutations(&inner.pattern);
                 let moves = pattern_parameter_moves(&inner.pattern);
-                if mutations != expected.mutations || moves != expected.moves {
+                let markers_inferred =
+                    function.markers_from_annotation && mutations.is_empty() && moves.is_empty();
+                if !markers_inferred
+                    && (mutations != expected.mutations || moves != expected.moves)
+                {
                     self.diagnostics.push(Diagnostic::new(
                         inner.pattern.syntax().span.clone(),
                         "parameter `mut`/`move` markers differ from the function annotation",
                     ));
                 }
+                if markers_inferred {
+                    self.register_inferred_parameter_markers(
+                        id,
+                        &expected.mutations,
+                        &expected.moves,
+                    );
+                }
                 result = Some(*expected.result.clone());
                 self.function_types.insert(id, expected);
                 body = &inner.body;
             }
+        }
+    }
+
+    /// Marks the parameters of a function whose `mut` and `move` markers
+    /// come from an expected type rather than its own pattern, as the
+    /// pattern's markers would.
+    fn register_inferred_parameter_markers(
+        &mut self,
+        function_id: FunctionId,
+        mutations: &[CheckedMutation],
+        moves: &[CheckedMutation],
+    ) {
+        let symbols = self
+            .parameter_symbols
+            .get(&function_id)
+            .cloned()
+            .unwrap_or_default();
+        for symbol in mutation_parameter_symbols(&symbols, mutations) {
+            self.mutable_parameter_symbols.insert(symbol);
+            self.mutated_parameter_symbols.insert(symbol);
+        }
+        for symbol in mutation_parameter_symbols(&symbols, moves) {
+            Arc::make_mut(&mut self.move_parameter_symbols).insert(symbol);
         }
     }
 
@@ -12456,6 +12495,33 @@ impl TypeChecker {
                     }
                     expected => expected.cloned(),
                 };
+                // Markers are part of a lambda's parameter type. A lambda
+                // without any takes them from its expected function type, as
+                // it takes its parameter types; one with any must agree.
+                if !self.checked_functions.contains(&function_id)
+                    && let Some(CheckedType::Function(expected)) = &merge_expected
+                {
+                    let mutations = pattern_parameter_mutations(&function.pattern);
+                    let moves = pattern_parameter_moves(&function.pattern);
+                    if mutations.is_empty() && moves.is_empty() {
+                        if let Some(current) = self.function_types.get_mut(&function_id) {
+                            current.mutations = expected.mutations.clone();
+                            current.moves = expected.moves.clone();
+                        }
+                        self.register_inferred_parameter_markers(
+                            function_id,
+                            &expected.mutations,
+                            &expected.moves,
+                        );
+                    } else if !parameter_markers_agree(&function.pattern, &mutations, &expected.mutations)
+                        || !parameter_markers_agree(&function.pattern, &moves, &expected.moves)
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            function.pattern.syntax().span.clone(),
+                            "parameter `mut`/`move` markers differ from the expected function type",
+                        ));
+                    }
+                }
                 if !self.checked_functions.contains(&function_id)
                     && let Some(CheckedType::Function(expected)) = &merge_expected
                     && let Some(current) = self.function_types.get(&function_id).cloned()
@@ -12465,28 +12531,6 @@ impl TypeChecker {
                     )
                 {
                     self.function_types.insert(function_id, merged);
-                }
-                // A lambda without `move` markers takes them from the
-                // expected function type. Its caller transfers ownership
-                // through that type, so the lambda must own those positions
-                // too; otherwise it would borrow a value passed by ownership,
-                // reading the value as an address.
-                if !self.checked_functions.contains(&function_id)
-                    && pattern_parameter_moves(&function.pattern).is_empty()
-                    && let Some(CheckedType::Function(expected)) = &merge_expected
-                    && !expected.moves.is_empty()
-                    && let Some(current) = self.function_types.get_mut(&function_id)
-                    && current.moves.is_empty()
-                {
-                    current.moves = expected.moves.clone();
-                    let symbols = self
-                        .parameter_symbols
-                        .get(&function_id)
-                        .cloned()
-                        .unwrap_or_default();
-                    for symbol in mutation_parameter_symbols(&symbols, &expected.moves) {
-                        Arc::make_mut(&mut self.move_parameter_symbols).insert(symbol);
-                    }
                 }
                 self.ensure_function_checked(module, function_id);
                 self.function_types
@@ -19698,6 +19742,7 @@ impl TypeChecker {
             effect_lower_bound: None,
             result_annotation: None,
             binding_annotation: None,
+            markers_from_annotation: false,
             companion_target: None,
             type_parameters: Vec::new(),
             trait_bounds: Vec::new(),
@@ -25039,6 +25084,31 @@ fn canonical_mutations(mut mutations: Vec<CheckedMutation>) -> Vec<CheckedMutati
     });
     mutations.dedup();
     mutations
+}
+
+/// Whether a lambda's written markers mark the same parameter positions as
+/// an expected function type's. A whole marker on a product pattern marks
+/// each of its elements.
+fn parameter_markers_agree(
+    pattern: &Pattern,
+    written: &[CheckedMutation],
+    expected: &[CheckedMutation],
+) -> bool {
+    let positions = |markers: &[CheckedMutation]| -> HashSet<Option<usize>> {
+        match pattern {
+            Pattern::Product(product) if markers.contains(&CheckedMutation::Whole) => {
+                (0..product.elements.len()).map(Some).collect()
+            }
+            _ => markers
+                .iter()
+                .map(|marker| match marker {
+                    CheckedMutation::Whole => None,
+                    CheckedMutation::Element(index) => Some(*index),
+                })
+                .collect(),
+        }
+    };
+    positions(written) == positions(expected)
 }
 
 fn mutation_parameter_symbols(

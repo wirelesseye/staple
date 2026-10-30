@@ -136,10 +136,11 @@ fn list_into_iter_drops_only_unyielded_elements_on_early_break() {
 
 #[cfg(unix)]
 #[test]
-fn unmarked_lambdas_own_parameters_their_expected_type_moves() {
-    // Each lambda omits `move` but is passed where the callee's type moves
-    // its argument in. It must own that argument, as `move` would declare:
-    // borrowing it read the moved value as an address and crashed.
+fn unmarked_lambdas_take_markers_from_their_expected_types() {
+    // Each lambda omits its markers and takes them from the type it is
+    // checked against. Where that type moves an argument in, the lambda owns
+    // it, as `move` would declare: borrowing it read the moved value as an
+    // address and crashed. Where it mutates one, the write reaches the caller.
     let source = concat!(
         "use std.list.List\n",
         "use std.iterator.IntoIterator\n",
@@ -153,6 +154,11 @@ fn unmarked_lambdas_own_parameters_their_expected_type_moves() {
         "def apply = (f: move Tag -> I32; move tag: Tag) => I32 :: f tag\n",
         "def apply_pair = (f: (move I32, move (I32, Tag)) -> I32; move pair: (I32, Tag)) => I32 ::\n",
         "  f (0, pair)\n",
+        "def update = (f: mut I32 -> ()) => I32 :: {\n",
+        "  let mut value: I32 = 1\n",
+        "  f value\n",
+        "  value\n",
+        "}\n",
         "def main = () => () :: {\n",
         "  printf (c_string \"used %d\\n\", apply (tag => id tag) (Tag 1))\n",
         "  printf (c_string \"dropped %d\\n\", apply (tag => { drop tag; 0 }) (Tag 2))\n",
@@ -165,13 +171,20 @@ fn unmarked_lambdas_own_parameters_their_expected_type_moves() {
         "  let lists: List<(I32, List<Tag>)> = List.of ((1, one), (2, none))\n",
         "  let count = IntoIterator.into_iterator lists |> fold (USize :: 0) ((sum, (_, list)) => sum + List.length list)\n",
         "  printf (c_string \"count %d\\n\", count)\n",
+        "  printf (c_string \"updated %d\\n\", update (value => { value = value + 41 }))\n",
+        "  let consume: move Tag -> I32 = tag => id tag\n",
+        "  let bump: I32 -> mut I32 -> () = step => value => { value = value + step }\n",
+        "  let mut counter: I32 = 0\n",
+        "  bump 3 counter\n",
+        "  printf (c_string \"bound %d %d\\n\", consume (Tag 7), counter)\n",
         "  ()\n",
         "}\n",
         "main ()\n",
     );
     // Every value drops once, inside the lambda that owns it.
     let expected = "drop 1\nused 1\ndrop 2\ndropped 0\ndrop 3\nnested 8\n\
-                    drop 4\ndrop 5\ntotal 9\ndrop 6\ncount 1\n";
+                    drop 4\ndrop 5\ntotal 9\ndrop 6\ncount 1\nupdated 42\n\
+                    drop 7\nbound 7 3\n";
     assert_eq!(run_mode(source, false), expected);
     assert_eq!(run_mode(source, true), expected);
 }

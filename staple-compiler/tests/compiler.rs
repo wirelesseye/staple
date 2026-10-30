@@ -3299,6 +3299,60 @@ fn parameter_move_markers_must_match_explicit_function_and_trait_effects() {
 }
 
 #[test]
+fn lambda_markers_are_inferred_only_when_omitted_and_never_for_defs() {
+    // A lambda with no markers takes them from its expected type, including
+    // through a `let` annotation and its curried stages.
+    type_check(concat!(
+        "def update = (f: mut I32 -> ()) => I32 :: { let mut value: I32 = 1; f value; value }\n",
+        "def consume = (f: move List<I32> -> USize; move list: List<I32>) => USize :: f list\n",
+        "let updated = update (value => { value = 2 })\n",
+        "let length = consume (list => { let n = List.length list; drop list; n }) (List.of (1))\n",
+        "let bump: I32 -> mut I32 -> () = step => value => { value = value + step }\n",
+        "let take: move List<I32> -> List<I32> = list => list\n",
+    ));
+
+    // Markers that are written must agree with the expected type.
+    for source in [
+        concat!(
+            "def fold_pair = (f: (move I32, move List<I32>) -> I32) => I32 :: f (0, List.of (1))\n",
+            "let total = fold_pair ((move sum, list) => sum)\n",
+        ),
+        concat!(
+            "def borrow = (f: List<I32> -> USize) => USize :: f (List.of (1))\n",
+            "let length = borrow (move list => List.length list)\n",
+        ),
+        concat!(
+            "def update = (f: mut I32 -> ()) => () :: { let mut value: I32 = 1; f value }\n",
+            "let updated = update ((mut value, other) => ())\n",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("written lambda markers must agree with the expected type");
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("markers differ from the expected function type")
+                || diagnostic.message.contains("expected `")),
+            "{diagnostics:?}"
+        );
+    }
+
+    // A `def` repeats its annotation's markers, curried stages included.
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "def bump: I32 -> mut I32 -> () = step => value => { value = value + step }\n",
+        ))
+        .expect_err_diagnostics("a curried def stage must repeat its markers");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("parameter `mut` markers declare")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
 fn resource_inference_preserves_parameter_declared_mutation() {
     let module = type_check(concat!(
         "type Clock wrap I32\n",
