@@ -23119,6 +23119,8 @@ mod tests {
             "let left = product.left\n",
             "let values: (I32 ^ 2) = (1, 2)\n",
             "let element = values[0]\n",
+            "def parenthesized_pair = () => (1, 2)\n",
+            "let (pair_left, pair_right) = (parenthesized_pair ())\n",
             "def logical = (flag: Bool) => flag && flag\n",
             "def looping = () => loop { break 1 }\n",
             "def matching = (value: Ok<I32> | IOError) => match value {\n",
@@ -23701,7 +23703,20 @@ mod tests {
                 }
                 LoweredExpressionKind::Product(product) => {
                     if let Some(CheckedType::Product(checked)) = module.type_of_expression(syntax) {
-                        if !checked.variadic {
+                        // A plain `(e)` is its element: lowering keeps a
+                        // one-element shape around `e`, which emission
+                        // collapses, while the checker records `e`'s own type,
+                        // which may be this product.
+                        let collapsed = match product.fields.as_slice() {
+                            [field] => {
+                                product.final_type.position_count() == 1
+                                    && program.expressions.get(*field).is_some_and(|field| {
+                                        field.value_type == CheckedType::Product(checked.clone())
+                                    })
+                            }
+                            _ => false,
+                        };
+                        if !checked.variadic && !collapsed {
                             assert_eq!(
                                 product.final_type.position_count(),
                                 checked.position_count()

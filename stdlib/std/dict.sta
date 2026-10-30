@@ -231,7 +231,7 @@ companion<K, V where Hash K> Dict<K, V> {
     }
 
     /// Returns whether the dict has an entry for `key`.
-    pub def contains_key = (dict: Dict<K, V>; key: K) => Bool :: match probe dict key {
+    pub def contains_key = (dict: Dict<K, V>; key: K) => Bool :: match (probe dict key) {
         (_, Some _) => True,
         _ => False,
     }
@@ -239,7 +239,7 @@ companion<K, V where Hash K> Dict<K, V> {
     /// Associates `value` with `key` and returns the value it replaced, or
     /// `None` when the key is new. Replacing keeps the original key.
     pub def insert = (mut dict: Dict<K, V>; move key: K; move value: V) => Option<V> :: {
-        match probe dict key {
+        match (probe dict key) {
             (_, Some index) => {
                 let element = Buffer.unsafe_element dict.entries index
                 let (stored, previous) = RawMutPtr.unsafe_read element
@@ -265,11 +265,10 @@ companion<K, V where Hash K> Dict<K, V> {
     /// Removes the entry for `key` and returns its key and value, or `None`
     /// when there is no entry.
     pub def remove_entry = (mut dict: Dict<K, V>; key: K) => Option<(K, V)> :: {
-        match probe dict key {
+        match (probe dict key) {
             (slot, Some index) => {
                 clear_slot dict slot
-                let entry = swap_remove_entry dict index
-                Some entry
+                Some (swap_remove_entry dict index)
             },
             _ => None,
         }
@@ -289,7 +288,7 @@ companion<K, V where Hash K> Dict<K, V> {
 companion<K, V where Hash K, Copy V> Dict<K, V> {
     /// Returns a copy of the value for `key`, or `None` when there is no
     /// entry.
-    pub def get = (dict: Dict<K, V>; key: K) => Option<V> :: match probe dict key {
+    pub def get = (dict: Dict<K, V>; key: K) => Option<V> :: match (probe dict key) {
         (_, Some index) => {
             let element = Buffer.unsafe_element dict.entries index
             let entry = RawMutPtr.unsafe_read element
@@ -304,7 +303,7 @@ companion<K, V where Hash K, Copy V> Dict<K, V> {
 companion<K, V where Hash K, Clone V> Dict<K, V> {
     /// Returns a clone of the value for `key`, or `None` when there is no
     /// entry.
-    pub def get_cloned = (dict: Dict<K, V>; key: K) => Option<V> :: match probe dict key {
+    pub def get_cloned = (dict: Dict<K, V>; key: K) => Option<V> :: match (probe dict key) {
         (_, Some index) => {
             let element = Buffer.unsafe_element dict.entries index
             let entry = RawMutPtr.unsafe_read element
@@ -355,7 +354,7 @@ impl<K, V where Clone K, Clone V> Clone (Dict<K, V>) {
 }
 
 // Whether `dict` maps `key` to a value equal to `value`.
-def maps_to = <K, V where Hash K, Eq V> (dict: Dict<K, V>; key: K; value: V) => Bool :: match probe dict key {
+def maps_to = <K, V where Hash K, Eq V> (dict: Dict<K, V>; key: K; value: V) => Bool :: match (probe dict key) {
     (_, Some index) => {
         let element = Buffer.unsafe_element dict.entries index
         let entry = RawMutPtr.unsafe_read element
