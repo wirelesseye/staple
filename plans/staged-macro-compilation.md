@@ -210,6 +210,7 @@ Phase 5.
 ### Phase 0: spike
 
 Prove the risky parts before committing to them. The spike doesn't merge.
+Breakdown and status: [`staged-macro-compilation-phase-0.md`](staged-macro-compilation-phase-0.md).
 
 - Compile a hand-written phase-1 program (one macro, one helper using `List`
   and `String`) for the host as a shared library with the existing
