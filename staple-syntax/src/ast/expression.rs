@@ -32,6 +32,7 @@ pub enum Expression {
     StringTemplate(StringTemplateExpression),
     CString(CStringExpression),
     Char(CharExpression),
+    Byte(ByteExpression),
     Integer(IntegerExpression),
     Float(FloatExpression),
 }
@@ -68,6 +69,7 @@ impl Expression {
             Self::String(expression) => &expression.syntax,
             Self::StringTemplate(expression) => &expression.syntax,
             Self::Char(expression) => &expression.syntax,
+            Self::Byte(expression) => &expression.syntax,
             Self::CString(expression) => &expression.syntax,
             Self::Integer(expression) => &expression.syntax,
             Self::Float(expression) => &expression.syntax,
@@ -487,6 +489,14 @@ pub struct StringExpression {
 pub struct CharExpression {
     pub syntax: Syntax,
     /// The literal exactly as written, including its quotes.
+    pub literal: String,
+}
+
+/// A byte literal such as `b'"'`, which produces a `U8`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ByteExpression {
+    pub syntax: Syntax,
+    /// The literal exactly as written, including its `b` prefix and quotes.
     pub literal: String,
 }
 

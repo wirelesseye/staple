@@ -1067,6 +1067,7 @@ impl Collector<'_> {
             | Expression::String(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
         }
@@ -1188,7 +1189,10 @@ impl Collector<'_> {
             Pattern::Nominal(value) => {
                 self.pattern_candidates(&value.argument, available_from, candidates)
             }
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+            Pattern::Wildcard(_)
+            | Pattern::StringLiteral(_)
+            | Pattern::CharLiteral(_)
+            | Pattern::Splice(_) => {}
         }
     }
 

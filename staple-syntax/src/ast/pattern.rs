@@ -6,6 +6,7 @@ pub enum Pattern {
     At(AtPattern),
     Wildcard(WildcardPattern),
     StringLiteral(StringLiteralPattern),
+    CharLiteral(CharLiteralPattern),
     Product(ProductPattern),
     Nominal(NominalPattern),
     Splice(SpliceExpression),
@@ -18,6 +19,7 @@ impl Pattern {
             Self::At(pattern) => &pattern.syntax,
             Self::Wildcard(pattern) => &pattern.syntax,
             Self::StringLiteral(pattern) => &pattern.syntax,
+            Self::CharLiteral(pattern) => &pattern.syntax,
             Self::Product(pattern) => &pattern.syntax,
             Self::Nominal(pattern) => &pattern.syntax,
             Self::Splice(pattern) => &pattern.syntax,
@@ -38,6 +40,11 @@ impl Pattern {
             Self::StringLiteral(pattern) => Type::StringLiteral(super::StringLiteralType {
                 syntax: pattern.syntax.clone(),
                 literal: pattern.literal.clone(),
+            }),
+            // Characters have no singleton literal type; the matched value's
+            // type comes from context.
+            Self::CharLiteral(pattern) => Type::Inferred(super::InferredType {
+                syntax: pattern.syntax.clone(),
             }),
             Self::Product(pattern) if pattern.annotation.is_some() => {
                 pattern.annotation.clone().expect("checked annotation")
@@ -72,6 +79,7 @@ impl Pattern {
                 Self::At(pattern) => Some(pattern.binding.name.clone()),
                 Self::Wildcard(_) => None,
                 Self::StringLiteral(_) => None,
+                Self::CharLiteral(_) => None,
                 Self::Product(_) => None,
                 Self::Nominal(_) => None,
                 Self::Splice(_) => None,
@@ -94,6 +102,13 @@ pub struct AtPattern {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StringLiteralPattern {
+    pub syntax: Syntax,
+    /// The literal exactly as written, including its quotes.
+    pub literal: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharLiteralPattern {
     pub syntax: Syntax,
     /// The literal exactly as written, including its quotes.
     pub literal: String,

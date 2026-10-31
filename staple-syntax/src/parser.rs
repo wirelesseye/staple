@@ -2694,6 +2694,12 @@ impl Grammar {
                 syntax: self.syntax(start),
                 literal,
             })
+        } else if self.peek() == Some(TokenKind::Char) {
+            let literal = self.bump_token().expect("peeked char").text;
+            Pattern::CharLiteral(crate::CharLiteralPattern {
+                syntax: self.syntax(start),
+                literal,
+            })
         } else if self.at(TokenKind::LParen) {
             self.parse_product_pattern(start, false, false)?
         } else {
@@ -2884,6 +2890,7 @@ impl Grammar {
                         | TokenKind::Underscore
                         | TokenKind::LParen
                         | TokenKind::String
+                        | TokenKind::Char
                         | TokenKind::Dollar
                 )
             );
@@ -4137,6 +4144,14 @@ impl Grammar {
                     literal,
                 }))
             }
+            Some(TokenKind::Byte) => {
+                let start = self.position;
+                let literal = self.bump_token().expect("peeked byte").text;
+                Ok(Expression::Byte(ByteExpression {
+                    syntax: self.syntax(start),
+                    literal,
+                }))
+            }
             Some(TokenKind::Integer) => {
                 let start = self.position;
                 let literal = self.bump_token().expect("peeked integer").text;
@@ -4701,6 +4716,7 @@ impl Grammar {
                     | TokenKind::Dollar
                     | TokenKind::String
                     | TokenKind::Char
+                    | TokenKind::Byte
                     | TokenKind::Integer
                     | TokenKind::Float
             )
@@ -5281,7 +5297,10 @@ fn pattern_has_mutable(pattern: &Pattern) -> bool {
         Pattern::At(at) => at.binding.mutable || pattern_has_mutable(&at.pattern),
         Pattern::Product(product) => product.elements.iter().any(pattern_has_mutable),
         Pattern::Nominal(nominal) => pattern_has_mutable(&nominal.argument),
-        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
+        Pattern::Wildcard(_)
+        | Pattern::StringLiteral(_)
+        | Pattern::CharLiteral(_)
+        | Pattern::Splice(_) => false,
     }
 }
 
@@ -5310,7 +5329,10 @@ fn pattern_has_move(pattern: &Pattern) -> bool {
         Pattern::At(at) => at.binding.moved || pattern_has_move(&at.pattern),
         Pattern::Product(product) => product.elements.iter().any(pattern_has_move),
         Pattern::Nominal(nominal) => nominal.moved || pattern_has_move(&nominal.argument),
-        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
+        Pattern::Wildcard(_)
+        | Pattern::StringLiteral(_)
+        | Pattern::CharLiteral(_)
+        | Pattern::Splice(_) => false,
     }
 }
 

@@ -7696,6 +7696,23 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     "dynamic nominal pattern subject is not yet supported",
                 )),
             },
+            LoweredPatternKind::Literal { .. } if let Some(scalar) = pattern.test.scalar => {
+                let value = self
+                    .load_dynamic_storage(
+                        self.backend.compile_type(&pattern.test.subject)?,
+                        pointer,
+                        "match.scalar",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let inkwell::values::BasicValueEnum::IntValue(value) = value else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "character match value has an invalid representation",
+                    ));
+                };
+                self.backend
+                    .build_scalar_literal_pattern_compare(value, scalar, success, failure)
+            }
             LoweredPatternKind::Literal { .. } => {
                 let bytes = pattern.test.literal.as_ref().ok_or_else(|| {
                     Diagnostic::new(span.clone(), "missing string pattern literal")

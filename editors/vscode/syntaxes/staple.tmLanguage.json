@@ -5,6 +5,7 @@
   "patterns": [
     { "include": "#comments" },
     { "include": "#strings" },
+    { "include": "#byte" },
     { "include": "#char" },
     { "include": "#declarations" },
     { "include": "#quotation" },
@@ -46,6 +47,21 @@
               "match": "\\\\."
             }
           ]
+        }
+      ]
+    },
+    "byte": {
+      "name": "string.quoted.single.byte.staple",
+      "begin": "\\bb'",
+      "end": "'|(?=$)",
+      "patterns": [
+        {
+          "name": "constant.character.escape.staple",
+          "match": "\\\\(?:[nrt0\\\\\"']|x[0-9a-fA-F]{2})"
+        },
+        {
+          "name": "invalid.illegal.escape.staple",
+          "match": "\\\\."
         }
       ]
     },

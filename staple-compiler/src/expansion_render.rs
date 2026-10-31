@@ -358,6 +358,7 @@ fn render_pattern(pattern: &Pattern) -> String {
             }
         }
         Pattern::StringLiteral(literal) => literal.literal.clone(),
+        Pattern::CharLiteral(literal) => literal.literal.clone(),
         Pattern::Product(product) => {
             let prefix = if product.mutable {
                 "mut "
@@ -413,6 +414,9 @@ fn render_pattern(pattern: &Pattern) -> String {
 
 fn render_expr(program: &Program, expression: &Expression) -> String {
     if let Expression::Char(value) = expression {
+        return value.literal.clone();
+    }
+    if let Expression::Byte(value) = expression {
         return value.literal.clone();
     }
     if !expr_has_generated(expression) {

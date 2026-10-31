@@ -437,6 +437,7 @@ impl DeclarationCollector<'_> {
             | Expression::String(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
         }
@@ -455,7 +456,10 @@ impl DeclarationCollector<'_> {
                 }
             }
             Pattern::Nominal(value) => self.pattern(&value.argument),
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+            Pattern::Wildcard(_)
+            | Pattern::StringLiteral(_)
+            | Pattern::CharLiteral(_)
+            | Pattern::Splice(_) => {}
         }
     }
 
@@ -1069,6 +1073,7 @@ impl Collector<'_> {
             Expression::String(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
         }
@@ -1101,7 +1106,7 @@ impl Collector<'_> {
             }
             Pattern::Wildcard(value) => self.ty(&value.ty),
             Pattern::Splice(value) => self.add_resolved(&value.syntax, &value.name, true),
-            Pattern::StringLiteral(_) => {}
+            Pattern::StringLiteral(_) | Pattern::CharLiteral(_) => {}
         }
     }
 

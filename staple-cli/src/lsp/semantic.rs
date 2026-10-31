@@ -123,7 +123,7 @@ pub fn entries_at_path(
 fn lexical_kind(kind: TokenKind) -> Option<u32> {
     match kind {
         TokenKind::LineComment | TokenKind::BlockComment => Some(COMMENT),
-        TokenKind::String | TokenKind::Char => Some(STRING),
+        TokenKind::String | TokenKind::Char | TokenKind::Byte => Some(STRING),
         TokenKind::Integer | TokenKind::Float => Some(NUMBER),
         // Storage modifiers (`storage.modifier` in the TextMate grammar):
         // classified distinctly from control/declaration keywords so a theme
@@ -264,7 +264,10 @@ impl<'a> Classifier<'a> {
             Pattern::Nominal(nominal) => {
                 self.collect_pattern_symbols(&nominal.argument, kind, resolved)
             }
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+            Pattern::Wildcard(_)
+            | Pattern::StringLiteral(_)
+            | Pattern::CharLiteral(_)
+            | Pattern::Splice(_) => {}
         }
     }
 
@@ -1003,6 +1006,7 @@ impl<'a> Classifier<'a> {
             Expression::String(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
         }
@@ -1101,7 +1105,7 @@ impl<'a> Classifier<'a> {
                 self.pattern(&value.argument, kind, resolved);
             }
             Pattern::Wildcard(value) => self.ty(&value.ty, resolved),
-            Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+            Pattern::StringLiteral(_) | Pattern::CharLiteral(_) | Pattern::Splice(_) => {}
         }
     }
 

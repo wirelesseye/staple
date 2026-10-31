@@ -4995,6 +4995,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map_err(compiler_diagnostic)
                 }
             }
+            crate::LoweredPatternKind::Literal { .. } if pattern.test.scalar.is_some() => {
+                let scalar = pattern.test.scalar.expect("checked scalar literal");
+                let Some(BasicValueEnum::IntValue(value)) = value_as_basic(value.into()) else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "character match value has an invalid representation",
+                    ));
+                };
+                self.backend
+                    .build_scalar_literal_pattern_compare(value, scalar, success, failure)
+            }
             crate::LoweredPatternKind::Literal { .. } => {
                 let Some(bytes) = &pattern.test.literal else {
                     return Err(Diagnostic::new(

@@ -9341,6 +9341,7 @@ impl TypeChecker {
             | Expression::String(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => CheckedEffectSet::default(),
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
@@ -10239,6 +10240,7 @@ impl TypeChecker {
             | Expression::StringTemplate(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => false,
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
@@ -10807,6 +10809,7 @@ impl TypeChecker {
             | Expression::String(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
@@ -10958,6 +10961,14 @@ impl TypeChecker {
                     self.diagnostics.push(Diagnostic::new(
                         pattern.syntax.span.clone(),
                         "a string literal binding pattern must have the same singleton literal type",
+                    ));
+                }
+            }
+            Pattern::CharLiteral(pattern) => {
+                if *value_type != CheckedType::Error {
+                    self.diagnostics.push(Diagnostic::new(
+                        pattern.syntax.span.clone(),
+                        "a character literal pattern is refutable; match on it instead",
                     ));
                 }
             }
@@ -14349,6 +14360,7 @@ impl TypeChecker {
                                 call.argument.as_ref(),
                                 Expression::Integer(_)
                                     | Expression::Char(_)
+                                    | Expression::Byte(_)
                                     | Expression::Float(_)
                                     | Expression::String(_)
                                     | Expression::CString(_)
@@ -15554,6 +15566,13 @@ impl TypeChecker {
                     .map(|id| self.resolve_type_id(module, id, "Char"))
                     .unwrap_or(CheckedType::Error)
             }
+            Expression::Byte(byte) => {
+                if let Err(error) = staple_syntax::string_literal::decode_byte(&byte.literal) {
+                    self.diagnostics
+                        .push(Diagnostic::new(byte.syntax.span.clone(), error));
+                }
+                CheckedType::U8
+            }
             Expression::CString(_) => self.cstring_type(module),
             Expression::Integer(integer) => {
                 let decoded =
@@ -16172,6 +16191,7 @@ impl TypeChecker {
                     *value_type == CheckedType::String || literal_is_admitted(value_type, &value)
                 })
             }
+            Pattern::CharLiteral(_) => is_char_type(module, value_type),
             Pattern::At(at) => {
                 self.pattern_selects_within(module, &at.pattern, value_type, refutable)
             }
@@ -16302,6 +16322,27 @@ impl TypeChecker {
                         format!(
                             "string pattern `{}` cannot match `{value_type}`",
                             staple_syntax::string_literal::encode(&value)
+                        ),
+                    ));
+                }
+            }
+            Pattern::CharLiteral(pattern) => {
+                let value = match staple_syntax::string_literal::decode_char(&pattern.literal) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.diagnostics.push(Diagnostic::new(
+                            pattern.syntax.span.clone(),
+                            error.to_string(),
+                        ));
+                        return;
+                    }
+                };
+                if !is_char_type(module, value_type) && *value_type != CheckedType::Error {
+                    self.diagnostics.push(Diagnostic::new(
+                        pattern.syntax.span.clone(),
+                        format!(
+                            "character pattern `{}` cannot match `{value_type}`",
+                            staple_syntax::string_literal::encode_char(value)
                         ),
                     ));
                 }
@@ -16565,6 +16606,37 @@ impl TypeChecker {
                     &specialized_matrix,
                     &specialized_candidate,
                 )
+            }
+            // A character literal is a constructor without fields over an
+            // unbounded domain: it is useful when no earlier row matches the
+            // same character or every character.
+            CheckedType::Wrapper { id, .. }
+                if module.builtin_type(*id) == Some(BuiltinType::Char)
+                    && let CoveragePattern::Pattern(Pattern::CharLiteral(pattern)) = first =>
+            {
+                let Ok(literal) = staple_syntax::string_literal::decode_char(&pattern.literal)
+                else {
+                    return false;
+                };
+                let specialized_matrix = matrix
+                    .iter()
+                    .filter(|row| match Self::canonical_coverage_pattern(row[0]) {
+                        CoveragePattern::Pattern(Pattern::CharLiteral(pattern)) => {
+                            staple_syntax::string_literal::decode_char(&pattern.literal)
+                                == Ok(literal)
+                        }
+                        _ => self
+                            .specialize_wrapper_row(module, row, *id, first_type)
+                            .is_some_and(|specialized| {
+                                matches!(
+                                    Self::canonical_coverage_pattern(specialized[0]),
+                                    CoveragePattern::Any
+                                )
+                            }),
+                    })
+                    .map(|row| row[1..].to_vec())
+                    .collect::<Vec<_>>();
+                self.coverage_is_useful(module, &types[1..], &specialized_matrix, &candidate[1..])
             }
             CheckedType::Wrapper {
                 id, representation, ..
@@ -22381,6 +22453,15 @@ fn widen_literal_type(value_type: CheckedType) -> CheckedType {
     }
 }
 
+/// Whether `value_type` is the standard library `Char`, the only type a
+/// character literal pattern matches.
+fn is_char_type(module: &ResolvedModule, value_type: &CheckedType) -> bool {
+    matches!(
+        value_type.desugared(),
+        CheckedType::Wrapper { id, .. } if module.builtin_type(*id) == Some(BuiltinType::Char)
+    )
+}
+
 fn coverage_pattern_matches_literal(pattern: CoveragePattern<'_>, literal: &str) -> bool {
     match pattern {
         CoveragePattern::Pattern(Pattern::At(at)) => {
@@ -25052,6 +25133,7 @@ fn pattern_element_symbol(module: &ResolvedModule, pattern: &Pattern) -> Option<
         Pattern::At(at) => module.symbol_for(at.binding.syntax.id),
         Pattern::Wildcard(_)
         | Pattern::StringLiteral(_)
+        | Pattern::CharLiteral(_)
         | Pattern::Product(_)
         | Pattern::Nominal(_)
         | Pattern::Splice(_) => None,
@@ -25350,6 +25432,7 @@ fn expression_reads_reactive(
         | Expression::String(_)
         | Expression::CString(_)
         | Expression::Char(_)
+        | Expression::Byte(_)
         | Expression::Integer(_)
         | Expression::Float(_) => false,
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
@@ -25431,6 +25514,7 @@ fn collect_value_bindings(module: &ResolvedModule) -> Vec<Binding> {
             | Expression::String(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
@@ -25495,7 +25579,10 @@ fn pattern_symbols(module: &ResolvedModule, pattern: &Pattern, symbols: &mut Has
             }
         }
         Pattern::Nominal(value) => pattern_symbols(module, &value.argument, symbols),
-        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+        Pattern::Wildcard(_)
+        | Pattern::StringLiteral(_)
+        | Pattern::CharLiteral(_)
+        | Pattern::Splice(_) => {}
     }
 }
 
@@ -25606,6 +25693,7 @@ fn expression_mentions_symbols(
         | Expression::String(_)
         | Expression::CString(_)
         | Expression::Char(_)
+        | Expression::Byte(_)
         | Expression::Integer(_)
         | Expression::Float(_) => false,
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
@@ -25686,6 +25774,7 @@ fn expression_contains_assignment(expression: &Expression) -> bool {
         | Expression::String(_)
         | Expression::CString(_)
         | Expression::Char(_)
+        | Expression::Byte(_)
         | Expression::Integer(_)
         | Expression::Float(_) => false,
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
@@ -25722,7 +25811,10 @@ fn synthesized_thunk_captures(module: &ResolvedModule, expression: &Expression) 
                 }
             }
             Pattern::Nominal(value) => declare_pattern(module, &value.argument, declared),
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+            Pattern::Wildcard(_)
+            | Pattern::StringLiteral(_)
+            | Pattern::CharLiteral(_)
+            | Pattern::Splice(_) => {}
         }
     }
 
@@ -25897,6 +25989,7 @@ fn synthesized_thunk_captures(module: &ResolvedModule, expression: &Expression) 
             | Expression::String(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),

@@ -664,6 +664,58 @@ fn parses_string_literal_types_and_patterns_losslessly() {
 }
 
 #[test]
+fn parses_byte_literals_and_character_patterns_losslessly() {
+    let source = concat!(
+        "let quote = b'\"'\n",
+        "let escaped = (b'\\'', b'\\x7F', ab'c')\n",
+        "def kind: Option<Char> -> I32 = value => match value {\n",
+        "  Some '\"' => 1,\n",
+        "  Some '\\\\' => 2,\n",
+        "  _ => 3,\n",
+        "}\n",
+    );
+    let root = parse(source).expect("byte literals and character patterns should parse");
+    assert_eq!(root.text(), source);
+    let Item::Binding(quote) = &root.items[0] else {
+        panic!("expected quote binding");
+    };
+    let Some(Expression::Byte(byte)) = &quote.value else {
+        panic!("expected byte literal");
+    };
+    assert_eq!(byte.literal, "b'\"'");
+    let Item::Binding(escaped) = &root.items[1] else {
+        panic!("expected escaped binding");
+    };
+    let Some(Expression::Product(product)) = &escaped.value else {
+        panic!("expected product");
+    };
+    let elements = product
+        .elements
+        .iter()
+        .map(|element| &element.value)
+        .collect::<Vec<_>>();
+    assert!(matches!(elements[0], Expression::Byte(_)));
+    assert!(matches!(elements[1], Expression::Byte(_)));
+    // `b` only prefixes a byte literal at the start of a token.
+    assert!(matches!(elements[2], Expression::Call(_)));
+    let Item::Binding(kind) = unmodified_item(&root.items[2]) else {
+        panic!("expected kind binding");
+    };
+    let Some(Expression::Function(function)) = &kind.value else {
+        panic!("expected kind function");
+    };
+    let Expression::Match(match_) = function.body.as_ref() else {
+        panic!("expected match body");
+    };
+    for arm in &match_.arms[..2] {
+        let Pattern::Nominal(nominal) = &arm.pattern else {
+            panic!("expected nominal pattern");
+        };
+        assert!(matches!(nominal.argument.as_ref(), Pattern::CharLiteral(_)));
+    }
+}
+
+#[test]
 fn parses_number_literal_types_and_dependent_product_sizes_losslessly() {
     let source = concat!(
         "type Three = 3\n",

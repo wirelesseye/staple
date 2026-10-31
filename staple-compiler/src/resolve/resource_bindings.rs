@@ -134,6 +134,7 @@ pub(super) fn rewrite_expression(expression: &mut Expression, references: &Refer
         | Expression::String(_)
         | Expression::CString(_)
         | Expression::Char(_)
+        | Expression::Byte(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
     }

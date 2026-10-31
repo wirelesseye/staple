@@ -2774,6 +2774,7 @@ fn find_block_submodules_in_expression(expression: &Expression, out: &mut Vec<Su
         | Expression::String(_)
         | Expression::CString(_)
         | Expression::Char(_)
+        | Expression::Byte(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
     }
@@ -2953,6 +2954,7 @@ fn find_block_use_declarations_in_expression(
         | Expression::String(_)
         | Expression::CString(_)
         | Expression::Char(_)
+        | Expression::Byte(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
     }

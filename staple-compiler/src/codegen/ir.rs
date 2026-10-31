@@ -1877,6 +1877,31 @@ impl<'program, 'context> Backend<'program, 'context> {
 
     /// Tests a String against a literal using a length check and memcmp,
     /// branching to the supplied success or failure block.
+    /// Branches on whether an integer-represented value, such as a `Char`,
+    /// equals a literal pattern's decoded value.
+    pub(crate) fn build_scalar_literal_pattern_compare(
+        &self,
+        value: inkwell::values::IntValue<'context>,
+        scalar: u64,
+        success: inkwell::basic_block::BasicBlock<'context>,
+        failure: inkwell::basic_block::BasicBlock<'context>,
+    ) -> CodeGenerationResult<()> {
+        let expected = value.get_type().const_int(scalar, false);
+        let matches = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                value,
+                expected,
+                "match.scalar.matches",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_conditional_branch(matches, success, failure)
+            .map(|_| ())
+            .map_err(compiler_diagnostic)
+    }
+
     pub(crate) fn build_string_literal_pattern_compare(
         &self,
         value: inkwell::values::PointerValue<'context>,

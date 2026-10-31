@@ -208,3 +208,146 @@ fn char_representation_cannot_be_constructed_or_narrowed_by_clients() {
         assert!(check(source).is_err(), "unexpectedly accepted: {source}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn byte_literals_produce_u8_values() {
+    let lowered = lower(
+        r#"
+use std.io.println
+let quote: U8 = b'"'
+println "${quote}"
+println "${b'a'} ${b'\''} ${b'\\'} ${b'\n'} ${b'\0'} ${b'\x7F'} ${b'\xff'}"
+def main = () => {
+    let bytes: List<U8> = String.bytes "a\"" |> collect
+    for byte in bytes {
+        println "${byte == b'"'}"
+    }
+}
+main ()
+"#,
+    );
+    assert_eq!(run(&lowered), "34\n97 39 92 10 0 127 255\nFalse\nTrue\n");
+}
+
+#[test]
+fn invalid_byte_literals_report_errors() {
+    for (literal, expected) in [
+        ("b''", "empty byte literal"),
+        ("b'ab'", "more than one byte"),
+        ("b'é'", "non-ASCII character"),
+        ("b'\\u{41}'", "Unicode escapes are not allowed"),
+        ("b'\\x4'", "exactly 2 hex digits"),
+        ("b'\\q'", "unknown character escape"),
+    ] {
+        let errors = check(&format!("let b = {literal}\n")).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.message.contains(expected)),
+            "{literal}: {errors:?}"
+        );
+    }
+    let errors = check("let c: Char = b'a'\n").unwrap_err();
+    assert!(!errors.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn character_literal_patterns_select_match_arms() {
+    let lowered = lower(
+        r#"
+use std.io.println
+def classify: Char -> String = c => match c {
+    '"' => "quote",
+    '\\' => "backslash",
+    '\u{2603}' => "snowman",
+    'a' => "a",
+    other => "other ${other}",
+}
+def pair: (Char, I32) -> String = value => match value {
+    ('{', depth) => "open ${depth}",
+    ('}', _) => "close",
+    _ => "skip",
+}
+def first: Option<Char> -> String = value => match value {
+    Some ',' => "comma",
+    Some c => "char ${c}",
+    None => "none",
+}
+def main = () => {
+    for c in (String.chars "\"\\☃ab") {
+        println (classify c)
+    }
+}
+main ()
+println (pair ('{', 2))
+println (pair ('}', 3))
+println (pair ('x', 4))
+println (first (Some ','))
+println (first (Some 'z'))
+println (first None)
+def keyed = <T> entry: (Char, T) => Bool :: match entry {
+    ('k', _) => True,
+    _ => False,
+}
+println "${keyed ('k', "value")} ${keyed ('v', 1)}"
+let stored = keyed
+let concrete: (Char, I32) -> Bool = stored
+println "${concrete ('k', 1)} ${concrete ('x', 2)}"
+"#,
+    );
+    assert_eq!(
+        run(&lowered),
+        "quote\nbackslash\nsnowman\na\nother b\nopen 2\nclose\nskip\ncomma\nchar z\nnone\nTrue False\nTrue False\n"
+    );
+}
+
+#[test]
+fn character_literal_patterns_need_a_catch_all_and_a_char_subject() {
+    let missing = check("def f: Char -> I32 = c => match c { 'a' => 1, 'b' => 2, }\n").unwrap_err();
+    assert!(
+        missing.iter().any(|e| e.message.contains("exhaustive")),
+        "{missing:?}"
+    );
+    let duplicate =
+        check("def f: Char -> I32 = c => match c { 'a' => 1, 'a' => 2, _ => 3, }\n").unwrap_err();
+    assert!(
+        duplicate.iter().any(|e| e.message.contains("unreachable")),
+        "{duplicate:?}"
+    );
+    let mismatched =
+        check("def f: String -> I32 = s => match s { 'a' => 1, _ => 2, }\n").unwrap_err();
+    assert!(
+        mismatched.iter().any(|e| e
+            .message
+            .contains("character pattern `'a'` cannot match `String`")),
+        "{mismatched:?}"
+    );
+    let invalid = check("def f: Char -> I32 = c => match c { 'ab' => 1, _ => 2, }\n").unwrap_err();
+    assert!(
+        invalid
+            .iter()
+            .any(|e| e.message.contains("2 scalar values")),
+        "{invalid:?}"
+    );
+    let irrefutable = check("def f = (c: Char) => { let 'a' = c\n() }\n").unwrap_err();
+    assert!(
+        irrefutable.iter().any(|e| e.message.contains("refutable")),
+        "{irrefutable:?}"
+    );
+    let parameter = check("def f: Char -> I32 = 'a' => 1\n").unwrap_err();
+    assert!(
+        parameter.iter().any(|e| e.message.contains("refutable")),
+        "{parameter:?}"
+    );
+    assert!(check("def f: Char -> I32 = c => match c { 'a' => 1, 'b' => 2, _ => 3, }\n").is_ok());
+    // The `escape` example from Staple.md.
+    let escape = concat!(
+        "def escape = c: Char => String :: match c {\n",
+        "    '\"' => \"\\\\\\\"\",\n",
+        "    '\\\\' => \"\\\\\\\\\",\n",
+        "    '\\n' => \"\\\\n\",\n",
+        "    other => \"$other\",\n",
+        "}\n",
+    );
+    check(escape).unwrap_or_else(|errors| panic!("{escape}{errors:?}"));
+}

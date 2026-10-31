@@ -335,6 +335,7 @@ fn scan_expression(
         | Expression::String(_)
         | Expression::CString(_)
         | Expression::Char(_)
+        | Expression::Byte(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
     }
@@ -357,7 +358,10 @@ fn collect_pattern_bindings(module: &TypedModule, pattern: &Pattern, out: &mut V
             }
         }
         Pattern::Nominal(nominal) => collect_pattern_bindings(module, &nominal.argument, out),
-        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+        Pattern::Wildcard(_)
+        | Pattern::StringLiteral(_)
+        | Pattern::CharLiteral(_)
+        | Pattern::Splice(_) => {}
     }
 }
 
@@ -482,6 +486,7 @@ fn collect_expression<'a>(
         | Expression::String(_)
         | Expression::CString(_)
         | Expression::Char(_)
+        | Expression::Byte(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
     }
