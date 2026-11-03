@@ -272,6 +272,7 @@ inventory and measurements.
 
 Every closure must pass the real front end. The interpreter still runs the
 macros. The real pipeline only checks them.
+Breakdown and status: [`staged-macro-compilation-phase-2.md`](staged-macro-compilation-phase-2.md).
 
 - Add a check that sends each closure through `NameResolver` and `TypeChecker`
   as a standalone program, after expansion. Run it on the standard library and
