@@ -237,6 +237,7 @@ not worth pursuing.
 ### Phase 1: phase-separation analysis (interpreter still runs)
 
 Make the phase rules real before anything is compiled.
+Breakdown and status: [`staged-macro-compilation-phase-1.md`](staged-macro-compilation-phase-1.md).
 
 - Compute compile-time closures and the stage order on unexpanded syntax
   (Decision 1). Report cycles with item chains.
@@ -245,8 +246,10 @@ Make the phase rules real before anything is compiled.
 - Recognize template macros (Decision 2) and instantiate them directly. The
   interpreter is still used for every other macro. This is the first speed win,
   and it gives Phase 5 a cheap differential test.
-- Replace `compile_time_items` (`resolve.rs:1874`) with the closure sets.
-  Items used only at compile time are still dropped from the run-time program.
+- Make `if` and `when` closure-free (templates, or compiler-provided macros
+  if the needed splices are too large an addition), since `panic` reaches
+  `String` and `String` uses `if`. Find and break every other cycle in the
+  standard library before cycles become errors.
 - Spec: add a "Phases" section to `Staple.md`.
 - Tests: closures across modules and packages, cycles, generated items in
   closures, template detection edge cases.
@@ -272,8 +275,6 @@ macros. The real pipeline only checks them.
     width, unbound type arguments). Fix them in the source with annotations.
   - The special orphan rule for `impl Parse` (`Staple.md`, "Parsing syntax with
     `Parse`"). It becomes the normal orphan rule.
-- Rewrite `if` and `when` as template macros (Decision 2), and confirm that
-  every standard library closure is acyclic.
 - Decide Decision 7.
 - Output: a list of language changes, each landed with run-time tests. The
   inventory is the main deliverable of this phase's breakdown plan.
@@ -346,6 +347,9 @@ Make syntax values exist in compiled code.
   evaluation half of `MacroExpander`, the step budget and the
   `Parse`-default stripping (`macro_expand.rs:1851`). Keep signature matching,
   overload selection, hygiene, intrinsic macros and template instantiation.
+- Replace `compile_time_items` (`resolve.rs:1877`), which lists the
+  `std.syntax` intrinsics so importing them is not an error, once those
+  intrinsics change.
   Consider splitting what remains into `macro_expand/{matching, hygiene,
   templates, stages}.rs`.
 - Remove `--macro-engine`.
