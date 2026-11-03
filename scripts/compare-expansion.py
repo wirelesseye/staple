@@ -60,9 +60,9 @@ def collect_inputs(dump):
     return inputs
 
 
-def expand(binary, source, timeout):
+def expand(binary, source, timeout, stdlib=None):
     try:
-        result = subprocess.run([str(binary), "expand", "--stdlib", str(ROOT / "stdlib"), str(source)],
+        result = subprocess.run([str(binary), "expand", "--stdlib", str(stdlib or ROOT / "stdlib"), str(source)],
                                 capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return dict(status="timeout", stdout="", stderr="")
@@ -76,8 +76,12 @@ def capture(args):
     destination = Path(args.directory)
     with tempfile.TemporaryDirectory(prefix="staple-expansion-") as directory:
         inputs = collect_inputs(Path(directory))
+        if args.stdlib:
+            # The standard library's own entry files come from the one being tested.
+            inputs = {name: (Path(args.stdlib) / "std" / name[len("stdlib/"):] if name.startswith("stdlib/") else path)
+                      for name, path in inputs.items()}
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            results = list(pool.map(lambda source: expand(binary, source, args.timeout), inputs.values()))
+            results = list(pool.map(lambda source: expand(binary, source, args.timeout, args.stdlib), inputs.values()))
     for name, result in zip(inputs, results):
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -113,6 +117,7 @@ def main():
     capture_parser = commands.add_parser("capture")
     capture_parser.add_argument("directory")
     capture_parser.add_argument("--staple", help="binary to run; default builds the release binary")
+    capture_parser.add_argument("--stdlib", help="standard library to expand against; default is this checkout's")
     capture_parser.add_argument("--jobs", type=int, default=os.cpu_count())
     capture_parser.add_argument("--timeout", type=float, default=120)
     compare_parser = commands.add_parser("compare")

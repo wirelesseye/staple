@@ -430,4 +430,11 @@ the closure of `derive_eq` from about 190 to over 800 items.
   because `if` stayed an interpreted macro, and the template speed-up for
   `while`, `for` and `discard` is too small to show in B4.
 
+- **Expander-only comparison: 232/232.** To separate the expander from the
+  standard-library edits, `compare-expansion.py capture --stdlib DIR` expands
+  against a given standard library. With the branch's standard library, except
+  that `flow.sta` and `syntax.sta` are `main`'s (the baseline binary does not
+  know `compile_error`), the baseline binary and this branch's binary produce
+  identical output for all 232 inputs, with no exceptions.
+
 Nothing else to record.
