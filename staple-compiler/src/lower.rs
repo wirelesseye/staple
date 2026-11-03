@@ -417,6 +417,7 @@ pub(crate) enum OrdinaryExpressionFamily {
     StringTemplate,
     CString,
     Char,
+    Byte,
     Integer,
     Float,
     Function,
@@ -2362,6 +2363,9 @@ pub(crate) struct LoweredPatternTestPlan {
     pub identity: LoweredPatternIdentity,
     /// The decoded bytes of a string-literal pattern.
     pub literal: Option<Vec<u8>>,
+    /// The decoded value of a character-literal pattern, compared against
+    /// the subject's integer representation.
+    pub scalar: Option<u64>,
 }
 
 impl LoweredPatternTestPlan {
@@ -2373,6 +2377,7 @@ impl LoweredPatternTestPlan {
             sum_alternative: None,
             identity: LoweredPatternIdentity::None,
             literal: None,
+            scalar: None,
         }
     }
 }
@@ -2425,6 +2430,7 @@ fn pattern_test_plan(
         sum_alternative: None,
         identity: LoweredPatternIdentity::None,
         literal: None,
+        scalar: None,
     };
     let mut children = Vec::new();
     match shape {
@@ -2542,6 +2548,17 @@ fn pattern_test_plan(
                 return Err("checked nominal pattern has an incompatible value".to_owned());
             }
         },
+        PatternPlanShape::Literal { literal } if literal.starts_with('\'') => {
+            let value = staple_syntax::string_literal::decode_char(literal)
+                .map_err(|error| error.to_string())?;
+            if !matches!(
+                subject.desugared(),
+                CheckedType::Wrapper { id, .. } if builtin_of(*id) == Some(BuiltinType::Char)
+            ) {
+                return Err("checked character pattern has an incompatible value".to_owned());
+            }
+            plan.scalar = Some(u64::from(u32::from(value)));
+        }
         PatternPlanShape::Literal { literal } => {
             let text = staple_syntax::string_literal::decode(literal)
                 .map_err(|message| message.to_owned())?;
@@ -2632,6 +2649,9 @@ fn pattern_plan_shape(
         Pattern::StringLiteral(literal) => PatternPlanShape::Literal {
             literal: literal.literal.clone(),
         },
+        Pattern::CharLiteral(literal) => PatternPlanShape::Literal {
+            literal: literal.literal.clone(),
+        },
         Pattern::At(_) => PatternPlanShape::At,
         Pattern::Splice(splice) => {
             return Err(Diagnostic::new(
@@ -2672,7 +2692,8 @@ pub(crate) enum LoweredPatternKind {
         moved: bool,
         argument: PatternId,
     },
-    /// A string literal pattern; the literal is retained exactly as written.
+    /// A string or character literal pattern; the literal is retained
+    /// exactly as written, so its quotes tell the two apart.
     Literal {
         literal: String,
     },
@@ -5620,6 +5641,9 @@ impl LoweredProgram {
             Pattern::StringLiteral(literal) => LoweredPatternKind::Literal {
                 literal: literal.literal.clone(),
             },
+            Pattern::CharLiteral(literal) => LoweredPatternKind::Literal {
+                literal: literal.literal.clone(),
+            },
             Pattern::At(at) => {
                 let binding_pattern = Pattern::Binding(at.binding.as_ref().clone());
                 let binding_subject = child_subject(0, &binding_pattern);
@@ -5898,6 +5922,14 @@ impl LoweredProgram {
                 Ok(LoweredExpressionKind::Integer(LoweredInteger {
                     value: value as u64,
                     integer_type: IntegerType::U32,
+                }))
+            }
+            (OrdinaryExpressionFamily::Byte, Expression::Byte(byte)) => {
+                let value = staple_syntax::string_literal::decode_byte(&byte.literal)
+                    .map_err(|e| Diagnostic::new(byte.syntax.span.clone(), e))?;
+                Ok(LoweredExpressionKind::Integer(LoweredInteger {
+                    value: u64::from(value),
+                    integer_type: IntegerType::U8,
                 }))
             }
             (OrdinaryExpressionFamily::Integer, Expression::Integer(integer)) => self
@@ -14128,6 +14160,7 @@ fn classify_expression(module: &TypedModule, expression: &Expression) -> Express
         Expression::StringTemplate(_) => Ordinary(Family::StringTemplate),
         Expression::CString(_) => Ordinary(Family::CString),
         Expression::Char(_) => Ordinary(Family::Char),
+        Expression::Byte(_) => Ordinary(Family::Byte),
         Expression::Integer(_) => Ordinary(Family::Integer),
         Expression::Float(_) => Ordinary(Family::Float),
     }
@@ -14291,6 +14324,7 @@ fn family_name(family: OrdinaryExpressionFamily) -> &'static str {
         OrdinaryExpressionFamily::StringTemplate => "StringTemplate",
         OrdinaryExpressionFamily::CString => "CString",
         OrdinaryExpressionFamily::Char => "Char",
+        OrdinaryExpressionFamily::Byte => "Byte",
         OrdinaryExpressionFamily::Integer => "Integer",
         OrdinaryExpressionFamily::Float => "Float",
         OrdinaryExpressionFamily::Function => "Function",
@@ -14334,6 +14368,7 @@ fn expression_variant_name(expression: &Expression) -> &'static str {
         Expression::StringTemplate(_) => "StringTemplate",
         Expression::CString(_) => "CString",
         Expression::Char(_) => "Char",
+        Expression::Byte(_) => "Byte",
         Expression::Integer(_) => "Integer",
         Expression::Float(_) => "Float",
     }
@@ -14500,7 +14535,10 @@ fn pattern_symbols(module: &ResolvedModule, pattern: &Pattern) -> Vec<SymbolId> 
                 }
             }
             Pattern::Nominal(nominal) => collect(module, &nominal.argument, symbols),
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+            Pattern::Wildcard(_)
+            | Pattern::StringLiteral(_)
+            | Pattern::CharLiteral(_)
+            | Pattern::Splice(_) => {}
         }
     }
     let mut symbols = Vec::new();
@@ -14607,7 +14645,10 @@ fn collect_pattern_facts(
         Pattern::Nominal(nominal) => {
             collect_pattern_facts(resolved, &nominal.argument, names, globals);
         }
-        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+        Pattern::Wildcard(_)
+        | Pattern::StringLiteral(_)
+        | Pattern::CharLiteral(_)
+        | Pattern::Splice(_) => {}
     }
 }
 
@@ -15632,6 +15673,7 @@ impl<'a> SourceCoverage<'a> {
             | Expression::String(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Unary(_)
@@ -19362,6 +19404,13 @@ mod tests {
             }),
         ));
         expressions.push((
+            "Byte",
+            Expression::Byte(staple_syntax::ByteExpression {
+                syntax: syntax.clone(),
+                literal: "b'a'".to_owned(),
+            }),
+        ));
+        expressions.push((
             "CString",
             Expression::CString(CStringExpression {
                 syntax: syntax.clone(),
@@ -19428,6 +19477,7 @@ mod tests {
                 "StringTemplate" => Ordinary(OrdinaryExpressionFamily::StringTemplate),
                 "CString" => Ordinary(OrdinaryExpressionFamily::CString),
                 "Char" => Ordinary(OrdinaryExpressionFamily::Char),
+                "Byte" => Ordinary(OrdinaryExpressionFamily::Byte),
                 "Integer" => Ordinary(OrdinaryExpressionFamily::Integer),
                 "Float" => Ordinary(OrdinaryExpressionFamily::Float),
                 other => panic!("unclassified expression variant {other}"),
@@ -19837,6 +19887,7 @@ mod tests {
             | Expression::String(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
         }
@@ -20961,6 +21012,7 @@ mod tests {
             | Expression::String(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
         }

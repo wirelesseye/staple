@@ -1707,8 +1707,8 @@ Inferred placeholders may appear wherever a type is expected.
 staple is expression-oriented. Function values, function applications, products,
 and blocks are all expressions.
 
-The syntax currently recognized for literal values includes strings, characters, integers,
-and floating-point numbers:
+The syntax currently recognized for literal values includes strings, characters, bytes,
+integers, and floating-point numbers:
 
 ```staple
 "hello"
@@ -1806,6 +1806,39 @@ escaped literal.
 `String.chars` iterates scalar values without copying the bytes. Collecting
 Chars produces a String; `String.char_count` counts scalars in O(n) time.
 Use `String.bytes` for UTF-8 bytes.
+
+A character literal is also a `match` pattern over a `Char` subject, including
+one nested in a product or a nominal payload such as `Some ','`:
+
+```staple
+def escape = c: Char => String :: match c {
+    '"' => "\\\"",
+    '\\' => "\\\\",
+    '\n' => "\\n",
+    other => "$other",
+}
+```
+
+`Char` has unboundedly many values, so a match over character patterns needs a
+binding or wildcard arm. A character pattern cannot match any other type, and
+it is refutable, so it cannot appear in a `let` or a function parameter.
+
+### Byte literals
+
+A `b` prefix before single quotes produces a `U8`:
+
+```staple
+let quote = b'"'
+let newline = b'\n'
+let delete = b'\x7F'
+```
+
+A byte literal holds exactly one ASCII character or escape. It supports the
+character escapes `\n`, `\r`, `\t`, `\0`, `\\`, `\'`, and `\"`, plus `\xHH`
+with exactly two hex digits for any byte, including those above `0x7F`.
+Non-ASCII characters and `\u{…}` escapes are errors because a byte is not a
+Unicode scalar value. Byte literals compare directly with the elements of
+`String.bytes`. They are not yet patterns.
 
 The `c_string` library macro from `std.cinterop` accepts only a string literal
 and produces an owned `CString` backed by allocated NUL-terminated storage:
@@ -3949,8 +3982,10 @@ def same = (left: Bool, right: Bool) => match (left, right) {
 ```
 
 A match must cover every possible sum alternative and product combination or
-include a catch-all. Duplicate or otherwise redundant arms are errors. Literal
-patterns, alternative patterns, and match guards are not currently supported.
+include a catch-all. Duplicate or otherwise redundant arms are errors. String
+and [character](#character-literals) literals are the only literal patterns;
+integer and byte literal patterns, alternative patterns, and match guards are
+not currently supported.
 
 An expected type is applied to every arm. Without one, equal arm types remain
 that type; differing represented nominal results are joined into an sum by

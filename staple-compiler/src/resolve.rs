@@ -1465,7 +1465,10 @@ impl ResolvedModule {
                     .iter()
                     .any(|element| pattern_contains(module, element, symbol)),
                 Pattern::Nominal(value) => pattern_contains(module, &value.argument, symbol),
-                Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
+                Pattern::Wildcard(_)
+                | Pattern::StringLiteral(_)
+                | Pattern::CharLiteral(_)
+                | Pattern::Splice(_) => false,
             }
         }
         self.program.modules().iter().any(|source| {
@@ -4221,7 +4224,10 @@ impl NameResolver {
 
     fn allocate_pattern_symbols(&mut self, pattern: &Pattern) {
         match pattern {
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+            Pattern::Wildcard(_)
+            | Pattern::StringLiteral(_)
+            | Pattern::CharLiteral(_)
+            | Pattern::Splice(_) => {}
             Pattern::Binding(binding) => {
                 let symbol = SymbolId(self.next_symbol_id);
                 self.next_symbol_id += 1;
@@ -5923,6 +5929,7 @@ impl NameResolver {
             | Expression::StringTemplate(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression was not desugared"),
@@ -6805,6 +6812,7 @@ impl NameResolver {
             Expression::String(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression was not desugared"),
@@ -7117,7 +7125,7 @@ impl NameResolver {
     fn resolve_pattern_types_with(&mut self, pattern: &Pattern, strict: bool) {
         match pattern {
             Pattern::Wildcard(wildcard) => self.resolve_type_with(&wildcard.ty, strict),
-            Pattern::StringLiteral(_) => {}
+            Pattern::StringLiteral(_) | Pattern::CharLiteral(_) => {}
             Pattern::Binding(binding) => {
                 let resolution_name = binding.resolution_name.as_deref().unwrap_or(&binding.name);
                 if !binding.mutable
@@ -7587,7 +7595,10 @@ impl NameResolver {
         seen: &mut HashSet<String>,
     ) {
         match pattern {
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+            Pattern::Wildcard(_)
+            | Pattern::StringLiteral(_)
+            | Pattern::CharLiteral(_)
+            | Pattern::Splice(_) => {}
             Pattern::Binding(binding) => {
                 if self.nominal_patterns.contains_key(&binding.syntax.id) {
                     return;
@@ -8029,7 +8040,10 @@ fn mutable_pattern_symbols(resolver: &NameResolver, pattern: &Pattern) -> Vec<Sy
                 }
             }
             Pattern::Nominal(nominal) => collect(resolver, &nominal.argument, symbols),
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+            Pattern::Wildcard(_)
+            | Pattern::StringLiteral(_)
+            | Pattern::CharLiteral(_)
+            | Pattern::Splice(_) => {}
         }
     }
     collect(resolver, pattern, &mut symbols);
@@ -8338,7 +8352,10 @@ fn declare_compile_pattern(
             }
         }
         Pattern::Nominal(nominal) => declare_compile_pattern(&nominal.argument, scope, kind, None),
-        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+        Pattern::Wildcard(_)
+        | Pattern::StringLiteral(_)
+        | Pattern::CharLiteral(_)
+        | Pattern::Splice(_) => {}
     }
 }
 
@@ -8386,6 +8403,7 @@ fn compile_expression_type(expression: &Expression, scope: &CompileTimeScope) ->
         }),
         Expression::String(_) => Some("String".to_owned()),
         Expression::Char(_) => Some("Char".to_owned()),
+        Expression::Byte(_) => Some("U8".to_owned()),
         Expression::Integer(_) => Some("Integer".to_owned()),
         Expression::Float(_) => Some("Float".to_owned()),
         Expression::TypeAscription(value) => Some(value.ty.to_string()),
@@ -8873,6 +8891,7 @@ impl<'a> InitializationAnalyzer<'a> {
             | Expression::StringTemplate(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression was not desugared"),
@@ -8914,7 +8933,10 @@ impl<'a> InitializationAnalyzer<'a> {
         states: &mut HashMap<SymbolId, InitializationState>,
     ) {
         match pattern {
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+            Pattern::Wildcard(_)
+            | Pattern::StringLiteral(_)
+            | Pattern::CharLiteral(_)
+            | Pattern::Splice(_) => {}
             Pattern::Binding(binding) => {
                 if let Some(symbol) = self.module.symbol_for(binding.syntax.id) {
                     states.insert(symbol, state);
@@ -9086,6 +9108,7 @@ fn find_block_type_declarations_in_expression<'a>(
         | Expression::StringTemplate(_)
         | Expression::CString(_)
         | Expression::Char(_)
+        | Expression::Byte(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
         Expression::Binary(_) => unreachable!("binary expression was not desugared"),

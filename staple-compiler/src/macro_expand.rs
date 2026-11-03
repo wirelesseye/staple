@@ -1411,6 +1411,7 @@ fn desugar_pattern(pattern: &mut Pattern) {
         Pattern::Binding(_)
         | Pattern::Wildcard(_)
         | Pattern::StringLiteral(_)
+        | Pattern::CharLiteral(_)
         | Pattern::Splice(_) => {}
     }
 }
@@ -1726,6 +1727,7 @@ fn desugar_expression(
         | Expression::String(_)
         | Expression::CString(_)
         | Expression::Char(_)
+        | Expression::Byte(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
     }
@@ -3418,6 +3420,7 @@ impl MacroExpander {
             }
             Expression::Name(name) => self.compile_name_type(module, name, environment),
             Expression::Char(_) => CompileType::Named("Char".to_owned()),
+            Expression::Byte(_) => CompileType::Integer,
             Expression::String(_) => CompileType::String,
             Expression::Integer(_) => CompileType::Integer,
             Expression::Float(_) => CompileType::Float,
@@ -3896,6 +3899,7 @@ impl MacroExpander {
             }
             Pattern::Wildcard(_)
             | Pattern::StringLiteral(_)
+            | Pattern::CharLiteral(_)
             | Pattern::Splice(_)
             | Pattern::Binding(_) => {}
         }
@@ -6862,6 +6866,19 @@ impl MacroExpander {
                     None
                 }
             },
+            Expression::Byte(byte) => {
+                match staple_syntax::string_literal::decode_byte(&byte.literal) {
+                    Ok(value) => Some(Value::Integer(
+                        i128::from(value),
+                        Some(crate::IntegerType::U8),
+                    )),
+                    Err(error) => {
+                        self.diagnostics
+                            .push(Diagnostic::new(byte.syntax.span.clone(), error));
+                        None
+                    }
+                }
+            }
             Expression::String(string) => Some(Value::String(string.literal.clone())),
             Expression::Integer(integer) => {
                 match staple_syntax::number_literal::decode_integer(&integer.literal) {
@@ -9884,6 +9901,7 @@ impl MacroExpander {
             | Expression::String(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
         }
@@ -12609,6 +12627,11 @@ fn compile_coverage_pattern(pattern: &Pattern, ty: &CompileType) -> CompileCover
             staple_syntax::string_literal::decode(&pattern.literal)
                 .unwrap_or_else(|_| pattern.literal.clone()),
         ),
+        Pattern::CharLiteral(pattern) => CompileCoveragePattern::Literal(
+            staple_syntax::string_literal::decode_char(&pattern.literal)
+                .map(staple_syntax::string_literal::encode_char)
+                .unwrap_or_else(|_| pattern.literal.clone()),
+        ),
         Pattern::Product(product) => CompileCoveragePattern::Constructor(
             "$product".to_owned(),
             product
@@ -13432,7 +13455,10 @@ pub(crate) fn pattern_meta_type(pattern: &Pattern) -> Option<MetaType> {
                 MetaType::Product(elements)
             })
         }
-        Pattern::Nominal(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => None,
+        Pattern::Nominal(_)
+        | Pattern::StringLiteral(_)
+        | Pattern::CharLiteral(_)
+        | Pattern::Splice(_) => None,
     }
 }
 
@@ -13613,7 +13639,7 @@ fn pattern_uses_macro_call_metadata(pattern: &Pattern) -> bool {
             .iter()
             .any(pattern_uses_macro_call_metadata),
         Pattern::Nominal(nominal) => pattern_uses_macro_call_metadata(&nominal.argument),
-        Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
+        Pattern::StringLiteral(_) | Pattern::CharLiteral(_) | Pattern::Splice(_) => false,
     }
 }
 
@@ -13680,7 +13706,7 @@ fn pattern_contains_syntax(pattern: &Pattern) -> bool {
         Pattern::Product(product) => product.elements.iter().any(pattern_contains_syntax),
         Pattern::Nominal(pattern) => pattern_contains_syntax(&pattern.argument),
         Pattern::Wildcard(wildcard) => type_contains_syntax(&wildcard.ty),
-        Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
+        Pattern::StringLiteral(_) | Pattern::CharLiteral(_) | Pattern::Splice(_) => false,
     }
 }
 
@@ -13747,6 +13773,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         | Expression::String(_)
         | Expression::CString(_)
         | Expression::Char(_)
+        | Expression::Byte(_)
         | Expression::Integer(_)
         | Expression::Float(_) => true,
     }
@@ -13952,6 +13979,13 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                 return false;
             };
             staple_syntax::string_literal::decode(&pattern.literal)
+                .is_ok_and(|literal| literal == value)
+        }
+        Pattern::CharLiteral(pattern) => {
+            let Value::Char(value) = value else {
+                return false;
+            };
+            staple_syntax::string_literal::decode_char(&pattern.literal)
                 .is_ok_and(|literal| literal == value)
         }
         Pattern::Binding(binding) => {
@@ -15033,6 +15067,7 @@ fn substitute_splices(
         | Expression::String(_)
         | Expression::CString(_)
         | Expression::Char(_)
+        | Expression::Byte(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
     }
@@ -15575,7 +15610,7 @@ fn substitute_pattern(
             }
             substitute_pattern(&mut nominal.argument, environment, diagnostics)?
         }
-        Pattern::StringLiteral(_) => {}
+        Pattern::StringLiteral(_) | Pattern::CharLiteral(_) => {}
         Pattern::Splice(_) => unreachable!(),
     }
     Some(())
@@ -16057,7 +16092,10 @@ fn alpha_rename_pattern(pattern: &mut Pattern, mark: u64, names: &mut HashMap<St
             }
         }
         Pattern::Nominal(pattern) => alpha_rename_pattern(&mut pattern.argument, mark, names),
-        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+        Pattern::Wildcard(_)
+        | Pattern::StringLiteral(_)
+        | Pattern::CharLiteral(_)
+        | Pattern::Splice(_) => {}
     }
 }
 
@@ -16175,6 +16213,7 @@ fn alpha_rename_expression(
         | Expression::String(_)
         | Expression::CString(_)
         | Expression::Char(_)
+        | Expression::Byte(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
     }
@@ -16260,6 +16299,7 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::Splice(value) => &mut value.syntax,
         Expression::Name(value) => &mut value.syntax,
         Expression::Char(value) => &mut value.syntax,
+        Expression::Byte(value) => &mut value.syntax,
         Expression::String(value) => &mut value.syntax,
         Expression::StringTemplate(value) => &mut value.syntax,
         Expression::CString(value) => &mut value.syntax,
@@ -16292,6 +16332,7 @@ fn freshen_pattern(
         Pattern::StringLiteral(literal) => {
             expander.freshen_syntax(&mut literal.syntax, module, mark)
         }
+        Pattern::CharLiteral(literal) => expander.freshen_syntax(&mut literal.syntax, module, mark),
         Pattern::Product(product) => {
             expander.freshen_syntax(&mut product.syntax, module, mark);
             for element in &mut product.elements {

@@ -108,6 +108,53 @@ pub fn decode_char(literal: &str) -> Result<char, CharLiteralError> {
     }
 }
 
+/// Decodes a byte literal such as `b'"'` or `b'\xFF'`. The content is one
+/// ASCII character or escape; `\xHH` spells any byte, and Unicode escapes are
+/// rejected because a byte is not a scalar value.
+pub fn decode_byte(literal: &str) -> Result<u8, String> {
+    let content = literal
+        .strip_prefix("b'")
+        .and_then(|s| s.strip_suffix('\''))
+        .ok_or_else(|| "unterminated byte literal".to_owned())?;
+    let mut chars = content.chars();
+    let value = match chars.next() {
+        None => return Err("empty byte literal".to_owned()),
+        Some('\\') => match chars.clone().next() {
+            Some('x') => {
+                chars.next();
+                let digits: String = chars.by_ref().take(2).collect();
+                if digits.len() != 2 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err("byte escape `\\x` requires exactly 2 hex digits".to_owned());
+                }
+                u8::from_str_radix(&digits, 16).expect("validated hex digits")
+            }
+            Some('u') => {
+                return Err(
+                    "Unicode escapes are not allowed in byte literals; use `\\xHH`".to_owned(),
+                );
+            }
+            _ => {
+                let escaped = decode_escape(&mut chars, '\'')?;
+                u8::try_from(escaped).expect("simple escapes are ASCII")
+            }
+        },
+        Some('\n' | '\r') => {
+            return Err("newline in byte literal; use an escape".to_owned());
+        }
+        Some('\'') => return Err("unescaped quote in literal".to_owned()),
+        Some(c) if c.is_ascii() => c as u8,
+        Some(c) => {
+            return Err(format!(
+                "non-ASCII character `{c}` in byte literal; use `\\xHH` for a byte above 0x7F"
+            ));
+        }
+    };
+    if chars.next().is_some() {
+        return Err("byte literal contains more than one byte".to_owned());
+    }
+    Ok(value)
+}
+
 pub fn encode(value: &str) -> String {
     format!("{value:?}").replace('$', "\\$")
 }
@@ -129,6 +176,37 @@ mod tests {
             assert_eq!(decode(&encode(s)).unwrap(), s);
         }
         assert!(decode("\"$5\"").is_err());
+    }
+    #[test]
+    fn byte_literals() {
+        for (literal, value) in [
+            ("b'a'", b'a'),
+            ("b'\"'", b'"'),
+            ("b'\\''", b'\''),
+            ("b'\\\\'", b'\\'),
+            ("b'\\n'", b'\n'),
+            ("b'\\0'", 0),
+            ("b'\\x7F'", 0x7F),
+            ("b'\\xff'", 0xFF),
+            ("b'$'", b'$'),
+        ] {
+            assert_eq!(decode_byte(literal), Ok(value), "{literal}");
+        }
+        for literal in [
+            "b''",
+            "b'ab'",
+            "b'é'",
+            "b'\\u{41}'",
+            "b'\\x'",
+            "b'\\x4'",
+            "b'\\xG0'",
+            "b'\\x410'",
+            "b'\\q'",
+            "b'\\$'",
+            "b'a",
+        ] {
+            assert!(decode_byte(literal).is_err(), "{literal}");
+        }
     }
     #[test]
     fn character_literals_and_unicode_escapes() {

@@ -162,7 +162,10 @@ impl<'a> OwnershipChecker<'a> {
                 }
             }
             Pattern::Nominal(nominal) => self.collect_top_level_pattern(&nominal.argument),
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+            Pattern::Wildcard(_)
+            | Pattern::StringLiteral(_)
+            | Pattern::CharLiteral(_)
+            | Pattern::Splice(_) => {}
         }
     }
 
@@ -634,6 +637,7 @@ impl<'a> OwnershipChecker<'a> {
             Expression::String(_)
             | Expression::CString(_)
             | Expression::Char(_)
+            | Expression::Byte(_)
             | Expression::Integer(_)
             | Expression::Float(_) => true,
             Expression::Binary(_) => unreachable!("binary expression reached ownership checking"),
@@ -1157,7 +1161,10 @@ impl<'a> OwnershipChecker<'a> {
                 }
             }
             Pattern::Nominal(value) => self.bind_pattern(&value.argument, freeze),
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+            Pattern::Wildcard(_)
+            | Pattern::StringLiteral(_)
+            | Pattern::CharLiteral(_)
+            | Pattern::Splice(_) => {}
         }
     }
 

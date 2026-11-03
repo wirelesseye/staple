@@ -42,6 +42,7 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
             .or(block_comment)
             .or(string)
             .or(|text: &str, at: usize| lex_char(text, at).map(|end| (TokenKind::Char, end)))
+            .or(|text: &str, at: usize| lex_byte(text, at).map(|end| (TokenKind::Byte, end)))
             .or(tag("::").map(|_| TokenKind::DoubleColon))
             .or(tag("=>").map(|_| TokenKind::FatArrow))
             .or(tag("->").map(|_| TokenKind::Arrow))
@@ -183,9 +184,7 @@ fn lex_number(source: &str, offset: usize) -> Option<(TokenKind, usize)> {
         if matches!(bytes.get(exponent_digit), Some(b'+' | b'-')) {
             exponent_digit += 1;
         }
-        bytes
-            .get(exponent_digit)
-            .is_some_and(u8::is_ascii_digit)
+        bytes.get(exponent_digit).is_some_and(u8::is_ascii_digit)
     };
     if bytes.get(end) == Some(&b'.')
         && bytes.get(end + 1) != Some(&b'.')
@@ -402,6 +401,14 @@ fn single_character_kind(character: char) -> TokenKind {
         '!' => TokenKind::Bang,
         _ => TokenKind::Unknown,
     }
+}
+
+/// A byte literal is a character literal behind a `b` prefix: `b'"'`.
+fn lex_byte(source: &str, offset: usize) -> Option<usize> {
+    if !source.get(offset..)?.starts_with("b'") {
+        return None;
+    }
+    lex_char(source, offset + 1)
 }
 
 fn lex_char(source: &str, offset: usize) -> Option<usize> {
