@@ -189,23 +189,264 @@ instead of a shared library, or running in-process for trusted libraries).
 
 Update this section as you work (see "Rules for the implementor").
 
+All work is on `spike/macro-server`. Measured on macOS and on Linux (Docker
+on the same machine).
+
 | Task | Status | Commit | Notes |
 |---|---|---|---|
-| 1. Stand-in program | not started | | |
-| 2. Shared-library emission | not started | | |
-| 3. Server stub | not started | | |
-| 4. Failure behavior | not started | | |
-| 5. Measurements | not started | | |
-| 6. JIT comparison | not started | | |
+| 1. Stand-in program | done | `428167cb` | `spike/macro-server/standin.sta` runs as an executable against `stubs.c` and prints `wrap(wrap(wrap(ALPHA, BETA, GAMMA)))`. Bytes cross the ABI one at a time because `Buffer` exposes no data pointer outside `std`. |
+| 2. Shared-library emission | done | `40716480`, `3e8a4060` | Hidden `--emit dylib` with `--library-entry <instance symbol>`. `EmissionUnit::with_library(LibrarySpec)` emits `__staple_library_init` (the setup `main` did, factored into `emit_set_stack_bottom` and `emit_program_setup`) and one `__staple_entry.<symbol>` shim per entry. All runtime `.ll` files linked unchanged. macOS needs `-dynamiclib -undefined dynamic_lookup`. With a package manifest, the library links the cached dependency objects and only the root unit is compiled. The census check in `lower/census.rs` is test-only and was not touched. |
+| 3. Server stub | done | `b3251a85` | `staple __macro-server <library>` (`staple-cli/src/macro_server.rs`). It loads with `dlopen`, binds, inits, then answers `call` and `bench` requests on stdin/stdout. Both binding styles work (Finding 3). |
+| 4. Failure behavior | done | `b3251a85`, `3e8a4060` | Panic, timeout, stack overflow and repeated calls all tested with `driver.py`. Results in Measurements, rows F1–F5. |
+| 5. Measurements | done | `3e8a4060`, this commit | Compile, startup and round-trip numbers, plus the interpreter baseline, on macOS and Linux. Tasks 1–6 were repeated on Linux with `spike/macro-server/linux/measure.sh`. |
+| 6. JIT comparison | done | `5c450b06` | `STAPLE_SPIKE_JIT=1` with `--emit dylib` loads the same IR into MCJIT. No faster to build, same call cost (Finding 6). |
 
-**Go / no-go:** undecided.
+**Go / no-go: go on Decision 3.** Every criterion holds on both macOS and
+Linux:
+
+- The library links and runs with no change to the runtime `.ll` files.
+- A panic, a timeout and a stack overflow all come back to the parent as a
+  reportable error. A trapped panic doesn't even need a restart.
+- The batched round trip (about 7 µs of overhead per request) is tiny next to
+  a closure build (about 1.6–2 s).
+- Threshold used for build time: under 5 s per cached, once-per-edit closure
+  build is acceptable. With cached std objects a build takes 1.6–2.0 s.
+  Without them it takes 3.2–3.7 s, which is still acceptable but wasteful
+  (Finding 1).
+
+On Linux, the same code worked with no platform-specific changes beyond the
+link flags already in place (`-shared` for libraries, `-rdynamic` for the
+server). See [Linux](#linux).
+
+**Linux environment.** The
+environment is `spike/macro-server/linux/`:
+
+- A `Dockerfile` based on `rust:1.96-bookworm`, with LLVM 21.1.5 from
+  apt.llvm.org and `LLVM_SYS_211_PREFIX=/usr/lib/llvm-21`.
+- `env.sh`, which builds the image and runs a shell or a command with the
+  worktree mounted at `/work`. The Linux `target/` and cargo registry live
+  in named volumes, so they never mix with the macOS build.
+
+`spike/macro-server/linux/env.sh cargo build --release -p staple` builds in
+about 1.5 minutes on Docker Desktop (Linux aarch64, 8 CPUs, 8 GB). The
+binary exports the `spike_text_*` intrinsics through `-rdynamic`. Docker runs
+on the same Apple M2, so its timings are only comparable with each other,
+not with the macOS numbers.
+`spike/macro-server/linux/env.sh spike/macro-server/linux/measure.sh` repeats
+tasks 1–6 in one container.
+
+### How to reproduce
+
+From the repository root on `spike/macro-server`, with `cargo build --release
+-p staple`:
+
+```sh
+# Task 1: executable against the C stubs
+target/release/staple compile --stdlib stdlib --no-incremental --emit object \
+    -o standin.o spike/macro-server/main.sta
+cc -c spike/macro-server/stubs.c -o stubs.o && cc standin.o stubs.o -o standin && ./standin
+
+# Task 2: whole-program library, dynamic lookup, or bound with the exit trap
+STAPLE_SPIKE_TIMING=1 spike/macro-server/build-lib.sh "$PWD/libdyn.dylib"
+STAPLE_SPIKE_TIMING=1 spike/macro-server/build-lib.sh "$PWD/libbound.dylib" lib.sta --bound
+
+# Tasks 3-5: scenarios are basic, panic, loop, deep, measure
+python3 spike/macro-server/driver.py target/release/staple "$PWD/libbound.dylib" measure
+
+# Package library (cached std objects): the command is in Measurements, M4
+# Task 6
+STAPLE_SPIKE_JIT=1 STAPLE_SPIKE_TIMING=1 target/release/staple compile --stdlib stdlib \
+    --no-incremental --emit dylib --library-trap-exit \
+    --library-entry __staple_mstandin.expand --library-entry __staple_mstandin.identity \
+    -o /dev/null spike/macro-server/lib.sta
+```
 
 ## Measurements
 
-_None yet._ For each one, record what was measured, the result, the machine,
-the commit and the command.
+Machine: Apple M2, 16 GB, macOS 27.0 (26A428), release build of `staple` at
+`5c450b06`, 2026-11-03. Times are a typical run of two or three. Client-side
+round trips are measured from Python (`driver.py`), so they include Python's
+own overhead.
+
+### Building a library
+
+| # | What | Result |
+|---|---|---|
+| M1 | Stand-in, whole program (`build-lib.sh`, `--no-incremental`) | front end 1.07 s, lowering 0.59 s, codegen 1.87 s, link 0.05 s: **3.6 s** |
+| M2 | Floor: one `identity` entry, nothing else, whole program (`spike/macro-server/floor`) | front end 0.97 s, lowering 0.51 s, codegen 1.62 s, link 0.03 s: **3.2 s** |
+| M3 | Stand-in as a package, first build (`spike/macro-server/package`) | front end 1.29 s, lowering 0.30 s, std objects 4.5 s (built once and cached), codegen 0.19 s, link 0.05 s |
+| M4 | Stand-in as a package, std objects cached: `staple compile --manifest-path spike/macro-server/package/staple.kdl --emit dylib -o libpkg.dylib --library-trap-exit --library-host-symbol spike_text_{len,byte,new,push} --library-entry __staple_mstandin.standin.{expand,expand_panic,expand_loop,expand_deep,identity}` | front end 1.10–1.19 s, lowering 0.27–0.31 s, codegen 0.18–0.20 s, link 0.04 s: **1.6 s** |
+| M5 | 12 copies of the stand-in's expansion (341 lines, about 3x the `@derive_eq` helpers in `stdlib/std/cmp.sta`), package, cached (`spike/macro-server/scaled`) | front end 1.18 s, lowering 0.35 s, codegen 0.47 s, link 0.04 s: **2.0 s** |
+| M6 | JIT: stand-in, whole program, MCJIT at `OptimizationLevel::Default` | front end 0.93 s, lowering 0.51 s, emit IR text 0.15 s, parse IR 0.11 s, compile and link 1.50 s: **3.2 s** |
+
+Task 5 asked for a `@derive_eq`-sized closure built from the derive's real
+helpers with stubs for the syntax types. M5 replaces it: M2 shows that the
+user code barely matters next to the standard library, and the syntax types
+can't be stubbed without first writing the Phase 3 data model.
+
+### Running
+
+| # | What | Result |
+|---|---|---|
+| R1 | Server startup: spawn, `dlopen`, bind, init, first call (median of 10) | 9.3–11.4 ms |
+| R2 | Round trip of `identity`, one request at a time (median of 1000) | 9.8–10.3 µs |
+| R3 | Round trip of `expand`, one request at a time (median of 1000) | 33 µs |
+| R4 | Round trip of `expand`, 1000 requests pipelined | 24–25 µs per request |
+| R5 | In-server call of `expand`, no IPC (`bench`, 10,000 calls) | 17.7–18.8 µs |
+| R6 | In-server call of `identity`, no IPC | 11 ns (dynamic lookup), 235 ns (exit trap with `setjmp`), 14 ns (exit trap with `_setjmp`) |
+| R7 | JIT call of `expand` and `identity` | 17.6 µs and 8–9 ns |
+
+So the IPC cost is about 10 µs per request one at a time (R2) and about 7 µs
+pipelined (R4 − R5). `expand`'s own 18 µs comes from the byte-at-a-time toy
+ABI and the IR not being optimized (Finding 5).
+
+### Interpreter baseline
+
+`staple expand` end to end, best of three, at `5c450b06`:
+
+| # | Input | Time | Per invocation |
+|---|---|---|---|
+| B1 | `let x: I32 = 1` (cost of loading and expanding the standard library) | 0.278 s | – |
+| B2 | 20 × `@derive_eq` on a 50-field `wrap` product | 0.289 s | about 0.5 ms |
+| B3 | One function with 1,000 `if … else …` | 0.712 s | about 0.43 ms |
+
+### Failure behavior
+
+| # | Case | Result |
+|---|---|---|
+| F1 | `panic` with `--library-trap-exit` | The server answers `exit 1`, the panic message goes to its stderr, and the next request works. Tested twice in a row in one server. |
+| F2 | `panic` without the trap | The server process exits with status 1. The client sees end of file. |
+| F3 | Infinite loop | No answer within the 2 s timeout. The client kills the server. Restart plus reload took 10.7 ms, and the new server answers. |
+| F4 | Recursion 100,000,000 deep | The server dies with SIGABRT: Rust's handler prints `thread 'main' has overflowed its stack`. The client sees end of file and the signal. |
+| F5 | Repeated calls | 10,000 `expand` calls in one server allocate enough to run the GC many times, with no failures. Initializers ran once, at load. |
+
+### Linux
+
+Docker Desktop's Linux VM (kernel 7.0.14-linuxkit, aarch64, 8 CPUs, 8 GB) on
+the same Apple M2. Rust 1.96, LLVM 21.1.5, gcc 12.2. Commit `bb7c12d3` (the
+spike with the `String.join` fix from `main` merged in), 2026-11-03. Command:
+`spike/macro-server/linux/env.sh spike/macro-server/linux/measure.sh`.
+
+| # | What | Linux result | macOS for comparison |
+|---|---|---|---|
+| M1 | Stand-in, whole program | front end 1.07–1.10 s, lowering 0.56–0.69 s, codegen 0.79–0.82 s, link 0.02 s: **2.5 s** | 3.6 s |
+| M2 | Floor (`identity` only), whole program | front end 1.01–1.08 s, lowering 0.54–0.63 s, codegen 0.75–0.83 s, link 0.02 s: **2.4 s** | 3.2 s |
+| M3 | Package, first build | std objects 3.7 s (cached afterwards) | 4.5 s |
+| M4 | Package, std cached | front end 1.18–1.20 s, lowering 0.29–0.30 s, codegen 0.08 s, link 0.02 s: **1.6 s** | 1.6 s |
+| M5 | Scaled package, std cached | front end 1.22–1.23 s, lowering 0.37–0.39 s, codegen 0.21–0.25 s, link 0.02 s: **1.9 s** | 2.0 s |
+| M6 | JIT, whole program | compile and link 0.76–0.79 s; calls: `expand` 29.4 µs, `identity` 11–13 ns | 1.50 s; 17.6 µs, 8–9 ns |
+| R1 | Server startup (median of 10) | 3.0–3.5 ms | 9.3–11.4 ms |
+| R2 | Round trip of `identity`, one at a time | 26–27 µs | 10 µs |
+| R3 | Round trip of `expand`, one at a time | 55–57 µs | 33 µs |
+| R4 | Round trip of `expand`, 1000 pipelined | 38–39 µs per request | 24–25 µs |
+| R5 | In-server call of `expand`, no IPC | 27.7–27.8 µs | 17.7–18.8 µs |
+| R6 | In-server call of `identity`, no IPC | 8 ns (dynamic lookup), 11 ns (bound, exit trap) | 11 ns, 14 ns |
+| B1 | Interpreter: load and expand the standard library | 0.268 s | 0.278 s |
+| B2 | Interpreter: 20 × 50-field `@derive_eq` | 0.289 s | 0.289 s |
+| B3 | Interpreter: 1,000 `if` | 0.716 s | 0.712 s |
+
+Failure behavior on Linux matches macOS for every row:
+
+- **F1:** trapped panic answers `exit 1`, and the next request works, twice
+  in a row. This holds for the whole-program bound library and for the
+  package library, whose `panic` is in the cached std object.
+- **F2:** an untrapped panic ends the server.
+- **F3:** a timeout plus restart takes 3.8–4.0 ms.
+- **F4:** a stack overflow dies with SIGABRT and Rust's message.
+- **F5:** repeated calls keep working.
+
+Task 1's executable and the bound library both work. The bound library has no
+undefined `spike_*` or `exit` symbols.
+
+Linux reading of the numbers:
+
+- Object codegen is about twice as fast as on macOS (0.8 s against 1.6–1.9 s
+  for the whole program). A package build with cached std objects costs the
+  same 1.6 s on both, because the front end (about 1.2 s) dominates
+  (Finding 1).
+- Per-request IPC is higher in the VM: about 10–17 µs pipelined, against
+  about 7 µs on macOS. That is still small next to a closure build, and the
+  per-request criterion ("well under 1 ms") holds.
+- Plain calls are slower too (`expand` 27.7 µs against 18 µs). Since the JIT
+  shows the same ratio (29.4 against 17.6 µs), this is the VM, not the server.
 
 ## Findings
 
-_None yet._ Record anything that changes the umbrella plan, any surprise in the
-runtime or codegen, and any open question for Phase 3 or 4.
+1. **Library builds are dominated by the standard library, not the closure.**
+   An `identity`-only library costs 3.2 s (M2) against 3.6 s for the stand-in
+   (M1). Two things cause it: the whole program is compiled, and lowering
+   seeds every non-generic template eagerly (`lower/worklist.rs:845`). With a
+   package graph, prebuilt std objects bring the cost down to 1.6 s (M4). The
+   remaining ~1.1 s is the front end checking the whole standard library on
+   every build. **Change for the umbrella plan:** phase-1 libraries are built
+   against cached std objects, like incremental package builds (Phase 4). To
+   go further, Phase 4 should either cache the front end's checked standard
+   library or check only the closure's modules.
+2. **Per invocation, compiled macros are much faster than the interpreter.**
+   The interpreter spends about 0.43 ms per `if` and 0.5 ms per 50-field
+   `@derive_eq` (B2, B3). A pipelined compiled call costs about 7 µs of IPC
+   plus the macro's own work (R4). This supports template macros (Decision 2)
+   for `if`: even in a server, a template filled in by the parent beats both.
+3. **Both ways of binding host intrinsics work.**
+   - Dynamic lookup: the externs stay undefined (`-undefined dynamic_lookup`)
+     and the server exports them (`-Wl,-export_dynamic` from
+     `staple-cli/build.rs`).
+   - Function table: with `--library-host-symbol`, each foreign declaration
+     becomes a thunk that calls through a slot. `__staple_library_bind(resolve)`
+     fills the slots by name.
+
+   The table needs no exported symbols in the `staple` binary and fails
+   cleanly on a missing symbol. It costs one indirect call per intrinsic.
+   **Keep the table (Decision 3 as written).** The thunks and the `exit` trap
+   must be *hidden external* definitions, not internal ones. Otherwise calls
+   from the prebuilt std object, where `panic` lives, still reach libc
+   (fixed in `3e8a4060`).
+4. **`exit` can be trapped without restarting the server.**
+   - In a library, `exit` gets a body that stores the code and `_longjmp`s
+     back to the entry shim, which `_setjmp`ed on entry. Only Staple frames
+     are skipped, and Staple has no unwinding, so nothing in Rust is jumped
+     over. The GC kept working afterwards (F1).
+   - Use `_setjmp`/`_longjmp`. Plain `setjmp` saves the signal mask, which
+     costs about 220 ns per call on macOS (R6).
+   - Open for Phase 4: values held by the abandoned frames are never dropped
+     (fine for GC memory, a leak for anything with a `Drop` that frees
+     outside the GC). Also, the panic message goes to stderr instead of
+     being returned as data.
+5. **The toy ABI and missing IR optimization dominate call cost.** `expand`
+   takes 18 µs for a 16-byte input, both in the server and under the JIT
+   (R5, R7). Codegen sets `OptimizationLevel::Default` on the target machine
+   but runs no IR pass pipeline (`codegen/mod.rs`). Phase 3's ABI should move
+   whole byte buffers, not one byte per call. Phase 4 should decide whether
+   phase-1 libraries run the IR optimizer: a slower build for faster
+   macros.
+6. **The JIT isn't worth it for builds.** MCJIT took 1.5 s to compile the
+   whole program (M6), the same as object codegen (M1). It also can't reuse
+   the cached std objects that make M4 fast, and its calls cost the same
+   (R7). The in-process mode the umbrella plan leaves for later should load
+   the *same* shared library with `dlopen`, not JIT.
+7. **A stack overflow kills the server with Rust's message** (F4). The parent
+   has to recognize SIGABRT and SIGSEGV and report "macro overflowed its
+   stack" at the invocation. Running each call on a dedicated thread with a
+   large stack (the expander uses 256 MB today) would make deep but finite
+   recursion work. A guard-page overflow would still kill the process.
+8. **Lowering bug, found along the way, not fixed here.** This program
+   type-checks (`staple check` passes) but fails to lower with
+   "trait `Iterator` for `IntoIterator.Iter, String` is ambiguous at run-time
+   types", naming three `String` iterator impls:
+
+   ```staple
+   use std.range.range
+   def expand = (move words: List<String>) => String :: String.join ", " words
+   ```
+
+   Without the `use std.range.range` line it compiles. `standin.sta` works
+   around it with a manual loop. This should be fixed on `main`, with a test.
+9. **Smaller notes:**
+   - `0..n` with `n: USize` infers the `0` as `I32` and fails, while
+     `range zero n` with a typed `zero` works.
+   - `Buffer` has no public data pointer, so a host can't fill Staple memory
+     in bulk. Phase 3 needs an intrinsic or a `std`-internal path for that.
+   - Instance symbols include the package path
+     (`__staple_mstandin.standin.expand` in a package and
+     `__staple_mstandin.expand` without one). Phase 4's shims should be named
+     by the compiler, not by the user's module layout.

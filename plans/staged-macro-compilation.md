@@ -144,7 +144,8 @@ the same choice rust-analyzer made with `proc-macro-srv`.
   batched by expansion round.
 - An in-process mode that loads the same library can be added later as an
   optimization for trusted, cached libraries such as the standard library's. It
-  is not part of this plan.
+  is not part of this plan. Phase 0 found that an LLVM JIT is no faster to
+  build and can't reuse cached objects, so that mode would use `dlopen` too.
 
 ### 4. Syntax values cross the ABI as handles
 
@@ -211,6 +212,15 @@ Phase 5.
 
 Prove the risky parts before committing to them. The spike doesn't merge.
 Breakdown and status: [`staged-macro-compilation-phase-0.md`](staged-macro-compilation-phase-0.md).
+
+**Status (2026-11-03): done on macOS and Linux.** The result is go on
+Decision 3. Libraries link with the existing runtime unchanged. A panic is
+trapped without a restart. A timeout or stack overflow comes back to the
+parent as an error. IPC costs about 7–10 µs per request. A closure builds in
+1.6–2 s against cached std objects. Findings that change later phases:
+phase-1 libraries must link cached std objects (Phase 4); the host table
+thunks and the `exit` trap must be hidden external definitions; the JIT is
+not worth pursuing.
 
 - Compile a hand-written phase-1 program (one macro, one helper using `List`
   and `String`) for the host as a shared library with the existing
@@ -301,6 +311,11 @@ Make syntax values exist in compiled code.
   table), loading libraries, requests, timeouts, and turning `panic`, abort and
   crashes into diagnostics located at the invocation, with the macro's panic
   message.
+- Build phase-1 libraries against the cached standard-library objects, as
+  incremental package builds do. A whole-program build costs about 3.2 s
+  even for an empty closure, against 1.6 s with cached objects. Most of what
+  is left is the front end checking the standard library. Cache that, or
+  check only the closure's modules.
 - Caching: fingerprint each closure (its items' syntax, the compiler version,
   the host triple and active features) with the hashing that
   `staple-cli/src/cache.rs` already uses. Store libraries in the user cache
