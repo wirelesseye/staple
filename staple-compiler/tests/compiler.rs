@@ -20748,6 +20748,43 @@ fn assert_cycle(messages: &[String], macro_name: &str, notes: &[&str]) {
 }
 
 #[test]
+fn compile_error_fails_the_macro_at_its_call_site() {
+    let messages = expansion_messages(concat!(
+        "use std.syntax.(compile_error, Expr)\n",
+        "macro refuse = value: Expr => compile_error \"refused\"\n",
+        "let a = refuse 1\n",
+    ));
+    assert_eq!(messages, vec!["macro `refuse` panicked: refused".to_owned()]);
+}
+
+#[test]
+fn a_macro_cycle_in_recovery_mode_leaves_the_rest_of_the_program() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let source = with_syntax_imports(concat!(
+        "def helper = value: Expr => Expr :: again value\n",
+        "macro again = value: Expr => helper value\n",
+        "macro fine = value: Expr => parse_quote { $value }\n",
+        "let a = again 1\n",
+        "let b: I32 = fine 2\n",
+    ));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(&source, root)
+        .expect("source should load");
+    let (module, diagnostics) = NameResolver::new().resolve_program_recovering(program);
+    assert!(module.is_some(), "{diagnostics:#?}");
+    let messages = diagnostics
+        .into_iter()
+        .map(|diagnostic| diagnostic.message)
+        .collect::<Vec<_>>();
+    assert_cycle(&messages, "again", &["`helper`"]);
+    assert!(
+        !messages.iter().any(|message| message.contains("`fine`")),
+        "{messages:#?}"
+    );
+}
+
+#[test]
 fn a_macro_that_needs_itself_is_reported_with_its_chain() {
     let messages = expansion_messages(concat!(
         "def helper = value: Expr => Expr :: again value\n",

@@ -318,7 +318,7 @@ Update this section as you work (see "Rules for the implementor").
 | 4. Stage-ordered expansion | done | `b71059f7` | `macro_expand/staged.rs`: `ensure_ready` (a macro's closure and the macros it calls are expanded first) and `ensure_expanded` (one top-level item, remembered by syntax id). `invoke_macro` and `invoke_modifier` call `ensure_ready`; the module walk (`expand_in_walk`) reuses an item's earlier expansion and puts it back where it was written. Compile-time helpers and macro bodies are expanded in a compile-time mode (quotations and syntax constructors stay as written) and the scopes' `HelperDefinition` is pointed at the expanded binding. The index moves each module's items out of the program instead of copying them, so the extra cost is small. Corpus comparison: 232/232 identical apart from the three standard-library files edited in task 6. |
 | 5. Cycle detection and inventory | done | `b71059f7` | A stack of macros and items in progress (`StageNode`). Meeting a node already on it records the chain; `STAPLE_MACRO_CYCLES=1 staple expand FILE` prints the chains on stderr. Inventory in Findings. |
 | 6. Break the standard library's cycles | done | `b71059f7` | `compile_error` intrinsic so `if` and `when` do not reach `panic`; `extern` blocks indexed per binding; hand-written `Eq`/`Hash`/`Debug` for `True` and `False` and `Eq`/`Hash` for `None` and `Some`. Zero cycles across the corpus afterwards. |
-| 7. Cycles become errors | done | `b71059f7` | The cycle is reported at the invocation that closed it ("macro `m` is needed to expand code that `m` itself depends on") with one `note:` diagnostic per link, each at its item; the invocation stays unexpanded. The lazy macro path in `eval_expression` is replaced by an error saying the closure scan missed an edge, and no corpus input reaches it. A name that resolves to nothing makes the scheduler expand the item-position macros and modified items of its module first (generated items); a loop through one is recorded but not reported, because names alone cannot say that the macro needs it. Tests: direct, across modules, through an `impl`, a generated item (recorded), a quotation that only looks like a cycle, and stage order. |
+| 7. Cycles become errors | done | `b71059f7` | The cycle is reported at the invocation that closed it ("macro `m` is needed to expand code that `m` itself depends on") with one `note:` diagnostic per link, each at its item; the invocation stays unexpanded. The lazy macro path in `eval_expression` is replaced by an error saying the closure scan missed an edge, and no corpus input reaches it. A name that resolves to nothing makes the scheduler expand the item-position macros and modified items of its module first (generated items); a loop through one is recorded but not reported, because names alone cannot say that the macro needs it. Tests: direct, across modules, through an `impl`, a generated item (recorded), a quotation that only looks like a cycle, and stage order. The review fixes (see Findings) made the closure complete for companion functions, interpolation and indexing, and turned the remaining first-call expansion of functions outside a closure into a recorded closure miss. |
 | 8. Language reference | done | `b71059f7` | "Compile-time phases" in `Staple.md`, linked from the metaprogramming introduction, plus `compile_error` in the `Parse` intrinsics listing. |
 | 9. Close out | done | `b71059f7` | Final corpus comparison: 227/232 identical; the five that differ are the standard-library entry files that were edited (`boolean`, `cmp`, `flow`, `option`, `result`). No cycle is reported as an error; two chains through the generated `typegroup ConversionError` in `std.convert` are recorded. Timings are in Measurements: B1–B3 are within noise of the baseline. Full test suite: 39 test binaries, no failures. |
 
@@ -416,11 +416,11 @@ the closure of `derive_eq` from about 190 to over 800 items.
   gain in the dependency structure, and the fallback (rewriting in Rust)
   duplicates `if_branches`. The cost is that `if` is still evaluated by the
   interpreter, so B3 does not get faster.
-- **Hand-written impls (task 6).** `True`, `False`, `None` and `Some` no longer
-  use the derive macros; their `Eq`, `Hash` and `Debug` impls are written out
-  as the derives produce them. The other derived standard-library types
-  (`Ordering`, `Result`'s variants) are not reached by any macro's closure and
-  keep their derives.
+- **Hand-written impls (task 6).** `True`, `False`, `None`, `Some`, `Ok` and
+  `Ordering` (with its variants, which `typegroup` used to make) no longer use
+  the derive macros or `typegroup`; their `Eq`, `Hash` and `Debug` impls are
+  written out as the macros produce them. No standard-library type uses a
+  derive modifier any more.
 - **Expansion differences from the baseline.** None for user programs, the
   examples and the fixtures. Five standard-library entry files differ, all
   because they were edited: `boolean.sta`, `option.sta`, `result.sta` and
@@ -437,4 +437,75 @@ the closure of `derive_eq` from about 190 to over 800 items.
   know `compile_error`), the baseline binary and this branch's binary produce
   identical output for all 232 inputs, with no exceptions.
 
-Nothing else to record.
+- **Review fixes (2026-11-04).** A review found that closures were
+  incomplete, and that a fallback hid it:
+  - **Companion functions were never followed.** The scan collected method
+    and pipe names, but the closure did not use them, and `Type.member` did
+    not reach the companion function either. `expanded_binding` expanded such
+    a function the first time the interpreter called it, so expansion worked
+    and the corpus showed nothing. That was item-level lazy expansion, which
+    the "Done when" list rules out. Now a companion function joins a closure
+    when its name is used as a method, a pipe stage or the member of a path,
+    and every type its companion targets is in the closure. A blanket
+    companion joins when one of its bounds is. The closures grow a lot:
+    `derive_eq` goes from 251 to 861 items and `typegroup` from 444 to 920.
+    Most of the growth is `impl` items, 205 of them `Convert`/`TryConvert`
+    between number types. The companion functions bring in the number types,
+    and the `impl` rule then takes every conversion between two types it
+    holds. That is the over-approximation of Decision 1, now visible. The
+    closures of `if`, `when`, `while` and `for` are unchanged (19, 26, 15 and
+    19).
+  - **Implicit trait uses were missing.** String interpolation now reaches
+    `Display`/`Debug` (`std.fmt`), and indexing reaches `Index`/`MutateIndex`
+    (`std.index`). `StdModules` gained `fmt` and `index` for this.
+  - **Misses are now visible.** `expanded_binding` still expands a function
+    on first call, which keeps the interpreter's tables cheap. But when the
+    function is outside the running macro's closure, it records a closure
+    miss (`MacroAnalysis::closure_misses`, printed with
+    `STAPLE_MACRO_CYCLES=1`). The corpus has none. A test fails if a
+    companion called through a pipe or a member is missing, and it was
+    checked to fail with the companion rule switched off.
+  - **Template detection.** A splice may have trivia between `$` and its name
+    (`$ other`), which the check used to skip.
+  - **Tests added:** companion closures, interpolation and indexing,
+    `compile_error`, a cycle in recovery mode, spaced splices, and `if`/`when`
+    not being templates.
+  - The corpus comparison against the reviewed commit is 232/232 identical,
+    and the full test suite passes. After the last change to the closure
+    loop, which only reorganizes how the impl list is walked, the unit tests
+    and the corpus comparison were run again.
+  - **Cost.** B1 0.261 → 0.276 s, B2 0.275 → 0.292 s, B3 0.700 → 0.713 s
+    (Apple M2, best of 7, the reviewed commit against this one, run back to
+    back). That is about 15–17 ms per run, so the "no slower than the
+    baseline" goal no longer holds. Nearly all of it is the first scan of
+    `typegroup`'s 920-item closure (about 24 ms, for `typegroup
+    ConversionError` in `std.convert`, which every program loads). Later
+    rounds of the same closure reuse the scans (about 0.6 ms). The closure
+    loop now keeps the `impl` entries still outside in one list instead of
+    rebuilding it each round, which saved little. Checking every trait
+    argument instead of only the self type would not help, since all the
+    number types are in the closure. Closures from checked code (Phase 2),
+    with only the impls the typechecker selects, would.
+- **Hand-written standard-library impls can probably return to derives
+  later.** The cycle comes from the over-approximate `impl` rule (a closure
+  that holds `Eq` and `True` also takes the derived `impl Eq True`) and from
+  treating a modified type as unavailable until its modifiers run. Two later
+  changes would remove it. (1) After Phase 2, closures could be computed from
+  checked code, with only the impls the typechecker selects. (2) Modifiers
+  that return their input unchanged plus new items (the derives) could let a
+  closure use the type before the modifier runs. Revisit once Phase 2's
+  closure check exists.
+- **Known limits, not fixed:**
+  - **Loops through a generated item.** Such a loop (the two `typegroup`
+    chains in `std.convert`) is still recorded and not reported, and the
+    macro runs. This is how the expander behaves now, not a language rule, so
+    `Staple.md` no longer describes it. Phase 2 can show whether it hides a
+    real dependency.
+  - **Current-module modifiers.** For a file whose module itself carries
+    modifiers (`@m pub mod`), the walk reads the list the modifiers rewrote,
+    while early expansions are stored by the written item's syntax id. If a
+    modifier gives items new ids, an item expanded early for a closure is
+    expanded again by the walk, and the closure ran against the version from
+    before the modifier. Only `@no_prelude` and `@doc` are used like this in
+    the corpus, and neither module has items that a closure reaches. Index the rewritten items once module modifiers can run
+    before the index is built.

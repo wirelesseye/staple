@@ -546,6 +546,8 @@ impl Scanner {
                 }
             }
             Expression::Index(index) => {
+                self.standard("Index", self.modules.index);
+                self.standard("MutateIndex", self.modules.index);
                 self.expression(&index.value);
                 self.expression(&index.index);
             }
@@ -656,6 +658,11 @@ impl Scanner {
             Expression::StringTemplate(template) => {
                 for part in &template.parts {
                     if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
+                        let format = match interpolation.format {
+                            staple_syntax::StringInterpolationFormat::Display => "Display",
+                            staple_syntax::StringInterpolationFormat::Debug => "Debug",
+                        };
+                        self.standard(format, self.modules.fmt);
                         self.expression(&interpolation.expression);
                     }
                 }

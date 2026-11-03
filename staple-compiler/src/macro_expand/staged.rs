@@ -26,6 +26,7 @@ struct SavedState {
     loop_types: Vec<Vec<CompileType>>,
     steps: usize,
     compile_time_depth: usize,
+    running_macros: Vec<ItemId>,
 }
 
 /// A step of the staged expansion in progress: a macro being made ready or an
@@ -62,6 +63,7 @@ impl MacroExpander {
             loop_types: std::mem::take(&mut self.loop_types),
             steps: std::mem::take(&mut self.steps),
             compile_time_depth: std::mem::take(&mut self.compile_time_depth),
+            running_macros: std::mem::take(&mut self.running_macros),
         }
     }
 
@@ -82,6 +84,7 @@ impl MacroExpander {
         self.loop_types = saved.loop_types;
         self.steps = saved.steps;
         self.compile_time_depth = saved.compile_time_depth;
+        self.running_macros = saved.running_macros;
     }
 
     /// Makes `definition` ready to run: its closure is expanded, and so are
@@ -289,7 +292,7 @@ impl MacroExpander {
         let expanded = self.expand_unit(module, item, true);
         self.restore_state(saved);
         self.stage_stack.pop();
-        self.finish_unit(module, id, expanded, true);
+        self.finish_unit(id, expanded, true);
         Ok(true)
     }
 
@@ -393,7 +396,7 @@ impl MacroExpander {
     }
 
     /// Records the result of expanding `id` and refreshes what depends on it.
-    fn finish_unit(&mut self, module: ModuleId, id: ItemId, expanded: Expanded, complete: bool) {
+    fn finish_unit(&mut self, id: ItemId, expanded: Expanded, complete: bool) {
         self.finish_unit_output(id, expanded, complete, true);
     }
 
@@ -528,10 +531,13 @@ impl MacroExpander {
         true
     }
 
-    /// `binding` with its macros expanded. A function the interpreter reaches
-    /// through a name or a method that the closure scan could not resolve is
-    /// expanded here, when it is first called.
+    /// `binding` with its macros expanded. Expanding a function the first time
+    /// it is called keeps the interpreter's tables cheap to maintain. A
+    /// function outside the running macro's closure is expanded here too, so
+    /// expansion still works, but it is recorded as a closure miss: the scan
+    /// should have found it.
     pub(super) fn expanded_binding(&mut self, binding: Rc<Binding>) -> Rc<Binding> {
+        self.check_closure_member(binding.syntax.id);
         // Only functions: a `const` expands to its folded value, which names
         // intrinsics relative to its own hygiene rather than to the module the
         // interpreter evaluates it in.
@@ -565,6 +571,35 @@ impl MacroExpander {
                 found
             }
             _ => binding,
+        }
+    }
+}
+
+impl MacroExpander {
+    /// Records a closure miss when compile-time code reaches the declaration
+    /// `inner` but the closure of the running macro does not hold its item.
+    fn check_closure_member(&mut self, inner: SyntaxId) {
+        let Some(running) = self.running_macros.last() else {
+            return;
+        };
+        let Some(closure) = self.macro_closures.get(running) else {
+            return;
+        };
+        let Some(unit) = self.closure.unit_of(inner) else {
+            return;
+        };
+        if closure.items.contains(&unit) {
+            return;
+        }
+        let name = self
+            .macro_by_item
+            .get(running)
+            .map(|key| key.name.clone())
+            .unwrap_or_default();
+        let item = self.node_label(&StageNode::Item(unit));
+        let miss = (name, item);
+        if !self.closure_misses.contains(&miss) {
+            self.closure_misses.push(miss);
         }
     }
 }
@@ -633,6 +668,37 @@ mod tests {
                 .any(|chain| chain.iter().any(|link| link.contains("macro `again`"))),
             "{cycles:?}"
         );
+    }
+
+    /// The closure misses of expanding `source`.
+    fn closure_misses(source: &str) -> Vec<(String, String)> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let source = format!("use std.syntax.(parse_quote, Expr, Item, Sequence)\n{source}");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(&source, &root)
+            .expect("source should load");
+        let (_, analysis) = super::super::expand_program(program).expect("source should expand");
+        analysis.closure_misses
+    }
+
+    #[test]
+    fn companion_functions_that_compile_time_code_calls_are_in_the_closure() {
+        let misses = closure_misses(concat!(
+            "type Box wrap I32\n",
+            "companion Box {\n",
+            "    pub def doubled = (b: Box) => b\n",
+            "    pub def tripled = (b: Box) => b\n",
+            "}\n",
+            "def helper = value: Expr => Expr :: {\n",
+            "    let piped = Box 1 |> doubled\n",
+            "    let named = Box.tripled piped\n",
+            "    value\n",
+            "}\n",
+            "macro m = value: Expr => helper value\n",
+            "let a = m 1\n",
+        ));
+        assert!(misses.is_empty(), "{misses:?}");
     }
 
     #[test]

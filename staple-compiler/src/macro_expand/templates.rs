@@ -36,11 +36,21 @@ pub(super) fn template_parts(value: &Expression) -> Option<TemplateParts<'_>> {
     }
     match tail {
         Expression::Quote(quote) => {
+            // A splice may put trivia between `$` and its name.
             let tokens = quote.contents.tokens();
-            let only_parameters = tokens.windows(2).all(|pair| {
-                pair[0].kind != staple_syntax::TokenKind::Dollar
-                    || pair[1].kind != staple_syntax::TokenKind::Identifier
-                    || names.contains(&pair[1].text)
+            let only_parameters = tokens.iter().enumerate().all(|(index, token)| {
+                if token.kind != staple_syntax::TokenKind::Dollar {
+                    return true;
+                }
+                match tokens[index + 1..]
+                    .iter()
+                    .find(|next| !next.kind.is_trivia())
+                {
+                    Some(next) if next.kind == staple_syntax::TokenKind::Identifier => {
+                        names.contains(&next.text)
+                    }
+                    _ => true,
+                }
             });
             only_parameters.then_some(TemplateParts { parameters, body })
         }
@@ -180,6 +190,16 @@ mod tests {
     }
 
     #[test]
+    fn a_spaced_splice_of_a_non_parameter_is_not_a_template() {
+        assert!(!is_template(
+            "macro stray = value: Expr => parse_quote { ($value, $ other) }\n"
+        ));
+        assert!(is_template(
+            "macro spaced = value: Expr => parse_quote { ($ value) }\n"
+        ));
+    }
+
+    #[test]
     fn a_call_in_the_body_is_not_a_template() {
         assert!(!is_template("macro called = value: Expr => helper value\n"));
         assert!(!is_template("macro unrelated = value: Expr => other\n"));
@@ -205,6 +225,12 @@ mod tests {
         for name in ["while", "discard", "for"] {
             assert!(
                 classified.contains(&(name.to_owned(), true)),
+                "{name}: {classified:?}"
+            );
+        }
+        for name in ["if", "when"] {
+            assert!(
+                classified.contains(&(name.to_owned(), false)),
                 "{name}: {classified:?}"
             );
         }

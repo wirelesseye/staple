@@ -1009,6 +1009,9 @@ pub(crate) struct MacroAnalysis {
     pub macro_ready_order: Vec<String>,
     /// Chains of items and macros that depend on themselves.
     pub cycles: Vec<Vec<String>>,
+    /// Items that compile-time code reached although the running macro's
+    /// closure did not include them, as `(macro, item)` labels.
+    pub closure_misses: Vec<(String, String)>,
     pub next_syntax_id: usize,
 }
 
@@ -1030,6 +1033,11 @@ pub(crate) struct StdModules {
     pub range: Option<ModuleId>,
     /// `std.boolean`, defining `Bool`.
     pub boolean: Option<ModuleId>,
+    /// `std.fmt`, defining the `Display` and `Debug` that string interpolation
+    /// uses.
+    pub fmt: Option<ModuleId>,
+    /// `std.index`, defining `Index` and `MutateIndex`.
+    pub index: Option<ModuleId>,
 }
 
 fn freshened_syntax(syntax: &Syntax, next_syntax_id: &mut usize) -> Syntax {
@@ -1946,6 +1954,9 @@ pub(crate) fn expand_program_recovering(
         for chain in &expander.cycles {
             eprintln!("macro cycle: {}", chain.join(" -> "));
         }
+        for (name, item) in &expander.closure_misses {
+            eprintln!("macro closure miss: macro `{name}` reached {item}");
+        }
     }
     let analysis = expander.analysis();
     let mut unknown_modifiers = Vec::new();
@@ -2078,6 +2089,11 @@ struct MacroExpander {
     cycles: Vec<Vec<String>>,
     /// The order macros became ready in.
     macro_ready_order: Vec<String>,
+    /// The declarations of the user macros whose bodies are running,
+    /// innermost last.
+    running_macros: Vec<closure::ItemId>,
+    /// See `MacroAnalysis::closure_misses`.
+    closure_misses: Vec<(String, String)>,
     module_names: Vec<String>,
     /// Non-zero while expanding compile-time code (a macro body or helper),
     /// where syntax constructors and quotations are expected.
@@ -2983,6 +2999,8 @@ impl MacroExpander {
             convert: find_module("std.convert"),
             range: find_module("std.range"),
             boolean: find_module("std.boolean"),
+            fmt: find_module("std.fmt"),
+            index: find_module("std.index"),
         };
         let closure =
             ClosureIndex::build(program, &use_kinds, program.imported_modules(), std_modules);
@@ -3007,6 +3025,8 @@ impl MacroExpander {
             macros_failed: HashSet::new(),
             cycles: Vec::new(),
             macro_ready_order: Vec::new(),
+            running_macros: Vec::new(),
+            closure_misses: Vec::new(),
             module_names: program
                 .modules()
                 .iter()
@@ -3135,6 +3155,7 @@ impl MacroExpander {
             closures: self.macro_closures.clone(),
             macro_ready_order: self.macro_ready_order.clone(),
             cycles: self.cycles.clone(),
+            closure_misses: self.closure_misses.clone(),
             templates: self
                 .definitions
                 .values()
@@ -5437,7 +5458,9 @@ impl MacroExpander {
         };
         let definition = refreshed.as_ref().unwrap_or(definition);
         self.invocation_spans.push(call_span.clone());
+        self.running_macros.push(definition.declaration.syntax.id);
         let result = self.invoke_modifier_inner(module, definition, argument, item, call_span);
+        self.running_macros.pop();
         self.invocation_spans.pop();
         result
     }
@@ -6549,7 +6572,9 @@ impl MacroExpander {
         };
         let definition = refreshed.as_ref().unwrap_or(definition);
         self.invocation_spans.push(call_span.clone());
+        self.running_macros.push(definition.declaration.syntax.id);
         let result = self.invoke_macro_inner(definition, arguments, call_span);
+        self.running_macros.pop();
         self.invocation_spans.pop();
         result
     }

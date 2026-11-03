@@ -802,14 +802,19 @@ in order, so a macro never runs against code that has not been expanded yet.
 The *compile-time closure* of a macro is everything its body needs in order to
 run: the helpers, types, traits, `extern` declarations and `impl` items that its
 body mentions, directly or through other items. Operators count, because they
-use the traits in `std.ops`, `std.cmp`, `std.try` and `std.convert`. A name that
+use the traits in `std.ops`, `std.cmp`, `std.try` and `std.convert`, and so do
+indexing (`Index` and `MutateIndex` in `std.index`) and string interpolation
+(`Display` and `Debug` in `std.fmt`). A name that
 a local binding, a parameter or a pattern introduces is not a reference to an
 item. Names written inside a `quote` or `parse_quote` are generated code rather
 than something the macro needs when it runs, so they do not belong to the
 macro's closure.
 
 An `impl` joins a closure once the closure holds both its trait and its self
-type; a blanket `impl` joins once it holds its trait.
+type; a blanket `impl` joins once it holds its trait. A companion function
+joins once its name is used as a method, a pipe stage or a member (as in
+`Box.doubled`) and the closure holds the type its companion is for; a blanket
+companion joins once the closure holds one of its bounds.
 
 Before a macro runs, every item in its closure is expanded, and so is every
 macro that those items call. This is why a helper that a macro uses can itself
@@ -831,8 +836,7 @@ note: macro `again` is needed by `helper`
 
 A name that nothing defines in its module may be made by an item-position macro
 or a modifier in that module, so those are expanded first and the name is looked
-up again. Whether a macro really needs such a generated item cannot be told from
-names alone, so a loop that passes through one is not reported; the macro runs.
+up again.
 
 Breaking a cycle usually means writing out, by hand, the code that the macro
 would have generated for the type involved. A macro used only inside a `quote`

@@ -1964,6 +1964,8 @@ impl NameResolver {
             convert: find_module("std.convert"),
             range: find_module("std.range"),
             boolean: find_module("std.boolean"),
+            fmt: find_module("std.fmt"),
+            index: find_module("std.index"),
         };
         self.standard_library_ops = ops_module.ops;
         self.standard_library_cmp = ops_module.cmp;
