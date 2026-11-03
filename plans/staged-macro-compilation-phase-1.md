@@ -14,14 +14,15 @@ template macros without evaluating anything. Later phases rely on all four:
 - Phase 5 compares the two engines, so the order the interpreter runs in has
   to match the compiled engine's.
 
-Unlike the spike, this phase merges to `main`, in several PRs.
+Unlike the spike, this code is kept. Everything is committed to one branch,
+with no pull requests.
 
 ## Rules for the implementor
 
 - **Keep the status section of this file up to date.** Each time you finish a
   task, find a blocker or measure something, update
-  [Implementation status](#implementation-status) in the same commit or PR.
-  Mark the task done, partly done or blocked, add the commit or PR, and write
+  [Implementation status](#implementation-status) in the same commit.
+  Mark the task done, partly done or blocked, add the commit, and write
   down what you found. Anything that changes the plan goes in
   [Findings](#findings). When the phase ends, update the Phase 1 section of the
   umbrella plan with a short status paragraph (as Phase 0 has), and change
@@ -113,7 +114,7 @@ All of these were read from the source.
    cycles are collected and turned into a list for the standard library and the
    test corpus, while expansion falls back to the current lazy behavior.
    They become errors (task 7) only once that list is empty or every entry is
-   understood. This keeps `main` green between PRs.
+   understood. This keeps the branch's tests passing after every commit.
 7. **`if` and `when` must not have a closure.** Every module that formats a
    `String` uses `if`, and `panic` reaches `String`. So as long as `if` or
    `when` calls a helper that can `panic`, both form a cycle. The fix depends
@@ -134,8 +135,9 @@ All of these were read from the source.
 
 ## Tasks
 
-The tasks are in dependency order, and each one is about one PR. Tasks 2 and 3
-can run in parallel after task 1.
+The tasks are in dependency order, and they are all committed to the same
+branch. A task can take several commits, but the tests pass after each one.
+Tasks 2 and 3 can run in parallel after task 1.
 
 ### 1. Baseline snapshots
 
@@ -308,7 +310,7 @@ document them where `$items...` is documented.
 
 Update this section as you work (see "Rules for the implementor").
 
-| Task | Status | PR / commit | Notes |
+| Task | Status | Commit | Notes |
 |---|---|---|---|
 | 1. Baseline snapshots | not started | | |
 | 2. Template macros | not started | | |
