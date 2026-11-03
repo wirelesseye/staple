@@ -312,7 +312,7 @@ Update this section as you work (see "Rules for the implementor").
 
 | Task | Status | Commit | Notes |
 |---|---|---|---|
-| 1. Baseline snapshots | not started | | |
+| 1. Baseline snapshots | done | (this commit) | `scripts/compare-expansion.py` (`capture DIR`, `compare A B`) covers 232 inputs: the standard library's entry files, the corpus dump, the examples and the test fixtures. Two captures of the same binary compare equal. `scripts/bench-expansion.py` reproduces B1–B3. |
 | 2. Template macros | not started | | |
 | 3. Item index and closure scan | not started | | |
 | 4. Stage-ordered expansion | not started | | |
@@ -324,12 +324,35 @@ Update this section as you work (see "Rules for the implementor").
 
 ## Measurements
 
-_None yet._ For each one, record what was measured, the result, the machine,
-the commit and the command. Use the same inputs as the Phase 0 interpreter
-baseline (B1–B3) so the numbers are comparable.
+For each one, record what was measured, the result, the machine, the commit
+and the command. Use the same inputs as the Phase 0 interpreter baseline
+(B1–B3) so the numbers are comparable.
+
+### Starting baseline
+
+Apple M2, macOS 27.0, release build at `2c8bb69b` (the code of this branch is
+identical to `main` there), 2026-11-03. Command:
+`python3 scripts/bench-expansion.py` (best of five).
+
+| # | Input | Time |
+|---|---|---|
+| B1 | `let x: I32 = 1` | 0.271 s |
+| B2 | 20 × `@derive_eq` on a 50-field `wrap` | 0.284 s |
+| B3 | One function with 1,000 `if … else …` | 0.724 s |
+
+These agree with the Phase 0 numbers (0.278, 0.289 and 0.712 s).
 
 ## Findings
 
-_None yet._ Record the cycle inventory (task 5), the choice for `if` and
+- **Baseline corpus.** `python3 scripts/compare-expansion.py capture DIR`
+  takes about 90 s. Hygiene names (`True__macro_18`) are renumbered by first
+  appearance, and diagnostics have the input path replaced, so two runs of one
+  binary are identical. One input exits non-zero in the baseline:
+  `stdlib/boolean.sta` ("splices are only allowed inside `quote`"). That is
+  expected when a standard-library file is expanded as an entry file, and its
+  stderr is part of the snapshot, so it only counts as a difference if it
+  changes.
+
+Still to record: the cycle inventory (task 5), the choice for `if` and
 `when` and its reason (Decision 7), every expansion difference from the
 baseline with its reason, and anything that changes later phases.
