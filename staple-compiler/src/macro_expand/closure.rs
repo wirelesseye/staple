@@ -125,7 +125,7 @@ pub(super) struct ClosureIndex {
     std_modules: StdModules,
 }
 
-fn item_kind(item: &Item) -> (ItemKind, bool, Vec<String>) {
+pub(super) fn item_kind(item: &Item) -> (ItemKind, bool, Vec<String>) {
     match item {
         Item::Modified(modified) => item_kind(&modified.item),
         Item::Binding(binding) => (ItemKind::Binding, false, vec![binding.name.clone()]),

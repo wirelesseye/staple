@@ -1877,11 +1877,22 @@ pub struct NameResolver {
     compile_time_items: HashSet<(ModuleId, String)>,
     standard_library_cinterop: Option<ModuleId>,
     standard_library_io: Option<ModuleId>,
+    /// Set for a program whose macros are already expanded, with the next free
+    /// syntax identity.
+    pre_expanded: Option<usize>,
 }
 
 impl NameResolver {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A resolver for a program that macro expansion has already run over.
+    pub(crate) fn pre_expanded(next_syntax_id: usize) -> Self {
+        Self {
+            pre_expanded: Some(next_syntax_id),
+            ..Self::default()
+        }
     }
 
     pub fn resolve(self, module: &Module) -> Result<ResolvedModule, Vec<Diagnostic>> {
@@ -1939,7 +1950,14 @@ impl NameResolver {
         recovering: bool,
     ) -> Result<(ResolvedModule, Vec<Diagnostic>), Vec<Diagnostic>> {
         let (mut program, mut macro_analysis, expansion_diagnostics) =
-            crate::macro_expand::expand_program_recovering(program, recovering)?;
+            match self.pre_expanded.take() {
+                Some(next_syntax_id) => (
+                    program,
+                    crate::macro_expand::MacroAnalysis::expanded(next_syntax_id),
+                    Vec::new(),
+                ),
+                None => crate::macro_expand::expand_program_recovering(program, recovering)?,
+            };
         let mut reported = None;
         if !expansion_diagnostics.is_empty() {
             if !recovering {

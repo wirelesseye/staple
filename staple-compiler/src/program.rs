@@ -551,6 +551,17 @@ impl Program {
         }
     }
 
+    /// A copy of the program whose modules hold `items`, one list per module.
+    pub(crate) fn with_module_items(&self, items: Vec<Vec<Item>>, next_syntax_id: usize) -> Self {
+        let mut program = self.clone();
+        for (module, items) in program.modules.iter_mut().zip(items) {
+            module.syntax.items = items;
+            module.syntax.modifiers.clear();
+        }
+        program.next_syntax_id = program.next_syntax_id.max(next_syntax_id);
+        program
+    }
+
     pub fn entry(&self) -> ModuleId {
         self.entry
     }

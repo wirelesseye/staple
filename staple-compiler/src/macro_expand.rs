@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+mod check_program;
 mod closure;
 mod parse;
 mod scan;
@@ -14,6 +15,7 @@ mod traits;
 
 use crate::program::source_location_at;
 use crate::{FloatType, IntegerType, ModuleId, Program, ResolvedMacro};
+use check_program::check_mode;
 use closure::{ClosureIndex, Lookup, MacroClosure};
 use parse::{ParseImpl, ParseTarget, SyntaxIntrinsic, TypeEnv};
 use staple_syntax::{
@@ -988,6 +990,27 @@ enum MemberKind {
     Other,
 }
 
+impl MacroAnalysis {
+    /// The analysis of a program that is already expanded.
+    pub(crate) fn expanded(next_syntax_id: usize) -> Self {
+        Self {
+            definitions: HashMap::new(),
+            invocations: HashMap::new(),
+            helpers: Vec::new(),
+            binding_types: HashMap::new(),
+            compile_time_items: HashSet::new(),
+            caller_location_spans: HashMap::new(),
+            closures: HashMap::new(),
+            templates: HashSet::new(),
+            macro_ready_order: Vec::new(),
+            cycles: Vec::new(),
+            closure_misses: Vec::new(),
+            check: None,
+            next_syntax_id,
+        }
+    }
+}
+
 pub(crate) struct MacroAnalysis {
     pub definitions: HashMap<SyntaxId, ResolvedMacro>,
     pub invocations: HashMap<SyntaxId, ResolvedMacro>,
@@ -1012,6 +1035,8 @@ pub(crate) struct MacroAnalysis {
     /// Items that compile-time code reached although the running macro's
     /// closure did not include them, as `(macro, item)` labels.
     pub closure_misses: Vec<(String, String)>,
+    /// What the compile-time code check needs, when it was asked for.
+    pub check: Option<check_program::CheckSnapshot>,
     pub next_syntax_id: usize,
 }
 
@@ -1886,6 +1911,7 @@ pub(crate) fn expand_program_recovering(
         }
         walked.push((module_index, parts));
     }
+    let mut check = check_mode().map(|mode| expander.check_snapshot(mode, program.modules().len()));
     expander.closure.release();
     expander.item_expansions.clear();
     for (module_index, parts) in walked {
@@ -1894,6 +1920,9 @@ pub(crate) fn expand_program_recovering(
         let mut items = Vec::new();
         for part in parts {
             items.extend(Rc::try_unwrap(part).unwrap_or_else(|part| (*part).clone()));
+        }
+        if let Some(check) = &mut check {
+            check.modules[module_index] = items.clone();
         }
         items.retain(|item| {
             !matches!(item,
@@ -1958,7 +1987,12 @@ pub(crate) fn expand_program_recovering(
             eprintln!("macro closure miss: macro `{name}` reached {item}");
         }
     }
-    let analysis = expander.analysis();
+    let mut analysis = expander.analysis();
+    analysis.check = check;
+    if expander.diagnostics.is_empty() && analysis.check.is_some() {
+        let checked = check_program::check_closures(&program, &mut analysis);
+        expander.diagnostics.extend(checked);
+    }
     let mut unknown_modifiers = Vec::new();
     expander.diagnostics.retain(|diagnostic| {
         if !diagnostic.message.starts_with("unknown modifier macro `") {
@@ -3188,6 +3222,7 @@ impl MacroExpander {
                 })
                 .unwrap_or_default(),
             caller_location_spans: self.caller_location_spans.clone(),
+            check: None,
             next_syntax_id: self.next_syntax_id,
         }
     }
