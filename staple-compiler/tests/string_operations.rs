@@ -278,3 +278,27 @@ def main = () => {
     source.push_str("println \"ok\"\n}\nmain ()\n");
     assert_eq!(run(&lower(&source)), "ok\n");
 }
+
+// `String.join`'s receiver is `IntoIterator.Iter Iter`, which follows from the
+// `IntoIterator` bound. Importing `std.range` brings several `String`
+// iterators into scope, so the receiver must not be guessed from
+// `Iterator.Item == String` alone. The program avoids `std.io`, whose imports
+// happened to hide the ambiguity.
+#[cfg(unix)]
+#[test]
+fn join_resolves_iterator_through_into_iterator_projection() {
+    let lowered = lower(
+        r#"
+use std.range.range
+def expand = (move words: List<String>) => String :: String.join ", " words
+if (expand (List.of ("a", "b", "c")) != "a, b, c") { panic "join" }
+"#,
+    );
+    let output = execute(&lowered);
+    assert!(
+        output.status.success(),
+        "execution: {:?}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

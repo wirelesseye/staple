@@ -3846,72 +3846,92 @@ impl LoweredProgram {
                 bounds.push(bound.clone());
             }
         }
-        // Completion asks the implementation or structural catalogs for the
-        // associated argument. Declared bounds for the same trait are useful
-        // for evidence, but here their still-open hidden slot would compete
-        // with the concrete answer, so leave them out of this selection.
-        let context = TraitSelectionContext::new(self, Vec::new());
         for _ in 0..=bounds.len() {
+            let values =
+                self.associated_projection_values(&bounds, &environment.substitution_map());
             let before = environment.clone();
-            for bound in &bounds {
-                let Some(trait_metadata) = self.traits.get(bound.trait_id) else {
-                    continue;
-                };
-                let explicit = trait_metadata
-                    .parameters
-                    .len()
-                    .saturating_sub(trait_metadata.associated_types.len());
-                if !bound
-                    .arguments
-                    .iter()
-                    .skip(explicit)
-                    .any(contains_type_parameter)
-                {
-                    continue;
-                }
-                let map = environment.substitution_map();
-                let mut query = bound.arguments.clone();
-                for (index, argument) in query.iter_mut().enumerate() {
-                    *argument = if index < explicit {
-                        substitute_type(argument.clone(), &map)
-                    } else {
-                        CheckedType::Inferred
-                    };
-                }
-                if query
-                    .iter()
-                    .take(explicit)
-                    .any(|argument| contains_inferred_type(argument))
-                {
-                    continue;
-                }
-                let Some(completed) = context.resolve_obligation(bound.trait_id, &query) else {
-                    continue;
-                };
-                for (argument, value) in bound.arguments.iter().zip(&completed).skip(explicit) {
-                    if contains_type_parameter(value) || contains_inferred_type(value) {
-                        continue;
-                    }
-                    let template = substitute_type(argument.clone(), &map);
-                    let mut inferred = HashMap::new();
-                    if !infer_type_parameters(&template, value, &mut inferred) {
-                        continue;
-                    }
-                    for (id, value) in inferred {
-                        if contains_type_parameter(&value) || contains_inferred_type(&value) {
-                            continue;
-                        }
-                        environment.entries.entry(id).or_insert(SubstitutionEntry {
-                            source: SubstitutionSource::Inferred,
-                            value: SubstitutionValue::Type(value),
-                        });
-                    }
-                }
+            for (id, value) in values {
+                environment.entries.entry(id).or_insert(SubstitutionEntry {
+                    source: SubstitutionSource::Inferred,
+                    value: SubstitutionValue::Type(value),
+                });
             }
             if *environment == before {
                 break;
             }
         }
+    }
+
+    /// One pass of associated-type completion: the concrete values that the
+    /// bounds' associated slots take once their explicit arguments are known
+    /// under `map`. Only associated slots are completed; an explicit position
+    /// such as `Iterator (IntoIterator.Iter Iter) String`'s receiver is never
+    /// guessed from the catalog, which may hold several matching receivers.
+    /// Callers repeat the pass until it learns nothing new, since one bound's
+    /// completed slot can be another bound's explicit argument.
+    pub(super) fn associated_projection_values(
+        &self,
+        bounds: &[CheckedTraitBound],
+        map: &HashMap<TypeParameterId, CheckedType>,
+    ) -> Vec<(TypeParameterId, CheckedType)> {
+        // Completion asks the implementation or structural catalogs for the
+        // associated argument. Declared bounds for the same trait are useful
+        // for evidence, but here their still-open hidden slot would compete
+        // with the concrete answer, so leave them out of this selection.
+        let context = TraitSelectionContext::new(self, Vec::new());
+        let mut values = Vec::new();
+        for bound in bounds {
+            let Some(trait_metadata) = self.traits.get(bound.trait_id) else {
+                continue;
+            };
+            let explicit = trait_metadata
+                .parameters
+                .len()
+                .saturating_sub(trait_metadata.associated_types.len());
+            if !bound
+                .arguments
+                .iter()
+                .skip(explicit)
+                .any(contains_type_parameter)
+            {
+                continue;
+            }
+            let mut query = bound.arguments.clone();
+            for (index, argument) in query.iter_mut().enumerate() {
+                *argument = if index < explicit {
+                    substitute_type(argument.clone(), map)
+                } else {
+                    CheckedType::Inferred
+                };
+            }
+            if query
+                .iter()
+                .take(explicit)
+                .any(|argument| contains_inferred_type(argument))
+            {
+                continue;
+            }
+            let Some(completed) = context.resolve_obligation(bound.trait_id, &query) else {
+                continue;
+            };
+            for (argument, value) in bound.arguments.iter().zip(&completed).skip(explicit) {
+                if contains_type_parameter(value) || contains_inferred_type(value) {
+                    continue;
+                }
+                let template = substitute_type(argument.clone(), map);
+                let mut inferred = HashMap::new();
+                if !infer_type_parameters(&template, value, &mut inferred) {
+                    continue;
+                }
+                for (id, value) in inferred {
+                    if contains_type_parameter(&value) || contains_inferred_type(&value) {
+                        continue;
+                    }
+                    values.push((id, value));
+                }
+            }
+        }
+        values
     }
 
     /// Builds the resolved substitution environment for one request.
