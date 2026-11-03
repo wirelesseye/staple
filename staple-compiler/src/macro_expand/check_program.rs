@@ -14,6 +14,7 @@ use staple_syntax::{
 };
 
 use super::closure::{ItemId, MacroClosure, item_kind};
+use super::lower_quote::{QuoteLowering, TemplateTable};
 use super::{MacroAnalysis, MacroExpander, MacroKind};
 use crate::{ModuleId, NameResolver, Program, TypeChecker};
 
@@ -128,8 +129,11 @@ pub(crate) fn build_check_program(
     package: Option<PackageId>,
     macros: &[&CheckedMacro],
     next_syntax_id: &mut usize,
-) -> Program {
+) -> (Program, TemplateTable) {
     let dependencies = package_dependencies(program, package);
+    // The program's own package is checked by its closures. A dependency's
+    // macros are built with the dependency, so its package is checked whole.
+    let whole = package != program.package_of(program.entry());
     let wanted = macros
         .iter()
         .flat_map(|checked| checked.closure.items.iter().copied())
@@ -151,7 +155,7 @@ pub(crate) fn build_check_program(
     for module in program.modules() {
         let owner = program.package_of(module.id);
         let expanded = expanded_of(module.id);
-        if owner == package {
+        if owner == package && !whole {
             let mut positioned = std::mem::take(&mut own_items[module.id.0]);
             positioned.sort_by_key(|(position, _)| *position);
             let mut kept = Vec::new();
@@ -161,8 +165,16 @@ pub(crate) fn build_check_program(
                 }
             }
             items.push(kept);
-        } else if dependencies.contains(&owner) {
-            items.push(expanded.to_vec());
+        } else if owner == package || dependencies.contains(&owner) {
+            let mut kept = Vec::new();
+            for item in expanded {
+                if owner == package {
+                    convert_item(item, next_syntax_id, &mut kept);
+                } else {
+                    kept.push(item.clone());
+                }
+            }
+            items.push(kept);
         } else {
             items.push(Vec::new());
         }
@@ -188,12 +200,12 @@ pub(crate) fn build_check_program(
             match item {
                 Item::Submodule(submodule) => {
                     let mut submodule = submodule.clone();
-                    if owner == package {
+                    if owner == package && !whole {
                         submodule.module.items.clear();
                         kept.push(Item::Submodule(submodule));
                     }
                 }
-                Item::UseDeclaration(declaration) if owner == package => {
+                Item::UseDeclaration(declaration) if owner == package && !whole => {
                     let mut declaration = declaration.clone();
                     let target = program.imported_module(declaration.syntax.id);
                     if let Some(target) = target
@@ -207,7 +219,18 @@ pub(crate) fn build_check_program(
             }
         }
     }
-    program.with_module_items(items, *next_syntax_id)
+    let mut table = TemplateTable::default();
+    if let Some(syntax_module) = program.standard_library_syntax() {
+        let mut lowering = QuoteLowering {
+            syntax_module,
+            next_syntax_id,
+            table: &mut table,
+        };
+        for item in items.iter_mut().flatten() {
+            lowering.lower_item(item);
+        }
+    }
+    (program.with_module_items(items, *next_syntax_id), table)
 }
 
 /// The packages `package` depends on, transitively, and the package itself.
@@ -347,7 +370,8 @@ pub(crate) fn check_closures(program: &Program, analysis: &mut MacroAnalysis) ->
             .iter()
             .filter(|checked| program.package_of(checked.module) == package)
             .collect::<Vec<_>>();
-        let check = build_check_program(program, &snapshot, package, &macros, &mut next_syntax_id);
+        let (check, _templates) =
+            build_check_program(program, &snapshot, package, &macros, &mut next_syntax_id);
         // A package that holds only closure items does not meet the contract
         // the standard library has with the compiler, which is no finding.
         let partial = |diagnostic: &Diagnostic| {

@@ -609,6 +609,8 @@ impl MacroExpander {
         match item {
             Item::TraitImplementation(implementation) => {
                 self.names_parse_trait(module, &implementation.trait_name)
+                    || (Some(module) == self.syntax_module
+                        && implementation.trait_name.name == "Splice")
                     || implementation.arguments.iter().any(type_contains_syntax)
             }
             Item::ExternBlock(block) => {

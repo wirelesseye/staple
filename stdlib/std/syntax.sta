@@ -290,6 +290,14 @@ pub trait Parse T {
         let value = Parse.parse.<T> input?
         if (is_empty input) { Ok value } else { error_at (input; "unexpected syntax") }
     }
+    /// Parses the fragment of a `parse_quote`, which `__quote` builds from the
+    /// fragment's id and the syntax spliced into it, as a `T`. A fragment that is
+    /// not one fails the macro being expanded.
+    parse_quote: (U64; Sequence<Syntax>) -> T = (fragment; splices) =>
+        match (Parse.parse_all.<T> (__quote (fragment; splices))) {
+            Ok value => value,
+            ParseError (message) => compile_error message,
+        }
 }
 
 // Compiler building blocks for the implementations below. Like those
@@ -307,6 +315,59 @@ extern "staple-intrinsic" {
     __take_rest: mut ParseStream -> Syntax
     __offset: ParseStream -> USize
     __sequence_push: <T> (Sequence<T>; T) -> Sequence<T>
+}
+
+// Compiler building blocks for quotations. A quotation is checked as a call of
+// `__quote` (or `__parse_quote`) with the id of its fragment and the values it
+// splices, each turned into syntax by `Splice`.
+extern "staple-intrinsic" {
+    __quote: (U64; Sequence<Syntax>) -> Syntax
+    __splice_node: <T> T -> Syntax
+    __splice_join: <T> Sequence<T> -> Syntax
+}
+
+/// Syntax that a quotation can splice with `$name`.
+pub trait Splice T {
+    splice: T -> Syntax
+}
+
+impl Splice Syntax { splice = move value => value }
+impl Splice SyntaxNode { splice = move value => __splice_node.<SyntaxNode> value }
+impl Splice Expr { splice = move value => __splice_node.<Expr> value }
+impl Splice CallExpr { splice = move value => __splice_node.<CallExpr> value }
+impl Splice StringExpr { splice = move value => __splice_node.<StringExpr> value }
+impl Splice CharExpr { splice = move value => __splice_node.<CharExpr> value }
+impl Splice UnstructuredExpr { splice = move value => __splice_node.<UnstructuredExpr> value }
+impl Splice Type { splice = move value => __splice_node.<Type> value }
+impl Splice ProductType { splice = move value => __splice_node.<ProductType> value }
+impl Splice UnstructuredType { splice = move value => __splice_node.<UnstructuredType> value }
+impl Splice Pattern { splice = move value => __splice_node.<Pattern> value }
+impl Splice BindingPattern { splice = move value => __splice_node.<BindingPattern> value }
+impl Splice NominalPattern { splice = move value => __splice_node.<NominalPattern> value }
+impl Splice UnstructuredPattern { splice = move value => __splice_node.<UnstructuredPattern> value }
+impl Splice Item { splice = move value => __splice_node.<Item> value }
+impl Splice ModifiedItem { splice = move value => __splice_node.<ModifiedItem> value }
+impl Splice TypeDeclarationItem { splice = move value => __splice_node.<TypeDeclarationItem> value }
+impl Splice UnstructuredItem { splice = move value => __splice_node.<UnstructuredItem> value }
+impl Splice Modifier { splice = move value => __splice_node.<Modifier> value }
+impl Splice ModifierCall { splice = move value => __splice_node.<ModifierCall> value }
+impl Splice UnstructuredModifier { splice = move value => __splice_node.<UnstructuredModifier> value }
+impl Splice Visibility { splice = move value => __splice_node.<Visibility> value }
+impl Splice Comma { splice = move value => __splice_node.<Comma> value }
+impl Splice Equals { splice = move value => __splice_node.<Equals> value }
+impl Splice FatArrow { splice = move value => __splice_node.<FatArrow> value }
+impl Splice TypeParameter { splice = move value => __splice_node.<TypeParameter> value }
+impl Splice TypeParameters { splice = move value => __splice_node.<TypeParameters> value }
+impl Splice TypeBody { splice = move value => __splice_node.<TypeBody> value }
+impl<S where S <: String> Splice Ident<S> { splice = move value => __splice_node.<Ident<S>> value }
+impl<C> Splice Parenthesized<C> { splice = move value => __splice_node.<Parenthesized<C>> value }
+impl<C> Splice Bracketed<C> { splice = move value => __splice_node.<Bracketed<C>> value }
+impl<C> Splice Braced<C> { splice = move value => __splice_node.<Braced<C>> value }
+impl<C> Splice Angled<C> { splice = move value => __splice_node.<Angled<C>> value }
+// A sequence splices as its elements in order, which is what `$name...` needs.
+// The bound is what makes splicing a sequence of anything else a type error.
+impl<T where Splice T> Splice Sequence<T> {
+    splice = move items => __splice_join.<T> items
 }
 
 // Leaf syntax nodes: each consumes the longest node the grammar accepts from

@@ -7,6 +7,7 @@ use std::{
 
 mod check_program;
 mod closure;
+mod lower_quote;
 mod parse;
 mod scan;
 mod staged;
