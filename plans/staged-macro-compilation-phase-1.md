@@ -313,8 +313,8 @@ Update this section as you work (see "Rules for the implementor").
 | Task | Status | Commit | Notes |
 |---|---|---|---|
 | 1. Baseline snapshots | done | (this commit) | `scripts/compare-expansion.py` (`capture DIR`, `compare A B`) covers 232 inputs: the standard library's entry files, the corpus dump, the examples and the test fixtures. Two captures of the same binary compare equal. `scripts/bench-expansion.py` reproduces B1–B3. |
-| 2. Template macros | not started | | |
-| 3. Item index and closure scan | not started | | |
+| 2. Template macros | done | (this commit) | `macro_expand/templates.rs`: `template_parts` detects the curried body (quotation over parameters only, optionally ascribed, or a bare parameter; each overload separately) and `instantiate_template` binds the arguments and evaluates only the quotation. `MacroDefinition.is_template` records it and `MacroAnalysis.templates` exposes it. Argument conversion moved into `macro_argument_value`, shared with the general path. The corpus comparison shows no difference. |
+| 3. Item index and closure scan | done | (this commit) | `macro_expand/scan.rs` (reference scanner with local scopes, quotations kept apart, operators seen through `desugar_item`), `macro_expand/closure.rs` (`ClosureIndex`: units by syntax id, names by module with imports, renames, globs, re-exports, prelude and companion fallback, `impl` entries; `MacroClosure { items, macros_used }`). `SyntaxId` gained `Ord`. Closures are computed on demand, not for every macro on every run, because doing all of them cost about 80 ms on B1. |
 | 4. Stage-ordered expansion | not started | | |
 | 5. Cycle detection and inventory | not started | | |
 | 6. Break the standard library's cycles | not started | | |
@@ -352,6 +352,15 @@ These agree with the Phase 0 numbers (0.278, 0.289 and 0.712 s).
   expected when a standard-library file is expanded as an entry file, and its
   stderr is part of the snapshot, so it only counts as a difference if it
   changes.
+
+- **Template measurements.** B1–B3 do not use `while`, `for` or `discard`, so
+  they cannot show the template speed-up; they stayed within noise
+  (0.262, 0.275 and 0.707 s after task 2).
+- **Closure sizes (task 3).** On the real standard library the closure of
+  `while` is 15 items and of `for` 19, with no macro dependencies beyond the
+  built-in modifiers. `if` has 153 items and `when` 157, and both call `if`
+  and the derive macros through `String`. `derive_eq` has 188 items and
+  `typegroup` 308. That `if` reaches itself is the cycle Decision 7 expects.
 
 Still to record: the cycle inventory (task 5), the choice for `if` and
 `when` and its reason (Decision 7), every expansion difference from the

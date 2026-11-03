@@ -5,9 +5,13 @@ use std::{
     sync::Arc,
 };
 
+mod closure;
 mod parse;
+mod scan;
+mod templates;
 mod traits;
 
+use closure::{ClosureIndex, Lookup, MacroClosure};
 use crate::program::source_location_at;
 use crate::{FloatType, IntegerType, ModuleId, Program, ResolvedMacro};
 use parse::{ParseImpl, ParseTarget, SyntaxIntrinsic, TypeEnv};
@@ -97,6 +101,9 @@ struct MacroDefinition {
     parameters: Vec<MetaType>,
     result: MetaType,
     kind: MacroKind,
+    /// Whether this overload's body only fills in a quotation or returns a
+    /// parameter, so it can be instantiated without evaluating anything.
+    is_template: bool,
 }
 
 #[derive(Clone)]
@@ -991,6 +998,12 @@ pub(crate) struct MacroAnalysis {
     /// Macro-generated references mapped to the span of the outermost macro
     /// invocation that produced them.
     pub caller_location_spans: HashMap<SyntaxId, Span>,
+    /// What each macro needs to run, keyed by the syntax id of its declaration,
+    /// for the macros that were invoked.
+    pub closures: HashMap<SyntaxId, MacroClosure>,
+    /// The macro overloads whose body only fills in a quotation or returns a
+    /// parameter, by the syntax id of their declaration.
+    pub templates: HashSet<SyntaxId>,
     pub next_syntax_id: usize,
 }
 
@@ -2006,6 +2019,11 @@ struct MacroExpander {
     integer_namespaces: [Option<ModuleId>; 10],
     /// Every implementation of `Parse`, standard and user-written.
     parse_impls: Vec<ParseImpl>,
+    /// Every top-level item by syntax id, with the names it defines, the
+    /// names it refers to and the compile-time closure of each macro.
+    closure: ClosureIndex,
+    /// The closure of each macro whose invocation has needed one.
+    macro_closures: HashMap<closure::ItemId, MacroClosure>,
     trait_registry: traits::Registry,
     call_targets: HashMap<SyntaxId, CompileType>,
     call_target: Option<MetaType>,
@@ -2252,6 +2270,8 @@ impl MacroExpander {
                             }
                             result = MetaType::Item;
                         }
+                        let is_template = matches!(&kind, MacroKind::User(value)
+                            if templates::template_parts(value).is_some());
                         definitions.insert(
                             key.clone(),
                             MacroDefinition {
@@ -2261,6 +2281,7 @@ impl MacroExpander {
                                 parameters,
                                 result,
                                 kind,
+                                is_template,
                             },
                         );
                         let namespace = if declaration.modifier {
@@ -2870,23 +2891,48 @@ impl MacroExpander {
             }
         }
 
+        let use_kinds: HashMap<SyntaxId, UseKind> = program
+            .modules()
+            .iter()
+            .flat_map(|module| {
+                module.syntax.items.iter().filter_map(|item| match item {
+                    Item::UseDeclaration(declaration) => Some((
+                        declaration.syntax.id,
+                        provisional_use_kind(program, declaration),
+                    )),
+                    _ => None,
+                })
+            })
+            .collect();
+        let find_module = |dotted: &str| {
+            program
+                .modules()
+                .iter()
+                .find(|module| program.module_dotted_name(module.id).as_deref() == Some(dotted))
+                .map(|module| module.id)
+        };
+        let std_modules = StdModules {
+            ops: find_module("std.ops"),
+            try_: find_module("std.try"),
+            result: find_module("std.result"),
+            cmp: find_module("std.cmp"),
+            convert: find_module("std.convert"),
+            range: find_module("std.range"),
+            boolean: find_module("std.boolean"),
+        };
+        let closure = ClosureIndex::build(
+            program,
+            &use_kinds,
+            program.imported_modules(),
+            std_modules,
+        );
         let mut expander = Self {
             definitions,
             scopes,
             imported_modules: program.imported_modules().clone(),
-            use_kinds: program
-                .modules()
-                .iter()
-                .flat_map(|module| {
-                    module.syntax.items.iter().filter_map(|item| match item {
-                        Item::UseDeclaration(declaration) => Some((
-                            declaration.syntax.id,
-                            provisional_use_kind(program, declaration),
-                        )),
-                        _ => None,
-                    })
-                })
-                .collect(),
+            use_kinds,
+            closure,
+            macro_closures: HashMap::new(),
             child_modules: program.child_modules().clone(),
             parent_modules: program
                 .modules()
@@ -2970,8 +3016,32 @@ impl MacroExpander {
         expander
     }
 
-    fn analysis(&self) -> MacroAnalysis {
+    /// The compile-time closure of the macro declared by the item `id`.
+    fn macro_closure(&mut self, id: closure::ItemId) -> MacroClosure {
+        let templates = self
+            .definitions
+            .values()
+            .filter(|definition| definition.is_template)
+            .map(|definition| definition.declaration.syntax.id)
+            .collect::<HashSet<_>>();
+        let lookup = Lookup {
+            scopes: &self.scopes,
+            parents: &self.parent_modules,
+            companions: &self.companion_modules,
+        };
+        self.closure
+            .closure(&lookup, id, &|item| templates.contains(&item))
+    }
+
+    fn analysis(&mut self) -> MacroAnalysis {
         MacroAnalysis {
+            closures: self.macro_closures.clone(),
+            templates: self
+                .definitions
+                .values()
+                .filter(|definition| definition.is_template)
+                .map(|definition| definition.declaration.syntax.id)
+                .collect(),
             definitions: self
                 .definitions
                 .values()
@@ -5275,12 +5345,19 @@ impl MacroExpander {
         let MacroKind::User(body) = &definition.kind else {
             unreachable!("compiler-provided macros cannot be modifiers")
         };
+        let evaluated = if definition.is_template {
+            let mut values: Vec<Value> = argument.iter().cloned().collect();
+            values.push(Value::Syntax(SyntaxValue::Item(Box::new(item.clone()))));
+            self.instantiate_template(definition, values)
+        } else {
+            None
+        };
         let previous_context = if quote_result_type(&definition.result) {
             self.quote_context.replace(definition.result.clone())
         } else {
             self.quote_context.take()
         };
-        let evaluated = (|| {
+        let evaluated = evaluated.unwrap_or_else(|| (|| {
             let mut value =
                 self.eval_expression(definition.key.module, body, &mut Environment::new())?;
             if let Some(argument) = argument {
@@ -5291,7 +5368,7 @@ impl MacroExpander {
                 Value::Syntax(SyntaxValue::Item(Box::new(item))),
                 call_span,
             )
-        })();
+        })());
         self.quote_context = previous_context;
         let value = evaluated?;
         match value {
@@ -6411,6 +6488,15 @@ impl MacroExpander {
                 None
             }
             MacroKind::User(body) => {
+                if definition.is_template {
+                    let mut values = Vec::with_capacity(arguments.len());
+                    for (expected, argument) in definition.parameters.iter().zip(arguments.iter()) {
+                        values.push(self.macro_argument_value(expected, argument.clone())?);
+                    }
+                    if let Some(instantiated) = self.instantiate_template(definition, values) {
+                        return self.macro_result_value(definition, instantiated?);
+                    }
+                }
                 let previous_context = if quote_result_type(&definition.result) {
                     self.quote_context.replace(definition.result.clone())
                 } else {
@@ -6420,116 +6506,99 @@ impl MacroExpander {
                     let mut value =
                         self.eval_expression(definition.key.module, body, &mut Environment::new())?;
                     for (expected, argument) in definition.parameters.iter().zip(arguments) {
-                        let argument = match argument {
-                            MacroArgument::Parsed(argument) => {
-                                value = self.apply_value(value, argument, call_span.clone())?;
-                                continue;
-                            }
-                            // A product parameter receives a parenthesized,
-                            // comma-separated argument as a product of syntax.
-                            MacroArgument::Expression(argument)
-                                if matches!(expected, MetaType::Product(_)) =>
-                            {
-                                let argument = match_syntax_fragment(
-                                    expected,
-                                    argument.syntax(),
-                                    &mut self.next_syntax_id,
-                                )?;
-                                value = self.apply_value(value, argument, call_span.clone())?;
-                                continue;
-                            }
-                            MacroArgument::Expression(argument) => {
-                                self.meta_argument_value(expected, &argument)?
-                            }
-                            MacroArgument::Visibility(visibility) => {
-                                SyntaxValue::Visibility(visibility)
-                            }
-                            MacroArgument::Metadata(metadata) => {
-                                value = self.apply_value(
-                                    value,
-                                    Value::Product(
-                                        vec![
-                                            (
-                                                Some("modifiers".to_owned()),
-                                                Value::Sequence(
-                                                    metadata
-                                                        .modifiers
-                                                        .iter()
-                                                        .enumerate()
-                                                        .map(|(index, invocation)| {
-                                                            Value::Syntax(SyntaxValue::Modifier(
-                                                                OpaqueModifier {
-                                                                    invocation: invocation.clone(),
-                                                                    enclosing: (index == 0).then(
-                                                                        || metadata.syntax.clone(),
-                                                                    ),
-                                                                },
-                                                            ))
-                                                        })
-                                                        .collect(),
-                                                ),
-                                            ),
-                                            (
-                                                Some("visibility".to_owned()),
-                                                Value::Syntax(SyntaxValue::Visibility(
-                                                    metadata.visibility,
-                                                )),
-                                            ),
-                                        ]
-                                        .into(),
-                                        false,
-                                    ),
-                                    call_span.clone(),
-                                )?;
-                                continue;
-                            }
-                            MacroArgument::Sequence(arguments) => {
-                                let MetaType::Sequence(element) = expected else {
-                                    return None;
-                                };
-                                let values = arguments
-                                    .iter()
-                                    .map(|argument| {
-                                        self.meta_argument_value(element, argument)
-                                            .map(Value::Syntax)
-                                    })
-                                    .collect::<Option<Vec<_>>>()?;
-                                value = self.apply_value(
-                                    value,
-                                    Value::Sequence(values.into()),
-                                    call_span.clone(),
-                                )?;
-                                continue;
-                            }
-                        };
-                        value =
-                            self.apply_value(value, Value::Syntax(argument), call_span.clone())?;
+                        let argument = self.macro_argument_value(expected, argument)?;
+                        value = self.apply_value(value, argument, call_span.clone())?;
                     }
                     Some(value)
                 })();
                 self.quote_context = previous_context;
-                match evaluated? {
-                    Value::Syntax(syntax) => Some(syntax),
-                    Value::Sequence(values)
-                        if matches!(definition.result, MetaType::Sequence(_)) =>
-                    {
-                        values
-                            .into_iter()
-                            .map(|value| match value {
-                                Value::Syntax(SyntaxValue::Item(item)) => Some(*item),
-                                _ => None,
-                            })
-                            .collect::<Option<Vec<_>>>()
-                            .map(SyntaxValue::Items)
-                    }
-                    _ => {
-                        self.diagnostics.push(Diagnostic::new(
-                            definition.declaration.syntax.span.clone(),
-                            format!("macro `{}` did not return `Syntax`", definition.key.name),
-                        ));
-                        None
-                    }
-                }
+                self.macro_result_value(definition, evaluated?)
+            }
+        }
+    }
+
+    fn macro_result_value(
+        &mut self,
+        definition: &MacroDefinition,
+        value: Value,
+    ) -> Option<SyntaxValue> {
+        match value {
+            Value::Syntax(syntax) => Some(syntax),
+            Value::Sequence(values) if matches!(definition.result, MetaType::Sequence(_)) => values
+                .into_iter()
+                .map(|value| match value {
+                    Value::Syntax(SyntaxValue::Item(item)) => Some(*item),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(SyntaxValue::Items),
+            _ => {
+                self.diagnostics.push(Diagnostic::new(
+                    definition.declaration.syntax.span.clone(),
+                    format!("macro `{}` did not return `Syntax`", definition.key.name),
+                ));
+                None
+            }
+        }
+    }
+
+    /// Converts one matched macro argument into the value its parameter binds.
+    fn macro_argument_value(
+        &mut self,
+        expected: &MetaType,
+        argument: MacroArgument,
+    ) -> Option<Value> {
+        match argument {
+            MacroArgument::Parsed(argument) => Some(argument),
+            // A product parameter receives a parenthesized, comma-separated
+            // argument as a product of syntax.
+            MacroArgument::Expression(argument) if matches!(expected, MetaType::Product(_)) => {
+                match_syntax_fragment(expected, argument.syntax(), &mut self.next_syntax_id)
+            }
+            MacroArgument::Expression(argument) => self
+                .meta_argument_value(expected, &argument)
+                .map(Value::Syntax),
+            MacroArgument::Visibility(visibility) => {
+                Some(Value::Syntax(SyntaxValue::Visibility(visibility)))
+            }
+            MacroArgument::Metadata(metadata) => Some(Value::Product(
+                vec![
+                    (
+                        Some("modifiers".to_owned()),
+                        Value::Sequence(
+                            metadata
+                                .modifiers
+                                .iter()
+                                .enumerate()
+                                .map(|(index, invocation)| {
+                                    Value::Syntax(SyntaxValue::Modifier(OpaqueModifier {
+                                        invocation: invocation.clone(),
+                                        enclosing: (index == 0).then(|| metadata.syntax.clone()),
+                                    }))
+                                })
+                                .collect(),
+                        ),
+                    ),
+                    (
+                        Some("visibility".to_owned()),
+                        Value::Syntax(SyntaxValue::Visibility(metadata.visibility)),
+                    ),
+                ]
+                .into(),
+                false,
+            )),
+            MacroArgument::Sequence(arguments) => {
+                let MetaType::Sequence(element) = expected else {
+                    return None;
+                };
+                let values = arguments
+                    .iter()
+                    .map(|argument| {
+                        self.meta_argument_value(element, argument)
+                            .map(Value::Syntax)
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(Value::Sequence(values.into()))
             }
         }
     }

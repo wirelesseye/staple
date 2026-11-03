@@ -20634,3 +20634,58 @@ def inspect = value: Result<String, FsError | InvalidUtf8> => I32 :: match value
     let context = Context::create();
     CodeGenerator::new(&context).compile_root(&lower(&module)).expect("filesystem residuals lower");
 }
+
+/// Expands `source` and renders the entry module, as `staple expand` does.
+fn expanded_text(source: &str) -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(&with_syntax_imports(source), root)
+        .expect("source should load");
+    let program = staple_compiler::expand_macros(program).expect("source should expand");
+    staple_compiler::render_expanded_module(&program).expect("expansion should render")
+}
+
+#[test]
+fn template_macros_expand_like_macros_that_evaluate_first() {
+    // The second macro is not a template (a `let` precedes the quotation) but
+    // builds the same syntax, so both calls must render identically.
+    let template = expanded_text(concat!(
+        "macro pair = (left: Expr; right: Expr) => parse_quote { ($left, $right) }\n",
+        "let value = pair 1 2\n",
+    ));
+    let evaluated = expanded_text(concat!(
+        "macro pair = (left: Expr; right: Expr) => {\n",
+        "    let kept = left\n",
+        "    parse_quote { ($kept, $right) }\n",
+        "}\n",
+        "let value = pair 1 2\n",
+    ));
+    let call = |text: &str| text.lines().find(|line| line.contains("value")).unwrap().to_owned();
+    assert_eq!(call(&template), call(&evaluated));
+}
+
+#[test]
+fn template_macros_keep_hygiene() {
+    // A binding the template introduces must not capture the caller's name.
+    let text = expanded_text(concat!(
+        "macro with_tmp = body: Expr => parse_quote { { let tmp = 1\n $body } }\n",
+        "let tmp = 10\n",
+        "let result = with_tmp tmp\n",
+    ));
+    let line = text
+        .lines()
+        .find(|line| line.contains("let tmp__macro"))
+        .unwrap_or_else(|| panic!("the template's binding should be renamed:\n{text}"));
+    assert!(!line.contains("let tmp ="), "{line}");
+}
+
+#[test]
+fn template_modifiers_return_their_parameter() {
+    let text = expanded_text(concat!(
+        "macro @same = item => item\n",
+        "@same\n",
+        "pub let answer = 42\n",
+    ));
+    assert!(text.contains("pub let answer = 42"), "{text}");
+}

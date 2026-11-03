@@ -8,7 +8,7 @@ pub struct SourceLocation {
     pub column: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SyntaxId(pub usize);
 
 impl SyntaxId {
