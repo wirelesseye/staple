@@ -322,7 +322,7 @@ Update this section as you work (see "Rules for the implementor").
 | 2. Typed quotation lowering | done | see git log | `macro_expand/lower_quote.rs`, `Splice`, `__quote` and `Parse.parse_quote` in `std.syntax`. `parse_quote` is a `Parse` trait member, not a free function (Findings, group 7). No splice of a non-syntax value was found that needs a `Splice` impl. |
 | 3. Check driver | done | see git log | `STAPLE_CHECK_MACRO_CLOSURES` and `scripts/check-macro-closures.py`. Cost measured on one input only (Measurements). |
 | 4. Gap inventory | partly done | see git log | Groups 1–9 below. The corpus run covered the standard library and fixtures only (40 inputs); the full corpus was not run. |
-| 5. Close the gaps | partly done | see git log | Groups 3–6 fixed. Groups 1, 2, 8 and 9 are open; groups 1, 2 and 8 are assigned to Phase 3, group 9 is open (no target yet). |
+| 5. Close the gaps | partly done | see git log | Groups 3–6 fixed and group 1 mostly fixed (264 diagnostics left, from about 800). Groups 2, 8 and 9 and the rest of group 1 are open; 2 is assigned to Phase 3, 8 to Phase 4, 9 has no target. |
 | 6. Static check after expansion | not started | | |
 | 7. Compile-time effects | decided, not enforced | see git log | Documented in `Staple.md` ("Compile-time effects"). |
 | 8. Check in the test suite | not started | | Not possible until the closures check clean: every check program contains the standard library, so one open gap fails every test. |
@@ -386,18 +386,25 @@ three-line program, which checks every standard-library macro, unless noted.
 Most diagnostics in a group have one cause, so the counts show size, not the
 number of defects.
 
-1. **Syntax types are opaque in the real front end. Open; Phase 3.** The
-   resolver registers `Sequence`, `Ident`, `Expr`, `Item`, `TypeBody` and the
-   rest of `std.syntax` as `BuiltinType::Syntax`. Patterns such as
-   `Sequence (first, rest)`, `TypeDeclarationItem (…)`, `WrapperBody (_, r)` and
-   `Ident<"else">` then fail: `the type of `Sequence` is not available here`
-   (about 150), `nominal pattern `Sequence` cannot match `Sequence<…>``
-   (about 50), `unreachable match arm` and `non-exhaustive match` (about 170),
-   and the unbound names that follow (`first`, `rest`, `fields`, …). About 30
-   macros are hit; every standard-library macro that destructures syntax is.
-   Resolution: declare these as ordinary types with a handle representation and
-   remove `BuiltinType::Syntax`, which is Phase 3 work, since it needs the
-   runtime representation. Not fixable in this phase without inventing one.
+1. **Syntax types are opaque in the real front end. Partly fixed; the rest is
+   Phase 3.** The resolver registers the `std.syntax` types as
+   `BuiltinType::Syntax`, which the checker treats as opaque handles, so
+   patterns such as `Sequence (first, rest)` failed (about 800 diagnostics on
+   the standard library). In the check program only the handle types (`Syntax`
+   and the `Unstructured*` types) stay opaque; the data types are ordinary
+   types, and three front-end changes make macro code on them check:
+   a `@recursive_constructor` type may refer to itself directly (the
+   self-reference is a stand-in, as for recursion through `Shared`); a product
+   pattern written against a wrapper of a sum selects the alternative of its
+   width (`Sequence (first, rest)`), in binding, checking and coverage; and a
+   binding whose type is a stand-in is unfolded before it is matched. None of
+   this runs for ordinary programs, which never see these types. That left 264
+   diagnostics. What remains in this group: `cyclic type definition involving
+   `Expr`` (a sum alias that is part of a recursive constructor cycle:
+   `Expr` → `CallExpr` → `Expr`), `the type of `visibility` is not available
+   here`, and `no trait implementation or matching bound is available` (about
+   80, mostly on `Sequence`/`Option` of syntax types, not yet traced). Phase 3
+   still has to give the types a handle representation.
 2. **`impl` targets the front end rejects. Open; Phase 3.** `trait
    implementation target must be fully concrete` for the `Parse` impls on
    variadic products (`(H; ...T)`, `(H, ...T)`) and on `Ident<S>`. These impls

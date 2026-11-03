@@ -1880,6 +1880,8 @@ pub struct NameResolver {
     /// Set for a program whose macros are already expanded, with the next free
     /// syntax identity.
     pre_expanded: Option<usize>,
+    /// Whether the syntax data types are checked as ordinary types.
+    ordinary_syntax_types: bool,
 }
 
 impl NameResolver {
@@ -1951,11 +1953,14 @@ impl NameResolver {
     ) -> Result<(ResolvedModule, Vec<Diagnostic>), Vec<Diagnostic>> {
         let (mut program, mut macro_analysis, expansion_diagnostics) =
             match self.pre_expanded.take() {
-                Some(next_syntax_id) => (
-                    program,
-                    crate::macro_expand::MacroAnalysis::expanded(next_syntax_id),
-                    Vec::new(),
-                ),
+                Some(next_syntax_id) => {
+                    self.ordinary_syntax_types = true;
+                    (
+                        program,
+                        crate::macro_expand::MacroAnalysis::expanded(next_syntax_id),
+                        Vec::new(),
+                    )
+                }
                 None => crate::macro_expand::expand_program_recovering(program, recovering)?,
             };
         let mut reported = None;
@@ -2623,6 +2628,21 @@ impl NameResolver {
             "Syntax",
             "SyntaxNode",
         ] {
+            // Checking macro code as ordinary code, only the handle types are
+            // opaque; the rest are data types like any other.
+            if self.ordinary_syntax_types
+                && !matches!(
+                    name,
+                    "Syntax"
+                        | "UnstructuredExpr"
+                        | "UnstructuredType"
+                        | "UnstructuredModifier"
+                        | "UnstructuredItem"
+                        | "UnstructuredPattern"
+                )
+            {
+                continue;
+            }
             self.register_builtin_type(syntax, "std.syntax", name, BuiltinType::Syntax);
         }
 
@@ -2671,7 +2691,10 @@ impl NameResolver {
         }
 
         for (id, declaration) in &self.type_declarations {
-            if declaration.recursive_constructor && !self.recursive_constructions.contains_key(id) {
+            if declaration.recursive_constructor
+                && !self.ordinary_syntax_types
+                && !self.recursive_constructions.contains_key(id)
+            {
                 self.diagnostics.push(Diagnostic::new(
                     declaration.syntax.span.clone(),
                     "`@recursive_constructor` may only mark a compiler-owned recursive constructor",

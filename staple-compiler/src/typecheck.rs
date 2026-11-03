@@ -10987,6 +10987,7 @@ impl TypeChecker {
                     }
                     return;
                 }
+                let original = &self.unfold_self_reference(module, original);
                 let value_type = if matches!(binding.ty, Type::Inferred(_)) {
                     original.clone()
                 } else {
@@ -11051,7 +11052,10 @@ impl TypeChecker {
                     CheckedType::Wrapper {
                         id, representation, ..
                     } if *id == expected_id => {
-                        self.bind_pattern_types(module, &pattern.argument, representation);
+                        let representation = self.unfold_self_reference(module, representation);
+                        let representation =
+                            narrow_to_product_alternative(&representation, &pattern.argument);
+                        self.bind_pattern_types(module, &pattern.argument, &representation);
                     }
                     CheckedType::Error => {}
                     other => self.diagnostics.push(Diagnostic::new(
@@ -16414,6 +16418,9 @@ impl TypeChecker {
                     _ => None,
                 };
                 if let Some(representation) = representation {
+                    let representation = self.unfold_self_reference(module, &representation);
+                    let representation =
+                        narrow_to_product_alternative(&representation, &pattern.argument);
                     self.check_match_pattern(module, &pattern.argument, &representation);
                 } else if *value_type != CheckedType::Error {
                     self.diagnostics.push(Diagnostic::new(
@@ -16519,6 +16526,15 @@ impl TypeChecker {
                             sum.alternatives.iter().position(
                                 |alternative| matches!(alternative, CheckedType::Wrapper { id: alternative_id, .. } if *alternative_id == id),
                             )
+                        })
+                        .into_iter()
+                        .collect(),
+                    CoveragePattern::Pattern(Pattern::Product(product)) => sum
+                        .alternatives
+                        .iter()
+                        .position(|alternative| {
+                            matches!(alternative, CheckedType::Product(value)
+                                if value.position_count() == product.elements.len())
                         })
                         .into_iter()
                         .collect(),
@@ -16834,6 +16850,14 @@ impl TypeChecker {
                     _ => return None,
                 };
                 let mut result = vec![head];
+                result.extend_from_slice(&row[1..]);
+                return Some(result);
+            }
+            CheckedType::Product(value)
+                if matches!(first, CoveragePattern::Pattern(Pattern::Product(product))
+                    if product.elements.len() == value.position_count()) =>
+            {
+                let mut result = vec![first];
                 result.extend_from_slice(&row[1..]);
                 return Some(result);
             }
@@ -20683,7 +20707,9 @@ impl TypeChecker {
         started_at: usize,
     ) -> Option<CheckedType> {
         let kind = declaration.kind();
-        if self.recursive_construction_depth <= started_at
+        // A type marked `@recursive_constructor` is a handle to syntax, so it
+        // may refer to itself directly.
+        if (self.recursive_construction_depth <= started_at && !declaration.recursive_constructor)
             || !matches!(kind, TypeDeclarationKind::Wrapper | TypeDeclarationKind::From)
         {
             return None;
@@ -20744,6 +20770,26 @@ impl TypeChecker {
                 arguments,
             },
         }
+    }
+
+    /// A recursive type's self-reference stand-in, replaced by the type with
+    /// its representation. Anything else is returned as it is.
+    fn unfold_self_reference(&mut self, module: &ResolvedModule, value_type: &CheckedType) -> CheckedType {
+        if let CheckedType::Wrapper {
+            id,
+            arguments,
+            representation,
+            ..
+        } = value_type
+            && matches!(representation.as_ref(), CheckedType::Opaque { id: opaque, .. } if opaque == id)
+            && !self.resolving_named_types.contains_key(id)
+        {
+            let unfolded = self.instantiate_type_declaration(module, *id, arguments.clone());
+            if matches!(unfolded, CheckedType::Wrapper { .. }) {
+                return unfolded;
+            }
+        }
+        value_type.clone()
     }
 
     fn instantiate_type_declaration(
@@ -21383,6 +21429,22 @@ impl TypeChecker {
             self.resolved_named_types.insert(id, value_type.clone());
         }
         value_type
+    }
+}
+
+/// A product pattern written against a wrapper of a sum selects the
+/// alternative that is a product of the pattern's width, as `Sequence (first,
+/// rest)` does for `Sequence<T>`.
+fn narrow_to_product_alternative(representation: &CheckedType, pattern: &Pattern) -> CheckedType {
+    let (CheckedType::Sum(sum), Pattern::Product(product)) = (representation, pattern) else {
+        return representation.clone();
+    };
+    let mut matching = sum.alternatives.iter().filter(|alternative| {
+        matches!(alternative, CheckedType::Product(value) if value.position_count() == product.elements.len())
+    });
+    match (matching.next(), matching.next()) {
+        (Some(alternative), None) => alternative.clone(),
+        _ => representation.clone(),
     }
 }
 
