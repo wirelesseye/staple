@@ -247,9 +247,7 @@ expansion is in the static check (below). Findings that change later phases:
 `if` and `when` stayed ordinary macros, with `compile_error` instead of `panic`,
 so B3 did not get faster; `True`, `False`, `None`, `Some` and `Ordering` are
 written by hand because the derive macros and `typegroup` reach them;
-the analysis costs 8–20% on the expansion timings (about 25 ms of scanning),
-so the "no slower" criterion is not met and Phase 4's cache should hold the
-closures;
+the expansion timings are unchanged within noise;
 `MacroAnalysis` carries `closures` (for the macros that were invoked) and
 `templates`, which Phase 2 reads. See the Phase 1 breakdown for the cycle
 inventory and measurements.

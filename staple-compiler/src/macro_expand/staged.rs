@@ -387,30 +387,23 @@ impl MacroExpander {
                     expanded.group.first(),
                     Some(Item::Binding(binding)) if binding_is_compile_time_helper(binding)
                 );
-            self.finish_unit_output(module, id, expanded, complete, false);
+            self.finish_unit_output(id, expanded, complete, false);
         }
         output
     }
 
     /// Records the result of expanding `id` and refreshes what depends on it.
     fn finish_unit(&mut self, module: ModuleId, id: ItemId, expanded: Expanded, complete: bool) {
-        self.finish_unit_output(module, id, expanded, complete, true);
+        self.finish_unit_output(id, expanded, complete, true);
     }
 
     fn finish_unit_output(
         &mut self,
-        module: ModuleId,
         id: ItemId,
         expanded: Expanded,
         complete: bool,
         keep_output: bool,
     ) {
-        // The interpreter reads bindings, trait declarations and implementations
-        // from its own tables, so point them at the expanded forms.
-        for item in expanded.group.iter() {
-            self.refresh_helper(item);
-            self.trait_registry.refresh(module, item);
-        }
         let introduced = self
             .closure
             .record_expansion(id, expanded.group.clone(), complete);
@@ -535,34 +528,16 @@ impl MacroExpander {
         true
     }
 
-    /// Points every scope's helper entry for `item` at its expanded binding.
-    fn refresh_helper(&mut self, item: &Item) {
-        // Only functions: a `const` expands to its folded value, which names
-        // intrinsics relative to its own hygiene rather than to the module the
-        // interpreter evaluates it in.
-        let Item::Binding(binding) = item else {
-            return;
-        };
-        if binding.kind != BindingKind::Def {
-            return;
-        }
-        let binding = Rc::new(binding.clone());
-        self.latest_bindings
-            .insert(binding.syntax.id, binding.clone());
-        let Some(slots) = self.helper_slots.get(&binding.syntax.id) else {
-            return;
-        };
-        for (scope, name) in slots {
-            if let Some(helper) = self.scopes[*scope].helpers.get_mut(name) {
-                helper.binding = binding.clone();
-            }
-        }
-    }
-
     /// `binding` with its macros expanded. A function the interpreter reaches
     /// through a name or a method that the closure scan could not resolve is
     /// expanded here, when it is first called.
     pub(super) fn expanded_binding(&mut self, binding: Rc<Binding>) -> Rc<Binding> {
+        // Only functions: a `const` expands to its folded value, which names
+        // intrinsics relative to its own hygiene rather than to the module the
+        // interpreter evaluates it in.
+        if binding.kind != BindingKind::Def {
+            return binding;
+        }
         if let Some(latest) = self.latest_bindings.get(&binding.syntax.id) {
             return latest.clone();
         }
@@ -570,10 +545,27 @@ impl MacroExpander {
             return binding;
         };
         let _ = self.ensure_expanded(unit, None);
-        self.latest_bindings
-            .get(&binding.syntax.id)
-            .cloned()
-            .unwrap_or(binding)
+        let id = binding.syntax.id;
+        let complete = self
+            .closure
+            .items
+            .get(&unit)
+            .is_some_and(|indexed| indexed.expanded);
+        let found = self
+            .closure
+            .group_of(unit)
+            .iter()
+            .find_map(|item| match item {
+                Item::Binding(found) if found.syntax.id == id => Some(Rc::new(found.clone())),
+                _ => None,
+            });
+        match found {
+            Some(found) if complete => {
+                self.latest_bindings.insert(id, found.clone());
+                found
+            }
+            _ => binding,
+        }
     }
 }
 

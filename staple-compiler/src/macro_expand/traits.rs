@@ -55,61 +55,45 @@ impl MacroExpander {
         key: &TraitKey,
     ) -> Option<staple_syntax::TraitDeclaration> {
         let declaration = self.trait_registry.declarations.get(key)?.clone();
-        if let Some(unit) = self.closure.unit_of(declaration.syntax.id) {
-            let _ = self.ensure_expanded(unit, None);
-            return self.trait_registry.declarations.get(key).cloned();
-        }
-        Some(declaration)
+        let id = declaration.syntax.id;
+        let Some(unit) = self.closure.unit_of(id) else {
+            return Some(declaration);
+        };
+        let _ = self.ensure_expanded(unit, None);
+        let expanded = self
+            .closure
+            .group_of(unit)
+            .iter()
+            .find_map(|item| match plain_item(item) {
+                Item::TraitDeclaration(found) if found.syntax.id == id => Some(found.clone()),
+                _ => None,
+            });
+        Some(expanded.unwrap_or(declaration))
     }
 
     /// `implementation` with the macros in its members expanded.
-    pub(super) fn expanded_impl(&mut self, implementation: TraitImpl) -> TraitImpl {
+    pub(super) fn expanded_impl(&mut self, mut implementation: TraitImpl) -> TraitImpl {
         let id = implementation.declaration.syntax.id;
         let Some(unit) = self.closure.unit_of(id) else {
             return implementation;
         };
         let _ = self.ensure_expanded(unit, None);
-        self.trait_registry
-            .impl_slots
-            .get(&id)
-            .and_then(|(key, index)| self.trait_registry.implementations.get(key)?.get(*index))
-            .cloned()
-            .unwrap_or(implementation)
+        let expanded = self
+            .closure
+            .group_of(unit)
+            .iter()
+            .find_map(|item| match plain_item(item) {
+                Item::TraitImplementation(found) if found.syntax.id == id => Some(found.clone()),
+                _ => None,
+            });
+        if let Some(expanded) = expanded {
+            implementation.declaration = expanded;
+        }
+        implementation
     }
 }
 
 impl Registry {
-    /// Replaces the written form of an expanded item with the expanded one, so
-    /// the interpreter runs expanded code.
-    pub(super) fn refresh(&mut self, module: ModuleId, item: &Item) {
-        match plain_item(item) {
-            Item::TraitDeclaration(declaration) => {
-                if let Some(slot) = self
-                    .declarations
-                    .get_mut(&TraitKey(module, declaration.name.clone()))
-                {
-                    *slot = declaration.clone();
-                }
-            }
-            Item::Binding(binding) => {
-                if let Some(index) = self.companion_slots.get(&binding.syntax.id) {
-                    self.companions[*index].binding = Rc::new(binding.clone());
-                }
-            }
-            Item::TraitImplementation(implementation) => {
-                if let Some((key, index)) = self.impl_slots.get(&implementation.syntax.id)
-                    && let Some(slot) = self
-                        .implementations
-                        .get_mut(key)
-                        .and_then(|list| list.get_mut(*index))
-                {
-                    slot.declaration = implementation.clone();
-                }
-            }
-            _ => {}
-        }
-    }
-
     pub(super) fn companion_member_exists(&self, name: &str) -> bool {
         self.companions
             .iter()

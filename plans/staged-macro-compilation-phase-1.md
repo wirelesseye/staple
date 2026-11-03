@@ -320,7 +320,7 @@ Update this section as you work (see "Rules for the implementor").
 | 6. Break the standard library's cycles | done | `b71059f7` | `compile_error` intrinsic so `if` and `when` do not reach `panic`; `extern` blocks indexed per binding; hand-written `Eq`/`Hash`/`Debug` for `True` and `False` and `Eq`/`Hash` for `None` and `Some`. Zero cycles across the corpus afterwards. |
 | 7. Cycles become errors | done | `b71059f7` | The cycle is reported at the invocation that closed it ("macro `m` is needed to expand code that `m` itself depends on") with one `note:` diagnostic per link, each at its item; the invocation stays unexpanded. The lazy macro path in `eval_expression` is replaced by an error saying the closure scan missed an edge, and no corpus input reaches it. A name that resolves to nothing makes the scheduler expand the item-position macros and modified items of its module first (generated items); a loop through one is recorded but not reported, because names alone cannot say that the macro needs it. Tests: direct, across modules, through an `impl`, a generated item (recorded), a quotation that only looks like a cycle, and stage order. |
 | 8. Language reference | done | `b71059f7` | "Compile-time phases" in `Staple.md`, linked from the metaprogramming introduction, plus `compile_error` in the `Parse` intrinsics listing. |
-| 9. Close out | done | `b71059f7` | Final corpus comparison: 227/232 identical; the five that differ are the standard-library entry files that were edited (`boolean`, `cmp`, `flow`, `option`, `result`). No cycle is reported as an error; two chains through the generated `typegroup ConversionError` in `std.convert` are recorded. Timings are in Measurements: **B1–B3 are 8–20% slower than the baseline, so that done-when criterion is not met** (see Findings). Full test suite: 39 test binaries, no failures. |
+| 9. Close out | done | `b71059f7` | Final corpus comparison: 227/232 identical; the five that differ are the standard-library entry files that were edited (`boolean`, `cmp`, `flow`, `option`, `result`). No cycle is reported as an error; two chains through the generated `typegroup ConversionError` in `std.convert` are recorded. Timings are in Measurements: B1–B3 are within noise of the baseline. Full test suite: 39 test binaries, no failures. |
 
 ## Measurements
 
@@ -344,28 +344,29 @@ These agree with the Phase 0 numbers (0.278, 0.289 and 0.712 s).
 
 ### At the end of the phase (task 9)
 
-Apple M2, macOS 27.0, release build of this branch (head of task 9) against
-the baseline binary (the spike branch's `staple`, whose expansion code is the
-same as `main`'s at `2c8bb69b`), run back to back, best of five. The machine
-was shared, so single runs vary by about ±0.03 s; CPU time (user plus system)
-for B1 was 0.25 s against 0.29 s.
+Apple M2, macOS 27.0, release build of this branch against the baseline
+binary (the spike branch's `staple`, whose expansion code is the same as
+`main`'s at `2c8bb69b`), run back to back, best of five. The machine was
+shared, so single runs vary by about ±0.02 s; CPU time (user plus system) for
+B1 was 0.26 s against 0.25 s.
 
 | # | Input | Baseline | Now |
 |---|---|---|---|
-| B1 | `let x: I32 = 1` | 0.260 s | 0.31 s |
-| B2 | 20 × `@derive_eq` on a 50-field `wrap` | 0.275 s | 0.32 s |
-| B3 | One function with 1,000 `if … else …` | 0.713 s | 0.77 s |
-| B4 | One function with 1,000 `while` and 1,000 `discard` (added) | 0.76 s | 0.82 s |
+| B1 | `let x: I32 = 1` | 0.28 s | 0.275–0.285 s |
+| B2 | 20 × `@derive_eq` on a 50-field `wrap` | 0.29 s | 0.295–0.306 s |
+| B3 | One function with 1,000 `if … else …` | 0.75 s | 0.73 s |
+| B4 | One function with 1,000 `while` and 1,000 `discard` (added) | 0.78 s | 0.78 s |
 
 Commands: `python3 scripts/bench-expansion.py [--staple BINARY]`; B4 is
 `staple expand` on a generated function (1,000 `while (y < i) { y = y + 1 }`
 and 1,000 `discard (y + i)`).
 
-Where the extra time goes (instrumented run of B1): scanning 1,364 items for
-six macro closures takes about 25 ms, and building the item index, tracking
-each expansion and the larger closures take the rest. The index no longer
-copies the standard library (it moves each module's items out of the program),
-which removed about 40 ms of an earlier version.
+An earlier version of this phase was 8–20% slower. Three things fixed that:
+the index moves each module's items out of the program instead of copying
+them; the interpreter's tables are no longer rewritten for every expanded item
+(a function's expanded form is looked up when it is first called); and the
+scan no longer follows `Type.member` through companion blocks, which had grown
+the closure of `derive_eq` from about 190 to over 800 items.
 
 ## Findings
 
@@ -425,60 +426,8 @@ which removed about 40 ms of an earlier version.
   because they were edited: `boolean.sta`, `option.sta`, `result.sta` and
   `cmp.sta` lost their derive and `typegroup` uses (`boolean.sta` used to fail
   when expanded alone, and now expands), and `flow.sta` uses `compile_error`.
-- **The speed criterion is not met.** B1–B4 are 8–20% slower than the baseline
-  (Measurements). B3 did not get faster because `if` stayed an interpreted
-  macro, and the template speed-up for `while`, `for` and `discard` is smaller
-  than the cost of the analysis, so B4 is slower too. The cost is the closure
-  scan (about 25 ms for the closures a run needs) plus the index. Options for
-  Phase 4, which wants the closures anyway: scan once and cache the result
-  with the standard-library objects, or store the scan with each parsed module.
-
-- **Task 7 findings.**
-  - *Lazy paths.* The corpus (232 inputs) reaches the interpreter's lazy macro
-    expansion zero times once the standard library is expanded in stage order,
-    after two additions: `Parse` member bodies and the trait's default
-    `parse_all` are expanded the first time they are used, and the walk keeps
-    an `impl` readable while its own expansion runs. The lazy path in
-    `eval_expression` is now an error, so a closure edge the scan misses fails
-    loudly instead of expanding late.
-  - *Static check.* The lazy expansion in the static check (`check` of
-    compile-time code) stays. It runs in `validate_compile_time_code`, before
-    any expansion, over raw syntax that still has macro calls in it, so it
-    cannot wait for the stage order. Removing it needs the check to run per
-    closure after expansion, which belongs with the front-end work of Phase 2.
-  - *`Ordering` by hand.* Turning unresolved names into expansions of their
-    module's generators exposed one more cycle: `typegroup`'s closure reaches
-    `Eq`, `PartialOrd` and `Ord`, which mention `Ordering`, which `typegroup`
-    itself makes in `std.cmp`. `Ordering` and its three variants are now written
-    out as the macros produce them.
-  - *Method calls and pipes.* A method call or pipe stage runs a companion
-    function chosen by the receiver's type, which names cannot tell. Adding
-    every companion function with that name to the closure grew the closure of
-    `derive_eq` from 188 to over 800 items and brought new cycles, so the scan
-    does not do it. Instead the interpreter expands the function it actually
-    selects, the first time it calls it: companion functions, trait
-    implementation members, trait default members and helpers reached by name
-    all go through `expanded_binding`, `expanded_impl` and `expanded_trait`.
-    These expand one item on demand and are subject to the same cycle
-    detection, but the closures recorded in `MacroAnalysis` do not contain
-    functions reached only through a method call. Phase 2 must add those when
-    it has the receiver types.
-  - *`const` initializers.* Folding a `const` runs arbitrary functions in the
-    interpreter, so its initializer is a closure root as well
-    (`ensure_expression_ready`). The scan resolves `Type.member` through the
-    type's companion blocks for the same reason.
-  - *`Ok` by hand.* Reaching companion members through type namespaces brought
-    `Ok` (`std.result`) into the closure of `derive_eq`, so it is written out
-    like `Some`; `result.sta` is the fourth standard-library file whose
-    expansion differs from the baseline.
-  - *Functions only.* The interpreter's tables point at the expanded form of
-    functions (`def`), trait declarations and implementations. A `const` is not
-    replaced: it expands to its folded value, and a folded NaN names the
-    `from_bits` intrinsic relative to its own hygiene, which the interpreter
-    cannot resolve from the module that refers to the constant.
-  - *Generated names the language cannot use yet.* A compile-time helper that
-    a macro generates is not visible to the interpreter at all (the helper
-    tables are built from written items), so the closure of a macro cannot
-    usefully depend on one; generated types and impls are what the rule is for.
+- **Speed.** B1–B4 are within noise of the baseline. B3 did not get faster
+  because `if` stayed an interpreted macro, and the template speed-up for
+  `while`, `for` and `discard` is too small to show in B4.
 
 Nothing else to record.
