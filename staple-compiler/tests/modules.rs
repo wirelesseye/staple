@@ -3481,3 +3481,24 @@ fn a_companion_macro_in_another_module_is_reached_through_the_type() {
         .compile()
         .expect("a companion macro belongs to the type's namespace wherever it is written");
 }
+
+#[test]
+fn a_macro_cycle_across_modules_is_reported() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "macros.sta",
+        "use helpers.(helper)\npub macro again = value: Expr => helper value\n",
+    );
+    fixture.write(
+        "helpers.sta",
+        "use macros.(again)\npub def helper = value: Expr => Expr :: again value\n",
+    );
+    fixture.write("main.sta", "use macros.(again)\nlet a = again 1\n");
+
+    let error = fixture.compile().expect_err("the macros need each other");
+    assert!(
+        error.contains("macro `again` is needed to expand code that `again` itself depends on"),
+        "{error}"
+    );
+    assert!(error.contains("note: `helper`"), "{error}");
+}

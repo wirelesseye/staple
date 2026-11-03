@@ -239,6 +239,21 @@ not worth pursuing.
 Make the phase rules real before anything is compiled.
 Breakdown and status: [`staged-macro-compilation-phase-1.md`](staged-macro-compilation-phase-1.md).
 
+**Status (2026-11-03): done.** Closures, stage-ordered expansion, template
+macros and cycle errors are in. Corpus expansion output is identical to the
+baseline, apart from five standard-library files that were edited. The
+interpreter no longer expands macros lazily; the one remaining lazy
+expansion is in the static check (below). Findings that change later phases:
+`if` and `when` stayed ordinary macros, with `compile_error` instead of `panic`,
+so B3 did not get faster; `True`, `False`, `None`, `Some` and `Ordering` are
+written by hand because the derive macros and `typegroup` reach them;
+the analysis costs 8–20% on the expansion timings (about 25 ms of scanning),
+so the "no slower" criterion is not met and Phase 4's cache should hold the
+closures;
+`MacroAnalysis` carries `closures` (for the macros that were invoked) and
+`templates`, which Phase 2 reads. See the Phase 1 breakdown for the cycle
+inventory and measurements.
+
 - Compute compile-time closures and the stage order on unexpanded syntax
   (Decision 1). Report cycles with item chains.
 - Drive the existing expander in stage order. Behavior should only change by
@@ -246,10 +261,11 @@ Breakdown and status: [`staged-macro-compilation-phase-1.md`](staged-macro-compi
 - Recognize template macros (Decision 2) and instantiate them directly. The
   interpreter is still used for every other macro. This is the first speed win,
   and it gives Phase 5 a cheap differential test.
-- Make `if` and `when` closure-free (templates, or compiler-provided macros
-  if the needed splices are too large an addition), since `panic` reaches
-  `String` and `String` uses `if`. Find and break every other cycle in the
-  standard library before cycles become errors.
+- Make `if` and `when` closure-free, since `panic` reaches `String` and
+  `String` uses `if` (done with a `compile_error` intrinsic; no template or
+  repeated splice was needed). Find and break every other cycle in the standard
+  library before cycles become errors (done: hand-written `True`, `False`,
+  `None`, `Some`, `Ordering`).
 - Spec: add a "Phases" section to `Staple.md`.
 - Tests: closures across modules and packages, cycles, generated items in
   closures, template detection edge cases.
@@ -262,6 +278,9 @@ macros. The real pipeline only checks them.
 - Add a check that sends each closure through `NameResolver` and `TypeChecker`
   as a standalone program, after expansion. Run it on the standard library and
   the macro tests. It is opt-in at first, then on in CI.
+- Run the interpreter's static check (`validate_compile_time_code`) per closure
+  after expansion instead of once over raw syntax. It still expands macros
+  lazily, which Phase 1 could not remove because it runs before any expansion.
 - Close the gaps the check finds. Known candidates:
   - The syntax types and intrinsics declared as run-time types with real
     representations (handles), including `Ident<"else">`-style singleton
@@ -350,8 +369,8 @@ Make syntax values exist in compiled code.
 - Replace `compile_time_items` (`resolve.rs:1877`), which lists the
   `std.syntax` intrinsics so importing them is not an error, once those
   intrinsics change.
-  Consider splitting what remains into `macro_expand/{matching, hygiene,
-  templates, stages}.rs`.
+  Phase 1 already added `macro_expand/{templates, scan, closure, staged}.rs`;
+  consider splitting what remains into `macro_expand/{matching, hygiene}.rs`.
 - Remove `--macro-engine`.
 - Spec: replace the "Compile-time evaluation supports ..." paragraph and the
   remaining-limitations list in `Staple.md` with the phase rules. Remove the
@@ -386,4 +405,6 @@ Make syntax values exist in compiled code.
    like `include_str` ever be supported? If so, they need to feed into the
    cache fingerprint.
 4. Does `staple expand` need a way to show which stage each item was expanded
-   in, for debugging cycles?
+   in, for debugging cycles? Phase 1 added the hidden `STAPLE_MACRO_CYCLES`
+   environment variable, which prints recorded cycles; a public flag is still
+   open.

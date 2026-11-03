@@ -134,12 +134,18 @@ mod tests {
             .expect("source declares a macro");
         let mut next_syntax_id = usize::MAX / 2;
         let declaration = with_curried_macro_value(declaration, &mut next_syntax_id);
-        declaration.value.as_ref().and_then(template_parts).is_some()
+        declaration
+            .value
+            .as_ref()
+            .and_then(template_parts)
+            .is_some()
     }
 
     #[test]
     fn a_quotation_over_parameters_is_a_template() {
-        assert!(is_template("macro twice = value: Expr => parse_quote { ($value, $value) }\n"));
+        assert!(is_template(
+            "macro twice = value: Expr => parse_quote { ($value, $value) }\n"
+        ));
         assert!(is_template(
             "macro both = (left: Expr; right: Expr) => parse_quote { ($left, $right) }\n"
         ));
@@ -154,7 +160,9 @@ mod tests {
 
     #[test]
     fn a_parameter_on_its_own_is_a_template() {
-        assert!(is_template("macro @identity: Item -> Item = item => item\n"));
+        assert!(is_template(
+            "macro @identity: Item -> Item = item => item\n"
+        ));
     }
 
     #[test]
@@ -186,12 +194,19 @@ mod tests {
         for item in &module.items {
             if let Item::MacroDeclaration(declaration) = traits::plain_item(item) {
                 let declaration = with_curried_macro_value(declaration, &mut next_syntax_id);
-                let template = declaration.value.as_ref().and_then(template_parts).is_some();
+                let template = declaration
+                    .value
+                    .as_ref()
+                    .and_then(template_parts)
+                    .is_some();
                 classified.push((declaration.name.clone(), template));
             }
         }
         for name in ["while", "discard", "for"] {
-            assert!(classified.contains(&(name.to_owned(), true)), "{name}: {classified:?}");
+            assert!(
+                classified.contains(&(name.to_owned(), true)),
+                "{name}: {classified:?}"
+            );
         }
     }
 }

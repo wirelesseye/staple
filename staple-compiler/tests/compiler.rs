@@ -2562,9 +2562,9 @@ fn field_defaults_may_name_global_values() {
         )))
         .expect_err_diagnostics("a mistyped global default is still rejected");
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("expected `I32`, found `String`")),
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("expected `I32`, found `String`")),
         "{diagnostics:?}"
     );
 }
@@ -3345,9 +3345,9 @@ fn lambda_markers_are_inferred_only_when_omitted_and_never_for_defs() {
         ))
         .expect_err_diagnostics("a curried def stage must repeat its markers");
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("parameter `mut` markers declare")),
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("parameter `mut` markers declare")),
         "{diagnostics:?}"
     );
 }
@@ -6907,25 +6907,42 @@ use std.syntax.*
 macro emit modifiers (@first): (MacroCallMetadata; Ident<"one">) -> Item = (metadata; value) => parse_quote { let one = 1 }
 macro emit modifiers (@second): (MacroCallMetadata; Ident<"two">) -> Item = (metadata; value) => parse_quote { let two = 2 }
 "#;
-    type_check(&format!("{declarations}\n@first emit one\n@second emit two\n"));
-    let diagnostics = resolve_result(&format!("{declarations}\n@first emit two\n")).expect_err_diagnostics("vocabulary cannot select an overload");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("does not accept modifier `@first`")), "{diagnostics:?}");
+    type_check(&format!(
+        "{declarations}\n@first emit one\n@second emit two\n"
+    ));
+    let diagnostics = resolve_result(&format!("{declarations}\n@first emit two\n"))
+        .expect_err_diagnostics("vocabulary cannot select an overload");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("does not accept modifier `@first`")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]
 fn macro_modifier_nested_arguments_stay_lossless() {
-    let module = resolve(r#"
+    let module = resolve(
+        r#"
 use std.syntax.*
 macro @apply: (Parenthesized<Separated<Modifier, Comma>>; Item) -> Item = (argument; item) => match argument {
     Separated (_, modifiers, _) => ModifiedItem (modifiers: modifiers, item: item),
 }
 @apply(@doc("x,y"), @doc("nested (parentheses)"),)
 let documented = 42
-"#);
-    let binding = module.syntax().items.iter().find_map(|item| match item { Item::Binding(binding) if binding.name == "documented" => Some(binding), _ => None }).unwrap();
+"#,
+    );
+    let binding = module
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "documented" => Some(binding),
+            _ => None,
+        })
+        .unwrap();
     assert_eq!(binding.docs, ["x,y", "nested (parentheses)"]);
 }
-
 
 #[test]
 fn expands_modifier_lists_generated_by_item_macros() {
@@ -20616,7 +20633,8 @@ fn mutable_resource_arguments_update_the_provider_at_runtime() {
 
 #[test]
 fn filesystem_errors_propagate_across_success_types_and_widen_residuals() {
-    let module = type_check(r#"
+    let module = type_check(
+        r#"
 use std.fs.FsError
 use std.string.InvalidUtf8
 use FsError.*
@@ -20630,9 +20648,12 @@ def inspect = value: Result<String, FsError | InvalidUtf8> => I32 :: match value
     FsError.Os (code) => code,
     _ => -1,
 }
-"#);
+"#,
+    );
     let context = Context::create();
-    CodeGenerator::new(&context).compile_root(&lower(&module)).expect("filesystem residuals lower");
+    CodeGenerator::new(&context)
+        .compile_root(&lower(&module))
+        .expect("filesystem residuals lower");
 }
 
 /// Expands `source` and renders the entry module, as `staple expand` does.
@@ -20661,7 +20682,12 @@ fn template_macros_expand_like_macros_that_evaluate_first() {
         "}\n",
         "let value = pair 1 2\n",
     ));
-    let call = |text: &str| text.lines().find(|line| line.contains("value")).unwrap().to_owned();
+    let call = |text: &str| {
+        text.lines()
+            .find(|line| line.contains("value"))
+            .unwrap()
+            .to_owned()
+    };
     assert_eq!(call(&template), call(&evaluated));
 }
 
@@ -20688,4 +20714,83 @@ fn template_modifiers_return_their_parameter() {
         "pub let answer = 42\n",
     ));
     assert!(text.contains("pub let answer = 42"), "{text}");
+}
+
+/// The messages from expanding `source`, or none when it expands.
+fn expansion_messages(source: &str) -> Vec<String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(&with_syntax_imports(source), root)
+        .expect("source should load");
+    match staple_compiler::expand_macros(program) {
+        Ok(_) => Vec::new(),
+        Err(diagnostics) => diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect(),
+    }
+}
+
+fn assert_cycle(messages: &[String], macro_name: &str, notes: &[&str]) {
+    let headline = format!(
+        "macro `{macro_name}` is needed to expand code that `{macro_name}` itself depends on"
+    );
+    assert!(messages.contains(&headline), "{messages:#?}");
+    for note in notes {
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.starts_with("note: ") && message.contains(note)),
+            "no note mentions `{note}`: {messages:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_macro_that_needs_itself_is_reported_with_its_chain() {
+    let messages = expansion_messages(concat!(
+        "def helper = value: Expr => Expr :: again value\n",
+        "macro again = value: Expr => helper value\n",
+        "let a = again 1\n",
+    ));
+    assert_cycle(&messages, "again", &["`helper`", "macro `again`"]);
+}
+
+#[test]
+fn a_cycle_through_a_trait_implementation_is_reported() {
+    // `again` reaches `Marker` and `Tag`, so it also needs their `impl`, whose
+    // body calls `again`.
+    let messages = expansion_messages(concat!(
+        "trait Marker A { mark: A -> I32 }\n",
+        "type Tag wrap I32\n",
+        "impl Marker Tag { mark = value => again 1 }\n",
+        "def helper = value: Expr => Expr :: { let probe = Tag 1; let marked = Marker.mark probe; value }\n",
+        "macro again = value: Expr => helper value\n",
+    ));
+    assert_cycle(&messages, "again", &["`impl", "macro `again`"]);
+}
+
+#[test]
+fn a_macro_used_only_inside_its_helpers_quotation_is_not_a_cycle() {
+    // `helper` mentions `again` only in generated code, so running `again`
+    // does not need `again` expanded first.
+    let messages = expansion_messages(concat!(
+        "def helper = value: Expr => Expr :: parse_quote { again $value }\n",
+        "macro again = value: Expr => parse_quote { $value }\n",
+        "macro viaq = value: Expr => helper value\n",
+        "let a = viaq 1\n",
+    ));
+    assert!(messages.is_empty(), "{messages:#?}");
+}
+
+#[test]
+fn a_macro_calling_other_macros_through_helpers_is_ready_in_stage_order() {
+    let messages = expansion_messages(concat!(
+        "macro second = value: Expr => parse_quote { $value }\n",
+        "def helper = value: Expr => Expr :: second value\n",
+        "macro first = value: Expr => helper value\n",
+        "let a = first 1\n",
+    ));
+    assert!(messages.is_empty(), "{messages:#?}");
 }

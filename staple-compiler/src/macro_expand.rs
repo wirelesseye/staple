@@ -8,12 +8,13 @@ use std::{
 mod closure;
 mod parse;
 mod scan;
+mod staged;
 mod templates;
 mod traits;
 
-use closure::{ClosureIndex, Lookup, MacroClosure};
 use crate::program::source_location_at;
 use crate::{FloatType, IntegerType, ModuleId, Program, ResolvedMacro};
+use closure::{ClosureIndex, Lookup, MacroClosure};
 use parse::{ParseImpl, ParseTarget, SyntaxIntrinsic, TypeEnv};
 use staple_syntax::{
     Accessor, BinaryOperator, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
@@ -1004,6 +1005,10 @@ pub(crate) struct MacroAnalysis {
     /// The macro overloads whose body only fills in a quotation or returns a
     /// parameter, by the syntax id of their declaration.
     pub templates: HashSet<SyntaxId>,
+    /// The order macros became ready in.
+    pub macro_ready_order: Vec<String>,
+    /// Chains of items and macros that depend on themselves.
+    pub cycles: Vec<Vec<String>>,
     pub next_syntax_id: usize,
 }
 
@@ -1802,7 +1807,18 @@ pub(crate) fn expand_program_recovering(
         return Err(expander.diagnostics);
     }
 
+    // The index takes each module's written items; a module with module-level
+    // modifiers keeps its own list, which the modifiers rewrite.
     for source_module in program.modules_mut() {
+        let written = if source_module.syntax.modifiers.is_empty() {
+            std::mem::take(&mut source_module.syntax.items)
+        } else {
+            source_module.syntax.items.clone()
+        };
+        expander.closure.load_raw(source_module.id, written);
+    }
+    let mut walked = Vec::new();
+    for (module_index, source_module) in program.modules_mut().iter_mut().enumerate() {
         let module = source_module.id;
         if !source_module.syntax.modifiers.is_empty() {
             let declaration = staple_syntax::Submodule {
@@ -1848,14 +1864,28 @@ pub(crate) fn expand_program_recovering(
                 None => {}
             }
         }
-        let mut items = Vec::new();
-        for mut item in source_module.syntax.items.clone() {
-            expander.expand_item(module, &mut item, 0);
-            if let Some(generated) = expander.emitted_items.take() {
-                items.extend(expander.expand_generated_items(module, generated, 1));
-            } else {
-                items.push(item);
+        let mut parts = Vec::new();
+        if source_module.syntax.items.is_empty() {
+            for position in 0..expander.closure.raw_len(module) {
+                if let Some(item) = expander.closure.take_raw(module, position) {
+                    parts.push(expander.expand_in_walk(module, item));
+                }
             }
+        } else {
+            for item in std::mem::take(&mut source_module.syntax.items) {
+                parts.push(expander.expand_in_walk(module, item));
+            }
+        }
+        walked.push((module_index, parts));
+    }
+    expander.closure.release();
+    expander.item_expansions.clear();
+    for (module_index, parts) in walked {
+        let source_module = &mut program.modules_mut()[module_index];
+        let module = source_module.id;
+        let mut items = Vec::new();
+        for part in parts {
+            items.extend(Rc::try_unwrap(part).unwrap_or_else(|part| (*part).clone()));
         }
         items.retain(|item| {
             !matches!(item,
@@ -1910,6 +1940,11 @@ pub(crate) fn expand_program_recovering(
                     format!("could not resolve module `{}`", declaration.path.join(".")),
                 ));
             }
+        }
+    }
+    if std::env::var_os("STAPLE_MACRO_CYCLES").is_some() {
+        for chain in &expander.cycles {
+            eprintln!("macro cycle: {}", chain.join(" -> "));
         }
     }
     let analysis = expander.analysis();
@@ -2024,11 +2059,40 @@ struct MacroExpander {
     closure: ClosureIndex,
     /// The closure of each macro whose invocation has needed one.
     macro_closures: HashMap<closure::ItemId, MacroClosure>,
+    /// The declarations of the template overloads.
+    template_items: HashSet<closure::ItemId>,
+    /// The macro each declaration item defines.
+    macro_by_item: HashMap<closure::ItemId, MacroKey>,
+    /// The scope entries each helper binding appears in, by syntax id.
+    helper_slots: HashMap<SyntaxId, Vec<(usize, String)>>,
+    /// The expanded form of each binding that has been expanded, by syntax id.
+    latest_bindings: HashMap<SyntaxId, Rc<Binding>>,
+    /// What top-level items expanded to ahead of the module walk.
+    item_expansions: HashMap<closure::ItemId, Rc<Vec<Item>>>,
+    /// The macros being made ready and the items being expanded, outermost first.
+    stage_stack: Vec<staged::StageNode>,
+    macros_ready: HashSet<MacroKey>,
+    /// Macros whose readiness failed with a cycle, already reported.
+    macros_failed: HashSet<MacroKey>,
+    /// Chains of macros and items that each needed the next, back to the first.
+    cycles: Vec<Vec<String>>,
+    /// The order macros became ready in.
+    macro_ready_order: Vec<String>,
+    module_names: Vec<String>,
+    /// Non-zero while expanding compile-time code (a macro body or helper),
+    /// where syntax constructors and quotations are expected.
+    compile_time_depth: usize,
+    /// Non-zero while expanding items only because a name might be defined
+    /// there, when a cycle is recorded but not reported.
+    soft_stage: usize,
     trait_registry: traits::Registry,
     call_targets: HashMap<SyntaxId, CompileType>,
     call_target: Option<MetaType>,
     /// The default body of `Parse.parse_all`, with the module it was written in.
     parse_all_default: Option<(ModuleId, Expression)>,
+    /// The `Parse` members whose bodies have been expanded already, by impl
+    /// (`None` for the trait's default) and member name.
+    expanded_parse_members: HashSet<(Option<usize>, String)>,
     /// What the type parameters of the `Parse` implementation being evaluated
     /// stand for.
     type_env: TypeEnv,
@@ -2920,12 +2984,12 @@ impl MacroExpander {
             range: find_module("std.range"),
             boolean: find_module("std.boolean"),
         };
-        let closure = ClosureIndex::build(
-            program,
-            &use_kinds,
-            program.imported_modules(),
-            std_modules,
-        );
+        let closure =
+            ClosureIndex::build(program, &use_kinds, program.imported_modules(), std_modules);
+        let macro_by_item = definitions
+            .keys()
+            .map(|key| (key.syntax, key.clone()))
+            .collect();
         let mut expander = Self {
             definitions,
             scopes,
@@ -2933,6 +2997,27 @@ impl MacroExpander {
             use_kinds,
             closure,
             macro_closures: HashMap::new(),
+            template_items: HashSet::new(),
+            macro_by_item,
+            helper_slots: HashMap::new(),
+            latest_bindings: HashMap::new(),
+            item_expansions: HashMap::new(),
+            stage_stack: Vec::new(),
+            macros_ready: HashSet::new(),
+            macros_failed: HashSet::new(),
+            cycles: Vec::new(),
+            macro_ready_order: Vec::new(),
+            module_names: program
+                .modules()
+                .iter()
+                .map(|module| {
+                    program
+                        .module_dotted_name(module.id)
+                        .unwrap_or_else(|| module.path.display().to_string())
+                })
+                .collect(),
+            compile_time_depth: 0,
+            soft_stage: 0,
             child_modules: program.child_modules().clone(),
             parent_modules: program
                 .modules()
@@ -2998,6 +3083,7 @@ impl MacroExpander {
             call_targets: HashMap::new(),
             call_target: None,
             parse_all_default: None,
+            expanded_parse_members: HashSet::new(),
             type_env: TypeEnv::default(),
             pending_return: None,
             pending_break: None,
@@ -3008,6 +3094,22 @@ impl MacroExpander {
             static_parameters: HashSet::new(),
             static_parse_bounds: HashSet::new(),
         };
+        let mut helper_slots: HashMap<SyntaxId, Vec<(usize, String)>> = HashMap::new();
+        for (scope, entry) in expander.scopes.iter().enumerate() {
+            for (name, helper) in &entry.helpers {
+                helper_slots
+                    .entry(helper.binding.syntax.id)
+                    .or_default()
+                    .push((scope, name.clone()));
+            }
+        }
+        expander.helper_slots = helper_slots;
+        expander.template_items = expander
+            .definitions
+            .values()
+            .filter(|definition| definition.is_template)
+            .map(|definition| definition.declaration.syntax.id)
+            .collect();
         expander.trait_registry = traits::Registry::collect(program, &expander);
         let (impls, default, diagnostics) = parse::collect_parse_impls(program, &expander);
         expander.parse_impls = impls;
@@ -3018,12 +3120,7 @@ impl MacroExpander {
 
     /// The compile-time closure of the macro declared by the item `id`.
     fn macro_closure(&mut self, id: closure::ItemId) -> MacroClosure {
-        let templates = self
-            .definitions
-            .values()
-            .filter(|definition| definition.is_template)
-            .map(|definition| definition.declaration.syntax.id)
-            .collect::<HashSet<_>>();
+        let templates = &self.template_items;
         let lookup = Lookup {
             scopes: &self.scopes,
             parents: &self.parent_modules,
@@ -3036,6 +3133,8 @@ impl MacroExpander {
     fn analysis(&mut self) -> MacroAnalysis {
         MacroAnalysis {
             closures: self.macro_closures.clone(),
+            macro_ready_order: self.macro_ready_order.clone(),
+            cycles: self.cycles.clone(),
             templates: self
                 .definitions
                 .values()
@@ -3126,19 +3225,22 @@ impl MacroExpander {
             }
             let mut expected = CompileType::Meta(definition.result.clone());
             for (index, parameter) in definition.parameters.iter().enumerate().rev() {
-                let parameter = if definition.key.modifier
-                    && index + 1 != definition.parameters.len()
-                {
-                    match modifier_argument_meta_type(parameter) {
-                        Some(MetaType::Delimited(_, DelimitedMetaContents::Separated { element, separator })) => {
-                            CompileType::Meta(MetaType::Nominal("Separated".to_owned(), vec![element.as_ref().clone(), separator.as_ref().clone()]))
+                let parameter =
+                    if definition.key.modifier && index + 1 != definition.parameters.len() {
+                        match modifier_argument_meta_type(parameter) {
+                            Some(MetaType::Delimited(
+                                _,
+                                DelimitedMetaContents::Separated { element, separator },
+                            )) => CompileType::Meta(MetaType::Nominal(
+                                "Separated".to_owned(),
+                                vec![element.as_ref().clone(), separator.as_ref().clone()],
+                            )),
+                            Some(inner) => CompileType::Meta(inner.clone()),
+                            None => CompileType::Meta(parameter.clone()),
                         }
-                        Some(inner) => CompileType::Meta(inner.clone()),
-                        None => CompileType::Meta(parameter.clone()),
-                    }
-                } else {
-                    CompileType::Meta(parameter.clone())
-                };
+                    } else {
+                        CompileType::Meta(parameter.clone())
+                    };
                 expected = CompileType::Function(Box::new(parameter), Box::new(expected));
             }
             let mut environment = CompileEnvironment::new();
@@ -5328,6 +5430,12 @@ impl MacroExpander {
         item: Item,
         call_span: Span,
     ) -> Option<Vec<Item>> {
+        let refreshed = match self.ensure_ready(definition, &call_span) {
+            Ok(true) => self.definitions.get(&definition.key).cloned(),
+            Ok(false) => None,
+            Err(()) => return None,
+        };
+        let definition = refreshed.as_ref().unwrap_or(definition);
         self.invocation_spans.push(call_span.clone());
         let result = self.invoke_modifier_inner(module, definition, argument, item, call_span);
         self.invocation_spans.pop();
@@ -5357,18 +5465,20 @@ impl MacroExpander {
         } else {
             self.quote_context.take()
         };
-        let evaluated = evaluated.unwrap_or_else(|| (|| {
-            let mut value =
-                self.eval_expression(definition.key.module, body, &mut Environment::new())?;
-            if let Some(argument) = argument {
-                value = self.apply_value(value, argument, call_span.clone())?;
-            }
-            self.apply_value(
-                value,
-                Value::Syntax(SyntaxValue::Item(Box::new(item))),
-                call_span,
-            )
-        })());
+        let evaluated = evaluated.unwrap_or_else(|| {
+            (|| {
+                let mut value =
+                    self.eval_expression(definition.key.module, body, &mut Environment::new())?;
+                if let Some(argument) = argument {
+                    value = self.apply_value(value, argument, call_span.clone())?;
+                }
+                self.apply_value(
+                    value,
+                    Value::Syntax(SyntaxValue::Item(Box::new(item))),
+                    call_span,
+                )
+            })()
+        });
         self.quote_context = previous_context;
         let value = evaluated?;
         match value {
@@ -5637,12 +5747,14 @@ impl MacroExpander {
                         annotation.and_then(|annotation| self.named_float_type(module, annotation));
                     let integer = annotation
                         .and_then(|annotation| self.named_integer_type(module, annotation));
+                    // What the initializer calls has to be expanded first.
+                    if self.ensure_expression_ready(module, value, &span).is_err() {
+                        return;
+                    }
                     let folded = self
                         .eval_expression(module, value, &mut Environment::new())
                         .and_then(|result| self.assign_float_type(result, float, span.clone()))
-                        .and_then(|result| {
-                            self.assign_integer_type(result, integer, span.clone())
-                        })
+                        .and_then(|result| self.assign_integer_type(result, integer, span.clone()))
                         .and_then(|result| {
                             self.value_to_expression(result, span, module, annotation)
                         });
@@ -5973,7 +6085,8 @@ impl MacroExpander {
             return result;
         }
 
-        if let Expression::Name(name) = head
+        if self.compile_time_depth == 0
+            && let Expression::Name(name) = head
             && matches!(
                 name.name.as_str(),
                 "Ident"
@@ -6103,14 +6216,17 @@ impl MacroExpander {
                 }
                 Expression::StringTemplate(template)
             }
+            // Compile-time code builds quotations, which stay as written.
             Expression::Quote(quote) => {
-                self.diagnostics.push(Diagnostic::new(
-                    quote.syntax.span.clone(),
-                    format!(
-                        "`{}` is only available in a macro body or compile-time helper",
-                        quote.kind.name()
-                    ),
-                ));
+                if self.compile_time_depth == 0 {
+                    self.diagnostics.push(Diagnostic::new(
+                        quote.syntax.span.clone(),
+                        format!(
+                            "`{}` is only available in a macro body or compile-time helper",
+                            quote.kind.name()
+                        ),
+                    ));
+                }
                 Expression::Quote(quote)
             }
             Expression::VisibilityArgument(visibility) => {
@@ -6426,6 +6542,12 @@ impl MacroExpander {
         arguments: Vec<MacroArgument>,
         call_span: Span,
     ) -> Option<SyntaxValue> {
+        let refreshed = match self.ensure_ready(definition, &call_span) {
+            Ok(true) => self.definitions.get(&definition.key).cloned(),
+            Ok(false) => None,
+            Err(()) => return None,
+        };
+        let definition = refreshed.as_ref().unwrap_or(definition);
         self.invocation_spans.push(call_span.clone());
         let result = self.invoke_macro_inner(definition, arguments, call_span);
         self.invocation_spans.pop();
@@ -6848,8 +6970,7 @@ impl MacroExpander {
                 let value =
                     self.eval_expression_target(module, &ascription.value, environment, target)?;
                 let float = self.named_float_type(module, &ascription.ty);
-                let value =
-                    self.assign_float_type(value, float, ascription.syntax.span.clone())?;
+                let value = self.assign_float_type(value, float, ascription.syntax.span.clone())?;
                 let integer = self.named_integer_type(module, &ascription.ty);
                 self.assign_integer_type(value, integer, ascription.syntax.span.clone())
             }
@@ -6965,8 +7086,10 @@ impl MacroExpander {
                         Some(Value::Integer(value, integer_type))
                     }
                     Err(error) => {
-                        self.diagnostics
-                            .push(Diagnostic::new(integer.syntax.span.clone(), error.to_string()));
+                        self.diagnostics.push(Diagnostic::new(
+                            integer.syntax.span.clone(),
+                            error.to_string(),
+                        ));
                         None
                     }
                 }
@@ -6974,16 +7097,15 @@ impl MacroExpander {
             Expression::Float(float) => {
                 match staple_syntax::number_literal::decode_float(&float.literal) {
                     Ok(decoded) => {
-                        let float_type =
-                            decoded.suffix.and_then(crate::FloatType::from_number_suffix);
+                        let float_type = decoded
+                            .suffix
+                            .and_then(crate::FloatType::from_number_suffix);
                         decoded
                             .digits
                             .parse::<f64>()
                             .ok()
                             .map(|value| match float_type {
-                                Some(FloatType::F32) => {
-                                    parse::round_float(FloatType::F32, value)
-                                }
+                                Some(FloatType::F32) => parse::round_float(FloatType::F32, value),
                                 _ => value,
                             })
                             // A float *literal* must still be finite; only
@@ -6994,8 +7116,10 @@ impl MacroExpander {
                             .map(|value| Value::Float(value, float_type))
                     }
                     Err(error) => {
-                        self.diagnostics
-                            .push(Diagnostic::new(float.syntax.span.clone(), error.to_string()));
+                        self.diagnostics.push(Diagnostic::new(
+                            float.syntax.span.clone(),
+                            error.to_string(),
+                        ));
                         None
                     }
                 }
@@ -7125,125 +7249,16 @@ impl MacroExpander {
                 if let Expression::TypeApplication(application) = call.callee.as_ref() {
                     return self.eval_type_applied_call(module, call, application, environment);
                 }
+                // Macro calls in compile-time code are expanded before that code
+                // runs, so reaching one here means the closure scan missed an
+                // edge.
                 if let Some(keys) = self.resolve_macro(module, head) {
-                    let selected = self.select_macro(
-                        &keys,
-                        &arguments,
-                        None,
+                    let name = keys.first().map(|key| key.name.clone()).unwrap_or_default();
+                    self.diagnostics.push(Diagnostic::new(
                         expression.syntax().span.clone(),
-                    )?;
-                    self.record_invocation(head.syntax().id, &selected.definition);
-                    let definition = selected.definition;
-                    let consumed_count = selected.consumed;
-                    let key = definition.key.clone();
-                    if self.expansion_stack.contains(&key) {
-                        self.diagnostics.push(Diagnostic::new(
-                            expression.syntax().span.clone(),
-                            format!("recursive macro expansion of `{}`", key.name),
-                        ));
-                        return None;
-                    }
-                    self.expansion_stack.push(key.clone());
-                    let mut result = self.invoke_macro(
-                        &definition,
-                        selected.arguments,
-                        expression.syntax().span.clone(),
-                    );
-                    // Only a `Raw` fragment needs reparsing; a structured
-                    // `SyntaxValue` must be preserved as-is. Using `result.take()`
-                    // as the `if let` scrutinee would drop non-`Raw` values on a
-                    // failed match, so branch on the variant explicitly.
-                    if matches!(result, Some(SyntaxValue::Raw(_))) {
-                        let Some(SyntaxValue::Raw(raw)) = result.take() else {
-                            unreachable!("checked to be a raw fragment above")
-                        };
-                        result = match staple_syntax::parse_expression_fragment(
-                            &raw,
-                            &mut self.next_syntax_id,
-                        ) {
-                            Ok(mut parsed) => {
-                                let mark = self.next_mark;
-                                self.next_mark += 1;
-                                alpha_rename_expression(&mut parsed, mark, &mut Vec::new());
-                                self.freshen_expression(&mut parsed, module, mark);
-                                Some(SyntaxValue::from_expression(parsed))
-                            }
-                            Err(error) => {
-                                self.diagnostics.push(Diagnostic::new(
-                                    expression.syntax().span.clone(),
-                                    format!(
-                                        "macro `{}` produced a syntax fragment that is not valid in expression position: {}",
-                                        key.name, error.message
-                                    ),
-                                ));
-                                None
-                            }
-                        };
-                    }
-                    if !arguments[consumed_count..].is_empty()
-                        && result
-                            .as_ref()
-                            .is_some_and(|syntax| syntax.to_expression().is_none())
-                    {
-                        self.diagnostics.push(Diagnostic::new(
-                            expression.syntax().span.clone(),
-                            format!(
-                                "{}-producing macro `{}` cannot have excess arguments",
-                                result.as_ref().map(syntax_category).unwrap_or("syntax"),
-                                key.name
-                            ),
-                        ));
-                        result = None;
-                    } else if let Some(syntax) = result.take() {
-                        if syntax.to_expression().is_none() {
-                            result = Some(syntax);
-                        } else {
-                            let mut expanded = syntax
-                                .into_expression()
-                                .expect("non-item syntax must contain an expression");
-                            for argument in &arguments[consumed_count..] {
-                                let mut syntax = expanded.syntax().clone();
-                                syntax.id = self.fresh_id();
-                                expanded = Expression::Call(staple_syntax::CallExpression {
-                                    spread: false,
-                                    syntax,
-                                    callee: Box::new(expanded),
-                                    argument: Box::new((*argument).clone()),
-                                });
-                            }
-                            result = Some(SyntaxValue::from_expression(expanded));
-                        };
-                    }
-                    // During compile-time evaluation, a control-flow macro such
-                    // as `if`/`when` expands to a `match Bool :: … { … }`
-                    // over compile-time-known operands. Evaluate that expansion
-                    // in place so the macro selects a branch inside compile-time
-                    // helper and macro bodies, instead of yielding the `match`
-                    // as an opaque syntax value the surrounding code cannot use.
-                    // Only bare control-flow shapes are evaluated; a macro that
-                    // builds an expression to emit (a constructor call, an
-                    // identifier, a literal) is still returned as syntax, as are
-                    // builtin producers (`c_string`) and excess-argument calls.
-                    if arguments[consumed_count..].is_empty()
-                        && matches!(definition.kind, MacroKind::User(_))
-                        && let Some(expanded) = result.as_ref().and_then(SyntaxValue::to_expression)
-                        && matches!(
-                            expanded,
-                            Expression::Match(_)
-                                | Expression::TypeAscription(_)
-                                | Expression::Block(_)
-                                | Expression::Loop(_)
-                        )
-                    {
-                        let expanded = expanded.clone();
-                        // The expansion is done; a branch may use the same
-                        // macro again.
-                        self.expansion_stack.pop();
-                        return self.eval_expression(module, &expanded, environment);
-                    }
-                    let result = result.map(Value::Syntax);
-                    self.expansion_stack.pop();
-                    return result;
+                        format!("macro `{name}` was called by compile-time code that had not been expanded"),
+                    ));
+                    return None;
                 }
                 if let Expression::Name(name) = call.callee.as_ref()
                     && name.name.chars().next().is_some_and(char::is_uppercase)
@@ -7873,25 +7888,36 @@ impl MacroExpander {
                     (Some(namespace_field), Value::Sequence(namespace)),
                     (Some(name_field), Value::Syntax(SyntaxValue::Ident(name))),
                     (Some(argument_field), argument),
-                ] = fields.as_slice() else {
+                ] = fields.as_slice()
+                else {
                     self.diagnostics.push(Diagnostic::new(span, invalid));
                     return None;
                 };
-                if namespace_field != "namespace" || name_field != "name" || argument_field != "argument" {
+                if namespace_field != "namespace"
+                    || name_field != "name"
+                    || argument_field != "argument"
+                {
                     self.diagnostics.push(Diagnostic::new(span, invalid));
                     return None;
                 }
-                let Some(namespace) = namespace.iter().map(|value| match value {
-                    Value::Syntax(SyntaxValue::Ident(name)) => Some(name.name.clone()),
-                    _ => None,
-                }).collect::<Option<Vec<_>>>() else {
+                let Some(namespace) = namespace
+                    .iter()
+                    .map(|value| match value {
+                        Value::Syntax(SyntaxValue::Ident(name)) => Some(name.name.clone()),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+                else {
                     self.diagnostics.push(Diagnostic::new(span, invalid));
                     return None;
                 };
-                let path = namespace.iter().map(|name| format!("{name}.")).collect::<String>();
+                let path = namespace
+                    .iter()
+                    .map(|name| format!("{name}."))
+                    .collect::<String>();
                 let mut tokens = staple_syntax::lex(&format!("@{path}{}", name.name));
                 match argument {
-                    Value::Nominal(kind, _) if kind == "None" => {},
+                    Value::Nominal(kind, _) if kind == "None" => {}
                     Value::Nominal(kind, value) if kind == "Some" => {
                         // `quote` may return a structured value, so accept any
                         // syntax value and splice its tokens.
@@ -7906,11 +7932,11 @@ impl MacroExpander {
                         };
                         append_syntax_tokens(&mut tokens, &syntax, hygiene);
                         tokens.extend(staple_syntax::lex(")"));
-                    },
+                    }
                     _ => {
                         self.diagnostics.push(Diagnostic::new(span, invalid));
                         return None;
-                    },
+                    }
                 }
                 let mut offset = 0;
                 for token in &mut tokens {
@@ -7922,14 +7948,22 @@ impl MacroExpander {
                 syntax.expansion_mark = name.syntax.expansion_mark;
                 syntax.tokens = tokens.into();
                 syntax.token_range = 0..syntax.tokens.len();
-                let invocation = match staple_syntax::parse_modifier_fragment(&syntax, &mut self.next_syntax_id) {
-                    Ok(invocation) => invocation,
-                    Err(error) => {
-                        self.diagnostics.push(Diagnostic::new(syntax.span, format!("invalid `ModifierCall`: {}", error.message)));
-                        return None;
-                    },
-                };
-                Some(Value::Syntax(SyntaxValue::Modifier(OpaqueModifier { invocation, enclosing: None })))
+                let invocation =
+                    match staple_syntax::parse_modifier_fragment(&syntax, &mut self.next_syntax_id)
+                    {
+                        Ok(invocation) => invocation,
+                        Err(error) => {
+                            self.diagnostics.push(Diagnostic::new(
+                                syntax.span,
+                                format!("invalid `ModifierCall`: {}", error.message),
+                            ));
+                            return None;
+                        }
+                    };
+                Some(Value::Syntax(SyntaxValue::Modifier(OpaqueModifier {
+                    invocation,
+                    enclosing: None,
+                })))
             }
             "ModifiedItem" => {
                 let Value::Product(fields, _) = argument else {
@@ -8382,6 +8416,10 @@ impl MacroExpander {
     /// binding annotated with a float type gives its value that type, so
     /// `F32.Pi` is an `F32` wherever it is read.
     fn eval_helper_binding(&mut self, helper: HelperDefinition, span: Span) -> Option<Value> {
+        let helper = HelperDefinition {
+            module: helper.module,
+            binding: self.expanded_binding(helper.binding.clone()),
+        };
         if let Some(intrinsic) = self.helper_intrinsic(&helper) {
             return Some(Value::Intrinsic(intrinsic));
         }
@@ -8771,20 +8809,14 @@ impl MacroExpander {
                 self.apply_intrinsic(intrinsic, None, argument, place, span)
             }
             Value::Helper(module, binding) => {
+                let binding = self.expanded_binding(binding);
                 if Some(module) == self.standard_library_process && binding.name == "panic" {
                     let message = match &argument {
                         Value::String(message) => staple_syntax::string_literal::decode(message)
                             .unwrap_or_else(|_| message.clone()),
                         _ => "compile-time panic".to_string(),
                     };
-                    let description = match self.expansion_stack.last() {
-                        Some(key) => format!("macro `{}` panicked: {message}", key.name),
-                        None => format!("panicked at compile time: {message}"),
-                    };
-                    let report_span = self.invocation_spans.last().cloned().unwrap_or(span);
-                    self.diagnostics
-                        .push(Diagnostic::new(report_span, description));
-                    self.suppress_expansion_trailer = true;
+                    self.report_compile_time_panic(&message, span);
                     return None;
                 }
                 let expected = binding_signature(&binding)
@@ -8810,6 +8842,19 @@ impl MacroExpander {
                 None
             }
         }
+    }
+
+    /// Reports a failure raised by compile-time code, at the call site of the
+    /// macro being expanded.
+    pub(super) fn report_compile_time_panic(&mut self, message: &str, span: Span) {
+        let description = match self.expansion_stack.last() {
+            Some(key) => format!("macro `{}` panicked: {message}", key.name),
+            None => format!("panicked at compile time: {message}"),
+        };
+        let report_span = self.invocation_spans.last().cloned().unwrap_or(span);
+        self.diagnostics
+            .push(Diagnostic::new(report_span, description));
+        self.suppress_expansion_trailer = true;
     }
 
     fn eval_binary_expression(
@@ -8923,12 +8968,10 @@ impl MacroExpander {
                 // for the default literal type is still checked against the
                 // constant's own integer type.
                 let zero = match integer_type {
-                    Some(integer_type) => {
-                        Expression::Integer(staple_syntax::IntegerExpression {
-                            syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                            literal: format!("0{}", integer_type.suffix()),
-                        })
-                    }
+                    Some(integer_type) => Expression::Integer(staple_syntax::IntegerExpression {
+                        syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                        literal: format!("0{}", integer_type.suffix()),
+                    }),
                     None => {
                         let zero = Expression::Integer(staple_syntax::IntegerExpression {
                             syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
@@ -9087,7 +9130,8 @@ impl MacroExpander {
                 // The payload takes its type from the annotation's `Option<T>`,
                 // so a negative or wide integer is checked as `T`, not `I32`.
                 let payload_type = expected.and_then(option_payload_type);
-                let value = self.value_to_expression(*payload, span.clone(), module, payload_type)?;
+                let value =
+                    self.value_to_expression(*payload, span.clone(), module, payload_type)?;
                 let callee = Expression::Name(staple_syntax::NameExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                     name,
@@ -12569,9 +12613,15 @@ fn compile_product_fields(ty: &CompileType, length: usize) -> Vec<CompileType> {
 
 fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<CompileType> {
     match (ty, name) {
-        (CompileType::Meta(MetaType::Nominal(kind, arguments)), "Separated") if kind == "Separated" && arguments.len() == 2 => {
-            Some(CompileType::Product(vec![CompileType::Meta(arguments[1].clone()), CompileType::Meta(MetaType::Sequence(Box::new(arguments[0].clone()))), CompileType::Bool]))
-        },
+        (CompileType::Meta(MetaType::Nominal(kind, arguments)), "Separated")
+            if kind == "Separated" && arguments.len() == 2 =>
+        {
+            Some(CompileType::Product(vec![
+                CompileType::Meta(arguments[1].clone()),
+                CompileType::Meta(MetaType::Sequence(Box::new(arguments[0].clone()))),
+                CompileType::Bool,
+            ]))
+        }
         (CompileType::Meta(MetaType::TypeParameter), "TypeParameter") => {
             Some(CompileType::Product(vec![
                 CompileType::Meta(MetaType::Ident(None)),
@@ -12580,9 +12630,12 @@ fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<Co
                 CompileType::Meta(MetaType::Type),
             ]))
         }
-        (CompileType::Meta(MetaType::ResourceDependency), "ResourceDependency") => Some(
-            CompileType::Product(vec![CompileType::Meta(MetaType::Type), CompileType::Bool]),
-        ),
+        (CompileType::Meta(MetaType::ResourceDependency), "ResourceDependency") => {
+            Some(CompileType::Product(vec![
+                CompileType::Meta(MetaType::Type),
+                CompileType::Bool,
+            ]))
+        }
         (CompileType::Meta(MetaType::ProductTypeField), "ProductTypeField") => {
             Some(CompileType::Product(product_type_field_types()))
         }
@@ -13010,9 +13063,11 @@ fn compile_sequence_coverage_pattern(
 fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<CompileType>)>> {
     Some(match ty {
         CompileType::Meta(MetaType::Nominal(name, _)) if name == "Separated" => {
-            let CompileType::Product(fields) = compile_constructor_representation(ty, name)? else { return None; };
+            let CompileType::Product(fields) = compile_constructor_representation(ty, name)? else {
+                return None;
+            };
             vec![(name.clone(), fields)]
-        },
+        }
         CompileType::Meta(
             MetaType::TypeParameter
             | MetaType::TypeParameters
@@ -13076,9 +13131,7 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
                     CompileType::Meta(MetaType::Type),
                     CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Ident(None)))),
                     CompileType::Meta(MetaType::Optional(Box::new(MetaType::TypeBody))),
-                    CompileType::Meta(MetaType::Sequence(Box::new(
-                        MetaType::ResourceDependency,
-                    ))),
+                    CompileType::Meta(MetaType::Sequence(Box::new(MetaType::ResourceDependency))),
                 ],
             ),
             ("UnstructuredItem".to_owned(), Vec::new()),

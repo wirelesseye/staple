@@ -1,19 +1,34 @@
 pub mod
 
-use package.cmp.(derive_eq)
-use package.hash.derive_hash
+use package.cmp.Eq
+use package.hash.(Hash, Hasher)
 use package.try.Try
 use package.result.Ok
 
+// `None` and `Some` are written out by hand rather than with the derive
+// macros, which the standard library's own macros cannot wait for.
+
 /// Represents the absence of a value.
-@derive_eq
-@derive_hash
 pub type None
 
+impl Eq None {
+    eq = (_; _) => True
+}
+
+impl Hash None {
+    hash = (_, mut hasher) => ()
+}
+
 /// Contains a present value.
-@derive_eq
-@derive_hash
 pub type Some<T> from pub T
+
+impl<T where Eq T> Eq Some<T> {
+    eq = (Some left; Some right) => left == right
+}
+
+impl<T where Hash T> Hash Some<T> {
+    hash = (Some inner, mut hasher) => Hash.hash (inner, hasher)
+}
 
 /// A value that may be absent.
 pub type Option<T> = None | Some<T>

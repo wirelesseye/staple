@@ -17,6 +17,8 @@ pub(super) enum SyntaxIntrinsic {
     IsEmpty,
     Remaining,
     ErrorAt,
+    /// `compile_error`: fails the macro being expanded with a message.
+    CompileError,
     ParsePrimitive,
     /// `__parenthesized_group`, `__bracketed_group`, `__braced_group`.
     Group(DelimiterKind),
@@ -42,6 +44,7 @@ impl SyntaxIntrinsic {
             "is_empty" => Self::IsEmpty,
             "remaining" => Self::Remaining,
             "error_at" => Self::ErrorAt,
+            "compile_error" => Self::CompileError,
             "__parse_primitive" => Self::ParsePrimitive,
             "__parenthesized_group" => Self::Group(DelimiterKind::Parenthesized),
             "__bracketed_group" => Self::Group(DelimiterKind::Bracketed),
@@ -849,6 +852,15 @@ impl MacroExpander {
             SyntaxIntrinsic::Integer(intrinsic) => {
                 self.eval_integer_intrinsic(intrinsic, argument, span)
             }
+            SyntaxIntrinsic::CompileError => {
+                let message = match &argument {
+                    Value::String(message) => staple_syntax::string_literal::decode(message)
+                        .unwrap_or_else(|_| message.clone()),
+                    _ => "compile-time error".to_owned(),
+                };
+                self.report_compile_time_panic(&message, span);
+                None
+            }
             SyntaxIntrinsic::ErrorAt => {
                 let Value::Product(mut elements, _) = argument else {
                     self.diagnostics.push(Diagnostic::new(
@@ -1517,9 +1529,13 @@ impl MacroExpander {
             ParseMember::ParseAll => "parse_all",
         };
         let (module, expression, env) = match self.parse_impls[index].members.get(name).cloned() {
-            Some(expression) => (module, expression, env),
+            Some(expression) => {
+                let expression = self.expanded_parse_member(Some(index), name, module, expression);
+                (module, expression, env)
+            }
             None if member == ParseMember::ParseAll => {
                 let (default_module, default) = self.parse_all_default.clone()?;
+                let default = self.expanded_parse_member(None, name, default_module, default);
                 // The default member is generic over the trait's own parameter.
                 let mut trait_env = HashMap::new();
                 trait_env.insert("T".to_owned(), TypeBinding::Meta(target));
@@ -2435,4 +2451,33 @@ pub(super) fn apply_float_ternary(
         crate::FloatType::F64 => first.mul_add(second, third),
     };
     determined_nan(result, &[first, second, third])
+}
+
+impl MacroExpander {
+    /// A `Parse` member, with the macros in its body expanded. The members are
+    /// compile-time code that runs in the interpreter, so each is expanded the
+    /// first time it is needed and the result is kept.
+    fn expanded_parse_member(
+        &mut self,
+        index: Option<usize>,
+        name: &str,
+        module: ModuleId,
+        expression: Expression,
+    ) -> Expression {
+        if !self.expanded_parse_members.insert((index, name.to_owned())) {
+            return expression;
+        }
+        self.compile_time_depth += 1;
+        let expanded = self.expand_expression(module, expression, 0);
+        self.compile_time_depth -= 1;
+        match index {
+            Some(index) => {
+                self.parse_impls[index]
+                    .members
+                    .insert(name.to_owned(), expanded.clone());
+            }
+            None => self.parse_all_default = Some((module, expanded.clone())),
+        }
+        expanded
+    }
 }

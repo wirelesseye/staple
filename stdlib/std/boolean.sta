@@ -1,8 +1,8 @@
 pub mod
 
 use package.ops.(Not)
-use package.cmp.(derive_eq)
-use package.hash.derive_hash
+use package.cmp.Eq
+use package.hash.(Hash, Hasher)
 use package.default.Default
 use package.convert.(Convert)
 use package.string.(String, ToString)
@@ -11,19 +11,40 @@ use package.string.(String, ToString)
 pub type InvalidBool
 
 use package.fmt.(Display, Debug, Formatter)
-use package.fmt.derive_debug
+
+// `True`, `False`, `None` and `Some` are written out by hand rather than with
+// the derive macros: the standard library's own macros rely on them, so they
+// cannot wait for those macros to run.
 
 /// The logical true value.
-@derive_debug
-@derive_eq
-@derive_hash
 pub type True
 
+impl Eq True {
+    eq = (_; _) => True
+}
+
+impl Hash True {
+    hash = (_, mut hasher) => ()
+}
+
+impl Debug True {
+    fmt = (_, mut formatter) => formatter |> write "True"
+}
+
 /// The logical false value.
-@derive_debug
-@derive_eq
-@derive_hash
 pub type False
+
+impl Eq False {
+    eq = (_; _) => True
+}
+
+impl Hash False {
+    hash = (_, mut hasher) => ()
+}
+
+impl Debug False {
+    fmt = (_, mut formatter) => formatter |> write "False"
+}
 
 /// A logical value that is either true or false.
 pub type Bool = True | False

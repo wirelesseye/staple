@@ -1,22 +1,41 @@
 pub mod
 
-use package.typegroup.(typegroup)
 use package.syntax.*
 use package.process.(panic)
-use package.hash.derive_hash
+use package.hash.Hash
+
+// `Ordering` is written out by hand, as `typegroup` and the derive modifiers
+// would produce it. The standard library's own macros depend on `Eq`,
+// `PartialOrd` and `Ord`, which mention `Ordering`, so it cannot be made by
+// those macros.
 
 /// The result of comparing two ordered values.
 ///
 /// The variants are not re-exported, so refer to them as `Ordering.Less`,
 /// `Ordering.Equal`, and `Ordering.Greater`.
-@all(@derive_eq, @derive_hash)
-pub typegroup Ordering {
+companion Ordering {
     /// The left value is smaller than the right value.
-    Less,
+    pub type Less
+    impl Hash Less { hash = (_, mut hasher) => () }
+    impl Eq Less { eq = (_; _) => True }
     /// The two values are equal.
-    Equal,
-    /// The left value is greater than the right value.
-    Greater,
+    pub type Equal
+    impl Hash Equal { hash = (_, mut hasher) => () }
+    impl Eq Equal { eq = (_; _) => True }
+    /// The left value is larger than the right value.
+    pub type Greater
+    impl Hash Greater { hash = (_, mut hasher) => () }
+    impl Eq Greater { eq = (_; _) => True }
+}
+
+pub type Ordering from pub Ordering.Less | Ordering.Equal | Ordering.Greater
+
+impl Hash Ordering {
+    hash = (Ordering inner, mut hasher) => Hash.hash (inner, hasher)
+}
+
+impl Eq Ordering {
+    eq = (Ordering left; Ordering right) => left == right
 }
 
 /// Provides equality and inequality comparisons.

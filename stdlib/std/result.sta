@@ -1,13 +1,22 @@
 pub mod
 
-use package.cmp.(derive_eq)
-use package.hash.derive_hash
+use package.cmp.Eq
+use package.hash.(Hash, Hasher)
 use package.try.Try
 
+// `Ok` is written out by hand rather than with the derive macros, which the
+// standard library's own macros cannot wait for.
+
 /// A successful value represented transparently by its payload.
-@derive_eq
-@derive_hash
 pub type Ok<T> from pub T
+
+impl<T where Eq T> Eq Ok<T> {
+    eq = (Ok left; Ok right) => left == right
+}
+
+impl<T where Hash T> Hash Ok<T> {
+    hash = (Ok inner, mut hasher) => Hash.hash (inner, hasher)
+}
 
 /// The outcome of an operation: success as `Ok`, or an error value.
 pub type Result<T, E> = Ok<T> | E

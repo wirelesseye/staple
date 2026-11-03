@@ -274,6 +274,8 @@ pub extern "staple-intrinsic" {
     remaining: ParseStream -> Syntax
     /// A `ParseError` whose message names the stream's current position.
     error_at: (ParseStream; String) -> ParseError
+    /// Fails the macro being expanded, reporting `message` at its call site.
+    compile_error: String -> Never
 }
 
 /// Syntax that can be parsed from the front of a `ParseStream` at compile time.

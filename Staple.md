@@ -64,7 +64,9 @@ Expression macros transform compiler-owned syntax values before ordinary name
 resolution and type checking. The syntax API is declared by `std.syntax` and is
 not part of the `std.core` prelude, so modules using it must import the required
 names explicitly, for example `use std.syntax (parse_quote, Expr, SyntaxNode)`.
-Examples below assume the syntax names they use have been imported.
+Examples below assume the syntax names they use have been imported. The order
+in which macros and the code they depend on are expanded is described in
+[Compile-time phases](#compile-time-phases).
 
 `Syntax` is an opaque, arbitrary lossless syntax fragment. It preserves source
 text, trivia, spans, and hygiene without requiring its contents to form one
@@ -335,6 +337,7 @@ pub extern "staple-intrinsic" {
     is_empty: ParseStream -> Bool          // only trivia remains
     remaining: ParseStream -> Syntax       // the unconsumed rest, losslessly
     error_at: (ParseStream; String) -> ParseError
+    compile_error: String -> Never         // fails the macro being expanded
 }
 
 pub trait Parse T {
@@ -789,6 +792,59 @@ A call written at the source site of the outermost macro invocation, such as
 one passed as a macro argument, reports its own location. A call produced by a
 macro definition reports the location of the outermost invocation that led to
 it.
+
+#### Compile-time phases
+
+A macro runs before the code that calls it exists in its final form, and the
+code the macro itself runs can call macros too. The compiler keeps these stages
+in order, so a macro never runs against code that has not been expanded yet.
+
+The *compile-time closure* of a macro is everything its body needs in order to
+run: the helpers, types, traits, `extern` declarations and `impl` items that its
+body mentions, directly or through other items. Operators count, because they
+use the traits in `std.ops`, `std.cmp`, `std.try` and `std.convert`. A name that
+a local binding, a parameter or a pattern introduces is not a reference to an
+item. Names written inside a `quote` or `parse_quote` are generated code rather
+than something the macro needs when it runs, so they do not belong to the
+macro's closure.
+
+An `impl` joins a closure once the closure holds both its trait and its self
+type; a blanket `impl` joins once it holds its trait.
+
+Before a macro runs, every item in its closure is expanded, and so is every
+macro that those items call. This is why a helper that a macro uses can itself
+use macros, in any module and in any order of declaration: each call is
+expanded before the code around it is used. Items are expanded once. The module
+that holds an item still lists it where it was written.
+
+A macro whose closure leads back to the macro itself cannot run. For example,
+a macro `again` that calls a helper `helper`, where `helper` calls `again`,
+would need `again` expanded before `again` could be expanded. Such a cycle is an
+error at the call that closed it, and the notes that follow it list the items
+that led there:
+
+```text
+macro `again` is needed to expand code that `again` itself depends on
+note: `helper` is needed by macro `again`
+note: macro `again` is needed by `helper`
+```
+
+A name that nothing defines in its module may be made by an item-position macro
+or a modifier in that module, so those are expanded first and the name is looked
+up again. Whether a macro really needs such a generated item cannot be told from
+names alone, so a loop that passes through one is not reported; the macro runs.
+
+Breaking a cycle usually means writing out, by hand, the code that the macro
+would have generated for the type involved. A macro used only inside a `quote`
+is not a dependency, so a helper may mention its own macro there.
+
+A *template macro* is an overload whose body, after its parameters, is only a
+`quote` or `parse_quote` that splices nothing but its parameters, or a bare
+parameter. The compiler fills in a template without running any compile-time
+code, and the names in its quotation count as references of the code that calls
+it. Being a template changes how fast the macro expands and what its closure
+holds, never what the macro means. Each overload is classified on its own, so
+a macro can mix template and non-template overloads.
 
 #### `@track_caller` and `Location`
 

@@ -17,6 +17,10 @@ pub(super) struct Registry {
     pub(super) declarations: HashMap<TraitKey, staple_syntax::TraitDeclaration>,
     pub(super) implementations: HashMap<TraitKey, Vec<TraitImpl>>,
     companions: Vec<HelperDefinition>,
+    /// Where each companion binding and implementation sits, by syntax id, so
+    /// an expanded item can replace its written form.
+    companion_slots: HashMap<SyntaxId, usize>,
+    impl_slots: HashMap<SyntaxId, (TraitKey, usize)>,
 }
 
 pub(super) fn parameter_names(patterns: &[staple_syntax::TypeParameterPattern]) -> HashSet<String> {
@@ -43,7 +47,69 @@ pub(super) fn plain_item(mut item: &Item) -> &Item {
     item
 }
 
+impl MacroExpander {
+    /// The trait declaration for `key`, with the macros in its default members
+    /// expanded.
+    pub(super) fn expanded_trait(
+        &mut self,
+        key: &TraitKey,
+    ) -> Option<staple_syntax::TraitDeclaration> {
+        let declaration = self.trait_registry.declarations.get(key)?.clone();
+        if let Some(unit) = self.closure.unit_of(declaration.syntax.id) {
+            let _ = self.ensure_expanded(unit, None);
+            return self.trait_registry.declarations.get(key).cloned();
+        }
+        Some(declaration)
+    }
+
+    /// `implementation` with the macros in its members expanded.
+    pub(super) fn expanded_impl(&mut self, implementation: TraitImpl) -> TraitImpl {
+        let id = implementation.declaration.syntax.id;
+        let Some(unit) = self.closure.unit_of(id) else {
+            return implementation;
+        };
+        let _ = self.ensure_expanded(unit, None);
+        self.trait_registry
+            .impl_slots
+            .get(&id)
+            .and_then(|(key, index)| self.trait_registry.implementations.get(key)?.get(*index))
+            .cloned()
+            .unwrap_or(implementation)
+    }
+}
+
 impl Registry {
+    /// Replaces the written form of an expanded item with the expanded one, so
+    /// the interpreter runs expanded code.
+    pub(super) fn refresh(&mut self, module: ModuleId, item: &Item) {
+        match plain_item(item) {
+            Item::TraitDeclaration(declaration) => {
+                if let Some(slot) = self
+                    .declarations
+                    .get_mut(&TraitKey(module, declaration.name.clone()))
+                {
+                    *slot = declaration.clone();
+                }
+            }
+            Item::Binding(binding) => {
+                if let Some(index) = self.companion_slots.get(&binding.syntax.id) {
+                    self.companions[*index].binding = Rc::new(binding.clone());
+                }
+            }
+            Item::TraitImplementation(implementation) => {
+                if let Some((key, index)) = self.impl_slots.get(&implementation.syntax.id)
+                    && let Some(slot) = self
+                        .implementations
+                        .get_mut(key)
+                        .and_then(|list| list.get_mut(*index))
+                {
+                    slot.declaration = implementation.clone();
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub(super) fn companion_member_exists(&self, name: &str) -> bool {
         self.companions
             .iter()
@@ -62,6 +128,9 @@ impl Registry {
                         );
                     }
                     Item::Binding(binding) if binding.companion_target.is_some() => {
+                        registry
+                            .companion_slots
+                            .insert(binding.syntax.id, registry.companions.len());
                         registry.companions.push(HelperDefinition {
                             module: module.id,
                             binding: Rc::new(binding.clone()),
@@ -88,15 +157,15 @@ impl Registry {
                         .map(|ty| header_pattern(ty, &parameters))
                         .collect::<Option<Vec<_>>>()
                         .unwrap_or_default();
+                    let slot = registry.implementations.entry(key.clone()).or_default();
                     registry
-                        .implementations
-                        .entry(key)
-                        .or_default()
-                        .push(TraitImpl {
-                            module: module.id,
-                            declaration: implementation.clone(),
-                            headers,
-                        });
+                        .impl_slots
+                        .insert(implementation.syntax.id, (key, slot.len()));
+                    slot.push(TraitImpl {
+                        module: module.id,
+                        declaration: implementation.clone(),
+                        headers,
+                    });
                 }
             }
         }
@@ -489,7 +558,7 @@ impl MacroExpander {
         explicit: Vec<Type>,
         span: Span,
     ) -> Option<Value> {
-        let declaration = self.trait_registry.declarations.get(&key)?.clone();
+        let declaration = self.expanded_trait(&key)?;
         let signature = declaration
             .members
             .iter()
@@ -643,6 +712,7 @@ impl MacroExpander {
             return None;
         }
         let (implementation, mut env) = candidates.pop().unwrap();
+        let implementation = self.expanded_impl(implementation);
         for associated in &implementation.declaration.associated_types {
             let target = self
                 .resolve_type_in(&associated.value, &env, 0)
@@ -861,9 +931,10 @@ impl MacroExpander {
             }
             if let Some((helper, env)) = candidates.into_iter().next() {
                 let previous = std::mem::replace(&mut self.type_env, Rc::new(env));
+                let binding = self.expanded_binding(helper.binding.clone());
                 let value = self.eval_expression(
                     helper.module,
-                    helper.binding.value.as_ref()?,
+                    binding.value.as_ref()?,
                     &mut Environment::new(),
                 );
                 self.type_env = previous;

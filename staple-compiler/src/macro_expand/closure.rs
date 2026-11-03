@@ -26,12 +26,25 @@ pub(super) enum ItemKind {
 
 pub(super) struct IndexedItem {
     pub(super) module: ModuleId,
-    /// The item as last seen: the raw item, replaced by what it expanded to.
-    pub(super) group: Rc<Vec<Item>>,
+    /// Where the item sits in its module's written items.
+    pub(super) position: usize,
+    /// For one binding of an `extern` block, which one. Each binding is its
+    /// own item, so reaching one does not reach the rest of its block.
+    pub(super) part: Option<usize>,
+    /// Whether expanding the item can define names it does not define as
+    /// written: an item-position macro invocation, or an item with modifiers.
+    pub(super) generates: bool,
+    /// What the item expanded to, once it has. Until then the item is read
+    /// from the written items.
+    pub(super) group: Option<Rc<Vec<Item>>>,
     pub(super) kind: ItemKind,
     /// Whether this is a modifier macro, which has its own namespace.
     pub(super) modifier: bool,
     pub(super) expanded: bool,
+    /// How the item is named in messages: what it defines, or its kind.
+    pub(super) label: String,
+    /// Where the item is written, for diagnostics.
+    pub(super) span: Span,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -41,6 +54,11 @@ struct Resolved {
     modifiers: Vec<ItemId>,
     quoted: Vec<ItemId>,
     quoted_macros: Vec<ItemId>,
+    /// Written names that resolve to nothing in the item's module, which an
+    /// item-position macro there may still generate.
+    unresolved: Vec<(ModuleId, String)>,
+    /// Names used as methods, which resolve against companion functions.
+    methods: Vec<String>,
 }
 
 struct ImplEntry {
@@ -53,6 +71,13 @@ struct ImplEntry {
 }
 
 type Names = HashMap<String, Vec<ItemId>>;
+
+/// Whom a companion function belongs to: it can only run for a receiver of one
+/// of these types, or for any receiver when it is a blanket companion.
+struct MethodTarget {
+    heads: Vec<ItemId>,
+    blanket: bool,
+}
 
 /// What a macro needs, as read by later phases.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -72,17 +97,29 @@ pub(super) struct Lookup<'a> {
 
 pub(super) struct ClosureIndex {
     pub(super) items: HashMap<ItemId, IndexedItem>,
+    uses: Vec<Vec<SyntaxId>>,
+    /// The unit that holds each binding, trait or implementation, by the id of
+    /// the declaration itself rather than of a modifier wrapped around it.
+    inner: HashMap<SyntaxId, ItemId>,
+    /// The companion blocks that add to each type namespace.
+    blocks: Vec<Vec<ModuleId>>,
+    /// The companion functions, by name: any of them may be what a method
+    /// call or pipe stage of that name runs.
+    methods: HashMap<String, Vec<ItemId>>,
+    /// The items as written, by module, until the module walk takes them.
+    raw: Vec<Vec<Option<Item>>>,
     own: Vec<Names>,
     own_modifiers: Vec<Names>,
     exports: Vec<Names>,
     export_modifiers: Vec<Names>,
-    visible: Vec<Names>,
-    visible_modifiers: Vec<Names>,
     core: Option<ModuleId>,
     prelude: Option<ModuleId>,
     uses_prelude: Vec<bool>,
     resolved: HashMap<ItemId, Rc<Resolved>>,
-    impls: Option<Rc<Vec<ImplEntry>>>,
+    impls: HashMap<ItemId, Rc<Vec<ImplEntry>>>,
+    method_targets: HashMap<ItemId, Rc<MethodTarget>>,
+    /// The units that currently contain an implementation.
+    impl_origins: BTreeSet<ItemId>,
     std_modules: StdModules,
 }
 
@@ -155,12 +192,25 @@ impl ClosureIndex {
         let count = program.modules().len();
         let mut index = Self {
             items: HashMap::new(),
+            uses: vec![Vec::new(); count],
+            inner: HashMap::new(),
+            blocks: program
+                .modules()
+                .iter()
+                .map(|module| {
+                    if module.namespace {
+                        program.companion_blocks(module.id)
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect(),
+            methods: HashMap::new(),
+            raw: (0..count).map(|_| Vec::new()).collect(),
             own: vec![Names::new(); count],
             own_modifiers: vec![Names::new(); count],
             exports: Vec::new(),
             export_modifiers: Vec::new(),
-            visible: Vec::new(),
-            visible_modifiers: Vec::new(),
             core: program.standard_library_core(),
             prelude: program.standard_library_prelude(),
             uses_prelude: program
@@ -169,14 +219,82 @@ impl ClosureIndex {
                 .map(|module| program.module_uses_prelude(module.id))
                 .collect(),
             resolved: HashMap::new(),
-            impls: None,
+            impls: HashMap::new(),
+            method_targets: HashMap::new(),
+            impl_origins: BTreeSet::new(),
             std_modules,
         };
         for module in program.modules() {
-            for item in &module.syntax.items {
+            for (position, item) in module.syntax.items.iter().enumerate() {
+                if let Item::UseDeclaration(declaration) = item {
+                    index.uses[module.id.0].push(declaration.syntax.id);
+                }
+                if let Item::ExternBlock(block) = item
+                    && block.bindings.len() > 1
+                {
+                    for (part, binding) in block.bindings.iter().enumerate() {
+                        let id = binding.syntax.id;
+                        add_name(&mut index.own[module.id.0], &binding.name, id);
+                        index.items.insert(
+                            id,
+                            IndexedItem {
+                                module: module.id,
+                                position,
+                                part: Some(part),
+                                generates: false,
+                                group: None,
+                                kind: ItemKind::Extern,
+                                modifier: false,
+                                expanded: true,
+                                label: binding.name.clone(),
+                                span: binding.syntax.span.clone(),
+                            },
+                        );
+                    }
+                    index.items.insert(
+                        item.syntax().id,
+                        IndexedItem {
+                            module: module.id,
+                            position,
+                            part: None,
+                            generates: false,
+                            group: None,
+                            kind: ItemKind::Other,
+                            modifier: false,
+                            expanded: false,
+                            label: format!("extern block #{position}"),
+                            span: item.syntax().span.clone(),
+                        },
+                    );
+                    continue;
+                }
                 if is_unit(item) {
                     let (kind, modifier, names) = item_kind(item);
                     let id = item.syntax().id;
+                    match traits_plain(item) {
+                        Item::Binding(binding) => {
+                            index.inner.insert(binding.syntax.id, id);
+                        }
+                        Item::TraitImplementation(implementation) => {
+                            index.inner.insert(implementation.syntax.id, id);
+                        }
+                        Item::TraitDeclaration(declaration) => {
+                            index.inner.insert(declaration.syntax.id, id);
+                        }
+                        _ => {}
+                    }
+                    if let Item::Binding(binding) = traits::plain_item(item)
+                        && binding.companion_target.is_some()
+                    {
+                        index
+                            .methods
+                            .entry(binding.name.clone())
+                            .or_default()
+                            .push(id);
+                    }
+                    if kind == ItemKind::Impl {
+                        index.impl_origins.insert(id);
+                    }
                     for name in &names {
                         let table = if modifier {
                             &mut index.own_modifiers
@@ -189,16 +307,27 @@ impl ClosureIndex {
                         id,
                         IndexedItem {
                             module: module.id,
-                            group: Rc::new(vec![item.clone()]),
+                            position,
+                            part: None,
+                            generates: kind == ItemKind::Other
+                                || matches!(item, Item::Modified(modified)
+                                    if !modified.modifiers.iter().all(|modifier| modifier.namespace.is_none() && modifier.name == "doc")),
+                            group: None,
                             kind,
                             modifier,
                             expanded: false,
+                            label: if names.is_empty() {
+                                format!("{kind:?} #{position}").to_lowercase()
+                            } else {
+                                names.join("+")
+                            },
+                            span: item.syntax().span.clone(),
                         },
                     );
                 }
             }
         }
-        index.rebuild(program, use_kinds, imported_modules);
+        index.rebuild(use_kinds, imported_modules);
         index
     }
 
@@ -207,25 +336,27 @@ impl ClosureIndex {
     /// closure larger.
     pub(super) fn rebuild(
         &mut self,
-        program: &Program,
         use_kinds: &HashMap<SyntaxId, UseKind>,
         imported_modules: &HashMap<SyntaxId, ModuleId>,
     ) {
         self.exports = self.own.clone();
         self.export_modifiers = self.own_modifiers.clone();
+        let mut version = vec![0usize; self.own.len()];
+        let mut seen: HashMap<SyntaxId, usize> = HashMap::new();
         loop {
             let mut changed = false;
-            for module in program.modules() {
-                for item in &module.syntax.items {
-                    let Item::UseDeclaration(declaration) = item else {
-                        continue;
-                    };
+            for module in 0..self.own.len() {
+                for use_id in self.uses[module].clone() {
                     let (Some(imported), Some(kind)) = (
-                        imported_modules.get(&declaration.syntax.id).copied(),
-                        use_kinds.get(&declaration.syntax.id),
+                        imported_modules.get(&use_id).copied(),
+                        use_kinds.get(&use_id),
                     ) else {
                         continue;
                     };
+                    if seen.get(&use_id) == Some(&version[imported.0]) {
+                        continue;
+                    }
+                    seen.insert(use_id, version[imported.0]);
                     let mut names = Names::new();
                     let mut modifiers = Names::new();
                     match kind {
@@ -236,41 +367,37 @@ impl ClosureIndex {
                         }
                         UseKind::Selected(selected) => {
                             for import in selected {
-                                self.select(imported, &import.name, import.alias(), &mut names, &mut modifiers);
+                                self.select(
+                                    imported,
+                                    &import.name,
+                                    import.alias(),
+                                    &mut names,
+                                    &mut modifiers,
+                                );
                             }
                         }
                         UseKind::Renamed { item, alias } => {
                             self.select(imported, item, alias, &mut names, &mut modifiers)
                         }
                     }
-                    changed |= merge(&mut self.exports[module.id.0], &names);
-                    changed |= merge(&mut self.export_modifiers[module.id.0], &modifiers);
+                    let grew = merge(&mut self.exports[module], &names)
+                        | merge(&mut self.export_modifiers[module], &modifiers);
+                    if grew {
+                        version[module] += 1;
+                        changed = true;
+                    }
                 }
             }
             if !changed {
                 break;
             }
         }
-        self.visible = self.exports.clone();
-        self.visible_modifiers = self.export_modifiers.clone();
-        for module in 0..program.modules().len() {
-            for implicit in [self.core, self.prelude.filter(|_| self.uses_prelude[module])]
-                .into_iter()
-                .flatten()
-            {
-                if implicit.0 == module {
-                    continue;
-                }
-                let (names, modifiers) = (
-                    self.exports[implicit.0].clone(),
-                    self.export_modifiers[implicit.0].clone(),
-                );
-                merge(&mut self.visible[module], &names);
-                merge(&mut self.visible_modifiers[module], &modifiers);
-            }
-        }
-        self.resolved.clear();
-        self.impls = None;
+        // A name that resolved still does, so only what mentions an unresolved
+        // name needs scanning again.
+        self.resolved
+            .retain(|_, resolved| resolved.unresolved.is_empty());
+        self.impls.clear();
+        self.method_targets.clear();
     }
 
     fn select(
@@ -293,15 +420,28 @@ impl ClosureIndex {
     /// attributed to `origin`, so reaching one of them reaches the unit that
     /// makes it. Returns whether a name is new, in which case the caller
     /// rebuilds the name tables with [`Self::rebuild`].
-    pub(super) fn record_expansion(&mut self, origin: ItemId, expanded: &[Item]) -> bool {
+    pub(super) fn record_expansion(
+        &mut self,
+        origin: ItemId,
+        expanded: Rc<Vec<Item>>,
+        complete: bool,
+    ) -> bool {
         let Some(indexed) = self.items.get_mut(&origin) else {
             return false;
         };
         let module = indexed.module;
-        indexed.group = Rc::new(expanded.to_vec());
-        indexed.expanded = true;
+        indexed.group = Some(expanded.clone());
+        indexed.expanded = complete;
+        if expanded
+            .iter()
+            .any(|item| matches!(traits_plain(item), Item::TraitImplementation(_)))
+        {
+            self.impl_origins.insert(origin);
+        } else {
+            self.impl_origins.remove(&origin);
+        }
         let mut introduced = false;
-        for item in expanded {
+        for item in expanded.iter() {
             let (_, modifier, names) = item_kind(item);
             for name in names {
                 let table = if modifier {
@@ -309,12 +449,92 @@ impl ClosureIndex {
                 } else {
                     &mut self.own
                 };
-                introduced |= add_name(&mut table[module.0], &name, origin);
+                // A name the module already defines is not made by this unit,
+                // which may only be the whole of a block that was split up.
+                if !table[module.0].contains_key(&name) {
+                    introduced |= add_name(&mut table[module.0], &name, origin);
+                }
             }
         }
         self.resolved.remove(&origin);
-        self.impls = None;
+        self.impls.remove(&origin);
         introduced
+    }
+
+    /// Moves a module's written items into the index. `copy` leaves the
+    /// module's own list in place, for a module the walk reads from there.
+    pub(super) fn load_raw(&mut self, module: ModuleId, items: Vec<Item>) {
+        self.raw[module.0] = items.into_iter().map(Some).collect();
+    }
+
+    /// Takes the written item at `position`, if it has not been taken.
+    pub(super) fn take_raw(&mut self, module: ModuleId, position: usize) -> Option<Item> {
+        self.raw[module.0].get_mut(position).and_then(Option::take)
+    }
+
+    pub(super) fn raw_len(&self, module: ModuleId) -> usize {
+        self.raw[module.0].len()
+    }
+
+    /// Runs `read` over what the unit `id` currently is, without copying the
+    /// item when it is still as written.
+    fn with_group<R>(&self, id: ItemId, read: impl FnOnce(&[Item]) -> R) -> R {
+        let indexed = &self.items[&id];
+        if let Some(group) = &indexed.group {
+            return read(group);
+        }
+        match (
+            self.raw[indexed.module.0]
+                .get(indexed.position)
+                .and_then(Option::as_ref),
+            indexed.part,
+        ) {
+            (Some(item), None) => read(std::slice::from_ref(item)),
+            _ => read(&self.group_of(id)),
+        }
+    }
+
+    /// What the unit `id` currently is: its expansion, or the item as written.
+    pub(super) fn group_of(&self, id: ItemId) -> Rc<Vec<Item>> {
+        let indexed = &self.items[&id];
+        match &indexed.group {
+            Some(group) => group.clone(),
+            None => {
+                let written = self.raw[indexed.module.0]
+                    .get(indexed.position)
+                    .and_then(|item| item.clone());
+                match (written, indexed.part) {
+                    (Some(Item::ExternBlock(mut block)), Some(part)) => {
+                        let binding = block.bindings.swap_remove(part);
+                        block.bindings = vec![binding];
+                        Rc::new(vec![Item::ExternBlock(block)])
+                    }
+                    (written, _) => Rc::new(written.into_iter().collect()),
+                }
+            }
+        }
+    }
+
+    /// The unit that holds the declaration with syntax id `inner`.
+    pub(super) fn unit_of(&self, inner: SyntaxId) -> Option<ItemId> {
+        self.inner.get(&inner).copied()
+    }
+
+    /// Keeps `item`, which the walk has taken, readable as the unit `id` until
+    /// its expansion is recorded.
+    pub(super) fn keep_written(&mut self, id: ItemId, item: &Item) {
+        if let Some(indexed) = self.items.get_mut(&id) {
+            indexed.group = Some(Rc::new(vec![item.clone()]));
+        }
+        self.impls.remove(&id);
+    }
+
+    /// Drops everything the module walk no longer needs.
+    pub(super) fn release(&mut self) {
+        self.items.clear();
+        self.raw.clear();
+        self.resolved.clear();
+        self.impls.clear();
     }
 
     // ----- resolution -----
@@ -340,9 +560,9 @@ impl ClosureIndex {
         modifier: bool,
     ) -> Option<&'a Vec<ItemId>> {
         let table = if modifier {
-            &self.visible_modifiers
+            &self.export_modifiers
         } else {
-            &self.visible
+            &self.exports
         };
         let mut cursor = module;
         loop {
@@ -350,10 +570,22 @@ impl ClosureIndex {
                 return Some(items);
             }
             if !lookup.companions[cursor.0] {
-                return None;
+                break;
             }
-            cursor = lookup.parents[cursor.0]?;
+            let Some(parent) = lookup.parents[cursor.0] else {
+                break;
+            };
+            cursor = parent;
         }
+        // The implicit imports come last, so they never shadow a written name.
+        [
+            self.core,
+            self.prelude.filter(|_| self.uses_prelude[module.0]),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|implicit| *implicit != module)
+        .find_map(|implicit| table[implicit.0].get(name))
     }
 
     /// The items a written name can mean. Every item sharing the name counts,
@@ -381,8 +613,10 @@ impl ClosureIndex {
             } else {
                 (&self.exports, ())
             };
-            if let Some(items) = exports[target.0].get(segment) {
-                found.extend(items.iter().copied());
+            for module in std::iter::once(target).chain(self.blocks[target.0].iter().copied()) {
+                if let Some(items) = exports[module.0].get(segment) {
+                    found.extend(items.iter().copied());
+                }
             }
             namespace = lookup.scopes[target.0].namespaces.get(segment).copied();
         }
@@ -393,25 +627,71 @@ impl ClosureIndex {
         if let Some(resolved) = self.resolved.get(&id) {
             return resolved.clone();
         }
+        self.resolved_uncached(lookup, id)
+    }
+
+    fn resolved_uncached(&mut self, lookup: &Lookup, id: ItemId) -> Rc<Resolved> {
         let Some(indexed) = self.items.get(&id) else {
             return Rc::new(Resolved::default());
         };
-        let (module, group) = (indexed.module, indexed.group.clone());
-        let mut scan = Scan::default();
-        for item in group.iter() {
-            let mut item = item.clone();
-            let mut next_syntax_id = usize::MAX / 2;
-            desugar_item(&mut item, &mut next_syntax_id, self.std_modules);
-            let part = Scan::item(&item);
-            scan.refs.extend(part.refs);
-            scan.quoted.extend(part.quoted);
-            scan.modifiers.extend(part.modifiers);
-        }
+        let module = indexed.module;
+        let modules = self.std_modules;
+        let scan = self.with_group(id, |group| {
+            let mut scan = Scan::default();
+            for item in group {
+                let part = Scan::item(item, modules);
+                scan.refs.extend(part.refs);
+                scan.quoted.extend(part.quoted);
+                scan.modifiers.extend(part.modifiers);
+                for method in part.methods {
+                    if !scan.methods.contains(&method) {
+                        scan.methods.push(method);
+                    }
+                }
+            }
+            scan
+        });
+        let resolved = Rc::new(self.resolve_scan(lookup, module, Some(id), &scan));
+        self.resolved.insert(id, resolved.clone());
+        resolved
+    }
+
+    /// Resolves what a scan found, written in `module`. `id` is the unit it
+    /// was scanned from, which does not count as a reference to itself.
+    fn resolve_scan(
+        &self,
+        lookup: &Lookup,
+        module: ModuleId,
+        id: Option<ItemId>,
+        scan: &Scan,
+    ) -> Resolved {
         let mut resolved = Resolved::default();
-        let sort = |references: &[RawRef], items: &mut Vec<ItemId>, macros: &mut Vec<ItemId>, this: &Self| {
+        let mut unresolved: Vec<(ModuleId, String)> = Vec::new();
+        let mut sort = |references: &[RawRef],
+                        items: &mut Vec<ItemId>,
+                        macros: &mut Vec<ItemId>,
+                        track: bool,
+                        this: &Self| {
             for reference in references {
-                for target in this.resolve_ref(lookup, module, reference, false) {
-                    if target == id {
+                let targets = this.resolve_ref(lookup, module, reference, false);
+                if track
+                    && targets.is_empty()
+                    && reference.path.len() == 1
+                    && !Self::namespace(
+                        lookup,
+                        reference.definition.unwrap_or(module),
+                        &reference.path[0],
+                    )
+                    .is_some()
+                {
+                    let context = reference.definition.unwrap_or(module);
+                    let pair = (context, reference.path[0].clone());
+                    if !unresolved.contains(&pair) {
+                        unresolved.push(pair);
+                    }
+                }
+                for target in targets {
+                    if Some(target) == id {
                         continue;
                     }
                     let list = match this.items.get(&target).map(|indexed| indexed.kind) {
@@ -425,75 +705,188 @@ impl ClosureIndex {
                 }
             }
         };
-        sort(&scan.refs, &mut resolved.items, &mut resolved.macros, self);
+        sort(
+            &scan.refs,
+            &mut resolved.items,
+            &mut resolved.macros,
+            true,
+            self,
+        );
         sort(
             &scan.quoted,
             &mut resolved.quoted,
             &mut resolved.quoted_macros,
+            false,
             self,
         );
+        resolved.unresolved = unresolved;
         for reference in &scan.modifiers {
             for target in self.resolve_ref(lookup, module, reference, true) {
-                if target != id && !resolved.modifiers.contains(&target) {
+                if Some(target) != id && !resolved.modifiers.contains(&target) {
                     resolved.modifiers.push(target);
                 }
             }
         }
-        let resolved = Rc::new(resolved);
-        self.resolved.insert(id, resolved.clone());
+        resolved.methods = scan.methods.clone();
         resolved
     }
 
-    fn impl_entries(&mut self, lookup: &Lookup) -> Rc<Vec<ImplEntry>> {
-        if let Some(entries) = &self.impls {
-            return entries.clone();
+    fn method_target(&mut self, lookup: &Lookup, id: ItemId) -> Rc<MethodTarget> {
+        if let Some(target) = self.method_targets.get(&id) {
+            return target.clone();
         }
-        let mut entries = Vec::new();
-        let mut origins: Vec<ItemId> = self.items.keys().copied().collect();
-        origins.sort();
-        for origin in origins {
-            let indexed = &self.items[&origin];
-            let (module, group) = (indexed.module, indexed.group.clone());
-            for item in group.iter() {
-                let Item::TraitImplementation(implementation) = traits_plain(item) else {
+        let module = self.items[&id].module;
+        let mut heads = Vec::new();
+        let mut blanket = false;
+        for item in self.group_of(id).iter() {
+            let Item::Binding(binding) = traits_plain(item) else {
+                continue;
+            };
+            let Some(target) = &binding.companion_target else {
+                continue;
+            };
+            let parameters = binding
+                .companion_generics
+                .iter()
+                .flat_map(|generics| generics.parameters.iter())
+                .flat_map(|parameter| parameter.names())
+                .collect::<HashSet<_>>();
+            let mut named = Vec::new();
+            collect_type_heads(target, &mut named);
+            blanket |= matches!(target, Type::Named(head)
+                if head.namespace.is_none() && parameters.contains(head.name.as_str()));
+            for head in named {
+                if head.namespace.is_none() && parameters.contains(head.name.as_str()) {
                     continue;
-                };
-                let trait_ref = named_ref(&implementation.trait_name);
-                let traits = self
-                    .resolve_ref(lookup, module, &trait_ref, false)
-                    .into_iter()
-                    .filter(|target| self.items.get(target).is_some_and(|item| item.kind == ItemKind::Trait))
-                    .collect::<Vec<_>>();
-                let parameters = implementation
-                    .type_parameters
-                    .iter()
-                    .flat_map(|parameter| parameter.names())
-                    .collect::<HashSet<_>>();
-                let mut heads = Vec::new();
-                if let Some(self_type) = implementation.arguments.first() {
-                    collect_type_heads(self_type, &mut heads);
                 }
-                let blanket = matches!(
-                    implementation.arguments.first(),
-                    Some(Type::Named(named)) if named.namespace.is_none() && parameters.contains(named.name.as_str())
-                );
-                let selves = heads
-                    .into_iter()
-                    .filter(|head| !(head.namespace.is_none() && parameters.contains(head.name.as_str())))
-                    .flat_map(|head| self.resolve_ref(lookup, module, &named_ref(&head), false))
-                    .filter(|target| self.items.get(target).is_some_and(|item| item.kind == ItemKind::Type))
-                    .collect::<Vec<_>>();
-                entries.push(ImplEntry {
-                    origin,
-                    traits,
-                    selves,
-                    blanket,
-                });
+                for found in self.resolve_ref(lookup, module, &named_ref(&head), false) {
+                    if self
+                        .items
+                        .get(&found)
+                        .is_some_and(|indexed| indexed.kind == ItemKind::Type)
+                    {
+                        heads.push(found);
+                    }
+                }
             }
         }
+        let target = Rc::new(MethodTarget { heads, blanket });
+        self.method_targets.insert(id, target.clone());
+        target
+    }
+
+    /// The implementations written in (or generated by) the unit `origin`.
+    fn impls_of(&mut self, lookup: &Lookup, origin: ItemId) -> Rc<Vec<ImplEntry>> {
+        if let Some(entries) = self.impls.get(&origin) {
+            return entries.clone();
+        }
+        let module = self.items[&origin].module;
+        let implementations = self.with_group(origin, |group| {
+            group
+                .iter()
+                .filter_map(|item| match traits_plain(item) {
+                    Item::TraitImplementation(implementation) => Some((
+                        named_ref(&implementation.trait_name),
+                        implementation
+                            .type_parameters
+                            .iter()
+                            .flat_map(|parameter| parameter.names())
+                            .map(str::to_owned)
+                            .collect::<HashSet<_>>(),
+                        implementation.arguments.first().cloned(),
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut entries = Vec::new();
+        for (trait_ref, parameters, self_type) in implementations {
+            let traits = self
+                .resolve_ref(lookup, module, &trait_ref, false)
+                .into_iter()
+                .filter(|target| {
+                    self.items
+                        .get(target)
+                        .is_some_and(|item| item.kind == ItemKind::Trait)
+                })
+                .collect::<Vec<_>>();
+            let mut heads = Vec::new();
+            if let Some(self_type) = &self_type {
+                collect_type_heads(self_type, &mut heads);
+            }
+            let blanket = matches!(
+                &self_type,
+                Some(Type::Named(named))
+                    if named.namespace.is_none() && parameters.contains(named.name.as_str())
+            );
+            let selves = heads
+                .into_iter()
+                .filter(|head| {
+                    !(head.namespace.is_none() && parameters.contains(head.name.as_str()))
+                })
+                .flat_map(|head| self.resolve_ref(lookup, module, &named_ref(&head), false))
+                .filter(|target| {
+                    self.items
+                        .get(target)
+                        .is_some_and(|item| item.kind == ItemKind::Type)
+                })
+                .collect::<Vec<_>>();
+            entries.push(ImplEntry {
+                origin,
+                traits,
+                selves,
+                blanket,
+            });
+        }
         let entries = Rc::new(entries);
-        self.impls = Some(entries.clone());
+        self.impls.insert(origin, entries.clone());
         entries
+    }
+
+    /// The names, within `items`, that resolve to nothing where they are
+    /// written.
+    pub(super) fn unresolved_in(
+        &mut self,
+        lookup: &Lookup,
+        items: &BTreeSet<ItemId>,
+    ) -> Vec<(ModuleId, String)> {
+        let mut names: Vec<(ModuleId, String)> = Vec::new();
+        for item in items {
+            for pair in self.resolved(lookup, *item).unresolved.iter() {
+                if !names.contains(pair) {
+                    names.push(pair.clone());
+                }
+            }
+        }
+        names
+    }
+
+    /// The units of `module` that are not yet expanded and can generate names:
+    /// item-position macro invocations and items with modifiers.
+    pub(super) fn generators_in(&self, module: ModuleId) -> Vec<ItemId> {
+        let mut found: Vec<(usize, ItemId)> = self
+            .items
+            .iter()
+            .filter(|(_, indexed)| {
+                indexed.module == module && !indexed.expanded && indexed.generates
+            })
+            .map(|(id, indexed)| (indexed.position, *id))
+            .collect();
+        found.sort();
+        found.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// An item of `within` that calls the macro or modifier declared by `target`.
+    pub(super) fn caller_of(
+        &mut self,
+        lookup: &Lookup,
+        within: &BTreeSet<ItemId>,
+        target: ItemId,
+    ) -> Option<ItemId> {
+        within.iter().copied().find(|item| {
+            let resolved = self.resolved(lookup, *item);
+            resolved.macros.contains(&target) || resolved.modifiers.contains(&target)
+        })
     }
 
     /// The closure of the macro declared by `start`. `is_template` says which
@@ -505,13 +898,42 @@ impl ClosureIndex {
         start: ItemId,
         is_template: &dyn Fn(ItemId) -> bool,
     ) -> MacroClosure {
+        let seed = self.resolved(lookup, start);
+        self.close(lookup, Some(start), seed, is_template)
+    }
+
+    /// The closure of an expression written in `module` that compile-time code
+    /// evaluates, such as a `const` initializer.
+    pub(super) fn closure_of_expression(
+        &mut self,
+        lookup: &Lookup,
+        module: ModuleId,
+        expression: &Expression,
+        is_template: &dyn Fn(ItemId) -> bool,
+    ) -> MacroClosure {
+        let scan = Scan::expression(expression, &[], self.std_modules);
+        let seed = Rc::new(self.resolve_scan(lookup, module, None, &scan));
+        self.close(lookup, None, seed, is_template)
+    }
+
+    fn close(
+        &mut self,
+        lookup: &Lookup,
+        start: Option<ItemId>,
+        seed: Rc<Resolved>,
+        is_template: &dyn Fn(ItemId) -> bool,
+    ) -> MacroClosure {
         let mut closure = MacroClosure::default();
-        closure.items.insert(start);
-        let mut work = vec![start];
-        let entries = self.impl_entries(lookup);
+        let mut work = Vec::new();
+        if let Some(start) = start {
+            closure.items.insert(start);
+        }
+        let mut pending = vec![seed];
         loop {
-            while let Some(next) = work.pop() {
-                let resolved = self.resolved(lookup, next);
+            while let Some(resolved) = pending
+                .pop()
+                .or_else(|| work.pop().map(|next| self.resolved(lookup, next)))
+            {
                 for target in &resolved.items {
                     if closure.items.insert(*target) {
                         work.push(*target);
@@ -531,18 +953,24 @@ impl ClosureIndex {
                 }
             }
             let mut added = false;
-            for entry in entries.iter() {
-                if closure.items.contains(&entry.origin) {
-                    continue;
-                }
-                let has_trait = entry.traits.iter().any(|item| closure.items.contains(item));
-                let has_self = entry.blanket
-                    || entry.selves.is_empty()
-                    || entry.selves.iter().all(|item| closure.items.contains(item));
-                if has_trait && has_self {
-                    closure.items.insert(entry.origin);
-                    work.push(entry.origin);
-                    added = true;
+            let mut groups = Vec::new();
+            for origin in self.impl_origins.clone() {
+                groups.push(self.impls_of(lookup, origin));
+            }
+            for group in &groups {
+                for entry in group.iter() {
+                    if closure.items.contains(&entry.origin) {
+                        continue;
+                    }
+                    let has_trait = entry.traits.iter().any(|item| closure.items.contains(item));
+                    let has_self = entry.blanket
+                        || entry.selves.is_empty()
+                        || entry.selves.iter().all(|item| closure.items.contains(item));
+                    if has_trait && has_self {
+                        closure.items.insert(entry.origin);
+                        work.push(entry.origin);
+                        added = true;
+                    }
                 }
             }
             if !added && work.is_empty() {
@@ -615,10 +1043,8 @@ mod tests {
 
     impl Fixture {
         fn new(label: &str) -> Self {
-            let root = std::env::temp_dir().join(format!(
-                "staple-closure-{label}-{}",
-                std::process::id()
-            ));
+            let root =
+                std::env::temp_dir().join(format!("staple-closure-{label}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).unwrap();
             Self { root }
@@ -641,12 +1067,11 @@ mod tests {
     /// written as `impl <Trait>`, and the names of the macros it calls.
     fn closure_of(fixture: &Fixture, macro_name: &str) -> (Vec<String>, Vec<String>) {
         let program = ProgramLoader::new()
-            .with_standard_library_root(
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../stdlib"),
-            )
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../stdlib"))
             .load_path(&fixture.root.join("main.sta"))
             .expect("fixture should load");
         let mut expander = MacroExpander::new(&program);
+        load_written_items(&mut expander, &program);
         let id = expander
             .definitions
             .values()
@@ -655,8 +1080,9 @@ mod tests {
             .expect("the macro is declared");
         let closure = expander.macro_closure(id);
         let describe = |id: &ItemId| -> Vec<String> {
-            expander.closure.items[id]
-                .group
+            expander
+                .closure
+                .group_of(*id)
                 .iter()
                 .flat_map(|item| match traits_plain(item) {
                     Item::TraitImplementation(implementation) => {
@@ -670,6 +1096,14 @@ mod tests {
             closure.items.iter().flat_map(describe).collect(),
             closure.macros_used.iter().flat_map(describe).collect(),
         )
+    }
+
+    fn load_written_items(expander: &mut MacroExpander, program: &Program) {
+        for module in program.modules() {
+            expander
+                .closure
+                .load_raw(module.id, module.syntax.items.clone());
+        }
     }
 
     fn contains(names: &[String], name: &str) -> bool {
@@ -750,7 +1184,10 @@ mod tests {
     #[test]
     fn a_closure_follows_namespaces_and_companions() {
         let fixture = Fixture::new("namespaces");
-        fixture.write("tools.sta", "pub mod\npub def made = (x: I32) => x\npub def other = (x: I32) => x\n");
+        fixture.write(
+            "tools.sta",
+            "pub mod\npub def made = (x: I32) => x\npub def other = (x: I32) => x\n",
+        );
         fixture.write(
             "main.sta",
             &format!(
@@ -793,7 +1230,11 @@ mod tests {
         );
         let (items, _) = closure_of(&fixture, "m");
         assert!(contains(&items, "Tag"), "{items:?}");
-        assert_eq!(items.iter().filter(|name| *name == "impl Tag").count(), 1, "{items:?}");
+        assert_eq!(
+            items.iter().filter(|name| *name == "impl Tag").count(),
+            1,
+            "{items:?}"
+        );
     }
 
     #[test]
@@ -803,10 +1244,13 @@ mod tests {
         fixture.write("main.sta", "let x: I32 = 1\n");
         for name in ["if", "when", "while", "for", "derive_eq", "typegroup"] {
             let program = ProgramLoader::new()
-                .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../stdlib"))
+                .with_standard_library_root(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../stdlib"),
+                )
                 .load_path(&fixture.root.join("main.sta"))
                 .unwrap();
             let mut expander = MacroExpander::new(&program);
+            load_written_items(&mut expander, &program);
             let Some(id) = expander
                 .definitions
                 .values()
@@ -817,8 +1261,9 @@ mod tests {
             };
             let closure = expander.macro_closure(id);
             let describe = |id: &ItemId| -> String {
-                expander.closure.items[id]
-                    .group
+                expander
+                    .closure
+                    .group_of(*id)
                     .iter()
                     .flat_map(|item| match traits_plain(item) {
                         Item::TraitImplementation(i) => vec![format!("impl {}", i.trait_name.name)],
@@ -829,7 +1274,36 @@ mod tests {
             };
             let items: Vec<_> = closure.items.iter().map(describe).collect();
             let macros: Vec<_> = closure.macros_used.iter().map(describe).collect();
-            eprintln!("{name}: {} items, macros {macros:?}\n  {items:?}", items.len());
+            eprintln!(
+                "{name}: {} items, macros {macros:?}\n  {items:?}",
+                items.len()
+            );
+            if let Ok(target) = std::env::var("EXPLAIN") {
+                for item in closure.items.iter() {
+                    let resolved = {
+                        let lookup = Lookup {
+                            scopes: &expander.scopes,
+                            parents: &expander.parent_modules,
+                            companions: &expander.companion_modules,
+                        };
+                        expander.closure.resolved(&lookup, *item)
+                    };
+                    let direct = resolved
+                        .items
+                        .iter()
+                        .chain(&resolved.macros)
+                        .filter(|t| {
+                            expander.closure.items[*t]
+                                .label
+                                .split('+')
+                                .any(|n| n == target)
+                        })
+                        .count();
+                    if direct > 0 {
+                        eprintln!("  {} -> {target}", expander.closure.items[item].label);
+                    }
+                }
+            }
         }
     }
 }

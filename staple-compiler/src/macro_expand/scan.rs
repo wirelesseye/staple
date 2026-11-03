@@ -22,38 +22,75 @@ pub(super) struct Scan {
     pub(super) quoted: Vec<RawRef>,
     /// Modifier names applied to items.
     pub(super) modifiers: Vec<RawRef>,
+    /// Names used as methods or pipe stages, which resolve against the
+    /// receiver's companion functions rather than against the scope.
+    pub(super) methods: Vec<String>,
 }
 
 impl Scan {
-    pub(super) fn item(item: &Item) -> Self {
-        let mut scanner = Scanner::default();
+    pub(super) fn item(item: &Item, modules: StdModules) -> Self {
+        let mut scanner = Scanner::new(modules);
         scanner.top_level_item(item);
         scanner.scan
     }
 
-    pub(super) fn expression(expression: &Expression, locals: &[String]) -> Self {
-        let mut scanner = Scanner::default();
-        scanner.scopes.push(locals.iter().cloned().collect());
+    pub(super) fn expression(
+        expression: &Expression,
+        locals: &[String],
+        modules: StdModules,
+    ) -> Self {
+        let mut scanner = Scanner::new(modules);
+        scanner.frames.push(Vec::new());
+        for name in locals {
+            scanner.bind(name);
+        }
         scanner.expression(expression);
         scanner.scan
     }
 }
 
-#[derive(Default)]
 struct Scanner {
     scan: Scan,
-    scopes: Vec<HashSet<String>>,
+    /// How many enclosing scopes bind each name, so a lookup hashes once.
+    bound: HashMap<String, u32>,
+    /// The names each open scope binds, to unbind them when it closes.
+    frames: Vec<Vec<String>>,
     quote_depth: usize,
+    /// The standard-library modules operator syntax resolves against.
+    modules: StdModules,
 }
 
 impl Scanner {
+    fn new(modules: StdModules) -> Self {
+        Self {
+            scan: Scan::default(),
+            bound: HashMap::new(),
+            frames: Vec::new(),
+            quote_depth: 0,
+            modules,
+        }
+    }
+
+    /// A name an operator stands for, resolved in the module that defines it
+    /// whatever the surrounding module imports.
+    fn standard(&mut self, name: &str, module: Option<ModuleId>) {
+        if self.quote_depth > 0 {
+            return;
+        }
+        self.scan.refs.push(RawRef {
+            path: vec![name.to_owned()],
+            definition: module,
+        });
+    }
+
     fn is_local(&self, name: &str) -> bool {
-        self.scopes.iter().any(|scope| scope.contains(name))
+        self.bound.contains_key(name)
     }
 
     fn bind(&mut self, name: &str) {
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_owned());
+        if let Some(frame) = self.frames.last_mut() {
+            frame.push(name.to_owned());
+            *self.bound.entry(name.to_owned()).or_insert(0) += 1;
         }
     }
 
@@ -72,6 +109,12 @@ impl Scanner {
         }
     }
 
+    fn method(&mut self, name: &str) {
+        if self.quote_depth == 0 && !self.scan.methods.iter().any(|known| known == name) {
+            self.scan.methods.push(name.to_owned());
+        }
+    }
+
     fn named_type(&mut self, named: &staple_syntax::NamedType) {
         let mut path = Vec::new();
         if let Some(namespace) = &named.namespace {
@@ -82,9 +125,16 @@ impl Scanner {
     }
 
     fn scoped(&mut self, body: impl FnOnce(&mut Self)) {
-        self.scopes.push(HashSet::new());
+        self.frames.push(Vec::new());
         body(self);
-        self.scopes.pop();
+        for name in self.frames.pop().unwrap_or_default() {
+            if let Some(count) = self.bound.get_mut(&name) {
+                *count -= 1;
+                if *count == 0 {
+                    self.bound.remove(&name);
+                }
+            }
+        }
     }
 
     // ----- items -----
@@ -367,12 +417,7 @@ impl Scanner {
     fn pattern(&mut self, pattern: &Pattern) {
         match pattern {
             Pattern::Binding(binding) => {
-                if binding
-                    .name
-                    .chars()
-                    .next()
-                    .is_some_and(char::is_uppercase)
-                {
+                if binding.name.chars().next().is_some_and(char::is_uppercase) {
                     let name = binding
                         .resolution_name
                         .clone()
@@ -494,6 +539,9 @@ impl Scanner {
                 if let Some(path) = Self::path(expression) {
                     self.reference(path, &access.syntax);
                 } else {
+                    if let Accessor::Method(name) = &access.accessor {
+                        self.method(name);
+                    }
                     self.expression(&access.value);
                 }
             }
@@ -501,21 +549,59 @@ impl Scanner {
                 self.expression(&index.value);
                 self.expression(&index.index);
             }
-            Expression::Unary(unary) => self.expression(&unary.operand),
-            Expression::Try(try_) => self.expression(&try_.operand),
+            Expression::Unary(unary) => {
+                let (trait_name, _) = unary.operator.trait_method();
+                self.standard(trait_name, self.modules.ops);
+                self.expression(&unary.operand);
+            }
+            Expression::Try(try_) => {
+                self.standard("Try", self.modules.try_);
+                self.standard("Ok", self.modules.result);
+                self.expression(&try_.operand);
+            }
             Expression::Conversion(conversion) => {
+                self.standard("Convert", self.modules.convert);
                 self.expression(&conversion.value);
                 self.ty(&conversion.ty);
             }
             Expression::Binary(binary) => {
+                use staple_syntax::BinaryOperator::*;
+                match binary.operator {
+                    Add => self.standard("Add", self.modules.ops),
+                    Subtract => self.standard("Subtract", self.modules.ops),
+                    Multiply => self.standard("Multiply", self.modules.ops),
+                    Divide => self.standard("Divide", self.modules.ops),
+                    Remainder => self.standard("Remainder", self.modules.ops),
+                    Equal | NotEqual => self.standard("Eq", self.modules.cmp),
+                    Less | LessEqual | Greater | GreaterEqual => {
+                        self.standard("PartialOrd", self.modules.cmp)
+                    }
+                    Range => self.standard("range", self.modules.range),
+                    RangeInclusive => self.standard("range_inclusive", self.modules.range),
+                    And | Or => self.standard("Bool", self.modules.boolean),
+                }
                 self.expression(&binary.left);
                 self.expression(&binary.right);
             }
             Expression::Pipe(pipe) => {
                 self.expression(&pipe.receiver);
+                let mut head = pipe.stage.as_ref();
+                loop {
+                    match head {
+                        Expression::Call(call) => head = &call.callee,
+                        Expression::Product(product) if product.is_grouping() => {
+                            head = &product.elements[0].value
+                        }
+                        _ => break,
+                    }
+                }
+                if let Expression::Name(name) = head {
+                    self.method(&name.name);
+                }
                 self.expression(&pipe.stage);
             }
             Expression::Logical(logical) => {
+                self.standard("Bool", self.modules.boolean);
                 self.expression(&logical.left);
                 self.expression(&logical.right);
                 self.ty(&logical.bool_type);
@@ -525,7 +611,8 @@ impl Scanner {
                 let tokens = argument.syntax.tokens();
                 for (index, token) in tokens.iter().enumerate() {
                     if token.kind == staple_syntax::TokenKind::Identifier
-                        && !(index > 0 && tokens[index - 1].kind == staple_syntax::TokenKind::Dollar)
+                        && !(index > 0
+                            && tokens[index - 1].kind == staple_syntax::TokenKind::Dollar)
                     {
                         self.reference(vec![token.text.clone()], &argument.syntax);
                     }
@@ -543,7 +630,9 @@ impl Scanner {
                 self.quote_depth += 1;
                 match &quote.template {
                     staple_syntax::QuoteTemplate::Expression(value) => self.expression(value),
-                    staple_syntax::QuoteTemplate::Item(item) => self.scoped(|scanner| scanner.item(item)),
+                    staple_syntax::QuoteTemplate::Item(item) => {
+                        self.scoped(|scanner| scanner.item(item))
+                    }
                     staple_syntax::QuoteTemplate::Items(items) => self.scoped(|scanner| {
                         for item in items {
                             scanner.item(item);

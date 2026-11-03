@@ -4,14 +4,13 @@ use package.boolean.(True, False)
 use package.iterator.(IntoIterator, Iterator)
 use package.iterator.IterStep.(Done, Yield)
 use package.syntax.*
-use package.process.(panic)
 
 def when_clauses = clauses: Sequence<(Expr; FatArrow; Expr)> => Expr :: match clauses {
     Sequence () => parse_quote { () },
     Sequence (first, rest) => match first {
         (condition: Ident<"else">; _; fallback) => match rest {
             Sequence () => fallback,
-            _ => panic "when clauses after else are unsupported",
+            _ => compile_error "when clauses after else are unsupported",
         },
         (condition; _; branch) => {
             let otherwise = when_clauses rest
@@ -64,19 +63,19 @@ def if_branches = (condition: Expr, consequent: Expr, rest: Sequence<Expr>) => E
                                     let elif_consequent = first
                                     if_branches (elif_condition, elif_consequent, rest)
                                 },
-                                _ => panic "if without an else-if body is unsupported",
+                                _ => compile_error "if without an else-if body is unsupported",
                             }
                         },
-                        _ => panic "if without an else-if condition is unsupported",
+                        _ => compile_error "if without an else-if condition is unsupported",
                     },
                     otherwise_branch => match rest {
                         Sequence () => otherwise_branch,
-                        _ => panic "if tokens after else are unsupported",
+                        _ => compile_error "if tokens after else are unsupported",
                     },
                 },
-                _ => panic "if without a branch after else is unsupported",
+                _ => compile_error "if without a branch after else is unsupported",
             },
-            _ => panic "if trailing syntax without else is unsupported",
+            _ => compile_error "if trailing syntax without else is unsupported",
         },
     }
     parse_quote {
