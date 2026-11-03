@@ -1128,7 +1128,7 @@ pub(super) fn callee_runtime_obligations(
     // The caller's types as its own instance spells them, so they compare
     // equal to its dictionary bounds.
     let enclosing_map = enclosing.environment.substitution_map();
-    let substitution = substitutions
+    let mut substitution = substitutions
         .types
         .iter()
         .map(|entry| {
@@ -1138,6 +1138,27 @@ pub(super) fn callee_runtime_obligations(
             )
         })
         .collect::<std::collections::HashMap<_, _>>();
+    // The site records only the callee's explicit parameters. Its associated
+    // projections follow from the bounds whose slots they fill
+    // (`IntoIterator Iter (IntoIterator.Iter Iter)`), and must be known before
+    // a bound that takes one as an explicit argument is completed: guessing
+    // `Iterator (IntoIterator.Iter Iter) String`'s receiver from the catalog
+    // is ambiguous once several `String` iterators are in scope.
+    for _ in 0..=callee.declared_bounds.len() {
+        let mut changed = false;
+        for (parameter, value) in
+            program.associated_projection_values(&callee.declared_bounds, &substitution)
+        {
+            if let std::collections::hash_map::Entry::Vacant(entry) = substitution.entry(parameter)
+            {
+                entry.insert(value);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
     runtime_obligations(
         &program.semantic_ids,
         &callee.declared_bounds,
