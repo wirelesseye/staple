@@ -143,7 +143,15 @@ impl QuoteLowering<'_> {
                 })
             }
         };
-        self.call(like, callee, arguments)
+        // The two slots are passed as consecutive arguments.
+        let call = self.call(like, callee, arguments);
+        match call {
+            Expression::Call(mut call) => {
+                call.spread = true;
+                Expression::Call(call)
+            }
+            call => call,
+        }
     }
 
     pub(super) fn lower_item(&mut self, item: &mut Item) {

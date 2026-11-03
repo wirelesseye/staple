@@ -3126,7 +3126,9 @@ impl NameResolver {
                     {
                         found.insert(index);
                         self.intrinsic_functions.insert(symbol, *intrinsic);
-                    } else {
+                    } else if module_name != "std.syntax" {
+                        // The syntax functions are provided by the macro
+                        // runtime, not by lowering, so they are only declared.
                         self.diagnostics.push(Diagnostic::new(
                             binding.syntax.span.clone(),
                             format!("unknown Staple intrinsic `{}`", binding.name),

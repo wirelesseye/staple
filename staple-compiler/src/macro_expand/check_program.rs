@@ -58,10 +58,38 @@ pub(crate) struct CheckSnapshot {
     pub(crate) modules: Vec<Vec<Item>>,
     /// The expanded form of each item some closure contains.
     pub(crate) groups: HashMap<ItemId, ClosureGroup>,
+    /// What each compile-time helper and macro declaration expanded to.
+    pub(crate) compile_time: HashMap<ItemId, Vec<Item>>,
     pub(crate) macros: Vec<CheckedMacro>,
 }
 
 impl MacroExpander {
+    /// Expands the macro calls in the bodies of `Parse` implementations, which
+    /// the interpreter runs as written and expansion otherwise leaves alone.
+    pub(super) fn expand_compile_time_items(&mut self, module: ModuleId, items: &mut [Item]) {
+        for item in items {
+            self.expand_compile_time_item(module, item);
+        }
+    }
+
+    fn expand_compile_time_item(&mut self, module: ModuleId, item: &mut Item) {
+        if let Item::Modified(modified) = item {
+            return self.expand_compile_time_item(module, &mut modified.item);
+        }
+        if !self.is_compile_time_parse_item(module, item) {
+            return;
+        }
+        if let Item::TraitImplementation(implementation) = item {
+            let saved = self.save_state();
+            self.compile_time_depth += 1;
+            for member in &mut implementation.members {
+                member.value = self.expand_expression(module, member.value.clone(), 0);
+            }
+            self.compile_time_depth -= 1;
+            self.restore_state(saved);
+        }
+    }
+
     /// Collects the closures to check and the items they contain. Runs after
     /// the module walk, before the index is released.
     pub(super) fn check_snapshot(&mut self, mode: CheckMode, modules: usize) -> CheckSnapshot {
@@ -78,6 +106,21 @@ impl MacroExpander {
             })
             .collect::<Vec<_>>();
         declared.sort();
+        {
+            // A macro nothing invoked has not had its closure expanded yet, and
+            // dependencies are checked whole.
+            for (start, _, _) in &declared {
+                let definition = self
+                    .definitions
+                    .values()
+                    .find(|definition| definition.declaration.syntax.id == *start)
+                    .cloned();
+                if let Some(definition) = definition {
+                    let span = definition.declaration.syntax.span.clone();
+                    let _ = self.ensure_ready(&definition, &span);
+                }
+            }
+        }
         let mut macros = Vec::new();
         for (start, name, module) in declared {
             let closure = match self.macro_closures.get(&start) {
@@ -101,7 +144,8 @@ impl MacroExpander {
                     continue;
                 };
                 let (module, position) = (indexed.module, indexed.position);
-                let items = self.closure.group_of(*id).as_ref().clone();
+                let mut items = self.closure.group_of(*id).as_ref().clone();
+                self.expand_compile_time_items(module, &mut items);
                 groups.insert(
                     *id,
                     ClosureGroup {
@@ -112,9 +156,29 @@ impl MacroExpander {
                 );
             }
         }
+        // The module walk leaves compile-time helpers and macro declarations as
+        // written; what they expand to is kept with the index.
+        let mut pending = Vec::new();
+        for (id, indexed) in &self.closure.items {
+            if let Some(group) = &indexed.group
+                && group.iter().any(|item| {
+                    matches!(item, Item::MacroDeclaration(_))
+                        || matches!(item, Item::Binding(binding)
+                            if super::binding_is_compile_time_helper(binding))
+                })
+            {
+                pending.push((*id, indexed.module, group.as_ref().clone()));
+            }
+        }
+        let mut compile_time = HashMap::new();
+        for (id, module, mut items) in pending {
+            self.expand_compile_time_items(module, &mut items);
+            compile_time.insert(id, items);
+        }
         CheckSnapshot {
             modules: vec![Vec::new(); modules],
             groups,
+            compile_time,
             macros,
         }
     }
@@ -237,6 +301,15 @@ pub(crate) fn build_check_program(
 fn package_dependencies(program: &Program, package: Option<PackageId>) -> HashSet<Option<PackageId>> {
     let mut found = HashSet::new();
     let Some(package) = package else {
+        // A single file has no package of its own; every package is one of its
+        // dependencies.
+        found.extend(
+            program
+                .modules()
+                .iter()
+                .map(|module| program.package_of(module.id))
+                .filter(Option::is_some),
+        );
         return found;
     };
     let Some(graph) = program.package_graph() else {
@@ -411,4 +484,172 @@ pub(crate) fn check_closures(program: &Program, analysis: &mut MacroAnalysis) ->
         }
     }
     diagnostics
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::ProgramLoader;
+
+    struct Built {
+        program: Program,
+        templates: TemplateTable,
+    }
+
+    /// Expands `source` and builds the check program of its macros' closures.
+    fn build(source: &str, mode: CheckMode) -> Built {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let source = format!("use std.syntax.(parse_quote, quote, Expr, Item, Sequence, Syntax)\n{source}");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(&source, &root)
+            .expect("source should load");
+        let (program, analysis, _) =
+            super::super::expand_program_checked(program, true, Some(mode), false)
+                .expect("source should expand");
+        let snapshot = analysis.check.expect("the snapshot is kept");
+        let package = program.package_of(program.entry());
+        let macros = snapshot
+            .macros
+            .iter()
+            .filter(|checked| program.package_of(checked.module) == package)
+            .collect::<Vec<_>>();
+        let mut next = analysis.next_syntax_id;
+        let (program, templates) = build_check_program(&program, &snapshot, package, &macros, &mut next);
+        Built { program, templates }
+    }
+
+    const HELPER_MACRO: &str = concat!(
+        "def keep = value: Expr => Expr :: value\n",
+        "macro same = value: Expr => keep value\n",
+        "let a = same 1\n",
+    );
+
+    fn entry_items(built: &Built) -> &[Item] {
+        &built.program.module(built.program.entry()).syntax.items
+    }
+
+    fn function_names(items: &[Item]) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Binding(binding) if binding.kind == BindingKind::Def => {
+                    Some(binding.name.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_macro_becomes_a_function_with_a_reserved_name() {
+        let built = build(HELPER_MACRO, CheckMode::Invoked);
+        let items = entry_items(&built);
+        let functions = function_names(items);
+        assert!(
+            functions.iter().any(|name| name.starts_with("macro#same#")),
+            "{functions:?}"
+        );
+        // The declaration stays, without its body, so imports of it resolve.
+        assert!(items.iter().any(|item| matches!(item,
+            Item::MacroDeclaration(declaration) if declaration.name == "same" && declaration.value.is_none())));
+    }
+
+    #[test]
+    fn overloads_become_one_function_each() {
+        let built = build(
+            concat!(
+                "def keep = value: Expr => Expr :: value\n",
+                "macro pick = value: Expr => keep value\n",
+                "macro pick = (a: Expr; b: Expr) => keep a\n",
+                "let x = pick 1\nlet y = pick 1 2\n",
+            ),
+            CheckMode::Invoked,
+        );
+        let count = function_names(entry_items(&built))
+            .iter()
+            .filter(|name| name.starts_with("macro#pick#"))
+            .count();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn only_what_a_closure_reaches_is_kept_from_the_checked_package() {
+        let built = build(
+            concat!(
+                "def used = value: Expr => Expr :: value\n",
+                "def unused = value: Expr => Expr :: value\n",
+                "macro m = value: Expr => used value\n",
+                "let a = m 1\n",
+            ),
+            CheckMode::Invoked,
+        );
+        let functions = function_names(entry_items(&built));
+        assert!(functions.contains(&"used".to_owned()), "{functions:?}");
+        assert!(!functions.contains(&"unused".to_owned()), "{functions:?}");
+    }
+
+    #[test]
+    fn every_macro_is_checked_with_all() {
+        let built = build(
+            "def keep = value: Expr => Expr :: value\nmacro never_called = value: Expr => keep value\n",
+            CheckMode::All,
+        );
+        let functions = function_names(entry_items(&built));
+        assert!(
+            functions.iter().any(|name| name.starts_with("macro#never_called#")),
+            "{functions:?}"
+        );
+    }
+
+    #[test]
+    fn dependencies_keep_their_compile_time_items() {
+        let built = build(HELPER_MACRO, CheckMode::Invoked);
+        let syntax = built
+            .program
+            .standard_library_syntax()
+            .expect("std.syntax is loaded");
+        let items = &built.program.module(syntax).syntax.items;
+        assert!(items.iter().any(|item| matches!(item,
+            Item::ExternBlock(block) if block.abi == "\"staple-intrinsic\"")));
+        assert!(items.iter().any(|item| matches!(item,
+            Item::TraitImplementation(implementation) if implementation.trait_name.name == "Parse")));
+    }
+
+    #[test]
+    fn quotations_become_calls_with_a_template_table() {
+        let built = build(
+            concat!(
+                "def keep = value: Expr => Expr :: value\n",
+                "def raw = value: Expr => Syntax :: quote { ($value) }\n",
+                "macro twice = value: Expr => { let unused = raw value; keep (parse_quote { $value + $value }) }\n",
+                "macro parsed: Expr -> Expr = value => keep (parse_quote { $value })\n",
+                "let a = twice 1\nlet b = parsed 1\n",
+            ),
+            CheckMode::Invoked,
+        );
+        let templates = &built.templates.templates;
+        assert!(templates.contains(&" $value + $value".to_owned()), "{templates:?}");
+        assert!(templates.contains(&" $value".to_owned()), "{templates:?}");
+        assert!(templates.contains(&" ($value)".to_owned()), "{templates:?}");
+        let rendered = format!("{:?}", entry_items(&built));
+        assert!(!rendered.contains("Quote("), "no quotation is left");
+        assert!(rendered.contains("\"__quote\""));
+        assert!(rendered.contains("\"parse_quote\""));
+        // One splice per distinct name in each quotation, so `$value` twice in
+        // one quotation is one splice.
+        assert_eq!(rendered.matches("\"splice\"").count(), 3);
+    }
+
+    #[test]
+    fn imports_of_names_the_check_program_lacks_are_dropped() {
+        let mut kind = UseKind::Selected(vec![SelectedImport::new("Kept"), SelectedImport::new("Gone")]);
+        let defined = ["Kept".to_owned()].into_iter().collect();
+        assert!(keep_import(&mut kind, &defined));
+        assert_eq!(kind, UseKind::Selected(vec![SelectedImport::new("Kept")]));
+        let mut kind = UseKind::Selected(vec![SelectedImport::new("Gone")]);
+        assert!(!keep_import(&mut kind, &defined));
+    }
 }

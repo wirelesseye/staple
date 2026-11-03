@@ -318,26 +318,154 @@ Update this section as you work (see "Rules for the implementor").
 
 | Task | Status | Commit | Notes |
 |---|---|---|---|
-| 1. Check-program builder | not started | | |
-| 2. Typed quotation lowering | not started | | |
-| 3. Check driver | not started | | |
-| 4. Gap inventory | not started | | |
-| 5. Close the gaps | not started | | |
+| 1. Check-program builder | done, with a known gap | see git log | `macro_expand/check_program.rs`. Seven unit tests. Known gap: imports from partial own-package modules in closure-only mode are not always dropped (Findings, group 9). |
+| 2. Typed quotation lowering | done | see git log | `macro_expand/lower_quote.rs`, `Splice`, `__quote` and `Parse.parse_quote` in `std.syntax`. `parse_quote` is a `Parse` trait member, not a free function (Findings, group 7). No splice of a non-syntax value was found that needs a `Splice` impl. |
+| 3. Check driver | done | see git log | `STAPLE_CHECK_MACRO_CLOSURES` and `scripts/check-macro-closures.py`. Cost measured on one input only (Measurements). |
+| 4. Gap inventory | partly done | see git log | Groups 1–9 below. The corpus run covered the standard library and fixtures only (40 inputs); the full corpus was not run. |
+| 5. Close the gaps | partly done | see git log | Groups 3–6 fixed. Groups 1, 2, 8 and 9 are open; groups 1, 2 and 8 are assigned to Phase 3, group 9 is open (no target yet). |
 | 6. Static check after expansion | not started | | |
-| 7. Compile-time effects | not started | | |
-| 8. Check in the test suite | not started | | |
-| 9. Language reference | not started | | |
-| 10. Close out | not started | | |
+| 7. Compile-time effects | decided, not enforced | see git log | Documented in `Staple.md` ("Compile-time effects"). |
+| 8. Check in the test suite | not started | | Not possible until the closures check clean: every check program contains the standard library, so one open gap fails every test. |
+| 9. Language reference | partly done | see git log | `Staple.md` describes the check, the quotation lowering and `Splice`. The statements that compile-time code is not type-checked as run-time code, that its checking is permissive and that `impl Parse` has its own orphan rule are unchanged, because they are still true. |
+| 10. Close out | partly done | | Umbrella plan updated. Corpus comparison: see Findings. |
+
+**Phase 2 is not done.** The "Done when" conditions on a clean check, on task 8
+and on task 6 are not met.
 
 ## Measurements
 
-_None yet._ For each one, record what was measured, the result, the machine,
-the commit and the command. Use B1–B3 from the Phase 0 baseline, with the
-check off, with `1` and with `all`.
+One input, not B1–B3 (the Phase 0 inputs were not at hand). `staple check` of a
+three-line program that uses `if`, release build, three runs each, on a
+machine that was also building and testing, so the numbers are noisy.
+Command: `STAPLE_CHECK_MACRO_CLOSURES=<mode> target/release/staple check --stdlib stdlib a.sta`.
+
+| Mode | Wall time (s) |
+|---|---|
+| off | 2.6–3.1 |
+| `1` | 3.8–6.1 |
+| `all` | 4.9–5.8 |
+
+The check costs about one more front-end pass over the standard library, as
+Phase 0 measured. Nothing was measured for B1–B3.
 
 ## Findings
 
-_None yet._ Record the gap inventory (task 4) and how each group was resolved,
-splice cases that changed (task 2), the effects decision (task 7), every
-expansion difference from the start of the phase with its reason, and
-anything that changes later phases.
+### Design changes made while implementing
+
+- **A package other than the program's own is checked whole.** Decision 1 says
+  the package being expanded contributes only its closure items. That cannot
+  hold for the standard library when a user macro uses `if`: the closure of `if`
+  lives in `std`, and checking it as closure-only needs `Splice` and `__quote`
+  through quotations (group 8). So the check takes the program's own package
+  (the package of the entry module) closure-only, and any other package, with
+  its dependencies, whole, with all of its macros converted. This matches how
+  Phase 4 would build a dependency's macros: with the dependency.
+- **A macro stays declared in the check program, without its body**, next to
+  its generated function, so `use` of the macro still resolves.
+- **The check needs compile-time items expanded.** The module walk leaves the
+  bodies of `Parse` implementations unexpanded (the interpreter runs them as
+  written), and helpers and macro bodies of macros nothing invoked are not
+  expanded at all. The snapshot expands both, on copies, so what the
+  interpreter runs does not change. All macros are made ready under the check,
+  which expands their closures.
+- **`parse_quote` is a `Parse` trait member (`Parse.parse_quote`)**, not the
+  free generic function Decision 3 names. The interpreter's static check
+  accepts a `Parse` bound on a type parameter only in an `impl`, so a free
+  `def __parse_quote = <T where Parse T> …` is rejected by it. This goes away
+  when task 6 or Phase 6 removes that check.
+- **The syntax intrinsics are declared, not implemented, for the resolver.** The
+  resolver no longer reports `unknown Staple intrinsic` for `std.syntax`, whose
+  functions the macro runtime will provide.
+- **`Splice` impls are compile-time items** (dropped after expansion, like
+  `Parse` impls).
+
+### Gap inventory
+
+Counts are diagnostics from `STAPLE_CHECK_MACRO_CLOSURES=all staple check` on a
+three-line program, which checks every standard-library macro, unless noted.
+Most diagnostics in a group have one cause, so the counts show size, not the
+number of defects.
+
+1. **Syntax types are opaque in the real front end. Open; Phase 3.** The
+   resolver registers `Sequence`, `Ident`, `Expr`, `Item`, `TypeBody` and the
+   rest of `std.syntax` as `BuiltinType::Syntax`. Patterns such as
+   `Sequence (first, rest)`, `TypeDeclarationItem (…)`, `WrapperBody (_, r)` and
+   `Ident<"else">` then fail: `the type of `Sequence` is not available here`
+   (about 150), `nominal pattern `Sequence` cannot match `Sequence<…>``
+   (about 50), `unreachable match arm` and `non-exhaustive match` (about 170),
+   and the unbound names that follow (`first`, `rest`, `fields`, …). About 30
+   macros are hit; every standard-library macro that destructures syntax is.
+   Resolution: declare these as ordinary types with a handle representation and
+   remove `BuiltinType::Syntax`, which is Phase 3 work, since it needs the
+   runtime representation. Not fixable in this phase without inventing one.
+2. **`impl` targets the front end rejects. Open; Phase 3.** `trait
+   implementation target must be fully concrete` for the `Parse` impls on
+   variadic products (`(H; ...T)`, `(H, ...T)`) and on `Ident<S>`. These impls
+   were never seen by the front end. Phase 3 rewrites the `Parse` impls
+   (Decision 4 of the umbrella plan), so it removes or reshapes them.
+3. **Names macro code uses without importing. Fixed.** `String` in `std.cmp`,
+   `std.default`, `std.hash` and `std.typegroup`, and `Ok` in `std.typegroup`.
+   The interpreter resolved them without an import. Added the imports.
+4. **Private representations. Fixed.** Patterns on `AliasBody`, `WrapperBody`
+   and `FromBody` from other modules were rejected, because the types were
+   declared `wrap` without `pub`. They are now `wrap pub`, which matches how
+   the other syntax data types are declared.
+5. **Compile-time code the snapshot had not expanded. Fixed** (see above).
+   Without it, `if … else …` in `derive_eq` and `derive_hash` helpers showed
+   up as `macro `if` must be invoked` and `unknown name `else``.
+6. **Quotation and splice typing. Fixed for the cases found.** No macro
+   splices a non-syntax value, so no case needed a `Splice` impl beyond the
+   syntax types. A `Syntax` is not `Copy`, so a name that is spliced twice in
+   one quotation is passed once, and a name used again after a quotation that
+   splices it is a use after move. The standard library has none.
+7. **The interpreter's static check is stricter than the front end about
+   generic helpers.** It needs a `Parse` bound on a type parameter to be on an
+   `impl`; it reports `(String)` for the one-field pattern `ParseError message`
+   (the front end unwraps it); and `non-exhaustive match` on a `Sequence<T>`
+   with a type-parameter element. New helpers were written to avoid these. They
+   go away with task 6 or Phase 6.
+8. **Quotation lowering adds edges the closure scan cannot have. Open;
+   Phase 4.** A quotation calls `__quote`, `Splice.splice` and (for
+   `parse_quote`) `Parse.parse_quote`. Counting these as references of the
+   macro gives a cycle: `when` → `Splice` impl for `Expr` → `CharExpr` → `Char` →
+   `len_utf8`, which uses `when`. It showed as `macro `when` is needed to
+   expand code that `when` itself depends on`. For now the closure scan does not
+   count quotation calls, and the check takes `std.syntax` whole. Phase 4 has
+   to break the cycle (for example `Char` written without `when`, or a
+   splice impl set that does not reach `Char`) before closure-only builds of
+   the standard library can compile quotations.
+9. **Imports in partial own-package modules. Open; no target phase yet.**
+   In a closure-only check of the standard library itself, an import of a name
+   outside the closure is not always dropped: `module has no public item named
+   `Hasher`` (from `std.ptr`) and `…`Default`` (from `std.string`). The target
+   of a `package.`-rooted import is probably not found through
+   `Program::imported_module`. Because every `std` entry file is a user program
+   in the corpus script, this is noise in the `stdlib/` inputs, not a defect in
+   a macro.
+
+Not found in this phase, because group 1 hides them: the effect of `?` on a
+non-`Result`, `return` from nested blocks and `mut` parameters passed by
+address; integer literal widths; `collect` without an expected type; and the
+orphan rule. They are not resolved, and each still has to be looked at once
+group 1 is fixed. The two `typegroup ConversionError` chains were not examined.
+The evidence for narrowing closures with selected impls is also not gathered.
+
+### Expansion difference from the start of the phase
+
+Not measured. `scripts/compare-expansion.py` was not run against the start of
+the phase for the final tree. Changes that can alter `staple expand` output:
+the new imports and `wrap pub` in the standard library, and the new items in
+`std.syntax` (`Splice`, `Parse.parse_quote`, three intrinsic declarations).
+None of them is meant to change the expansion of user code.
+
+### Later phases
+
+- **Phase 3** must declare the syntax types as real types (group 1), rewrite or
+  remove the `Parse` impls the front end rejects (group 2), and implement
+  `__quote`, `__splice_node`, `__splice_join` and the template table exactly as
+  lowered here: ids index `TemplateTable::templates` in the order the check
+  program lowers them, and `Splice.splice` is applied once per distinct name in
+  order of first use.
+- **Phase 4** must resolve the quotation cycle (group 8) and decide how a
+  dependency's macros are built (the check checks them whole).
+- **Phase 6** deletes the interpreter's static check, which removes group 7.

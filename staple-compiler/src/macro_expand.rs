@@ -1818,8 +1818,20 @@ pub(crate) fn expand_program(
 /// With `recovering`, invalid macro definitions do not stop expansion, so the
 /// result always carries a program; otherwise they fail fast with `Err`.
 pub(crate) fn expand_program_recovering(
+    program: Program,
+    recovering: bool,
+) -> Result<(Program, MacroAnalysis, Vec<Diagnostic>), Vec<Diagnostic>> {
+    expand_program_checked(program, recovering, check_mode(), true)
+}
+
+/// Like [`expand_program_recovering`], with the closure check chosen by the
+/// caller. Without `run_check`, the material for the check stays in the
+/// analysis.
+pub(crate) fn expand_program_checked(
     mut program: Program,
     recovering: bool,
+    check_mode: Option<check_program::CheckMode>,
+    run_check: bool,
 ) -> Result<(Program, MacroAnalysis, Vec<Diagnostic>), Vec<Diagnostic>> {
     let mut expander = MacroExpander::new(&program);
     expander.validate_definitions();
@@ -1912,7 +1924,7 @@ pub(crate) fn expand_program_recovering(
         }
         walked.push((module_index, parts));
     }
-    let mut check = check_mode().map(|mode| expander.check_snapshot(mode, program.modules().len()));
+    let mut check = check_mode.map(|mode| expander.check_snapshot(mode, program.modules().len()));
     expander.closure.release();
     expander.item_expansions.clear();
     for (module_index, parts) in walked {
@@ -1923,7 +1935,15 @@ pub(crate) fn expand_program_recovering(
             items.extend(Rc::try_unwrap(part).unwrap_or_else(|part| (*part).clone()));
         }
         if let Some(check) = &mut check {
-            check.modules[module_index] = items.clone();
+            let mut snapshot = Vec::new();
+            for item in &items {
+                match check.compile_time.get(&item.syntax().id) {
+                    Some(expanded) => snapshot.extend(expanded.iter().cloned()),
+                    None => snapshot.push(item.clone()),
+                }
+            }
+            expander.expand_compile_time_items(module, &mut snapshot);
+            check.modules[module_index] = snapshot;
         }
         items.retain(|item| {
             !matches!(item,
@@ -1990,7 +2010,7 @@ pub(crate) fn expand_program_recovering(
     }
     let mut analysis = expander.analysis();
     analysis.check = check;
-    if expander.diagnostics.is_empty() && analysis.check.is_some() {
+    if run_check && expander.diagnostics.is_empty() && analysis.check.is_some() {
         let checked = check_program::check_closures(&program, &mut analysis);
         expander.diagnostics.extend(checked);
     }

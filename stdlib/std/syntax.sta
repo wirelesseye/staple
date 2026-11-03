@@ -155,15 +155,15 @@ pub type ResourceDependency wrap pub (resource_type: Type, mutable: Bool)
 
 /// A transparent alias type declaration body, written `= Type`.
 @recursive_constructor
-pub type AliasBody<Element> wrap Element
+pub type AliasBody<Element> wrap pub Element
 
 /// A `wrap` type declaration body with its representation visibility.
 @recursive_constructor
-pub type WrapperBody<Representation, Element> wrap (Representation, Element)
+pub type WrapperBody<Representation, Element> wrap pub (Representation, Element)
 
 /// A `from` type declaration body with its representation visibility.
 @recursive_constructor
-pub type FromBody<Representation, Element> wrap (Representation, Element)
+pub type FromBody<Representation, Element> wrap pub (Representation, Element)
 
 /// An `opaque` type declaration body.
 pub type OpaqueBody
@@ -328,7 +328,7 @@ extern "staple-intrinsic" {
 
 /// Syntax that a quotation can splice with `$name`.
 pub trait Splice T {
-    splice: T -> Syntax
+    splice: move T -> Syntax
 }
 
 impl Splice Syntax { splice = move value => value }

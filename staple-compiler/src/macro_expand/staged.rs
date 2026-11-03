@@ -9,7 +9,7 @@ use super::*;
 
 /// The interpreter's transient state, set aside while an item is expanded
 /// ahead of its turn from the middle of another expansion.
-struct SavedState {
+pub(super) struct SavedState {
     expansion_stack: Vec<MacroKey>,
     modifier_frames: Vec<(MacroKey, Vec<SyntaxId>)>,
     emitted_items: Option<Vec<Item>>,
@@ -45,7 +45,7 @@ pub(super) struct Expanded {
 }
 
 impl MacroExpander {
-    fn save_state(&mut self) -> SavedState {
+    pub(super) fn save_state(&mut self) -> SavedState {
         SavedState {
             expansion_stack: std::mem::take(&mut self.expansion_stack),
             modifier_frames: std::mem::take(&mut self.modifier_frames),
@@ -67,7 +67,7 @@ impl MacroExpander {
         }
     }
 
-    fn restore_state(&mut self, saved: SavedState) {
+    pub(super) fn restore_state(&mut self, saved: SavedState) {
         self.expansion_stack = saved.expansion_stack;
         self.modifier_frames = saved.modifier_frames;
         self.emitted_items = saved.emitted_items;

@@ -274,6 +274,16 @@ Every closure must pass the real front end. The interpreter still runs the
 macros. The real pipeline only checks them.
 Breakdown and status: [`staged-macro-compilation-phase-2.md`](staged-macro-compilation-phase-2.md).
 
+**Status (2026-11-04): partly done.** The check exists and is opt-in
+(`STAPLE_CHECK_MACRO_CLOSURES`): it builds a program from the expanded
+dependencies and the closures, lowers quotations to typed calls (`__quote`,
+`Parse.parse_quote`, `Splice`) and runs `NameResolver` and `TypeChecker` over it.
+It does not pass yet. The syntax types are opaque in the front end, so every
+macro that destructures syntax fails; that, and the `Parse` impls the front end
+rejects, move to Phase 3. Quotation lowering creates a cycle through `Char` that
+Phase 4 has to break. The interpreter's static check still expands lazily, and
+the check is not in the test suite. See the Phase 2 breakdown for the inventory.
+
 - Add a check that sends each closure through `NameResolver` and `TypeChecker`
   as a standalone program, after expansion. Run it on the standard library and
   the macro tests. It is opt-in at first, then on in CI.

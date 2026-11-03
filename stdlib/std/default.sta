@@ -1,5 +1,6 @@
 pub mod
 
+use package.string.String
 use package.syntax.*
 use package.process.(panic)
 

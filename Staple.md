@@ -850,6 +850,35 @@ it. Being a template changes how fast the macro expands and what its closure
 holds, never what the macro means. Each overload is classified on its own, so
 a macro can mix template and non-template overloads.
 
+Macro code can be checked as ordinary code. With the hidden environment
+variable `STAPLE_CHECK_MACRO_CLOSURES` set to `1`, `staple check`, `compile`,
+`run` and `expand` also resolve and type-check the closure of every macro that
+was invoked, and with `all` the closure of every macro. The check builds a
+program from every dependency package as expanded, including its compile-time
+items, and from the package being expanded only the items in the closures. Each
+macro overload with a body is checked as a private function, and each
+diagnostic names the macro whose closure held the code it is in. In that
+program a quotation is a call:
+
+- `quote { … }` is `__quote (id, splices)`, which returns `Syntax`.
+- `parse_quote { … }` is `Parse.parse_quote (id, splices)`, which parses the
+  fragment as the `T` the context expects, through `Parse.parse_all`. A type
+  with no `Parse` implementation cannot be the result of a `parse_quote`.
+- `$name` and `$name...` are `Splice.splice name`, one per distinct name in
+  a quotation, in order of first use. `Splice` is declared in `std.syntax`
+  and implemented for every syntax type and for `Sequence<T>` when `T`
+  implements it, so splicing a value that is not syntax is a type error.
+
+The check is not on by default, and it does not change what macros do.
+
+#### Compile-time effects
+
+Macro code may not read files, read from standard input, spawn processes or
+seed `std.rand` from the operating system, so that expansion is deterministic
+and can be cached. Writing diagnostics to standard error is allowed. Nothing
+enforces this yet: the closure of a macro over-approximates what it calls, so a
+rule applied to the closure would report functions that never run.
+
 #### `@track_caller` and `Location`
 
 `@track_caller`, declared in `std.source` as `pub macro @track_caller: Item ->
