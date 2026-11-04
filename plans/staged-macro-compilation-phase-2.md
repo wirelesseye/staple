@@ -459,11 +459,14 @@ The evidence for narrowing closures with selected impls is also not gathered.
 
 ### Expansion difference from the start of the phase
 
-Not measured. `scripts/compare-expansion.py` was not run against the start of
-the phase for the final tree. Changes that can alter `staple expand` output:
-the new imports and `wrap pub` in the standard library, and the new items in
-`std.syntax` (`Splice`, `Parse.parse_quote`, three intrinsic declarations).
-None of them is meant to change the expansion of user code.
+`scripts/compare-expansion.py` against `62d80109` (binary built from that
+commit, its own standard library): 227 of 232 inputs match. The five that
+differ are the standard-library files this phase edited: `std/cmp.sta`,
+`std/default.sta`, `std/hash.sta` and `std/typegroup.sta` (new imports) and
+`std/syntax.sta` (`Splice`, `Parse.parse_quote`, three intrinsic declarations,
+`wrap pub` on three body types). Expansion of every other input, including
+all fixtures and corpus programs, is unchanged. The comparison ran before the
+front-end changes for group 1, which do not touch expansion.
 
 ### Later phases
 
