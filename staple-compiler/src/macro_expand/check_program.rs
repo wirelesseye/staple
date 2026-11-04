@@ -459,7 +459,11 @@ fn span_within(inner: &Span, outer: &Span) -> bool {
                 range: outer,
                 ..
             },
-        ) => inner_source == outer_source && outer.start <= inner.start && inner.end <= outer.end,
+        ) => {
+            (inner_source == outer_source || inner_source.is_none() || outer_source.is_none())
+                && outer.start <= inner.start
+                && inner.end <= outer.end
+        }
         _ => false,
     }
 }
@@ -684,6 +688,66 @@ mod tests {
         // One splice per distinct name in each quotation, so `$value` twice in
         // one quotation is one splice.
         assert_eq!(rendered.matches("\"splice\"").count(), 3);
+    }
+
+    /// Expands `source` with the closure check on every macro, and returns what it reports.
+    fn check_all(source: &str) -> Vec<String> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let source = format!("use std.syntax.*\n{source}");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(&source, &root)
+            .expect("source should load");
+        let (_, _, diagnostics) =
+            super::super::expand_program_checked(program, true, Some(CheckMode::All), true)
+                .expect("source should expand");
+        diagnostics.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn the_standard_library_macros_check_as_ordinary_code() {
+        // Every standard-library macro is checked along with the program's own.
+        let diagnostics = check_all("def main = () => 0\n");
+        assert!(diagnostics.is_empty(), "{}", diagnostics.join("\n"));
+    }
+
+    #[test]
+    fn macros_of_every_shape_check_as_ordinary_code() {
+        let diagnostics = check_all(concat!(
+            "def keep = value: Expr => Expr :: value\n",
+            // One slot, several slots, overloads, and no quotation splices.
+            "macro one: Expr -> Item = value => parse_quote { let one = $value }\n",
+            "macro two: (Expr; Expr) -> Item = (a; b) => match a { _ => parse_quote { let two = 2 } }\n",
+            "macro pick = value: Expr => keep value\n",
+            "macro pick = (a: Expr; b: Expr) => keep a\n",
+            // Metadata, with modifiers it may carry.
+            "macro inspect modifiers (@traced): (MacroCallMetadata; Expr) -> Item = ((modifiers, _); value) => match modifiers {\n",
+            "    Sequence () => parse_quote { let plain = $value },\n",
+            "    _ => parse_quote { let traced = $value },\n",
+            "}\n",
+            // A modifier macro, a refinement pattern, and a splice of a sequence.
+            "macro @mark: Item -> Sequence<Item> = item => Sequence (first: item, rest: Sequence ())\n",
+            "macro words = (first: Expr; rest: Sequence<Expr>) => match first {\n",
+            "    else_word: Ident<\"else\"> => parse_quote { ($rest...) },\n",
+            "    other => parse_quote { ($other, $rest...) },\n",
+            "}\n",
+            "def main = () => 0\n",
+        ));
+        assert!(diagnostics.is_empty(), "{}", diagnostics.join("\n"));
+    }
+
+    #[test]
+    fn splicing_a_value_that_is_not_syntax_is_a_type_error() {
+        let diagnostics = check_all(concat!(
+            "macro bad = value: Expr => { let count = 3; parse_quote { $count } }\n",
+            "def main = () => 0\n",
+        ));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("macro `bad`")),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
