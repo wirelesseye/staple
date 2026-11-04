@@ -4263,6 +4263,10 @@ pub struct TypeChecker {
     logicals: HashMap<SyntaxId, CheckedLogical>,
     accesses: HashMap<SyntaxId, CheckedAccess>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
+    /// Typed patterns that narrow an alternative to a refinement of it, such as
+    /// `Ident<"else">` against `Ident<String>`. They can fail to match, so they
+    /// cover nothing.
+    refinement_patterns: HashSet<SyntaxId>,
     /// Patterns matched against the representation of a `from` subject
     /// rather than the subject itself.
     pattern_projections: HashMap<SyntaxId, TypeId>,
@@ -15892,6 +15896,7 @@ impl TypeChecker {
                         };
                         let specialized = matrix
                             .iter()
+                            .filter(|row| !self.is_refinement(row[0]))
                             .filter_map(|row| self.specialize_sum_row(module, row, index, sum))
                             .collect::<Vec<_>>();
                         self.coverage_is_useful(
@@ -16405,6 +16410,11 @@ impl TypeChecker {
                     self.pattern_types
                         .insert(pattern.syntax().id, declared.clone());
                     self.bind_pattern_types(module, pattern, &declared);
+                } else if let Some(alternative) = refined_alternative(sum, &declared) {
+                    self.pattern_types
+                        .insert(pattern.syntax().id, alternative.clone());
+                    self.refinement_patterns.insert(pattern.syntax().id);
+                    self.bind_pattern_types(module, pattern, &declared);
                 } else if declared != CheckedType::Error {
                     self.diagnostics.push(Diagnostic::new(
                         binding.syntax.span.clone(),
@@ -16425,6 +16435,11 @@ impl TypeChecker {
                 if sum.alternatives.contains(&declared) {
                     self.pattern_types
                         .insert(pattern.syntax().id, declared.clone());
+                    self.bind_pattern_types(module, pattern, &declared);
+                } else if let Some(alternative) = refined_alternative(sum, &declared) {
+                    self.pattern_types
+                        .insert(pattern.syntax().id, alternative.clone());
+                    self.refinement_patterns.insert(pattern.syntax().id);
                     self.bind_pattern_types(module, pattern, &declared);
                 } else if declared != CheckedType::Error {
                     self.diagnostics.push(Diagnostic::new(
@@ -16556,6 +16571,15 @@ impl TypeChecker {
             }
             Pattern::Splice(_) => {}
         }
+    }
+
+    /// Whether a coverage pattern is a refinement pattern, which can fail.
+    fn is_refinement(&self, pattern: CoveragePattern<'_>) -> bool {
+        let CoveragePattern::Pattern(pattern) = Self::structural_coverage_pattern(pattern) else {
+            return false;
+        };
+        matches!(pattern, Pattern::Binding(_) | Pattern::Wildcard(_))
+            && self.refinement_patterns.contains(&pattern.syntax().id)
     }
 
     fn match_pattern_is_useful<'a>(
@@ -16716,6 +16740,7 @@ impl TypeChecker {
                     };
                     let specialized_matrix = matrix
                         .iter()
+                        .filter(|row| !self.is_refinement(row[0]))
                         .filter_map(|row| self.specialize_sum_row(module, row, index, sum))
                         .collect::<Vec<_>>();
                     let Some(specialized_candidate) =
@@ -21653,6 +21678,27 @@ impl TypeChecker {
         }
         value_type
     }
+}
+
+/// The alternative of `sum` that `declared` refines: the same wrapper with a
+/// string literal type where the alternative has `String`.
+fn refined_alternative<'a>(sum: &'a CheckedSumType, declared: &CheckedType) -> Option<&'a CheckedType> {
+    let CheckedType::Wrapper {
+        id, arguments: refined, ..
+    } = declared
+    else {
+        return None;
+    };
+    sum.alternatives.iter().find(|alternative| {
+        matches!(alternative, CheckedType::Wrapper { id: other, arguments, .. }
+            if other == id
+                && arguments.len() == refined.len()
+                && refined.iter().zip(arguments).all(|(refined, argument)| {
+                    refined == argument
+                        || (matches!(refined, CheckedType::StringLiteralSet(_))
+                            && *argument == CheckedType::String)
+                }))
+    })
 }
 
 /// A product pattern written against a wrapper of a sum selects the

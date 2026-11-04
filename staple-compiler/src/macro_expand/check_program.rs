@@ -375,6 +375,11 @@ fn macro_function(
     {
         name_metadata_pattern(&mut value, syntax_module, next_syntax_id);
     }
+    if declaration.annotation.is_none()
+        && let Some(syntax_module) = syntax_module
+    {
+        expression_result(&mut value, syntax_module, next_syntax_id);
+    }
     let id = SyntaxId(*next_syntax_id);
     *next_syntax_id += 1;
     let mut syntax: Syntax = declaration.syntax.clone();
@@ -676,24 +681,20 @@ mod tests {
 /// as a bare `(modifiers, visibility)`. As a function it is a `MacroCallMetadata`
 /// like any other wrapper, so the pattern names it.
 fn name_metadata_pattern(value: &mut Expression, syntax_module: ModuleId, next_syntax_id: &mut usize) {
+    // The parameters are curried, so the metadata is the first function's own
+    // parameter.
     let Expression::Function(function) = value else {
         return;
     };
-    let Pattern::Product(parameters) = &mut function.pattern else {
-        return;
-    };
-    let Some(first) = parameters.elements.first_mut() else {
-        return;
-    };
-    if !matches!(first, Pattern::Product(_)) {
+    if !matches!(function.pattern, Pattern::Product(_)) {
         return;
     }
-    let argument = first.clone();
+    let argument = function.pattern.clone();
     let mut syntax = argument.syntax().clone();
     syntax.id = SyntaxId(*next_syntax_id);
     *next_syntax_id += 1;
     syntax.definition_module = Some(syntax_module.0);
-    *first = Pattern::Nominal(staple_syntax::NominalPattern {
+    function.pattern = Pattern::Nominal(staple_syntax::NominalPattern {
         syntax,
         namespace: None,
         name: "MacroCallMetadata".to_owned(),
@@ -701,4 +702,39 @@ fn name_metadata_pattern(value: &mut Expression, syntax_module: ModuleId, next_s
         argument: Box::new(argument),
         annotation: None,
     });
+}
+
+/// A macro without a signature produces what its call site expects, which for
+/// the function-style macros that have no signature is an expression.
+fn expression_result(value: &mut Expression, syntax_module: ModuleId, next_syntax_id: &mut usize) {
+    let Expression::Function(function) = value else {
+        return;
+    };
+    if matches!(function.body.as_ref(), Expression::Function(_)) {
+        return expression_result(&mut function.body, syntax_module, next_syntax_id);
+    }
+    if matches!(function.body.as_ref(), Expression::TypeAscription(_)) {
+        return;
+    }
+    let mut syntax = function.body.syntax().clone();
+    syntax.id = SyntaxId(*next_syntax_id);
+    *next_syntax_id += 1;
+    syntax.definition_module = Some(syntax_module.0);
+    let ty = staple_syntax::Type::Named(staple_syntax::NamedType {
+        syntax: syntax.clone(),
+        namespace: None,
+        name: "Expr".to_owned(),
+    });
+    let body = std::mem::replace(
+        function.body.as_mut(),
+        Expression::Name(staple_syntax::NameExpression {
+            syntax: Syntax::compiler(),
+            name: String::new(),
+        }),
+    );
+    *function.body = Expression::TypeAscription(Box::new(staple_syntax::TypeAscriptionExpression {
+        syntax,
+        value: Box::new(body),
+        ty,
+    }));
 }
