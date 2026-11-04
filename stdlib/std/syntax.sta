@@ -288,13 +288,13 @@ pub trait Parse T {
     parse_all: Syntax -> Result<T, ParseError> = syntax => {
         let mut input = stream syntax
         let value = Parse.parse.<T> input?
-        if (is_empty input) { Ok value } else { error_at (input; "unexpected syntax") }
+        if (is_empty input) { Ok value } else { error_at ...(input; "unexpected syntax") }
     }
     /// Parses the fragment of a `parse_quote`, which `__quote` builds from the
     /// fragment's id and the syntax spliced into it, as a `T`. A fragment that is
     /// not one fails the macro being expanded.
     parse_quote: (U64; Sequence<Syntax>) -> T = (fragment; splices) =>
-        match (Parse.parse_all.<T> (__quote (fragment; splices))) {
+        match (Parse.parse_all.<T> (__quote ...(fragment; splices))) {
             Ok value => value,
             ParseError (message) => compile_error message,
         }
@@ -431,9 +431,9 @@ impl<C where Parse C> Parse Parenthesized<C> {
         let mut contents = inner
         let value = Parse.parse.<C> contents?
         if (is_empty contents) {
-            Ok (__parenthesized.<C> (source; value))
+            Ok (__parenthesized.<C> ...(source; value))
         } else {
-            error_at (contents; "unexpected syntax")
+            error_at ...(contents; "unexpected syntax")
         }
     }
 }
@@ -444,9 +444,9 @@ impl<C where Parse C> Parse Bracketed<C> {
         let mut contents = inner
         let value = Parse.parse.<C> contents?
         if (is_empty contents) {
-            Ok (__bracketed.<C> (source; value))
+            Ok (__bracketed.<C> ...(source; value))
         } else {
-            error_at (contents; "unexpected syntax")
+            error_at ...(contents; "unexpected syntax")
         }
     }
 }
@@ -457,9 +457,9 @@ impl<C where Parse C> Parse Angled<C> {
         let mut contents = inner
         let value = Parse.parse.<C> contents?
         if (is_empty contents) {
-            Ok (__angled.<C> (source; value))
+            Ok (__angled.<C> ...(source; value))
         } else {
-            error_at (contents; "unexpected syntax")
+            error_at ...(contents; "unexpected syntax")
         }
     }
 }
@@ -470,9 +470,9 @@ impl<C where Parse C> Parse Braced<C> {
         let mut contents = inner
         let value = Parse.parse.<C> contents?
         if (is_empty contents) {
-            Ok (__braced.<C> (source; value))
+            Ok (__braced.<C> ...(source; value))
         } else {
-            error_at (contents; "unexpected syntax")
+            error_at ...(contents; "unexpected syntax")
         }
     }
 }
@@ -520,7 +520,7 @@ impl<T> Default (Sequence<T>) {
 
 impl<T> FromIterator Sequence<T> T {
     insert = (move sequence: Sequence<T>; move item: T) => Sequence<T> ::
-        __sequence_push (sequence; item)
+        __sequence_push ...(sequence; item)
 }
 
 // Elements until the stream ends or `T` stops parsing.
@@ -535,7 +535,7 @@ impl<T where Parse T> Parse Sequence<T> {
                 Ok first => {
                     if (__offset fork == start) { break }
                     input = fork
-                    elements = __sequence_push (elements; first)
+                    elements = __sequence_push ...(elements; first)
                 },
                 ParseError _ => { break },
             }
@@ -556,7 +556,7 @@ impl<T where Parse T> Parse Separated<T, Comma> {
             let first = Parse.parse.<T> fork?
             if (__offset fork == start) { break }
             input = fork
-            elements = __sequence_push (elements; first)
+            elements = __sequence_push ...(elements; first)
             trailing = False
             if (is_empty input) { break }
             let _ = Parse.parse.<Comma> input?
