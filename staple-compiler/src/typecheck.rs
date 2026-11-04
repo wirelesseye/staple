@@ -5579,6 +5579,13 @@ impl TypeChecker {
             );
             self.active_function_bounds
                 .push(self.expand_trait_bounds(bounds.clone()));
+            let mut header_subtype_bounds = Vec::new();
+            for bound in &implementation.subtype_bounds {
+                if let Some(bound) = self.resolve_subtype_bound(module, bound) {
+                    header_subtype_bounds.push(bound);
+                }
+            }
+            self.active_subtype_bounds.push(header_subtype_bounds);
             let resolved_arguments = self.resolve_trait_arguments(
                 module,
                 implementation.trait_id,
@@ -5587,6 +5594,7 @@ impl TypeChecker {
                 span.clone(),
                 false,
             );
+            self.active_subtype_bounds.pop();
             self.active_function_bounds.pop();
             let Some((arguments, substitutions)) = resolved_arguments else {
                 continue;
@@ -17366,6 +17374,10 @@ impl TypeChecker {
                 .collect::<Vec<_>>();
             let Some(arguments) = self.resolve_trait_obligation(trait_id, &partial_arguments)
             else {
+                if std::env::var_os("STAPLE_DEBUG_CONCRETE").is_some() {
+                    let text = format!("{:?}", partial_arguments);
+                    eprintln!("unavailable {} : {}", module.traits()[&trait_id].declaration.name, &text[..text.len().min(260)]);
+                }
                 unavailable = true;
                 continue;
             };
