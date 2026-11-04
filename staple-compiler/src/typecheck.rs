@@ -15721,6 +15721,110 @@ impl TypeChecker {
         bool_type
     }
 
+    /// `value_type` with the stand-ins that `patterns` look inside replaced by
+    /// the types they stand for, so coverage sees as deep as the patterns go.
+    fn unfold_for_patterns(
+        &mut self,
+        module: &ResolvedModule,
+        value_type: &CheckedType,
+        patterns: &[&Pattern],
+    ) -> CheckedType {
+        let canonical = |pattern: &Pattern| -> Option<Pattern> {
+            match Self::canonical_coverage_pattern(CoveragePattern::Pattern(pattern)) {
+                CoveragePattern::Pattern(pattern) => Some(pattern.clone()),
+                CoveragePattern::Any => None,
+            }
+        };
+        let patterns = patterns
+            .iter()
+            .filter_map(|pattern| canonical(pattern))
+            .collect::<Vec<_>>();
+        if patterns.is_empty() {
+            return value_type.clone();
+        }
+        let value_type = self.unfold_self_reference(module, value_type.desugared());
+        match &value_type {
+            CheckedType::Wrapper {
+                id,
+                name,
+                arguments,
+                representation,
+                introduction,
+            } => {
+                let inner = patterns
+                    .iter()
+                    .filter_map(|pattern| match pattern {
+                        Pattern::Nominal(nominal)
+                            if module.type_for_pattern(nominal.syntax.id) == Some(*id) =>
+                        {
+                            Some((*nominal.argument).clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let inner = inner.iter().collect::<Vec<_>>();
+                let representation = self.unfold_self_reference(module, representation);
+                CheckedType::Wrapper {
+                    id: *id,
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                    representation: Box::new(self.unfold_for_patterns(module, &representation, &inner)),
+                    introduction: *introduction,
+                }
+            }
+            CheckedType::Sum(sum) => {
+                let mut alternatives = Vec::new();
+                for alternative in &sum.alternatives {
+                    let selected = patterns
+                        .iter()
+                        .filter_map(|pattern| match (alternative, pattern) {
+                            (CheckedType::Wrapper { id, .. }, Pattern::Nominal(nominal))
+                                if module.type_for_pattern(nominal.syntax.id) == Some(*id) =>
+                            {
+                                Some(pattern.clone())
+                            }
+                            (CheckedType::Product(value), Pattern::Product(product))
+                                if value.position_count() == product.elements.len() =>
+                            {
+                                Some(pattern.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    let selected = selected.iter().collect::<Vec<_>>();
+                    alternatives.push(self.unfold_for_patterns(module, alternative, &selected));
+                }
+                CheckedType::Sum(CheckedSumType { alternatives })
+            }
+            CheckedType::Product(product)
+                if product.spreads.is_empty()
+                    && product
+                        .runs
+                        .iter()
+                        .all(|run| matches!(run.count, RunCount::Fixed(1))) =>
+            {
+                let mut product = product.clone();
+                for index in 0..product.runs.len() {
+                    let column = patterns
+                        .iter()
+                        .filter_map(|pattern| match pattern {
+                            Pattern::Product(shape) if shape.elements.len() == product.runs.len() => {
+                                Some(shape.elements[index].clone())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    let column = column.iter().collect::<Vec<_>>();
+                    let element = product.runs[index].element.value_type.clone();
+                    product.runs[index].element.value_type =
+                        self.unfold_for_patterns(module, &element, &column);
+                }
+                CheckedType::Product(product)
+            }
+            other => other.clone(),
+        }
+    }
+
     fn check_match_expression(
         &mut self,
         module: &ResolvedModule,
@@ -15731,6 +15835,14 @@ impl TypeChecker {
         if self.did_return {
             return CheckedType::empty_product();
         }
+        // Coverage sees only what is unfolded, so open up the stand-ins the
+        // arms look inside.
+        let coverage_source = if self.ordinary_syntax_types {
+            let arms = match_.arms.iter().map(|arm| &arm.pattern).collect::<Vec<_>>();
+            self.unfold_for_patterns(module, &source, &arms)
+        } else {
+            source.clone()
+        };
 
         let outer_reachable = self.return_reachable;
         let mut previous_patterns = Vec::new();
@@ -15739,7 +15851,7 @@ impl TypeChecker {
 
         for arm in &match_.arms {
             self.check_match_pattern(module, &arm.pattern, &source);
-            if !self.match_pattern_is_useful(module, &source, &previous_patterns, &arm.pattern) {
+            if !self.match_pattern_is_useful(module, &coverage_source, &previous_patterns, &arm.pattern) {
                 self.diagnostics.push(Diagnostic::new(
                     arm.pattern.syntax().span.clone(),
                     "unreachable match arm",
@@ -15764,7 +15876,7 @@ impl TypeChecker {
 
         if self.match_pattern_is_useful(
             module,
-            &source,
+            &coverage_source,
             &previous_patterns,
             &Pattern::Wildcard(staple_syntax::WildcardPattern {
                 syntax: match_.syntax.clone(),
@@ -15773,7 +15885,7 @@ impl TypeChecker {
                 }),
             }),
         ) {
-            let missing = if let CheckedType::Sum(sum) = source.desugared() {
+            let missing = if let CheckedType::Sum(sum) = coverage_source.desugared() {
                 let matrix = previous_patterns
                     .iter()
                     .map(|pattern| vec![CoveragePattern::Pattern(pattern)])
