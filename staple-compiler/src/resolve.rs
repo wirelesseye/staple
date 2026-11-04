@@ -790,6 +790,7 @@ pub struct ResolvedModule {
     function_parents: HashMap<FunctionId, Option<FunctionId>>,
     expression_function_owners: HashMap<SyntaxId, Option<FunctionId>>,
     caller_location_spans: HashMap<SyntaxId, Span>,
+    ordinary_syntax_types: bool,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
@@ -871,6 +872,12 @@ impl ResolvedModule {
     /// macros do, instead of the macro definition's own text. `None` for
     /// references written directly in source and for references that lie
     /// inside the outermost invocation (such as macro arguments).
+    /// Whether the syntax data types are checked as ordinary types, which is
+    /// how macro code is checked.
+    pub fn ordinary_syntax_types(&self) -> bool {
+        self.ordinary_syntax_types
+    }
+
     pub fn caller_location_span(&self, syntax_id: SyntaxId) -> Option<&Span> {
         self.caller_location_spans.get(&syntax_id)
     }
@@ -2463,6 +2470,7 @@ impl NameResolver {
             function_parents: self.function_parents,
             expression_function_owners: self.expression_function_owners,
             caller_location_spans: macro_analysis.caller_location_spans,
+            ordinary_syntax_types: self.ordinary_syntax_types,
             symbol_modules: self.symbol_modules,
             symbol_declarations: self.symbol_declarations,
             symbol_declaration_spans: self.symbol_declaration_spans,

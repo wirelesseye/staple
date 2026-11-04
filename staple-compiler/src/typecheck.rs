@@ -4345,6 +4345,7 @@ pub struct TypeChecker {
     /// some *other* unfinished type remains open embeds that placeholder, so
     /// it is not cached: resolved again later, it gets the real type instead.
     open_self_references: Vec<TypeId>,
+    ordinary_syntax_types: bool,
     /// Memoized `type_parameters_are_indirect` answers: whether every type
     /// parameter of a represented type occurs in its representation only
     /// behind an out-of-line indirection, so an application of that type
@@ -4480,6 +4481,7 @@ impl TypeChecker {
         recovering: bool,
     ) -> Result<(TypedModule, Vec<Diagnostic>), Vec<Diagnostic>> {
         self.next_implicit_function = module.functions().len();
+        self.ordinary_syntax_types = module.ordinary_syntax_types();
         self.io_type = module
             .type_declarations()
             .keys()
@@ -5632,6 +5634,14 @@ impl TypeChecker {
                         .iter()
                         .any(|id| !declared_parameters.contains(id))
             }) {
+                if std::env::var_os("STAPLE_DEBUG_CONCRETE").is_some() {
+                    let text = format!("{:?}", arguments);
+                    for needle in ["Error", "TypeConstructor", "Inferred"] {
+                        if let Some(at) = text.find(needle) {
+                            eprintln!("not concrete near {needle}: {}", &text[at.saturating_sub(300)..(at + 120).min(text.len())]);
+                        }
+                    }
+                }
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     if arguments.len() == 1 {
@@ -20707,6 +20717,16 @@ impl TypeChecker {
         started_at: usize,
     ) -> Option<CheckedType> {
         let kind = declaration.kind();
+        // A sum alias such as `Expr` is part of a recursive syntax type, whose
+        // recursion goes through its data types.
+        if kind == TypeDeclarationKind::Alias && self.ordinary_syntax_types {
+            return Some(CheckedType::Opaque {
+                sized: true,
+                id,
+                name: display_name.to_owned(),
+                arguments: arguments.to_vec(),
+            });
+        }
         // A type marked `@recursive_constructor` is a handle to syntax, so it
         // may refer to itself directly.
         if (self.recursive_construction_depth <= started_at && !declaration.recursive_constructor)
@@ -20788,6 +20808,14 @@ impl TypeChecker {
             if matches!(unfolded, CheckedType::Wrapper { .. }) {
                 return unfolded;
             }
+        }
+        if let CheckedType::Opaque { id, arguments, .. } = value_type
+            && self.type_declarations.get(id).is_some_and(|declaration| {
+                declaration.kind() == TypeDeclarationKind::Alias
+            })
+            && !self.resolving_named_types.contains_key(id)
+        {
+            return self.instantiate_type_declaration(module, *id, arguments.clone());
         }
         value_type.clone()
     }
