@@ -203,7 +203,11 @@ pub(crate) fn build_check_program(
     let dependencies = package_dependencies(program, package);
     // The program's own package is checked by its closures. A dependency's
     // macros are built with the dependency, so its package is checked whole.
-    let whole = package != program.package_of(program.entry());
+    // The standard library is always a dependency in a real build, even when a
+    // corpus input is a standard-library file, so it is checked whole too.
+    let standard_library_package = syntax_module.and_then(|module| program.package_of(module));
+    let whole = package != program.package_of(program.entry())
+        || (package.is_some() && package == standard_library_package);
     let wanted = macros
         .iter()
         .flat_map(|checked| checked.closure.items.iter().copied())
@@ -253,13 +257,15 @@ pub(crate) fn build_check_program(
     // contents are known.
     let defined = items
         .iter()
-        .zip(program.modules())
-        .map(|(module, source)| {
-            defined_names(module.iter().chain(
-                expanded_of(source.id)
-                    .iter()
-                    .filter(|item| matches!(item, Item::Submodule(_))),
-            ))
+        .map(|module| defined_names(module.iter()))
+        .collect::<Vec<_>>();
+    let module_names = program
+        .modules()
+        .iter()
+        .filter_map(|module| {
+            program
+                .module_dotted_name(module.id)
+                .map(|name| (name, module.id))
         })
         .collect::<Vec<_>>();
     for module in program.modules() {
@@ -277,7 +283,7 @@ pub(crate) fn build_check_program(
                 }
                 Item::UseDeclaration(declaration) if owner == package && !whole => {
                     let mut declaration = declaration.clone();
-                    let target = program.imported_module(declaration.syntax.id);
+                    let target = check_import_target(program, module.id, &declaration, &module_names);
                     if let Some(target) = target
                         && !keep_import(&mut declaration.kind, &defined[target.0])
                     {
@@ -423,16 +429,42 @@ fn macro_function(
     })
 }
 
-/// The names `items` define at module level.
+/// The names `items` define as importable items at module level.
 fn defined_names<'a>(items: impl Iterator<Item = &'a Item>) -> HashSet<String> {
     let mut names = HashSet::new();
     for item in items {
         names.extend(item_kind(item).2);
-        if let Item::Submodule(submodule) = item {
-            names.insert(submodule.name.clone());
-        }
     }
     names
+}
+
+/// The module an import names in the check program. Imports rooted at
+/// `package` name the importing package's own modules, which the loader does
+/// not resolve through `Program::imported_module`; matching the dotted module
+/// names covers those and any other package-rooted path.
+fn check_import_target(
+    program: &Program,
+    source: ModuleId,
+    declaration: &staple_syntax::UseDeclaration,
+    module_names: &[(String, ModuleId)],
+) -> Option<ModuleId> {
+    if let Some(target) = program.imported_module(declaration.syntax.id) {
+        return Some(target);
+    }
+    let mut parts = declaration.path.clone();
+    if parts.first().is_some_and(|part| part == "package") {
+        let package = program.package_of(source)?;
+        let graph = program.package_graph()?;
+        parts[0] = graph.package(package).name.clone();
+    }
+    let mut candidate = parts.join(".");
+    loop {
+        if let Some((_, target)) = module_names.iter().find(|(name, _)| name == &candidate) {
+            return Some(*target);
+        }
+        let (prefix, _) = candidate.rsplit_once('.')?;
+        candidate = prefix.to_owned();
+    }
 }
 
 /// Drops the names of an import that nothing defines. `false` when none remain.
@@ -443,7 +475,9 @@ fn keep_import(kind: &mut UseKind, defined: &HashSet<String>) -> bool {
             !selected.is_empty()
         }
         UseKind::Renamed { item, .. } => defined.contains(item),
-        _ => true,
+        // A namespace import is only useful when the module it names is part
+        // of the check program.
+        _ => !defined.is_empty(),
     }
 }
 
@@ -743,11 +777,15 @@ mod tests {
     }
 
     fn check_with(source: &str, mode: CheckMode) -> Vec<String> {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         let source = format!("use std.syntax.*\n{source}");
+        check_source(&source, mode)
+    }
+
+    fn check_source(source: &str, mode: CheckMode) -> Vec<String> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
-            .load_source(&source, &root)
+            .load_source(source, &root)
             .expect("source should load");
         let (_, _, diagnostics) =
             super::super::expand_program_checked(program, true, Some(mode), true)
@@ -760,6 +798,23 @@ mod tests {
         // Every standard-library macro is checked along with the program's own.
         let diagnostics = check_all("def main = () => 0\n");
         assert!(diagnostics.is_empty(), "{}", diagnostics.join("\n"));
+    }
+
+    #[test]
+    fn the_macro_fixtures_check_as_ordinary_code() {
+        // The compiler tests set this variable per process, which would race
+        // with other tests, so one test checks all the fixture macros instead.
+        for (name, source) in [
+            ("conversions_as.sta", include_str!("../../tests/fixtures/conversions_as.sta")),
+            ("macros.sta", include_str!("../../examples/macros.sta")),
+        ] {
+            let diagnostics = check_source(source, CheckMode::All);
+            assert!(
+                diagnostics.is_empty(),
+                "{name}:\n{}",
+                diagnostics.join("\n")
+            );
+        }
     }
 
     #[test]
@@ -877,6 +932,67 @@ mod tests {
         assert_eq!(kind, UseKind::Selected(vec![SelectedImport::new("Kept")]));
         let mut kind = UseKind::Selected(vec![SelectedImport::new("Gone")]);
         assert!(!keep_import(&mut kind, &defined));
+    }
+
+    #[test]
+    fn the_standard_library_checks_when_it_is_the_checked_package() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let stdlib = root.join("stdlib");
+        let path = stdlib.join("std/alloc.sta");
+        let source = std::fs::read_to_string(&path).expect("the module should be readable");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(&stdlib)
+            .load_source_at(&path, &source)
+            .expect("the module should load");
+        let (_, _, diagnostics) =
+            super::super::expand_program_checked(program, true, Some(CheckMode::All), true)
+                .expect("the standard library should expand");
+        let rendered = diagnostics.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert!(rendered.is_empty(), "{}", rendered.join("\n"));
+    }
+
+    #[test]
+    fn package_rooted_imports_resolve_by_their_dotted_module_name() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let stdlib = root.join("stdlib");
+        let path = stdlib.join("std/ptr.sta");
+        let source = std::fs::read_to_string(&path).expect("the module should be readable");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(&stdlib)
+            .load_source_at(&path, &source)
+            .expect("the module should load");
+        let module_names = program
+            .modules()
+            .iter()
+            .filter_map(|module| {
+                program
+                    .module_dotted_name(module.id)
+                    .map(|name| (name, module.id))
+            })
+            .collect::<Vec<_>>();
+        let (source_module, declaration) = program
+            .modules()
+            .iter()
+            .flat_map(|module| {
+                module.syntax.items.iter().filter_map(move |item| match item {
+                    Item::UseDeclaration(declaration)
+                        if declaration.path.first().is_some_and(|part| part == "package")
+                            && declaration.path.iter().any(|part| part == "hash") =>
+                    {
+                        Some((module.id, declaration))
+                    }
+                    _ => None,
+                })
+            })
+            .next()
+            .expect("ptr.sta imports package.hash");
+        let target = check_import_target(&program, source_module, declaration, &module_names)
+            .expect("the package-rooted import should resolve");
+        assert_eq!(
+            program.module_dotted_name(target).as_deref(),
+            Some("std.hash"),
+            "{module_names:?}"
+        );
     }
 }
 

@@ -432,24 +432,21 @@ impl<T where Parse T> Parse Pair<T> {
 ```
 
 `parse` must declare its parameter `mut`; `parse_all` may be replaced the same
-way. A type parameter used as a target needs a `Parse` bound. The compiler
-never type-checks these implementations as runtime code: they are checked
-as compile-time code and dropped after macro expansion, together with the
-intrinsics they call. Because of that, the orphan rule is applied by the macro
-expander: outside the standard library, the implemented type must be a nominal
-type declared in the implementing package. User `Parse` types are not macro
-parameter types, and macro argument matching is unchanged; the trait is used by
-explicit calls only.
+way. A type parameter used as a target needs a `Parse` bound. These
+implementations are ordinary compile-time code: they are checked like any
+other implementation, dropped after macro expansion together with the
+intrinsics they call, and follow the normal orphan rule. User `Parse` types are
+not macro parameter types, and macro argument matching is unchanged; the trait
+is used by explicit calls only.
 
-Compile-time `mut` parameters are passed by address. A call such as
-`skip_one input` hands the callee the caller's own `mut` binding, so the callee's
-assignments are visible after the call, while passing an immutable binding to a
-`mut` parameter is rejected like it is at run time. In compile-time code, a
-postfix `?` on a `Result` yields the `Ok` payload, and any other value leaves
-the innermost compile-time function with that value; `return` likewise leaves
-the whole function rather than just its block. Compile-time recursion, including
-the recursion of `Sequence` and `Separated`, shares the evaluation depth limit
-described above.
+Compile-time `mut` parameters are passed by address, as they are at run time. A
+call such as `skip_one input` hands the callee the caller's own `mut` binding,
+so the callee's assignments are visible after the call, while passing an
+immutable binding to a `mut` parameter is rejected. In macro code, a postfix
+`?` unwraps a `Try` value, and `return` leaves the enclosing function.
+Compile-time recursion, including the recursion of `Sequence` and `Separated`,
+shares the evaluation depth limit described in
+[Compile-time phases](#compile-time-phases).
 
 Identifiers and calls may also be inspected, constructed, and changed as
 compile-time values:
@@ -744,10 +741,13 @@ shape (`Iterator.next iter`), or from an expected result type
 (`let value: T = Default.default ()`). Explicit `.<...>` arguments, generic
 bindings, and type ascriptions also supply dispatch types. Nominal values erase
 their type arguments; unbound arguments do not constrain implementation bounds.
-Integer and float values have no width for dispatch, so implementations for
-multiple widths are ambiguous. Ambiguous calls report the matching headers.
-Compile-time checking remains permissive for these calls: missing implementations
-and undetermined dispatch types are diagnosed when the macro evaluates them.
+Integer and float values have no width for dispatch in the interpreter, so
+implementations for multiple widths are ambiguous. Ambiguous calls report the
+matching headers. Macro code is checked as ordinary code: the check described
+in [Compile-time phases](#compile-time-phases) resolves these calls with the
+ordinary implementation rules. A build that does not run the check diagnoses a
+missing implementation or an undetermined dispatch type when the macro
+evaluates it.
 
 `Sequence<T>` implements `Iterator`, `IntoIterator`, `Default`, and
 `FromIterator`. Its iterator consumes elements in order. Iterate a `Separated`

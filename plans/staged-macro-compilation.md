@@ -274,16 +274,18 @@ Every closure must pass the real front end. The interpreter still runs the
 macros. The real pipeline only checks them.
 Breakdown and status: [`staged-macro-compilation-phase-2.md`](staged-macro-compilation-phase-2.md).
 
-**Status (2026-11-04): partly done.** The check exists and is opt-in
+**Status (2026-11-05): done.** The check exists and is opt-in
 (`STAPLE_CHECK_MACRO_CLOSURES`): it builds a program from the expanded
 dependencies and the closures, lowers quotations to typed calls (`__quote`,
-`Parse.parse_quote`, `Splice`) and runs `NameResolver` and `TypeChecker` over it.
-It reports nothing on the standard library's macros, but it leaves out the
-variadic `Parse` impls the front end rejects; those, and a handle representation
-for the syntax types, move to Phase 3. Quotation lowering creates a cycle through
-`Char` that Phase 4 has to break. The interpreter's static check still expands
-lazily, and the test suite checks only the standard library's macros and macros
-of each shape, not the fixtures. See the Phase 2 breakdown for the inventory.
+`Parse.parse_quote`, `Splice`) and runs `NameResolver` and `TypeChecker` over
+it. Every standard-library macro, the fixture macros and the macro example
+check with no diagnostics. The interpreter's static check now runs after
+expansion and has no lazy macro expansion left. Gaps that remain are assigned:
+the syntax types' handle representation and the variadic `Parse` impls go to
+Phase 3; the quotation cycle through `Char` and the generated-item loops go to
+Phase 4. The check found no language change beyond the code that already had to
+be annotated; corpus expansion is unchanged apart from the standard-library
+files edited for the check. See the Phase 2 breakdown for the inventory.
 
 - Add a check that sends each closure through `NameResolver` and `TypeChecker`
   as a standalone program, after expansion. Run it on the standard library and
@@ -316,9 +318,12 @@ Make syntax values exist in compiled code.
   written in Rust on top of `staple-syntax`.
 - Rewrite `std.syntax`'s `Parse` implementations to use the non-generic
   intrinsics. Delete `__parse_primitive` and the `__*_group` intrinsics they
-  replace.
-- Lower `quote` and `parse_quote` inside phase-1 code to template-instantiation
-  calls (Decision 4).
+  replace. The variadic product and `Ident<S>` implementations move with them.
+- Lower `quote` and `parse_quote` inside phase-1 code exactly as the closure
+  check does: `__quote (template_id, splices)` and
+  `Parse.parse_quote.<T> (template_id, splices)`, with `Splice.splice` once per
+  distinct spliced name. Template ids index the per-program table in lowering
+  order.
 - Argument passing: the parent still matches arguments against `MetaType`
   signatures. It sends the *match tree* (atoms, sequence elements, present or
   absent options, delimiter contents) as handles. The shim generated for each
@@ -337,6 +342,14 @@ Make syntax values exist in compiled code.
   per macro (`extern "C"`, one symbol per macro, plus the template table).
   Compile it for the host triple through the normal pipeline, and link it with
   `-shared` against the restricted runtime (Decision 7).
+- Break the quotation-lowering cycle through `Char` before a closure-only
+  standard-library build compiles quotations, for example by writing `Char`
+  without `when` or by keeping the `Splice` impl set away from `Char`. Decide
+  whether the generated-item loops in `std.convert` need breaking for the same
+  reason.
+- Dependency macros are built with their package, as the closure check does;
+  the standard library is therefore always whole. A user package's own macros
+  still use its closure.
 - `staple __macro-server`: startup handshake (protocol version, intrinsic
   table), loading libraries, requests, timeouts, and turning `panic`, abort and
   crashes into diagnostics located at the invocation, with the macro's panic

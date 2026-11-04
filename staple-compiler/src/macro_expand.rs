@@ -1836,7 +1836,6 @@ pub(crate) fn expand_program_checked(
 ) -> Result<(Program, MacroAnalysis, Vec<Diagnostic>), Vec<Diagnostic>> {
     let mut expander = MacroExpander::new(&program);
     expander.validate_definitions();
-    expander.validate_compile_time_code();
     for module in program.modules() {
         for item in &module.syntax.items {
             if let Item::Binding(binding) = item
@@ -1851,8 +1850,17 @@ pub(crate) fn expand_program_checked(
         }
     }
     if !recovering && !expander.diagnostics.is_empty() {
+        // Expansion will not run, so check the definitions as written. This is
+        // the same syntax-level check the successful path applies to macros
+        // that never became ready.
+        expander.validate_compile_time_code();
+        expander.check_parse_impls();
         return Err(expander.diagnostics);
     }
+    // The interpreter still reads contextual types that the static check
+    // derives. Fill those in from the written syntax first; the diagnostic
+    // pass runs again on expanded syntax once expansion is done.
+    expander.prepare_compile_time_evaluation();
 
     // The index takes each module's written items; a module with module-level
     // modifiers keeps its own list, which the modifiers rewrite.
@@ -1925,6 +1933,9 @@ pub(crate) fn expand_program_checked(
         }
         walked.push((module_index, parts));
     }
+    // The static check runs on the syntax expansion produced: macro calls in a
+    // closure have been expanded before the macro became ready.
+    expander.validate_compile_time_code();
     let own_package = program.package_of(program.entry());
     let mut check = check_mode
         .map(|mode| expander.check_snapshot(mode, own_package, program.modules().len()));
@@ -2102,6 +2113,13 @@ struct MacroExpander {
     suppress_expansion_trailer: bool,
     checked_compile_helpers: HashSet<SyntaxId>,
     checking_compile_helpers: HashSet<SyntaxId>,
+    /// Whether the expression being statically checked comes from an expanded
+    /// closure, where a remaining macro call is a missing closure edge.
+    check_expanded_compile_time: bool,
+    /// Whether the static check is running only to fill the contextual types
+    /// the interpreter reads. This pass types unexpanded macro calls; it does
+    /// not expand or run them, and its diagnostics are discarded.
+    prepare_compile_time_context: bool,
     compile_binding_types: HashMap<SyntaxId, String>,
     /// Whether a statically checked call argument fills every remaining slot
     /// of a slotted parameter, keyed by the argument's syntax identity.
@@ -3149,6 +3167,8 @@ impl MacroExpander {
             suppress_expansion_trailer: false,
             checked_compile_helpers: HashSet::new(),
             checking_compile_helpers: HashSet::new(),
+            check_expanded_compile_time: false,
+            prepare_compile_time_context: false,
             compile_binding_types: HashMap::new(),
             slotted_argument_fills: HashMap::new(),
             invocation_spans: Vec::new(),
@@ -3300,19 +3320,49 @@ impl MacroExpander {
         }
     }
 
-    /// Statically validates code which can run in the macro interpreter.
-    /// This deliberately runs before the first expansion: otherwise an
-    /// unused bad definition would remain silent and a used one would fail
-    /// only on the path exercised by that invocation.
+    /// Runs the static check for its contextual types only, before the
+    /// interpreter starts. The interpreter reads `parse_targets`,
+    /// `call_targets` and `slotted_argument_fills`; those are keyed by syntax
+    /// identity, which expansion preserves for the nodes it rewrites.
+    fn prepare_compile_time_evaluation(&mut self) {
+        let start = self.diagnostics.len();
+        self.checked_compile_helpers.clear();
+        self.checking_compile_helpers.clear();
+        self.check_expanded_compile_time = false;
+        self.prepare_compile_time_context = true;
+        self.validate_compile_time_code();
+        self.prepare_compile_time_context = false;
+        self.diagnostics.truncate(start);
+        self.checked_compile_helpers.clear();
+        self.checking_compile_helpers.clear();
+        self.check_expanded_compile_time = false;
+        // `Parse` bodies run as written in the interpreter and are mutated by
+        // expansion the first time a macro evaluates them, so they are checked
+        // once here, before that happens.
+        self.check_parse_impls();
+    }
+
+    /// Statically validates code which can run in the macro interpreter. A
+    /// macro that became ready is checked on the syntax expansion produced for
+    /// its closure; a definition nothing called is still checked as written,
+    /// without expanding the macros it mentions. That keeps an unused invalid
+    /// definition visible without making every macro in the program ready.
     fn validate_compile_time_code(&mut self) {
+        let ready = self.macros_ready.clone();
+        let ready_items = ready
+            .iter()
+            .filter_map(|key| self.macro_closures.get(&key.syntax))
+            .flat_map(|closure| closure.items.iter().copied())
+            .collect::<HashSet<_>>();
         let definitions = self.definitions.values().cloned().collect::<Vec<_>>();
         for definition in definitions {
-            let MacroKind::User(body) = &definition.kind else {
+            let MacroKind::User(_) = &definition.kind else {
                 continue;
             };
-            if definition.declaration.value.is_none() {
+            let Some(body) = definition.declaration.value.as_ref() else {
                 continue;
-            }
+            };
+            self.check_expanded_compile_time = ready.contains(&definition.key);
             let mut expected = CompileType::Meta(definition.result.clone());
             for (index, parameter) in definition.parameters.iter().enumerate().rev() {
                 let parameter =
@@ -3341,6 +3391,7 @@ impl MacroExpander {
                 Some(&expected),
             );
         }
+        self.check_expanded_compile_time = false;
 
         let helpers = self
             .scopes
@@ -3350,12 +3401,15 @@ impl MacroExpander {
             .cloned()
             .collect::<Vec<_>>();
         for helper in helpers {
-            self.check_compile_helper(&helper);
+            let expanded = self
+                .closure
+                .unit_of(helper.binding.syntax.id)
+                .is_some_and(|unit| ready_items.contains(&unit));
+            self.check_compile_helper(&helper, expanded);
         }
-        self.check_parse_impls();
     }
 
-    fn check_compile_helper(&mut self, helper: &HelperDefinition) {
+    fn check_compile_helper(&mut self, helper: &HelperDefinition, expanded: bool) {
         let syntax = helper.binding.syntax.id;
         if self.checked_compile_helpers.contains(&syntax)
             || !self.checking_compile_helpers.insert(syntax)
@@ -3364,8 +3418,15 @@ impl MacroExpander {
         {
             return;
         }
-        if let Some(value) = &helper.binding.value {
-            let expected = binding_signature(&helper.binding)
+        let binding = if expanded {
+            self.expanded_binding(helper.binding.clone())
+        } else {
+            helper.binding.clone()
+        };
+        let previous = self.check_expanded_compile_time;
+        self.check_expanded_compile_time = expanded;
+        if let Some(value) = &binding.value {
+            let expected = binding_signature(&binding)
                 .map(|ty| self.checked_compile_type(&ty))
                 .unwrap_or(CompileType::Unknown);
             self.check_compile_expression(
@@ -3375,6 +3436,7 @@ impl MacroExpander {
                 (expected != CompileType::Unknown).then_some(&expected),
             );
         }
+        self.check_expanded_compile_time = previous;
         self.checking_compile_helpers.remove(&syntax);
         self.checked_compile_helpers.insert(syntax);
     }
@@ -3522,7 +3584,8 @@ impl MacroExpander {
                     return CompileType::Unknown;
                 }
                 if let Some(helper) = self.qualified_compile_helper(module, access) {
-                    self.check_compile_helper(&helper);
+                    let expanded = self.check_expanded_compile_time;
+                    self.check_compile_helper(&helper, expanded);
                     helper_compile_type(&helper.binding)
                 } else {
                     let value =
@@ -3917,7 +3980,8 @@ impl MacroExpander {
                 && let Some(helper) = self.lookup_helper(module, &name.name)
                 && matches!(&helper.binding.value, Some(Expression::Function(function)) if function.generics.is_some())
             {
-                self.check_compile_helper(&helper);
+                let expanded = self.check_expanded_compile_time;
+                self.check_compile_helper(&helper, expanded);
                 for argument in &arguments {
                     self.check_compile_expression(module, argument, environment, None);
                 }
@@ -3935,49 +3999,38 @@ impl MacroExpander {
             }
         }
         if let Some(keys) = self.resolve_macro(module, head) {
-            // Match overloads the same way real call sites and compile-time
-            // evaluation do, so function-style macros with greedy `Expr *`
-            // parameters and a trailing `Sequence<Expr>` (`if`, `while`, `for`,
-            // `when`) are usable inside compile-time helper and macro bodies.
-            // `select_macro` reports its own diagnostic when nothing matches.
-            let Some(selected) =
-                self.select_macro(&keys, &arguments, None, expression.syntax().span.clone())
-            else {
-                return CompileType::Error;
-            };
-            if selected.consumed < arguments.len() {
-                // Excess arguments would be applied to the expansion as calls;
-                // that is only meaningful for function-producing macros, which
-                // are not expressible as a compile-time meta type. Leave the
-                // result unconstrained rather than guessing.
-                for argument in &arguments[selected.consumed..] {
+            if self.prepare_compile_time_context {
+                return self.check_compile_macro_call(
+                    module,
+                    expression,
+                    keys,
+                    &arguments,
+                    environment,
+                    expected,
+                );
+            }
+            if self.check_expanded_compile_time {
+                // Macro calls in a ready closure were expanded before the macro
+                // ran. Reaching one here means the closure scan missed an edge.
+                let name = keys
+                    .first()
+                    .map(|key| key.name.clone())
+                    .unwrap_or_default();
+                self.diagnostics.push(Diagnostic::new(
+                    expression.syntax().span.clone(),
+                    format!(
+                        "macro `{name}` was called by compile-time code that had not been expanded"
+                    ),
+                ));
+                for argument in &arguments {
                     self.check_compile_expression(module, argument, environment, None);
                 }
-                return CompileType::Unknown;
+                return CompileType::Error;
             }
-            // A macro whose result is raw `Syntax`/`SyntaxNode` yields an
-            // expression value here, the same coercion `parse_quote` performs:
-            // adopt the expected quotable meta type when one is supplied.
-            let result = selected.definition.result.clone();
-            // A control-flow macro such as `if` or `when` is evaluated in
-            // place, so a `Result` context says nothing about its syntax type.
-            if matches!(expected, Some(CompileType::Result(..)))
-                && matches!(
-                    result,
-                    MetaType::Syntax | MetaType::SyntaxNode | MetaType::Expr
-                )
-            {
-                return CompileType::Unknown;
-            }
-            if matches!(result, MetaType::Syntax | MetaType::SyntaxNode) {
-                match expected {
-                    Some(CompileType::Meta(meta)) if quote_result_type(meta) => {
-                        return CompileType::Meta(meta.clone());
-                    }
-                    _ => return CompileType::Meta(MetaType::Expr),
-                }
-            }
-            return CompileType::Meta(result);
+            // A definition that never became ready is checked as written. Its
+            // macro calls are not expanded or typed, so they and their
+            // arguments are skipped and the result stays unconstrained.
+            return CompileType::Unknown;
         }
 
         if let Expression::Name(name) = head
@@ -4045,6 +4098,62 @@ impl MacroExpander {
         callee
     }
 
+    /// Types a macro call in written syntax for the interpreter's context
+    /// tables. The macro is not expanded or run here.
+    fn check_compile_macro_call(
+        &mut self,
+        module: ModuleId,
+        expression: &Expression,
+        keys: Vec<MacroKey>,
+        arguments: &[&Expression],
+        environment: &mut CompileEnvironment,
+        expected: Option<&CompileType>,
+    ) -> CompileType {
+        // Match overloads the same way real call sites and compile-time
+        // evaluation do, so function-style macros with greedy `Expr *`
+        // parameters and a trailing `Sequence<Expr>` (`if`, `while`, `for`,
+        // `when`) are usable inside compile-time helper and macro bodies.
+        // `select_macro` reports its own diagnostic when nothing matches.
+        let Some(selected) =
+            self.select_macro(&keys, arguments, None, expression.syntax().span.clone())
+        else {
+            return CompileType::Error;
+        };
+        if selected.consumed < arguments.len() {
+            // Excess arguments would be applied to the expansion as calls;
+            // that is only meaningful for function-producing macros, which
+            // are not expressible as a compile-time meta type. Leave the
+            // result unconstrained rather than guessing.
+            for argument in &arguments[selected.consumed..] {
+                self.check_compile_expression(module, argument, environment, None);
+            }
+            return CompileType::Unknown;
+        }
+        // A macro whose result is raw `Syntax`/`SyntaxNode` yields an
+        // expression value here, the same coercion `parse_quote` performs:
+        // adopt the expected quotable meta type when one is supplied.
+        let result = selected.definition.result.clone();
+        // A control-flow macro such as `if` or `when` is evaluated in
+        // place, so a `Result` context says nothing about its syntax type.
+        if matches!(expected, Some(CompileType::Result(..)))
+            && matches!(
+                result,
+                MetaType::Syntax | MetaType::SyntaxNode | MetaType::Expr
+            )
+        {
+            return CompileType::Unknown;
+        }
+        if matches!(result, MetaType::Syntax | MetaType::SyntaxNode) {
+            match expected {
+                Some(CompileType::Meta(meta)) if quote_result_type(meta) => {
+                    return CompileType::Meta(meta.clone());
+                }
+                _ => return CompileType::Meta(MetaType::Expr),
+            }
+        }
+        CompileType::Meta(result)
+    }
+
     fn compile_name_type(
         &mut self,
         module: ModuleId,
@@ -4061,7 +4170,8 @@ impl MacroExpander {
             .unwrap_or(module);
         loop {
             if let Some(helper) = self.scopes[cursor.0].helpers.get(&name.name).cloned() {
-                self.check_compile_helper(&helper);
+                let expanded = self.check_expanded_compile_time;
+                self.check_compile_helper(&helper, expanded);
                 return helper_compile_type(&helper.binding);
             }
             if !self.companion_modules[cursor.0] {

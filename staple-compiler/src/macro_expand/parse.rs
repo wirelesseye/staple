@@ -1963,12 +1963,18 @@ impl MacroExpander {
                     ));
                     continue;
                 }
+                // The interpreter expands a member the first time it runs it.
+                // This check runs before expansion, on the body as written, so
+                // macro calls in it are not expanded here either.
+                let previous = self.check_expanded_compile_time;
+                self.check_expanded_compile_time = false;
                 self.check_compile_expression(
                     module,
                     &expression,
                     &mut CompileEnvironment::new(),
                     Some(&expected),
                 );
+                self.check_expanded_compile_time = previous;
             }
             self.static_parameters = HashSet::new();
             self.static_parse_bounds = HashSet::new();

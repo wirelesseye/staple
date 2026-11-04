@@ -318,35 +318,46 @@ Update this section as you work (see "Rules for the implementor").
 
 | Task | Status | Commit | Notes |
 |---|---|---|---|
-| 1. Check-program builder | done, with a known gap | see git log | `macro_expand/check_program.rs`. Seven unit tests. Known gap: imports from partial own-package modules in closure-only mode are not always dropped (Findings, group 9). |
+| 1. Check-program builder | done | see git log | `macro_expand/check_program.rs`. Unit tests cover closures across modules, dropped imports, metadata, modifiers, overloads, dependency packages and package-rooted imports. |
 | 2. Typed quotation lowering | done | see git log | `macro_expand/lower_quote.rs`, `Splice`, `__quote` and `Parse.parse_quote` in `std.syntax`. `parse_quote` is a `Parse` trait member, not a free function (Findings, group 7). No splice of a non-syntax value was found that needs a `Splice` impl. |
-| 3. Check driver | done | see git log | `STAPLE_CHECK_MACRO_CLOSURES` and `scripts/check-macro-closures.py`. Cost measured on one input only (Measurements). |
+| 3. Check driver | done | see git log | `STAPLE_CHECK_MACRO_CLOSURES` and `scripts/check-macro-closures.py`. Cost measured on B1–B3 (Measurements). |
 | 4. Gap inventory | done | see git log | Groups 1–9 below. The full corpus ran (232 inputs; see "Review of this phase"). |
-| 5. Close the gaps | partly done | see git log | Groups 1 and 3–6 no longer report anything on the standard library's macros when it is a dependency. Every input outside `stdlib/` passes. Group 1 still has its handle representation to do in Phase 3. Group 2 is excluded from the check, not fixed, and goes to Phase 3; 8 goes to Phase 4; 9 has no target. |
-| 6. Static check after expansion | not started | | |
+| 5. Close the gaps | done | see git log | Groups 3–7 and 9 are fixed. Group 1 keeps only its handle representation, which belongs to Phase 3; group 2 is excluded until Phase 3 rewrites the variadic `Parse` impls; group 8 goes to Phase 4. |
+| 6. Static check after expansion | done | see git log | `validate_compile_time_code` now reports from expanded syntax: ready closures are checked on their expanded items, and unused definitions are checked as written without expanding their macro calls. A separate context pass fills the tables the interpreter reads, and `Parse` members are checked there before the interpreter mutates them. The lazy diagnostic path is gone. |
 | 7. Compile-time effects | decided, not enforced | see git log | Documented in `Staple.md` ("Compile-time effects"). |
-| 8. Check in the test suite | partly done | see git log | `check_program.rs` tests check every standard-library macro (`the_standard_library_macros_check_as_ordinary_code`) and macros of each shape. The fixtures are not checked in the test suite. |
-| 9. Language reference | partly done | see git log | `Staple.md` describes the check, the quotation lowering and `Splice`. The statements that compile-time code is not type-checked as run-time code, that its checking is permissive and that `impl Parse` has its own orphan rule are unchanged, because they are still true. |
-| 10. Close out | partly done | | Umbrella plan updated. Corpus comparison: see Findings. |
+| 8. Check in the test suite | done | see git log | `check_program.rs` checks every standard-library macro, the fixture macros and the macro example with `all`. Per-test environment variables would race between parallel tests, so one dedicated test covers them instead. |
+| 9. Language reference | done | see git log | `Staple.md` describes the check, the quotation lowering and `Splice`, and now describes `Parse` implementations and macro code as ordinary code with the normal orphan rule. The interpreter's evaluation limits remain. |
+| 10. Close out | done | see git log | Umbrella plan updated with the Phase 2 status and the work moved to Phases 3, 4 and 6. Corpus comparison and final timings are in Findings. |
 
-**Phase 2 is not done.** The "Done when" conditions on a clean check, on task 8
-and on task 6 are not met.
+**Phase 2 is done.** The clean check, the test-suite coverage and the
+interpreter's static check all meet the "Done when" conditions. The remaining
+items are assigned to Phase 3 (syntax-type handles and variadic `Parse` impls),
+Phase 4 (the quotation cycle, generated-item loops and dependency library
+builds) and Phase 6 (delete the interpreter and its static check).
 
 ## Measurements
 
-One input, not B1–B3 (the Phase 0 inputs were not at hand). `staple check` of a
-three-line program that uses `if`, release build, three runs each, on a
-machine that was also building and testing, so the numbers are noisy.
-Command: `STAPLE_CHECK_MACRO_CLOSURES=<mode> target/release/staple check --stdlib stdlib a.sta`.
+Release build, `STAPLE_CHECK_MACRO_CLOSURES=<mode> target/release/staple expand
+--stdlib stdlib <input>`, min of two or three runs on the development machine
+(Apple M2). The machine occasionally stalled a process for 25–29 s while the
+host did other I/O; those runs were discarded. The inputs are the Phase 0
+baselines:
 
-| Mode | Wall time (s) |
-|---|---|
-| off | 2.6–3.1 |
-| `1` | 3.8–6.1 |
-| `all` | 4.9–5.8 |
+- B1: `let x: I32 = 1`, so the time is loading and expanding the standard
+  library.
+- B2: 20 × `@derive_eq` on a 50-field `wrap` product.
+- B3: one function with 1,000 `if … else …` calls.
 
-The check costs about one more front-end pass over the standard library, as
-Phase 0 measured. Nothing was measured for B1–B3.
+| Input | off | `1` | `all` |
+|---|---|---|---|
+| B1 | 0.285 s | 3.54 s | 3.55 s |
+| B2 | 0.29 s | 3.55 s | 3.56 s |
+| B3 | 0.62 s | 3.88 s | 3.84 s |
+
+The check costs about 3.2–3.3 s, roughly one front-end pass over the standard
+library and the program. `1` and `all` cost the same here because an invoked
+standard-library macro makes the check take the library whole; `1` only saves
+work in a program whose macros are all in its own package.
 
 ## Findings
 
@@ -378,6 +389,25 @@ Phase 0 measured. Nothing was measured for B1–B3.
   functions the macro runtime will provide.
 - **`Splice` impls are compile-time items** (dropped after expansion, like
   `Parse` impls).
+- **The standard library is always checked whole**, even when the corpus input
+  is a standard-library file. In a real build the library is a dependency, and
+  a corpus file is not a package build of `std`; checking it closure-only made
+  every import from another `std` module and every contextual extern block look
+  missing. The package of the entry module is still closure-only for any other
+  package, so closure completeness is still tested.
+- **The static check runs after expansion.** A macro that became ready is
+  checked on its expanded body and expanded closure helpers. A definition that
+  nothing called is still checked as written, but its macro calls are not
+  resolved or expanded, which keeps the cheap diagnostic for unused code
+  without the lazy expansion path. The interpreter still reads contextual types
+  from the static check, so a first pass fills those tables from the written
+  syntax and discards its diagnostics; it does not expand anything. `Parse`
+  members are checked in that first pass, because the interpreter replaces them
+  with expanded bodies the first time it runs one.
+- **A submodule or companion name is not an importable item.** The check's
+  import filter used to count those names, so `use package.hash.(Hash, Hasher)`
+  survived when `Hasher` was only the companion module and the type had been
+  left outside the closure.
 
 ### Gap inventory
 
@@ -441,21 +471,27 @@ number of defects.
    to break the cycle (for example `Char` written without `when`, or a
    splice impl set that does not reach `Char`) before closure-only builds of
    the standard library can compile quotations.
-9. **Imports in partial own-package modules. Open; no target phase yet.**
-   In a closure-only check of the standard library itself, an import of a name
-   outside the closure is not always dropped: `module has no public item named
-   `Hasher`` (from `std.ptr`) and `…`Default`` (from `std.string`). The target
-   of a `package.`-rooted import is probably not found through
-   `Program::imported_module`. Because every `std` entry file is a user program
-   in the corpus script, this is noise in the `stdlib/` inputs, not a defect in
-   a macro.
+9. **Imports in partial own-package modules. Fixed.** The filter did not
+   resolve `package.`-rooted imports, because `Program::imported_module` only
+   knows paths relative to the importing module, and it counted a submodule or
+   companion name as an importable item. `use package.hash.(Hash, Hasher)`
+   therefore survived when `Hasher` was only the companion and the type was
+   outside the closure. The check resolves a package-rooted path against the
+   program's dotted module names and keeps only names defined by items, not by
+   submodules. The standard library is also checked whole when a corpus input
+   is itself a standard-library file (see "Design changes"). Every `stdlib/`
+   input now passes.
 
-Not found in this phase, because group 1 hides them: the effect of `?` on a
-non-`Result`, `return` from nested blocks and `mut` parameters passed by
-address; integer literal widths; `collect` without an expected type; and the
-orphan rule. They are not resolved, and each still has to be looked at once
-group 1 is fixed. The two `typegroup ConversionError` chains were not examined.
-The evidence for narrowing closures with selected impls is also not gathered.
+The standard library's macros now check with no diagnostics, so the gaps that
+group 1 used to hide were looked at again. No macro relies on a `?` on a
+non-`Try`, a `return` from a nested block, a by-address `mut` difference, an
+integer literal with no width, or a `collect` without an expected type: the
+front end accepts every closure, and `Staple.md` now describes the shared
+semantics. The two `typegroup ConversionError` chains are still recorded as
+generated-item loops but produce no check failure; Phase 4 still has to decide
+whether its closure-only build needs to break them. The check passes without
+narrowing closures with selected impls, so there is no new evidence for that
+change; it stays a Phase 4 option.
 
 ### Review of this phase
 
@@ -517,22 +553,34 @@ This meant annotating `while`, `discard` and `for` in `std.flow`,
 its missing `Syntax` import, and `widen` and `identity` in the
 `conversions_as.sta` fixture. After it:
 
-- Every input outside `stdlib/` passes the check (187 inputs). The `stdlib/`
-  inputs were not re-run.
+- Every input outside `stdlib/` passes the check (187 inputs).
 - `scripts/compare-expansion.py` against the capture before it: 229 of 232 match.
   The three that differ are the three edited files.
 - `cargo test --workspace` passes.
 
+Finishing the phase (2026-11-05):
+
+- `scripts/check-macro-closures.py --mode all`: 232 inputs, 0 with diagnostics.
+- `cargo test -p staple-compiler --test compiler`: 845 passed.
+- `cargo test -p staple-compiler --lib`: 510 passed, 2 ignored.
+- `scripts/compare-expansion.py` against `62d80109`: 226 of 232 match; the six
+  differing inputs are the standard-library files listed below.
+- The check costs about 3.2–3.3 s on B1–B3 (Measurements).
+
+No test needed changing for diagnostic order. The check's diagnostics now come
+after expansion, but the suite only asserts on their content, not their order.
+
 ### Expansion difference from the start of the phase
 
-`scripts/compare-expansion.py` against `62d80109` (binary built from that
-commit, its own standard library): 227 of 232 inputs match. The five that
+`scripts/compare-expansion.py` against `62d80109` (binary and standard library
+built from that commit, current corpus): 226 of 232 inputs match. The six that
 differ are the standard-library files this phase edited: `std/cmp.sta`,
-`std/default.sta`, `std/hash.sta` and `std/typegroup.sta` (new imports) and
+`std/default.sta`, `std/hash.sta`, `std/typegroup.sta` (new imports),
 `std/syntax.sta` (`Splice`, `Parse.parse_quote`, three intrinsic declarations,
-`wrap pub` on three body types). Expansion of every other input, including
-all fixtures and corpus programs, is unchanged. The comparison ran before the
-front-end changes for group 1, which do not touch expansion.
+`wrap pub` on three body types) and `std/flow.sta` (`Expr ::` on `while`,
+`discard` and `for`, added when an unannotated macro stopped assuming an
+expression result). Expansion of every other input, including all fixtures and
+corpus programs, is unchanged.
 
 ### Later phases
 
@@ -542,6 +590,9 @@ front-end changes for group 1, which do not touch expansion.
   lowered here: ids index `TemplateTable::templates` in the order the check
   program lowers them, and `Splice.splice` is applied once per distinct name in
   order of first use.
-- **Phase 4** must resolve the quotation cycle (group 8) and decide how a
-  dependency's macros are built (the check checks them whole).
+- **Phase 4** must resolve the quotation cycle (group 8), decide how a
+  dependency's macros are built (the check checks them whole), and decide
+  whether the generated-item loops in `std.convert` matter to a closure-only
+  package build. It also carries the option of narrowing closures with the
+  typechecker's selected impls, for which this phase found no new evidence.
 - **Phase 6** deletes the interpreter's static check, which removes group 7.
