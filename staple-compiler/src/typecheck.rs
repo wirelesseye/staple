@@ -10901,6 +10901,24 @@ impl TypeChecker {
         }
     }
 
+    /// Whether `value_type` is syntax, which is a handle to a fragment that
+    /// macro code may use again after matching on it.
+    fn is_syntax_handle(&self, value_type: &CheckedType) -> bool {
+        match value_type.desugared() {
+            CheckedType::Wrapper {
+                id, representation, ..
+            } => {
+                self.type_declarations
+                    .get(id)
+                    .is_some_and(|declaration| declaration.recursive_constructor)
+                    || self.is_syntax_handle(representation)
+            }
+            CheckedType::Opaque { .. } => true,
+            CheckedType::Sum(sum) => sum.alternatives.iter().all(|alt| self.is_syntax_handle(alt)),
+            _ => false,
+        }
+    }
+
     fn require_copy_at_pattern(
         &mut self,
         pattern: &staple_syntax::AtPattern,
@@ -10912,7 +10930,9 @@ impl TypeChecker {
             .flatten()
             .cloned()
             .collect::<Vec<_>>();
-        if !self.is_copy_with(value_type, &bounds) {
+        if !self.is_copy_with(value_type, &bounds)
+            && !(self.ordinary_syntax_types && self.is_syntax_handle(value_type))
+        {
             self.diagnostics.push(Diagnostic::new(
                 pattern.syntax.span.clone(),
                 format!("an `@` pattern requires a Copy value, found `{value_type}`"),

@@ -50,7 +50,7 @@ def if_branches = (condition: Expr, consequent: Expr, rest: Sequence<Expr>) => E
     // `first` and `rest` are the required binding names for a `Sequence`
     // head/tail destructure, so each level rebinds `first` to a descriptive
     // local before recursing.
-    let otherwise = match rest {
+    let otherwise: Expr = match rest {
         Sequence () => parse_quote { () },
         Sequence (first, rest) => match first {
             else_keyword: Ident<"else"> => match rest {

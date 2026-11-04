@@ -235,7 +235,7 @@ pub(crate) fn build_check_program(
             for item in expanded {
                 if owner == package {
                     convert_item(item, next_syntax_id, syntax_module, &mut kept);
-                } else {
+                } else if !is_variadic_parse_impl(item) {
                     kept.push(item.clone());
                 }
             }
@@ -355,8 +355,23 @@ fn convert_item(
                 out.extend(inner);
             }
         }
+        item if is_variadic_parse_impl(item) => {}
         item => out.push(item.clone()),
     }
+}
+
+/// A `Parse` implementation for a product with a spread element, such as
+/// `(H; ...T)`. The interpreter parses slotted and comma products through
+/// them, and no checked code names them.
+fn is_variadic_parse_impl(item: &Item) -> bool {
+    let Item::TraitImplementation(implementation) = item else {
+        return false;
+    };
+    implementation.trait_name.name == "Parse"
+        && implementation.arguments.iter().any(|argument| {
+            matches!(argument, staple_syntax::Type::Product(product)
+                if product.variadic || product.elements.iter().any(|element| element.spread))
+        })
 }
 
 /// The function a macro overload with a body becomes. Its name is generated and

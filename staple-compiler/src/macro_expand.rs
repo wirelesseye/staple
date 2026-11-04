@@ -12388,7 +12388,7 @@ fn compile_types_compatible(actual: &CompileType, expected: &CompileType) -> boo
         }
         // `None`, or a `Some` whose payload is not syntax, is still an `Option`.
         (CompileType::Named(actual), CompileType::Meta(MetaType::Optional(_))) => {
-            actual == "Option"
+            matches!(actual.as_str(), "Option" | "None" | "Some")
         }
         (CompileType::Product(actual), CompileType::Product(expected)) => {
             actual.len() == expected.len()
@@ -12400,7 +12400,28 @@ fn compile_types_compatible(actual: &CompileType, expected: &CompileType) -> boo
         (CompileType::Function(ap, ar), CompileType::Function(ep, er)) => {
             compile_types_compatible(ap, ep) && compile_types_compatible(ar, er)
         }
-        (CompileType::Named(actual), CompileType::Named(expected)) => actual == expected,
+        // An empty `Sequence ()` is a sequence of whatever the annotation says.
+        (CompileType::Meta(MetaType::Sequence(_)), CompileType::Written(expected)) => {
+            let written = expected.to_string();
+            written.split('<').next().unwrap_or(&written).trim() == "Sequence"
+        }
+        (CompileType::Meta(MetaType::Sequence(_)), CompileType::Meta(MetaType::Nominal(name, _))) => {
+            name == "Sequence"
+        }
+        (CompileType::Named(actual), CompileType::Written(expected)) => {
+            let written = expected.to_string();
+            let head = written.split('<').next().unwrap_or(&written).trim();
+            actual == head || (matches!(actual.as_str(), "None" | "Some") && head == "Option")
+        }
+        (CompileType::Named(actual), CompileType::Named(expected)) => {
+            // Compile-time values do not record their type arguments, so a
+            // generic type matches its application, and an alternative of a
+            // sum matches the sum.
+            let head = |name: &str| name.split('<').next().unwrap_or(name).to_owned();
+            actual == expected
+                || head(actual) == head(expected)
+                || (matches!(actual.as_str(), "None" | "Some") && head(expected) == "Option")
+        }
         _ => actual == expected,
     }
 }

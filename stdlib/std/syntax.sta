@@ -328,46 +328,46 @@ extern "staple-intrinsic" {
 
 /// Syntax that a quotation can splice with `$name`.
 pub trait Splice T {
-    splice: move T -> Syntax
+    splice: T -> Syntax
 }
 
-impl Splice Syntax { splice = move value => value }
-impl Splice SyntaxNode { splice = move value => __splice_node.<SyntaxNode> value }
-impl Splice Expr { splice = move value => __splice_node.<Expr> value }
-impl Splice CallExpr { splice = move value => __splice_node.<CallExpr> value }
-impl Splice StringExpr { splice = move value => __splice_node.<StringExpr> value }
-impl Splice CharExpr { splice = move value => __splice_node.<CharExpr> value }
-impl Splice UnstructuredExpr { splice = move value => __splice_node.<UnstructuredExpr> value }
-impl Splice Type { splice = move value => __splice_node.<Type> value }
-impl Splice ProductType { splice = move value => __splice_node.<ProductType> value }
-impl Splice UnstructuredType { splice = move value => __splice_node.<UnstructuredType> value }
-impl Splice Pattern { splice = move value => __splice_node.<Pattern> value }
-impl Splice BindingPattern { splice = move value => __splice_node.<BindingPattern> value }
-impl Splice NominalPattern { splice = move value => __splice_node.<NominalPattern> value }
-impl Splice UnstructuredPattern { splice = move value => __splice_node.<UnstructuredPattern> value }
-impl Splice Item { splice = move value => __splice_node.<Item> value }
-impl Splice ModifiedItem { splice = move value => __splice_node.<ModifiedItem> value }
-impl Splice TypeDeclarationItem { splice = move value => __splice_node.<TypeDeclarationItem> value }
-impl Splice UnstructuredItem { splice = move value => __splice_node.<UnstructuredItem> value }
-impl Splice Modifier { splice = move value => __splice_node.<Modifier> value }
-impl Splice ModifierCall { splice = move value => __splice_node.<ModifierCall> value }
-impl Splice UnstructuredModifier { splice = move value => __splice_node.<UnstructuredModifier> value }
-impl Splice Visibility { splice = move value => __splice_node.<Visibility> value }
-impl Splice Comma { splice = move value => __splice_node.<Comma> value }
-impl Splice Equals { splice = move value => __splice_node.<Equals> value }
-impl Splice FatArrow { splice = move value => __splice_node.<FatArrow> value }
-impl Splice TypeParameter { splice = move value => __splice_node.<TypeParameter> value }
-impl Splice TypeParameters { splice = move value => __splice_node.<TypeParameters> value }
-impl Splice TypeBody { splice = move value => __splice_node.<TypeBody> value }
-impl<S where S <: String> Splice Ident<S> { splice = move value => __splice_node.<Ident<S>> value }
-impl<C> Splice Parenthesized<C> { splice = move value => __splice_node.<Parenthesized<C>> value }
-impl<C> Splice Bracketed<C> { splice = move value => __splice_node.<Bracketed<C>> value }
-impl<C> Splice Braced<C> { splice = move value => __splice_node.<Braced<C>> value }
-impl<C> Splice Angled<C> { splice = move value => __splice_node.<Angled<C>> value }
+impl Splice Syntax { splice = value => value }
+impl Splice SyntaxNode { splice = value => __splice_node.<SyntaxNode> value }
+impl Splice Expr { splice = value => __splice_node.<Expr> value }
+impl Splice CallExpr { splice = value => __splice_node.<CallExpr> value }
+impl Splice StringExpr { splice = value => __splice_node.<StringExpr> value }
+impl Splice CharExpr { splice = value => __splice_node.<CharExpr> value }
+impl Splice UnstructuredExpr { splice = value => __splice_node.<UnstructuredExpr> value }
+impl Splice Type { splice = value => __splice_node.<Type> value }
+impl Splice ProductType { splice = value => __splice_node.<ProductType> value }
+impl Splice UnstructuredType { splice = value => __splice_node.<UnstructuredType> value }
+impl Splice Pattern { splice = value => __splice_node.<Pattern> value }
+impl Splice BindingPattern { splice = value => __splice_node.<BindingPattern> value }
+impl Splice NominalPattern { splice = value => __splice_node.<NominalPattern> value }
+impl Splice UnstructuredPattern { splice = value => __splice_node.<UnstructuredPattern> value }
+impl Splice Item { splice = value => __splice_node.<Item> value }
+impl Splice ModifiedItem { splice = value => __splice_node.<ModifiedItem> value }
+impl Splice TypeDeclarationItem { splice = value => __splice_node.<TypeDeclarationItem> value }
+impl Splice UnstructuredItem { splice = value => __splice_node.<UnstructuredItem> value }
+impl Splice Modifier { splice = value => __splice_node.<Modifier> value }
+impl Splice ModifierCall { splice = value => __splice_node.<ModifierCall> value }
+impl Splice UnstructuredModifier { splice = value => __splice_node.<UnstructuredModifier> value }
+impl Splice Visibility { splice = value => __splice_node.<Visibility> value }
+impl Splice Comma { splice = value => __splice_node.<Comma> value }
+impl Splice Equals { splice = value => __splice_node.<Equals> value }
+impl Splice FatArrow { splice = value => __splice_node.<FatArrow> value }
+impl Splice TypeParameter { splice = value => __splice_node.<TypeParameter> value }
+impl Splice TypeParameters { splice = value => __splice_node.<TypeParameters> value }
+impl Splice TypeBody { splice = value => __splice_node.<TypeBody> value }
+impl<S where S <: String> Splice Ident<S> { splice = value => __splice_node.<Ident<S>> value }
+impl<C> Splice Parenthesized<C> { splice = value => __splice_node.<Parenthesized<C>> value }
+impl<C> Splice Bracketed<C> { splice = value => __splice_node.<Bracketed<C>> value }
+impl<C> Splice Braced<C> { splice = value => __splice_node.<Braced<C>> value }
+impl<C> Splice Angled<C> { splice = value => __splice_node.<Angled<C>> value }
 // A sequence splices as its elements in order, which is what `$name...` needs.
 // The bound is what makes splicing a sequence of anything else a type error.
 impl<T where Splice T> Splice Sequence<T> {
-    splice = move items => __splice_join.<T> items
+    splice = items => __splice_join.<T> items
 }
 
 // Leaf syntax nodes: each consumes the longest node the grammar accepts from
@@ -416,9 +416,13 @@ impl<T where Parse T> Parse Option<T> {
         match (Parse.parse.<T> fork) {
             Ok value => {
                 input = fork
-                Ok (Some value)
+                let found: Option<T> = Some value
+                Ok found
             },
-            ParseError _ => Ok None,
+            ParseError _ => {
+                let absent: Option<T> = None
+                Ok absent
+            },
         }
     }
 }
@@ -526,7 +530,7 @@ impl<T> FromIterator Sequence<T> T {
 // Elements until the stream ends or `T` stops parsing.
 impl<T where Parse T> Parse Sequence<T> {
     parse = mut input => {
-        let mut elements = Sequence ()
+        let mut elements: Sequence<T> = Sequence ()
         loop {
             if (is_empty input) { break }
             let mut fork = input
@@ -547,8 +551,8 @@ impl<T where Parse T> Parse Sequence<T> {
 // Comma-separated elements with an optional trailing comma.
 impl<T where Parse T> Parse Separated<T, Comma> {
     parse = mut input => {
-        let mut elements = Sequence ()
-        let mut trailing = False
+        let mut elements: Sequence<T> = Sequence ()
+        let mut trailing: Bool = False
         loop {
             if (is_empty input) { break }
             let mut fork = input
