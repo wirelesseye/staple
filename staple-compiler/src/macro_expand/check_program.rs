@@ -367,6 +367,11 @@ fn macro_function(
     syntax_module: Option<ModuleId>,
 ) -> Option<Binding> {
     let mut value = declaration.value.clone()?;
+    if let Some(slots) = declaration.annotation.as_ref().and_then(slot_count)
+        && slots > 1
+    {
+        merge_slots(&mut value, slots, next_syntax_id);
+    }
     if let Some(syntax_module) = syntax_module
         && declaration
             .annotation
@@ -681,20 +686,25 @@ mod tests {
 /// as a bare `(modifiers, visibility)`. As a function it is a `MacroCallMetadata`
 /// like any other wrapper, so the pattern names it.
 fn name_metadata_pattern(value: &mut Expression, syntax_module: ModuleId, next_syntax_id: &mut usize) {
-    // The parameters are curried, so the metadata is the first function's own
-    // parameter.
     let Expression::Function(function) = value else {
         return;
     };
-    if !matches!(function.pattern, Pattern::Product(_)) {
+    let first = match &mut function.pattern {
+        Pattern::Product(parameters) if parameters.slotted => parameters.elements.first_mut(),
+        pattern => Some(pattern),
+    };
+    let Some(first) = first else {
+        return;
+    };
+    if !matches!(first, Pattern::Product(_)) {
         return;
     }
-    let argument = function.pattern.clone();
+    let argument = first.clone();
     let mut syntax = argument.syntax().clone();
     syntax.id = SyntaxId(*next_syntax_id);
     *next_syntax_id += 1;
     syntax.definition_module = Some(syntax_module.0);
-    function.pattern = Pattern::Nominal(staple_syntax::NominalPattern {
+    *first = Pattern::Nominal(staple_syntax::NominalPattern {
         syntax,
         namespace: None,
         name: "MacroCallMetadata".to_owned(),
@@ -702,6 +712,47 @@ fn name_metadata_pattern(value: &mut Expression, syntax_module: ModuleId, next_s
         argument: Box::new(argument),
         annotation: None,
     });
+}
+
+/// How many slots a macro signature's parameter has, when it is slotted.
+fn slot_count(annotation: &staple_syntax::Type) -> Option<usize> {
+    let staple_syntax::Type::Function(function) = annotation else {
+        return None;
+    };
+    match function.parameter.as_ref() {
+        staple_syntax::Type::Product(product) if product.slotted => Some(product.elements.len()),
+        _ => None,
+    }
+}
+
+/// A macro's parameters are written `(a; b) => body` but parsed one function
+/// per slot. As a function they are one slotted parameter, as the signature
+/// says, so the first `slots` functions become one.
+fn merge_slots(value: &mut Expression, slots: usize, next_syntax_id: &mut usize) {
+    let Expression::Function(outer) = value else {
+        return;
+    };
+    let mut patterns = vec![outer.pattern.clone()];
+    let mut body = outer.body.as_ref().clone();
+    while patterns.len() < slots {
+        let Expression::Function(inner) = body else {
+            return;
+        };
+        patterns.push(inner.pattern.clone());
+        body = inner.body.as_ref().clone();
+    }
+    let mut syntax = patterns[0].syntax().clone();
+    syntax.id = SyntaxId(*next_syntax_id);
+    *next_syntax_id += 1;
+    outer.pattern = Pattern::Product(staple_syntax::ProductPattern {
+        slotted: true,
+        syntax,
+        elements: patterns,
+        mutable: false,
+        moved: false,
+        annotation: None,
+    });
+    *outer.body = body;
 }
 
 /// A macro without a signature produces what its call site expects, which for
