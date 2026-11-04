@@ -499,9 +499,17 @@ After these fixes:
   the program's own package, in closure-only mode (group 9). The imports explain
   some of the roughly 350 messages. The rest (`unknown name `Splice``, `unknown
   name `__pointer_read``) are not traced. The last is `staple-compiler/examples/macros.sta`:
-  `setting_value` writes `Braced<Syntax>` without importing `Syntax`, which the
-  interpreter accepts. **Open:** the example needs the import (group 3's kind of
-  gap), so the "Done when" condition on the fixtures is one import short.
+  `setting_value` wrote `Braced<Syntax>` without importing `Syntax`, which the
+  interpreter accepts. The example now has the import, and that uncovered the
+  gap below, which the unknown type had been hiding.
+- **Open: an unannotated macro whose result is a `quote`.** The check ascribes
+  `Expr` to the result of every unannotated macro (`expression_result`), but
+  `quote` returns `Syntax`, so `macro one = (x: Expr) => quote { $x }` reports
+  `expected `Expr`, found `Syntax``, with or without the import. Ten macros in
+  `staple-compiler/examples/macros.sta` report this, and `bind` there returns an
+  item, not an expression. `Staple.md` documents this form (`macro unit = () =>
+  quote {}`), so the check is wrong, not the macro. It is the only input outside
+  `stdlib/` that fails, and the test suite does not catch it.
 - `staple check` of a small program using a template macro, one run each, on a
   machine that was also busy: off 1.11 s, `1` 7.16 s, `all` 7.12 s.
 
