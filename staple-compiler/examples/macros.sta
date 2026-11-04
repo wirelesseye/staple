@@ -83,7 +83,7 @@ macro replace_argument = (value: CallExpr; replacement: Expr) => {
     let original = value
     let mut changed = value
     changed.argument = replacement
-    parse_quote { ($original, $changed) }
+    Expr :: parse_quote { ($original, $changed) }
 }
 
 macro call_increment = value: Expr => {

@@ -16,8 +16,8 @@ type Target wrap I32
 impl ! Copy Source {}
 impl Convert Source Target { convert = move Source value => Target value }
 
-macro widen = value: Expr => parse_quote { $value as I64 }
-macro identity = value: Expr => parse_quote { $value }
+macro widen = value: Expr => Expr :: parse_quote { $value as I64 }
+macro identity = value: Expr => Expr :: parse_quote { $value }
 
 def run: () -> () = () => {
     let small: I8 = 42

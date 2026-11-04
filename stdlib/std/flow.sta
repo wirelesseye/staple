@@ -106,7 +106,7 @@ pub macro if =
 /// ```
 pub macro while =
     (condition: Expr; body: Expr) =>
-    parse_quote {
+    Expr :: parse_quote {
         loop {
             match Bool :: $condition {
                 True() => $body,
@@ -124,7 +124,7 @@ pub macro while =
 /// ```
 pub macro discard =
     value: Expr =>
-    parse_quote {
+    Expr :: parse_quote {
         {
             $value
             ()
@@ -140,7 +140,7 @@ pub macro discard =
 /// ```
 pub macro for =
     (pattern: Pattern; _: Ident<"in">; source: Expr; body: Expr) =>
-    parse_quote {
+    Expr :: parse_quote {
         {
             let mut iterator = IntoIterator.into_iterator $source
             loop {

@@ -402,11 +402,6 @@ fn macro_function(
     {
         name_metadata_pattern(&mut value, syntax_module, next_syntax_id);
     }
-    if declaration.annotation.is_none()
-        && let Some(syntax_module) = syntax_module
-    {
-        expression_result(&mut value, syntax_module, next_syntax_id);
-    }
     let id = SyntaxId(*next_syntax_id);
     *next_syntax_id += 1;
     let mut syntax: Syntax = declaration.syntax.clone();
@@ -670,7 +665,7 @@ mod tests {
         let built = build(
             concat!(
                 "def keep = value: Expr => Expr :: value\n",
-                "macro invoked_template = value: Expr => parse_quote { $value }\n",
+                "macro invoked_template = value: Expr => Expr :: parse_quote { $value }\n",
                 "macro idle = value: Expr => keep value\n",
                 "let a = invoked_template 1\n",
             ),
@@ -783,7 +778,7 @@ mod tests {
             "}\n",
             // A modifier macro, a refinement pattern, and a splice of a sequence.
             "macro @mark: Item -> Sequence<Item> = item => Sequence (first: item, rest: Sequence ())\n",
-            "macro words = (first: Expr; rest: Sequence<Expr>) => match first {\n",
+            "macro words: (Expr; Sequence<Expr>) -> Expr = (first; rest) => match first {\n",
             "    else_word: Ident<\"else\"> => parse_quote { ($rest...) },\n",
             "    other => parse_quote { ($other, $rest...) },\n",
             "}\n",
@@ -793,9 +788,39 @@ mod tests {
     }
 
     #[test]
+    fn a_quote_result_needs_no_annotation() {
+        let diagnostics = check_all(concat!(
+            "macro direct = value: Expr => quote { $value }\n",
+            "macro in_a_block = value: Expr => { let same = value; quote { let a = $same } }\n",
+            "macro in_a_match = value: Expr => match value { _ => quote { $value } }\n",
+            "def main = () => 0\n",
+        ));
+        assert!(diagnostics.is_empty(), "{}", diagnostics.join("\n"));
+    }
+
+    #[test]
+    fn a_parse_quote_result_needs_a_type() {
+        let diagnostics = check_all(concat!(
+            "macro untyped = value: Expr => parse_quote { $value }\n",
+            "def main = () => 0\n",
+        ));
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic.contains("macro `untyped`")),
+            "{diagnostics:?}"
+        );
+
+        let diagnostics = check_all(concat!(
+            "macro declared: Expr -> Expr = value => parse_quote { $value }\n",
+            "macro ascribed = value: Expr => Expr :: parse_quote { $value }\n",
+            "def main = () => 0\n",
+        ));
+        assert!(diagnostics.is_empty(), "{}", diagnostics.join("\n"));
+    }
+
+    #[test]
     fn splicing_a_value_that_is_not_syntax_is_a_type_error() {
         let diagnostics = check_all(concat!(
-            "macro bad = value: Expr => { let count = 3; parse_quote { $count } }\n",
+            "macro bad = value: Expr => { let count = 3; Expr :: parse_quote { $count } }\n",
             "def main = () => 0\n",
         ));
         assert!(
@@ -809,7 +834,7 @@ mod tests {
     #[test]
     fn a_spaced_splice_is_a_splice() {
         let diagnostics = check_all(concat!(
-            "macro bad = value: Expr => { let count = 3; parse_quote { $ count } }\n",
+            "macro bad = value: Expr => { let count = 3; Expr :: parse_quote { $ count } }\n",
             "def main = () => 0\n",
         ));
         assert!(
@@ -928,37 +953,3 @@ fn merge_slots(value: &mut Expression, slots: usize, next_syntax_id: &mut usize)
     *outer.body = body;
 }
 
-/// A macro without a signature produces what its call site expects, which for
-/// the function-style macros that have no signature is an expression.
-fn expression_result(value: &mut Expression, syntax_module: ModuleId, next_syntax_id: &mut usize) {
-    let Expression::Function(function) = value else {
-        return;
-    };
-    if matches!(function.body.as_ref(), Expression::Function(_)) {
-        return expression_result(&mut function.body, syntax_module, next_syntax_id);
-    }
-    if matches!(function.body.as_ref(), Expression::TypeAscription(_)) {
-        return;
-    }
-    let mut syntax = function.body.syntax().clone();
-    syntax.id = SyntaxId(*next_syntax_id);
-    *next_syntax_id += 1;
-    syntax.definition_module = Some(syntax_module.0);
-    let ty = staple_syntax::Type::Named(staple_syntax::NamedType {
-        syntax: syntax.clone(),
-        namespace: None,
-        name: "Expr".to_owned(),
-    });
-    let body = std::mem::replace(
-        function.body.as_mut(),
-        Expression::Name(staple_syntax::NameExpression {
-            syntax: Syntax::compiler(),
-            name: String::new(),
-        }),
-    );
-    *function.body = Expression::TypeAscription(Box::new(staple_syntax::TypeAscriptionExpression {
-        syntax,
-        value: Box::new(body),
-        ty,
-    }));
-}

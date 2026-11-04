@@ -90,7 +90,7 @@ atomic syntax unit; an omitted parameter type means `SyntaxNode`, not opaque
 `Syntax`:
 
 ```staple
-macro choose = (condition; then; else) => parse_quote {
+macro choose = (condition; then; else) => Expr :: parse_quote {
     match $condition {
         True => $then,
         False => $else,
@@ -106,7 +106,7 @@ The empty product `()` accepts only `()`:
 macro unit = () => quote {}
 unit ()
 
-macro sum = (a: Expr; b: Expr, c: Expr; d: Expr) => parse_quote { $a + $b + $c + $d }
+macro sum = (a: Expr; b: Expr, c: Expr; d: Expr) => Expr :: parse_quote { $a + $b + $c + $d }
 sum 1 (2, 3) 4
 ```
 
@@ -870,6 +870,14 @@ quotation is a call:
   a quotation, in order of first use. `Splice` is declared in `std.syntax`
   and implemented for every syntax type and for `Sequence<T>` when `T`
   implements it, so splicing a value that is not syntax is a type error.
+
+The check assumes no result type for a macro that does not declare one. A
+`quote` result is `Syntax`, so such a macro needs no annotation. A `parse_quote`
+needs a type to parse as: declare the macro's result, as in
+`macro next: Expr -> Expr = value => parse_quote { $value + 1 }`, or ascribe the
+quotation, as in `macro next = value: Expr => Expr :: parse_quote { $value + 1 }`.
+Without either, the check reports `no trait implementation or matching bound is
+available`. Expansion itself still infers the result from the fragment's shape.
 
 The check is not on by default, and it does not change what macros do.
 

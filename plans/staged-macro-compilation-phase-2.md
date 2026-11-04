@@ -322,7 +322,7 @@ Update this section as you work (see "Rules for the implementor").
 | 2. Typed quotation lowering | done | see git log | `macro_expand/lower_quote.rs`, `Splice`, `__quote` and `Parse.parse_quote` in `std.syntax`. `parse_quote` is a `Parse` trait member, not a free function (Findings, group 7). No splice of a non-syntax value was found that needs a `Splice` impl. |
 | 3. Check driver | done | see git log | `STAPLE_CHECK_MACRO_CLOSURES` and `scripts/check-macro-closures.py`. Cost measured on one input only (Measurements). |
 | 4. Gap inventory | done | see git log | Groups 1–9 below. The full corpus ran (232 inputs; see "Review of this phase"). |
-| 5. Close the gaps | partly done | see git log | Groups 1 and 3–6 no longer report anything on the standard library's macros when it is a dependency. One input outside `stdlib/` still fails (`examples/macros.sta`; see "Review of this phase"). Group 1 still has its handle representation to do in Phase 3. Group 2 is excluded from the check, not fixed, and goes to Phase 3; 8 goes to Phase 4; 9 has no target. |
+| 5. Close the gaps | partly done | see git log | Groups 1 and 3–6 no longer report anything on the standard library's macros when it is a dependency. Every input outside `stdlib/` passes. Group 1 still has its handle representation to do in Phase 3. Group 2 is excluded from the check, not fixed, and goes to Phase 3; 8 goes to Phase 4; 9 has no target. |
 | 6. Static check after expansion | not started | | |
 | 7. Compile-time effects | decided, not enforced | see git log | Documented in `Staple.md` ("Compile-time effects"). |
 | 8. Check in the test suite | partly done | see git log | `check_program.rs` tests check every standard-library macro (`the_standard_library_macros_check_as_ordinary_code`) and macros of each shape. The fixtures are not checked in the test suite. |
@@ -494,24 +494,34 @@ After these fixes:
 - `cargo test --workspace` passes.
 - `scripts/compare-expansion.py` against `996e1bee`: 232 of 232 inputs match.
 - `scripts/check-macro-closures.py --mode all` over the corpus: 232 inputs, 46
-  with diagnostics. The 186 others are clean. All 45 `stdlib/` inputs
-  fail, as they do on the binary from before these fixes: each treats `std` as
-  the program's own package, in closure-only mode (group 9). The imports explain
-  some of the roughly 350 messages. The rest (`unknown name `Splice``, `unknown
-  name `__pointer_read``) are not traced. The last is `staple-compiler/examples/macros.sta`:
-  `setting_value` wrote `Braced<Syntax>` without importing `Syntax`, which the
-  interpreter accepts. The example now has the import, and that uncovered the
-  gap below, which the unknown type had been hiding.
-- **Open: an unannotated macro whose result is a `quote`.** The check ascribes
-  `Expr` to the result of every unannotated macro (`expression_result`), but
-  `quote` returns `Syntax`, so `macro one = (x: Expr) => quote { $x }` reports
-  `expected `Expr`, found `Syntax``, with or without the import. Ten macros in
-  `staple-compiler/examples/macros.sta` report this, and `bind` there returns an
-  item, not an expression. `Staple.md` documents this form (`macro unit = () =>
-  quote {}`), so the check is wrong, not the macro. It is the only input outside
-  `stdlib/` that fails, and the test suite does not catch it.
+  with diagnostics. All 45 `stdlib/` inputs fail, as they do on the binary from
+  before these fixes: each treats `std` as the program's own package, in
+  closure-only mode (group 9). The imports explain some of the roughly 350
+  messages. The rest (`unknown name `Splice``, `unknown name `__pointer_read``)
+  are not traced. The last was `staple-compiler/examples/macros.sta`, resolved
+  below.
 - `staple check` of a small program using a template macro, one run each, on a
   machine that was also busy: off 1.11 s, `1` 7.16 s, `all` 7.12 s.
+
+A macro's result is no longer assumed. The check used to ascribe `Expr` to the
+result of every unannotated macro, which rejected a bare `quote`, a form
+`Staple.md` documents, and was wrong for a macro that returns an item. Now a
+`quote` result is `Syntax` with no annotation, and a `parse_quote` needs the
+macro's declared result or `Type ::`; without either the check reports `no trait
+implementation or matching bound is available`, which does not name the rule.
+Expansion still infers the result from the fragment's shape, so normal builds
+accept what the check rejects, until Phase 6 removes that inference.
+
+This meant annotating `while`, `discard` and `for` in `std.flow`,
+`replace_argument` in `staple-compiler/examples/macros.sta`, which also gained
+its missing `Syntax` import, and `widen` and `identity` in the
+`conversions_as.sta` fixture. After it:
+
+- Every input outside `stdlib/` passes the check (187 inputs). The `stdlib/`
+  inputs were not re-run.
+- `scripts/compare-expansion.py` against the capture before it: 229 of 232 match.
+  The three that differ are the three edited files.
+- `cargo test --workspace` passes.
 
 ### Expansion difference from the start of the phase
 
