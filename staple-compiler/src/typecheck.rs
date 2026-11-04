@@ -5642,14 +5642,6 @@ impl TypeChecker {
                         .iter()
                         .any(|id| !declared_parameters.contains(id))
             }) {
-                if std::env::var_os("STAPLE_DEBUG_CONCRETE").is_some() {
-                    let text = format!("{:?}", arguments);
-                    for needle in ["Error", "TypeConstructor", "Inferred"] {
-                        if let Some(at) = text.find(needle) {
-                            eprintln!("not concrete near {needle}: {}", &text[at.saturating_sub(300)..(at + 120).min(text.len())]);
-                        }
-                    }
-                }
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     if arguments.len() == 1 {
@@ -16547,10 +16539,6 @@ impl TypeChecker {
                     } if *id == expected_id => Some(representation.as_ref().clone()),
                     _ => None,
                 };
-                if representation.is_none() && std::env::var_os("STAPLE_DEBUG_CONCRETE").is_some() {
-                    let text = format!("{:?}", value_type);
-                    eprintln!("nominal miss: expected {:?} in {}", expected_id, &text[..text.len().min(500)]);
-                }
                 if let Some(representation) = representation {
                     let representation = self.unfold_self_reference(module, &representation);
                     let representation =
@@ -16607,14 +16595,26 @@ impl TypeChecker {
         // A wildcard against rows that all ignore this column does not need the
         // column's alternatives expanded, which for a deeply nested syntax type
         // is exponential.
-        if matches!(first, CoveragePattern::Any)
-            && matrix.iter().all(|row| {
-                matches!(
-                    Self::canonical_coverage_pattern(row[0]),
-                    CoveragePattern::Any
-                )
-            })
-        {
+        let plain_wildcard = |pattern: CoveragePattern<'_>| match pattern {
+            CoveragePattern::Any => true,
+            CoveragePattern::Pattern(pattern) => matches!(
+                Self::structural_coverage_pattern(CoveragePattern::Pattern(pattern)),
+                CoveragePattern::Pattern(Pattern::Wildcard(staple_syntax::WildcardPattern {
+                    ty: Type::Inferred(_),
+                    ..
+                })) | CoveragePattern::Pattern(Pattern::Binding(
+                    staple_syntax::BindingPattern {
+                        ty: Type::Inferred(_),
+                        ..
+                    }
+                ))
+            ) && matches!(
+                Self::structural_coverage_pattern(CoveragePattern::Pattern(pattern)),
+                CoveragePattern::Pattern(Pattern::Binding(binding))
+                    if module.type_for_pattern(binding.syntax.id).is_some()
+            ) == false,
+        };
+        if plain_wildcard(candidate[0]) && matrix.iter().all(|row| plain_wildcard(row[0])) {
             let tails = matrix.iter().map(|row| row[1..].to_vec()).collect::<Vec<_>>();
             return self.coverage_is_useful(module, &types[1..], &tails, &candidate[1..]);
         }
@@ -17508,10 +17508,6 @@ impl TypeChecker {
                 .collect::<Vec<_>>();
             let Some(arguments) = self.resolve_trait_obligation(trait_id, &partial_arguments)
             else {
-                if std::env::var_os("STAPLE_DEBUG_CONCRETE").is_some() {
-                    let text = format!("{:?}", partial_arguments);
-                    eprintln!("unavailable {} : {}", module.traits()[&trait_id].declaration.name, &text[..text.len().min(260)]);
-                }
                 unavailable = true;
                 continue;
             };
