@@ -278,11 +278,12 @@ Breakdown and status: [`staged-macro-compilation-phase-2.md`](staged-macro-compi
 (`STAPLE_CHECK_MACRO_CLOSURES`): it builds a program from the expanded
 dependencies and the closures, lowers quotations to typed calls (`__quote`,
 `Parse.parse_quote`, `Splice`) and runs `NameResolver` and `TypeChecker` over it.
-It does not pass yet. The syntax types are opaque in the front end, so every
-macro that destructures syntax fails; that, and the `Parse` impls the front end
-rejects, move to Phase 3. Quotation lowering creates a cycle through `Char` that
-Phase 4 has to break. The interpreter's static check still expands lazily, and
-the check is not in the test suite. See the Phase 2 breakdown for the inventory.
+It reports nothing on the standard library's macros, but it leaves out the
+variadic `Parse` impls the front end rejects; those, and a handle representation
+for the syntax types, move to Phase 3. Quotation lowering creates a cycle through
+`Char` that Phase 4 has to break. The interpreter's static check still expands
+lazily, and the test suite checks only the standard library's macros and macros
+of each shape, not the fixtures. See the Phase 2 breakdown for the inventory.
 
 - Add a check that sends each closure through `NameResolver` and `TypeChecker`
   as a standalone program, after expansion. Run it on the standard library and

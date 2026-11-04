@@ -857,8 +857,10 @@ was invoked, and with `all` the closure of every macro. The check builds a
 program from every dependency package as expanded, including its compile-time
 items, and from the package being expanded only the items in the closures. Each
 macro overload with a body is checked as a private function, and each
-diagnostic names the macro whose closure held the code it is in. In that
-program a quotation is a call:
+diagnostic names the macro whose closure held the code it is in. A dependency
+package is checked whole once one of its macros is, so with `1` an invoked
+macro of a dependency checks all of that package's macros. In that program a
+quotation is a call:
 
 - `quote { … }` is `__quote (id, splices)`, which returns `Syntax`.
 - `parse_quote { … }` is `Parse.parse_quote (id, splices)`, which parses the

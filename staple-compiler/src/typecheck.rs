@@ -10907,26 +10907,9 @@ impl TypeChecker {
         }
     }
 
-    /// Whether `value_type` is syntax, which is a handle to a fragment that
-    /// macro code may use again after matching on it.
-    fn is_syntax_handle(&self, value_type: &CheckedType) -> bool {
-        match value_type.desugared() {
-            CheckedType::Wrapper {
-                id, representation, ..
-            } => {
-                self.type_declarations
-                    .get(id)
-                    .is_some_and(|declaration| declaration.recursive_constructor)
-                    || self.is_syntax_handle(representation)
-            }
-            CheckedType::Opaque { .. } => true,
-            CheckedType::Sum(sum) => sum.alternatives.iter().all(|alt| self.is_syntax_handle(alt)),
-            _ => false,
-        }
-    }
-
     fn require_copy_at_pattern(
         &mut self,
+        module: &ResolvedModule,
         pattern: &staple_syntax::AtPattern,
         value_type: &CheckedType,
     ) {
@@ -10937,7 +10920,7 @@ impl TypeChecker {
             .cloned()
             .collect::<Vec<_>>();
         if !self.is_copy_with(value_type, &bounds)
-            && !(self.ordinary_syntax_types && self.is_syntax_handle(value_type))
+            && !(self.ordinary_syntax_types && is_syntax_value(module, value_type))
         {
             self.diagnostics.push(Diagnostic::new(
                 pattern.syntax.span.clone(),
@@ -10979,7 +10962,7 @@ impl TypeChecker {
                     &Pattern::Binding(at.binding.as_ref().clone()),
                     original,
                 );
-                self.require_copy_at_pattern(at, value_type);
+                self.require_copy_at_pattern(module, at, value_type);
                 self.bind_pattern_types(module, &at.pattern, value_type);
             }
             Pattern::Wildcard(wildcard) => {
@@ -11094,7 +11077,7 @@ impl TypeChecker {
                     } if *id == expected_id => {
                         let representation = self.unfold_self_reference(module, representation);
                         let representation =
-                            narrow_to_product_alternative(&representation, &pattern.argument);
+                            self.narrow_to_product_alternative(&representation, &pattern.argument);
                         self.bind_pattern_types(module, &pattern.argument, &representation);
                     }
                     CheckedType::Error => {}
@@ -11572,7 +11555,7 @@ impl TypeChecker {
                 &Pattern::Binding(at.binding.as_ref().clone()),
                 value_type,
             );
-            self.require_copy_at_pattern(at, value_type);
+            self.require_copy_at_pattern(module, at, value_type);
             root = &at.pattern;
         }
         let Pattern::Nominal(pattern) = root else {
@@ -16389,7 +16372,7 @@ impl TypeChecker {
                     &Pattern::Binding(at.binding.as_ref().clone()),
                     original,
                 );
-                self.require_copy_at_pattern(at, value_type);
+                self.require_copy_at_pattern(module, at, value_type);
                 self.check_match_pattern(module, &at.pattern, value_type);
             }
             Pattern::Binding(binding) if module.type_for_pattern(binding.syntax.id).is_some() => {
@@ -16436,7 +16419,9 @@ impl TypeChecker {
                     self.pattern_types
                         .insert(pattern.syntax().id, declared.clone());
                     self.bind_pattern_types(module, pattern, &declared);
-                } else if let Some(alternative) = refined_alternative(sum, &declared) {
+                } else if self.ordinary_syntax_types
+                    && let Some(alternative) = refined_alternative(sum, &declared)
+                {
                     self.pattern_types
                         .insert(pattern.syntax().id, alternative.clone());
                     self.refinement_patterns.insert(pattern.syntax().id);
@@ -16462,7 +16447,9 @@ impl TypeChecker {
                     self.pattern_types
                         .insert(pattern.syntax().id, declared.clone());
                     self.bind_pattern_types(module, pattern, &declared);
-                } else if let Some(alternative) = refined_alternative(sum, &declared) {
+                } else if self.ordinary_syntax_types
+                    && let Some(alternative) = refined_alternative(sum, &declared)
+                {
                     self.pattern_types
                         .insert(pattern.syntax().id, alternative.clone());
                     self.refinement_patterns.insert(pattern.syntax().id);
@@ -16583,7 +16570,7 @@ impl TypeChecker {
                 if let Some(representation) = representation {
                     let representation = self.unfold_self_reference(module, &representation);
                     let representation =
-                        narrow_to_product_alternative(&representation, &pattern.argument);
+                        self.narrow_to_product_alternative(&representation, &pattern.argument);
                     self.check_match_pattern(module, &pattern.argument, &representation);
                 } else if *value_type != CheckedType::Error {
                     self.diagnostics.push(Diagnostic::new(
@@ -21018,9 +21005,34 @@ impl TypeChecker {
         }
     }
 
+    /// A product pattern written against a wrapper of a sum selects the
+    /// alternative that is a product of the pattern's width, as `Sequence
+    /// (first, rest)` does for `Sequence<T>`. Only macro code does this.
+    fn narrow_to_product_alternative(
+        &self,
+        representation: &CheckedType,
+        pattern: &Pattern,
+    ) -> CheckedType {
+        let (true, CheckedType::Sum(sum), Pattern::Product(product)) =
+            (self.ordinary_syntax_types, representation, pattern)
+        else {
+            return representation.clone();
+        };
+        let mut matching = sum.alternatives.iter().filter(|alternative| {
+            matches!(alternative, CheckedType::Product(value) if value.position_count() == product.elements.len())
+        });
+        match (matching.next(), matching.next()) {
+            (Some(alternative), None) => alternative.clone(),
+            _ => representation.clone(),
+        }
+    }
+
     /// A recursive type's self-reference stand-in, replaced by the type with
     /// its representation. Anything else is returned as it is.
     fn unfold_self_reference(&mut self, module: &ResolvedModule, value_type: &CheckedType) -> CheckedType {
+        if !self.ordinary_syntax_types {
+            return value_type.clone();
+        }
         if let CheckedType::Wrapper {
             id,
             arguments,
@@ -21719,7 +21731,7 @@ fn is_syntax_value(module: &ResolvedModule, value_type: &CheckedType) -> bool {
                 .is_some_and(|declaration| declaration.recursive_constructor)
                 || is_syntax_value(module, representation)
         }
-        CheckedType::Opaque { .. } => true,
+        CheckedType::Opaque { id, .. } => module.is_syntax_type(*id),
         CheckedType::Sum(sum) => sum
             .alternatives
             .iter()
@@ -21756,22 +21768,6 @@ fn refined_alternative<'a>(sum: &'a CheckedSumType, declared: &CheckedType) -> O
                             && *argument == CheckedType::String)
                 }))
     })
-}
-
-/// A product pattern written against a wrapper of a sum selects the
-/// alternative that is a product of the pattern's width, as `Sequence (first,
-/// rest)` does for `Sequence<T>`.
-fn narrow_to_product_alternative(representation: &CheckedType, pattern: &Pattern) -> CheckedType {
-    let (CheckedType::Sum(sum), Pattern::Product(product)) = (representation, pattern) else {
-        return representation.clone();
-    };
-    let mut matching = sum.alternatives.iter().filter(|alternative| {
-        matches!(alternative, CheckedType::Product(value) if value.position_count() == product.elements.len())
-    });
-    match (matching.next(), matching.next()) {
-        (Some(alternative), None) => alternative.clone(),
-        _ => representation.clone(),
-    }
 }
 
 /// The element type of the standard library `Buffer<T>` wrapper, recognized

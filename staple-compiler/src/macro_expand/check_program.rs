@@ -15,7 +15,7 @@ use staple_syntax::{
 
 use super::closure::{ItemId, MacroClosure, item_kind};
 use super::lower_quote::{QuoteLowering, TemplateTable};
-use super::{MacroAnalysis, MacroExpander, MacroKind};
+use super::{MacroAnalysis, MacroDefinition, MacroExpander, MacroKind};
 use crate::{ModuleId, NameResolver, Program, TypeChecker};
 
 /// Which macros have their closures checked.
@@ -92,45 +92,50 @@ impl MacroExpander {
 
     /// Collects the closures to check and the items they contain. Runs after
     /// the module walk, before the index is released.
-    pub(super) fn check_snapshot(&mut self, mode: CheckMode, modules: usize) -> CheckSnapshot {
+    pub(super) fn check_snapshot(
+        &mut self,
+        mode: CheckMode,
+        own_package: Option<PackageId>,
+        modules: usize,
+    ) -> CheckSnapshot {
+        // What the check itself expands below does not count as invoked.
+        let invoked = self.invoked_macros.clone();
+        let wanted = |definition: &MacroDefinition| {
+            mode == CheckMode::All || invoked.contains(&definition.key)
+        };
         let mut declared = self
             .definitions
             .values()
             .filter(|definition| matches!(definition.kind, MacroKind::User(_)))
-            .map(|definition| {
-                (
-                    definition.declaration.syntax.id,
-                    definition.key.name.clone(),
-                    definition.key.module,
-                )
-            })
+            .cloned()
             .collect::<Vec<_>>();
-        declared.sort();
-        {
-            // A macro nothing invoked has not had its closure expanded yet, and
-            // dependencies are checked whole.
-            for (start, _, _) in &declared {
-                let definition = self
-                    .definitions
-                    .values()
-                    .find(|definition| definition.declaration.syntax.id == *start)
-                    .cloned();
-                if let Some(definition) = definition {
-                    let span = definition.declaration.syntax.span.clone();
-                    let _ = self.ensure_ready(&definition, &span);
-                }
+        declared.sort_by_key(|definition| definition.declaration.syntax.id);
+        for definition in &declared {
+            // Every check program holds the other packages whole, so all of
+            // their macros need their closures expanded. Of the program's own
+            // package, it holds only the closures being checked.
+            if self.module_packages[definition.key.module.0] == own_package && !wanted(definition) {
+                continue;
             }
+            // Making ready a macro nothing called must not fail the build with
+            // a cycle that a build without the check would not report.
+            let soft = usize::from(!wanted(definition));
+            self.soft_stage += soft;
+            let span = definition.declaration.syntax.span.clone();
+            let _ = self.ensure_ready(definition, &span);
+            self.soft_stage -= soft;
         }
         let mut macros = Vec::new();
-        for (start, name, module) in declared {
+        for definition in declared.iter().filter(|definition| wanted(definition)) {
+            let start = definition.declaration.syntax.id;
             let closure = match self.macro_closures.get(&start) {
                 Some(closure) => closure.clone(),
-                None if mode == CheckMode::All => self.macro_closure(start),
-                None => continue,
+                // Templates need nothing to run, so nothing computed theirs.
+                None => self.macro_closure(start),
             };
             macros.push(CheckedMacro {
-                name,
-                module,
+                name: definition.key.name.clone(),
+                module: definition.key.module,
                 closure,
             });
         }
@@ -362,7 +367,9 @@ fn convert_item(
 
 /// A `Parse` implementation for a product with a spread element, such as
 /// `(H; ...T)`. The interpreter parses slotted and comma products through
-/// them, and no checked code names them.
+/// them, but the front end rejects their targets, so the check leaves them out.
+/// Macro code that parses a product as `Parse.parse.<(Expr; Expr)>` is therefore
+/// reported as having no implementation until these impls can be checked.
 fn is_variadic_parse_impl(item: &Item) -> bool {
     let Item::TraitImplementation(implementation) = item else {
         return false;
@@ -502,15 +509,22 @@ pub(crate) fn check_closures(program: &Program, analysis: &mut MacroAnalysis) ->
         let (resolved, mut reported) =
             NameResolver::pre_expanded(next_syntax_id).resolve_program_recovering(check);
         reported.retain(|diagnostic| !partial(diagnostic));
-        if reported.is_empty()
-            && let Some(resolved) = resolved
-            && let Err(found) = TypeChecker::new().check(resolved)
-        {
-            reported = found;
-            reported.retain(|diagnostic| !partial(diagnostic));
+        if reported.is_empty() {
+            match resolved {
+                Some(resolved) => {
+                    if let Err(found) = TypeChecker::new().check(resolved) {
+                        reported = found;
+                        reported.retain(|diagnostic| !partial(diagnostic));
+                    }
+                }
+                // The resolver gave up without saying why, which is not a pass.
+                None => reported.push(Diagnostic::new(
+                    Span::Compiler,
+                    "the check of macro code could not resolve its program",
+                )),
+            }
         }
-        let reported = Some(reported);
-        for mut diagnostic in reported.unwrap_or_default() {
+        for mut diagnostic in reported {
             let owner = macros.iter().find(|checked| {
                 checked.closure.items.iter().any(|id| {
                     snapshot.groups.get(id).is_some_and(|group| {
@@ -652,6 +666,44 @@ mod tests {
     }
 
     #[test]
+    fn only_invoked_macros_are_checked_with_one() {
+        let built = build(
+            concat!(
+                "def keep = value: Expr => Expr :: value\n",
+                "macro invoked_template = value: Expr => parse_quote { $value }\n",
+                "macro idle = value: Expr => keep value\n",
+                "let a = invoked_template 1\n",
+            ),
+            CheckMode::Invoked,
+        );
+        let functions = function_names(entry_items(&built));
+        assert!(
+            functions.iter().any(|name| name.starts_with("macro#invoked_template#")),
+            "{functions:?}"
+        );
+        assert!(
+            !functions.iter().any(|name| name.starts_with("macro#idle#")),
+            "{functions:?}"
+        );
+        assert!(!functions.contains(&"keep".to_owned()), "{functions:?}");
+    }
+
+    #[test]
+    fn a_cycle_in_a_macro_nothing_calls_only_fails_with_all() {
+        let source = concat!(
+            "def helper = value: Expr => Expr :: again value\n",
+            "macro again = value: Expr => helper value\n",
+            "def main = () => 0\n",
+        );
+        assert!(check_with(source, CheckMode::Invoked).is_empty());
+        assert!(
+            check_with(source, CheckMode::All)
+                .iter()
+                .any(|diagnostic| diagnostic.contains("`again` itself depends on")),
+        );
+    }
+
+    #[test]
     fn dependencies_keep_their_compile_time_items() {
         let built = build(HELPER_MACRO, CheckMode::Invoked);
         let syntax = built
@@ -692,6 +744,10 @@ mod tests {
 
     /// Expands `source` with the closure check on every macro, and returns what it reports.
     fn check_all(source: &str) -> Vec<String> {
+        check_with(source, CheckMode::All)
+    }
+
+    fn check_with(source: &str, mode: CheckMode) -> Vec<String> {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         let source = format!("use std.syntax.*\n{source}");
         let program = ProgramLoader::new()
@@ -699,7 +755,7 @@ mod tests {
             .load_source(&source, &root)
             .expect("source should load");
         let (_, _, diagnostics) =
-            super::super::expand_program_checked(program, true, Some(CheckMode::All), true)
+            super::super::expand_program_checked(program, true, Some(mode), true)
                 .expect("source should expand");
         diagnostics.iter().map(ToString::to_string).collect()
     }
@@ -748,6 +804,44 @@ mod tests {
                 .any(|diagnostic| diagnostic.contains("macro `bad`")),
             "{diagnostics:?}"
         );
+    }
+
+    #[test]
+    fn a_spaced_splice_is_a_splice() {
+        let diagnostics = check_all(concat!(
+            "macro bad = value: Expr => { let count = 3; parse_quote { $ count } }\n",
+            "def main = () => 0\n",
+        ));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("macro `bad`")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn only_syntax_is_copied_freely() {
+        let diagnostics = check_all(concat!(
+            "use std.coroutine.Task\n",
+            "def twice = (move handle: Task<I32>) => () :: {\n",
+            "    let first = handle\n",
+            "    let second = handle\n",
+            "}\n",
+            "macro uses = value: Expr => { let unused = twice; value }\n",
+            "def main = () => 0\n",
+        ));
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic.contains("macro `uses`")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn the_macro_runtime_intrinsics_are_a_closed_list() {
+        assert!(super::super::is_macro_runtime_intrinsic("__quote"));
+        assert!(super::super::is_macro_runtime_intrinsic("stream"));
+        assert!(!super::super::is_macro_runtime_intrinsic("__splice_nod"));
     }
 
     #[test]

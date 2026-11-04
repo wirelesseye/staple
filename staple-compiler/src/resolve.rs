@@ -791,6 +791,7 @@ pub struct ResolvedModule {
     expression_function_owners: HashMap<SyntaxId, Option<FunctionId>>,
     caller_location_spans: HashMap<SyntaxId, Span>,
     ordinary_syntax_types: bool,
+    standard_library_syntax: Option<ModuleId>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
@@ -872,14 +873,21 @@ impl ResolvedModule {
     /// macros do, instead of the macro definition's own text. `None` for
     /// references written directly in source and for references that lie
     /// inside the outermost invocation (such as macro arguments).
+    pub fn caller_location_span(&self, syntax_id: SyntaxId) -> Option<&Span> {
+        self.caller_location_spans.get(&syntax_id)
+    }
+
     /// Whether the syntax data types are checked as ordinary types, which is
     /// how macro code is checked.
     pub fn ordinary_syntax_types(&self) -> bool {
         self.ordinary_syntax_types
     }
 
-    pub fn caller_location_span(&self, syntax_id: SyntaxId) -> Option<&Span> {
-        self.caller_location_spans.get(&syntax_id)
+    /// Whether `id` is declared in `std.syntax`, so that a value of it, when it
+    /// is opaque, is a handle to a syntax fragment.
+    pub(crate) fn is_syntax_type(&self, id: TypeId) -> bool {
+        self.standard_library_syntax
+            .is_some_and(|syntax| self.type_modules.get(&id) == Some(&syntax))
     }
 
     pub(crate) fn symbols_in_id_order(&self) -> Vec<ResolvedSymbolInfo> {
@@ -1928,9 +1936,17 @@ impl NameResolver {
         program: Program,
     ) -> (Option<ResolvedModule>, Vec<Diagnostic>) {
         let fallback = program.clone();
+        // The program is what it was, so retrying must not expand it again.
+        let pre_expanded = self.pre_expanded;
         let resolved = self
             .resolve_on_thread(program, true)
-            .or_else(|_| Self::new().resolve_on_thread(fallback, false));
+            .or_else(|_| {
+                Self {
+                    pre_expanded,
+                    ..Self::new()
+                }
+                .resolve_on_thread(fallback, false)
+            });
         match resolved {
             Ok(Ok((resolved, diagnostics))) => (Some(resolved), diagnostics),
             Ok(Err(diagnostics)) => (None, diagnostics),
@@ -2471,6 +2487,7 @@ impl NameResolver {
             expression_function_owners: self.expression_function_owners,
             caller_location_spans: macro_analysis.caller_location_spans,
             ordinary_syntax_types: self.ordinary_syntax_types,
+            standard_library_syntax: self.standard_library_syntax,
             symbol_modules: self.symbol_modules,
             symbol_declarations: self.symbol_declarations,
             symbol_declaration_spans: self.symbol_declaration_spans,
@@ -3157,7 +3174,10 @@ impl NameResolver {
                     {
                         found.insert(index);
                         self.intrinsic_functions.insert(symbol, *intrinsic);
-                    } else if module_name != "std.syntax" {
+                    } else if !(self.ordinary_syntax_types
+                        && module_name == "std.syntax"
+                        && crate::macro_expand::is_macro_runtime_intrinsic(&binding.name))
+                    {
                         // The syntax functions are provided by the macro
                         // runtime, not by lowering, so they are only declared.
                         self.diagnostics.push(Diagnostic::new(

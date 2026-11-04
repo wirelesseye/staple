@@ -14778,6 +14778,57 @@ fn type_check_errors(source: &str, reason: &str) -> Vec<String> {
 }
 
 #[test]
+fn ordinary_code_cannot_match_a_string_literal_refinement() {
+    let errors = type_check_errors(
+        concat!(
+            "pub type Tag<S = String where S <: String> wrap pub S\n",
+            "type Either = Tag<String> | I32\n",
+            "def pick = (value: Either) => I32 :: match value {\n",
+            "    tagged: Tag<\"x\"> => 1,\n",
+            "    _ => 2,\n",
+            "}\n",
+        ),
+        "a refinement needs a run-time string comparison",
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.contains("does not select an alternative")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn ordinary_code_cannot_narrow_a_wrapper_with_a_product_pattern() {
+    let errors = type_check_errors(
+        concat!(
+            "pub type Pair wrap pub () | (first: I32, second: I32)\n",
+            "def sum = (value: Pair) => I32 :: match value {\n",
+            "    Pair (first, second) => first + second,\n",
+            "    _ => 0,\n",
+            "}\n",
+        ),
+        "selecting an alternative by width is only for macro code",
+    );
+    assert!(!errors.is_empty());
+}
+
+#[test]
+fn compile_time_annotations_with_different_arguments_do_not_match() {
+    let messages = expansion_messages(concat!(
+        "use std.syntax.(Expr, Item, Sequence, parse_quote)\n",
+        "def items = () => Sequence<Item> :: Sequence ()\n",
+        "def exprs = () => Sequence<Expr> :: items ()\n",
+        "macro m = value: Expr => { let unused = exprs (); value }\n",
+        "let a = m 1\n",
+    ));
+    assert!(
+        messages.iter().any(|message| message.contains("expected")),
+        "{messages:?}"
+    );
+}
+
+#[test]
 fn from_types_introduce_their_representation_contextually() {
     let module = type_check(concat!(
         "type Meters from F64\n",

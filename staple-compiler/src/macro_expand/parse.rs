@@ -36,6 +36,12 @@ pub(super) enum SyntaxIntrinsic {
     Integer(crate::IntrinsicFunction),
 }
 
+/// Whether `name` is a `std.syntax` function that the macro runtime provides.
+pub(crate) fn is_macro_runtime_intrinsic(name: &str) -> bool {
+    SyntaxIntrinsic::from_name(name).is_some()
+        || matches!(name, "__quote" | "__splice_node" | "__splice_join")
+}
+
 impl SyntaxIntrinsic {
     pub(super) fn from_name(name: &str) -> Option<Self> {
         Some(match name {

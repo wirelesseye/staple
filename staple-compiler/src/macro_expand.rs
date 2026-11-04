@@ -17,6 +17,7 @@ mod traits;
 use crate::program::source_location_at;
 use crate::{FloatType, IntegerType, ModuleId, Program, ResolvedMacro};
 use check_program::check_mode;
+pub(crate) use parse::is_macro_runtime_intrinsic;
 use closure::{ClosureIndex, Lookup, MacroClosure};
 use parse::{ParseImpl, ParseTarget, SyntaxIntrinsic, TypeEnv};
 use staple_syntax::{
@@ -1924,7 +1925,9 @@ pub(crate) fn expand_program_checked(
         }
         walked.push((module_index, parts));
     }
-    let mut check = check_mode.map(|mode| expander.check_snapshot(mode, program.modules().len()));
+    let own_package = program.package_of(program.entry());
+    let mut check = check_mode
+        .map(|mode| expander.check_snapshot(mode, own_package, program.modules().len()));
     expander.closure.release();
     expander.item_expansions.clear();
     for (module_index, parts) in walked {
@@ -2156,6 +2159,9 @@ struct MacroExpander {
     /// Non-zero while expanding items only because a name might be defined
     /// there, when a cycle is recorded but not reported.
     soft_stage: usize,
+    /// The macros and modifiers that have been called, which the closure check
+    /// selects by.
+    invoked_macros: HashSet<MacroKey>,
     trait_registry: traits::Registry,
     call_targets: HashMap<SyntaxId, CompileType>,
     call_target: Option<MetaType>,
@@ -3093,6 +3099,7 @@ impl MacroExpander {
                 .collect(),
             compile_time_depth: 0,
             soft_stage: 0,
+            invoked_macros: HashSet::new(),
             child_modules: program.child_modules().clone(),
             parent_modules: program
                 .modules()
@@ -3245,6 +3252,12 @@ impl MacroExpander {
             caller_location_spans: self.caller_location_spans.clone(),
             check: None,
             next_syntax_id: self.next_syntax_id,
+        }
+    }
+
+    fn record_invoked(&mut self, definition: &MacroDefinition) {
+        if !self.invoked_macros.contains(&definition.key) {
+            self.invoked_macros.insert(definition.key.clone());
         }
     }
 
@@ -5507,6 +5520,7 @@ impl MacroExpander {
         item: Item,
         call_span: Span,
     ) -> Option<Vec<Item>> {
+        self.record_invoked(definition);
         let refreshed = match self.ensure_ready(definition, &call_span) {
             Ok(true) => self.definitions.get(&definition.key).cloned(),
             Ok(false) => None,
@@ -6621,6 +6635,7 @@ impl MacroExpander {
         arguments: Vec<MacroArgument>,
         call_span: Span,
     ) -> Option<SyntaxValue> {
+        self.record_invoked(definition);
         let refreshed = match self.ensure_ready(definition, &call_span) {
             Ok(true) => self.definitions.get(&definition.key).cloned(),
             Ok(false) => None,
@@ -12401,12 +12416,11 @@ fn compile_types_compatible(actual: &CompileType, expected: &CompileType) -> boo
             compile_types_compatible(ap, ep) && compile_types_compatible(ar, er)
         }
         // An empty `Sequence ()` is a sequence of whatever the annotation says.
-        (CompileType::Meta(MetaType::Sequence(_)), CompileType::Written(expected)) => {
+        (CompileType::Meta(MetaType::Sequence(element)), CompileType::Written(expected))
+            if **element == MetaType::SyntaxNode =>
+        {
             let written = expected.to_string();
             written.split('<').next().unwrap_or(&written).trim() == "Sequence"
-        }
-        (CompileType::Meta(MetaType::Sequence(_)), CompileType::Meta(MetaType::Nominal(name, _))) => {
-            name == "Sequence"
         }
         (CompileType::Named(actual), CompileType::Written(expected)) => {
             let written = expected.to_string();
@@ -12414,13 +12428,14 @@ fn compile_types_compatible(actual: &CompileType, expected: &CompileType) -> boo
             actual == head || (matches!(actual.as_str(), "None" | "Some") && head == "Option")
         }
         (CompileType::Named(actual), CompileType::Named(expected)) => {
-            // Compile-time values do not record their type arguments, so a
-            // generic type matches its application, and an alternative of a
-            // sum matches the sum.
-            let head = |name: &str| name.split('<').next().unwrap_or(name).to_owned();
+            // A compile-time value does not record its type arguments, so a
+            // bare generic type matches any application of it, and an
+            // alternative of a sum matches the sum. Two written applications
+            // still have to agree.
+            let head = expected.split('<').next().unwrap_or(expected);
             actual == expected
-                || head(actual) == head(expected)
-                || (matches!(actual.as_str(), "None" | "Some") && head(expected) == "Option")
+                || actual == head
+                || (matches!(actual.as_str(), "None" | "Some") && head == "Option")
         }
         _ => actual == expected,
     }

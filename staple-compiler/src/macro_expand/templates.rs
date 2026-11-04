@@ -36,22 +36,8 @@ pub(super) fn template_parts(value: &Expression) -> Option<TemplateParts<'_>> {
     }
     match tail {
         Expression::Quote(quote) => {
-            // A splice may put trivia between `$` and its name.
-            let tokens = quote.contents.tokens();
-            let only_parameters = tokens.iter().enumerate().all(|(index, token)| {
-                if token.kind != staple_syntax::TokenKind::Dollar {
-                    return true;
-                }
-                match tokens[index + 1..]
-                    .iter()
-                    .find(|next| !next.kind.is_trivia())
-                {
-                    Some(next) if next.kind == staple_syntax::TokenKind::Identifier => {
-                        names.contains(&next.text)
-                    }
-                    _ => true,
-                }
-            });
+            let only_parameters = super::lower_quote::splice_names(quote.contents.tokens())
+                .all(|name| names.contains(name));
             only_parameters.then_some(TemplateParts { parameters, body })
         }
         Expression::Name(name) => names

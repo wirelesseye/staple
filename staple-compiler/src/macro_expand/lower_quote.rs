@@ -9,10 +9,24 @@
 
 use staple_syntax::{
     Accessor, BlockExpression, CallExpression, Expression, IntegerExpression, Item, NameExpression,
-    ProductElement, ProductExpression, QuoteExpression, QuoteKind, Syntax, SyntaxId, TokenKind,
+    ProductElement, ProductExpression, QuoteExpression, QuoteKind, Syntax, SyntaxId, SyntaxToken,
+    TokenKind,
 };
 
 use crate::ModuleId;
+
+/// The names a quotation's tokens splice, in order and with repeats. A splice
+/// may put trivia between `$` and its name.
+pub(super) fn splice_names(tokens: &[SyntaxToken]) -> impl Iterator<Item = &str> {
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| token.kind == TokenKind::Dollar)
+        .filter_map(|(index, _)| {
+            let next = tokens[index + 1..].iter().find(|next| !next.kind.is_trivia())?;
+            (next.kind == TokenKind::Identifier).then_some(next.text.as_str())
+        })
+}
 
 /// The text of each quotation lowered so far, by template id.
 #[derive(Default)]
@@ -88,12 +102,9 @@ impl QuoteLowering<'_> {
     /// The names a quotation splices, in order of first use.
     fn splices(quote: &QuoteExpression) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
-        for token in quote.contents.tokens().windows(2) {
-            if token[0].kind == TokenKind::Dollar
-                && token[1].kind == TokenKind::Identifier
-                && !names.contains(&token[1].text)
-            {
-                names.push(token[1].text.clone());
+        for name in splice_names(quote.contents.tokens()) {
+            if !names.iter().any(|known| known == name) {
+                names.push(name.to_owned());
             }
         }
         names
