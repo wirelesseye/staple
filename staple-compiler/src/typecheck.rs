@@ -16487,7 +16487,25 @@ impl TypeChecker {
         if types.is_empty() {
             return !matrix.iter().any(Vec::is_empty);
         }
+        // Nothing to be covered by: the candidate is useful whatever it is.
+        if matrix.is_empty() {
+            return true;
+        }
         let first = Self::canonical_coverage_pattern(candidate[0]);
+        // A wildcard against rows that all ignore this column does not need the
+        // column's alternatives expanded, which for a deeply nested syntax type
+        // is exponential.
+        if matches!(first, CoveragePattern::Any)
+            && matrix.iter().all(|row| {
+                matches!(
+                    Self::canonical_coverage_pattern(row[0]),
+                    CoveragePattern::Any
+                )
+            })
+        {
+            let tails = matrix.iter().map(|row| row[1..].to_vec()).collect::<Vec<_>>();
+            return self.coverage_is_useful(module, &types[1..], &tails, &candidate[1..]);
+        }
         let first_type = types[0].desugared();
         match first_type {
             CheckedType::Sum(sum) => {
@@ -20724,6 +20742,38 @@ impl TypeChecker {
     /// whole type rather than the back-edge. Yields a nominal stand-in whose
     /// representation is left opaque rather than expanded a second time; `None`
     /// means this is a genuine cyclic definition.
+    /// Inside another type's representation, a syntax data type is a handle:
+    /// a stand-in that a pattern unfolds when it matches on it. Resolving every
+    /// syntax type in full inside every other one makes the types enormous.
+    fn lazy_syntax_reference(
+        &self,
+        declaration: &TypeDeclaration,
+        id: TypeId,
+        display_name: &str,
+        arguments: &[CheckedType],
+    ) -> Option<CheckedType> {
+        let kind = declaration.kind();
+        if !self.ordinary_syntax_types
+            || self.resolving_named_types.is_empty()
+            || !declaration.recursive_constructor
+            || !matches!(kind, TypeDeclarationKind::Wrapper | TypeDeclarationKind::From)
+        {
+            return None;
+        }
+        Some(CheckedType::Wrapper {
+            id,
+            name: display_name.to_owned(),
+            arguments: arguments.to_vec(),
+            representation: Box::new(CheckedType::Opaque {
+                sized: true,
+                id,
+                name: display_name.to_owned(),
+                arguments: arguments.to_vec(),
+            }),
+            introduction: WrapperIntroduction::of(kind),
+        })
+    }
+
     fn recursive_self_reference(
         &mut self,
         declaration: &TypeDeclaration,
@@ -20834,6 +20884,20 @@ impl TypeChecker {
         {
             return self.instantiate_type_declaration(module, *id, arguments.clone());
         }
+        // The representation placeholder of a wrapper stand-in.
+        if let CheckedType::Opaque { id, arguments, .. } = value_type
+            && self.type_declarations.get(id).is_some_and(|declaration| {
+                matches!(
+                    declaration.kind(),
+                    TypeDeclarationKind::Wrapper | TypeDeclarationKind::From
+                )
+            })
+            && !self.resolving_named_types.contains_key(id)
+            && let CheckedType::Wrapper { representation, .. } =
+                self.instantiate_type_declaration(module, *id, arguments.clone())
+        {
+            return *representation;
+        }
         value_type.clone()
     }
 
@@ -20929,6 +20993,9 @@ impl TypeChecker {
                 representation: Box::new(CheckedType::empty_product()),
                 introduction: WrapperIntroduction::Explicit,
             };
+        }
+        if let Some(reference) = self.lazy_syntax_reference(&declaration, id, &display_name, &arguments) {
+            return reference;
         }
         if let Some(&started_at) = self.resolving_named_types.get(&id) {
             if let Some(reference) = self.recursive_self_reference(
@@ -21423,6 +21490,9 @@ impl TypeChecker {
             };
             self.resolved_named_types.insert(id, value_type.clone());
             return value_type;
+        }
+        if let Some(reference) = self.lazy_syntax_reference(&declaration, id, &display_name, &[]) {
+            return reference;
         }
         if let Some(&started_at) = self.resolving_named_types.get(&id) {
             if let Some(reference) =

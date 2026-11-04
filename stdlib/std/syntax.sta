@@ -212,7 +212,7 @@ pub type Item = ModifiedItem | TypeDeclarationItem | UnstructuredItem
 
 /// Compiler-owned metadata supplied to a function-style macro invocation.
 /// Modifiers are ordered outermost first.
-pub type MacroCallMetadata wrap (
+pub type MacroCallMetadata wrap pub (
     modifiers: Sequence<Modifier>,
     visibility: Visibility,
 )

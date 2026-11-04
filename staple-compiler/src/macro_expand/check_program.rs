@@ -9,7 +9,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use staple_project::PackageId;
 use staple_syntax::{
-    Binding, BindingKind, Diagnostic, Item, MacroDeclaration, SelectedImport, Span, Syntax,
+    Binding, BindingKind, Diagnostic, Expression, Item, MacroDeclaration, Pattern, SelectedImport, Span, Syntax,
     SyntaxId, UseKind, Visibility,
 };
 
@@ -194,6 +194,7 @@ pub(crate) fn build_check_program(
     macros: &[&CheckedMacro],
     next_syntax_id: &mut usize,
 ) -> (Program, TemplateTable) {
+    let syntax_module = program.standard_library_syntax();
     let dependencies = package_dependencies(program, package);
     // The program's own package is checked by its closures. A dependency's
     // macros are built with the dependency, so its package is checked whole.
@@ -225,7 +226,7 @@ pub(crate) fn build_check_program(
             let mut kept = Vec::new();
             for (_, group) in positioned {
                 for item in group {
-                    convert_item(item, next_syntax_id, &mut kept);
+                    convert_item(item, next_syntax_id, syntax_module, &mut kept);
                 }
             }
             items.push(kept);
@@ -233,7 +234,7 @@ pub(crate) fn build_check_program(
             let mut kept = Vec::new();
             for item in expanded {
                 if owner == package {
-                    convert_item(item, next_syntax_id, &mut kept);
+                    convert_item(item, next_syntax_id, syntax_module, &mut kept);
                 } else {
                     kept.push(item.clone());
                 }
@@ -328,10 +329,15 @@ fn package_dependencies(program: &Program, package: Option<PackageId>) -> HashSe
 
 /// Keeps `item` for the check, turning macros into functions. A macro stays
 /// declared as well, without its body, so names that import it still resolve.
-fn convert_item(item: &Item, next_syntax_id: &mut usize, out: &mut Vec<Item>) {
+fn convert_item(
+    item: &Item,
+    next_syntax_id: &mut usize,
+    syntax_module: Option<ModuleId>,
+    out: &mut Vec<Item>,
+) {
     match item {
         Item::MacroDeclaration(declaration) => {
-            if let Some(function) = macro_function(declaration, next_syntax_id) {
+            if let Some(function) = macro_function(declaration, next_syntax_id, syntax_module) {
                 out.push(Item::Binding(function));
             }
             let mut bodyless = declaration.clone();
@@ -340,7 +346,7 @@ fn convert_item(item: &Item, next_syntax_id: &mut usize, out: &mut Vec<Item>) {
         }
         Item::Modified(modified) => {
             let mut inner = Vec::new();
-            convert_item(&modified.item, next_syntax_id, &mut inner);
+            convert_item(&modified.item, next_syntax_id, syntax_module, &mut inner);
             if inner.len() == 1 {
                 let mut modified = modified.clone();
                 modified.item = Box::new(inner.remove(0));
@@ -355,8 +361,20 @@ fn convert_item(item: &Item, next_syntax_id: &mut usize, out: &mut Vec<Item>) {
 
 /// The function a macro overload with a body becomes. Its name is generated and
 /// holds a character no source name can, so no code refers to it.
-fn macro_function(declaration: &MacroDeclaration, next_syntax_id: &mut usize) -> Option<Binding> {
-    let value = declaration.value.clone()?;
+fn macro_function(
+    declaration: &MacroDeclaration,
+    next_syntax_id: &mut usize,
+    syntax_module: Option<ModuleId>,
+) -> Option<Binding> {
+    let mut value = declaration.value.clone()?;
+    if let Some(syntax_module) = syntax_module
+        && declaration
+            .annotation
+            .as_ref()
+            .is_some_and(|annotation| super::type_contains_named(annotation, "MacroCallMetadata"))
+    {
+        name_metadata_pattern(&mut value, syntax_module, next_syntax_id);
+    }
     let id = SyntaxId(*next_syntax_id);
     *next_syntax_id += 1;
     let mut syntax: Syntax = declaration.syntax.clone();
@@ -652,4 +670,35 @@ mod tests {
         let mut kind = UseKind::Selected(vec![SelectedImport::new("Gone")]);
         assert!(!keep_import(&mut kind, &defined));
     }
+}
+
+/// A macro's first parameter is the call's metadata, which macro code writes
+/// as a bare `(modifiers, visibility)`. As a function it is a `MacroCallMetadata`
+/// like any other wrapper, so the pattern names it.
+fn name_metadata_pattern(value: &mut Expression, syntax_module: ModuleId, next_syntax_id: &mut usize) {
+    let Expression::Function(function) = value else {
+        return;
+    };
+    let Pattern::Product(parameters) = &mut function.pattern else {
+        return;
+    };
+    let Some(first) = parameters.elements.first_mut() else {
+        return;
+    };
+    if !matches!(first, Pattern::Product(_)) {
+        return;
+    }
+    let argument = first.clone();
+    let mut syntax = argument.syntax().clone();
+    syntax.id = SyntaxId(*next_syntax_id);
+    *next_syntax_id += 1;
+    syntax.definition_module = Some(syntax_module.0);
+    *first = Pattern::Nominal(staple_syntax::NominalPattern {
+        syntax,
+        namespace: None,
+        name: "MacroCallMetadata".to_owned(),
+        moved: false,
+        argument: Box::new(argument),
+        annotation: None,
+    });
 }
