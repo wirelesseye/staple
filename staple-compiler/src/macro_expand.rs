@@ -1861,6 +1861,10 @@ pub(crate) fn expand_program_checked(
     // derives. Fill those in from the written syntax first; the diagnostic
     // pass runs again on expanded syntax once expansion is done.
     expander.prepare_compile_time_evaluation();
+    if !recovering && !expander.diagnostics.is_empty() {
+        expander.validate_compile_time_code();
+        return Err(expander.diagnostics);
+    }
 
     // The index takes each module's written items; a module with module-level
     // modifiers keeps its own list, which the modifiers rewrite.
@@ -2116,10 +2120,16 @@ struct MacroExpander {
     /// Whether the expression being statically checked comes from an expanded
     /// closure, where a remaining macro call is a missing closure edge.
     check_expanded_compile_time: bool,
-    /// Whether the static check is running only to fill the contextual types
-    /// the interpreter reads. This pass types unexpanded macro calls; it does
-    /// not expand or run them, and its diagnostics are discarded.
-    prepare_compile_time_context: bool,
+    /// The items of the closures that became ready, whose helpers the static
+    /// check reads as expanded.
+    ready_compile_items: HashSet<closure::ItemId>,
+    /// Helpers the static check rejected.
+    failed_compile_helpers: HashSet<SyntaxId>,
+    /// Whether what the static check just visited has an error, including one
+    /// that was reported earlier, as for a helper two macros share.
+    static_check_failed: bool,
+    /// The macros checked before their first run, and whether they passed.
+    macro_checks: HashMap<MacroKey, bool>,
     compile_binding_types: HashMap<SyntaxId, String>,
     /// Whether a statically checked call argument fills every remaining slot
     /// of a slotted parameter, keyed by the argument's syntax identity.
@@ -3168,7 +3178,10 @@ impl MacroExpander {
             checked_compile_helpers: HashSet::new(),
             checking_compile_helpers: HashSet::new(),
             check_expanded_compile_time: false,
-            prepare_compile_time_context: false,
+            ready_compile_items: HashSet::new(),
+            failed_compile_helpers: HashSet::new(),
+            static_check_failed: false,
+            macro_checks: HashMap::new(),
             compile_binding_types: HashMap::new(),
             slotted_argument_fills: HashMap::new(),
             invocation_spans: Vec::new(),
@@ -3323,19 +3336,16 @@ impl MacroExpander {
     /// Runs the static check for its contextual types only, before the
     /// interpreter starts. The interpreter reads `parse_targets`,
     /// `call_targets` and `slotted_argument_fills`; those are keyed by syntax
-    /// identity, which expansion preserves for the nodes it rewrites.
+    /// identity, which expansion preserves for the nodes it rewrites. Nothing
+    /// is ready yet, so everything is checked as written, and the check repeats
+    /// on expanded syntax, which is why its diagnostics are discarded here.
     fn prepare_compile_time_evaluation(&mut self) {
         let start = self.diagnostics.len();
-        self.checked_compile_helpers.clear();
-        self.checking_compile_helpers.clear();
-        self.check_expanded_compile_time = false;
-        self.prepare_compile_time_context = true;
         self.validate_compile_time_code();
-        self.prepare_compile_time_context = false;
         self.diagnostics.truncate(start);
         self.checked_compile_helpers.clear();
-        self.checking_compile_helpers.clear();
-        self.check_expanded_compile_time = false;
+        self.failed_compile_helpers.clear();
+        self.static_check_failed = false;
         // `Parse` bodies run as written in the interpreter and are mutated by
         // expansion the first time a macro evaluates them, so they are checked
         // once here, before that happens.
@@ -3344,73 +3354,105 @@ impl MacroExpander {
 
     /// Statically validates code which can run in the macro interpreter. A
     /// macro that became ready is checked on the syntax expansion produced for
-    /// its closure; a definition nothing called is still checked as written,
-    /// without expanding the macros it mentions. That keeps an unused invalid
-    /// definition visible without making every macro in the program ready.
+    /// its closure, once, before its first run or here; a definition nothing
+    /// called is still checked as written, without expanding the macros it
+    /// mentions. That keeps an unused invalid definition visible without making
+    /// every macro in the program ready.
     fn validate_compile_time_code(&mut self) {
-        let ready = self.macros_ready.clone();
-        let ready_items = ready
+        let ready = self
+            .macros_ready
             .iter()
             .filter_map(|key| self.macro_closures.get(&key.syntax))
             .flat_map(|closure| closure.items.iter().copied())
             .collect::<HashSet<_>>();
-        let definitions = self.definitions.values().cloned().collect::<Vec<_>>();
+        self.ready_compile_items.extend(ready);
+        let mut definitions = self.definitions.values().cloned().collect::<Vec<_>>();
+        definitions.sort_by_key(|definition| definition.declaration.syntax.id);
         for definition in definitions {
-            let MacroKind::User(_) = &definition.kind else {
-                continue;
-            };
-            let Some(body) = definition.declaration.value.as_ref() else {
-                continue;
-            };
-            self.check_expanded_compile_time = ready.contains(&definition.key);
-            let mut expected = CompileType::Meta(definition.result.clone());
-            for (index, parameter) in definition.parameters.iter().enumerate().rev() {
-                let parameter =
-                    if definition.key.modifier && index + 1 != definition.parameters.len() {
-                        match modifier_argument_meta_type(parameter) {
-                            Some(MetaType::Delimited(
-                                _,
-                                DelimitedMetaContents::Separated { element, separator },
-                            )) => CompileType::Meta(MetaType::Nominal(
-                                "Separated".to_owned(),
-                                vec![element.as_ref().clone(), separator.as_ref().clone()],
-                            )),
-                            Some(inner) => CompileType::Meta(inner.clone()),
-                            None => CompileType::Meta(parameter.clone()),
-                        }
-                    } else {
-                        CompileType::Meta(parameter.clone())
-                    };
-                expected = CompileType::Function(Box::new(parameter), Box::new(expected));
+            if !self.macro_checks.contains_key(&definition.key) {
+                self.check_macro_definition(&definition);
             }
-            let mut environment = CompileEnvironment::new();
-            self.check_compile_expression(
-                definition.key.module,
-                body,
-                &mut environment,
-                Some(&expected),
-            );
         }
-        self.check_expanded_compile_time = false;
 
-        let helpers = self
+        let mut helpers = self
             .scopes
             .iter()
             .flat_map(|scope| scope.helpers.values())
             .filter(|helper| binding_is_compile_time_helper(&helper.binding))
             .cloned()
             .collect::<Vec<_>>();
+        helpers.sort_by_key(|helper| helper.binding.syntax.id);
         for helper in helpers {
-            let expanded = self
-                .closure
-                .unit_of(helper.binding.syntax.id)
-                .is_some_and(|unit| ready_items.contains(&unit));
-            self.check_compile_helper(&helper, expanded);
+            self.check_compile_helper(&helper);
         }
     }
 
-    fn check_compile_helper(&mut self, helper: &HelperDefinition, expanded: bool) {
+    /// Checks a ready macro on its expanded closure the first time it is about
+    /// to run. `false` means it has a static error and must not run.
+    fn check_before_running(&mut self, definition: &MacroDefinition) -> bool {
+        if !self.macros_ready.contains(&definition.key) {
+            return true;
+        }
+        if let Some(passed) = self.macro_checks.get(&definition.key) {
+            return *passed;
+        }
+        if let Some(closure) = self.macro_closures.get(&definition.key.syntax) {
+            self.ready_compile_items.extend(closure.items.iter().copied());
+        }
+        let start = self.diagnostics.len();
+        self.static_check_failed = false;
+        self.check_macro_definition(definition);
+        let passed = self.diagnostics.len() == start && !self.static_check_failed;
+        self.macro_checks.insert(definition.key.clone(), passed);
+        passed
+    }
+
+    fn check_macro_definition(&mut self, definition: &MacroDefinition) {
+        let MacroKind::User(_) = &definition.kind else {
+            return;
+        };
+        let Some(body) = definition.declaration.value.as_ref() else {
+            return;
+        };
+        let previous = self.check_expanded_compile_time;
+        self.check_expanded_compile_time = self.macros_ready.contains(&definition.key);
+        let mut expected = CompileType::Meta(definition.result.clone());
+        for (index, parameter) in definition.parameters.iter().enumerate().rev() {
+            let parameter = if definition.key.modifier && index + 1 != definition.parameters.len()
+            {
+                match modifier_argument_meta_type(parameter) {
+                    Some(MetaType::Delimited(
+                        _,
+                        DelimitedMetaContents::Separated { element, separator },
+                    )) => CompileType::Meta(MetaType::Nominal(
+                        "Separated".to_owned(),
+                        vec![element.as_ref().clone(), separator.as_ref().clone()],
+                    )),
+                    Some(inner) => CompileType::Meta(inner.clone()),
+                    None => CompileType::Meta(parameter.clone()),
+                }
+            } else {
+                CompileType::Meta(parameter.clone())
+            };
+            expected = CompileType::Function(Box::new(parameter), Box::new(expected));
+        }
+        let mut environment = CompileEnvironment::new();
+        self.check_compile_expression(
+            definition.key.module,
+            body,
+            &mut environment,
+            Some(&expected),
+        );
+        self.check_expanded_compile_time = previous;
+    }
+
+    /// Checks a helper once, in one form whichever caller reaches it first: as
+    /// expanded when a ready closure holds it, and otherwise as written.
+    fn check_compile_helper(&mut self, helper: &HelperDefinition) {
         let syntax = helper.binding.syntax.id;
+        if self.failed_compile_helpers.contains(&syntax) {
+            self.static_check_failed = true;
+        }
         if self.checked_compile_helpers.contains(&syntax)
             || !self.checking_compile_helpers.insert(syntax)
             || (Some(helper.module) == self.standard_library_process
@@ -3418,12 +3460,18 @@ impl MacroExpander {
         {
             return;
         }
+        let expanded = self
+            .closure
+            .unit_of(syntax)
+            .is_some_and(|unit| self.ready_compile_items.contains(&unit));
         let binding = if expanded {
             self.expanded_binding(helper.binding.clone())
         } else {
             helper.binding.clone()
         };
         let previous = self.check_expanded_compile_time;
+        let previous_failure = std::mem::take(&mut self.static_check_failed);
+        let start = self.diagnostics.len();
         self.check_expanded_compile_time = expanded;
         if let Some(value) = &binding.value {
             let expected = binding_signature(&binding)
@@ -3437,6 +3485,11 @@ impl MacroExpander {
             );
         }
         self.check_expanded_compile_time = previous;
+        let failed = self.static_check_failed || self.diagnostics.len() != start;
+        if failed {
+            self.failed_compile_helpers.insert(syntax);
+        }
+        self.static_check_failed = previous_failure || failed;
         self.checking_compile_helpers.remove(&syntax);
         self.checked_compile_helpers.insert(syntax);
     }
@@ -3584,8 +3637,7 @@ impl MacroExpander {
                     return CompileType::Unknown;
                 }
                 if let Some(helper) = self.qualified_compile_helper(module, access) {
-                    let expanded = self.check_expanded_compile_time;
-                    self.check_compile_helper(&helper, expanded);
+                    self.check_compile_helper(&helper);
                     helper_compile_type(&helper.binding)
                 } else {
                     let value =
@@ -3980,8 +4032,7 @@ impl MacroExpander {
                 && let Some(helper) = self.lookup_helper(module, &name.name)
                 && matches!(&helper.binding.value, Some(Expression::Function(function)) if function.generics.is_some())
             {
-                let expanded = self.check_expanded_compile_time;
-                self.check_compile_helper(&helper, expanded);
+                self.check_compile_helper(&helper);
                 for argument in &arguments {
                     self.check_compile_expression(module, argument, environment, None);
                 }
@@ -3999,38 +4050,35 @@ impl MacroExpander {
             }
         }
         if let Some(keys) = self.resolve_macro(module, head) {
-            if self.prepare_compile_time_context {
-                return self.check_compile_macro_call(
-                    module,
-                    expression,
-                    keys,
-                    &arguments,
-                    environment,
-                    expected,
-                );
-            }
             if self.check_expanded_compile_time {
                 // Macro calls in a ready closure were expanded before the macro
-                // ran. Reaching one here means the closure scan missed an edge.
-                let name = keys
-                    .first()
-                    .map(|key| key.name.clone())
-                    .unwrap_or_default();
-                self.diagnostics.push(Diagnostic::new(
-                    expression.syntax().span.clone(),
-                    format!(
-                        "macro `{name}` was called by compile-time code that had not been expanded"
-                    ),
-                ));
-                for argument in &arguments {
-                    self.check_compile_expression(module, argument, environment, None);
+                // ran. Reaching one means the closure scan missed an edge, unless
+                // the call failed to expand, which has been reported already.
+                self.static_check_failed = true;
+                if self.diagnostics.is_empty() {
+                    let name = keys
+                        .first()
+                        .map(|key| key.name.clone())
+                        .unwrap_or_default();
+                    self.diagnostics.push(Diagnostic::new(
+                        expression.syntax().span.clone(),
+                        format!(
+                            "macro `{name}` was called by compile-time code that had not been expanded"
+                        ),
+                    ));
                 }
                 return CompileType::Error;
             }
             // A definition that never became ready is checked as written. Its
-            // macro calls are not expanded or typed, so they and their
-            // arguments are skipped and the result stays unconstrained.
-            return CompileType::Unknown;
+            // macro calls are selected and typed but not expanded.
+            return self.check_compile_macro_call(
+                module,
+                expression,
+                keys,
+                &arguments,
+                environment,
+                expected,
+            );
         }
 
         if let Expression::Name(name) = head
@@ -4098,8 +4146,8 @@ impl MacroExpander {
         callee
     }
 
-    /// Types a macro call in written syntax for the interpreter's context
-    /// tables. The macro is not expanded or run here.
+    /// Types a macro call in written syntax. The macro is not expanded or run
+    /// here.
     fn check_compile_macro_call(
         &mut self,
         module: ModuleId,
@@ -4170,8 +4218,7 @@ impl MacroExpander {
             .unwrap_or(module);
         loop {
             if let Some(helper) = self.scopes[cursor.0].helpers.get(&name.name).cloned() {
-                let expanded = self.check_expanded_compile_time;
-                self.check_compile_helper(&helper, expanded);
+                self.check_compile_helper(&helper);
                 return helper_compile_type(&helper.binding);
             }
             if !self.companion_modules[cursor.0] {
@@ -5637,6 +5684,9 @@ impl MacroExpander {
             Err(()) => return None,
         };
         let definition = refreshed.as_ref().unwrap_or(definition);
+        if !self.check_before_running(definition) {
+            return None;
+        }
         self.invocation_spans.push(call_span.clone());
         self.running_macros.push(definition.declaration.syntax.id);
         let result = self.invoke_modifier_inner(module, definition, argument, item, call_span);
@@ -6752,6 +6802,9 @@ impl MacroExpander {
             Err(()) => return None,
         };
         let definition = refreshed.as_ref().unwrap_or(definition);
+        if !self.check_before_running(definition) {
+            return None;
+        }
         self.invocation_spans.push(call_span.clone());
         self.running_macros.push(definition.declaration.syntax.id);
         let result = self.invoke_macro_inner(definition, arguments, call_span);

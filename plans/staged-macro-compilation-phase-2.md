@@ -323,7 +323,7 @@ Update this section as you work (see "Rules for the implementor").
 | 3. Check driver | done | see git log | `STAPLE_CHECK_MACRO_CLOSURES` and `scripts/check-macro-closures.py`. Cost measured on B1–B3 (Measurements). |
 | 4. Gap inventory | done | see git log | Groups 1–9 below. The full corpus ran (232 inputs; see "Review of this phase"). |
 | 5. Close the gaps | done | see git log | Groups 3–7 and 9 are fixed. Group 1 keeps only its handle representation, which belongs to Phase 3; group 2 is excluded until Phase 3 rewrites the variadic `Parse` impls; group 8 goes to Phase 4. |
-| 6. Static check after expansion | done | see git log | `validate_compile_time_code` now reports from expanded syntax: ready closures are checked on their expanded items, and unused definitions are checked as written without expanding their macro calls. A separate context pass fills the tables the interpreter reads, and `Parse` members are checked there before the interpreter mutates them. The lazy diagnostic path is gone. |
+| 6. Static check after expansion | done | see git log | A ready macro is checked on its expanded closure just before its first run, and does not run if that fails. What was not checked by the end of the walk is checked then: ready closures as expanded, and unused definitions as written, with their macro calls selected and typed but not expanded. A separate context pass fills the tables the interpreter reads, and `Parse` members are checked there before the interpreter mutates them; an error there stops expansion. The lazy diagnostic path is gone. Known limit: a `const` initializer can still run a helper with a static error, as it could before this phase. |
 | 7. Compile-time effects | decided, not enforced | see git log | Documented in `Staple.md` ("Compile-time effects"). |
 | 8. Check in the test suite | done | see git log | `check_program.rs` checks every standard-library macro, the fixture macros and the macro example with `all`. Per-test environment variables would race between parallel tests, so one dedicated test covers them instead. |
 | 9. Language reference | done | see git log | `Staple.md` describes the check, the quotation lowering and `Splice`, and now describes `Parse` implementations and macro code as ordinary code with the normal orphan rule. The interpreter's evaluation limits remain. |
@@ -569,6 +569,30 @@ Finishing the phase (2026-11-05):
 
 No test needed changing for diagnostic order. The check's diagnostics now come
 after expansion, but the suite only asserts on their content, not their order.
+
+A second review, of the work that closed the phase, found problems in moving
+the static check after expansion and in the check's imports. Fixed, with tests:
+
+- A helper's form depended on which macro reached it first, and definitions are
+  held in a hash map, so `staple check` of one unchanged file passed or failed by
+  chance (8 passes in 20 runs). A helper's form now depends only on whether a
+  ready closure holds it, and definitions and helpers are visited in syntax order.
+- A macro with a static error ran before the error was reported. It is now
+  checked before its first run, including a macro that shares a helper already
+  rejected. An invalid `Parse` impl stops expansion again.
+- A wrong macro call in an unused macro was not reported. It is again.
+- A call that failed to expand also reported "had not been expanded". That
+  report now appears only when nothing else has been reported.
+- Imports of own-package submodules were dropped, which reported `unknown name`.
+  Companion modules still do not count as importable.
+- Mode `1` failed on standard-library files, because the snapshot and the builder
+  disagreed on whether `std` is checked whole.
+- `Staple.md` described the check's `?` as what a default build does.
+- Package-rooted imports in a real `staple.kdl` package now have a test.
+
+After these fixes, `scripts/check-macro-closures.py` reports nothing on all 232
+inputs in both `all` and `1`, `scripts/compare-expansion.py` matches on all 232
+against the capture before them, and `cargo test --workspace` passes.
 
 ### Expansion difference from the start of the phase
 

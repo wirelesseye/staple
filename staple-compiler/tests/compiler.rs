@@ -14814,6 +14814,125 @@ fn ordinary_code_cannot_narrow_a_wrapper_with_a_product_pattern() {
 }
 
 #[test]
+fn the_static_check_of_a_helper_does_not_depend_on_which_macro_reaches_it() {
+    // Definitions are held in a hash map, so each run visits them in a new order.
+    for _ in 0..3 {
+        let messages = expansion_messages(concat!(
+            "use std.syntax.(Expr, parse_quote)\n",
+            "def helper = value: Expr => Expr :: if True {\n",
+            "    let wrong: I32 = \"text\"\n",
+            "    value\n",
+            "} else { value }\n",
+            "macro user: Expr -> Expr = value => helper value\n",
+            "macro idle_one: Expr -> Expr = value => helper value\n",
+            "macro idle_two: Expr -> Expr = value => helper value\n",
+            "macro idle_three: Expr -> Expr = value => helper value\n",
+            "let a: I32 = user 1\n",
+        ));
+        assert!(
+            messages.iter().any(|message| message.contains("expected")),
+            "{messages:?}"
+        );
+    }
+}
+
+#[test]
+fn a_macro_with_a_static_error_does_not_run() {
+    let messages = expansion_messages(concat!(
+        "use std.syntax.(Expr, parse_quote)\n",
+        "macro bad: Expr -> Expr = value => {\n",
+        "    let count: I32 = \"text\"\n",
+        "    panic \"ran the body\"\n",
+        "    value\n",
+        "}\n",
+        "let a: I32 = bad 1\n",
+    ));
+    assert!(
+        messages.iter().any(|message| message.contains("expected")),
+        "{messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("ran the body")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn a_macro_that_shares_a_rejected_helper_does_not_run() {
+    let messages = expansion_messages(concat!(
+        "use std.syntax.(Expr, parse_quote)\n",
+        "def helper = value: Expr => Expr :: {\n",
+        "    let wrong: I32 = \"text\"\n",
+        "    value\n",
+        "}\n",
+        "macro first: Expr -> Expr = value => helper value\n",
+        "macro second: Expr -> Expr = value => { panic \"ran the body\"; helper value }\n",
+        "let a: I32 = first 1\n",
+        "let b: I32 = second 2\n",
+    ));
+    assert!(
+        !messages.iter().any(|message| message.contains("ran the body")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn an_invalid_parse_impl_stops_expansion() {
+    let messages = expansion_messages(concat!(
+        "use std.syntax.(Parse, ParseError, Expr, parse_quote)\n",
+        "type Local wrap I32\n",
+        "impl Parse Local {\n",
+        "    parse = mut input => {\n",
+        "        let wrong: I32 = \"text\"\n",
+        "        ParseError \"no\"\n",
+        "    }\n",
+        "}\n",
+        "macro bad: Expr -> Expr = value => { panic \"ran the body\"; value }\n",
+        "let a: I32 = bad 1\n",
+    ));
+    assert!(
+        messages.iter().any(|message| message.contains("expected")),
+        "{messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("ran the body")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn an_unused_macro_with_a_bad_macro_call_is_reported() {
+    let messages = expansion_messages(concat!(
+        "use std.syntax.(Expr, parse_quote)\n",
+        "macro takes: (Expr; Expr) -> Expr = (a; b) => a\n",
+        "macro unused: Expr -> Expr = value => takes value\n",
+        "let a: I32 = 1\n",
+    ));
+    assert!(
+        messages.iter().any(|message| message.contains("requires 2 arguments")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn a_call_that_fails_to_expand_is_reported_once() {
+    let messages = expansion_messages(concat!(
+        "use std.syntax.(Expr, parse_quote)\n",
+        "macro takes: (Expr; Expr) -> Expr = (a; b) => a\n",
+        "macro bad: Expr -> Expr = value => takes value\n",
+        "let a: I32 = bad 1\n",
+    ));
+    assert!(
+        messages.iter().any(|message| message.contains("requires 2 arguments")),
+        "{messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("had not been expanded")),
+        "{messages:?}"
+    );
+}
+
+#[test]
 fn compile_time_annotations_with_different_arguments_do_not_match() {
     let messages = expansion_messages(concat!(
         "use std.syntax.(Expr, Item, Sequence, parse_quote)\n",

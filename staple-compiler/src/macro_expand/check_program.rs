@@ -103,6 +103,10 @@ impl MacroExpander {
         let wanted = |definition: &MacroDefinition| {
             mode == CheckMode::All || invoked.contains(&definition.key)
         };
+        // The standard library is checked whole even as the program's own
+        // package, as `build_check_program` does.
+        let own_is_whole = own_package.is_some()
+            && self.syntax_module.map(|module| self.module_packages[module.0]) == Some(own_package);
         let mut declared = self
             .definitions
             .values()
@@ -114,7 +118,10 @@ impl MacroExpander {
             // Every check program holds the other packages whole, so all of
             // their macros need their closures expanded. Of the program's own
             // package, it holds only the closures being checked.
-            if self.module_packages[definition.key.module.0] == own_package && !wanted(definition) {
+            if self.module_packages[definition.key.module.0] == own_package
+                && !own_is_whole
+                && !wanted(definition)
+            {
                 continue;
             }
             // Making ready a macro nothing called must not fail the build with
@@ -257,7 +264,12 @@ pub(crate) fn build_check_program(
     // contents are known.
     let defined = items
         .iter()
-        .map(|module| defined_names(module.iter()))
+        .zip(program.modules())
+        .map(|(module, source)| {
+            defined_names(module.iter().chain(expanded_of(source.id).iter().filter(
+                |item| matches!(item, Item::Submodule(submodule) if !submodule.companion),
+            )))
+        })
         .collect::<Vec<_>>();
     let module_names = program
         .modules()
@@ -429,11 +441,14 @@ fn macro_function(
     })
 }
 
-/// The names `items` define as importable items at module level.
+/// The names `items` define at module level, as items or submodules.
 fn defined_names<'a>(items: impl Iterator<Item = &'a Item>) -> HashSet<String> {
     let mut names = HashSet::new();
     for item in items {
         names.extend(item_kind(item).2);
+        if let Item::Submodule(submodule) = item {
+            names.insert(submodule.name.clone());
+        }
     }
     names
 }
@@ -947,6 +962,85 @@ mod tests {
         let (_, _, diagnostics) =
             super::super::expand_program_checked(program, true, Some(CheckMode::All), true)
                 .expect("the standard library should expand");
+        let rendered = diagnostics.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert!(rendered.is_empty(), "{}", rendered.join("\n"));
+    }
+
+    #[test]
+    fn invoked_macros_of_a_standard_library_file_check_with_one() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let stdlib = root.join("stdlib");
+        let path = stdlib.join("std/alloc.sta");
+        let source = std::fs::read_to_string(&path).expect("the module should be readable");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(&stdlib)
+            .load_source_at(&path, &source)
+            .expect("the module should load");
+        let (_, _, diagnostics) =
+            super::super::expand_program_checked(program, true, Some(CheckMode::Invoked), true)
+                .expect("the standard library should expand");
+        let rendered = diagnostics.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert!(rendered.is_empty(), "{}", rendered.join("\n"));
+    }
+
+    #[test]
+    fn imports_of_submodules_are_kept() {
+        let diagnostics = check_all(concat!(
+            "mod inner {\n",
+            "    use std.syntax.Expr\n",
+            "    pub mod deeper {\n",
+            "        use std.syntax.Expr\n",
+            "        pub def f = value: Expr => Expr :: value\n",
+            "    }\n",
+            "}\n",
+            "use inner.(deeper)\n",
+            "use inner.deeper as alias\n",
+            "macro through_selected: Expr -> Expr = value => deeper.f value\n",
+            "macro through_alias: Expr -> Expr = value => alias.f value\n",
+            "let a: I32 = through_selected 1\n",
+            "let b: I32 = through_alias 1\n",
+        ));
+        assert!(diagnostics.is_empty(), "{}", diagnostics.join("\n"));
+    }
+
+    #[test]
+    fn package_rooted_imports_outside_the_closure_are_dropped_in_a_package() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-check-package-imports-{}",
+            std::process::id()
+        ));
+        let write = |path: &str, contents: &str| {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        };
+        write("staple.kdl", "package \"app\"\n");
+        write("src/main.sta", "use package.a.(m)\nlet x: I32 = m 1\n");
+        write(
+            "src/a.sta",
+            concat!(
+                "pub mod\n",
+                "use std.syntax.Expr\n",
+                "use package.b.(Kept)\n",
+                "use package.c.(Idle)\n",
+                "pub def idle_use = (value: Idle) => value\n",
+                "def keep = value: Expr => Expr :: { let kept: Kept = Kept 1; value }\n",
+                "pub macro m: Expr -> Expr = value => keep value\n",
+            ),
+        );
+        write("src/b.sta", "pub mod\npub type Kept wrap pub I32\n");
+        write("src/c.sta", "pub mod\npub type Idle wrap pub I32\n");
+        let graph = staple_project::load_package_graph(&root.join("staple.kdl")).unwrap();
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../stdlib"),
+            )
+            .with_package_graph(graph)
+            .load_package_graph()
+            .expect("the package should load");
+        let result = super::super::expand_program_checked(program, true, Some(CheckMode::All), true);
+        std::fs::remove_dir_all(&root).ok();
+        let (_, _, diagnostics) = result.expect("the package should expand");
         let rendered = diagnostics.iter().map(ToString::to_string).collect::<Vec<_>>();
         assert!(rendered.is_empty(), "{}", rendered.join("\n"));
     }

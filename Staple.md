@@ -442,8 +442,12 @@ is used by explicit calls only.
 Compile-time `mut` parameters are passed by address, as they are at run time. A
 call such as `skip_one input` hands the callee the caller's own `mut` binding,
 so the callee's assignments are visible after the call, while passing an
-immutable binding to a `mut` parameter is rejected. In macro code, a postfix
-`?` unwraps a `Try` value, and `return` leaves the enclosing function.
+immutable binding to a `mut` parameter is rejected. In the interpreter, a
+postfix `?` on a `Result` yields the `Ok` payload, and any other value leaves the
+innermost compile-time function with that value; `return` likewise leaves the
+whole function rather than just its block. The check described in
+[Compile-time phases](#compile-time-phases) holds macro code to the ordinary
+rules, where `?` needs a `Try` value.
 Compile-time recursion, including the recursion of `Sequence` and `Separated`,
 shares the evaluation depth limit described in
 [Compile-time phases](#compile-time-phases).
