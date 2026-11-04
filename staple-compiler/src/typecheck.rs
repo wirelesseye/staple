@@ -3362,6 +3362,12 @@ impl TypedModule {
         // are globally unique, so including all active function bounds also
         // makes the enclosing `Copy T` obligation visible in the closure.
         let _ = function;
+        // Syntax is a handle to a fragment, which macro code copies freely.
+        if self.resolved().ordinary_syntax_types()
+            && is_syntax_value(self.resolved(), value_type)
+        {
+            return true;
+        }
         let resolved = self.resolve_recursive_payload(value_type);
         let value_type = resolved.as_ref().unwrap_or(value_type);
         is_copy_type(
@@ -21697,6 +21703,37 @@ impl TypeChecker {
             self.resolved_named_types.insert(id, value_type.clone());
         }
         value_type
+    }
+}
+
+/// Whether `value_type` is made of syntax: the handle types, and the data
+/// types built from them.
+fn is_syntax_value(module: &ResolvedModule, value_type: &CheckedType) -> bool {
+    match value_type.desugared() {
+        CheckedType::Wrapper {
+            id, representation, ..
+        } => {
+            module
+                .type_declarations()
+                .get(id)
+                .is_some_and(|declaration| declaration.recursive_constructor)
+                || is_syntax_value(module, representation)
+        }
+        CheckedType::Opaque { .. } => true,
+        CheckedType::Sum(sum) => sum
+            .alternatives
+            .iter()
+            .all(|alternative| is_syntax_value(module, alternative)),
+        CheckedType::Product(product) => {
+            product.spreads.is_empty()
+                && !product.runs.is_empty()
+                && product
+                    .runs
+                    .iter()
+                    .all(|run| is_syntax_value(module, &run.element.value_type))
+        }
+        CheckedType::String => false,
+        _ => false,
     }
 }
 
