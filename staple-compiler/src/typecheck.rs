@@ -11057,7 +11057,7 @@ impl TypeChecker {
                 let Some(expected_id) = module.type_for_pattern(pattern.syntax.id) else {
                     return;
                 };
-                match value_type {
+                match value_type.desugared() {
                     CheckedType::String
                         if module.builtin_type(expected_id) == Some(BuiltinType::String) =>
                     {
@@ -16401,7 +16401,7 @@ impl TypeChecker {
                 let Some(expected_id) = module.type_for_pattern(pattern.syntax.id) else {
                     return;
                 };
-                let representation = match value_type {
+                let representation = match value_type.desugared() {
                     CheckedType::String
                         if module.builtin_type(expected_id) == Some(BuiltinType::String) =>
                     {
@@ -16435,6 +16435,10 @@ impl TypeChecker {
                     } if *id == expected_id => Some(representation.as_ref().clone()),
                     _ => None,
                 };
+                if representation.is_none() && std::env::var_os("STAPLE_DEBUG_CONCRETE").is_some() {
+                    let text = format!("{:?}", value_type);
+                    eprintln!("nominal miss: expected {:?} in {}", expected_id, &text[..text.len().min(500)]);
+                }
                 if let Some(representation) = representation {
                     let representation = self.unfold_self_reference(module, &representation);
                     let representation =
@@ -20732,6 +20736,7 @@ impl TypeChecker {
         // A sum alias such as `Expr` is part of a recursive syntax type, whose
         // recursion goes through its data types.
         if kind == TypeDeclarationKind::Alias && self.ordinary_syntax_types {
+            self.open_self_references.push(id);
             return Some(CheckedType::Opaque {
                 sized: true,
                 id,
