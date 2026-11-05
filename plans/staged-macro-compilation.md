@@ -313,7 +313,18 @@ files edited for the check. See the Phase 2 breakdown for the inventory.
 ### Phase 3: syntax runtime
 
 Make syntax values exist in compiled code.
+Breakdown and status: [`staged-macro-compilation-phase-3.md`](staged-macro-compilation-phase-3.md).
 
+- Give the `std.syntax` data types a run-time representation. They are boxed
+  nodes with a hidden origin slot, which solves both their infinite size and
+  the source syntax that plain data would lose.
+- Declare syntax ownership. `Ident`, punctuation, `Visibility` and `ParseStream`
+  are `Copy`; other nodes are non-`Copy`, and `Clone` is a deep copy of the
+  structured nodes. A splice borrows its value, so a name can be spliced any
+  number of times in a quotation without a clone. This replaces the closure
+  check's copy exception.
+- Replace `$name...` with plain `$name`. A sequence's type already says how it
+  splices, and `...` after a splice blocks spreading in generated code.
 - Server-side syntax arena and the intrinsic function table (Decision 4),
   written in Rust on top of `staple-syntax`.
 - Rewrite `std.syntax`'s `Parse` implementations to use the non-generic
@@ -326,9 +337,9 @@ Make syntax values exist in compiled code.
   order.
 - Argument passing: the parent still matches arguments against `MetaType`
   signatures. It sends the *match tree* (atoms, sequence elements, present or
-  absent options, delimiter contents) as handles. The shim generated for each
-  macro builds the typed parameter values from that tree, with one decoder per
-  parameter type, generated from its `MetaType`. Results come back as a handle
+  absent options, delimiter contents) as handles. A generated entry function
+  for each macro builds the typed parameter values from that tree through a
+  `FromMatch` trait in `std.syntax`. Results come back as a handle
   plus the declared result category. `Sequence<Item>` results and emitted items
   come back as a list of handles.
 - Wire format between parent and server: a versioned, length-prefixed binary
@@ -371,6 +382,8 @@ Make syntax values exist in compiled code.
 
 - Add `--macro-engine=interp|compiled` (hidden). The compiled engine expands in
   stage order through the server, and template macros stay in the parent.
+  With the compiled engine, normal builds start enforcing syntax ownership, so
+  user macros that reuse a non-`Copy` value without a clone stop compiling.
 - Differential testing: run both engines on the standard library, every test
   in `staple-compiler/tests` (about 450 macro tests), and the examples. Compare
   the expanded syntax trees from `render_expanded_module`, normalized for
