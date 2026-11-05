@@ -876,6 +876,10 @@ impl SupportWalker<'_> {
             }
         }
         match &expression.kind {
+            LoweredExpressionKind::SyntaxOrigin { .. }
+            | LoweredExpressionKind::SyntaxWithOrigin { .. } => {
+                self.reject(RejectionReason::RecursiveConstruction);
+            }
             LoweredExpressionKind::String(_) | LoweredExpressionKind::CString(_) => {}
             LoweredExpressionKind::Deferred(_) => self.reject(RejectionReason::Deferred),
             LoweredExpressionKind::StringTemplate(template) => {

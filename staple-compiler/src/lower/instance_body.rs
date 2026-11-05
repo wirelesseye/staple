@@ -1281,6 +1281,17 @@ impl<'a> BodyCloner<'a> {
             LoweredExpressionKind::Float(float) => LoweredExpressionKind::Float(float),
             LoweredExpressionKind::String(string) => LoweredExpressionKind::String(string),
             LoweredExpressionKind::CString(c_string) => LoweredExpressionKind::CString(c_string),
+            LoweredExpressionKind::SyntaxOrigin { value } => {
+                LoweredExpressionKind::SyntaxOrigin {
+                    value: self.clone_expression(value),
+                }
+            }
+            LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {
+                LoweredExpressionKind::SyntaxWithOrigin {
+                    value: self.clone_expression(value),
+                    origin: self.clone_expression(origin),
+                }
+            }
             LoweredExpressionKind::Access(mut access) => {
                 access.base = self.clone_expression(access.base);
                 access.kind = match access.kind {
@@ -1291,6 +1302,12 @@ impl<'a> BodyCloner<'a> {
                     }
                     super::LoweredAccessKind::Product { index, dereference } => {
                         super::LoweredAccessKind::Product {
+                            index,
+                            dereference: dereference.iter().map(|ty| self.ty(ty)).collect(),
+                        }
+                    }
+                    super::LoweredAccessKind::SyntaxNodeField { index, dereference } => {
+                        super::LoweredAccessKind::SyntaxNodeField {
                             index,
                             dereference: dereference.iter().map(|ty| self.ty(ty)).collect(),
                         }
@@ -2161,7 +2178,8 @@ impl<'a> BodyCloner<'a> {
                 super::LoweredAccessKind::Representation { dereference } => {
                     !dereference.is_empty() || self.body_value_has_place(access.base)
                 }
-                super::LoweredAccessKind::Product { dereference, .. } => {
+                super::LoweredAccessKind::Product { dereference, .. }
+                | super::LoweredAccessKind::SyntaxNodeField { dereference, .. } => {
                     !dereference.is_empty() || self.body_value_has_place(access.base)
                 }
                 super::LoweredAccessKind::SharedBuffer { .. } => true,
@@ -4734,11 +4752,19 @@ impl<'a> BodyValidator<'a> {
             | LoweredExpressionKind::Float(_)
             | LoweredExpressionKind::String(_)
             | LoweredExpressionKind::CString(_) => {}
+            LoweredExpressionKind::SyntaxOrigin { value } => {
+                self.visit_expression(*value);
+            }
+            LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {
+                self.visit_expression(*value);
+                self.visit_expression(*origin);
+            }
             LoweredExpressionKind::Access(access) => {
                 self.visit_expression(access.base);
                 match &access.kind {
                     super::LoweredAccessKind::Representation { dereference }
                     | super::LoweredAccessKind::Product { dereference, .. }
+                    | super::LoweredAccessKind::SyntaxNodeField { dereference, .. }
                     | super::LoweredAccessKind::SharedBuffer { dereference, .. }
                     | super::LoweredAccessKind::Scalar { dereference } => {
                         for value_type in dereference {

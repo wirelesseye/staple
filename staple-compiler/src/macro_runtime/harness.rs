@@ -245,13 +245,13 @@ mod tests {
 
 
     #[test]
-    #[ignore = "needs the compiled syntax runtime"]
+    #[ignore = "whole-program emission fails LLVM verification"]
     fn compiled_code_allocates_with_the_collector() {
-        let run = check_run_for_with(concat!(
+        let run = check_run_for(concat!(
             "use std.syntax.*\n",
             "def probe: () -> I32 = () => { let list: List<I32> = List.with_capacity 4; let _ = list; 1 }\n",
             "macro touch = () => probe ()\n",
-        ), false);
+        ));
         let lowered = lower_run(&run).expect("the probe should lower");
         let symbol = instance_symbol(&lowered, "probe").expect("probe is instantiated");
         with_jit(&lowered, |engine| {
@@ -262,9 +262,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs the compiled syntax runtime"]
+    #[ignore = "whole-program emission fails LLVM verification"]
     fn compiled_code_constructs_an_empty_sequence() {
-        let run = check_run_for_with(concat!(
+        let run = check_run_for(concat!(
             "use std.syntax.*\n",
             "def probe: () -> I32 = () => {\n",
             "    let empty: Sequence<Ident<String>> = Sequence ()\n",
@@ -272,7 +272,7 @@ mod tests {
             "    1\n",
             "}\n",
             "macro touch = () => probe ()\n",
-        ), false);
+        ));
         let lowered = lower_run(&run).expect("the probe should lower");
         let symbol = instance_symbol(&lowered, "probe").expect("probe is instantiated");
         with_jit(&lowered, |engine| {
@@ -283,13 +283,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs the compiled syntax runtime"]
+    #[ignore = "whole-program emission fails LLVM verification"]
     fn compiled_code_calls_a_plain_function() {
-        let run = check_run_for_with(concat!(
+        let run = check_run_for(concat!(
             "use std.syntax.*\n",
             "def probe: () -> I32 = () => 7\n",
             "macro touch = () => probe ()\n",
-        ), false);
+        ));
         let lowered = lower_run(&run).expect("the probe should lower");
         let symbol = instance_symbol(&lowered, "probe").expect("probe is instantiated");
         with_jit(&lowered, |engine| {
@@ -302,9 +302,9 @@ mod tests {
     /// Compiled code constructs a boxed sequence, matches its alternatives by
     /// width, and reads a bound field.
     #[test]
-    #[ignore = "needs the compiled syntax runtime"]
+    #[ignore = "whole-program emission fails LLVM verification"]
     fn compiled_code_constructs_and_matches_a_sequence() {
-        let run = check_run_for_with(concat!(
+        let run = check_run_for(concat!(
             "use std.syntax.*\n",
             "def probe: () -> I32 = () => {\n",
             "    let empty: Sequence<Ident<String>> = Sequence ()\n",
@@ -320,7 +320,7 @@ mod tests {
             "    from_empty + from_one\n",
             "}\n",
             "macro touch = () => probe ()\n",
-        ), false);
+        ));
         let lowered = lower_run(&run).expect("the probe should lower");
         let names = lowered.planned_instance_names("probe");
         assert!(!names.is_empty(), "probe is instantiated; package={:?} items={:?}", run.package, entry_items(&run).iter().map(|item| item.syntax().id).collect::<Vec<_>>());

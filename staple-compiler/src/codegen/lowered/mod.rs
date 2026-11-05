@@ -486,9 +486,28 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 continue;
             }
             let CheckedType::Function(signature) = &symbol.value_type else {
-                // A generic foreign declaration is instantiated by each call;
-                // its emitted declaration comes from that instantiation.
+                // A generic foreign declaration is instantiated by each call.
+                // Emit one trapping stub under the symbol's name; call sites
+                // cast it to their instantiated signature until the real host
+                // implementation replaces it.
                 if matches!(symbol.value_type, CheckedType::Forall(_)) {
+                    let function_type = self
+                        .backend
+                        .context
+                        .void_type()
+                        .fn_type(&[], false);
+                    let name = symbol.name.clone();
+                    let function = self
+                        .backend
+                        .llvm_module
+                        .add_function(&name, function_type, Some(Linkage::Internal));
+                    let entry = self.backend.context.append_basic_block(function, "trap");
+                    self.backend.builder.position_at_end(entry);
+                    self.backend.build_trap(symbol.origin.span.clone())?;
+                    self.backend
+                        .builder
+                        .build_unreachable()
+                        .map_err(compiler_diagnostic)?;
                     continue;
                 }
                 return Err(Diagnostic::new(
@@ -3797,6 +3816,86 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredExpressionKind::Access(access) => {
                 self.emit_access(owner, id, expression, access, environment)
             }
+            LoweredExpressionKind::SyntaxOrigin { value } => {
+                let value_expression = self
+                    .view
+                    .expression(owner, *value)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            expression.origin.span.clone(),
+                            "missing syntax origin operand",
+                        )
+                    })?
+                    .clone();
+                let CheckedType::Wrapper { representation, .. } =
+                    &value_expression.value_type
+                else {
+                    return Err(Diagnostic::new(
+                        expression.origin.span.clone(),
+                        "syntax origin operand is not a boxed node",
+                    ));
+                };
+                let representation_type = self.backend.compile_type(representation)?;
+                let value = self.emit_expression(owner, *value, environment)?;
+                let Some(BasicValueEnum::PointerValue(pointer)) = value_as_basic(value) else {
+                    return Err(Diagnostic::new(
+                        expression.origin.span.clone(),
+                        "syntax origin operand is not a node pointer",
+                    ));
+                };
+                self.backend
+                    .load_syntax_node_origin(pointer, representation_type)
+                    .map(|origin| origin.as_any_value_enum())
+            }
+            LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {
+                let value_expression = self
+                    .view
+                    .expression(owner, *value)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            expression.origin.span.clone(),
+                            "missing syntax node operand",
+                        )
+                    })?
+                    .clone();
+                let CheckedType::Wrapper { representation, .. } =
+                    &value_expression.value_type
+                else {
+                    return Err(Diagnostic::new(
+                        expression.origin.span.clone(),
+                        "syntax node operand is not a boxed node",
+                    ));
+                };
+                let representation_type = self.backend.compile_type(representation)?;
+                let value = self.emit_expression(owner, *value, environment)?;
+                let Some(BasicValueEnum::PointerValue(pointer)) = value_as_basic(value) else {
+                    return Err(Diagnostic::new(
+                        expression.origin.span.clone(),
+                        "syntax node operand is not a node pointer",
+                    ));
+                };
+                let origin = self.emit_expression(owner, *origin, environment)?;
+                let Some(origin) = value_as_basic(origin) else {
+                    return Err(Diagnostic::new(
+                        expression.origin.span.clone(),
+                        "syntax origin is not a handle",
+                    ));
+                };
+                let BasicValueEnum::IntValue(origin) = origin else {
+                    return Err(Diagnostic::new(
+                        expression.origin.span.clone(),
+                        "syntax origin is not an integer",
+                    ));
+                };
+                self.backend
+                    .build_syntax_node_with_origin(
+                        pointer,
+                        representation_type,
+                        origin,
+                        expression.origin.span.clone(),
+                    )
+                    .map(|pointer| pointer.as_any_value_enum())
+            }
             LoweredExpressionKind::Product(product) => {
                 self.emit_product(owner, expression, product, environment)
             }
@@ -4036,6 +4135,51 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .load_shared_payloads(base, dereference, span.clone())
                         .map(|value| value.as_any_value_enum())
                 }
+            }
+            crate::LoweredAccessKind::SyntaxNodeField { index, dereference } => {
+                let value = if dereference.is_empty() {
+                    value_as_basic(base)
+                } else {
+                    Some(
+                        self.backend
+                            .load_shared_payloads(base, dereference, span.clone())?,
+                    )
+                };
+                let Some(BasicValueEnum::PointerValue(pointer)) = value else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "syntax node field access requires a node value",
+                    ));
+                };
+                let representation = self
+                    .view
+                    .expression(owner, access.base)
+                    .and_then(|base| match &base.value_type {
+                        CheckedType::Wrapper { representation, .. } => {
+                            Some(representation.as_ref().clone())
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            span.clone(),
+                            "syntax node field access has no representation",
+                        )
+                    })?;
+                let representation_type = self.backend.compile_type(&representation)?;
+                let value = self.backend.load_syntax_node_representation(
+                    pointer,
+                    representation_type,
+                )?;
+                let BasicValueEnum::StructValue(value) = value else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "syntax node representation is not a product",
+                    ));
+                };
+                self.backend
+                    .extract_product_element(value, *index, "syntax.node.element")
+                    .map(|value| value.as_any_value_enum())
             }
             crate::LoweredAccessKind::Product { index, dereference } => {
                 let value = if dereference.is_empty() {
@@ -5075,9 +5219,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.backend
                     .build_string_literal_pattern_compare(string, literal, success, failure, span)
             }
-            crate::LoweredPatternKind::Product { elements, .. }
-                if elements.len() == 1 && !matches!(subject, CheckedType::Sum(_)) =>
-            {
+            crate::LoweredPatternKind::Product { elements, .. } if elements.len() == 1 => {
                 self.emit_match_pattern_branch(
                     owner,
                     elements[0],
@@ -6654,12 +6796,30 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .externs
                     .get(symbol)
                     .copied()
+                    .or_else(|| {
+                        let name = &self.view.symbol(*symbol)?.name;
+                        self.backend.llvm_module.get_function(name)
+                    })
                     .ok_or_else(|| unsupported("foreign symbol declaration"))?;
-                let result = self
-                    .backend
-                    .builder
-                    .build_direct_call(function, &values, "extern.call")
-                    .map_err(compiler_diagnostic)?;
+                let signature =
+                    self.backend.compile_native_function_type(&call.function_type)?;
+                let result = if function.get_type() == signature {
+                    self.backend
+                        .builder
+                        .build_direct_call(function, &values, "extern.call")
+                } else {
+                    let pointer = function.as_global_value().as_pointer_value();
+                    let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+                    let cast = self
+                        .backend
+                        .builder
+                        .build_pointer_cast(pointer, pointer_type, "extern.cast")
+                        .map_err(compiler_diagnostic)?;
+                    self.backend
+                        .builder
+                        .build_indirect_call(signature, cast, &values, "extern.call")
+                }
+                .map_err(compiler_diagnostic)?;
                 Ok(result.try_as_basic_value().basic().map_or_else(
                     || self.backend.unit_value(),
                     |value| value.as_any_value_enum(),

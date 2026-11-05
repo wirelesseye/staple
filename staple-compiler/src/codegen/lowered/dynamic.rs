@@ -9003,6 +9003,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .as_ref()
             .map_or(&expression.value_type, |coercion| &coercion.source);
         let value = match expression.kind {
+            LoweredExpressionKind::SyntaxOrigin { .. }
+            | LoweredExpressionKind::SyntaxWithOrigin { .. } => {
+                return Err(Diagnostic::new(
+                    expression.origin.span.clone(),
+                    "dynamic syntax node origin use is unsupported",
+                ));
+            }
             LoweredExpressionKind::Product(product) => {
                 let collapsed =
                     product.fields.len() == 1 && !matches!(raw_type, CheckedType::Product(_));
@@ -9123,6 +9130,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     | crate::LoweredAccessKind::Scalar { dereference }
                     | crate::LoweredAccessKind::Representation { dereference }
                     | crate::LoweredAccessKind::SharedBuffer { dereference, .. } => dereference,
+                    crate::LoweredAccessKind::SyntaxNodeField { .. } => {
+                        return Err(Diagnostic::new(
+                            expression.origin.span.clone(),
+                            "dynamic access to a syntax node field is unsupported",
+                        ));
+                    }
                 };
                 let container_type = dereference
                     .last()
@@ -9158,6 +9171,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     crate::LoweredAccessKind::Product { index, .. } => {
                         self.dynamic_product_field(descriptor, base, *index as u32)?
                             .0
+                    }
+                    crate::LoweredAccessKind::SyntaxNodeField { .. } => {
+                        return Err(Diagnostic::new(
+                            expression.origin.span.clone(),
+                            "dynamic access to a syntax node field is unsupported",
+                        ));
                     }
                     crate::LoweredAccessKind::Scalar { .. }
                     | crate::LoweredAccessKind::Representation { .. } => base,

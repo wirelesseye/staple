@@ -494,8 +494,8 @@ Update this section as you work (see "Rules for the implementor").
 
 | Task | Status | Commit | Notes |
 |---|---|---|---|
-| 1. JIT harness and lowering inventory | partly done | this commit | `macro_runtime/harness.rs` builds, checks and lowers the standard library's check program, maps the host table, and runs plain functions under the JIT. The full lowering inventory is in Findings. The JIT cannot yet run syntax code because no syntax intrinsic is implemented. |
-| 2. Boxed nodes | partly done | this commit | `@syntax_node` marks the node types. Lowering and codegen give them a pointer-sized box `(representation, origin)`, direct and adapter constructors allocate one, nominal patterns unbox them, product patterns select sum alternatives by width, and syntax handles (`Syntax`, `ParseStream`, ...) are `U64`. `__origin`/`__with_origin` and the compiled-code proof are still missing. |
+| 1. JIT harness and lowering inventory | partly done | this commit | `macro_runtime/harness.rs` builds, checks and lowers the standard library's check program. Generic foreign intrinsics now emit trapping stubs cast to each call's signature. Whole-program emission stops at one LLVM verifier failure, recorded in Findings. |
+| 2. Boxed nodes | partly done | this commit | `@syntax_node` marks the node types. Lowering and codegen give them a pointer-sized box `(representation, origin)`, constructors allocate one, nominal patterns unbox them, product patterns select sum alternatives by width, field reads load the representation, and `__origin`/`__with_origin` lower inline. The compiled-code proof waits on the LLVM verifier failure recorded in Findings. |
 | 3. Ownership of syntax | not started | | |
 | 4. Arena and core intrinsics | not started | | |
 | 5. Node views and rebuilding | not started | | |
@@ -548,8 +548,23 @@ changes. Before them, every distinct failure was one of:
   rejected `Syntax` as an opaque type with no by-value representation.
 
 After these fixes the standard-library check program resolves, type-checks
-and lowers. Code generation still stops on the unimplemented syntax runtime
-intrinsics and on a few field accesses through syntax nodes.
+and lowers. Code generation then got through the generic foreign declarations
+by emitting one trapping stub per generic intrinsic and casting it to each
+call's instantiated signature at the call site. Boxed node field reads lower as
+new `SyntaxNodeField` accesses that load the representation from the box. With
+those changes the whole check program's only remaining emit diagnostic is an
+LLVM verifier failure:
+
+```
+PHI node operands are not the same type as the result!
+%match.value = phi { i32, [1 x ptr] } [ %fallback, ... ], [ %extern.call, ... ]
+```
+
+It appears while emitting match arms in the whole standard-library program,
+after the generic stubs and field accesses are in place. No JIT execution has
+been attempted past this point.  The whole-program emit takes about 6.7 s in
+the test profile. This is the next blocker; it is recorded here rather than
+worked around.
 
 ### Boxed representation (task 2, in progress)
 
@@ -557,7 +572,7 @@ The box works in lowering and in the IR: a node is a GC pointer to
 `(representation, origin: U64)`; construction stores origin `0`, and a direct
 or adapter constructor call boxes its representation. Pattern tests load the
 representation before matching, and `Sequence` alternatives are selected by
-tag. The compiled-code proof is blocked on the missing syntax runtime
-intrinsics, not on the representation itself. `__origin` and `__with_origin`
-are not lowered yet, and field reads through a boxed node still lower as
-ordinary product access.
+tag. `__origin` and `__with_origin` now lower inline as `SyntaxOrigin` and
+`SyntaxWithOrigin` expressions, and field reads through a boxed node lower as
+`SyntaxNodeField` accesses. The compiled-code proof still waits on the LLVM
+verifier failure recorded above, so no JIT result exists yet.

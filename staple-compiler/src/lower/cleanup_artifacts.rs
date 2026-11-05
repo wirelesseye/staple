@@ -968,6 +968,13 @@ impl<'a> LoweredWalker<'a> {
             super::LoweredExpressionKind::Integer(_)
             | super::LoweredExpressionKind::Float(_)
             | super::LoweredExpressionKind::CString(_) => {}
+            super::LoweredExpressionKind::SyntaxOrigin { value } => {
+                self.walk_expression(value)?;
+            }
+            super::LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {
+                self.walk_expression(value)?;
+                self.walk_expression(origin)?;
+            }
             super::LoweredExpressionKind::Access(access) => {
                 self.walk_expression(access.base)?;
                 if access.take_unique {

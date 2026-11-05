@@ -3361,12 +3361,22 @@ impl<'a> ParameterCollector<'a> {
             LoweredExpressionKind::Float(_) => self.family("expression.float"),
             LoweredExpressionKind::String(_) => self.family("expression.string"),
             LoweredExpressionKind::CString(_) => self.family("expression.cstring"),
+            LoweredExpressionKind::SyntaxOrigin { value } => {
+                self.family("expression.syntax-origin");
+                self.collect_expression(*value);
+            }
+            LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {
+                self.family("expression.syntax-with-origin");
+                self.collect_expression(*value);
+                self.collect_expression(*origin);
+            }
             LoweredExpressionKind::Access(access) => {
                 self.family("expression.access");
                 self.collect_expression(access.base);
                 match &access.kind {
                     LoweredAccessKind::Representation { dereference }
                     | LoweredAccessKind::Product { dereference, .. }
+                    | LoweredAccessKind::SyntaxNodeField { dereference, .. }
                     | LoweredAccessKind::SharedBuffer { dereference, .. }
                     | LoweredAccessKind::Scalar { dereference } => {
                         for value_type in dereference {

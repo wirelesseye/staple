@@ -324,6 +324,10 @@ extern "staple-intrinsic" {
     __quote: (U64; Sequence<Syntax>) -> Syntax
     __splice_node: <T> T -> Syntax
     __splice_join: <T> Sequence<T> -> Syntax
+    /// The hidden origin stored with a syntax node.
+    __origin: <T> T -> Syntax
+    /// The same syntax node value with a different hidden origin.
+    __with_origin: <T> (T; Syntax) -> T
 }
 
 /// Syntax that a quotation can splice with `$name`.

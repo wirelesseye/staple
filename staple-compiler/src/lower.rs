@@ -1101,6 +1101,13 @@ pub(crate) enum LoweredExpressionKind {
     Coro(LoweredCoroId),
     /// An owned `await` suspension site in its owning coroutine plan.
     Await(LoweredAwaitId),
+    /// The hidden origin of a boxed syntax node.
+    SyntaxOrigin { value: ExpressionId },
+    /// A boxed syntax node with a replacement origin.
+    SyntaxWithOrigin {
+        value: ExpressionId,
+        origin: ExpressionId,
+    },
 }
 
 /// A string template with its ordered parts and checked formatting
@@ -2324,6 +2331,11 @@ pub(crate) enum LoweredAccessKind {
     Representation { dereference: Vec<CheckedType> },
     /// Element `index` of a fixed product, optionally behind `Shared` payloads.
     Product {
+        index: usize,
+        dereference: Vec<CheckedType>,
+    },
+    /// Element `index` of a boxed syntax node's representation.
+    SyntaxNodeField {
         index: usize,
         dereference: Vec<CheckedType>,
     },
@@ -6386,6 +6398,11 @@ impl LoweredProgram {
                     LoweredAccessKind::Scalar { dereference }
                 } else if slice {
                     LoweredAccessKind::SharedBuffer { index, dereference }
+                } else if module
+                    .type_of_expression(access.value.syntax().id)
+                    .is_some_and(|value_type| self.is_syntax_node_type(value_type))
+                {
+                    LoweredAccessKind::SyntaxNodeField { index, dereference }
                 } else {
                     LoweredAccessKind::Product { index, dereference }
                 }
@@ -8136,6 +8153,34 @@ impl LoweredProgram {
         let resolved = module.resolved();
         let callee_syntax = call.callee.syntax().id;
         let symbol = call_callee_symbol(module, &call.callee);
+        if let Some(name) = symbol
+            .and_then(|symbol| self.symbols.get(symbol))
+            .map(|symbol| symbol.name.clone())
+            .filter(|name| {
+                name == "__staple_syntax_origin" || name == "__staple_syntax_with_origin"
+            })
+        {
+                let arguments = syntax_intrinsic_arguments(&call.argument);
+                if arguments.is_empty() || arguments.len() > 2 {
+                    return Err(Diagnostic::new(
+                        call.syntax.span.clone(),
+                        format!("`{name}` takes one or two arguments"),
+                    ));
+                }
+                let value =
+                    self.lower_expression(module, owner, context, arguments[0])?;
+                if name == "__staple_syntax_origin" {
+                    return Ok(LoweredExpressionKind::SyntaxOrigin { value });
+                }
+                let Some(origin) = arguments.get(1) else {
+                    return Err(Diagnostic::new(
+                        call.syntax.span.clone(),
+                        "`__with_origin` needs an origin",
+                    ));
+                };
+                let origin = self.lower_expression(module, owner, context, origin)?;
+                return Ok(LoweredExpressionKind::SyntaxWithOrigin { value, origin });
+        }
         let mut substitutions = CallSubstitutions::default();
         let mut initialization_checks = Vec::new();
         let mut evidence = None;
@@ -11022,7 +11067,9 @@ impl LoweredProgram {
                         "callable expression was not lowered",
                     ));
                 }
-                LoweredExpressionKind::String(_) => {}
+                LoweredExpressionKind::String(_)
+                | LoweredExpressionKind::SyntaxOrigin { .. }
+                | LoweredExpressionKind::SyntaxWithOrigin { .. } => {}
                 LoweredExpressionKind::Integer(integer) => {
                     let width = integer_literal_bit_width(integer.integer_type);
                     let value_bits = if integer.integer_type.is_signed() {
@@ -12592,6 +12639,13 @@ impl LoweredProgram {
             LoweredExpressionKind::RepeatedProduct(repeated) => {
                 self.visit_owned_expression(repeated.expression, reached);
             }
+            LoweredExpressionKind::SyntaxOrigin { value } => {
+                self.visit_owned_expression(*value, reached);
+            }
+            LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {
+                self.visit_owned_expression(*value, reached);
+                self.visit_owned_expression(*origin, reached);
+            }
             LoweredExpressionKind::Access(access) => {
                 self.visit_owned_expression(access.base, reached);
             }
@@ -13432,6 +13486,13 @@ impl LoweredProgram {
             }
             LoweredExpressionKind::RepeatedProduct(repeated) => {
                 self.collect_loop_expression(repeated.expression, depth, reached, diagnostics);
+            }
+            LoweredExpressionKind::SyntaxOrigin { value } => {
+                self.collect_loop_expression(*value, depth, reached, diagnostics);
+            }
+            LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {
+                self.collect_loop_expression(*value, depth, reached, diagnostics);
+                self.collect_loop_expression(*origin, depth, reached, diagnostics);
             }
             LoweredExpressionKind::Access(access) => {
                 self.collect_loop_expression(access.base, depth, reached, diagnostics);
@@ -15067,6 +15128,26 @@ fn symbol_function_type(module: &TypedModule, symbol: SymbolId) -> Option<Checke
 /// The checked function type of a call's callee, falling back to the callee
 /// symbol's declared function type when the occurrence is checked as a
 /// coerced type.
+/// The operands of an intrinsic call, unwrapping a slotted product used for
+/// multiple parameters.
+fn syntax_intrinsic_arguments(argument: &Expression) -> Vec<&Expression> {
+    match argument {
+        Expression::Product(product)
+            if product.slotted
+                && product.elements.iter().all(|element| {
+                    !element.spread && !element.named_spread && element.name.is_none()
+                }) =>
+        {
+            product
+                .elements
+                .iter()
+                .map(|element| &element.value)
+                .collect()
+        }
+        other => vec![other],
+    }
+}
+
 /// The symbol a call's callee names, looking through an explicit type
 /// application to the function it instantiates.
 fn call_callee_symbol(
@@ -21984,6 +22065,7 @@ mod tests {
         assert!(
             accesses.iter().any(|access| match &access.kind {
                 LoweredAccessKind::Product { dereference, .. }
+                | LoweredAccessKind::SyntaxNodeField { dereference, .. }
                 | LoweredAccessKind::SharedBuffer { dereference, .. }
                 | LoweredAccessKind::Scalar { dereference } => !dereference.is_empty(),
                 LoweredAccessKind::Representation { dereference } => !dereference.is_empty(),
@@ -23398,6 +23480,8 @@ mod tests {
             LoweredExpressionKind::String(_) => "string".to_owned(),
             LoweredExpressionKind::CString(_) => "cstring".to_owned(),
             LoweredExpressionKind::Access(_) => "access".to_owned(),
+            LoweredExpressionKind::SyntaxOrigin { .. } => "syntax-origin".to_owned(),
+            LoweredExpressionKind::SyntaxWithOrigin { .. } => "syntax-with-origin".to_owned(),
             LoweredExpressionKind::Product(_) => "product".to_owned(),
             LoweredExpressionKind::RepeatedProduct(_) => "repeated-product".to_owned(),
             LoweredExpressionKind::TypeAscription(_) => "type_ascription".to_owned(),
