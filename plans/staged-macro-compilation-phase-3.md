@@ -494,8 +494,8 @@ Update this section as you work (see "Rules for the implementor").
 
 | Task | Status | Commit | Notes |
 |---|---|---|---|
-| 1. JIT harness and lowering inventory | not started | | |
-| 2. Boxed nodes | not started | | |
+| 1. JIT harness and lowering inventory | partly done | this commit | `macro_runtime/harness.rs` builds, checks and lowers the standard library's check program, maps the host table, and runs plain functions under the JIT. The full lowering inventory is in Findings. The JIT cannot yet run syntax code because no syntax intrinsic is implemented. |
+| 2. Boxed nodes | partly done | this commit | `@syntax_node` marks the node types. Lowering and codegen give them a pointer-sized box `(representation, origin)`, direct and adapter constructors allocate one, nominal patterns unbox them, product patterns select sum alternatives by width, and syntax handles (`Syntax`, `ParseStream`, ...) are `U64`. `__origin`/`__with_origin` and the compiled-code proof are still missing. |
 | 3. Ownership of syntax | not started | | |
 | 4. Arena and core intrinsics | not started | | |
 | 5. Node views and rebuilding | not started | | |
@@ -516,7 +516,48 @@ encoded sizes (task 10).
 
 ## Findings
 
-_None yet._ Record the lowering inventory (task 1), the result of proving the boxed
-representation (task 2), which mode gates remain, the final count of macro code the ownership rule
-changed (task 3), whether raw-token substitution handled sequence splices (task 7), every
-difference from the interpreter with its reason, and anything that changes later phases.
+### Lowering inventory (task 1)
+
+The standard-library check program lowered for the first time after these
+changes. Before them, every distinct failure was one of:
+
+- **Product patterns over recursive stand-ins.** `Sequence (first, rest)` and
+  the product patterns inside `ModifiedItem` saw the `Opaque` placeholder the
+  checker leaves for a recursive syntax type instead of the wrapper's
+  representation. Lowering now resolves those placeholders to the wrapper or
+  to its representation, depending on whether the pattern names the wrapper
+  (`Sequence (...)`) or destructures it (the argument product).
+- **Sum alternatives behind stand-ins.** `None`/`Some`, `ModifiedItem`, and
+  `WrapperBody` alternatives are `Opaque` stand-ins in some sums. The pattern
+  planner now accepts an opaque alternative with the expected type id and
+  reads its representation from the pattern's checked type.
+- **Product alternatives of a sum.** A product pattern whose subject is a sum
+  now records the alternative selected by the pattern's width, so `Sequence
+  ()` and `Sequence (first, rest)` get a run-time tag test.
+- **Inferred fields.** Coercions and generic constructor calls can retain an
+  `Inferred` field after checking. Such a field adopts the source type and
+  names no runtime layout, so its coercion is the identity and descriptor
+  scanning skips it.
+- **Generic foreign declarations.** A macro-runtime intrinsic is an external
+  binding, not a compiler intrinsic. It is declared as `Forall` until a call
+  instantiates it, so codegen declares it from the call rather than skipping
+  it as an ordinary extern. This is the remaining blocker for compiling the
+  whole standard-library check program.
+- **Syntax handles.** `Syntax`, `ParseStream` and the `Unstructured*` types
+  are `U64` handles; boxed syntax nodes are pointers. Before this, codegen
+  rejected `Syntax` as an opaque type with no by-value representation.
+
+After these fixes the standard-library check program resolves, type-checks
+and lowers. Code generation still stops on the unimplemented syntax runtime
+intrinsics and on a few field accesses through syntax nodes.
+
+### Boxed representation (task 2, in progress)
+
+The box works in lowering and in the IR: a node is a GC pointer to
+`(representation, origin: U64)`; construction stores origin `0`, and a direct
+or adapter constructor call boxes its representation. Pattern tests load the
+representation before matching, and `Sequence` alternatives are selected by
+tag. The compiled-code proof is blocked on the missing syntax runtime
+intrinsics, not on the representation itself. `__origin` and `__with_origin`
+are not lowered yet, and field reads through a boxed node still lower as
+ordinary product access.

@@ -335,6 +335,8 @@ pub struct TypeDeclaration {
     pub name_syntax: Syntax,
     pub docs: Vec<String>,
     pub recursive_constructor: bool,
+    /// Whether the type is a boxed syntax node with a hidden origin.
+    pub syntax_node: bool,
     /// Whether the stdlib intrinsic supplies a statically sized opaque representation.
     pub sized_opaque: bool,
     pub visibility: Visibility,

@@ -1,0 +1,11 @@
+//! The syntax runtime that compiled macro code calls.
+//!
+//! Macro code reaches the compiler through the `std.syntax` intrinsics. They
+//! are lowered as ordinary external calls; the host supplies their addresses
+//! from [`intrinsics::TABLE`]. In tests, [`harness`] runs the checked code
+//! in-process through LLVM's JIT.
+
+pub(crate) mod intrinsics;
+
+#[cfg(test)]
+pub(crate) mod harness;

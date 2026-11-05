@@ -2036,6 +2036,7 @@ impl Grammar {
             name_syntax,
             docs: Vec::new(),
             recursive_constructor: false,
+            syntax_node: false,
             sized_opaque: false,
             visibility,
             body,

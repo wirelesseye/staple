@@ -20,6 +20,7 @@ mod coroutine_lower;
 mod expansion_render;
 mod lower;
 mod macro_expand;
+mod macro_runtime;
 mod ownership;
 mod program;
 mod resolve;

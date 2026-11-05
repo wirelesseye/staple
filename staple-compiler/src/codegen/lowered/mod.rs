@@ -486,6 +486,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 continue;
             }
             let CheckedType::Function(signature) = &symbol.value_type else {
+                // A generic foreign declaration is instantiated by each call;
+                // its emitted declaration comes from that instantiation.
+                if matches!(symbol.value_type, CheckedType::Forall(_)) {
+                    continue;
+                }
                 return Err(Diagnostic::new(
                     symbol.origin.span.clone(),
                     "external bindings must have a function type",
@@ -2583,6 +2588,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     "constructor adapter plan was never expanded",
                 ));
             }
+        };
+        // A syntax node's value is a box holding its representation and origin.
+        let result: BasicValueEnum<'context> = if self.view.is_syntax_node_id(plan.type_id) {
+            self.backend
+                .build_syntax_node_box(result, None, span.clone())?
+                .into()
+        } else {
+            result
         };
         self.backend
             .builder
@@ -5062,28 +5075,86 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.backend
                     .build_string_literal_pattern_compare(string, literal, success, failure, span)
             }
-            crate::LoweredPatternKind::Product { elements, .. } if elements.len() == 1 => self
-                .emit_match_pattern_branch(
+            crate::LoweredPatternKind::Product { elements, .. }
+                if elements.len() == 1 && !matches!(subject, CheckedType::Sum(_)) =>
+            {
+                self.emit_match_pattern_branch(
                     owner,
                     elements[0],
                     value,
                     success,
                     failure,
                     environment,
-                ),
+                )
+            }
             crate::LoweredPatternKind::Product { elements, .. } => {
-                let CheckedType::Product(_) = &subject else {
-                    return Err(Diagnostic::new(
-                        span.clone(),
-                        "checked product pattern has a non-product value",
-                    ));
-                };
-                let Some(BasicValueEnum::StructValue(product_value)) = value_as_basic(value.into())
-                else {
-                    return Err(Diagnostic::new(
-                        span.clone(),
-                        "product match value has an invalid representation",
-                    ));
+                let product_value = match &subject {
+                    CheckedType::Sum(sum) => {
+                        let Some(index) = pattern.test.sum_alternative else {
+                            return Err(Diagnostic::new(
+                                span.clone(),
+                                "product pattern does not select a sum alternative",
+                            ));
+                        };
+                        let Some(BasicValueEnum::StructValue(sum_value)) =
+                            value_as_basic(value.into())
+                        else {
+                            return Err(Diagnostic::new(
+                                span.clone(),
+                                "sum match value has an invalid representation",
+                            ));
+                        };
+                        let tag = self.backend.build_sum_tag(sum_value, "match.tag")?;
+                        let selected = self.backend.context.append_basic_block(
+                            success.get_parent().ok_or_else(|| {
+                                internal_invariant(
+                                    staple_syntax::Span::Compiler,
+                                    "match block belongs to an LLVM function",
+                                )
+                            })?,
+                            "match.product.selected",
+                        );
+                        let matches = self.backend.build_sum_tag_compare(
+                            tag,
+                            index,
+                            "match.product.tag",
+                        )?;
+                        self.backend
+                            .builder
+                            .build_conditional_branch(matches, selected, failure)
+                            .map_err(compiler_diagnostic)?;
+                        self.backend.builder.position_at_end(selected);
+                        let payload = self.backend.extract_sum_alternative(
+                            sum_value,
+                            sum,
+                            index,
+                            span.clone(),
+                        )?;
+                        let BasicValueEnum::StructValue(product) = payload else {
+                            return Err(Diagnostic::new(
+                                span.clone(),
+                                "sum product alternative has an invalid representation",
+                            ));
+                        };
+                        product
+                    }
+                    CheckedType::Product(_) => {
+                        let Some(BasicValueEnum::StructValue(product)) =
+                            value_as_basic(value.into())
+                        else {
+                            return Err(Diagnostic::new(
+                                span.clone(),
+                                "product match value has an invalid representation",
+                            ));
+                        };
+                        product
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            span.clone(),
+                            "checked product pattern has a non-product value",
+                        ));
+                    }
                 };
                 if elements.is_empty() {
                     return self
@@ -5127,8 +5198,36 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(())
             }
             crate::LoweredPatternKind::Nominal { argument, .. } => match &subject {
+                CheckedType::Wrapper { representation, .. }
+                    if pattern.test.identity == crate::LoweredPatternIdentity::SyntaxNode =>
+                {
+                    let Some(BasicValueEnum::PointerValue(pointer)) = value_as_basic(value.into())
+                    else {
+                        return Err(Diagnostic::new(
+                            span.clone(),
+                            "syntax node match value has an invalid representation",
+                        ));
+                    };
+                    let representation_type = self.backend.compile_type(representation)?;
+                    let representation = self.backend.load_syntax_node_representation(
+                        pointer,
+                        representation_type,
+                    )?;
+                    self.emit_match_pattern_branch(
+                        owner,
+                        *argument,
+                        representation,
+                        success,
+                        failure,
+                        environment,
+                    )
+                }
                 CheckedType::String
-                    if pattern.test.identity == crate::LoweredPatternIdentity::String =>
+                    if matches!(
+                        pattern.test.identity,
+                        crate::LoweredPatternIdentity::String
+                            | crate::LoweredPatternIdentity::SyntaxNode
+                    ) =>
                 {
                     self.emit_match_pattern_branch(
                         owner,
@@ -5200,6 +5299,33 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         index,
                         span.clone(),
                     )?;
+                    let payload = if pattern.test.identity
+                        == crate::LoweredPatternIdentity::SyntaxNode
+                    {
+                        let BasicValueEnum::PointerValue(pointer) = payload else {
+                            return Err(Diagnostic::new(
+                                span.clone(),
+                                "syntax node match value has an invalid representation",
+                            ));
+                        };
+                        let representation = self
+                            .view
+                            .pattern(owner, *argument)
+                            .map(|argument| argument.test.subject.clone())
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    span.clone(),
+                                    "syntax node pattern has no representation",
+                                )
+                            })?;
+                        let representation_type = self.backend.compile_type(&representation)?;
+                        self.backend.load_syntax_node_representation(
+                            pointer,
+                            representation_type,
+                        )?
+                    } else {
+                        payload
+                    };
                     self.emit_match_pattern_branch(
                         owner,
                         *argument,
@@ -6539,7 +6665,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     |value| value.as_any_value_enum(),
                 ))
             }
-            LoweredCallableTarget::Constructor { .. } => {
+            LoweredCallableTarget::Constructor { type_id, .. } => {
                 let basic = values
                     .iter()
                     .map(|value| {
@@ -6568,6 +6694,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     self.backend
                         .build_product_value(&basic, call.origin.span.clone())?
                 };
+                let value: BasicValueEnum<'context> =
+                    if self.view.is_syntax_node_id(*type_id) {
+                        self.backend
+                            .build_syntax_node_box(value, None, call.origin.span.clone())?
+                            .into()
+                    } else {
+                        value
+                    };
                 Ok(value.as_any_value_enum())
             }
             // Trait implementation selection is already closed into a catalog binding.
@@ -8287,7 +8421,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let global = self
             .storage
             .get(&symbol)
-            .ok_or_else(|| Diagnostic::new(span.clone(), "symbol storage is not available here"))?;
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    span.clone(),
+                    format!(
+                        "symbol storage is not available here ({})",
+                        self.view.symbol(symbol).map_or("?", |symbol| symbol.name.as_str())
+                    ),
+                )
+            })?;
         self.force_derived_read(owner, environment, symbol, span)?;
         if check_initialization && let Some(state) = self.initialization_states.get(&symbol) {
             self.backend

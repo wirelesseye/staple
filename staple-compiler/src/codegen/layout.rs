@@ -217,6 +217,25 @@ impl<'program> LayoutContext<'program> {
         opaque_is(value_type, self.view.semantic_ids().reactive_type)
     }
 
+    /// Whether the type is an opaque syntax handle, represented as a word.
+    pub(crate) fn is_syntax_handle(&self, value_type: &CheckedType) -> bool {
+        match value_type {
+            CheckedType::Opaque { id, .. } => self.view.is_syntax_handle_id(*id),
+            _ => false,
+        }
+    }
+
+    /// Whether the type is a boxed syntax node, represented as a pointer to
+    /// `(representation, origin)`.
+    pub(crate) fn is_syntax_node(&self, value_type: &CheckedType) -> bool {
+        match value_type {
+            CheckedType::Wrapper { id, .. } | CheckedType::Opaque { id, .. } => {
+                self.view.is_syntax_node_id(*id)
+            }
+            _ => false,
+        }
+    }
+
     /// Whether the type is one of the runtime handles represented as a pointer:
     /// coroutines (their GC frame), tasks (`%TaskRecord`), schedulers / task
     /// scopes (their runtime records), and `Wait` / `Resolver` /
@@ -282,6 +301,14 @@ impl<'program, 'context> Backend<'program, 'context> {
                 Span::Compiler,
                 format!("cannot generate code for partially applied type `{name}`"),
             )),
+            CheckedType::Opaque { .. } | CheckedType::Wrapper { .. }
+                if self.layout.is_syntax_node(value_type) =>
+            {
+                Ok(self.context.ptr_type(AddressSpace::default()).into())
+            }
+            CheckedType::Opaque { .. } if self.layout.is_syntax_handle(value_type) => {
+                Ok(self.compile_integer_type(IntegerType::U64).into())
+            }
             CheckedType::Opaque { .. } if self.layout.is_io(value_type) => {
                 Ok(self.context.struct_type(&[], false).into())
             }

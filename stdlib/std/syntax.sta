@@ -12,32 +12,32 @@ use package.default.(Default)
 /// their data in the first structured-syntax slice; remaining expressions round-trip
 /// through `UnstructuredExpr` without exposing fields.
 /// An identifier syntax node, optionally constrained to one spelling.
-@recursive_constructor
+@syntax_node
 pub type Ident<Spelling = String where Spelling <: String> wrap pub Spelling
 
 /// A structured call expression syntax node.
-@recursive_constructor
+@syntax_node
 pub type CallExpr wrap pub (
     callee: Expr,
     argument: Expr,
 )
 
 /// A string-literal expression constructed from a compile-time string.
-@recursive_constructor
+@syntax_node
 pub type StringExpr wrap pub String
 
 /// A character-literal expression constructed from a compile-time Char.
-@recursive_constructor
+@syntax_node
 pub type CharExpr wrap pub Char
 
 /// A sequence of syntax values.
-@recursive_constructor
+@syntax_node
 pub type Sequence<Element> wrap pub
     () |
     (first: Element, rest: Sequence<Element>)
 
 /// A separated syntax sequence with its separator and trailing state.
-@recursive_constructor
+@syntax_node
 pub type Separated<Element, Separator> wrap pub (
     separator: Separator,
     elements: Sequence<Element>,
@@ -54,24 +54,24 @@ pub type Equals
 pub type FatArrow
 
 /// A parenthesized syntax fragment.
-@recursive_constructor
+@syntax_node
 pub type Parenthesized<Contents> wrap pub Contents
 
 /// A bracketed syntax fragment.
-@recursive_constructor
+@syntax_node
 pub type Bracketed<Contents> wrap pub Contents
 
 /// A braced syntax fragment.
-@recursive_constructor
+@syntax_node
 pub type Braced<Contents> wrap pub Contents
 
 /// An explicitly requested angle-bracketed syntax fragment. Comparisons are
 /// not implicitly treated as delimited syntax.
-@recursive_constructor
+@syntax_node
 pub type Angled<Contents> wrap pub Contents
 
 /// One declaration parameter, retaining its original syntax and optional default.
-@recursive_constructor
+@syntax_node
 pub type TypeParameter wrap pub (
     name: Ident<String>,
     default: Option<Type>,
@@ -81,7 +81,7 @@ pub type TypeParameter wrap pub (
 
 /// A declaration's complete `<...>` header, including defaults and bounds.
 /// `arguments` contains only `<T, U, ...>`, suitable for applying the type.
-@recursive_constructor
+@syntax_node
 pub type TypeParameters wrap pub (
     parameters: Sequence<TypeParameter>,
     declaration: Syntax,
@@ -122,11 +122,11 @@ impl !Copy UnstructuredType {}
 pub type Type = ProductType | UnstructuredType
 
 /// A binding pattern constructed from an identifier.
-@recursive_constructor
+@syntax_node
 pub type BindingPattern wrap pub Ident<String>
 
 /// A nominal destructuring pattern.
-@recursive_constructor
+@syntax_node
 pub type NominalPattern wrap pub (name: Ident<String>, argument: Pattern)
 
 /// A pattern whose structure is not exposed yet.
@@ -141,7 +141,7 @@ pub type Pattern = BindingPattern | NominalPattern | UnstructuredPattern
 /// An inspectable type declaration item. Type parameters are exposed by name;
 /// their original declaration syntax remains part of the lossless item value.
 /// `body` is `None` for a bodyless singleton declaration.
-@recursive_constructor
+@syntax_node
 pub type TypeDeclarationItem wrap pub (
     name: Ident<String>,
     declared_type: Type,
@@ -154,15 +154,15 @@ pub type TypeDeclarationItem wrap pub (
 pub type ResourceDependency wrap pub (resource_type: Type, mutable: Bool)
 
 /// A transparent alias type declaration body, written `= Type`.
-@recursive_constructor
+@syntax_node
 pub type AliasBody<Element> wrap pub Element
 
 /// A `wrap` type declaration body with its representation visibility.
-@recursive_constructor
+@syntax_node
 pub type WrapperBody<Representation, Element> wrap pub (Representation, Element)
 
 /// A `from` type declaration body with its representation visibility.
-@recursive_constructor
+@syntax_node
 pub type FromBody<Representation, Element> wrap pub (Representation, Element)
 
 /// An `opaque` type declaration body.
@@ -183,7 +183,7 @@ impl !Copy UnstructuredItem {}
 
 /// A written modifier invocation. The namespace lists qualifiers outermost
 /// first and is empty for an unqualified name. The argument excludes its parentheses.
-@recursive_constructor
+@syntax_node
 pub type ModifierCall wrap pub (
     namespace: Sequence<Ident<String>>,
     name: Ident<String>,
@@ -201,7 +201,7 @@ pub type Modifier = ModifierCall | UnstructuredModifier
 
 /// An item carrying modifiers that have not yet been applied. Modifiers are
 /// ordered outermost first.
-@recursive_constructor
+@syntax_node
 pub type ModifiedItem wrap pub (
     modifiers: Sequence<Modifier>,
     item: Item,

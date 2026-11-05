@@ -37,3 +37,7 @@ pub(package) macro @sized_opaque: Item -> Item
 
 /// Marks a compiler-owned recursive type constructor. Reserved for the standard library.
 pub(package) macro @recursive_constructor: Item -> Item
+
+/// Marks a standard-library syntax type whose values are boxed nodes with a
+/// hidden origin. Reserved for the standard library.
+pub(package) macro @syntax_node: Item -> Item

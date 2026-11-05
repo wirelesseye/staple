@@ -2243,16 +2243,20 @@ impl NameResolver {
             reported.get_or_insert(std::mem::take(&mut self.diagnostics));
         }
         self.functions.sort_by_key(|function| function.id.0);
+        // A `staple-intrinsic` declaration is a compiler intrinsic when the
+        // compiler maps it; the syntax runtime's entries stay external so
+        // lowering calls the host symbol.
         let external_symbols = program
             .modules()
             .iter()
             .flat_map(|module| module.syntax.items.iter())
             .filter_map(|item| match item {
-                Item::ExternBlock(block) if block.abi != "\"staple-intrinsic\"" => Some(block),
+                Item::ExternBlock(block) => Some(block),
                 _ => None,
             })
             .flat_map(|block| block.bindings.iter())
             .filter_map(|binding| self.declared_symbols.get(&binding.syntax.id).copied())
+            .filter(|symbol| !self.intrinsic_functions.contains_key(symbol))
             .collect();
         let mut standard_traits = self
             .standard_library_core

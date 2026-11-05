@@ -466,6 +466,22 @@ impl<'a> EmissionView<'a> {
         self.program.symbols.get(id)
     }
 
+    /// Whether a type is a boxed syntax node.
+    pub(crate) fn is_syntax_node_id(&self, id: crate::TypeId) -> bool {
+        self.program
+            .types
+            .get(id)
+            .is_some_and(|metadata| metadata.syntax_node)
+    }
+
+    /// Whether a type is an opaque syntax handle.
+    pub(crate) fn is_syntax_handle_id(&self, id: crate::TypeId) -> bool {
+        self.program
+            .types
+            .get(id)
+            .is_some_and(|metadata| metadata.syntax_handle)
+    }
+
     /// The `LoweredSemanticIds` layout context (`runtime_opaque_kind`, string
     /// representation, entry resources, standard trait IDs).
     pub(crate) fn semantic_ids(&self) -> &'a LoweredSemanticIds {

@@ -132,8 +132,8 @@ fn check_symbol_type(
     Err(vec![Diagnostic::new(
         origin.span.clone(),
         format!(
-            "extern adapter for symbol {} disagrees with the external binding's checked type",
-            plan.symbol.0
+            "extern adapter for symbol {} ({}) disagrees with the external binding's checked type",
+            plan.symbol.0, symbol.name
         ),
     )])
 }

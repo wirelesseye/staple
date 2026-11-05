@@ -883,6 +883,11 @@ impl LoweredCoercionPlan {
         if source == &CheckedType::Never {
             return Ok(LoweredCoercionPlan::Identity);
         }
+        // An inferred position adopts the source's type, so the runtime
+        // representation does not change.
+        if crate::contains_inferred_type(source) || crate::contains_inferred_type(target) {
+            return Ok(LoweredCoercionPlan::Identity);
+        }
         let same_nominal = matches!((source, target),
             (CheckedType::Wrapper { id: source_id, .. }, CheckedType::Wrapper { id: target_id, .. }) if source_id == target_id);
         if source == target
@@ -2398,6 +2403,8 @@ pub(crate) enum LoweredPatternIdentity {
     /// A wrapper representation destructure where the subject is the wrapper
     /// type itself.
     Representation,
+    /// A boxed syntax node: load its representation before matching.
+    SyntaxNode,
     /// A singleton name pattern (`True`, `False`, or a declared singleton).
     Singleton,
 }
@@ -2424,6 +2431,8 @@ fn pattern_test_plan(
     shape: &PatternPlanShape,
     builtin_of: &dyn Fn(TypeId) -> Option<BuiltinType>,
     string_representation: Option<&CheckedType>,
+    is_syntax_node: &dyn Fn(TypeId) -> bool,
+    representation_of: &dyn Fn(&CheckedType) -> Option<CheckedType>,
 ) -> Result<(LoweredPatternTestPlan, Vec<CheckedType>), String> {
     let mut plan = LoweredPatternTestPlan {
         subject: subject.clone(),
@@ -2440,15 +2449,12 @@ fn pattern_test_plan(
             // whole subject as its type and tests nothing.
             if let CheckedType::Sum(sum) = subject
                 && value_type != subject
+                && let Some(index) = sum
+                    .alternatives
+                    .iter()
+                    .position(|alternative| alternative == value_type)
             {
-                plan.sum_alternative = Some(
-                    sum.alternatives
-                        .iter()
-                        .position(|alternative| alternative == value_type)
-                        .ok_or_else(|| {
-                            "typed match pattern does not select a sum alternative".to_owned()
-                        })?,
-                );
+                plan.sum_alternative = Some(index);
             }
         }
         PatternPlanShape::At => {
@@ -2467,7 +2473,8 @@ fn pattern_test_plan(
                             .position(|alternative| {
                                 matches!(
                                     alternative,
-                                    CheckedType::Wrapper { id, .. } if id == singleton
+                                    CheckedType::Wrapper { id, .. } | CheckedType::Opaque { id, .. }
+                                        if id == singleton
                                 )
                             })
                             .ok_or_else(|| {
@@ -2484,9 +2491,42 @@ fn pattern_test_plan(
         PatternPlanShape::Product { elements } => {
             if *elements == 1 {
                 children.push(subject.clone());
-            } else if *elements > 1 {
-                let CheckedType::Product(product) = subject else {
-                    return Err("checked product pattern has a non-product value".to_owned());
+            } else {
+                // A wrapper such as `Sequence` is matched by the width of its
+                // product alternative. The subject stays the sum so emission
+                // can test the tag before reading the fields.
+                let product = match subject {
+                    CheckedType::Sum(sum) => {
+                        let index = sum
+                            .alternatives
+                            .iter()
+                            .position(|alternative| {
+                                matches!(
+                                    alternative,
+                                    CheckedType::Product(product)
+                                        if product.position_count() == *elements
+                                )
+                            })
+                            .ok_or_else(|| {
+                                "checked product pattern does not select a sum alternative".to_owned()
+                            })?;
+                        plan.sum_alternative = Some(index);
+                        match &sum.alternatives[index] {
+                            CheckedType::Product(product) => product,
+                            _ => {
+                                return Err(
+                                    "checked product pattern selects a non-product alternative"
+                                        .to_owned(),
+                                );
+                            }
+                        }
+                    }
+                    CheckedType::Product(product) => product,
+                    _ => {
+                        return Err(
+                            "checked product pattern has a non-product value".to_owned()
+                        );
+                    }
                 };
                 if product.position_count() != *elements {
                     return Err(
@@ -2523,25 +2563,56 @@ fn pattern_test_plan(
                 })?;
                 children.push(representation.clone());
             }
+            // An `Ident` field already lowered to its spelling has no box left
+            // to load; the nominal pattern destructures the spelling directly.
+            CheckedType::String if target.is_some_and(is_syntax_node) => {
+                plan.identity = LoweredPatternIdentity::SyntaxNode;
+                children.push(subject.clone());
+            }
             CheckedType::Sum(sum) => {
                 let expected = target.ok_or_else(|| "unresolved match pattern".to_owned())?;
                 let index = sum
                     .alternatives
                     .iter()
                     .position(|alternative| {
-                        matches!(alternative, CheckedType::Wrapper { id, .. } if *id == expected)
+                        matches!(
+                            alternative,
+                            CheckedType::Wrapper { id, .. } | CheckedType::Opaque { id, .. }
+                                if *id == expected
+                        )
                     })
-                    .ok_or_else(|| "match pattern does not select a sum alternative".to_owned())?;
+                    .ok_or_else(|| {
+                        "match pattern does not select a sum alternative".to_owned()
+                    })?;
                 plan.sum_alternative = Some(index);
-                let CheckedType::Wrapper { representation, .. } = &sum.alternatives[index] else {
-                    return Err("checked sum alternative is not a wrapper type".to_owned());
+                if is_syntax_node(expected) {
+                    plan.identity = LoweredPatternIdentity::SyntaxNode;
+                }
+                let alternative = &sum.alternatives[index];
+                let representation = match alternative {
+                    CheckedType::Wrapper { representation, .. } => representation.as_ref().clone(),
+                    CheckedType::Opaque { .. } => match value_type {
+                        CheckedType::Wrapper {
+                            id, representation, ..
+                        } if *id == expected => representation.as_ref().clone(),
+                        _ => representation_of(alternative).ok_or_else(|| {
+                            format!("checked sum alternative has no representation: {alternative:?}")
+                        })?,
+                    },
+                    _ => {
+                        return Err("checked sum alternative is not a wrapper type".to_owned());
+                    }
                 };
-                children.push(representation.as_ref().clone());
+                children.push(representation);
             }
             CheckedType::Wrapper {
                 id, representation, ..
             } if *target == Some(*id) => {
-                plan.identity = LoweredPatternIdentity::Representation;
+                plan.identity = if is_syntax_node(*id) {
+                    LoweredPatternIdentity::SyntaxNode
+                } else {
+                    LoweredPatternIdentity::Representation
+                };
                 children.push(representation.as_ref().clone());
             }
             _ => {
@@ -3129,6 +3200,10 @@ pub(crate) struct LoweredTypeMetadata {
     pub module: ModuleId,
     pub builtin: Option<BuiltinType>,
     pub recursive_construction: Option<RecursiveConstruction>,
+    /// The type is a boxed syntax node with a hidden origin.
+    pub syntax_node: bool,
+    /// The type is an opaque syntax handle (`Syntax`, `ParseStream`, ...).
+    pub syntax_handle: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -3504,6 +3579,10 @@ impl LoweredProgram {
                 module: module_id,
                 builtin: resolved.builtin_type(id),
                 recursive_construction: resolved.recursive_construction(id),
+                syntax_node: declaration.syntax_node,
+                syntax_handle: resolved.builtin_type(id) == Some(BuiltinType::Syntax)
+                    || (resolved.program().standard_library_syntax() == Some(module_id)
+                        && declaration.kind() == TypeDeclarationKind::Opaque),
             };
             if let Err(diagnostic) = self.types.insert("type", id, origin, value) {
                 diagnostics.push(diagnostic);
@@ -3798,6 +3877,17 @@ impl LoweredProgram {
         );
         let has_global = facts.globals.contains(&symbol);
         let global_root = has_global && checked_type_holds_gc_pointer(&value_type);
+        let declared_name = facts.names.get(&symbol).cloned().unwrap_or_default();
+        // The syntax runtime lives in the host, so its entries have stable
+        // symbol names that the host table and the library share.
+        let name = if resolved.symbol_module(symbol) == resolved.program().standard_library_syntax()
+            && resolved.is_external_symbol(symbol)
+            && crate::macro_expand::is_macro_runtime_intrinsic(&declared_name)
+        {
+            crate::macro_runtime::intrinsics::symbol_name(&declared_name).to_owned()
+        } else {
+            declared_name
+        };
         let value = LoweredSymbol {
             initialization_state_type: module
                 .type_of_symbol(symbol)
@@ -3810,7 +3900,7 @@ impl LoweredProgram {
             origin: origin.clone(),
             semantic_id: symbol,
             module: module_id,
-            name: facts.names.get(&symbol).cloned().unwrap_or_default(),
+            name,
             owner,
             value_type,
             storage,
@@ -5494,6 +5584,8 @@ impl LoweredProgram {
                 &shape,
                 &|id| module.resolved().builtin_type(id),
                 module.string_representation(),
+                &|id| self.is_syntax_node_type_id(id),
+                &|ty| self.syntax_node_representation(ty).or_else(|| self.recursive_representation(ty)),
             )
             .map_err(|message| Diagnostic::new(syntax.span.clone(), message))?;
             let argument = self.lower_dereferenced_pattern(module, pattern, payload, depth + 1)?;
@@ -5534,6 +5626,8 @@ impl LoweredProgram {
                 &shape,
                 &|id| resolved.builtin_type(id),
                 module.string_representation(),
+                &|id| self.is_syntax_node_type_id(id),
+                &|ty| self.syntax_node_representation(ty).or_else(|| self.recursive_representation(ty)),
             )
             .map_err(|message| Diagnostic::new(syntax.span.clone(), message))?;
             let argument = self.lower_unprojected_pattern(module, pattern, &children[0])?;
@@ -5572,12 +5666,24 @@ impl LoweredProgram {
         };
         let resolved = module.resolved();
         let shape = pattern_plan_shape(resolved, pattern)?;
+        // A nominal pattern names the wrapper itself, so its subject keeps the
+        // wrapper form the test unboxes. Every other pattern sees the
+        // representation an enclosing nominal pattern selected.
+        let representation_subject;
+        let subject = if matches!(pattern, Pattern::Nominal(_)) {
+            subject
+        } else {
+            representation_subject = self.concrete_syntax_subject(subject);
+            &representation_subject
+        };
         let (test, child_subjects) = match pattern_test_plan(
             subject,
             &value_type,
             &shape,
             &|id| resolved.builtin_type(id),
             module.string_representation(),
+            &|id| self.is_syntax_node_type_id(id),
+            &|ty| self.syntax_node_representation(ty).or_else(|| self.recursive_representation(ty)),
         ) {
             Ok(result) => result,
             Err(message) => {
@@ -5597,7 +5703,7 @@ impl LoweredProgram {
                 }
             }
         };
-        let child_subject = |index: usize, child: &Pattern| {
+        let child_subject_type = |index: usize, child: &Pattern| {
             child_subjects
                 .get(index)
                 .cloned()
@@ -5620,7 +5726,8 @@ impl LoweredProgram {
             Pattern::Product(product) => {
                 let mut elements = Vec::with_capacity(product.elements.len());
                 for (index, element) in product.elements.iter().enumerate() {
-                    let element_subject = child_subject(index, element);
+                    let element_subject =
+                        self.concrete_syntax_subject(&child_subject_type(index, element));
                     elements.push(self.lower_pattern(module, element, &element_subject)?);
                 }
                 LoweredPatternKind::Product {
@@ -5634,7 +5741,8 @@ impl LoweredProgram {
                 name: nominal.name.clone(),
                 moved: nominal.moved,
                 argument: {
-                    let argument_subject = child_subject(0, &nominal.argument);
+                    let argument_subject =
+                        self.concrete_syntax_representation(&child_subject_type(0, &nominal.argument));
                     self.lower_pattern(module, &nominal.argument, &argument_subject)?
                 },
             },
@@ -5646,9 +5754,11 @@ impl LoweredProgram {
             },
             Pattern::At(at) => {
                 let binding_pattern = Pattern::Binding(at.binding.as_ref().clone());
-                let binding_subject = child_subject(0, &binding_pattern);
+                let binding_subject =
+                    self.concrete_syntax_subject(&child_subject_type(0, &binding_pattern));
                 let binding = self.lower_pattern(module, &binding_pattern, &binding_subject)?;
-                let inner_subject = child_subject(1, &at.pattern);
+                let inner_subject =
+                    self.concrete_syntax_subject(&child_subject_type(1, &at.pattern));
                 let pattern = self.lower_pattern(module, &at.pattern, &inner_subject)?;
                 LoweredPatternKind::At { binding, pattern }
             }
@@ -7196,10 +7306,17 @@ impl LoweredProgram {
         if resolved.primitive_macro_for(call.syntax.id).is_some() {
             return Ok(CallRoute::PrimitiveMacro);
         }
-        if let Some(symbol) = module.symbol_for(call.callee.syntax().id)
+        if let Some(symbol) = call_callee_symbol(module, &call.callee)
             && resolved.constructor_type(symbol).is_some()
         {
             return Ok(CallRoute::Constructor);
+        }
+        // A spread call flattens its product argument; an external function
+        // still has one native call and needs no closure adapter.
+        if let Some(symbol) = call_callee_symbol(module, &call.callee)
+            && resolved.is_external_symbol(symbol)
+        {
+            return Ok(CallRoute::External);
         }
         if let Some(plan) = module.juxtaposed_call_plan(call.syntax.id) {
             let expected = match plan.function.parameter.as_ref() {
@@ -7229,7 +7346,7 @@ impl LoweredProgram {
         if let Some(dispatch) = module.trait_dispatch_for(call.callee.syntax().id) {
             return self.classify_trait_call_route(module, dispatch);
         }
-        if let Some(symbol) = module.symbol_for(call.callee.syntax().id) {
+        if let Some(symbol) = call_callee_symbol(module, &call.callee) {
             if resolved.intrinsic_function(symbol).is_some() {
                 return Ok(CallRoute::Intrinsic);
             }
@@ -8018,7 +8135,7 @@ impl LoweredProgram {
         };
         let resolved = module.resolved();
         let callee_syntax = call.callee.syntax().id;
-        let symbol = module.symbol_for(callee_syntax);
+        let symbol = call_callee_symbol(module, &call.callee);
         let mut substitutions = CallSubstitutions::default();
         let mut initialization_checks = Vec::new();
         let mut evidence = None;
@@ -13038,6 +13155,8 @@ impl LoweredProgram {
             &shape,
             &|id| self.types.get(id).and_then(|meta| meta.builtin),
             self.semantic_ids.string_representation.as_ref(),
+            &|id| self.is_syntax_node_type_id(id),
+            &|ty| self.syntax_node_representation(ty).or_else(|| self.recursive_representation(ty)),
         ) {
             Ok((expected, child_subjects)) => {
                 if expected != pattern.test {
@@ -13058,7 +13177,13 @@ impl LoweredProgram {
                     let Some(child) = self.patterns.get(*child) else {
                         continue;
                     };
-                    if !unresolved(&child.test.subject) && child.test.subject != *subject {
+                    let representation = self.concrete_syntax_representation(subject);
+                    let wrapper = self.concrete_syntax_subject(subject);
+                    if !unresolved(&child.test.subject)
+                        && child.test.subject != *subject
+                        && child.test.subject != representation
+                        && child.test.subject != wrapper
+                    {
                         diagnostics.push(Diagnostic::new(
                             child.origin.span.clone(),
                             "nested pattern test plan subject disagrees with its parent",
@@ -14942,25 +15067,86 @@ fn symbol_function_type(module: &TypedModule, symbol: SymbolId) -> Option<Checke
 /// The checked function type of a call's callee, falling back to the callee
 /// symbol's declared function type when the occurrence is checked as a
 /// coerced type.
+/// The symbol a call's callee names, looking through an explicit type
+/// application to the function it instantiates.
+fn call_callee_symbol(
+    module: &TypedModule,
+    callee: &Expression,
+) -> Option<crate::SymbolId> {
+    module.symbol_for(callee.syntax().id).or_else(|| match callee {
+        Expression::TypeApplication(application) => {
+            module.symbol_for(application.value.syntax().id)
+        }
+        Expression::TypeAscription(ascription) => {
+            module.symbol_for(ascription.value.syntax().id)
+        }
+        _ => None,
+    })
+}
+
 fn checked_call_function_type(
     module: &TypedModule,
     call: &staple_syntax::CallExpression,
     origin: &Origin,
 ) -> Result<CheckedFunctionType, Diagnostic> {
-    if let Some(CheckedType::Function(function_type)) =
+    let mut function_type = if let Some(CheckedType::Function(function_type)) =
         module.type_of_expression(call.callee.syntax().id)
     {
-        return Ok(function_type.clone());
-    }
-    if let Some(symbol) = module.symbol_for(call.callee.syntax().id)
+        function_type.clone()
+    } else if let Some(symbol) = module.symbol_for(call.callee.syntax().id)
         && let Some(function_type) = symbol_function_type(module, symbol)
     {
-        return Ok(function_type);
+        function_type
+    } else {
+        return Err(Diagnostic::new(
+            origin.span.clone(),
+            "call has no checked function type",
+        ));
+    };
+    // The callee keeps the template's result when no argument names a type
+    // parameter, while the call's own checked type has the expected one.
+    if crate::typecheck::contains_inferred_type(&function_type.result) {
+        let actual = module
+            .type_of_expression(call.syntax.id)
+            .filter(|actual| !crate::typecheck::contains_inferred_type(actual))
+            .cloned()
+            .or_else(|| {
+                module
+                    .coercion_for(call.syntax.id)
+                    .map(|coercion| coercion.target.clone())
+                    .filter(|target| !crate::typecheck::contains_inferred_type(target))
+            });
+        if let Some(actual) = actual
+            && let Some(merged) =
+                crate::merge_types(function_type.result.as_ref().clone(), actual)
+        {
+            function_type.result = Box::new(merged);
+        }
     }
-    Err(Diagnostic::new(
-        origin.span.clone(),
-        "call has no checked function type",
-    ))
+    // A constructor's parameter is the result wrapper's representation. Once
+    // the result is known, fill the holes the argument could not name.
+    if crate::typecheck::contains_inferred_type(&function_type.parameter)
+        && let CheckedType::Wrapper { id, arguments, .. } =
+            function_type.result.as_ref()
+        && !crate::typecheck::contains_inferred_type(&function_type.result)
+        && let Some(representation) = module.type_representation(*id)
+    {
+        let declaration = module.resolved().type_declarations().get(id);
+        let substitutions = declaration
+            .into_iter()
+            .flat_map(|declaration| declaration.type_parameters.iter())
+            .filter_map(|parameter| module.resolved().type_parameter_for(parameter.syntax().id))
+            .zip(arguments.iter().cloned())
+            .collect();
+        let representation = crate::substitute_type(representation.clone(), &substitutions);
+        if let Some(merged) = crate::merge_types(
+            function_type.parameter.as_ref().clone(),
+            representation,
+        ) {
+            function_type.parameter = Box::new(merged);
+        }
+    }
+    Ok(function_type)
 }
 
 /// Whether an argument with `slots` elements fits a variadic parameter whose

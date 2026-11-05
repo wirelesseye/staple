@@ -2128,7 +2128,97 @@ impl LoweredProgram {
     /// and implementation catalogs. A concrete instance has no declared
     /// parameters, so only implementation-derived facts decide.
     pub(crate) fn concrete_is_copy(&self, value_type: &CheckedType) -> bool {
+        if self.is_syntax_node_type(value_type) || self.is_syntax_handle_type(value_type) {
+            // A boxed syntax node is a pointer and a syntax handle is a word:
+            // moving one copies the handle, and neither has a `Drop`.
+            return true;
+        }
         TraitSelectionContext::new(self, Vec::new()).is_copy(value_type)
+    }
+
+    /// Whether `value_type` is a standard-library syntax node with the
+    /// boxed representation.
+    pub(crate) fn is_syntax_node_type(&self, value_type: &CheckedType) -> bool {
+        let id = match value_type.desugared() {
+            CheckedType::Wrapper { id, .. } | CheckedType::Opaque { id, .. } => *id,
+            _ => return false,
+        };
+        self.is_syntax_node_type_id(id)
+    }
+
+    /// The wrapper representation an opaque syntax-node stand-in stands for.
+    /// Type checking leaves these placeholders in nested syntax types so that
+    /// resolving them stays finite; patterns and layouts need the real shape.
+    pub(crate) fn syntax_node_representation(
+        &self,
+        value_type: &CheckedType,
+    ) -> Option<CheckedType> {
+        let CheckedType::Opaque {
+            id, arguments, ..
+        } = value_type
+        else {
+            return None;
+        };
+        let metadata = self.types.get(*id)?;
+        if !metadata.syntax_node {
+            return None;
+        }
+        let representation = metadata.representation.clone()?;
+        let substitutions = metadata
+            .parameters
+            .iter()
+            .copied()
+            .zip(arguments.iter().cloned())
+            .collect();
+        Some(crate::substitute_type(representation, &substitutions))
+    }
+
+    /// `value_type` with an opaque syntax-node stand-in replaced by the
+    /// wrapper it names. A nominal pattern needs the wrapper so it can unbox.
+    pub(crate) fn concrete_syntax_subject(&self, value_type: &CheckedType) -> CheckedType {
+        let CheckedType::Opaque {
+            id,
+            name,
+            arguments,
+            ..
+        } = value_type
+        else {
+            return value_type.clone();
+        };
+        let Some(representation) = self.syntax_node_representation(value_type) else {
+            return value_type.clone();
+        };
+        CheckedType::Wrapper {
+            id: *id,
+            name: name.clone(),
+            arguments: arguments.clone(),
+            representation: Box::new(representation),
+            introduction: crate::typecheck::WrapperIntroduction::Explicit,
+        }
+    }
+
+    /// `value_type` with an opaque syntax-node stand-in replaced by the
+    /// representation a nominal pattern destructures.
+    pub(crate) fn concrete_syntax_representation(&self, value_type: &CheckedType) -> CheckedType {
+        self.syntax_node_representation(value_type)
+            .unwrap_or_else(|| value_type.clone())
+    }
+
+    /// Whether `id` names a boxed syntax node type.
+    pub(crate) fn is_syntax_node_type_id(&self, id: crate::TypeId) -> bool {
+        self.types
+            .get(id)
+            .is_some_and(|metadata| metadata.syntax_node)
+    }
+
+    /// Whether `value_type` is an opaque syntax handle.
+    pub(crate) fn is_syntax_handle_type(&self, value_type: &CheckedType) -> bool {
+        let CheckedType::Opaque { id, .. } = value_type else {
+            return false;
+        };
+        self.types
+            .get(*id)
+            .is_some_and(|metadata| metadata.syntax_handle)
     }
 
     /// The opaque runtime type identity of a fully substituted type, exactly
@@ -2165,7 +2255,7 @@ impl LoweredProgram {
             return None;
         };
         let metadata = self.types.get(*id)?;
-        if metadata.builtin.is_some() {
+        if metadata.builtin.is_some() || metadata.syntax_node {
             return None;
         }
         let representation = metadata.representation.as_ref()?;
@@ -2179,6 +2269,9 @@ impl LoweredProgram {
     }
 
     pub(crate) fn contains_recursive_payload(&self, ty: &CheckedType) -> bool {
+        if self.is_syntax_node_type(ty) {
+            return false;
+        }
         match ty {
             CheckedType::Opaque { .. } => self.recursive_representation(ty).is_some(),
             CheckedType::Wrapper { representation, .. } => {
@@ -2226,6 +2319,9 @@ impl LoweredProgram {
     pub(crate) fn concrete_needs_drop(&self, value_type: &CheckedType) -> bool {
         if self.runtime_opaque_kind(value_type).is_some() {
             return true;
+        }
+        if self.is_syntax_node_type(value_type) || self.is_syntax_handle_type(value_type) {
+            return false;
         }
         concrete_type_needs_drop(self, value_type)
     }

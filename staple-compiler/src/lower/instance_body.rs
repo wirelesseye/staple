@@ -1645,7 +1645,11 @@ impl<'a> BodyCloner<'a> {
                 test: super::LoweredPatternTestPlan::undecided(CheckedType::Error),
             });
         };
-        let concrete_subject = self.ty(subject);
+        let concrete_subject = if matches!(pattern.kind, super::LoweredPatternKind::Nominal { .. }) {
+            self.program.concrete_syntax_subject(&self.ty(subject))
+        } else {
+            self.program.concrete_syntax_representation(&self.ty(subject))
+        };
         let value_type = self.ty(&pattern.value_type);
         let shape = super::pattern_plan_shape_from_kind(&pattern.kind, pattern.test.identity);
         let string_representation = self.program.semantic_ids.string_representation.clone();
@@ -1655,6 +1659,8 @@ impl<'a> BodyCloner<'a> {
             &shape,
             &|id| self.program.types.get(id).and_then(|meta| meta.builtin),
             string_representation.as_ref(),
+            &|id| self.program.is_syntax_node_type_id(id),
+            &|ty| self.program.syntax_node_representation(ty).or_else(|| self.program.recursive_representation(ty)),
         ) {
             Ok(result) => result,
             Err(message) => {
@@ -4896,11 +4902,13 @@ impl<'a> BodyValidator<'a> {
         if !unresolved(&pattern.test.subject) && !unresolved(&pattern.value_type) {
             let shape = super::pattern_plan_shape_from_kind(&pattern.kind, pattern.test.identity);
             match super::pattern_test_plan(
-                &pattern.test.subject,
+                &self.program.concrete_syntax_subject(&pattern.test.subject),
                 &pattern.value_type,
                 &shape,
                 &|id| self.program.types.get(id).and_then(|meta| meta.builtin),
                 self.program.semantic_ids.string_representation.as_ref(),
+                &|id| self.program.is_syntax_node_type_id(id),
+                &|ty| self.program.syntax_node_representation(ty).or_else(|| self.program.recursive_representation(ty)),
             ) {
                 Ok((expected, child_subjects)) => {
                     if expected != pattern.test {
@@ -4921,7 +4929,14 @@ impl<'a> BodyValidator<'a> {
                         let Some(child) = self.body.patterns.get(*child) else {
                             continue;
                         };
-                        if !unresolved(&child.test.subject) && child.test.subject != *subject {
+                        let representation =
+                            self.program.concrete_syntax_representation(subject);
+                        let wrapper = self.program.concrete_syntax_subject(subject);
+                        if !unresolved(&child.test.subject)
+                            && child.test.subject != *subject
+                            && child.test.subject != representation
+                            && child.test.subject != wrapper
+                        {
                             self.report(
                                 child.origin.span.clone(),
                                 "instance pattern subject disagrees with its parent plan",

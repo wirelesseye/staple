@@ -206,6 +206,20 @@ pub(crate) fn build_check_program(
     macros: &[&CheckedMacro],
     next_syntax_id: &mut usize,
 ) -> (Program, TemplateTable) {
+    build_check_program_with(program, snapshot, package, macros, next_syntax_id, true)
+}
+
+/// Like [`build_check_program`], with a choice between whole dependency
+/// packages (the closure check) and only the closure items of every package
+/// (the harness's small executable programs).
+pub(crate) fn build_check_program_with(
+    program: &Program,
+    snapshot: &CheckSnapshot,
+    package: Option<PackageId>,
+    macros: &[&CheckedMacro],
+    next_syntax_id: &mut usize,
+    whole_dependencies: bool,
+) -> (Program, TemplateTable) {
     let syntax_module = program.standard_library_syntax();
     let dependencies = package_dependencies(program, package);
     // The program's own package is checked by its closures. A dependency's
@@ -213,8 +227,10 @@ pub(crate) fn build_check_program(
     // The standard library is always a dependency in a real build, even when a
     // corpus input is a standard-library file, so it is checked whole too.
     let standard_library_package = syntax_module.and_then(|module| program.package_of(module));
-    let whole = package != program.package_of(program.entry())
-        || (package.is_some() && package == standard_library_package);
+    let whole = whole_dependencies
+        && (package != program.package_of(program.entry())
+            || (package.is_some() && package == standard_library_package));
+    let closure_only = !whole_dependencies;
     let wanted = macros
         .iter()
         .flat_map(|checked| checked.closure.items.iter().copied())
@@ -236,7 +252,7 @@ pub(crate) fn build_check_program(
     for module in program.modules() {
         let owner = program.package_of(module.id);
         let expanded = expanded_of(module.id);
-        if owner == package && !whole {
+        if closure_only || (owner == package && !whole) {
             let mut positioned = std::mem::take(&mut own_items[module.id.0]);
             positioned.sort_by_key(|(position, _)| *position);
             let mut kept = Vec::new();
@@ -288,12 +304,14 @@ pub(crate) fn build_check_program(
             match item {
                 Item::Submodule(submodule) => {
                     let mut submodule = submodule.clone();
-                    if owner == package && !whole {
+                    if closure_only || (owner == package && !whole) {
                         submodule.module.items.clear();
                         kept.push(Item::Submodule(submodule));
                     }
                 }
-                Item::UseDeclaration(declaration) if owner == package && !whole => {
+                Item::UseDeclaration(declaration)
+                    if closure_only || (owner == package && !whole) =>
+                {
                     let mut declaration = declaration.clone();
                     let target = check_import_target(program, module.id, &declaration, &module_names);
                     if let Some(target) = target
@@ -527,22 +545,10 @@ pub(crate) fn check_closures(program: &Program, analysis: &mut MacroAnalysis) ->
         return Vec::new();
     };
     let mut next_syntax_id = analysis.next_syntax_id;
-    let mut packages: Vec<Option<PackageId>> = Vec::new();
-    for checked in &snapshot.macros {
-        let package = program.package_of(checked.module);
-        if !packages.contains(&package) {
-            packages.push(package);
-        }
-    }
     let mut diagnostics = Vec::new();
-    for package in packages {
-        let macros = snapshot
-            .macros
-            .iter()
-            .filter(|checked| program.package_of(checked.module) == package)
-            .collect::<Vec<_>>();
-        let (check, _templates) =
-            build_check_program(program, &snapshot, package, &macros, &mut next_syntax_id);
+    for (_package, macros, check, _templates) in
+        check_programs(program, &snapshot, &mut next_syntax_id)
+    {
         // A package that holds only closure items does not meet the contract
         // the standard library has with the compiler, which is no finding.
         let partial = |diagnostic: &Diagnostic| {
@@ -589,6 +595,36 @@ pub(crate) fn check_closures(program: &Program, analysis: &mut MacroAnalysis) ->
         }
     }
     diagnostics
+}
+
+/// The check program of each package that has checked macros, in the order the
+/// packages first appear. The macros come from `snapshot`; `next_syntax_id` is
+/// advanced past every generated identity.
+pub(crate) fn check_programs<'a>(
+    program: &Program,
+    snapshot: &'a CheckSnapshot,
+    next_syntax_id: &mut usize,
+) -> Vec<(Option<PackageId>, Vec<&'a CheckedMacro>, Program, TemplateTable)> {
+    let mut packages: Vec<Option<PackageId>> = Vec::new();
+    for checked in &snapshot.macros {
+        let package = program.package_of(checked.module);
+        if !packages.contains(&package) {
+            packages.push(package);
+        }
+    }
+    packages
+        .into_iter()
+        .map(|package| {
+            let macros = snapshot
+                .macros
+                .iter()
+                .filter(|checked| program.package_of(checked.module) == package)
+                .collect::<Vec<_>>();
+            let (check, templates) =
+                build_check_program(program, snapshot, package, &macros, next_syntax_id);
+            (package, macros, check, templates)
+        })
+        .collect()
 }
 
 #[cfg(test)]

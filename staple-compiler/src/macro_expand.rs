@@ -5,9 +5,9 @@ use std::{
     sync::Arc,
 };
 
-mod check_program;
+pub(crate) mod check_program;
 mod closure;
-mod lower_quote;
+pub(crate) mod lower_quote;
 mod parse;
 mod scan;
 mod staged;
@@ -67,6 +67,7 @@ enum MacroKind {
     TrackCaller,
     SizedOpaque,
     RecursiveConstructor,
+    SyntaxNode,
     Quote,
     ParseQuote,
 }
@@ -2388,6 +2389,12 @@ impl MacroExpander {
                                 && declaration.name == "recursive_constructor"
                             {
                                 MacroKind::RecursiveConstructor
+                            } else if standard_library_directory.as_ref().is_some_and(|root| {
+                                source_module.path == root.join("annotation.sta")
+                            }) && declaration.modifier
+                                && declaration.name == "syntax_node"
+                            {
+                                MacroKind::SyntaxNode
                             } else if let Some(value) = &declaration.value {
                                 MacroKind::User(value.clone())
                             } else {
@@ -4664,6 +4671,7 @@ impl MacroExpander {
                 if matches!(
                     definition.key.name.as_str(),
                     "recursive_constructor"
+                        | "syntax_node"
                         | "doc"
                         | "feature"
                         | "no_prelude"
@@ -4677,6 +4685,7 @@ impl MacroExpander {
                         | MacroKind::TrackCaller
                         | MacroKind::SizedOpaque
                         | MacroKind::RecursiveConstructor
+                        | MacroKind::SyntaxNode
                 ) {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
@@ -4767,6 +4776,7 @@ impl MacroExpander {
                 }
                 MacroKind::SizedOpaque
                 | MacroKind::RecursiveConstructor
+                | MacroKind::SyntaxNode
                 | MacroKind::TrackCaller
                     if definition.parameters != [MetaType::Item]
                         || definition.result != MetaType::Item
@@ -4785,7 +4795,8 @@ impl MacroExpander {
                 | MacroKind::NoPrelude
                 | MacroKind::TrackCaller
                 | MacroKind::SizedOpaque
-                | MacroKind::RecursiveConstructor => {}
+                | MacroKind::RecursiveConstructor
+                | MacroKind::SyntaxNode => {}
                 MacroKind::User(_) if definition.declaration.value.is_none() => {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
@@ -5404,6 +5415,18 @@ impl MacroExpander {
                 ));
                 return None;
             };
+            declaration.recursive_constructor = true;
+            return Some(ModifierChainResult::Item(current));
+        }
+        if matches!(definition.kind, MacroKind::SyntaxNode) {
+            let Some(declaration) = modified_type_declaration_mut(&mut current) else {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span,
+                    "`@syntax_node` may only modify a type declaration",
+                ));
+                return None;
+            };
+            declaration.syntax_node = true;
             declaration.recursive_constructor = true;
             return Some(ModifierChainResult::Item(current));
         }
@@ -6851,7 +6874,8 @@ impl MacroExpander {
             | MacroKind::NoPrelude
             | MacroKind::TrackCaller
             | MacroKind::SizedOpaque
-            | MacroKind::RecursiveConstructor => {
+            | MacroKind::RecursiveConstructor
+            | MacroKind::SyntaxNode => {
                 unreachable!("built-in modifiers are applied directly")
             }
             MacroKind::Quote => {

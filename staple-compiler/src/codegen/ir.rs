@@ -132,6 +132,109 @@ impl<'program, 'context> Backend<'program, 'context> {
         self.build_gc_allocation(size, "gc.allocate", span)
     }
 
+    /// The layout of a boxed syntax node: its representation followed by the
+    /// hidden origin.
+    pub(crate) fn syntax_node_box_type(
+        &self,
+        representation: BasicTypeEnum<'context>,
+    ) -> StructType<'context> {
+        self.context
+            .struct_type(&[representation, self.context.i64_type().into()], false)
+    }
+
+    /// Allocates a syntax node box holding `representation` and `origin`
+    /// (zero when `None`).
+    pub(crate) fn build_syntax_node_box(
+        &self,
+        representation: BasicValueEnum<'context>,
+        origin: Option<IntValue<'context>>,
+        span: Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let box_type = self.syntax_node_box_type(representation.get_type());
+        let size = self.target_data.get_abi_size(&box_type);
+        let pointer = self.build_gc_allocation(
+            self.size_type.const_int(size, false),
+            "syntax.node",
+            span.clone(),
+        )?;
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let typed = self
+            .builder
+            .build_pointer_cast(pointer, pointer_type, "syntax.node.typed")
+            .map_err(compiler_diagnostic)?;
+        let field = self
+            .builder
+            .build_struct_gep(box_type, typed, 0, "syntax.node.representation")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(field, representation)
+            .map_err(compiler_diagnostic)?;
+        let origin_field = self
+            .builder
+            .build_struct_gep(box_type, typed, 1, "syntax.node.origin")
+            .map_err(compiler_diagnostic)?;
+        let origin = origin.unwrap_or_else(|| self.context.i64_type().const_zero());
+        self.builder
+            .build_store(origin_field, origin)
+            .map_err(compiler_diagnostic)?;
+        Ok(typed)
+    }
+
+    /// The representation stored in a syntax node box.
+    pub(crate) fn load_syntax_node_representation(
+        &self,
+        pointer: PointerValue<'context>,
+        representation: BasicTypeEnum<'context>,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let box_type = self.syntax_node_box_type(representation);
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let typed = self
+            .builder
+            .build_pointer_cast(pointer, pointer_type, "syntax.node.typed")
+            .map_err(compiler_diagnostic)?;
+        let field = self
+            .builder
+            .build_struct_gep(box_type, typed, 0, "syntax.node.representation")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_load(representation, field, "syntax.node.value")
+            .map_err(compiler_diagnostic)
+    }
+
+    /// The origin stored in a syntax node box.
+    pub(crate) fn load_syntax_node_origin(
+        &self,
+        pointer: PointerValue<'context>,
+        representation: BasicTypeEnum<'context>,
+    ) -> CodeGenerationResult<IntValue<'context>> {
+        let box_type = self.syntax_node_box_type(representation);
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let typed = self
+            .builder
+            .build_pointer_cast(pointer, pointer_type, "syntax.node.typed")
+            .map_err(compiler_diagnostic)?;
+        let field = self
+            .builder
+            .build_struct_gep(box_type, typed, 1, "syntax.node.origin")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_load(self.context.i64_type(), field, "syntax.node.origin")
+            .map_err(compiler_diagnostic)
+            .map(|value| value.into_int_value())
+    }
+
+    /// A copy of the box at `pointer` with a different origin.
+    pub(crate) fn build_syntax_node_with_origin(
+        &self,
+        pointer: PointerValue<'context>,
+        representation: BasicTypeEnum<'context>,
+        origin: IntValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let value = self.load_syntax_node_representation(pointer, representation)?;
+        self.build_syntax_node_box(value, Some(origin), span)
+    }
+
     /// Attaches a finalizer to a GC allocation.
     pub(crate) fn set_gc_finalizer(
         &self,
