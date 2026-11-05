@@ -494,8 +494,8 @@ Update this section as you work (see "Rules for the implementor").
 
 | Task | Status | Commit | Notes |
 |---|---|---|---|
-| 1. JIT harness and lowering inventory | partly done | this commit | `macro_runtime/harness.rs` builds, checks and lowers the standard library's check program. Generic foreign intrinsics now emit trapping stubs cast to each call's signature. Whole-program emission stops at one LLVM verifier failure, recorded in Findings. |
-| 2. Boxed nodes | partly done | this commit | `@syntax_node` marks the node types. Lowering and codegen give them a pointer-sized box `(representation, origin)`, constructors allocate one, nominal patterns unbox them, product patterns select sum alternatives by width, field reads load the representation, and `__origin`/`__with_origin` lower inline. The compiled-code proof waits on the LLVM verifier failure recorded in Findings. |
+| 1. JIT harness and lowering inventory | partly done | `8c30bf5` | `macro_runtime/harness.rs` builds, checks, lowers and JITs the whole check program. Plain functions and empty-sequence construction run. Generic foreign intrinsics emit trapping stubs cast to each call's signature. Whole-program emit is about 6.7 s; a full harness test is about 7.5 s. |
+| 2. Boxed nodes | blocked | this commit | `@syntax_node` marks the node types. Lowering and codegen give them a pointer-sized box `(representation, origin)`, constructors allocate one, nominal patterns unbox them, product patterns select sum alternatives by width, field reads load the representation, and `__origin`/`__with_origin` lower inline. The proof fails on a one-element `Sequence` because inferred fields in the constructor sum are never filled; the reduced case is in Findings. |
 | 3. Ownership of syntax | not started | | |
 | 4. Arena and core intrinsics | not started | | |
 | 5. Node views and rebuilding | not started | | |
@@ -574,5 +574,27 @@ or adapter constructor call boxes its representation. Pattern tests load the
 representation before matching, and `Sequence` alternatives are selected by
 tag. `__origin` and `__with_origin` now lower inline as `SyntaxOrigin` and
 `SyntaxWithOrigin` expressions, and field reads through a boxed node lower as
-`SyntaxNodeField` accesses. The compiled-code proof still waits on the LLVM
-verifier failure recorded above, so no JIT result exists yet.
+`SyntaxNodeField` accesses.
+
+The whole-program JIT now runs plain compiled functions and constructs an
+empty `Sequence` successfully. The proof fails on a one-element sequence. A
+reduced case:
+
+```staple
+let empty: Sequence<Ident<String>> = Sequence ()
+let one: Sequence<Ident<String>> = Sequence (first: Ident "a", rest: empty)
+match one { Sequence (_, _) => 1, _ => 2 }
+```
+
+returns `2`, so the product argument was not injected into the sum
+representation. The constructor's checked parameter still says
+`() | (first: _, rest: Sequence<_>)`: the `_` fields are never filled from the
+argument or from the concrete `Sequence<Ident<String>>` result. The current
+`Inferred` coercion shortcut treats the product-to-sum coercion as the
+identity, so the box holds the product instead of a tagged sum. This is the
+task 2 proof failure, and it stops the phase at the planned gate.
+
+A separate general codegen bug found on the way is fixed: a call whose own
+result is `Never` was not treated as divergent when the surrounding expression
+had the expected non-`Never` type, so `compile_error` arms put an empty value
+into a match phi.

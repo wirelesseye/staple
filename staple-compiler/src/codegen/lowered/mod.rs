@@ -3483,7 +3483,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             || expression
                 .coercion
                 .as_ref()
-                .is_some_and(|coercion| coercion.source == CheckedType::Never);
+                .is_some_and(|coercion| coercion.source == CheckedType::Never)
+            // A call whose own result is `Never` diverges even when its
+            // surrounding expression was checked at the expected type.
+            || match &expression.kind {
+                LoweredExpressionKind::Call(call) => self
+                    .view
+                    .call(owner, *call)
+                    .is_some_and(|call| call.result_type == CheckedType::Never),
+                _ => false,
+            };
         if diverges {
             self.backend
                 .builder

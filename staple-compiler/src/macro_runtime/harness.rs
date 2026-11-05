@@ -245,7 +245,7 @@ mod tests {
 
 
     #[test]
-    #[ignore = "whole-program emission fails LLVM verification"]
+    #[ignore = "blocked on inferred fields in a sequence constructor"]
     fn compiled_code_allocates_with_the_collector() {
         let run = check_run_for(concat!(
             "use std.syntax.*\n",
@@ -262,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "whole-program emission fails LLVM verification"]
+    #[ignore = "blocked on inferred fields in a sequence constructor"]
     fn compiled_code_constructs_an_empty_sequence() {
         let run = check_run_for(concat!(
             "use std.syntax.*\n",
@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "whole-program emission fails LLVM verification"]
+    #[ignore = "blocked on inferred fields in a sequence constructor"]
     fn compiled_code_calls_a_plain_function() {
         let run = check_run_for(concat!(
             "use std.syntax.*\n",
@@ -302,7 +302,7 @@ mod tests {
     /// Compiled code constructs a boxed sequence, matches its alternatives by
     /// width, and reads a bound field.
     #[test]
-    #[ignore = "whole-program emission fails LLVM verification"]
+    #[ignore = "blocked on inferred fields in a sequence constructor"]
     fn compiled_code_constructs_and_matches_a_sequence() {
         let run = check_run_for(concat!(
             "use std.syntax.*\n",
