@@ -884,7 +884,10 @@ impl LoweredCoercionPlan {
             return Ok(LoweredCoercionPlan::Identity);
         }
         // An inferred position adopts the source's type, so the runtime
-        // representation does not change.
+        // representation does not change. This stays until every generic
+        // constructor call completes its type parameters in the checker;
+        // removing it exposes product-to-sum coercions with `Inferred`
+        // fields throughout the standard library.
         if crate::contains_inferred_type(source) || crate::contains_inferred_type(target) {
             return Ok(LoweredCoercionPlan::Identity);
         }
@@ -892,6 +895,10 @@ impl LoweredCoercionPlan {
             (CheckedType::Wrapper { id: source_id, .. }, CheckedType::Wrapper { id: target_id, .. }) if source_id == target_id);
         if source == target
             || (same_nominal && crate::merge_types(source.clone(), target.clone()).is_some())
+            || (matches!(
+                (source, target),
+                (CheckedType::Product(_), CheckedType::Product(_))
+            ) && crate::merge_types(source.clone(), target.clone()).is_some())
             || matches!(
                 (source, target),
                 (CheckedType::StringLiteralSet(_), CheckedType::String)

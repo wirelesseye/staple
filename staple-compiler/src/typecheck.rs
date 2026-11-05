@@ -14188,6 +14188,10 @@ impl TypeChecker {
                         ));
                         return CheckedType::Error;
                     }
+                    let constructor_callee = module
+                        .symbol_for(call.callee.syntax().id)
+                        .and_then(|symbol| module.constructor_type(symbol))
+                        .is_some();
                     let argument_expected_owned = match &raw_callee_type {
                         CheckedType::Function(function) if function.is_slotted() => {
                             match function.parameter.as_ref() {
@@ -14414,7 +14418,7 @@ impl TypeChecker {
                         }
                         value
                     };
-                    let argument_type = if let CheckedType::Forall(scheme) = argument_type {
+                    let mut argument_type = if let CheckedType::Forall(scheme) = argument_type {
                         if argument_expected.is_none_or(|ty| matches!(ty, CheckedType::Inferred)) {
                             let body = *scheme.body;
                             self.expression_types
@@ -15003,7 +15007,98 @@ impl TypeChecker {
                             );
                         }
                     }
+                    // A constructor's parameter is the representation of its
+                    // result. A bare product argument is one alternative of a
+                    // sum representation, so ordinary parameter inference
+                    // cannot solve the element types through it. Solve them
+                    // from the expected result and from the one alternative
+                    // the argument matches, then record the concrete call
+                    // type for lowering.
+                    let constructor_call = constructor_callee;
+                    if constructor_call {
+                        let template = match &raw_callee_type {
+                            CheckedType::Forall(scheme) => match scheme.body.as_ref() {
+                                CheckedType::Function(template) => Some(template.clone()),
+                                _ => None,
+                            },
+                            CheckedType::Function(template) => Some(template.clone()),
+                            _ => None,
+                        };
+                        if let Some(template) = template {
+                        let mut substitutions = HashMap::new();
+                        if let Some(expected) = expected {
+                            infer_type_parameters(
+                                &template.result,
+                                expected,
+                                &mut substitutions,
+                            );
+                        }
+                        let argument_source = self
+                            .expression_coercions
+                            .get(&call.argument.syntax().id)
+                            .map(|coercion| coercion.source.clone())
+                            .unwrap_or_else(|| argument_type.clone());
+                        if !matches!(argument_source.desugared(), CheckedType::Sum(_))
+                            && let CheckedType::Sum(sum) = template.parameter.desugared()
+                        {
+                            let matches = sum
+                                .alternatives
+                                .iter()
+                                .filter(|alternative| {
+                                    infer_type_parameters(
+                                        alternative,
+                                        &argument_source,
+                                        &mut HashMap::new(),
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            if let [alternative] = matches.as_slice() {
+                                infer_type_parameters(
+                                    alternative,
+                                    &argument_source,
+                                    &mut substitutions,
+                                );
+                            } else if matches.len() > 1 {
+                                self.diagnostics.push(Diagnostic::new(
+                                    call.callee.syntax().span.clone(),
+                                    "could not infer all compile-time parameters: the argument matches more than one alternative",
+                                ));
+                                return CheckedType::Error;
+                            }
+                        }
+                        let instantiated = substitute_type(
+                            CheckedType::Function(template.clone()),
+                            &substitutions,
+                        );
+                        if !contains_type_parameter(&instantiated)
+                            && !contains_inferred_type(&instantiated)
+                        {
+                            raw_callee_type = instantiated.clone();
+                            self.expression_types
+                                .insert(call.callee.syntax().id, instantiated.clone());
+                            // The argument was checked against the erased
+                            // parameter. Re-check it against the concrete one
+                            // so its sum injection and record types are known.
+                            if contains_inferred_type(&argument_type)
+                                && let CheckedType::Function(function) = &instantiated
+                            {
+                                let before = self.diagnostics.len();
+                                let checked = self.check_expression_expected(
+                                    module,
+                                    &call.argument,
+                                    Some(&function.parameter),
+                                );
+                                if self.diagnostics.len() == before
+                                    && !contains_inferred_type(&checked)
+                                {
+                                    argument_type = checked;
+                                }
+                            }
+                        }
+                        }
+                    }
                     if let Some(expected_result) = expected
+                        && !constructor_call
                         && !matches!(expected_result.desugared(), CheckedType::Sum(_))
                         && implicit_wrapper_representation(expected_result).is_none()
                         && !checked_type_contains_slice(&raw_callee_type)

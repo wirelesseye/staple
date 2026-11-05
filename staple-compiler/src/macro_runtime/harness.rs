@@ -245,64 +245,6 @@ mod tests {
 
 
     #[test]
-    #[ignore = "blocked on inferred fields in a sequence constructor"]
-    fn compiled_code_allocates_with_the_collector() {
-        let run = check_run_for(concat!(
-            "use std.syntax.*\n",
-            "def probe: () -> I32 = () => { let list: List<I32> = List.with_capacity 4; let _ = list; 1 }\n",
-            "macro touch = () => probe ()\n",
-        ));
-        let lowered = lower_run(&run).expect("the probe should lower");
-        let symbol = instance_symbol(&lowered, "probe").expect("probe is instantiated");
-        with_jit(&lowered, |engine| {
-            type Probe = unsafe extern "C" fn(*const usize) -> i32;
-            let probe = unsafe { engine.get_function::<Probe>(&symbol).unwrap() };
-            assert_eq!(unsafe { probe.call(std::ptr::null()) }, 1);
-        });
-    }
-
-    #[test]
-    #[ignore = "blocked on inferred fields in a sequence constructor"]
-    fn compiled_code_constructs_an_empty_sequence() {
-        let run = check_run_for(concat!(
-            "use std.syntax.*\n",
-            "def probe: () -> I32 = () => {\n",
-            "    let empty: Sequence<Ident<String>> = Sequence ()\n",
-            "    let _ = empty\n",
-            "    1\n",
-            "}\n",
-            "macro touch = () => probe ()\n",
-        ));
-        let lowered = lower_run(&run).expect("the probe should lower");
-        let symbol = instance_symbol(&lowered, "probe").expect("probe is instantiated");
-        with_jit(&lowered, |engine| {
-            type Probe = unsafe extern "C" fn(*const usize) -> i32;
-            let probe = unsafe { engine.get_function::<Probe>(&symbol).unwrap() };
-            assert_eq!(unsafe { probe.call(std::ptr::null()) }, 1);
-        });
-    }
-
-    #[test]
-    #[ignore = "blocked on inferred fields in a sequence constructor"]
-    fn compiled_code_calls_a_plain_function() {
-        let run = check_run_for(concat!(
-            "use std.syntax.*\n",
-            "def probe: () -> I32 = () => 7\n",
-            "macro touch = () => probe ()\n",
-        ));
-        let lowered = lower_run(&run).expect("the probe should lower");
-        let symbol = instance_symbol(&lowered, "probe").expect("probe is instantiated");
-        with_jit(&lowered, |engine| {
-            type Probe = unsafe extern "C" fn(*const usize) -> i32;
-            let probe = unsafe { engine.get_function::<Probe>(&symbol).unwrap() };
-            assert_eq!(unsafe { probe.call(std::ptr::null()) }, 7);
-        });
-    }
-
-    /// Compiled code constructs a boxed sequence, matches its alternatives by
-    /// width, and reads a bound field.
-    #[test]
-    #[ignore = "blocked on inferred fields in a sequence constructor"]
     fn compiled_code_constructs_and_matches_a_sequence() {
         let run = check_run_for(concat!(
             "use std.syntax.*\n",

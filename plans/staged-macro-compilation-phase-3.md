@@ -494,8 +494,8 @@ Update this section as you work (see "Rules for the implementor").
 
 | Task | Status | Commit | Notes |
 |---|---|---|---|
-| 1. JIT harness and lowering inventory | partly done | `8c30bf5` | `macro_runtime/harness.rs` builds, checks, lowers and JITs the whole check program. Plain functions and empty-sequence construction run. Generic foreign intrinsics emit trapping stubs cast to each call's signature. Whole-program emit is about 6.7 s; a full harness test is about 7.5 s. |
-| 2. Boxed nodes | blocked | this commit | `@syntax_node` marks the node types. Lowering and codegen give them a pointer-sized box `(representation, origin)`, constructors allocate one, nominal patterns unbox them, product patterns select sum alternatives by width, field reads load the representation, and `__origin`/`__with_origin` lower inline. The proof fails on a one-element `Sequence` because inferred fields in the constructor sum are never filled; the reduced case is in Findings. |
+| 1. JIT harness and lowering inventory | done | `8c30bf5` | `macro_runtime/harness.rs` builds, checks, lowers and JITs the whole check program. Plain functions and empty-sequence construction run. Generic foreign intrinsics emit trapping stubs cast to each call's signature. Whole-program emit is about 6.7 s; a full harness test is about 7.5 s. |
+| 2. Boxed nodes | partly done | this commit | `@syntax_node` marks the node types. Lowering and codegen give them a pointer-sized box `(representation, origin)`, constructors allocate one, nominal patterns unbox them, product patterns select sum alternatives by width, field reads load the representation, and `__origin`/`__with_origin` lower inline. The whole-program proof runs; refinement patterns and field updates still need tests, and the `Inferred` coercion shortcut still covers 145 generic constructor calls. |
 | 3. Ownership of syntax | not started | | |
 | 4. Arena and core intrinsics | not started | | |
 | 5. Node views and rebuilding | not started | | |
@@ -510,9 +510,10 @@ Update this section as you work (see "Rules for the implementor").
 
 ## Measurements
 
-_None yet._ For each one, record what was measured, the result, the machine, the
-commit and the command. Include per-call cost against the interpreter (task 11) and
-encoded sizes (task 10).
+- **Whole-program JIT, proof test:** about 8.6 s from check program to result on
+  the development machine (macOS, arm64), commit `this commit`, command
+  `cargo test -p staple-compiler --lib macro_runtime::harness::tests::compiled_code_constructs_and_matches_a_sequence`.
+- **Whole-program emit:** about 6.7 s in the test profile.
 
 ## Findings
 
@@ -576,23 +577,42 @@ tag. `__origin` and `__with_origin` now lower inline as `SyntaxOrigin` and
 `SyntaxWithOrigin` expressions, and field reads through a boxed node lower as
 `SyntaxNodeField` accesses.
 
-The whole-program JIT now runs plain compiled functions and constructs an
-empty `Sequence` successfully. The proof fails on a one-element sequence. A
-reduced case:
+The whole-program JIT now runs the proof: a `Sequence<Ident<String>>` is
+constructed, matched by alternative, and its fields are read. The earlier
+failure was not a box or representation problem. It reproduces without syntax
+types:
 
 ```staple
-let empty: Sequence<Ident<String>> = Sequence ()
-let one: Sequence<Ident<String>> = Sequence (first: Ident "a", rest: empty)
-match one { Sequence (_, _) => 1, _ => 2 }
+pub type Empty wrap pub ()
+pub type Pair<Element> wrap pub Empty | (first: Element, rest: I32)
+
+def compute: () -> I32 = () => {
+    let one: Pair<I32> = Pair (first: 5, rest: 0)
+    classify one
+}
 ```
 
-returns `2`, so the product argument was not injected into the sum
-representation. The constructor's checked parameter still says
-`() | (first: _, rest: Sequence<_>)`: the `_` fields are never filled from the
-argument or from the concrete `Sequence<Ident<String>>` result. The current
-`Inferred` coercion shortcut treats the product-to-sum coercion as the
-identity, so the box holds the product instead of a tagged sum. This is the
-task 2 proof failure, and it stops the phase at the planned gate.
+A constructor call was checked by erasing its element parameter to
+`Inferred`; the expected result was only used for numeric literals, and a
+product argument never solved an element through a sum parameter. Top-level
+lets happened to work because their expected result reached the call
+differently from a `def` body. The checker now solves a constructor call's
+parameters from the expected result and, when the argument has one matching
+sum alternative, from that alternative. It also records the concrete function
+type on the callee, and re-checks the argument against the instantiated
+parameter. Tests for the annotated `def`, constructor result, top-level let,
+unannotated let, ambiguous alternative and wrong annotation are in
+`staple-compiler/tests/constructor_inference.rs`.
+
+The `Inferred` coercion shortcut is **still present**. Removing it now exposes
+145 product-to-sum coercions with inferred fields in generic standard-library
+constructor calls. They need the same checker completion before the shortcut
+can become an internal error; that is the next checker task.
+
+The proof runs under the whole-program harness in about 8.6 s. The expansion
+comparison against the start of the phase matches 231 of 232 inputs; the only
+difference is `stdlib/annotation.sta`, which gained the `@syntax_node`
+declaration. The closure check reports 232 inputs and no diagnostics.
 
 A separate general codegen bug found on the way is fixed: a call whose own
 result is `Never` was not treated as divergent when the surrounding expression
