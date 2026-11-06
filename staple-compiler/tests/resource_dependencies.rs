@@ -584,7 +584,7 @@ fn type_declaration_items_expose_the_dependency_clause() {
         r#"
 use std.syntax.(Item, ResourceDependency, Sequence, TypeDeclarationItem, WrapperBody)
 type Logger wrap ()
-macro @inspect: Item -> Item = item => match item {
+macro @inspect: move Item -> Item = move item => match item {
     TypeDeclarationItem(_, _, _, Some (WrapperBody _), dependencies) => {
         let entries: Sequence<ResourceDependency> = dependencies
         item
@@ -608,7 +608,7 @@ fn type_declaration_items_expose_dependency_mutability() {
 use std.syntax.(Item, ResourceDependency, Sequence, TypeDeclarationItem, WrapperBody)
 type Logger wrap ()
 type Clock wrap ()
-macro @inspect: Item -> Item = item => match item {
+macro @inspect: move Item -> Item = move item => match item {
     TypeDeclarationItem(
         _, _, _, Some (WrapperBody _),
         Sequence (ResourceDependency (_, first), ResourceDependency (_, second)),

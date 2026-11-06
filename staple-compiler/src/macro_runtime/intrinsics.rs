@@ -45,6 +45,7 @@ pub(crate) const INTRINSICS: &[Intrinsic] = &[
     intrinsic("__quote", "__staple_syntax_quote"),
     intrinsic("__splice_node", "__staple_syntax_splice_node"),
     intrinsic("__splice_join", "__staple_syntax_splice_join"),
+    intrinsic("__clone_syntax", "__staple_syntax_clone_syntax"),
     intrinsic("__origin", "__staple_syntax_origin"),
     intrinsic("__with_origin", "__staple_syntax_with_origin"),
 ];
@@ -76,6 +77,7 @@ pub(crate) fn symbol_name(name: &str) -> &'static str {
         "__quote" => "__staple_syntax_quote",
         "__splice_node" => "__staple_syntax_splice_node",
         "__splice_join" => "__staple_syntax_splice_join",
+        "__clone_syntax" => "__staple_syntax_clone_syntax",
         "__origin" => "__staple_syntax_origin",
         "__with_origin" => "__staple_syntax_with_origin",
         _ => "",
@@ -130,6 +132,7 @@ mod tests {
             "__quote",
             "__splice_node",
             "__splice_join",
+            "__clone_syntax",
             "__origin",
             "__with_origin",
         ] {

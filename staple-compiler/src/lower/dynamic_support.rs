@@ -876,7 +876,8 @@ impl SupportWalker<'_> {
             }
         }
         match &expression.kind {
-            LoweredExpressionKind::SyntaxOrigin { .. }
+            LoweredExpressionKind::SyntaxClone { .. }
+            | LoweredExpressionKind::SyntaxOrigin { .. }
             | LoweredExpressionKind::SyntaxWithOrigin { .. } => {
                 self.reject(RejectionReason::RecursiveConstruction);
             }

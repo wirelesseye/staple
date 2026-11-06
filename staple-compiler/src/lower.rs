@@ -1107,6 +1107,8 @@ pub(crate) enum LoweredExpressionKind {
     Coro(LoweredCoroId),
     /// An owned `await` suspension site in its owning coroutine plan.
     Await(LoweredAwaitId),
+    /// A syntax node copied without rebuilding it.
+    SyntaxClone { value: ExpressionId },
     /// The hidden origin of a boxed syntax node.
     SyntaxOrigin { value: ExpressionId },
     /// A boxed syntax node with a replacement origin.
@@ -8204,6 +8206,9 @@ impl LoweredProgram {
                 }
                 let value =
                     self.lower_expression(module, owner, context, arguments[0])?;
+                if name == "__staple_syntax_clone_syntax" {
+                    return Ok(LoweredExpressionKind::SyntaxClone { value });
+                }
                 if name == "__staple_syntax_origin" {
                     return Ok(LoweredExpressionKind::SyntaxOrigin { value });
                 }
@@ -11103,6 +11108,7 @@ impl LoweredProgram {
                     ));
                 }
                 LoweredExpressionKind::String(_)
+                | LoweredExpressionKind::SyntaxClone { .. }
                 | LoweredExpressionKind::SyntaxOrigin { .. }
                 | LoweredExpressionKind::SyntaxWithOrigin { .. } => {}
                 LoweredExpressionKind::Integer(integer) => {
@@ -12674,7 +12680,8 @@ impl LoweredProgram {
             LoweredExpressionKind::RepeatedProduct(repeated) => {
                 self.visit_owned_expression(repeated.expression, reached);
             }
-            LoweredExpressionKind::SyntaxOrigin { value } => {
+            LoweredExpressionKind::SyntaxClone { value }
+            | LoweredExpressionKind::SyntaxOrigin { value } => {
                 self.visit_owned_expression(*value, reached);
             }
             LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {
@@ -13523,7 +13530,8 @@ impl LoweredProgram {
             LoweredExpressionKind::RepeatedProduct(repeated) => {
                 self.collect_loop_expression(repeated.expression, depth, reached, diagnostics);
             }
-            LoweredExpressionKind::SyntaxOrigin { value } => {
+            LoweredExpressionKind::SyntaxClone { value }
+            | LoweredExpressionKind::SyntaxOrigin { value } => {
                 self.collect_loop_expression(*value, depth, reached, diagnostics);
             }
             LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {
@@ -23516,6 +23524,7 @@ mod tests {
             LoweredExpressionKind::String(_) => "string".to_owned(),
             LoweredExpressionKind::CString(_) => "cstring".to_owned(),
             LoweredExpressionKind::Access(_) => "access".to_owned(),
+            LoweredExpressionKind::SyntaxClone { .. } => "syntax-clone".to_owned(),
             LoweredExpressionKind::SyntaxOrigin { .. } => "syntax-origin".to_owned(),
             LoweredExpressionKind::SyntaxWithOrigin { .. } => "syntax-with-origin".to_owned(),
             LoweredExpressionKind::Product(_) => "product".to_owned(),

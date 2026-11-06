@@ -663,7 +663,8 @@ mod tests {
     }
 
     const HELPER_MACRO: &str = concat!(
-        "def keep = value: Expr => Expr :: value\n",
+        "use std.clone.Clone\n",
+            "def keep = value: Expr => Expr :: Clone.clone value\n",
         "macro same = value: Expr => keep value\n",
         "let a = same 1\n",
     );
@@ -702,9 +703,10 @@ mod tests {
     fn overloads_become_one_function_each() {
         let built = build(
             concat!(
-                "def keep = value: Expr => Expr :: value\n",
-                "macro pick = value: Expr => keep value\n",
-                "macro pick = (a: Expr; b: Expr) => keep a\n",
+                "use std.clone.Clone\n",
+            "def keep = value: Expr => Expr :: Clone.clone value\n",
+                "macro pick = move value: Expr => keep value\n",
+                "macro pick = (move a: Expr; b: Expr) => keep a\n",
                 "let x = pick 1\nlet y = pick 1 2\n",
             ),
             CheckMode::Invoked,
@@ -749,7 +751,8 @@ mod tests {
     fn only_invoked_macros_are_checked_with_one() {
         let built = build(
             concat!(
-                "def keep = value: Expr => Expr :: value\n",
+                "use std.clone.Clone\n",
+            "def keep = value: Expr => Expr :: Clone.clone value\n",
                 "macro invoked_template = value: Expr => Expr :: parse_quote { $value }\n",
                 "macro idle = value: Expr => keep value\n",
                 "let a = invoked_template 1\n",
@@ -801,7 +804,8 @@ mod tests {
     fn quotations_become_calls_with_a_template_table() {
         let built = build(
             concat!(
-                "def keep = value: Expr => Expr :: value\n",
+                "use std.clone.Clone\n",
+            "def keep = value: Expr => Expr :: Clone.clone value\n",
                 "def raw = value: Expr => Syntax :: quote { ($value) }\n",
                 "macro twice = value: Expr => { let unused = raw value; keep (parse_quote { $value + $value }) }\n",
                 "macro parsed: Expr -> Expr = value => keep (parse_quote { $value })\n",
@@ -871,19 +875,20 @@ mod tests {
     #[test]
     fn macros_of_every_shape_check_as_ordinary_code() {
         let diagnostics = check_all(concat!(
-            "def keep = value: Expr => Expr :: value\n",
+            "use std.clone.Clone\n",
+            "def keep = value: Expr => Expr :: Clone.clone value\n",
             // One slot, several slots, overloads, and no quotation splices.
             "macro one: Expr -> Item = value => parse_quote { let one = $value }\n",
             "macro two: (Expr; Expr) -> Item = (a; b) => match a { _ => parse_quote { let two = 2 } }\n",
-            "macro pick = value: Expr => keep value\n",
-            "macro pick = (a: Expr; b: Expr) => keep a\n",
+            "macro pick = move value: Expr => keep value\n",
+            "macro pick = (move a: Expr; b: Expr) => keep a\n",
             // Metadata, with modifiers it may carry.
             "macro inspect modifiers (@traced): (MacroCallMetadata; Expr) -> Item = ((modifiers, _); value) => match modifiers {\n",
             "    Sequence () => parse_quote { let plain = $value },\n",
             "    _ => parse_quote { let traced = $value },\n",
             "}\n",
             // A modifier macro, a refinement pattern, and a splice of a sequence.
-            "macro @mark: Item -> Sequence<Item> = item => Sequence (first: item, rest: Sequence ())\n",
+            "macro @mark: move Item -> Sequence<Item> = move item => Sequence (first: item, rest: Sequence ())\n",
             "macro words: (Expr; Sequence<Expr>) -> Expr = (first; rest) => match first {\n",
             "    else_word: Ident<\"else\"> => parse_quote { ($rest...) },\n",
             "    other => parse_quote { ($other, $rest...) },\n",
@@ -897,7 +902,7 @@ mod tests {
     fn a_quote_result_needs_no_annotation() {
         let diagnostics = check_all(concat!(
             "macro direct = value: Expr => quote { $value }\n",
-            "macro in_a_block = value: Expr => { let same = value; quote { let a = $same } }\n",
+            "macro in_a_block = move value: Expr => { let same = value; quote { let a = $same } }\n",
             "macro in_a_match = value: Expr => match value { _ => quote { $value } }\n",
             "def main = () => 0\n",
         ));
@@ -1026,13 +1031,13 @@ mod tests {
             "    use std.syntax.Expr\n",
             "    pub mod deeper {\n",
             "        use std.syntax.Expr\n",
-            "        pub def f = value: Expr => Expr :: value\n",
+            "        pub def f = move value: Expr => Expr :: value\n",
             "    }\n",
             "}\n",
             "use inner.(deeper)\n",
             "use inner.deeper as alias\n",
-            "macro through_selected: Expr -> Expr = value => deeper.f value\n",
-            "macro through_alias: Expr -> Expr = value => alias.f value\n",
+            "macro through_selected: move Expr -> Expr = move value => deeper.f value\n",
+            "macro through_alias: move Expr -> Expr = move value => alias.f value\n",
             "let a: I32 = through_selected 1\n",
             "let b: I32 = through_alias 1\n",
         ));
@@ -1060,8 +1065,8 @@ mod tests {
                 "use package.b.(Kept)\n",
                 "use package.c.(Idle)\n",
                 "pub def idle_use = (value: Idle) => value\n",
-                "def keep = value: Expr => Expr :: { let kept: Kept = Kept 1; value }\n",
-                "pub macro m: Expr -> Expr = value => keep value\n",
+                "def keep = move value: Expr => Expr :: { let kept: Kept = Kept 1; value }\n",
+                "pub macro m: move Expr -> Expr = move value => keep value\n",
             ),
         );
         write("src/b.sta", "pub mod\npub type Kept wrap pub I32\n");
@@ -1079,6 +1084,112 @@ mod tests {
         let (_, _, diagnostics) = result.expect("the package should expand");
         let rendered = diagnostics.iter().map(ToString::to_string).collect::<Vec<_>>();
         assert!(rendered.is_empty(), "{}", rendered.join("\n"));
+    }
+
+    #[test]
+    fn syntax_moves_are_reported_and_clone_makes_the_value_usable_again() {
+        let diagnostics = check_all(concat!(
+            "use std.clone.Clone\n",
+            "macro use_after_move = (move value: Expr) => Expr :: { let moved = value; value }\n",
+            "macro cloned = (move value: Expr) => Expr :: { let copied = Clone.clone value; value }\n",
+            "def main = () => 0\n",
+        ));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("use of moved value")),
+            "{diagnostics:?}"
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("macro `cloned`")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn ident_is_copy_while_sequences_of_ident_and_expr_are_not() {
+        let diagnostics = check_all(concat!(
+            "macro copy_ident = (move name: Ident<String>) => Ident<String> :: { let other = name; name }\n",
+            "macro move_idents = (move values: Sequence<Ident<String>>) => Sequence<Ident<String>> :: { let moved = values; values }\n",
+            "macro move_exprs = (move values: Sequence<Expr>) => Sequence<Expr> :: { let moved = values; values }\n",
+            "def main = () => 0\n",
+        ));
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("macro `copy_ident`")),
+            "{diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.contains("use of moved value"))
+                .count(),
+            2,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn sequence_clone_impls_copy_ident_and_expr_elements() {
+        let diagnostics = check_all(concat!(
+            "use std.clone.Clone\n",
+            "macro clone_idents = values: Sequence<Ident<String>> => Sequence<Ident<String>> :: Clone.clone values\n",
+            "macro clone_exprs = values: Sequence<Expr> => Sequence<Expr> :: Clone.clone values\n",
+            "def main = () => 0\n",
+        ));
+        assert!(diagnostics.is_empty(), "{}", diagnostics.join("\n"));
+    }
+
+    #[test]
+    fn separated_is_not_copy_and_has_clone() {
+        let diagnostics = check_all(concat!(
+            "use std.clone.Clone\n",
+            "def move_separated = (move values: Separated<Ident<String>, Comma>) => Separated<Ident<String>, Comma> :: { let moved = values; values }\n",
+            "def clone_separated = values: Separated<Ident<String>, Comma> => Separated<Ident<String>, Comma> :: Clone.clone values\n",
+            "macro uses_move = move value: Expr => { let unused = move_separated; value }\n",
+            "macro uses_clone = move value: Expr => { let unused = clone_separated; value }\n",
+            "def main = () => 0\n",
+        ));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("use of moved value")),
+            "{diagnostics:?}"
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("macro `uses_clone`")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn an_at_pattern_requires_a_copy_syntax_value() {
+        let diagnostics = check_all(concat!(
+            "macro bad = whole@value: Expr => whole\n",
+            "def main = () => 0\n",
+        ));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("an `@` pattern requires a Copy value")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn borrowed_splices_and_repeated_splices_need_no_clone() {
+        let diagnostics = check_all(concat!(
+            "macro borrowed = value: Expr => Expr :: parse_quote { $value }\n",
+            "macro repeated = value: Expr => Expr :: parse_quote { $value + $value }\n",
+            "macro syntax_repeated = value: Syntax => Syntax :: quote { $value $value }\n",
+            "def main = () => 0\n",
+        ));
+        assert!(diagnostics.is_empty(), "{}", diagnostics.join("\n"));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 // Macro APIs are compile-time-only and are not part of the standard prelude,
 // so every syntax type used below is imported explicitly.
 use std.io.println
+use std.clone.Clone
 use std.syntax.(
     quote,
     parse_quote,
@@ -79,16 +80,16 @@ destructure ((left, right)) pair
 // Ident and CallExpr are the currently structured expression syntax. They can
 // be inspected, copied, constructed, and mutated with ordinary Staple code.
 // Mutation follows value semantics: changing `changed` leaves `original` alone.
-macro replace_argument = (value: CallExpr; replacement: Expr) => {
-    let original = value
-    let mut changed = value
+macro replace_argument = (value: CallExpr; move replacement: Expr) => {
+    let original: CallExpr = Clone.clone value
+    let mut changed: CallExpr = Clone.clone value
     changed.argument = replacement
     Expr :: parse_quote { ($original, $changed) }
 }
 
 macro call_increment = value: Expr => {
     let callee = Ident "increment"
-    CallExpr (callee: callee, argument: value)
+    CallExpr (callee: callee, argument: Clone.clone value)
 }
 
 def increment: I32 -> I32 = value => value + 1
@@ -109,7 +110,7 @@ generate_pair 41
 // argument is always written in parentheses. The outermost modifier runs
 // first; here @identity returns the ModifiedItem it receives, explicitly
 // continuing expansion with @replace.
-macro @identity: Item -> Item = item => item
+macro @identity: move Item -> Item = move item => item
 macro @replace: (Parenthesized<Expr>; Item) -> Item = (value; item) => parse_quote {
     let replaced: I32 = $value
 }
@@ -194,7 +195,7 @@ impl Parse Setting {
 }
 
 macro setting_value: Braced<Syntax> -> Expr = body => {
-    let Braced (contents) = body
+    let Braced (contents) = Clone.clone body
     match (Parse.parse_all.<Setting> contents) {
         Ok Setting (_, value) => parse_quote { $value },
         ParseError (message) => panic message,

@@ -62,7 +62,7 @@ fn applies_user_modifiers_to_the_current_module() {
     let resolved = resolve(concat!(
         "@identity\n",
         "pub mod\n",
-        "macro @identity: Item -> Item = item => item\n",
+        "macro @identity: move Item -> Item = move item => item\n",
         "pub let answer = 42\n",
     ));
     assert_eq!(
@@ -5031,15 +5031,15 @@ fn at_patterns_require_copy_runtime_values_and_honor_copy_bounds() {
 }
 
 #[test]
-fn compile_time_at_patterns_bind_whole_syntax_values() {
+fn compile_time_at_patterns_bind_whole_copy_syntax_values() {
     let module = type_check(concat!(
-        "macro keep = whole@value: Expr => whole\n",
-        "let answer: I32 = keep 42\n",
+        "macro keep = whole@value: Ident<String> => parse_quote { 1 }\n",
+        "let answer: I32 = keep abc\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_root(&lower(&module))
-        .expect("compile-time at-patterns should clone syntax values");
+        .expect("compile-time at-patterns should copy a Copy syntax value");
 }
 
 #[test]
@@ -6484,7 +6484,7 @@ fn expands_explicit_and_inferred_item_macros() {
         "macro define_answer: Expr -> Item = value => parse_quote {\n",
         "    def answer = () => $value\n",
         "}\n",
-        "def item_identity: Item -> Item = item => item\n",
+        "def item_identity: move Item -> Item = move item => item\n",
         "macro define_type = _: Expr => item_identity parse_quote { type Generated }\n",
         "define_answer 42\n",
         "define_type ()\n",
@@ -6570,8 +6570,8 @@ fn macro_modifier_arguments() {
     type_check(
         r#"
 use std.syntax.*
-macro @identity: Item -> Item = item => item
-macro @twice: (Parenthesized<Modifier>; Item) -> Item = (modifier; item) => {
+macro @identity: move Item -> Item = move item => item
+macro @twice: (Parenthesized<Modifier>; Item) -> Item = (modifier; move item) => {
     let (first, second) = duplicate_modifier modifier
     ModifiedItem (modifiers: Sequence (first: first, rest: Sequence (first: second, rest: Sequence ())), item: item)
 }
@@ -6581,7 +6581,7 @@ macro @twice: (Parenthesized<Modifier>; Item) -> Item = (modifier; item) => {
     let diagnostics = resolve_result(
         r#"
 use std.syntax.*
-macro @twice: (Parenthesized<Modifier>; Item) -> Item = (modifier; item) => item
+macro @twice: (Parenthesized<Modifier>; Item) -> Item = (modifier; move item) => item
 @twice(identity) let answer = 42
 "#,
     )
@@ -6623,7 +6623,7 @@ fn typegroup_distributed_modifiers() {
     type_check(
         r#"
 use std.syntax.*
-macro @identity: Item -> Item = item => item
+macro @identity: move Item -> Item = move item => item
 @all(@identity) @variants(@identity)
 typegroup Switch { @identity Enabled, Disabled }
 let value: Switch = Switch.Enabled
@@ -6639,7 +6639,7 @@ fn macro_modifier_namespace_and_construction() {
     type_check(
         r#"
 use std.syntax.*
-macro @identity: Item -> Item = item => item
+macro @identity: move Item -> Item = move item => item
 macro emit: (MacroCallMetadata; Expr) -> Item = ((modifiers, _); value) => match modifiers {
     Sequence (first, rest) => match first {
     ModifierCall (Sequence (Ident "lib", Ident "inner"), Ident "bar", None) => {
@@ -6725,13 +6725,13 @@ fn typegroup_distributed_modifiers_keep_order() {
     let module = resolve(
         r#"
 use std.syntax.*
-def add_doc = (syntax: Syntax, item: Item) => Item :: match Parse.parse_all.<Modifier> syntax {
+def add_doc = (syntax: Syntax, move item: Item) => Item :: match Parse.parse_all.<Modifier> syntax {
     Ok modifier => ModifiedItem (modifiers: Sequence (first: modifier, rest: Sequence ()), item: item),
     _ => panic "expected doc modifier",
 }
-macro @a: Item -> Item = item => add_doc (quote { @doc("a") }, item)
-macro @b: Item -> Item = item => add_doc (quote { @doc("b") }, item)
-macro @c: Item -> Item = item => add_doc (quote { @doc("c") }, item)
+macro @a: move Item -> Item = move item => add_doc (quote { @doc("a") }, item)
+macro @b: move Item -> Item = move item => add_doc (quote { @doc("b") }, item)
+macro @c: move Item -> Item = move item => add_doc (quote { @doc("c") }, item)
 @all(@a) @variants(@c) @doc("group")
 typegroup Switch { @b Enabled, Disabled }
 "#,
@@ -6775,7 +6775,7 @@ typegroup Switch { @b Enabled, Disabled }
 fn repeated_modifier_prefixes_are_not_recursive() {
     resolve(
         r#"
-macro @identity: Item -> Item = item => item
+macro @identity: move Item -> Item = move item => item
 @identity @identity @identity
 let original = 0
 "#,
@@ -6829,7 +6829,7 @@ fn macro_modifier_vocabulary_shadows_only_unqualified_modifiers() {
 use std.syntax.*
 mod attrs {
     use std.syntax.*
-    pub macro @all: Item -> Item = item => item
+    pub macro @all: move Item -> Item = move item => item
 }
 use attrs.all
 macro emit modifiers (@all): (MacroCallMetadata; Expr) -> Item = ((modifiers, _); value) => match modifiers {
@@ -6873,8 +6873,8 @@ fn macro_modifier_separated_arguments() {
     type_check(
         r#"
 use std.syntax.*
-macro @identity: Item -> Item = item => item
-macro @apply: (Parenthesized<Separated<Modifier, Comma>>; Item) -> Item = (argument; item) => match argument { Separated (_, modifiers, _) => ModifiedItem (modifiers: modifiers, item: item), }
+macro @identity: move Item -> Item = move item => item
+macro @apply: (Parenthesized<Separated<Modifier, Comma>>; Item) -> Item = (argument; move item) => match argument { Separated (_, modifiers, _) => ModifiedItem (modifiers: modifiers, item: item), }
 @apply(@identity, @identity,) let answer: I32 = 42
 "#,
     );
@@ -6925,7 +6925,7 @@ fn macro_modifier_nested_arguments_stay_lossless() {
     let module = resolve(
         r#"
 use std.syntax.*
-macro @apply: (Parenthesized<Separated<Modifier, Comma>>; Item) -> Item = (argument; item) => match argument {
+macro @apply: (Parenthesized<Separated<Modifier, Comma>>; Item) -> Item = (argument; move item) => match argument {
     Separated (_, modifiers, _) => ModifiedItem (modifiers: modifiers, item: item),
 }
 @apply(@doc("x,y"), @doc("nested (parentheses)"),)
@@ -6961,7 +6961,7 @@ fn expands_modifier_lists_generated_by_item_macros() {
 #[test]
 fn builtin_doc_composes_with_modifier_expansion_in_source_order() {
     let module = type_check(concat!(
-        "macro @identity: Item -> Item = item => item\n",
+        "macro @identity: move Item -> Item = move item => item\n",
         "@doc(\"outer\")\n",
         "@identity\n",
         "///inner\n",
@@ -7150,7 +7150,7 @@ fn outermost_multi_item_result_discards_remaining_modifiers() {
 #[test]
 fn returning_modified_input_continues_to_a_zero_item_modifier() {
     let source = concat!(
-        "macro @outer: Item -> Item = item => item\n",
+        "macro @outer: move Item -> Item = move item => item\n",
         "macro @inner: Item -> Sequence<Item> = _ => parse_quote {}\n",
         "@outer\n",
         "@inner\n",
@@ -7171,7 +7171,7 @@ fn returning_modified_input_continues_to_a_zero_item_modifier() {
 fn modified_item_can_be_destructured_and_reconstructed_losslessly() {
     let module = type_check(concat!(
         "use std.syntax.(ModifiedItem, parse_quote, Item)\n",
-        "macro @outer: Item -> Item = item => match item {\n",
+        "macro @outer: move Item -> Item = move item => match item {\n",
         "    ModifiedItem (modifiers, inner) => ModifiedItem (modifiers: modifiers, item: inner),\n",
         "    _ => panic \"outer item is unsupported\",\n",
         "}\n",
@@ -7887,7 +7887,7 @@ fn macro_call_metadata_can_generate_a_public_representation() {
 #[test]
 fn modifiers_compose_after_metadata_aware_item_calls() {
     let module = type_check(concat!(
-        "macro @identity: Item -> Item = item => item\n",
+        "macro @identity: move Item -> Item = move item => item\n",
         "macro define = metadata: MacroCallMetadata => { let visibility = metadata.visibility; parse_quote { $visibility let generated: I32 = 42 } }\n",
         "@identity\n",
         "pub define\n",
@@ -8025,7 +8025,7 @@ fn diagnoses_invalid_metadata_macro_uses() {
             "macro `ordinary` has no overload whose first parameter is `MacroCallMetadata`",
         ),
         (
-            "macro @ignored: Item -> Item = item => item\nmacro ordinary: Expr -> Expr = value => parse_quote { $value }\n@ignored ordinary\n",
+            "macro @ignored: move Item -> Item = move item => item\nmacro ordinary: Expr -> Expr = value => parse_quote { $value }\n@ignored ordinary\n",
             "macro `ordinary` has no overload whose first parameter is `MacroCallMetadata`",
         ),
         (
@@ -8084,15 +8084,15 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
-            "macro @invalid: (SyntaxNode; Item) -> Item = (value; item) => item\n",
+            "macro @invalid: (SyntaxNode; Item) -> Item = (value; move item) => item\n",
             "modifier macro `@invalid` must have signature `Item -> Item`, `Item -> Sequence<Item>`, or `Item -> Syntax`, optionally with a leading `Parenthesized<Expr | Type | Pattern> ->` argument",
         ),
         (
-            "macro @required: (Parenthesized<Expr>; Item) -> Item = (value; item) => item\n@required\nlet value = 1\n",
+            "macro @required: (Parenthesized<Expr>; Item) -> Item = (value; move item) => item\n@required\nlet value = 1\n",
             "modifier macro `@required` requires a parenthesized argument",
         ),
         (
-            "macro @plain: Item -> Item = item => item\n@plain(1)\nlet value = 1\n",
+            "macro @plain: move Item -> Item = move item => item\n@plain(1)\nlet value = 1\n",
             "modifier macro `@plain` does not accept an argument",
         ),
         (
@@ -8100,11 +8100,11 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
             "macro `ordinary` is function-style and cannot be used as modifier `@ordinary`",
         ),
         (
-            "macro @recursive_constructor: Item -> Item = item => item\n",
+            "macro @recursive_constructor: move Item -> Item = move item => item\n",
             "modifier name `@recursive_constructor` is reserved by the compiler",
         ),
         (
-            "macro @doc: Item -> Item = item => item\n",
+            "macro @doc: move Item -> Item = move item => item\n",
             "modifier name `@doc` is reserved by the compiler",
         ),
         (
@@ -8128,7 +8128,7 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
             "`@doc` may only modify a named declaration",
         ),
         (
-            "macro @identity: Item -> Item = item => item\n@identity\nuse std.core.*\n",
+            "macro @identity: move Item -> Item = move item => item\n@identity\nuse std.core.*\n",
             "modifier macros may only be applied to `let`, `def`, `type`, `extern`, `trait`, or `impl` items",
         ),
         (
@@ -8139,8 +8139,8 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
         // provenance, but it is a new invocation rather than a pending one.
         (
             concat!(
-                "macro @identity: Item -> Item = item => item\n",
-                "macro @again: (Parenthesized<Modifier>; Item) -> Item = (inner; item) => match inner {\n",
+                "macro @identity: move Item -> Item = move item => item\n",
+                "macro @again: (Parenthesized<Modifier>; Item) -> Item = (inner; move item) => match inner {\n",
                 "    ModifierCall (namespace, name, Some argument) => ModifiedItem (\n",
                 "        modifiers: Sequence (\n",
                 "            first: ModifierCall (namespace: namespace, name: name, argument: Some (quote { @again($argument) })),\n",
@@ -9013,7 +9013,7 @@ fn rejects_invalid_top_level_macro_sequence_signatures() {
             "a macro signature may contain at most one top-level `Sequence` parameter",
         ),
         (
-            "macro @invalid: (Sequence<Ident<String>>; Item) -> Item = (values; item) => item\n",
+            "macro @invalid: (Sequence<Ident<String>>; Item) -> Item = (values; move item) => item\n",
             "top-level `Sequence` parameters are not supported by modifier macros",
         ),
         (
@@ -10698,7 +10698,7 @@ fn quoted_type_declarations_from_one_template_get_distinct_identity() {
 #[test]
 fn exposes_type_declarations_as_structured_items() {
     let module = type_check(concat!(
-        "macro @inspect_item: Item -> Item = item => match item {\n",
+        "macro @inspect_item: move Item -> Item = move item => match item {\n",
         "  TypeDeclarationItem (Ident name, declared_type, parameters, Some (WrapperBody (visibility, representation)), _) => item,\n",
         "  UnstructuredItem() => item,\n",
         "  _ => panic \"inspect_item item is unsupported\",\n",
@@ -14275,7 +14275,7 @@ fn sized_opaque_modifier_is_package_visible_in_stdlib() {
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            &with_syntax_imports("macro @sized_opaque: Item -> Item = item => item\n"),
+            &with_syntax_imports("macro @sized_opaque: move Item -> Item = move item => item\n"),
             root,
         )
         .expect("source should load");
@@ -14317,7 +14317,7 @@ fn recursive_constructor_modifier_is_package_visible_in_stdlib() {
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            &with_syntax_imports("macro @recursive_constructor: Item -> Item = item => item\n"),
+            &with_syntax_imports("macro @recursive_constructor: move Item -> Item = move item => item\n"),
             root,
         )
         .expect("source should load");
@@ -14413,7 +14413,7 @@ fn sized_opaque_stdlib_contract_and_validation() {
     let diagnostics = stdlib_modifier_diagnostics(
         "std/number/types.sta",
         "@sized_opaque\npub type I32 opaque",
-        "@std.annotation.sized_opaque\n@identity\npub type I32 opaque\nuse std.syntax.Item\nmacro @identity: Item -> Item = item => item",
+        "@std.annotation.sized_opaque\n@identity\npub type I32 opaque\nuse std.syntax.Item\nmacro @identity: move Item -> Item = move item => item",
     );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
@@ -15236,7 +15236,7 @@ fn recursive_constructor_stdlib_contract_and_validation() {
         (
             "std/annotation.sta",
             "macro @recursive_constructor: Item -> Item",
-            "macro @recursive_constructor: Item -> Item = item => item",
+            "macro @recursive_constructor: move Item -> Item = move item => item",
             "compiler-provided modifier `@recursive_constructor` must be bodyless",
         ),
     ] {
@@ -18780,7 +18780,7 @@ fn track_caller_allows_reading_module_level_values() {
 #[test]
 fn track_caller_modifier_is_stdlib_reserved() {
     let diagnostics = resolve_result(&with_syntax_imports(
-        "macro @track_caller: Item -> Item = item => item\n",
+        "macro @track_caller: move Item -> Item = move item => item\n",
     ))
     .expect_err_diagnostics("track_caller name is reserved");
     assert!(

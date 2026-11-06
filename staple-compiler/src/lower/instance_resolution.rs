@@ -3361,6 +3361,10 @@ impl<'a> ParameterCollector<'a> {
             LoweredExpressionKind::Float(_) => self.family("expression.float"),
             LoweredExpressionKind::String(_) => self.family("expression.string"),
             LoweredExpressionKind::CString(_) => self.family("expression.cstring"),
+            LoweredExpressionKind::SyntaxClone { value } => {
+                self.family("expression.syntax-clone");
+                self.collect_expression(*value);
+            }
             LoweredExpressionKind::SyntaxOrigin { value } => {
                 self.family("expression.syntax-origin");
                 self.collect_expression(*value);

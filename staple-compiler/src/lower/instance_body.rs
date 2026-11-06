@@ -1281,6 +1281,11 @@ impl<'a> BodyCloner<'a> {
             LoweredExpressionKind::Float(float) => LoweredExpressionKind::Float(float),
             LoweredExpressionKind::String(string) => LoweredExpressionKind::String(string),
             LoweredExpressionKind::CString(c_string) => LoweredExpressionKind::CString(c_string),
+            LoweredExpressionKind::SyntaxClone { value } => {
+                LoweredExpressionKind::SyntaxClone {
+                    value: self.clone_expression(value),
+                }
+            }
             LoweredExpressionKind::SyntaxOrigin { value } => {
                 LoweredExpressionKind::SyntaxOrigin {
                     value: self.clone_expression(value),
@@ -4752,7 +4757,8 @@ impl<'a> BodyValidator<'a> {
             | LoweredExpressionKind::Float(_)
             | LoweredExpressionKind::String(_)
             | LoweredExpressionKind::CString(_) => {}
-            LoweredExpressionKind::SyntaxOrigin { value } => {
+            LoweredExpressionKind::SyntaxClone { value }
+            | LoweredExpressionKind::SyntaxOrigin { value } => {
                 self.visit_expression(*value);
             }
             LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {

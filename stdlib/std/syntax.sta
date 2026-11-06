@@ -7,6 +7,7 @@ use package.string.(String)
 use package.iterator.(Iterator, IntoIterator, FromIterator, IterStep)
 use package.iterator.IterStep.(Done, Yield)
 use package.default.(Default)
+use package.clone.Clone
 
 /// Compiler-owned, compile-time-only syntax values. Identifiers and calls expose
 /// their data in the first structured-syntax slice; remaining expressions round-trip
@@ -237,6 +238,10 @@ impl !Copy Syntax {}
 /// Exactly one structural syntax node.
 pub type SyntaxNode = Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | TypeParameter | TypeParameters | Angled<Syntax> | Parenthesized<Syntax> | Bracketed<Syntax> | Braced<Syntax>
 
+/// Duplicates a syntax value. A boxed node is immutable, so the copy can
+/// share its storage until a field update copies it.
+pub def clone_syntax = <T> value: T => T :: __clone_syntax value
+
 /// Produces opaque syntax from a braced quotation without reparsing it.
 ///
 /// # Example
@@ -328,6 +333,8 @@ extern "staple-intrinsic" {
     __origin: <T> T -> Syntax
     /// The same syntax node value with a different hidden origin.
     __with_origin: <T> (T; Syntax) -> T
+    /// Duplicates a syntax node from a borrow.
+    __clone_syntax: <T> T -> T
 }
 
 /// Syntax that a quotation can splice with `$name`.
@@ -335,7 +342,7 @@ pub trait Splice T {
     splice: T -> Syntax
 }
 
-impl Splice Syntax { splice = value => value }
+impl Splice Syntax { splice = value => clone_syntax value }
 impl Splice SyntaxNode { splice = value => __splice_node.<SyntaxNode> value }
 impl Splice Expr { splice = value => __splice_node.<Expr> value }
 impl Splice CallExpr { splice = value => __splice_node.<CallExpr> value }
@@ -509,6 +516,37 @@ impl<H, T where Parse H, Parse T> Parse (H, ...T) {
     }
 }
 
+impl !Copy CallExpr {}
+impl !Copy StringExpr {}
+impl !Copy CharExpr {}
+impl<T> !Copy Sequence<T> {}
+impl<Element, Separator> !Copy Separated<Element, Separator> {}
+impl<Contents> !Copy Parenthesized<Contents> {}
+impl<Contents> !Copy Bracketed<Contents> {}
+impl<Contents> !Copy Braced<Contents> {}
+impl<Contents> !Copy Angled<Contents> {}
+impl !Copy TypeParameter {}
+impl !Copy TypeParameters {}
+impl !Copy ProductTypeField {}
+impl !Copy ProductType {}
+impl !Copy BindingPattern {}
+impl !Copy NominalPattern {}
+impl !Copy TypeDeclarationItem {}
+impl !Copy ResourceDependency {}
+impl<Element> !Copy AliasBody<Element> {}
+impl<Representation, Element> !Copy WrapperBody<Representation, Element> {}
+impl<Representation, Element> !Copy FromBody<Representation, Element> {}
+impl !Copy Expr {}
+impl !Copy Type {}
+impl !Copy Pattern {}
+impl !Copy Item {}
+impl !Copy Modifier {}
+impl !Copy SyntaxNode {}
+impl !Copy TypeBody {}
+impl !Copy ModifierCall {}
+impl !Copy ModifiedItem {}
+impl !Copy MacroCallMetadata {}
+
 impl<T> Iterator Sequence<T> {
     type Item = T
     next = move sequence => match sequence {
@@ -573,3 +611,42 @@ impl<T where Parse T> Parse Separated<T, Comma> {
         Ok (Separated (separator: Comma, elements: elements, trailing: trailing))
     }
 }
+
+// A boxed node is immutable, so a clone can share its storage until a field
+// update copies it.
+impl Clone CallExpr { clone = value => clone_syntax value }
+impl Clone StringExpr { clone = value => clone_syntax value }
+impl Clone CharExpr { clone = value => clone_syntax value }
+impl<T> Clone (Sequence<T>) { clone = value => clone_syntax value }
+impl<Element, Separator> Clone (Separated<Element, Separator>) { clone = value => clone_syntax value }
+impl<C> Clone (Parenthesized<C>) { clone = value => clone_syntax value }
+impl<C> Clone (Bracketed<C>) { clone = value => clone_syntax value }
+impl<C> Clone (Braced<C>) { clone = value => clone_syntax value }
+impl<C> Clone (Angled<C>) { clone = value => clone_syntax value }
+impl Clone TypeParameter { clone = value => clone_syntax value }
+impl Clone TypeParameters { clone = value => clone_syntax value }
+impl Clone ProductTypeField { clone = value => clone_syntax value }
+impl Clone ProductType { clone = value => clone_syntax value }
+impl Clone BindingPattern { clone = value => clone_syntax value }
+impl Clone NominalPattern { clone = value => clone_syntax value }
+impl Clone TypeDeclarationItem { clone = value => clone_syntax value }
+impl Clone ResourceDependency { clone = value => clone_syntax value }
+impl<Element> Clone (AliasBody<Element>) { clone = value => clone_syntax value }
+impl<Representation, Element> Clone (WrapperBody<Representation, Element>) { clone = value => clone_syntax value }
+impl<Representation, Element> Clone (FromBody<Representation, Element>) { clone = value => clone_syntax value }
+impl Clone ModifierCall { clone = value => clone_syntax value }
+impl Clone ModifiedItem { clone = value => clone_syntax value }
+impl Clone MacroCallMetadata { clone = value => clone_syntax value }
+impl Clone Expr { clone = value => clone_syntax value }
+impl Clone Type { clone = value => clone_syntax value }
+impl Clone Pattern { clone = value => clone_syntax value }
+impl Clone Item { clone = value => clone_syntax value }
+impl Clone Modifier { clone = value => clone_syntax value }
+impl Clone TypeBody { clone = value => clone_syntax value }
+impl Clone SyntaxNode { clone = value => clone_syntax value }
+impl Clone Syntax { clone = value => clone_syntax value }
+impl Clone UnstructuredExpr { clone = value => clone_syntax value }
+impl Clone UnstructuredType { clone = value => clone_syntax value }
+impl Clone UnstructuredPattern { clone = value => clone_syntax value }
+impl Clone UnstructuredItem { clone = value => clone_syntax value }
+impl Clone UnstructuredModifier { clone = value => clone_syntax value }

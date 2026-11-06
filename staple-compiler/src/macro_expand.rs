@@ -14026,7 +14026,22 @@ fn type_contains_unshadowed_syntax(ty: &Type, declared: &std::collections::HashS
 }
 
 fn binding_is_compile_time_helper(binding: &Binding) -> bool {
-    binding.kind == BindingKind::Def && binding_contains_syntax(binding)
+    binding.kind == BindingKind::Def
+        && (binding_contains_syntax(binding) || binding_uses_clone_syntax_intrinsic(binding))
+}
+
+/// `clone_syntax` is generic over any syntax type, so its signature cannot
+/// mention `Syntax`; its body names `__clone_syntax`, which only exists while
+/// macros expand. Treat it as a compile-time helper so normal builds drop it
+/// instead of lowering an external call to the macro runtime.
+fn binding_uses_clone_syntax_intrinsic(binding: &Binding) -> bool {
+    binding.value.as_ref().is_some_and(|value| {
+        value
+            .syntax()
+            .tokens()
+            .iter()
+            .any(|token| token.text == "__clone_syntax")
+    })
 }
 
 fn binding_contains_syntax(binding: &Binding) -> bool {

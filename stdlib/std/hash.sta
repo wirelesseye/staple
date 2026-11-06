@@ -5,6 +5,8 @@
 /// processes, or write tests against specific values.
 pub mod
 
+use package.clone.Clone
+
 use package.cmp.Eq
 use package.ops.BitXor
 use package.shared_buffer.SharedBuffer
@@ -150,7 +152,7 @@ pub def hash_with = <T where Hash T> (key: HashKey; value: T) => U64 :: {
 }
 
 /// Joins type parameter syntax with commas.
-def derived_hash_parameters = parameters: Sequence<Ident<String>> => Syntax :: match parameters {
+def derived_hash_parameters = parameters: Sequence<Ident<String>> => Syntax :: match (Clone.clone parameters) {
     Sequence () => quote {},
     Sequence (first, rest) => match rest {
         Sequence () => quote { $first },
@@ -162,7 +164,7 @@ def derived_hash_parameters = parameters: Sequence<Ident<String>> => Syntax :: m
 }
 
 /// Joins fragments with commas.
-def derived_hash_join = fragments: Sequence<Syntax> => Syntax :: match fragments {
+def derived_hash_join = fragments: Sequence<Syntax> => Syntax :: match (Clone.clone fragments) {
     Sequence () => quote {},
     Sequence (first, rest) => match rest {
         Sequence () => first,
@@ -173,8 +175,8 @@ def derived_hash_join = fragments: Sequence<Syntax> => Syntax :: match fragments
     },
 }
 
-def derived_hash_concat = (left: Sequence<Syntax>, right: Sequence<Syntax>) => Sequence<Syntax> :: match left {
-    Sequence () => right,
+def derived_hash_concat = (left: Sequence<Syntax>, right: Sequence<Syntax>) => Sequence<Syntax> :: match (Clone.clone left) {
+    Sequence () => Clone.clone right,
     Sequence (first, rest) => Sequence (first: first, rest: derived_hash_concat (rest, right)),
 }
 
@@ -204,7 +206,7 @@ def derived_hash_implementation = (
     representation: Type,
     singleton: Bool,
 ) => Item :: {
-    let header = match parameters {
+    let header = match (Clone.clone parameters) {
         Sequence () => quote { impl Hash $target },
         _ => {
             let names = derived_hash_parameters parameters
@@ -237,9 +239,9 @@ def derived_hash_implementation = (
 }
 
 /// Inspects a declaration while preserving pending modifiers on the output.
-def derived_hash_declaration = item: Item => Item :: match item {
+def derived_hash_declaration = item: Item => Item :: match (Clone.clone item) {
     ModifiedItem (_, nested) => derived_hash_declaration nested,
-    _ => item,
+    _ => Clone.clone item,
 }
 
 /// Derives `Hash` for a `wrap` or `from` type, or a bodyless singleton.
@@ -273,7 +275,7 @@ pub macro @derive_hash: Item -> Sequence<Item> = item => {
             derived_hash_implementation (name, target, parameters, target, True),
         _ => panic "derive_hash item is unsupported",
     }
-    Sequence (first: item, rest: Sequence (first: implementation, rest: Sequence ()))
+    Sequence (first: Clone.clone item, rest: Sequence (first: implementation, rest: Sequence ()))
 }
 
 impl Hash U8 { hash = (value, mut hasher) => Hasher.write_u8 hasher value }

@@ -1,5 +1,7 @@
 pub mod
 
+use package.clone.Clone
+
 use package.string.String
 use package.syntax.*
 use package.process.(panic)
@@ -11,7 +13,7 @@ pub trait Default T {
 }
 
 /// Joins fragments with commas.
-def derived_default_join = fragments: Sequence<Syntax> => Syntax :: match fragments {
+def derived_default_join = fragments: Sequence<Syntax> => Syntax :: match (Clone.clone fragments) {
     Sequence () => quote {},
     Sequence (first, rest) => match rest {
         Sequence () => first,
@@ -22,13 +24,13 @@ def derived_default_join = fragments: Sequence<Syntax> => Syntax :: match fragme
     },
 }
 
-def derived_default_concat = (left: Sequence<Syntax>, right: Sequence<Syntax>) => Sequence<Syntax> :: match left {
-    Sequence () => right,
+def derived_default_concat = (left: Sequence<Syntax>, right: Sequence<Syntax>) => Sequence<Syntax> :: match (Clone.clone left) {
+    Sequence () => Clone.clone right,
     Sequence (first, rest) => Sequence (first: first, rest: derived_default_concat (rest, right)),
 }
 
 /// Whether any field, or any field of a nested product, declares a default.
-def derived_default_has_defaults = fields: Sequence<ProductTypeField> => Bool :: match fields {
+def derived_default_has_defaults = fields: Sequence<ProductTypeField> => Bool :: match (Clone.clone fields) {
     Sequence () => False,
     Sequence (first, rest) => match first {
         ProductTypeField (_, _, Some _) => True,
@@ -44,19 +46,21 @@ def derived_default_has_defaults = fields: Sequence<ProductTypeField> => Bool ::
 /// product built field by field when it declares defaults, or
 /// `Default.default ()` ascribed to the field type, which a generic
 /// constructor cannot infer from its expected type.
-def derived_default_values = fields: Sequence<ProductTypeField> => Sequence<Syntax> :: match fields {
+def derived_default_values = fields: Sequence<ProductTypeField> => Sequence<Syntax> :: match (Clone.clone fields) {
     Sequence () => Sequence (),
     Sequence (first, rest) => {
         let value = match first {
             ProductTypeField (_, _, Some default) => quote { $default },
-            ProductTypeField (_, field_type@(ProductType nested), None) => match (derived_default_has_defaults nested) {
-                True => {
-                    let arguments = derived_default_join (derived_default_values nested)
-                    quote { ($arguments) }
+            ProductTypeField (_, field_type, None) => match (Clone.clone field_type) {
+                ProductType nested => match (derived_default_has_defaults nested) {
+                    True => {
+                        let arguments = derived_default_join (derived_default_values nested)
+                        quote { ($arguments) }
+                    },
+                    False => quote { $field_type :: Default.default () },
                 },
-                False => quote { $field_type :: Default.default () },
+                _ => quote { $field_type :: Default.default () },
             },
-            ProductTypeField (_, field_type, None) => quote { $field_type :: Default.default () },
         }
         Sequence (first: value, rest: derived_default_values rest)
     },
@@ -65,7 +69,7 @@ def derived_default_values = fields: Sequence<ProductTypeField> => Sequence<Synt
 /// The `Default` bounds the fields need: one per field that takes
 /// `Default.default ()`, looking through nested products. A product's own
 /// structural `Default` follows from its elements' bounds.
-def derived_default_field_bounds = fields: Sequence<ProductTypeField> => Sequence<Syntax> :: match fields {
+def derived_default_field_bounds = fields: Sequence<ProductTypeField> => Sequence<Syntax> :: match (Clone.clone fields) {
     Sequence () => Sequence (),
     Sequence (first, rest) => match first {
         ProductTypeField (_, _, Some _) => derived_default_field_bounds rest,
@@ -80,12 +84,12 @@ def derived_default_field_bounds = fields: Sequence<ProductTypeField> => Sequenc
     },
 }
 
-def derived_default_bounds = ty: Type => Sequence<Syntax> :: match ty {
+def derived_default_bounds = ty: Type => Sequence<Syntax> :: match (Clone.clone ty) {
     ProductType fields => derived_default_field_bounds fields,
     _ => Sequence.<Syntax> (first: quote { Default $ty }, rest: Sequence.<Syntax> ()),
 }
 
-def derived_default_parameters = parameters: Sequence<Ident<String>> => Sequence<Syntax> :: match parameters {
+def derived_default_parameters = parameters: Sequence<Ident<String>> => Sequence<Syntax> :: match (Clone.clone parameters) {
     Sequence () => Sequence (),
     Sequence (first, rest) => Sequence (
         first: quote { $first },
@@ -125,7 +129,7 @@ def derived_wrapper_default_implementation = (
     representation: Type,
 ) => Item :: {
     let header = derived_default_header (name, target, parameters, representation)
-    let arguments = match representation {
+    let arguments = match (Clone.clone representation) {
         ProductType fields => match (derived_default_has_defaults fields) {
             True => derived_default_join (derived_default_values fields),
             False => quote { $representation :: Default.default () },
@@ -149,7 +153,7 @@ def derived_from_default_implementation = (
     representation: Type,
 ) => Item :: {
     let header = derived_default_header (name, target, parameters, representation)
-    let value = match representation {
+    let value = match (Clone.clone representation) {
         ProductType fields => match (derived_default_has_defaults fields) {
             True => {
                 let arguments = derived_default_join (derived_default_values fields)
@@ -177,9 +181,9 @@ def derived_singleton_default_implementation = (name: Ident<String>, target: Typ
 }
 
 /// Inspects a declaration without consuming its pending modifiers.
-def derived_default_declaration = item: Item => Item :: match item {
+def derived_default_declaration = item: Item => Item :: match (Clone.clone item) {
     ModifiedItem (_, nested) => derived_default_declaration nested,
-    _ => item,
+    _ => Clone.clone item,
 }
 
 /// Derives `Default` for a `wrap` or `from` type, or a bodyless singleton.
@@ -202,21 +206,21 @@ def derived_default_declaration = item: Item => Item :: match item {
 /// ```
 pub macro @derive_default: Item -> Sequence<Item> = item => match (derived_default_declaration item) {
     TypeDeclarationItem (name, target, parameters, Some (WrapperBody (_, representation)), _) => Sequence (
-        first: item,
+        first: Clone.clone item,
         rest: Sequence (
             first: derived_wrapper_default_implementation (name, target, parameters, representation),
             rest: Sequence (),
         ),
     ),
     TypeDeclarationItem (name, target, parameters, Some (FromBody (_, representation)), _) => Sequence (
-        first: item,
+        first: Clone.clone item,
         rest: Sequence (
             first: derived_from_default_implementation (name, target, parameters, representation),
             rest: Sequence (),
         ),
     ),
     TypeDeclarationItem (name, target, _, None, _) => Sequence (
-        first: item,
+        first: Clone.clone item,
         rest: Sequence (
             first: derived_singleton_default_implementation (name, target),
             rest: Sequence (),

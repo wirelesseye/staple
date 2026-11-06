@@ -1,5 +1,7 @@
 pub mod
 
+use package.clone.Clone
+
 use package.string.String
 use package.syntax.*
 use package.process.(panic)
@@ -84,7 +86,7 @@ pub trait Ord T where Eq T, PartialOrd T {
 }
 
 /// Joins type parameter syntax with commas.
-def derived_eq_parameters = parameters: Sequence<Ident<String>> => Syntax :: match parameters {
+def derived_eq_parameters = parameters: Sequence<Ident<String>> => Syntax :: match (Clone.clone parameters) {
     Sequence () => quote {},
     Sequence (first, rest) => match rest {
         Sequence () => quote { $first },
@@ -96,7 +98,7 @@ def derived_eq_parameters = parameters: Sequence<Ident<String>> => Syntax :: mat
 }
 
 /// Joins fragments with commas.
-def derived_eq_join = fragments: Sequence<Syntax> => Syntax :: match fragments {
+def derived_eq_join = fragments: Sequence<Syntax> => Syntax :: match (Clone.clone fragments) {
     Sequence () => quote {},
     Sequence (first, rest) => match rest {
         Sequence () => first,
@@ -107,8 +109,8 @@ def derived_eq_join = fragments: Sequence<Syntax> => Syntax :: match fragments {
     },
 }
 
-def derived_eq_concat = (left: Sequence<Syntax>, right: Sequence<Syntax>) => Sequence<Syntax> :: match left {
-    Sequence () => right,
+def derived_eq_concat = (left: Sequence<Syntax>, right: Sequence<Syntax>) => Sequence<Syntax> :: match (Clone.clone left) {
+    Sequence () => Clone.clone right,
     Sequence (first, rest) => Sequence (first: first, rest: derived_eq_concat (rest, right)),
 }
 
@@ -138,7 +140,7 @@ def derived_eq_implementation = (
     representation: Type,
     singleton: Bool,
 ) => Item :: {
-    let header = match parameters {
+    let header = match (Clone.clone parameters) {
         Sequence () => quote { impl Eq $target },
         _ => {
             let names = derived_eq_parameters parameters
@@ -171,9 +173,9 @@ def derived_eq_implementation = (
 }
 
 /// Inspects a declaration while preserving pending modifiers on the output.
-def derived_eq_declaration = item: Item => Item :: match item {
+def derived_eq_declaration = item: Item => Item :: match (Clone.clone item) {
     ModifiedItem (_, nested) => derived_eq_declaration nested,
-    _ => item,
+    _ => Clone.clone item,
 }
 
 /// Derives `Eq` for a `wrap` or `from` type, or a bodyless singleton.
@@ -203,5 +205,5 @@ pub macro @derive_eq: Item -> Sequence<Item> = item => {
             derived_eq_implementation (name, target, parameters, target, True),
         _ => panic "derive_eq item is unsupported",
     }
-    Sequence (first: item, rest: Sequence (first: implementation, rest: Sequence ()))
+    Sequence (first: Clone.clone item, rest: Sequence (first: implementation, rest: Sequence ()))
 }

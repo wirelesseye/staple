@@ -9003,7 +9003,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .as_ref()
             .map_or(&expression.value_type, |coercion| &coercion.source);
         let value = match expression.kind {
-            LoweredExpressionKind::SyntaxOrigin { .. }
+            LoweredExpressionKind::SyntaxClone { .. }
+            | LoweredExpressionKind::SyntaxOrigin { .. }
             | LoweredExpressionKind::SyntaxWithOrigin { .. } => {
                 return Err(Diagnostic::new(
                     expression.origin.span.clone(),

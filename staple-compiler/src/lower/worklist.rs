@@ -1219,7 +1219,8 @@ impl<'a> WorklistBuilder<'a> {
             | LoweredExpressionKind::Float(_)
             | LoweredExpressionKind::String(_)
             | LoweredExpressionKind::CString(_) => {}
-            LoweredExpressionKind::SyntaxOrigin { value } => {
+            LoweredExpressionKind::SyntaxClone { value }
+            | LoweredExpressionKind::SyntaxOrigin { value } => {
                 self.traverse_expression(*value, owner, enclosing);
             }
             LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {

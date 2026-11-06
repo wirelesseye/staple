@@ -296,7 +296,7 @@ fn macros_inspect_product_type_fields() {
         "        Sequence (first: name, rest: Sequence (first: marker, rest: describe_fields rest))\n",
         "    },\n",
         "}\n",
-        "macro @describe: (Parenthesized<Ident<String>>; Item) -> Sequence<Item> = (binding; item) => {\n",
+        "macro @describe: (Parenthesized<Ident<String>>; Item) -> Sequence<Item> = (binding; move item) => {\n",
         "    let binding = BindingPattern binding\n",
         "    match item {\n",
         "    TypeDeclarationItem (_, _, _, Some (WrapperBody (_, ProductType fields)), _) => {\n",

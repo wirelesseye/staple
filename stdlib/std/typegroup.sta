@@ -1,13 +1,15 @@
 pub mod
 
+use package.clone.Clone
+
 use package.result.Ok
 use package.string.String
 use package.syntax.*
 use package.process.(panic)
 
 def typegroup_apply_modifiers = (
-    modifiers: Sequence<Modifier>,
-    item: Item,
+    move modifiers: Sequence<Modifier>,
+    move item: Item,
 ) => Item :: match modifiers {
     Sequence () => item,
     _ => ModifiedItem (modifiers: modifiers, item: item),
@@ -16,11 +18,11 @@ def typegroup_apply_modifiers = (
 // Macro helpers reuse syntax values, as with TypeParameters below. Explicitly
 // duplicate distributed modifiers so every application gets fresh syntax IDs.
 def typegroup_prepend = (prefix: Sequence<Modifier>, suffix: Sequence<Modifier>) => Sequence<Modifier> :: match prefix {
-    Sequence () => suffix,
-    Sequence (first, rest) => {
-        let (copy, _) = duplicate_modifier first
-        Sequence (first: copy, rest: typegroup_prepend (rest, suffix))
-    },
+    Sequence () => Clone.clone suffix,
+    Sequence (first, rest) => Sequence (
+        first: Clone.clone first,
+        rest: typegroup_prepend (rest, suffix),
+    ),
 }
 
 def typegroup_modifier_contents = syntax: Syntax => Sequence<Modifier> :: {
@@ -34,7 +36,7 @@ def typegroup_modifier_contents = syntax: Syntax => Sequence<Modifier> :: {
 // Splits prefix modifiers into those distributed to every variant and those
 // applied to the group. The group keeps source order, with each `@all(...)`
 // replaced by its contents and each `@variants(...)` removed.
-def typegroup_split_modifiers = modifiers: Sequence<Modifier> => (Sequence<Modifier>, Sequence<Modifier>) :: match modifiers {
+def typegroup_split_modifiers = modifiers: Sequence<Modifier> => (Sequence<Modifier>, Sequence<Modifier>) :: match (Clone.clone modifiers) {
     Sequence () => (Sequence (), Sequence ()),
     Sequence (first, rest) => {
         let (variants, group) = typegroup_split_modifiers rest
@@ -52,7 +54,7 @@ def typegroup_split_modifiers = modifiers: Sequence<Modifier> => (Sequence<Modif
     },
 }
 
-def typegroup_body_item = (variant: Ident<String>, body: TypeBody) => Item :: match body {
+def typegroup_body_item = (variant: Ident<String>, body: TypeBody) => Item :: match (Clone.clone body) {
     AliasBody underlying => parse_quote { pub type $variant = $underlying },
     WrapperBody (visibility, underlying) => match visibility {
         Private => parse_quote { pub type $variant wrap $underlying },
@@ -72,7 +74,7 @@ def typegroup_generic_body_item = (
     parameters: TypeParameters,
     body: TypeBody,
 ) => Item :: {
-    let declaration = parameters.declaration
+    let declaration = Clone.clone parameters.declaration
     match body {
         AliasBody underlying => parse_quote { pub type $variant$declaration = $underlying },
         WrapperBody (visibility, underlying) => match visibility {
@@ -89,7 +91,7 @@ def typegroup_generic_body_item = (
     }
 }
 
-def typegroup_items = (shared: Sequence<Modifier>, entries: Sequence<(Sequence<Modifier>; Ident<String>; Option<TypeBody>)>) => Sequence<Item> :: match entries {
+def typegroup_items = (shared: Sequence<Modifier>, entries: Sequence<(Sequence<Modifier>; Ident<String>; Option<TypeBody>)>) => Sequence<Item> :: match (Clone.clone entries) {
     Sequence () => Sequence (),
     Sequence (first, rest) => match first {
         (modifiers; variant; None) => {
@@ -109,7 +111,7 @@ def typegroup_generic_items = (
     shared: Sequence<Modifier>,
     parameters: TypeParameters,
     entries: Sequence<(Sequence<Modifier>; Ident<String>; Option<TypeBody>)>,
-) => Sequence<Item> :: match entries {
+) => Sequence<Item> :: match (Clone.clone entries) {
     Sequence () => Sequence (),
     Sequence (first, rest) => {
         let tail = typegroup_generic_items (shared, parameters, rest)
@@ -157,7 +159,7 @@ def typegroup_generic_sum_syntax = (
             let head: Syntax = match underlying {
                 None => quote { $group.$variant },
                 Some _ => {
-                    let arguments = parameters.arguments
+                    let arguments = Clone.clone parameters.arguments
                     quote { $group.$variant$arguments }
                 },
             }
@@ -243,7 +245,7 @@ pub macro typegroup
                 )
             },
             Some parameters => {
-                let declaration = parameters.declaration
+                let declaration = Clone.clone parameters.declaration
                 let items = typegroup_generic_items (shared, parameters, elements)
                 let sum = typegroup_generic_sum_syntax (group, parameters, elements)
                 let base: Item = match visibility {

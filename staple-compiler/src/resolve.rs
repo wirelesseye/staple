@@ -3178,8 +3178,7 @@ impl NameResolver {
                     {
                         found.insert(index);
                         self.intrinsic_functions.insert(symbol, *intrinsic);
-                    } else if !(self.ordinary_syntax_types
-                        && module_name == "std.syntax"
+                    } else if !(module_name == "std.syntax"
                         && crate::macro_expand::is_macro_runtime_intrinsic(&binding.name))
                     {
                         // The syntax functions are provided by the macro

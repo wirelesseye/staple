@@ -1,5 +1,7 @@
 pub mod
 
+use package.clone.Clone
+
 use package.string_builder.StringBuilder
 use package.char.Char
 use package.string.(String, ToString)
@@ -58,9 +60,9 @@ def derived_debug_implementation = (
 }
 
 /// Inspects a declaration without consuming its pending modifiers.
-def derived_debug_declaration = item: Item => Item :: match item {
+def derived_debug_declaration = item: Item => Item :: match (Clone.clone item) {
     ModifiedItem (_, nested) => derived_debug_declaration nested,
-    _ => item,
+    _ => Clone.clone item,
 }
 
 /// Derives `Debug` for a bodyless singleton type, formatting it as its name.
@@ -92,25 +94,31 @@ def derived_singleton_debug_implementation = (name: String, target: Type) => Ite
 /// ```
 pub macro @derive_debug: Item -> Sequence<Item> = item => match (derived_debug_declaration item) {
     TypeDeclarationItem (
-        name_syntax@(Ident name), target, parameters, Some (WrapperBody (_, representation)), _,
-    ) => Sequence (
-        first: item,
-        rest: Sequence (
-            first: derived_debug_implementation (name_syntax, name, target, parameters, representation),
-            rest: Sequence (),
-        ),
-    ),
+        name_syntax, target, parameters, Some (WrapperBody (_, representation)), _,
+    ) => {
+        let name = match (Clone.clone name_syntax) { Ident name => name }
+        Sequence (
+            first: Clone.clone item,
+            rest: Sequence (
+                first: derived_debug_implementation (name_syntax, name, target, parameters, representation),
+                rest: Sequence (),
+            ),
+        )
+    },
     TypeDeclarationItem (
-        name_syntax@(Ident name), target, parameters, Some (FromBody (_, representation)), _,
-    ) => Sequence (
-        first: item,
-        rest: Sequence (
-            first: derived_debug_implementation (name_syntax, name, target, parameters, representation),
-            rest: Sequence (),
-        ),
-    ),
+        name_syntax, target, parameters, Some (FromBody (_, representation)), _,
+    ) => {
+        let name = match (Clone.clone name_syntax) { Ident name => name }
+        Sequence (
+            first: Clone.clone item,
+            rest: Sequence (
+                first: derived_debug_implementation (name_syntax, name, target, parameters, representation),
+                rest: Sequence (),
+            ),
+        )
+    },
     TypeDeclarationItem (Ident name, target, _, None, _) => Sequence (
-        first: item,
+        first: Clone.clone item,
         rest: Sequence (
             first: derived_singleton_debug_implementation (name, target),
             rest: Sequence (),

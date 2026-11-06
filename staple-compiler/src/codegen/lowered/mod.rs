@@ -3825,6 +3825,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredExpressionKind::Access(access) => {
                 self.emit_access(owner, id, expression, access, environment)
             }
+            LoweredExpressionKind::SyntaxClone { value } => {
+                self.emit_expression(owner, *value, environment)
+            }
             LoweredExpressionKind::SyntaxOrigin { value } => {
                 let value_expression = self
                     .view

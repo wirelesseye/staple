@@ -16,11 +16,24 @@ pub(super) struct TraitImpl {
 pub(super) struct Registry {
     pub(super) declarations: HashMap<TraitKey, staple_syntax::TraitDeclaration>,
     pub(super) implementations: HashMap<TraitKey, Vec<TraitImpl>>,
+    /// Headers of `impl !Copy T` declarations.
+    negative_copy: Vec<Vec<HeaderPattern>>,
     companions: Vec<HelperDefinition>,
     /// Where each companion binding and implementation sits, by syntax id, so
     /// an expanded item can replace its written form.
     companion_slots: HashMap<SyntaxId, usize>,
     impl_slots: HashMap<SyntaxId, (TraitKey, usize)>,
+}
+
+/// A negative `Copy` implementation with binder parameters applies to every
+/// instantiation of its nominal constructor. When the target's arguments are
+/// not known yet, matching the constructor name is enough to exclude `Copy`.
+fn unknown_nominal_negative(pattern: &HeaderPattern, target: &MetaType) -> bool {
+    matches!(
+        (pattern, target),
+        (HeaderPattern::Nominal(pattern, _), MetaType::Nominal(target, arguments))
+            if pattern == target && arguments.is_empty()
+    )
 }
 
 pub(super) fn parameter_names(patterns: &[staple_syntax::TypeParameterPattern]) -> HashSet<String> {
@@ -128,6 +141,17 @@ impl Registry {
             for item in &module.syntax.items {
                 if let Item::TraitImplementation(implementation) = plain_item(item) {
                     if implementation.negative {
+                        if implementation.trait_name.name == "Copy" {
+                            let parameters = parameter_names(&implementation.type_parameters);
+                            if let Some(headers) = implementation
+                                .arguments
+                                .iter()
+                                .map(|ty| header_pattern(ty, &parameters))
+                                .collect::<Option<Vec<_>>>()
+                            {
+                                registry.negative_copy.push(headers);
+                            }
+                        }
                         continue;
                     }
                     let Some(key) = expander.trait_key(module.id, &implementation.trait_name)
@@ -455,8 +479,22 @@ impl MacroExpander {
         env: &HashMap<String, TypeBinding>,
         depth: usize,
     ) -> bool {
-        if matches!(bound.trait_name.name.as_str(), "Copy" | "Sized") {
+        if bound.trait_name.name == "Sized" {
             return true;
+        }
+        if bound.trait_name.name == "Copy" {
+            let Some(target) = bound
+                .arguments
+                .first()
+                .and_then(|ty| parse::parse_target_meta(ty, env))
+            else {
+                return true;
+            };
+            return !self.trait_registry.negative_copy.iter().any(|headers| {
+                headers.len() == 1
+                    && (match_header(&headers[0], &target, &mut HashMap::new())
+                        || unknown_nominal_negative(&headers[0], &target))
+            });
         }
         if depth > 64 {
             return false;

@@ -27,6 +27,7 @@ pub(super) enum SyntaxIntrinsic {
     TakeRest,
     Offset,
     SequencePush,
+    CloneSyntax,
     /// A float companion intrinsic (`__f64_floor`, `__f32_from_bits`, ...),
     /// so `const` initializers fold them with the results LLVM produces at
     /// run time.
@@ -62,6 +63,7 @@ impl SyntaxIntrinsic {
             "__take_rest" => Self::TakeRest,
             "__offset" => Self::Offset,
             "__sequence_push" => Self::SequencePush,
+            "__clone_syntax" => Self::CloneSyntax,
             _ => return None,
         })
     }
@@ -614,8 +616,10 @@ impl MacroExpander {
         match item {
             Item::TraitImplementation(implementation) => {
                 self.names_parse_trait(module, &implementation.trait_name)
+                    // `Splice` and the syntax `Clone` impls only run while
+                    // macros expand; normal code never owns syntax values.
                     || (Some(module) == self.syntax_module
-                        && implementation.trait_name.name == "Splice")
+                        && matches!(implementation.trait_name.name.as_str(), "Splice" | "Clone"))
                     || implementation.arguments.iter().any(type_contains_syntax)
             }
             Item::ExternBlock(block) => {
@@ -835,6 +839,7 @@ impl MacroExpander {
                     &syntax, cursor, end,
                 ))))
             }
+            SyntaxIntrinsic::CloneSyntax => Some(argument),
             SyntaxIntrinsic::SequencePush => {
                 let Value::Product(mut values, _) = argument else {
                     return None;

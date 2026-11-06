@@ -276,12 +276,15 @@ impl<'a> OwnershipChecker<'a> {
                                 value.syntax.span.clone(),
                                 "a borrowed closure cannot be captured by another closure",
                             ));
-                        } else if self.parameter_symbols.contains(&capture)
+                        } else if (self.parameter_symbols.contains(&capture)
                             && !self.module.is_move_parameter(capture)
                             && self.module.type_of_symbol(capture).is_some_and(|ty| {
                                 !self.module.is_copy_in_function(ty, self.function)
-                            })
+                            }))
+                            || matches!(self.states.get(&capture), Some(ValueState::Frozen))
                         {
+                            // A borrowed parameter or capture is reborrowed by
+                            // the nested closure instead of being moved in.
                             self.info.borrowed_captures.insert((function_id, capture));
                         } else if !self.module.has_mutable_storage(capture) {
                             self.use_symbol(capture, &value.syntax, true);
@@ -551,7 +554,7 @@ impl<'a> OwnershipChecker<'a> {
                             self.use_symbol(*capture, value.argument.syntax(), true);
                         }
                     }
-                } else if scoped_c_string {
+                } else if scoped_c_string || self.is_splice_call(value.callee.as_ref()) {
                     self.check_expression(&value.argument, false);
                 } else {
                     let callee_function_type = self
@@ -681,6 +684,34 @@ impl<'a> OwnershipChecker<'a> {
     /// position; otherwise the whole argument is consumed only if the
     /// callee requires a move somewhere in it, matching the existing rule
     /// that a partial move out of a single bound value is rejected.
+    /// Whether `callee` is the `Splice.splice` method. A quotation splice only
+    /// reads its argument, even though the method's declared parameter is
+    /// non-`Copy`.
+    fn is_splice_call(&self, callee: &Expression) -> bool {
+        let Expression::Access(access) = callee else {
+            return false;
+        };
+        if !matches!(
+            access.accessor,
+            staple_syntax::Accessor::Name(ref name) if name == "splice"
+        ) {
+            return false;
+        }
+        let resolved = self.module.resolved();
+        let is_splice = |trait_id| {
+            resolved
+                .traits()
+                .get(&trait_id)
+                .is_some_and(|declaration| declaration.declaration.name == "Splice")
+        };
+        let syntax = callee.syntax().id;
+        resolved.trait_for(syntax).is_some_and(is_splice)
+            || resolved
+                .trait_methods_for_expression(syntax)
+                .iter()
+                .any(|method| resolved.trait_for_method(*method).is_some_and(is_splice))
+    }
+
     fn check_call_argument(
         &mut self,
         argument: &Expression,

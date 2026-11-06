@@ -3369,12 +3369,6 @@ impl TypedModule {
         // are globally unique, so including all active function bounds also
         // makes the enclosing `Copy T` obligation visible in the closure.
         let _ = function;
-        // Syntax is a handle to a fragment, which macro code copies freely.
-        if self.resolved().ordinary_syntax_types()
-            && is_syntax_value(self.resolved(), value_type)
-        {
-            return true;
-        }
         let resolved = self.resolve_recursive_payload(value_type);
         let value_type = resolved.as_ref().unwrap_or(value_type);
         is_copy_type(
@@ -5679,15 +5673,24 @@ impl TypeChecker {
                 ));
                 continue;
             }
-            if implementation.negative
-                && !matches!(
-                    target,
-                    CheckedType::Wrapper { .. } | CheckedType::Opaque { sized: true, .. }
-                )
-            {
+            // `TypeBody` is a union of nominal body types; a negative impl on
+            // the union is how that alias opts its alternatives out together.
+            let negatable = |target: &CheckedType| match target {
+                CheckedType::Wrapper { .. }
+                | CheckedType::Opaque { sized: true, .. }
+                | CheckedType::Sum(_) => true,
+                CheckedType::Alias { target, .. } => matches!(
+                    target.as_ref(),
+                    CheckedType::Wrapper { .. }
+                        | CheckedType::Opaque { sized: true, .. }
+                        | CheckedType::Sum(_)
+                ),
+                _ => false,
+            };
+            if implementation.negative && !negatable(target) {
                 self.diagnostics.push(Diagnostic::new(
                     span,
-                    "`!Copy` may only be implemented for a represented nominal type or sized opaque type",
+                    "`!Copy` may only be implemented for a represented nominal type, sized opaque type, or union alias",
                 ));
                 continue;
             }
@@ -6405,11 +6408,14 @@ impl TypeChecker {
         {
             return self.is_copy_with(&arguments[0], &[]);
         }
-        if arguments.iter().any(contains_type_parameter) {
-            return true;
-        }
+        // `Copy` is structural, so a type containing parameters can still be
+        // known non-`Copy` through a negative implementation. Consult those
+        // before assuming an open type could satisfy the bound.
         if Some(trait_id) == self.copy_trait {
             return self.is_copy_with(&arguments[0], &[]);
+        }
+        if arguments.iter().any(contains_type_parameter) {
+            return true;
         }
         self.trait_obligation_available(trait_id, arguments)
     }
@@ -10927,9 +10933,7 @@ impl TypeChecker {
             .flatten()
             .cloned()
             .collect::<Vec<_>>();
-        if !self.is_copy_with(value_type, &bounds)
-            && !(self.ordinary_syntax_types && is_syntax_value(module, value_type))
-        {
+        if !self.is_copy_with(value_type, &bounds) {
             self.diagnostics.push(Diagnostic::new(
                 pattern.syntax.span.clone(),
                 format!("an `@` pattern requires a Copy value, found `{value_type}`"),
@@ -21823,37 +21827,6 @@ impl TypeChecker {
             self.resolved_named_types.insert(id, value_type.clone());
         }
         value_type
-    }
-}
-
-/// Whether `value_type` is made of syntax: the handle types, and the data
-/// types built from them.
-fn is_syntax_value(module: &ResolvedModule, value_type: &CheckedType) -> bool {
-    match value_type.desugared() {
-        CheckedType::Wrapper {
-            id, representation, ..
-        } => {
-            module
-                .type_declarations()
-                .get(id)
-                .is_some_and(|declaration| declaration.recursive_constructor)
-                || is_syntax_value(module, representation)
-        }
-        CheckedType::Opaque { id, .. } => module.is_syntax_type(*id),
-        CheckedType::Sum(sum) => sum
-            .alternatives
-            .iter()
-            .all(|alternative| is_syntax_value(module, alternative)),
-        CheckedType::Product(product) => {
-            product.spreads.is_empty()
-                && !product.runs.is_empty()
-                && product
-                    .runs
-                    .iter()
-                    .all(|run| is_syntax_value(module, &run.element.value_type))
-        }
-        CheckedType::String => false,
-        _ => false,
     }
 }
 
