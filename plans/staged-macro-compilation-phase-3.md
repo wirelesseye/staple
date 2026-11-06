@@ -138,9 +138,13 @@ All of these were read from the source at `ef52149a`.
    | Kind | Types |
    |---|---|
    | `Copy` | `Ident`, `Comma`, `Equals`, `FatArrow`, `Visibility`, `ParseStream` |
-   | Non-`Copy`, `Clone` | `Syntax`, `Expr`, `Type`, `Pattern`, `Item`, `Modifier` and their nodes, the delimiter types |
-   | Follows its elements | `Sequence<T>`, `Separated<T, S>` |
+   | Non-`Copy`, `Clone` | `Syntax`, `Expr`, `Type`, `Pattern`, `Item`, `Modifier` and their nodes, the delimiter types, `Sequence<T>`, `Separated<T, S>` |
 
+   - **`Sequence` and `Separated` are always non-`Copy`, whatever their elements.**
+     `Sequence<Ident>` is non-`Copy` even though `Ident` is `Copy`. Their recursive
+     representation makes structural `Copy` false, and explicit positive `Copy` impls
+     are rejected. They are `Clone` when their elements are, through
+     `impl<T where Clone T> Clone Sequence<T>` and the same for `Separated<T, S>`.
    - **A splice borrows.** `Splice.splice` stays `T -> Syntax`, which borrows today
      and becomes `ref T -> Syntax` under the planned memory model, with no change
      to macro code. A quotation keeps Phase 2's one `Splice.splice` per distinct
@@ -293,15 +297,10 @@ The tasks are in dependency order.
 Do this as one change, so the closure check stays clean at every commit.
 
 - Declare `Copy` and `Clone` as Decision 2 says, and remove the `impl !Copy`
-  declarations only where the table contradicts them. `Sequence<T>` and
-  `Separated<T, S>` are `Copy` when their elements are. If conditional `Copy` isn't
-  supported on these types, record it and raise it before working around it.
+  declarations only where the table contradicts them.
 - Remove the copy exception (`is_syntax_value`, `typecheck.rs:3367` and `:10923`).
   An `@` pattern on a non-`Copy` node is then an error, as for any other type.
-- Add the deep `Clone` impls, with the handle types copying only the handle. Check
-  whether `impl<T where Copy T> Clone T` (`stdlib/std/clone.sta`) overlaps with a
-  conditionally `Copy` `Sequence<T>` that has its own `Clone` impl. If it does, make
-  `Sequence` and `Separated` always non-`Copy`, and update Decision 2.
+- Add the deep `Clone` impls, with the handle types copying only the handle.
 - Fix the macro code the check now rejects: the standard library's 33 known errors
   and whatever appears once they are gone, then the fixtures, the test sources and
   `staple-compiler/examples/macros.sta`. Prefer `move` on parameters and typed nodes
@@ -310,8 +309,8 @@ Do this as one change, so the closure check stays clean at every commit.
 - Make `Clone.clone` on syntax work under the interpreter (Decision 2), and replace
   `duplicate_modifier`.
 - Tests: a use after a move is reported, `Clone.clone` makes it valid, `Ident` is
-  copied freely, a `Sequence` of `Ident` and a `Sequence` of `Expr` each behave as
-  the table says, a spliced borrowed binding needs no clone, and an `Expr` and an
+  copied freely, a `Sequence` of `Ident` and a `Sequence` of `Expr` are both non-`Copy`
+  and `Clone`, a spliced borrowed binding needs no clone, and an `Expr` and an
   opaque `Syntax` value can each be spliced twice in one quotation without a clone.
 
 ### 4. Arena and core intrinsics
@@ -574,8 +573,8 @@ language constraints:
 
 - Conditional `Copy` is not supported for `Sequence<T>` and `Separated<T, S>`.
   Their recursive representation makes structural `Copy` false, and explicit
-  positive `Copy` implementations are rejected. Taking the fallback in
-  Decision 2 makes both types always non-`Copy`.
+  positive `Copy` implementations are rejected. Decision 2 now makes both types
+  always non-`Copy`.
 - `Ident<S>` is still `Copy` as the table says. Its spelling `String` is Copy:
   `String` is the builtin `CheckedType::String`, which `is_copy_type` treats as
   copyable. An earlier attempt marked `Ident` `!Copy` itself, which caused the
