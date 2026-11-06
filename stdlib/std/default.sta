@@ -82,7 +82,7 @@ def derived_default_field_bounds = fields: Sequence<ProductTypeField> => Sequenc
 
 def derived_default_bounds = ty: Type => Sequence<Syntax> :: match ty {
     ProductType fields => derived_default_field_bounds fields,
-    _ => Sequence (first: quote { Default $ty }, rest: Sequence ()),
+    _ => Sequence.<Syntax> (first: quote { Default $ty }, rest: Sequence.<Syntax> ()),
 }
 
 def derived_default_parameters = parameters: Sequence<Ident<String>> => Sequence<Syntax> :: match parameters {

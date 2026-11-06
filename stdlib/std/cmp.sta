@@ -128,7 +128,7 @@ def derived_eq_field_bounds = fields: Sequence<ProductTypeField> => Sequence<Syn
 
 def derived_eq_bounds = ty: Type => Sequence<Syntax> :: match ty {
     ProductType fields => derived_eq_field_bounds fields,
-    _ => Sequence (first: quote { Eq $ty }, rest: Sequence ()),
+    _ => Sequence.<Syntax> (first: quote { Eq $ty }, rest: Sequence.<Syntax> ()),
 }
 
 def derived_eq_implementation = (

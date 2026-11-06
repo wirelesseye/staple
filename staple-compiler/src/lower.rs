@@ -884,10 +884,9 @@ impl LoweredCoercionPlan {
             return Ok(LoweredCoercionPlan::Identity);
         }
         // An inferred position adopts the source's type, so the runtime
-        // representation does not change. This stays until every generic
-        // constructor call completes its type parameters in the checker;
-        // removing it exposes product-to-sum coercions with `Inferred`
-        // fields throughout the standard library.
+        // representation does not change. Removing this still exposes
+        // product-to-sum coercions with inferred fields in generic
+        // standard-library constructor calls.
         if crate::contains_inferred_type(source) || crate::contains_inferred_type(target) {
             return Ok(LoweredCoercionPlan::Identity);
         }
@@ -5940,6 +5939,7 @@ impl LoweredProgram {
                     {
                         None
                     } else {
+                        eprintln!("DEBUG coercion at {:?}: {message}", syntax.span);
                         return Err(Diagnostic::new(syntax.span.clone(), message));
                     }
                 }

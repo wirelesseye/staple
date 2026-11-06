@@ -9,8 +9,8 @@
 
 use staple_syntax::{
     Accessor, BlockExpression, CallExpression, Expression, IntegerExpression, Item, NameExpression,
-    ProductElement, ProductExpression, QuoteExpression, QuoteKind, Syntax, SyntaxId, SyntaxToken,
-    TokenKind,
+    NamedType, ProductElement, ProductExpression, QuoteExpression, QuoteKind, Syntax, SyntaxId,
+    SyntaxToken, TokenKind, Type, TypeApplicationExpression,
 };
 
 use crate::ModuleId;
@@ -75,6 +75,30 @@ impl QuoteLowering<'_> {
         })
     }
 
+    /// The `Syntax` type as written by the quoting module, so a generated
+    /// sequence has a concrete element type and needs no inference.
+    fn syntax_type(&mut self, like: &Syntax) -> Type {
+        let mut syntax = self.syntax(like);
+        syntax.definition_module = Some(self.syntax_module.0);
+        Type::Named(NamedType {
+            syntax,
+            namespace: None,
+            name: "Syntax".to_owned(),
+        })
+    }
+
+    fn sequence(&mut self, like: &Syntax, elements: Vec<(Option<&str>, Expression)>) -> Expression {
+        let constructor = self.name(like, "Sequence");
+        let constructor =
+            Expression::TypeApplication(Box::new(TypeApplicationExpression {
+                syntax: self.syntax(like),
+                value: Box::new(constructor),
+                arguments: vec![self.syntax_type(like)],
+            }));
+        let product = self.product(like, false, elements);
+        self.call(like, constructor, product)
+    }
+
     fn product(
         &mut self,
         like: &Syntax,
@@ -114,11 +138,7 @@ impl QuoteLowering<'_> {
         let like = &quote.syntax;
         let id = self.table.templates.len();
         self.table.templates.push(quote.contents.text());
-        let mut list = {
-            let constructor = self.name(like, "Sequence");
-            let empty = self.product(like, false, Vec::new());
-            self.call(like, constructor, empty)
-        };
+        let mut list = self.sequence(like, Vec::new());
         for name in Self::splices(quote).into_iter().rev() {
             let splice = {
                 let trait_ = self.name(like, "Splice");
@@ -130,13 +150,10 @@ impl QuoteLowering<'_> {
             };
             let value = self.local(like, &name);
             let spliced = self.call(like, splice, value);
-            let constructor = self.name(like, "Sequence");
-            let cell = self.product(
+            list = self.sequence(
                 like,
-                false,
                 vec![(Some("first"), spliced), (Some("rest"), list)],
             );
-            list = self.call(like, constructor, cell);
         }
         let template = Expression::Integer(IntegerExpression {
             syntax: self.syntax(like),

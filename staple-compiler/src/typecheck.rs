@@ -15091,7 +15091,12 @@ impl TypeChecker {
                                 if self.diagnostics.len() == before
                                     && !contains_inferred_type(&checked)
                                 {
-                                    argument_type = checked;
+                                    argument_type = self.coerce_expression_type(
+                                        call.argument.syntax().id,
+                                        checked,
+                                        &function.parameter,
+                                        call.argument.syntax().span.clone(),
+                                    );
                                 }
                             }
                         }

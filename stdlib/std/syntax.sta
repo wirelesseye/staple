@@ -534,7 +534,7 @@ impl<T> FromIterator Sequence<T> T {
 // Elements until the stream ends or `T` stops parsing.
 impl<T where Parse T> Parse Sequence<T> {
     parse = mut input => {
-        let mut elements: Sequence<T> = Sequence ()
+        let mut elements: Sequence<T> = Sequence<T> :: Sequence ()
         loop {
             if (is_empty input) { break }
             let mut fork = input
@@ -555,7 +555,7 @@ impl<T where Parse T> Parse Sequence<T> {
 // Comma-separated elements with an optional trailing comma.
 impl<T where Parse T> Parse Separated<T, Comma> {
     parse = mut input => {
-        let mut elements: Sequence<T> = Sequence ()
+        let mut elements: Sequence<T> = Sequence<T> :: Sequence ()
         let mut trailing: Bool = False
         loop {
             if (is_empty input) { break }

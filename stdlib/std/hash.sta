@@ -194,7 +194,7 @@ def derived_hash_field_bounds = fields: Sequence<ProductTypeField> => Sequence<S
 
 def derived_hash_bounds = ty: Type => Sequence<Syntax> :: match ty {
     ProductType fields => derived_hash_field_bounds fields,
-    _ => Sequence (first: quote { Hash $ty }, rest: Sequence ()),
+    _ => Sequence.<Syntax> (first: quote { Hash $ty }, rest: Sequence.<Syntax> ()),
 }
 
 def derived_hash_implementation = (

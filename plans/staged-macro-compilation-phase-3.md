@@ -495,7 +495,7 @@ Update this section as you work (see "Rules for the implementor").
 | Task | Status | Commit | Notes |
 |---|---|---|---|
 | 1. JIT harness and lowering inventory | done | `8c30bf5` | `macro_runtime/harness.rs` builds, checks, lowers and JITs the whole check program. Plain functions and empty-sequence construction run. Generic foreign intrinsics emit trapping stubs cast to each call's signature. Whole-program emit is about 6.7 s; a full harness test is about 7.5 s. |
-| 2. Boxed nodes | partly done | this commit | `@syntax_node` marks the node types. Lowering and codegen give them a pointer-sized box `(representation, origin)`, constructors allocate one, nominal patterns unbox them, product patterns select sum alternatives by width, field reads load the representation, and `__origin`/`__with_origin` lower inline. The whole-program proof runs; refinement patterns and field updates still need tests, and the `Inferred` coercion shortcut still covers 145 generic constructor calls. |
+| 2. Boxed nodes | partly done | `8aef7018` | `@syntax_node` marks the node types. Lowering and codegen give them a pointer-sized box `(representation, origin)`, constructors allocate one, nominal patterns unbox them, product patterns select sum alternatives by width, field reads load the representation, and `__origin`/`__with_origin` lower inline. The whole-program proof runs; refinement patterns and field updates still need tests, and the `Inferred` coercion shortcut still covers 145 generic constructor calls. |
 | 3. Ownership of syntax | not started | | |
 | 4. Arena and core intrinsics | not started | | |
 | 5. Node views and rebuilding | not started | | |
@@ -604,10 +604,12 @@ parameter. Tests for the annotated `def`, constructor result, top-level let,
 unannotated let, ambiguous alternative and wrong annotation are in
 `staple-compiler/tests/constructor_inference.rs`.
 
-The `Inferred` coercion shortcut is **still present**. Removing it now exposes
-145 product-to-sum coercions with inferred fields in generic standard-library
-constructor calls. They need the same checker completion before the shortcut
-can become an internal error; that is the next checker task.
+The `Inferred` coercion shortcut is **still present**. Quotation lowering now
+annotates its generated lists as `Sequence<Syntax>`, which removed most of the
+holes, and a few standard-library macro lists carry explicit element types.
+The full standard-library inventory still reports product-to-sum coercions
+with inferred fields in generic macro helpers, so the shortcut cannot yet
+become the requested internal error. That is the next checker task.
 
 The proof runs under the whole-program harness in about 8.6 s. The expansion
 comparison against the start of the phase matches 231 of 232 inputs; the only
