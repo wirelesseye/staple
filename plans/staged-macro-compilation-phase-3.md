@@ -496,7 +496,7 @@ Update this section as you work (see "Rules for the implementor").
 |---|---|---|---|
 | 1. JIT harness and lowering inventory | done | `8c30bf5` | `macro_runtime/harness.rs` builds, checks, lowers and JITs the whole check program. Plain functions and empty-sequence construction run. Generic foreign intrinsics emit trapping stubs cast to each call's signature. Whole-program emit is about 6.7 s; a full harness test is about 7.5 s. |
 | 2. Boxed nodes | done | this commit | `@syntax_node` marks the node types. Lowering and codegen give them a pointer-sized box `(representation, origin)`, constructors allocate one, nominal patterns unbox them, product patterns select sum alternatives by width, field reads load the representation, and `__origin`/`__with_origin` lower inline. The proof runs: sequence and `Expr`/`CallExpr` construction, matching, field reads, a rebuilt node and a run-time `Ident<"else">` refinement. `__origin`/`__with_origin` lower but are not callable from source tests. The `Inferred` coercion shortcut still covers generic constructor calls; that work belongs to tasks 4–6. |
-| 3. Ownership of syntax | blocked | | Conditional `Copy` is unavailable, so `Sequence`/`Separated` are always non-`Copy`. `Ident<String>` is non-`Copy` because `String` is. `Clone.clone` keeps its borrowing parameter, so a syntax clone needs a copying implementation rather than an identity return. The source migration is not started. |
+| 3. Ownership of syntax | blocked | | Conditional `Copy` is unavailable, so `Sequence`/`Separated` are always non-`Copy`. `Clone.clone` keeps its borrowing parameter, so a syntax clone needs a copying implementation rather than an identity return. The source migration is not started. |
 | 4. Arena and core intrinsics | not started | | |
 | 5. Node views and rebuilding | not started | | |
 | 6. `Parse` impls | not started | | |
@@ -569,16 +569,17 @@ worked around.
 
 ### Ownership blockers (task 3)
 
-Trying the ownership change before writing it into the plan exposed three
+Trying the ownership change before writing it into the plan exposed two
 language constraints:
 
 - Conditional `Copy` is not supported for `Sequence<T>` and `Separated<T, S>`.
   Their recursive representation makes structural `Copy` false, and explicit
   positive `Copy` implementations are rejected. Taking the fallback in
   Decision 2 makes both types always non-`Copy`.
-- `Ident<String>` is not `Copy`, because its spelling is `String` and `String`
-  is not `Copy`. The boxed pointer is copyable at run time, but the checker
-  only sees the representation. The table now records `Ident` as non-`Copy`.
+- `Ident<S>` is still `Copy` as the table says. Its spelling `String` is Copy:
+  `String` is the builtin `CheckedType::String`, which `is_copy_type` treats as
+  copyable. An earlier attempt marked `Ident` `!Copy` itself, which caused the
+  false "Ident is non-Copy" reading; that marker is not needed.
 - `Clone.clone` keeps its borrowing signature. A non-`Copy` clone cannot just
   return the borrowed value, so each syntax `Clone` impl needs a real copying
   body (or a compiler intrinsic that copies from a borrow). Making clone
