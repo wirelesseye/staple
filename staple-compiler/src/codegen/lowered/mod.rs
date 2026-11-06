@@ -5146,7 +5146,69 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         index,
                         span.clone(),
                     )?;
-                    self.bind_pattern(owner, pattern_id, payload.as_any_value_enum(), environment)?;
+                    if let Some(refined) = &pattern.test.refined {
+                        let BasicValueEnum::PointerValue(pointer) = payload else {
+                            return Err(Diagnostic::new(
+                                span.clone(),
+                                "refined binding value is not a syntax node",
+                            ));
+                        };
+                        let crate::CheckedType::Wrapper { representation, .. } =
+                            &pattern.value_type
+                        else {
+                            return Err(Diagnostic::new(
+                                span.clone(),
+                                "refined binding has no wrapper representation",
+                            ));
+                        };
+                        let representation_type = self.backend.compile_type(representation)?;
+                        let spelling = self.backend.load_syntax_node_representation(
+                            pointer,
+                            representation_type,
+                        )?;
+                        let BasicValueEnum::PointerValue(spelling) = spelling else {
+                            return Err(Diagnostic::new(
+                                span.clone(),
+                                "refined binding spelling is not a string",
+                            ));
+                        };
+                        let literal = std::str::from_utf8(refined).map_err(|_| {
+                            Diagnostic::new(
+                                span.clone(),
+                                "refined binding spelling is not UTF-8",
+                            )
+                        })?;
+                        let matched = self.backend.context.append_basic_block(
+                            success.get_parent().ok_or_else(|| {
+                                internal_invariant(
+                                    staple_syntax::Span::Compiler,
+                                    "match block belongs to an LLVM function",
+                                )
+                            })?,
+                            "match.refined",
+                        );
+                        self.backend.build_string_literal_pattern_compare(
+                            spelling,
+                            literal,
+                            matched,
+                            failure,
+                            span.clone(),
+                        )?;
+                        self.backend.builder.position_at_end(matched);
+                        self.bind_pattern(
+                            owner,
+                            pattern_id,
+                            payload.as_any_value_enum(),
+                            environment,
+                        )?;
+                    } else {
+                        self.bind_pattern(
+                            owner,
+                            pattern_id,
+                            payload.as_any_value_enum(),
+                            environment,
+                        )?;
+                    }
                     self.backend
                         .builder
                         .build_unconditional_branch(success)

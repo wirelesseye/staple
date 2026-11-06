@@ -2389,6 +2389,8 @@ pub(crate) struct LoweredPatternTestPlan {
     /// The decoded value of a character-literal pattern, compared against
     /// the subject's integer representation.
     pub scalar: Option<u64>,
+    /// The spelling a refinement binding such as `Ident<"else">` requires.
+    pub refined: Option<Vec<u8>>,
 }
 
 impl LoweredPatternTestPlan {
@@ -2401,6 +2403,7 @@ impl LoweredPatternTestPlan {
             identity: LoweredPatternIdentity::None,
             literal: None,
             scalar: None,
+            refined: None,
         }
     }
 }
@@ -2458,6 +2461,7 @@ fn pattern_test_plan(
         identity: LoweredPatternIdentity::None,
         literal: None,
         scalar: None,
+        refined: None,
     };
     let mut children = Vec::new();
     match shape {
@@ -2716,6 +2720,24 @@ fn pattern_plan_shape_from_kind(
         },
         LoweredPatternKind::At { .. } => PatternPlanShape::At,
     }
+}
+
+/// The spelling a refinement binding's declared type requires, as in
+/// `Ident<"else">`.
+fn refinement_spelling(ty: &staple_syntax::Type) -> Option<String> {
+    let staple_syntax::Type::Application(application) = ty else {
+        return None;
+    };
+    let staple_syntax::Type::Named(name) = application.callee.as_ref() else {
+        return None;
+    };
+    if name.namespace.is_some() || name.name != "Ident" {
+        return None;
+    }
+    let staple_syntax::Type::StringLiteral(literal) = application.argument.as_ref() else {
+        return None;
+    };
+    staple_syntax::string_literal::decode(&literal.literal).ok()
 }
 
 /// The plan-relevant shape of a syntax pattern, or a diagnostic when the
@@ -5694,7 +5716,7 @@ impl LoweredProgram {
             representation_subject = self.concrete_syntax_subject(subject);
             &representation_subject
         };
-        let (test, child_subjects) = match pattern_test_plan(
+        let (mut test, child_subjects) = match pattern_test_plan(
             subject,
             &value_type,
             &shape,
@@ -5721,6 +5743,12 @@ impl LoweredProgram {
                 }
             }
         };
+        if let Pattern::Binding(binding) = pattern
+            && module.is_refinement_pattern(syntax.id)
+            && let Some(spelling) = refinement_spelling(&binding.ty)
+        {
+            test.refined = Some(spelling.into_bytes());
+        }
         let child_subject_type = |index: usize, child: &Pattern| {
             child_subjects
                 .get(index)
@@ -13219,7 +13247,8 @@ impl LoweredProgram {
             &|id| self.is_syntax_node_type_id(id),
             &|ty| self.syntax_node_representation(ty).or_else(|| self.recursive_representation(ty)),
         ) {
-            Ok((expected, child_subjects)) => {
+            Ok((mut expected, child_subjects)) => {
+                expected.refined = pattern.test.refined.clone();
                 if expected != pattern.test {
                     diagnostics.push(Diagnostic::new(
                         pattern.origin.span.clone(),

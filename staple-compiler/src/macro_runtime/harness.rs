@@ -251,6 +251,11 @@ mod tests {
             "def probe: () -> I32 = () => {\n",
             "    let empty: Sequence<Ident<String>> = Sequence ()\n",
             "    let one: Sequence<Ident<String>> = Sequence (first: Ident \"a\", rest: empty)\n",
+            "    let call: CallExpr = CallExpr (callee: Ident \"f\", argument: Ident \"a\")\n",
+            "    let changed: CallExpr = CallExpr (callee: call.callee, argument: Ident \"b\")\n",
+            "    let updated = match changed { CallExpr (_, argument) => match argument { Ident _ => 1, _ => 60 } }\n",
+            "    let expr: Expr = Ident \"else\"\n",
+            "    let refined = match expr { word: Ident<\"else\"> => 1, _ => 50 }\n",
             "    let from_empty = match empty { Sequence () => 0, Sequence (_, _) => 10 }\n",
             "    let from_one = match one {\n",
             "        Sequence () => 20,\n",
@@ -259,7 +264,7 @@ mod tests {
             "            _ => 40,\n",
             "        },\n",
             "    }\n",
-            "    from_empty + from_one\n",
+            "    from_empty + from_one + refined + updated\n",
             "}\n",
             "macro touch = () => probe ()\n",
         ));
@@ -270,7 +275,7 @@ mod tests {
         with_jit(&lowered, |engine| {
             type Probe = unsafe extern "C" fn(*const usize) -> i32;
             let probe = unsafe { engine.get_function::<Probe>(&symbol).unwrap() };
-            assert_eq!(unsafe { probe.call(std::ptr::null()) }, 1);
+            assert_eq!(unsafe { probe.call(std::ptr::null()) }, 3);
         });
     }
 

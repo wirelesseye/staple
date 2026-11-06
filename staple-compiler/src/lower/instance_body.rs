@@ -4936,7 +4936,8 @@ impl<'a> BodyValidator<'a> {
                 &|id| self.program.is_syntax_node_type_id(id),
                 &|ty| self.program.syntax_node_representation(ty).or_else(|| self.program.recursive_representation(ty)),
             ) {
-                Ok((expected, child_subjects)) => {
+                Ok((mut expected, child_subjects)) => {
+                    expected.refined = pattern.test.refined.clone();
                     if expected != pattern.test {
                         self.report(
                             pattern.origin.span.clone(),

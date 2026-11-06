@@ -495,7 +495,7 @@ Update this section as you work (see "Rules for the implementor").
 | Task | Status | Commit | Notes |
 |---|---|---|---|
 | 1. JIT harness and lowering inventory | done | `8c30bf5` | `macro_runtime/harness.rs` builds, checks, lowers and JITs the whole check program. Plain functions and empty-sequence construction run. Generic foreign intrinsics emit trapping stubs cast to each call's signature. Whole-program emit is about 6.7 s; a full harness test is about 7.5 s. |
-| 2. Boxed nodes | partly done | `8aef7018` | `@syntax_node` marks the node types. Lowering and codegen give them a pointer-sized box `(representation, origin)`, constructors allocate one, nominal patterns unbox them, product patterns select sum alternatives by width, field reads load the representation, and `__origin`/`__with_origin` lower inline. The whole-program proof runs; refinement patterns and field updates still need tests, and the `Inferred` coercion shortcut still covers 145 generic constructor calls. |
+| 2. Boxed nodes | done | this commit | `@syntax_node` marks the node types. Lowering and codegen give them a pointer-sized box `(representation, origin)`, constructors allocate one, nominal patterns unbox them, product patterns select sum alternatives by width, field reads load the representation, and `__origin`/`__with_origin` lower inline. The proof runs: sequence and `Expr`/`CallExpr` construction, matching, field reads, a rebuilt node and a run-time `Ident<"else">` refinement. `__origin`/`__with_origin` lower but are not callable from source tests. The `Inferred` coercion shortcut still covers generic constructor calls; that work belongs to tasks 4–6. |
 | 3. Ownership of syntax | not started | | |
 | 4. Arena and core intrinsics | not started | | |
 | 5. Node views and rebuilding | not started | | |
@@ -510,7 +510,7 @@ Update this section as you work (see "Rules for the implementor").
 
 ## Measurements
 
-- **Whole-program JIT, proof test:** about 8.6 s from check program to result on
+- **Whole-program JIT, proof test:** about 8.8 s from check program to result on
   the development machine (macOS, arm64), commit `this commit`, command
   `cargo test -p staple-compiler --lib macro_runtime::harness::tests::compiled_code_constructs_and_matches_a_sequence`.
 - **Whole-program emit:** about 6.7 s in the test profile.
@@ -578,7 +578,20 @@ tag. `__origin` and `__with_origin` now lower inline as `SyntaxOrigin` and
 `SyntaxNodeField` accesses.
 
 The whole-program JIT now runs the proof: a `Sequence<Ident<String>>` is
-constructed, matched by alternative, and its fields are read. The earlier
+constructed and matched by alternative; an `Expr`/`CallExpr` tree is
+constructed, its field is read, a changed node is rebuilt from it, and the
+result is matched; and a refinement binding (`word: Ident<"else">`) compares
+the spelling at run time. `__origin` and `__with_origin` lower inline, but no
+source test calls them because the intrinsic bindings stay private to
+`std.syntax`.
+
+Mode gates: none became unnecessary with the boxed declarations alone. The
+copy exception goes with task 3. The `ordinary_syntax_types` gates, recursive
+stand-ins, refinement coverage and the standard-library checks stay until the
+interpreter goes in Phase 6, because normal builds must still treat these
+types as compile-time only.
+
+The earlier
 failure was not a box or representation problem. It reproduces without syntax
 types:
 

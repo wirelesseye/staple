@@ -2490,6 +2490,8 @@ pub struct TypedModule {
     logicals: HashMap<SyntaxId, CheckedLogical>,
     accesses: HashMap<SyntaxId, CheckedAccess>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
+    /// Binding patterns that refine a spelling, such as `Ident<"else">`.
+    refinement_patterns: HashSet<SyntaxId>,
     /// Alias-bearing display copies, kept sparse; canonical entries are erased.
     display_pattern_types: HashMap<SyntaxId, CheckedType>,
     pattern_projections: HashMap<SyntaxId, TypeId>,
@@ -3296,6 +3298,11 @@ impl TypedModule {
 
     pub fn type_of_pattern(&self, syntax_id: SyntaxId) -> Option<&CheckedType> {
         self.pattern_types.get(&syntax_id)
+    }
+
+    /// Whether this binding pattern refines a spelling, as `Ident<"else">` does.
+    pub(crate) fn is_refinement_pattern(&self, syntax_id: SyntaxId) -> bool {
+        self.refinement_patterns.contains(&syntax_id)
     }
 
     /// The checked pattern type for display, keeping source aliases.
@@ -4712,6 +4719,7 @@ impl TypeChecker {
             logicals: self.logicals,
             accesses: self.accesses,
             pattern_types: self.pattern_types,
+            refinement_patterns: self.refinement_patterns,
             display_pattern_types: HashMap::new(),
             pattern_projections: self.pattern_projections,
             pattern_dereferences: self.pattern_dereferences,
