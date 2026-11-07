@@ -581,17 +581,15 @@ An earlier attempt marked `Ident` `!Copy` itself, which caused the false
 "Ident is non-Copy" reading; that marker is not needed.
 
 `Clone.clone` keeps its borrowing signature. A non-`Copy` clone cannot just
-return the borrowed value, so the syntax impls call the generic helper
-`clone_syntax`, whose body is the `__clone_syntax` intrinsic. The interpreter
-returns the argument unchanged, which preserves its hidden source and origin;
-compiled lowering emits the operand as `SyntaxClone`. That is a handle copy,
-not a structural rebuild, which is safe because boxed nodes are immutable and a
-field update constructs a new node. Both `clone_syntax` and the syntax `Clone`
-impls are compile-time-only: normal builds drop them, so they never become
-runtime external calls. `clone_syntax` is classified as a helper by the
-`__clone_syntax` token in its body, because its generic signature cannot
-mention `Syntax`; the original `Syntax`-typed helper classification remains
-for the rest.
+return the borrowed value, so the syntax impls call `__clone_syntax` directly:
+calling `Clone.clone` inside an impl would recurse back into the same impl.
+The interpreter returns the argument unchanged, which preserves its hidden
+source and origin; compiled lowering emits the operand as `SyntaxClone`. That
+is a handle copy, not a structural rebuild, which is safe because boxed nodes
+are immutable and a field update constructs a new node. The syntax `Clone`
+impls are compile-time-only, and normal builds drop them with the intrinsic
+declaration, so the intrinsic never becomes a runtime external call. Other
+macro code, including `stdlib/std/flow.sta`, uses the public `Clone.clone`.
 
 The `Clone` overlap was real. `impl<T where Copy T> Clone T` and
 `impl<T> Clone (Sequence<T>)` are reported as ambiguous at a `Clone.clone` call

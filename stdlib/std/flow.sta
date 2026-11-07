@@ -97,7 +97,7 @@ def if_branches = (move condition: Expr, move consequent: Expr, move rest: Seque
 /// ```
 pub macro if =
     (condition: Expr; consequent: Expr; rest: Sequence<Expr>) =>
-    if_branches (clone_syntax condition, clone_syntax consequent, clone_syntax rest)
+    if_branches (Clone.clone condition, Clone.clone consequent, Clone.clone rest)
 
 /// Repeats a body while its condition evaluates to `True`.
 ///

@@ -238,10 +238,6 @@ impl !Copy Syntax {}
 /// Exactly one structural syntax node.
 pub type SyntaxNode = Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | TypeParameter | TypeParameters | Angled<Syntax> | Parenthesized<Syntax> | Bracketed<Syntax> | Braced<Syntax>
 
-/// Duplicates a syntax value. A boxed node is immutable, so the copy can
-/// share its storage until a field update copies it.
-pub def clone_syntax = <T> value: T => T :: __clone_syntax value
-
 /// Produces opaque syntax from a braced quotation without reparsing it.
 ///
 /// # Example
@@ -342,7 +338,7 @@ pub trait Splice T {
     splice: T -> Syntax
 }
 
-impl Splice Syntax { splice = value => clone_syntax value }
+impl Splice Syntax { splice = value => __clone_syntax value }
 impl Splice SyntaxNode { splice = value => __splice_node.<SyntaxNode> value }
 impl Splice Expr { splice = value => __splice_node.<Expr> value }
 impl Splice CallExpr { splice = value => __splice_node.<CallExpr> value }
@@ -614,39 +610,39 @@ impl<T where Parse T> Parse Separated<T, Comma> {
 
 // A boxed node is immutable, so a clone can share its storage until a field
 // update copies it.
-impl Clone CallExpr { clone = value => clone_syntax value }
-impl Clone StringExpr { clone = value => clone_syntax value }
-impl Clone CharExpr { clone = value => clone_syntax value }
-impl<T> Clone (Sequence<T>) { clone = value => clone_syntax value }
-impl<Element, Separator> Clone (Separated<Element, Separator>) { clone = value => clone_syntax value }
-impl<C> Clone (Parenthesized<C>) { clone = value => clone_syntax value }
-impl<C> Clone (Bracketed<C>) { clone = value => clone_syntax value }
-impl<C> Clone (Braced<C>) { clone = value => clone_syntax value }
-impl<C> Clone (Angled<C>) { clone = value => clone_syntax value }
-impl Clone TypeParameter { clone = value => clone_syntax value }
-impl Clone TypeParameters { clone = value => clone_syntax value }
-impl Clone ProductTypeField { clone = value => clone_syntax value }
-impl Clone ProductType { clone = value => clone_syntax value }
-impl Clone BindingPattern { clone = value => clone_syntax value }
-impl Clone NominalPattern { clone = value => clone_syntax value }
-impl Clone TypeDeclarationItem { clone = value => clone_syntax value }
-impl Clone ResourceDependency { clone = value => clone_syntax value }
-impl<Element> Clone (AliasBody<Element>) { clone = value => clone_syntax value }
-impl<Representation, Element> Clone (WrapperBody<Representation, Element>) { clone = value => clone_syntax value }
-impl<Representation, Element> Clone (FromBody<Representation, Element>) { clone = value => clone_syntax value }
-impl Clone ModifierCall { clone = value => clone_syntax value }
-impl Clone ModifiedItem { clone = value => clone_syntax value }
-impl Clone MacroCallMetadata { clone = value => clone_syntax value }
-impl Clone Expr { clone = value => clone_syntax value }
-impl Clone Type { clone = value => clone_syntax value }
-impl Clone Pattern { clone = value => clone_syntax value }
-impl Clone Item { clone = value => clone_syntax value }
-impl Clone Modifier { clone = value => clone_syntax value }
-impl Clone TypeBody { clone = value => clone_syntax value }
-impl Clone SyntaxNode { clone = value => clone_syntax value }
-impl Clone Syntax { clone = value => clone_syntax value }
-impl Clone UnstructuredExpr { clone = value => clone_syntax value }
-impl Clone UnstructuredType { clone = value => clone_syntax value }
-impl Clone UnstructuredPattern { clone = value => clone_syntax value }
-impl Clone UnstructuredItem { clone = value => clone_syntax value }
-impl Clone UnstructuredModifier { clone = value => clone_syntax value }
+impl Clone CallExpr { clone = value => __clone_syntax value }
+impl Clone StringExpr { clone = value => __clone_syntax value }
+impl Clone CharExpr { clone = value => __clone_syntax value }
+impl<T> Clone (Sequence<T>) { clone = value => __clone_syntax value }
+impl<Element, Separator> Clone (Separated<Element, Separator>) { clone = value => __clone_syntax value }
+impl<C> Clone (Parenthesized<C>) { clone = value => __clone_syntax value }
+impl<C> Clone (Bracketed<C>) { clone = value => __clone_syntax value }
+impl<C> Clone (Braced<C>) { clone = value => __clone_syntax value }
+impl<C> Clone (Angled<C>) { clone = value => __clone_syntax value }
+impl Clone TypeParameter { clone = value => __clone_syntax value }
+impl Clone TypeParameters { clone = value => __clone_syntax value }
+impl Clone ProductTypeField { clone = value => __clone_syntax value }
+impl Clone ProductType { clone = value => __clone_syntax value }
+impl Clone BindingPattern { clone = value => __clone_syntax value }
+impl Clone NominalPattern { clone = value => __clone_syntax value }
+impl Clone TypeDeclarationItem { clone = value => __clone_syntax value }
+impl Clone ResourceDependency { clone = value => __clone_syntax value }
+impl<Element> Clone (AliasBody<Element>) { clone = value => __clone_syntax value }
+impl<Representation, Element> Clone (WrapperBody<Representation, Element>) { clone = value => __clone_syntax value }
+impl<Representation, Element> Clone (FromBody<Representation, Element>) { clone = value => __clone_syntax value }
+impl Clone ModifierCall { clone = value => __clone_syntax value }
+impl Clone ModifiedItem { clone = value => __clone_syntax value }
+impl Clone MacroCallMetadata { clone = value => __clone_syntax value }
+impl Clone Expr { clone = value => __clone_syntax value }
+impl Clone Type { clone = value => __clone_syntax value }
+impl Clone Pattern { clone = value => __clone_syntax value }
+impl Clone Item { clone = value => __clone_syntax value }
+impl Clone Modifier { clone = value => __clone_syntax value }
+impl Clone TypeBody { clone = value => __clone_syntax value }
+impl Clone SyntaxNode { clone = value => __clone_syntax value }
+impl Clone Syntax { clone = value => __clone_syntax value }
+impl Clone UnstructuredExpr { clone = value => __clone_syntax value }
+impl Clone UnstructuredType { clone = value => __clone_syntax value }
+impl Clone UnstructuredPattern { clone = value => __clone_syntax value }
+impl Clone UnstructuredItem { clone = value => __clone_syntax value }
+impl Clone UnstructuredModifier { clone = value => __clone_syntax value }
