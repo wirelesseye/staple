@@ -788,13 +788,11 @@ into a match phi.
 
 ### Collector limit found by the long-sequence test
 
-The collector's mark phase is recursive (`__staple_gc_mark_candidate` and
-`__staple_gc_scan_region` in `gc.ll`), so a collection overflows a 2 MiB stack on a
-linked list somewhere between 8,000 and 20,000 cells. The `Clone` loop isn't the cause.
-The long-clone test raises the collection threshold and clones 500,000 cells without
-collecting. A collection test runs separately at 2,000 cells. Any long linked data in any
-program has this limit, so it should be fixed in the collector with a work list, as its
-own change.
+The collector's mark phase was recursive, so a collection overflowed a 2 MiB stack on a
+linked list somewhere between 8,000 and 20,000 cells. The `Clone` loop wasn't the cause;
+any long linked data in any program had this limit. It was fixed in the collector with an
+explicit mark stack, as its own change (`a888224`). The long-clone test now clones 500,000
+cells at the default collection threshold.
 
 ### Known limits left as they are
 

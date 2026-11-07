@@ -761,11 +761,11 @@ def nested_sequence_clone: () -> I32 = () => {
         });
     }
 
-    /// Far more cells than the test thread's stack could recurse through. No
-    /// collection runs, because the collector's mark phase recurses along a list.
+    /// The clone keeps both lists live across collections, so this also covers
+    /// marking a long list.
     #[test]
     fn a_long_sequence_clones_without_deep_stack() {
-        with_node_probes_threshold(Some(1 << 40), |probes| {
+        with_node_probes(|probes| {
             let long: extern "C" fn(*const usize, i32) -> i32 =
                 unsafe { std::mem::transmute(probes.address("long_clone")) };
             assert_eq!(long(std::ptr::null(), 500_000), 500_000);
