@@ -6572,7 +6572,8 @@ fn macro_modifier_arguments() {
 use std.syntax.*
 macro @identity: move Item -> Item = move item => item
 macro @twice: (Parenthesized<Modifier>; Item) -> Item = (modifier; move item) => {
-    let (first, second) = duplicate_modifier modifier
+    let first = Clone.clone modifier
+    let second = Clone.clone modifier
     ModifiedItem (modifiers: Sequence (first: first, rest: Sequence (first: second, rest: Sequence ())), item: item)
 }
 @twice(@identity) let answer: I32 = 42
@@ -21000,4 +21001,67 @@ fn a_macro_calling_other_macros_through_helpers_is_ready_in_stage_order() {
         "let a = first 1\n",
     ));
     assert!(messages.is_empty(), "{messages:#?}");
+}
+
+#[test]
+fn another_splice_trait_gets_no_borrow_exception() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+        r#"
+pub trait Splice T {
+    splice: move T -> I32
+}
+pub type Token wrap pub I32
+impl !Copy Token {}
+impl Splice Token {
+    splice = move value => value.*
+}
+def twice: move Token -> I32 = move value => Splice.splice value + Splice.splice value
+"#,
+    ))
+    .expect_err_diagnostics("a user `Splice` method moves its argument");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("moved")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn stage_modifiers_are_for_the_standard_library() {
+    for modifier in ["@compiled_only", "@interpreted_only"] {
+        let source = format!("{modifier} let answer: I32 = 42\n");
+        resolve_result(&source).expect_err_diagnostics("an unknown modifier outside the library");
+    }
+}
+
+#[test]
+fn an_interpreted_clone_is_a_separate_binding() {
+    type_check(
+        r#"
+use std.syntax.*
+macro pick = value: CallExpr => {
+    let mut changed = Clone.clone value
+    changed.callee = Ident "changed"
+    value.callee
+}
+let original: I32 = 1
+let changed: String = "text"
+let picked: I32 = pick (original 1)
+"#,
+    );
+    type_check(
+        r#"
+use std.syntax.*
+macro pick = value: CallExpr => {
+    let mut changed = Clone.clone value
+    changed.callee = Ident "changed"
+    changed
+}
+let original: String = "text"
+def changed: I32 -> I32 = number => number
+let picked: I32 = pick (original 1)
+"#,
+    );
 }

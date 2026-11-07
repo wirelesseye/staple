@@ -91,7 +91,7 @@ def typegroup_generic_body_item = (
     }
 }
 
-def typegroup_items = (shared: Sequence<Modifier>, entries: Sequence<(Sequence<Modifier>; Ident<String>; Option<TypeBody>)>) => Sequence<Item> :: match (Clone.clone entries) {
+def typegroup_items = (shared: Sequence<Modifier>, entries: Sequence<(Sequence<Modifier>; Ident<String>; Option<TypeBody>)>) => Sequence<Item> :: match entries {
     Sequence () => Sequence (),
     Sequence (first, rest) => match first {
         (modifiers; variant; None) => {
@@ -111,7 +111,7 @@ def typegroup_generic_items = (
     shared: Sequence<Modifier>,
     parameters: TypeParameters,
     entries: Sequence<(Sequence<Modifier>; Ident<String>; Option<TypeBody>)>,
-) => Sequence<Item> :: match (Clone.clone entries) {
+) => Sequence<Item> :: match entries {
     Sequence () => Sequence (),
     Sequence (first, rest) => {
         let tail = typegroup_generic_items (shared, parameters, rest)

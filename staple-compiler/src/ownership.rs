@@ -673,17 +673,6 @@ impl<'a> OwnershipChecker<'a> {
                 .is_some_and(|value_type| *value_type == crate::CheckedType::Never)
     }
 
-    /// Checks a call's argument against the callee's per-position parameter
-    /// modes: a position is consuming only when the callee marks it `move`
-    /// (or the whole parameter is `move`d as one unit). `mut` positions and
-    /// ordinary non-`Copy` positions (the new implicit-borrow default) are
-    /// non-consuming — `use_symbol` already no-ops for `Copy` positions
-    /// regardless of `consume`, so this doesn't need to consult Copy-ness
-    /// itself. When the argument is a literal product matching the callee's
-    /// product-shaped parameter, each element is checked against its own
-    /// position; otherwise the whole argument is consumed only if the
-    /// callee requires a move somewhere in it, matching the existing rule
-    /// that a partial move out of a single bound value is rejected.
     /// Whether `callee` is the `Splice.splice` method. A quotation splice only
     /// reads its argument, even though the method's declared parameter is
     /// non-`Copy`.
@@ -698,11 +687,16 @@ impl<'a> OwnershipChecker<'a> {
             return false;
         }
         let resolved = self.module.resolved();
+        // Only the standard library's trait: another `Splice` has no such
+        // promise about its implementations.
+        let syntax_module = resolved.program().standard_library_syntax();
         let is_splice = |trait_id| {
-            resolved
-                .traits()
-                .get(&trait_id)
-                .is_some_and(|declaration| declaration.declaration.name == "Splice")
+            resolved.traits().get(&trait_id).is_some_and(|declaration| {
+                declaration.declaration.name == "Splice"
+                    && syntax_module.is_some()
+                    && resolved.module_for_syntax(declaration.declaration.syntax.id)
+                        == syntax_module
+            })
         };
         let syntax = callee.syntax().id;
         resolved.trait_for(syntax).is_some_and(is_splice)
@@ -712,6 +706,17 @@ impl<'a> OwnershipChecker<'a> {
                 .any(|method| resolved.trait_for_method(*method).is_some_and(is_splice))
     }
 
+    /// Checks a call's argument against the callee's per-position parameter
+    /// modes: a position is consuming only when the callee marks it `move`
+    /// (or the whole parameter is `move`d as one unit). `mut` positions and
+    /// ordinary non-`Copy` positions (the new implicit-borrow default) are
+    /// non-consuming — `use_symbol` already no-ops for `Copy` positions
+    /// regardless of `consume`, so this doesn't need to consult Copy-ness
+    /// itself. When the argument is a literal product matching the callee's
+    /// product-shaped parameter, each element is checked against its own
+    /// position; otherwise the whole argument is consumed only if the
+    /// callee requires a move somewhere in it, matching the existing rule
+    /// that a partial move out of a single bound value is rejected.
     fn check_call_argument(
         &mut self,
         argument: &Expression,

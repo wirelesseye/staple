@@ -10,6 +10,7 @@ mod closure;
 pub(crate) mod lower_quote;
 mod parse;
 mod scan;
+mod stage_items;
 mod staged;
 mod templates;
 mod traits;
@@ -1835,6 +1836,7 @@ pub(crate) fn expand_program_checked(
     check_mode: Option<check_program::CheckMode>,
     run_check: bool,
 ) -> Result<(Program, MacroAnalysis, Vec<Diagnostic>), Vec<Diagnostic>> {
+    let stages = stage_items::separate(&mut program);
     let mut expander = MacroExpander::new(&program);
     expander.validate_definitions();
     for module in program.modules() {
@@ -1944,6 +1946,13 @@ pub(crate) fn expand_program_checked(
     let own_package = program.package_of(program.entry());
     let mut check = check_mode
         .map(|mode| expander.check_snapshot(mode, own_package, program.modules().len()));
+    let mut compiled_items = vec![Vec::new(); program.modules().len()];
+    if check.is_some() {
+        for (module, mut item) in stages.compiled {
+            expander.expand_item(module, &mut item, 1);
+            compiled_items[module.0].push(item);
+        }
+    }
     expander.closure.release();
     expander.item_expansions.clear();
     for (module_index, parts) in walked {
@@ -1961,7 +1970,9 @@ pub(crate) fn expand_program_checked(
                     None => snapshot.push(item.clone()),
                 }
             }
+            snapshot.retain(|item| !stages.interpreted.contains(&item.syntax().id));
             expander.expand_compile_time_items(module, &mut snapshot);
+            snapshot.append(&mut compiled_items[module_index]);
             check.modules[module_index] = snapshot;
         }
         items.retain(|item| {
@@ -3649,6 +3660,11 @@ impl MacroExpander {
                 } else {
                     let value =
                         self.check_compile_expression(module, &access.value, environment, None);
+                    // A trait method's result has no known type here, as with
+                    // `Clone.clone value`, and the evaluator reports a bad field.
+                    if value == CompileType::Unknown {
+                        return CompileType::Unknown;
+                    }
                     compile_field_type(&value, &access.accessor).unwrap_or_else(|| {
                         let message = if value == CompileType::Meta(MetaType::CallExpr) {
                             format!(

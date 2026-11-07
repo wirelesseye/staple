@@ -4122,7 +4122,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         match &access.kind {
             crate::LoweredAccessKind::Representation { dereference } => {
                 if dereference.is_empty() {
-                    Ok(base)
+                    let base_type = self.access_base_type(owner, access.base, &span)?;
+                    self.syntax_node_contents(base, &base_type, &span)
                 } else {
                     if access.take_unique {
                         return self.emit_unique_take(
@@ -4135,17 +4136,22 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let payload =
                         self.backend
                             .load_shared_payloads(base, dereference, span.clone())?;
-                    Ok(payload.as_any_value_enum())
+                    let payload_type = dereference.last().cloned().unwrap_or(CheckedType::Error);
+                    self.syntax_node_contents(payload.as_any_value_enum(), &payload_type, &span)
                 }
             }
-            // The emitter returns a scalar access as-is, dereference chain included.
+            // A scalar access is the value itself, dereference chain included,
+            // or what a syntax node's box holds.
             crate::LoweredAccessKind::Scalar { dereference } => {
                 if dereference.is_empty() {
-                    Ok(base)
+                    let base_type = self.access_base_type(owner, access.base, &span)?;
+                    self.syntax_node_contents(base, &base_type, &span)
                 } else {
-                    self.backend
-                        .load_shared_payloads(base, dereference, span.clone())
-                        .map(|value| value.as_any_value_enum())
+                    let payload =
+                        self.backend
+                            .load_shared_payloads(base, dereference, span.clone())?;
+                    let payload_type = dereference.last().cloned().unwrap_or(CheckedType::Error);
+                    self.syntax_node_contents(payload.as_any_value_enum(), &payload_type, &span)
                 }
             }
             crate::LoweredAccessKind::SyntaxNodeField { index, dereference } => {
@@ -5175,28 +5181,33 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                                 "refined binding spelling is not a string",
                             ));
                         };
-                        let literal = std::str::from_utf8(refined).map_err(|_| {
-                            Diagnostic::new(
-                                span.clone(),
-                                "refined binding spelling is not UTF-8",
+                        let function = success.get_parent().ok_or_else(|| {
+                            internal_invariant(
+                                staple_syntax::Span::Compiler,
+                                "match block belongs to an LLVM function",
                             )
                         })?;
-                        let matched = self.backend.context.append_basic_block(
-                            success.get_parent().ok_or_else(|| {
-                                internal_invariant(
-                                    staple_syntax::Span::Compiler,
-                                    "match block belongs to an LLVM function",
-                                )
-                            })?,
-                            "match.refined",
-                        );
-                        self.backend.build_string_literal_pattern_compare(
-                            spelling,
-                            literal,
-                            matched,
-                            failure,
-                            span.clone(),
-                        )?;
+                        let matched = self
+                            .backend
+                            .context
+                            .append_basic_block(function, "match.refined");
+                        for (index, literal) in refined.iter().enumerate() {
+                            let next = if index + 1 == refined.len() {
+                                failure
+                            } else {
+                                self.backend
+                                    .context
+                                    .append_basic_block(function, "match.refined.next")
+                            };
+                            self.backend.build_string_literal_pattern_compare(
+                                spelling,
+                                literal,
+                                matched,
+                                next,
+                                span.clone(),
+                            )?;
+                            self.backend.builder.position_at_end(next);
+                        }
                         self.backend.builder.position_at_end(matched);
                         self.bind_pattern(
                             owner,
@@ -7078,6 +7089,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             // need the local's stack copy as a place.
             && !(record.pass_mode == LoweredArgumentPassMode::BorrowedPointer
                 && self.place_rooted_in_plain_local(owner, place, environment))
+            // A place holds the value before its coercion, so a borrowed
+            // argument that changes representation passes a copy as well.
+            && !(record.pass_mode == LoweredArgumentPassMode::BorrowedPointer
+                && self.view.expression(owner, expression).is_some_and(|record| {
+                    record
+                        .coercion_plan
+                        .as_ref()
+                        .is_some_and(|plan| !matches!(plan, crate::LoweredCoercionPlan::Identity))
+                }))
         {
             match self.emit_place_pointer(owner, place, environment) {
                 Ok(pointer) => {
@@ -7685,6 +7705,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )?;
                 }
                 let pointer = self.emit_place_pointer(owner, *base, environment)?;
+                let pointer = self.syntax_node_place_contents(
+                    pointer,
+                    &base_place.value_type,
+                    &place.origin.span,
+                )?;
                 let container_type =
                     super::layout::strip_place_wrappers(base_place.value_type.clone());
                 let BasicTypeEnum::StructType(container_llvm) =
@@ -7700,12 +7725,98 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             // A wrapper representation read is the base place itself.
             crate::LoweredPlaceKind::Representation { base } => {
-                self.emit_place_pointer(owner, *base, environment)
+                let base_type = self
+                    .view
+                    .place(owner, *base)
+                    .map(|place| place.value_type.clone())
+                    .ok_or_else(|| {
+                        Diagnostic::new(place.origin.span.clone(), "missing base place")
+                    })?;
+                let pointer = self.emit_place_pointer(owner, *base, environment)?;
+                self.syntax_node_place_contents(pointer, &base_type, &place.origin.span)
             }
             // An indexed place is an assignment target dispatched through
             // `MutateIndex`, never a pointer.
             crate::LoweredPlaceKind::Indexed { .. } => Err(unsupported("indexed place")),
         }
+    }
+
+    fn access_base_type(
+        &self,
+        owner: EmissionOwner,
+        base: ExpressionId,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<CheckedType> {
+        self.view
+            .expression(owner, base)
+            .map(|expression| expression.value_type.clone())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing access base"))
+    }
+
+    /// What a value holds when its representation is read: the contents of the
+    /// box for a syntax node, and the value itself for anything else.
+    fn syntax_node_contents(
+        &mut self,
+        value: AnyValueEnum<'context>,
+        value_type: &CheckedType,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let CheckedType::Wrapper {
+            id, representation, ..
+        } = value_type.desugared()
+        else {
+            return Ok(value);
+        };
+        if !self.view.is_syntax_node_id(*id) {
+            return Ok(value);
+        }
+        let Some(BasicValueEnum::PointerValue(node)) = value_as_basic(value) else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "syntax node value is not a box",
+            ));
+        };
+        let representation = self.backend.compile_type(representation)?;
+        self.backend
+            .load_syntax_node_representation(node, representation)
+            .map(|contents| contents.as_any_value_enum())
+    }
+
+    /// The address a field of `value_type` is reached from, given the place
+    /// holding that value. A syntax node's place holds the pointer to its box,
+    /// and its fields live inside the box, so writing one changes the node in
+    /// place and leaves its origin alone. Any other value is its own contents.
+    fn syntax_node_place_contents(
+        &mut self,
+        place: PointerValue<'context>,
+        value_type: &CheckedType,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let value_type = value_type.desugared();
+        let CheckedType::Wrapper {
+            id, representation, ..
+        } = value_type
+        else {
+            return Ok(place);
+        };
+        if !self.view.is_syntax_node_id(*id) {
+            return Ok(place);
+        }
+        let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+        let node = self
+            .backend
+            .builder
+            .build_load(pointer_type, place, "syntax.node.box")
+            .map_err(compiler_diagnostic)?;
+        let BasicValueEnum::PointerValue(node) = node else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "syntax node place does not hold a box",
+            ));
+        };
+        let representation = self.backend.compile_type(representation)?;
+        self.backend
+            .syntax_node_representation_pointer(node, representation)
     }
 
     /// Native owner allocations may be replaced while the replacement expression

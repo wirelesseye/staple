@@ -153,3 +153,27 @@ fn a_wrong_result_annotation_is_rejected() {
     ));
     assert!(!diagnostics.is_empty(), "the wrong annotation should fail");
 }
+
+#[test]
+fn a_constructor_inside_a_generic_function_is_tagged() {
+    let module = check_ok(&format!(
+        "{PAIR}\
+         def make: <T> move T -> Pair<T> = <T> move x => Pair (first: x, rest: 0)\n\
+         def run: () -> I32 = () => classify (make 5)\n\
+         run ()\n"
+    ));
+    assert_eq!(run_i32(&module, "run"), 1);
+}
+
+#[test]
+fn an_annotation_settles_an_argument_that_matches_two_alternatives() {
+    let module = check_ok(
+        "pub type Choice<Left, Right> wrap pub Left | Right\n\
+         def run: () -> I32 = () => {\n\
+             let a: Choice<I32, String> = Choice 5\n\
+             match a { Choice inner => match inner { number: I32 => number, _ => 0 } }\n\
+         }\n\
+         run ()\n",
+    );
+    assert_eq!(run_i32(&module, "run"), 5);
+}

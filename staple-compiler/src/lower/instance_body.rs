@@ -1675,7 +1675,7 @@ impl<'a> BodyCloner<'a> {
         let value_type = self.ty(&pattern.value_type);
         let shape = super::pattern_plan_shape_from_kind(&pattern.kind, pattern.test.identity);
         let string_representation = self.program.semantic_ids.string_representation.clone();
-        let (test, child_subjects) = match super::pattern_test_plan(
+        let (mut test, child_subjects) = match super::pattern_test_plan(
             &concrete_subject,
             &value_type,
             &shape,
@@ -1698,6 +1698,9 @@ impl<'a> BodyCloner<'a> {
                 )
             }
         };
+        // The spellings come from the checker, not from the concrete types,
+        // so the recomputed plan keeps them.
+        test.refined = pattern.test.refined.clone();
         let child_ids = match &pattern.kind {
             LoweredPatternKind::Product { elements, .. } => elements.clone(),
             LoweredPatternKind::Nominal { argument, .. } => vec![*argument],

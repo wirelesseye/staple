@@ -7,7 +7,7 @@ use package.iterator.(IntoIterator, Iterator)
 use package.iterator.IterStep.(Done, Yield)
 use package.syntax.*
 
-def when_clauses = clauses: Sequence<(Expr; FatArrow; Expr)> => Expr :: match (Clone.clone clauses) {
+def when_clauses = move clauses: Sequence<(Expr; FatArrow; Expr)> => Expr :: match clauses {
     Sequence () => parse_quote { () },
     Sequence (first, rest) => match first {
         (condition: Ident<"else">; _; fallback) => match rest {
@@ -37,7 +37,7 @@ def when_clauses = clauses: Sequence<(Expr; FatArrow; Expr)> => Expr :: match (C
 /// }
 /// ```
 pub macro when =
-    body: Braced<Separated<(Expr; FatArrow; Expr), Comma>> => match body {
+    move body: Braced<Separated<(Expr; FatArrow; Expr), Comma>> => match body {
         Braced (Separated (_, clauses, _)) => when_clauses clauses,
     }
 

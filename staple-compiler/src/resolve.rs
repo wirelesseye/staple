@@ -791,7 +791,6 @@ pub struct ResolvedModule {
     expression_function_owners: HashMap<SyntaxId, Option<FunctionId>>,
     caller_location_spans: HashMap<SyntaxId, Span>,
     ordinary_syntax_types: bool,
-    standard_library_syntax: Option<ModuleId>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
@@ -881,13 +880,6 @@ impl ResolvedModule {
     /// how macro code is checked.
     pub fn ordinary_syntax_types(&self) -> bool {
         self.ordinary_syntax_types
-    }
-
-    /// Whether `id` is declared in `std.syntax`, so that a value of it, when it
-    /// is opaque, is a handle to a syntax fragment.
-    pub(crate) fn is_syntax_type(&self, id: TypeId) -> bool {
-        self.standard_library_syntax
-            .is_some_and(|syntax| self.type_modules.get(&id) == Some(&syntax))
     }
 
     pub(crate) fn symbols_in_id_order(&self) -> Vec<ResolvedSymbolInfo> {
@@ -2491,7 +2483,6 @@ impl NameResolver {
             expression_function_owners: self.expression_function_owners,
             caller_location_spans: macro_analysis.caller_location_spans,
             ordinary_syntax_types: self.ordinary_syntax_types,
-            standard_library_syntax: self.standard_library_syntax,
             symbol_modules: self.symbol_modules,
             symbol_declarations: self.symbol_declarations,
             symbol_declaration_spans: self.symbol_declaration_spans,

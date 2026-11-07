@@ -574,9 +574,8 @@ match `ModifierCall (namespace, name, argument)`: the namespace is a sequence of
 identifiers, outermost first, and the optional opaque `Syntax` argument excludes
 its parentheses. Documentation comments match only `UnstructuredModifier` and
 retain their comment form when passed through. Constructing a `ModifierCall`
-reparses its invocation. `duplicate_modifier` creates two independent modifiers
-with fresh syntax identities, preserving source locations and dropping any
-original enclosing item wrapper. `ModifiedItem` can be destructured and reconstructed to
+reparses its invocation. `Clone.clone` gives a second copy of a modifier that
+can be attached somewhere else. `ModifiedItem` can be destructured and reconstructed to
 preserve, reorder, or discard pending modifiers. A wrapped type declaration
 matches `ModifiedItem`, not `TypeDeclarationItem`, until unwrapped.
 `Item` exposes unwrapped type declarations as `TypeDeclarationItem (name,

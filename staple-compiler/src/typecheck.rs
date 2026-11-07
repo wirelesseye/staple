@@ -2491,7 +2491,7 @@ pub struct TypedModule {
     accesses: HashMap<SyntaxId, CheckedAccess>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
     /// Binding patterns that refine a spelling, such as `Ident<"else">`.
-    refinement_patterns: HashSet<SyntaxId>,
+    refinement_patterns: HashMap<SyntaxId, Vec<String>>,
     /// Alias-bearing display copies, kept sparse; canonical entries are erased.
     display_pattern_types: HashMap<SyntaxId, CheckedType>,
     pattern_projections: HashMap<SyntaxId, TypeId>,
@@ -3301,8 +3301,10 @@ impl TypedModule {
     }
 
     /// Whether this binding pattern refines a spelling, as `Ident<"else">` does.
-    pub(crate) fn is_refinement_pattern(&self, syntax_id: SyntaxId) -> bool {
-        self.refinement_patterns.contains(&syntax_id)
+    /// The spellings a refinement pattern accepts, or `None` for any other
+    /// pattern.
+    pub(crate) fn refinement_spellings(&self, syntax_id: SyntaxId) -> Option<&[String]> {
+        self.refinement_patterns.get(&syntax_id).map(Vec::as_slice)
     }
 
     /// The checked pattern type for display, keeping source aliases.
@@ -4273,7 +4275,7 @@ pub struct TypeChecker {
     /// Typed patterns that narrow an alternative to a refinement of it, such as
     /// `Ident<"else">` against `Ident<String>`. They can fail to match, so they
     /// cover nothing.
-    refinement_patterns: HashSet<SyntaxId>,
+    refinement_patterns: HashMap<SyntaxId, Vec<String>>,
     /// Patterns matched against the representation of a `from` subject
     /// rather than the subject itself.
     pattern_projections: HashMap<SyntaxId, TypeId>,
@@ -6400,13 +6402,6 @@ impl TypeChecker {
                     CheckedType::NumberLiteral(_) | CheckedType::Parameter { .. }
                 )
             });
-        }
-        if Some(trait_id) == self.copy_trait
-            && arguments
-                .first()
-                .is_some_and(|argument| !matches!(argument, CheckedType::Parameter { .. }))
-        {
-            return self.is_copy_with(&arguments[0], &[]);
         }
         // `Copy` is structural, so a type containing parameters can still be
         // known non-`Copy` through a negative implementation. Consult those
@@ -10923,7 +10918,6 @@ impl TypeChecker {
 
     fn require_copy_at_pattern(
         &mut self,
-        module: &ResolvedModule,
         pattern: &staple_syntax::AtPattern,
         value_type: &CheckedType,
     ) {
@@ -10974,7 +10968,7 @@ impl TypeChecker {
                     &Pattern::Binding(at.binding.as_ref().clone()),
                     original,
                 );
-                self.require_copy_at_pattern(module, at, value_type);
+                self.require_copy_at_pattern(at, value_type);
                 self.bind_pattern_types(module, &at.pattern, value_type);
             }
             Pattern::Wildcard(wildcard) => {
@@ -11567,7 +11561,7 @@ impl TypeChecker {
                 &Pattern::Binding(at.binding.as_ref().clone()),
                 value_type,
             );
-            self.require_copy_at_pattern(module, at, value_type);
+            self.require_copy_at_pattern(at, value_type);
             root = &at.pattern;
         }
         let Pattern::Nominal(pattern) = root else {
@@ -15037,6 +15031,9 @@ impl TypeChecker {
                             _ => None,
                         };
                         if let Some(template) = template {
+                        let constructor_parameters =
+                            type_parameter_ids(&CheckedType::Function(template.clone()));
+                        let mut selected_alternative = None;
                         let mut substitutions = HashMap::new();
                         if let Some(expected) = expected {
                             infer_type_parameters(
@@ -15070,7 +15067,10 @@ impl TypeChecker {
                                     &argument_source,
                                     &mut substitutions,
                                 );
-                            } else if matches.len() > 1 {
+                                selected_alternative = Some((*alternative).clone());
+                            } else if matches.len() > 1
+                                && !constructor_parameters.iter().all(|id| substitutions.contains_key(id))
+                            {
                                 self.diagnostics.push(Diagnostic::new(
                                     call.callee.syntax().span.clone(),
                                     "could not infer all compile-time parameters: the argument matches more than one alternative",
@@ -15082,7 +15082,12 @@ impl TypeChecker {
                             CheckedType::Function(template.clone()),
                             &substitutions,
                         );
-                        if !contains_type_parameter(&instantiated)
+                        // A solution may name a parameter of the enclosing
+                        // generic. That parameter is known here, so only the
+                        // constructor's own parameters need solving.
+                        if constructor_parameters
+                            .iter()
+                            .all(|id| substitutions.contains_key(id))
                             && !contains_inferred_type(&instantiated)
                         {
                             raw_callee_type = instantiated.clone();
@@ -15091,14 +15096,26 @@ impl TypeChecker {
                             // The argument was checked against the erased
                             // parameter. Re-check it against the concrete one
                             // so its sum injection and record types are known.
-                            if contains_inferred_type(&argument_type)
+                            let stale_coercion = self
+                                .expression_coercions
+                                .get(&call.argument.syntax().id)
+                                .is_some_and(|coercion| {
+                                    contains_inferred_type(&coercion.source)
+                                        || contains_inferred_type(&coercion.target)
+                                });
+                            if (contains_inferred_type(&argument_type) || stale_coercion)
                                 && let CheckedType::Function(function) = &instantiated
                             {
+                                // Field types flow in through the alternative, so a
+                                // nested constructor learns its parameters too.
+                                let argument_expected = selected_alternative
+                                    .map(|alternative| substitute_type(alternative, &substitutions))
+                                    .unwrap_or_else(|| function.parameter.as_ref().clone());
                                 let before = self.diagnostics.len();
                                 let checked = self.check_expression_expected(
                                     module,
                                     &call.argument,
-                                    Some(&function.parameter),
+                                    Some(&argument_expected),
                                 );
                                 if self.diagnostics.len() == before
                                     && !contains_inferred_type(&checked)
@@ -15109,6 +15126,8 @@ impl TypeChecker {
                                         &function.parameter,
                                         call.argument.syntax().span.clone(),
                                     );
+                                    self.expression_types
+                                        .insert(call.argument.syntax().id, argument_type.clone());
                                 }
                             }
                         }
@@ -16484,7 +16503,7 @@ impl TypeChecker {
                     &Pattern::Binding(at.binding.as_ref().clone()),
                     original,
                 );
-                self.require_copy_at_pattern(module, at, value_type);
+                self.require_copy_at_pattern(at, value_type);
                 self.check_match_pattern(module, &at.pattern, value_type);
             }
             Pattern::Binding(binding) if module.type_for_pattern(binding.syntax.id).is_some() => {
@@ -16534,10 +16553,14 @@ impl TypeChecker {
                 } else if self.ordinary_syntax_types
                     && let Some(alternative) = refined_alternative(sum, &declared)
                 {
+                    // The name keeps the refined type, while the pattern
+                    // records the alternative its tag test selects. Binding
+                    // records a type too, so the alternative goes in last.
+                    self.bind_pattern_types(module, pattern, &declared);
                     self.pattern_types
                         .insert(pattern.syntax().id, alternative.clone());
-                    self.refinement_patterns.insert(pattern.syntax().id);
-                    self.bind_pattern_types(module, pattern, &declared);
+                    self.refinement_patterns
+                        .insert(pattern.syntax().id, refinement_spellings(&declared));
                 } else if declared != CheckedType::Error {
                     self.diagnostics.push(Diagnostic::new(
                         binding.syntax.span.clone(),
@@ -16562,10 +16585,14 @@ impl TypeChecker {
                 } else if self.ordinary_syntax_types
                     && let Some(alternative) = refined_alternative(sum, &declared)
                 {
+                    // The name keeps the refined type, while the pattern
+                    // records the alternative its tag test selects. Binding
+                    // records a type too, so the alternative goes in last.
+                    self.bind_pattern_types(module, pattern, &declared);
                     self.pattern_types
                         .insert(pattern.syntax().id, alternative.clone());
-                    self.refinement_patterns.insert(pattern.syntax().id);
-                    self.bind_pattern_types(module, pattern, &declared);
+                    self.refinement_patterns
+                        .insert(pattern.syntax().id, refinement_spellings(&declared));
                 } else if declared != CheckedType::Error {
                     self.diagnostics.push(Diagnostic::new(
                         wildcard.syntax.span.clone(),
@@ -16704,7 +16731,7 @@ impl TypeChecker {
             return false;
         };
         matches!(pattern, Pattern::Binding(_) | Pattern::Wildcard(_))
-            && self.refinement_patterns.contains(&pattern.syntax().id)
+            && self.refinement_patterns.contains_key(&pattern.syntax().id)
     }
 
     fn match_pattern_is_useful<'a>(
@@ -21849,6 +21876,21 @@ fn refined_alternative<'a>(sum: &'a CheckedSumType, declared: &CheckedType) -> O
                             && *argument == CheckedType::String)
                 }))
     })
+}
+
+/// The spellings a refined wrapper accepts: the values of its string literal
+/// type argument.
+fn refinement_spellings(declared: &CheckedType) -> Vec<String> {
+    let CheckedType::Wrapper { arguments, .. } = declared else {
+        return Vec::new();
+    };
+    arguments
+        .iter()
+        .find_map(|argument| match argument {
+            CheckedType::StringLiteralSet(values) => Some(values.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// The element type of the standard library `Buffer<T>` wrapper, recognized

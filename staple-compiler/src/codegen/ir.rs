@@ -180,22 +180,30 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(typed)
     }
 
-    /// The representation stored in a syntax node box.
-    pub(crate) fn load_syntax_node_representation(
+    /// The address of the representation inside a syntax node box.
+    pub(crate) fn syntax_node_representation_pointer(
         &self,
         pointer: PointerValue<'context>,
         representation: BasicTypeEnum<'context>,
-    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+    ) -> CodeGenerationResult<PointerValue<'context>> {
         let box_type = self.syntax_node_box_type(representation);
         let pointer_type = self.context.ptr_type(AddressSpace::default());
         let typed = self
             .builder
             .build_pointer_cast(pointer, pointer_type, "syntax.node.typed")
             .map_err(compiler_diagnostic)?;
-        let field = self
-            .builder
+        self.builder
             .build_struct_gep(box_type, typed, 0, "syntax.node.representation")
-            .map_err(compiler_diagnostic)?;
+            .map_err(compiler_diagnostic)
+    }
+
+    /// The representation stored in a syntax node box.
+    pub(crate) fn load_syntax_node_representation(
+        &self,
+        pointer: PointerValue<'context>,
+        representation: BasicTypeEnum<'context>,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let field = self.syntax_node_representation_pointer(pointer, representation)?;
         self.builder
             .build_load(representation, field, "syntax.node.value")
             .map_err(compiler_diagnostic)

@@ -8122,6 +8122,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .place(owner, *base)
                     .map(|place| place.value_type.clone())
                     .unwrap_or(CheckedType::Error);
+                if matches!(base_type.desugared(), CheckedType::Wrapper { id, .. } if self.view.is_syntax_node_id(*id))
+                {
+                    return Err(Diagnostic::new(
+                        place.origin.span.clone(),
+                        "dynamic mutation of a syntax node field is unsupported",
+                    ));
+                }
                 if let CheckedType::Wrapper { representation, .. } = &base_type
                     && !matches!(representation.as_ref(), CheckedType::Product(_))
                 {
@@ -8164,6 +8171,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok((self.backend.dynamic_byte_offset(data, offset)?, descriptor))
             }
             crate::LoweredPlaceKind::Representation { base } => {
+                if self
+                    .view
+                    .place(owner, *base)
+                    .is_some_and(|base| matches!(base.value_type.desugared(), CheckedType::Wrapper { id, .. } if self.view.is_syntax_node_id(*id)))
+                {
+                    return Err(Diagnostic::new(
+                        place.origin.span.clone(),
+                        "dynamic mutation of a syntax node field is unsupported",
+                    ));
+                }
                 self.emit_dynamic_place(owner, *base, environment)
             }
             crate::LoweredPlaceKind::Indexed { .. } => Err(Diagnostic::new(

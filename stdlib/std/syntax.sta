@@ -8,6 +8,7 @@ use package.iterator.(Iterator, IntoIterator, FromIterator, IterStep)
 use package.iterator.IterStep.(Done, Yield)
 use package.default.(Default)
 use package.clone.Clone
+use package.option.(Option, None, Some)
 
 /// Compiler-owned, compile-time-only syntax values. Identifiers and calls expose
 /// their data in the first structured-syntax slice; remaining expressions round-trip
@@ -265,8 +266,6 @@ pub type ParseError wrap pub (message: String)
 pub type ParseStream opaque
 
 pub extern "staple-intrinsic" {
-    /// Duplicates a modifier with fresh syntax identities, preserving its source.
-    duplicate_modifier: Modifier -> (Modifier, Modifier)
     /// Starts a stream at the beginning of `syntax`.
     stream: Syntax -> ParseStream
     /// `True` when only trivia remains.
@@ -328,8 +327,9 @@ extern "staple-intrinsic" {
     /// The hidden origin stored with a syntax node.
     __origin: <T> T -> Syntax
     /// The same syntax node value with a different hidden origin.
-    __with_origin: <T> (T; Syntax) -> T
-    /// Duplicates a syntax node from a borrow.
+    __with_origin: <T> (T, Syntax) -> T
+    /// Copies a handle: `Syntax` or an unstructured node. Interpreted, it copies
+    /// any syntax value.
     __clone_syntax: <T> T -> T
 }
 
@@ -608,41 +608,370 @@ impl<T where Parse T> Parse Separated<T, Comma> {
     }
 }
 
-// A boxed node is immutable, so a clone can share its storage until a field
-// update copies it.
-impl Clone CallExpr { clone = value => __clone_syntax value }
-impl Clone StringExpr { clone = value => __clone_syntax value }
-impl Clone CharExpr { clone = value => __clone_syntax value }
-impl<T> Clone (Sequence<T>) { clone = value => __clone_syntax value }
-impl<Element, Separator> Clone (Separated<Element, Separator>) { clone = value => __clone_syntax value }
-impl<C> Clone (Parenthesized<C>) { clone = value => __clone_syntax value }
-impl<C> Clone (Bracketed<C>) { clone = value => __clone_syntax value }
-impl<C> Clone (Braced<C>) { clone = value => __clone_syntax value }
-impl<C> Clone (Angled<C>) { clone = value => __clone_syntax value }
-impl Clone TypeParameter { clone = value => __clone_syntax value }
-impl Clone TypeParameters { clone = value => __clone_syntax value }
-impl Clone ProductTypeField { clone = value => __clone_syntax value }
-impl Clone ProductType { clone = value => __clone_syntax value }
-impl Clone BindingPattern { clone = value => __clone_syntax value }
-impl Clone NominalPattern { clone = value => __clone_syntax value }
-impl Clone TypeDeclarationItem { clone = value => __clone_syntax value }
-impl Clone ResourceDependency { clone = value => __clone_syntax value }
-impl<Element> Clone (AliasBody<Element>) { clone = value => __clone_syntax value }
-impl<Representation, Element> Clone (WrapperBody<Representation, Element>) { clone = value => __clone_syntax value }
-impl<Representation, Element> Clone (FromBody<Representation, Element>) { clone = value => __clone_syntax value }
-impl Clone ModifierCall { clone = value => __clone_syntax value }
-impl Clone ModifiedItem { clone = value => __clone_syntax value }
-impl Clone MacroCallMetadata { clone = value => __clone_syntax value }
-impl Clone Expr { clone = value => __clone_syntax value }
-impl Clone Type { clone = value => __clone_syntax value }
-impl Clone Pattern { clone = value => __clone_syntax value }
-impl Clone Item { clone = value => __clone_syntax value }
-impl Clone Modifier { clone = value => __clone_syntax value }
-impl Clone TypeBody { clone = value => __clone_syntax value }
-impl Clone SyntaxNode { clone = value => __clone_syntax value }
+// The handle types copy only the handle: their fragments are immutable.
 impl Clone Syntax { clone = value => __clone_syntax value }
 impl Clone UnstructuredExpr { clone = value => __clone_syntax value }
 impl Clone UnstructuredType { clone = value => __clone_syntax value }
 impl Clone UnstructuredPattern { clone = value => __clone_syntax value }
 impl Clone UnstructuredItem { clone = value => __clone_syntax value }
 impl Clone UnstructuredModifier { clone = value => __clone_syntax value }
+
+// The interpreter's values are immutable and carry their source, so a clone is
+// the same value. Rebuilding one through its constructor would lose the source.
+@interpreted_only
+impl Clone CallExpr { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone StringExpr { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone CharExpr { clone = value => __clone_syntax value }
+@interpreted_only
+impl<T> Clone (Sequence<T>) { clone = value => __clone_syntax value }
+@interpreted_only
+impl<Element, Separator> Clone (Separated<Element, Separator>) { clone = value => __clone_syntax value }
+@interpreted_only
+impl<C> Clone (Parenthesized<C>) { clone = value => __clone_syntax value }
+@interpreted_only
+impl<C> Clone (Bracketed<C>) { clone = value => __clone_syntax value }
+@interpreted_only
+impl<C> Clone (Braced<C>) { clone = value => __clone_syntax value }
+@interpreted_only
+impl<C> Clone (Angled<C>) { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone TypeParameter { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone TypeParameters { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone ProductTypeField { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone ProductType { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone BindingPattern { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone NominalPattern { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone TypeDeclarationItem { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone ResourceDependency { clone = value => __clone_syntax value }
+@interpreted_only
+impl<Element> Clone (AliasBody<Element>) { clone = value => __clone_syntax value }
+@interpreted_only
+impl<Representation, Element> Clone (WrapperBody<Representation, Element>) { clone = value => __clone_syntax value }
+@interpreted_only
+impl<Representation, Element> Clone (FromBody<Representation, Element>) { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone ModifierCall { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone ModifiedItem { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone MacroCallMetadata { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone Expr { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone Type { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone Pattern { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone Item { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone Modifier { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone TypeBody { clone = value => __clone_syntax value }
+@interpreted_only
+impl Clone SyntaxNode { clone = value => __clone_syntax value }
+
+// Compiled, a clone shares no box with the original apart from `Copy` nodes and
+// handles, so assigning to one leaves the other alone. Origins are kept, since
+// an unchanged clone must still rebuild to its original tokens.
+
+@compiled_only
+def clone_option: <T where Clone T> Option<T> -> Option<T> = <T where Clone T> value => match value {
+    None => None,
+    Some item => Some (Clone.clone item),
+}
+
+// Loops rather than recursing, so a long sequence doesn't use deep stack. A
+// borrow can't be rebound, so the walk owns one copy of the top box and moves
+// down from there. It only reads what it moves, which the original still owns.
+@compiled_only
+impl<T where Clone T> Clone Sequence<T> {
+    clone = value => {
+        let mut cloned: Sequence<T> = Sequence ()
+        let mut cursor: Sequence<T> = __with_origin (value, __origin value)
+        let mut end_origin = __origin value
+        loop {
+            let origin = __origin cursor
+            match cursor {
+                Sequence () => {
+                    end_origin = origin
+                    break
+                },
+                Sequence (first, rest) => {
+                    cloned = __with_origin (Sequence (first: Clone.clone first, rest: cloned), origin)
+                    cursor = rest
+                },
+            }
+        }
+        let mut result: Sequence<T> = __with_origin (Sequence<T> :: Sequence (), end_origin)
+        loop {
+            let origin = __origin cloned
+            match cloned {
+                Sequence () => { break },
+                Sequence (first, rest) => {
+                    result = __with_origin (Sequence (first: first, rest: result), origin)
+                    cloned = rest
+                },
+            }
+        }
+        result
+    }
+}
+
+@compiled_only
+impl<Element, Separator where Clone Element, Clone Separator> Clone Separated<Element, Separator> {
+    clone = value => __with_origin (
+        Separated (separator: Clone.clone (value.separator), elements: Clone.clone (value.elements), trailing: value.trailing),
+        __origin value
+    )
+}
+
+@compiled_only
+impl Clone CallExpr {
+    clone = value => __with_origin (
+        CallExpr (callee: Clone.clone (value.callee), argument: Clone.clone (value.argument)),
+        __origin value
+    )
+}
+
+@compiled_only
+impl Clone StringExpr {
+    clone = value => __with_origin (
+        StringExpr (value.*),
+        __origin value
+    )
+}
+
+@compiled_only
+impl Clone CharExpr {
+    clone = value => __with_origin (
+        CharExpr (value.*),
+        __origin value
+    )
+}
+
+@compiled_only
+impl<C where Clone C> Clone Parenthesized<C> {
+    clone = value => __with_origin (
+        Parenthesized (Clone.clone (value.*)),
+        __origin value
+    )
+}
+
+@compiled_only
+impl<C where Clone C> Clone Bracketed<C> {
+    clone = value => __with_origin (
+        Bracketed (Clone.clone (value.*)),
+        __origin value
+    )
+}
+
+@compiled_only
+impl<C where Clone C> Clone Braced<C> {
+    clone = value => __with_origin (
+        Braced (Clone.clone (value.*)),
+        __origin value
+    )
+}
+
+@compiled_only
+impl<C where Clone C> Clone Angled<C> {
+    clone = value => __with_origin (
+        Angled (Clone.clone (value.*)),
+        __origin value
+    )
+}
+
+@compiled_only
+impl Clone TypeParameter {
+    clone = value => __with_origin (
+        TypeParameter (name: value.name, default: clone_option (value.default), declaration: Clone.clone (value.declaration), argument: Clone.clone (value.argument)),
+        __origin value
+    )
+}
+
+@compiled_only
+impl Clone TypeParameters {
+    clone = value => __with_origin (
+        TypeParameters (parameters: Clone.clone (value.parameters), declaration: Clone.clone (value.declaration), arguments: Clone.clone (value.arguments), bounds: Clone.clone (value.bounds)),
+        __origin value
+    )
+}
+
+@compiled_only
+impl Clone ProductTypeField {
+    clone = value => ProductTypeField (name: value.name, field_type: Clone.clone (value.field_type), default: clone_option (value.default))
+}
+
+@compiled_only
+impl Clone ProductType {
+    clone = value => ProductType (Clone.clone (value.*))
+}
+
+@compiled_only
+impl Clone BindingPattern {
+    clone = value => __with_origin (
+        BindingPattern (value.*),
+        __origin value
+    )
+}
+
+@compiled_only
+impl Clone NominalPattern {
+    clone = value => __with_origin (
+        NominalPattern (name: value.name, argument: Clone.clone (value.argument)),
+        __origin value
+    )
+}
+
+@compiled_only
+impl Clone TypeDeclarationItem {
+    clone = value => __with_origin (
+        TypeDeclarationItem (name: value.name, declared_type: Clone.clone (value.declared_type), type_parameters: Clone.clone.<Sequence<Ident<String>>> (value.type_parameters), body: clone_option (value.body), resource_dependencies: Clone.clone (value.resource_dependencies)),
+        __origin value
+    )
+}
+
+@compiled_only
+impl Clone ResourceDependency {
+    clone = value => ResourceDependency (resource_type: Clone.clone (value.resource_type), mutable: value.mutable)
+}
+
+@compiled_only
+impl<Element where Clone Element> Clone AliasBody<Element> {
+    clone = value => __with_origin (
+        AliasBody (Clone.clone (value.*)),
+        __origin value
+    )
+}
+
+@compiled_only
+impl<Representation, Element where Clone Representation, Clone Element> Clone WrapperBody<Representation, Element> {
+    clone = value => __with_origin (
+        WrapperBody (Clone.clone (value.0), Clone.clone (value.1)),
+        __origin value
+    )
+}
+
+@compiled_only
+impl<Representation, Element where Clone Representation, Clone Element> Clone FromBody<Representation, Element> {
+    clone = value => __with_origin (
+        FromBody (Clone.clone (value.0), Clone.clone (value.1)),
+        __origin value
+    )
+}
+
+@compiled_only
+impl Clone ModifierCall {
+    clone = value => __with_origin (
+        ModifierCall (namespace: Clone.clone.<Sequence<Ident<String>>> (value.namespace), name: value.name, argument: clone_option (value.argument)),
+        __origin value
+    )
+}
+
+@compiled_only
+impl Clone ModifiedItem {
+    clone = value => __with_origin (
+        ModifiedItem (modifiers: Clone.clone (value.modifiers), item: Clone.clone (value.item)),
+        __origin value
+    )
+}
+
+@compiled_only
+impl Clone MacroCallMetadata {
+    clone = value => MacroCallMetadata (modifiers: Clone.clone (value.modifiers), visibility: value.visibility)
+}
+
+@compiled_only
+impl Clone Expr {
+    clone = value => match value {
+        node: Ident<String> => Clone.clone.<Ident<String>> node,
+        node: CallExpr => Clone.clone.<CallExpr> node,
+        node: StringExpr => Clone.clone.<StringExpr> node,
+        node: CharExpr => Clone.clone.<CharExpr> node,
+        node: UnstructuredExpr => Clone.clone.<UnstructuredExpr> node,
+    }
+}
+
+@compiled_only
+impl Clone Type {
+    clone = value => match value {
+        node: ProductType => Clone.clone.<ProductType> node,
+        node: UnstructuredType => Clone.clone.<UnstructuredType> node,
+    }
+}
+
+@compiled_only
+impl Clone Pattern {
+    clone = value => match value {
+        node: BindingPattern => Clone.clone.<BindingPattern> node,
+        node: NominalPattern => Clone.clone.<NominalPattern> node,
+        node: UnstructuredPattern => Clone.clone.<UnstructuredPattern> node,
+    }
+}
+
+@compiled_only
+impl Clone Item {
+    clone = value => match value {
+        node: ModifiedItem => Clone.clone.<ModifiedItem> node,
+        node: TypeDeclarationItem => Clone.clone.<TypeDeclarationItem> node,
+        node: UnstructuredItem => Clone.clone.<UnstructuredItem> node,
+    }
+}
+
+@compiled_only
+impl Clone Modifier {
+    clone = value => match value {
+        node: ModifierCall => Clone.clone.<ModifierCall> node,
+        node: UnstructuredModifier => Clone.clone.<UnstructuredModifier> node,
+    }
+}
+
+@compiled_only
+impl Clone TypeBody {
+    clone = value => match value {
+        node: AliasBody<Type> => Clone.clone.<AliasBody<Type>> node,
+        node: WrapperBody<Visibility, Type> => Clone.clone.<WrapperBody<Visibility, Type>> node,
+        node: FromBody<Visibility, Type> => Clone.clone.<FromBody<Visibility, Type>> node,
+        node: OpaqueBody => node,
+    }
+}
+
+@compiled_only
+impl Clone SyntaxNode {
+    clone = value => match value {
+        node: Ident<String> => Clone.clone.<Ident<String>> node,
+        node: CallExpr => Clone.clone.<CallExpr> node,
+        node: StringExpr => Clone.clone.<StringExpr> node,
+        node: CharExpr => Clone.clone.<CharExpr> node,
+        node: UnstructuredExpr => Clone.clone.<UnstructuredExpr> node,
+        node: ProductType => Clone.clone.<ProductType> node,
+        node: UnstructuredType => Clone.clone.<UnstructuredType> node,
+        node: BindingPattern => Clone.clone.<BindingPattern> node,
+        node: NominalPattern => Clone.clone.<NominalPattern> node,
+        node: UnstructuredPattern => Clone.clone.<UnstructuredPattern> node,
+        node: ModifiedItem => Clone.clone.<ModifiedItem> node,
+        node: TypeDeclarationItem => Clone.clone.<TypeDeclarationItem> node,
+        node: UnstructuredItem => Clone.clone.<UnstructuredItem> node,
+        node: Private => Clone.clone.<Private> node,
+        node: Package => Clone.clone.<Package> node,
+        node: Public => Clone.clone.<Public> node,
+        node: Comma => Clone.clone.<Comma> node,
+        node: Equals => Clone.clone.<Equals> node,
+        node: FatArrow => Clone.clone.<FatArrow> node,
+        node: TypeParameter => Clone.clone.<TypeParameter> node,
+        node: TypeParameters => Clone.clone.<TypeParameters> node,
+        node: Angled<Syntax> => Clone.clone.<Angled<Syntax>> node,
+        node: Parenthesized<Syntax> => Clone.clone.<Parenthesized<Syntax>> node,
+        node: Bracketed<Syntax> => Clone.clone.<Bracketed<Syntax>> node,
+        node: Braced<Syntax> => Clone.clone.<Braced<Syntax>> node,
+    }
+}

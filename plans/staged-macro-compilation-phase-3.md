@@ -523,9 +523,9 @@ Update this section as you work (see "Rules for the implementor").
 
 | Task | Status | Commit | Notes |
 |---|---|---|---|
-| 1. JIT harness and lowering inventory | done | `8c30bf5` | `macro_runtime/harness.rs` builds, checks, lowers and JITs the whole check program. Plain functions and empty-sequence construction run. Generic foreign intrinsics emit trapping stubs cast to each call's signature. Whole-program emit is about 6.7 s; a full harness test is about 7.5 s. |
-| 2. Boxed nodes | done | this commit | `@syntax_node` marks the node types. Lowering and codegen give them a pointer-sized box `(representation, origin)`, constructors allocate one, nominal patterns unbox them, product patterns select sum alternatives by width, field reads load the representation, and `__origin`/`__with_origin` lower inline. The proof runs: sequence and `Expr`/`CallExpr` construction, matching, field reads, a rebuilt node and a run-time `Ident<"else">` refinement. `__origin`/`__with_origin` lower but are not callable from source tests. The `Inferred` coercion shortcut still covers generic constructor calls; that work belongs to tasks 4–6. |
-| 3. Ownership of syntax | partly done | `24dd4cf` | **Reopened:** Decision 2 now requires a real deep `Clone`, which isn't written yet. The notes below describe the earlier handle copy. `Sequence<T>` and `Separated<T, S>` are always non-`Copy` and have unconditional `Clone` impls. `Clone.clone` keeps its borrowing parameter and copies through `__clone_syntax`, which the interpreter evaluates as identity. Negative `!Copy` headers exclude the `Copy` blanket in the macro trait registry, and the normal overlap check consults them before assuming an open type could be `Copy`. The check now reborrows frozen captures, a quotation splice reads its argument, and the standard library, fixtures and `examples/macros.sta` are migrated. New tests cover use-after-move, `Clone.clone`, `Ident` copying, `Sequence`/`Separated`, and repeated splices. Full-suite and corpus results are in Findings: the library and compiler suites pass, the closure check has no diagnostics over 232 inputs, and the expansion gate matches 224/232. |
+| 1. JIT harness and lowering inventory | done | `8c30bf5`, this commit | `macro_runtime/harness.rs` builds, checks, lowers and JITs the whole check program. Running the program's `main` first sets the collector's stack bottom, registers roots and runs module initializers, so plain functions and their globals work. Generic foreign intrinsics emit trapping stubs cast to each call's signature, and non-generic ones trap with their own name. A harness test takes about 25 s. |
+| 2. Boxed nodes | done | `8c30bf5`, `725cff0`, this commit | `@syntax_node` marks the node types. Constructors allocate a pointer-sized box `(representation, origin)`, and patterns, field reads and `.*` read through it. Refinement patterns compare the spelling at run time, including a set such as `Ident<"a" \| "b">`. Field assignment writes into the box. `__origin` and `__with_origin` lower inline and run under the harness. Generic constructors are solved in the checker, and the `Inferred` shortcut is now an internal error for a product-to-sum coercion. |
+| 3. Ownership of syntax | done | `24dd4cf`, this commit | `Sequence<T>` and `Separated<T, S>` are always non-`Copy`. `Clone` is a deep copy in compiled code and the interpreter's is an identity, using `@compiled_only` and `@interpreted_only`. Handle types copy through `__clone_syntax`, which compiled code rejects for anything else. `duplicate_modifier` is gone. The check treats a splice as a read only for the real `std.syntax` `Splice`. See Findings for the suite and corpus results. |
 | 4. Arena and core intrinsics | not started | | |
 | 5. Node views and rebuilding | not started | | |
 | 6. `Parse` impls | not started | | |
@@ -539,9 +539,9 @@ Update this section as you work (see "Rules for the implementor").
 
 ## Measurements
 
-- **Whole-program JIT, proof test:** about 8.8 s from check program to result on
-  the development machine (macOS, arm64), commit `this commit`, command
-  `cargo test -p staple-compiler --lib macro_runtime::harness::tests::compiled_code_constructs_and_matches_a_sequence`.
+- **Whole-program JIT, one harness test:** about 25 s from check program to result
+  on the development machine (macOS, arm64), command
+  `cargo test -p staple-compiler --lib macro_runtime::harness::tests::plain_functions_run_after_initialization`.
 - **Whole-program emit:** about 6.7 s in the test profile.
 
 ## Findings
@@ -564,15 +564,15 @@ changes. Before them, every distinct failure was one of:
 - **Product alternatives of a sum.** A product pattern whose subject is a sum
   now records the alternative selected by the pattern's width, so `Sequence
   ()` and `Sequence (first, rest)` get a run-time tag test.
-- **Inferred fields.** Coercions and generic constructor calls can retain an
-  `Inferred` field after checking. Such a field adopts the source type and
-  names no runtime layout, so its coercion is the identity and descriptor
-  scanning skips it.
+- **Inferred fields.** A coercion may still see an `Inferred` position, which
+  adopts the source's type and names no layout, so it stays the identity.
+  A product-to-sum coercion is the exception and is an internal error, because
+  a sum alternative is chosen by its exact type. Descriptor scanning skips
+  `Inferred` fields.
 - **Generic foreign declarations.** A macro-runtime intrinsic is an external
   binding, not a compiler intrinsic. It is declared as `Forall` until a call
   instantiates it, so codegen declares it from the call rather than skipping
-  it as an ordinary extern. This is the remaining blocker for compiling the
-  whole standard-library check program.
+  it as an ordinary extern.
 - **Syntax handles.** `Syntax`, `ParseStream` and the `Unstructured*` types
   are `U64` handles; boxed syntax nodes are pointers. Before this, codegen
   rejected `Syntax` as an opaque type with no by-value representation.
@@ -581,44 +581,52 @@ After these fixes the standard-library check program resolves, type-checks
 and lowers. Code generation then got through the generic foreign declarations
 by emitting one trapping stub per generic intrinsic and casting it to each
 call's instantiated signature at the call site. Boxed node field reads lower as
-new `SyntaxNodeField` accesses that load the representation from the box. With
-those changes the whole check program's only remaining emit diagnostic is an
-LLVM verifier failure:
-
-```
-PHI node operands are not the same type as the result!
-%match.value = phi { i32, [1 x ptr] } [ %fallback, ... ], [ %extern.call, ... ]
-```
-
-It appears while emitting match arms in the whole standard-library program,
-after the generic stubs and field accesses are in place. No JIT execution has
-been attempted past this point.  The whole-program emit takes about 6.7 s in
-the test profile. This is the next blocker; it is recorded here rather than
-worked around.
+new `SyntaxNodeField` accesses that load the representation from the box. The
+whole-program emit then failed the LLVM verifier on a match phi, whose cause is
+described under "Boxed representation". It is fixed.
 
 ### Ownership of syntax (task 3)
 
-The handle-copy `Clone` and unconditional `Sequence`/`Separated` impls described in this
-section were replaced by the deep copy in Decision 2, and that work is still to do.
-
 Conditional `Copy` is unavailable, so Decision 2 makes `Sequence<T>` and
-`Separated<T, S>` always non-`Copy`. They implement `Clone` unconditionally:
-the element types are not inspected because the interpreter's copy is an
-identity and compiled field updates rebuild the node. `Ident<S>` stays `Copy`;
-its spelling is the builtin `String`, which `is_copy_type` treats as copyable.
-An earlier attempt marked `Ident` `!Copy` itself, which caused the false
-"Ident is non-Copy" reading; that marker is not needed.
+`Separated<T, S>` always non-`Copy`. `Ident<S>` stays `Copy`; its spelling is the
+builtin `String`, which `is_copy_type` treats as copyable. An earlier attempt
+marked `Ident` `!Copy` itself, which caused a false "Ident is non-Copy" reading;
+that marker is not needed.
 
-`Clone.clone` keeps its borrowing signature. A non-`Copy` clone cannot just
-return the borrowed value, so the syntax impls call `__clone_syntax` directly:
-calling `Clone.clone` inside an impl would recurse back into the same impl.
-The interpreter returns the argument unchanged, which preserves its hidden
-source and origin; compiled lowering emits the operand as `SyntaxClone`. That
-is a handle copy, not a structural rebuild, which is safe because boxed nodes
-are immutable and a field update constructs a new node. The syntax `Clone`
-impls are compile-time-only, and normal builds drop them with the intrinsic
-declaration, so the intrinsic never becomes a runtime external call. Other
-macro code, including `stdlib/std/flow.sta`, uses the public `Clone.clone`.
+**Deep `Clone`.** `std.syntax` has one `@compiled_only` impl per node, which builds
+a new box from cloned children and copies the origin with `__with_origin`. The
+`@interpreted_only` impl of the same type is the identity. The handle types share
+one impl, `__clone_syntax value`, and lowering rejects that intrinsic on anything
+but an opaque handle, so it can't alias a box.
+
+`Sequence` clones in two loops, cloning into a reversed list and then reversing it.
+A borrow can't be rebound in Staple, so the walk starts from `__with_origin (value,
+__origin value)`, one owned copy of the top box, and moves down the original's
+cells from there. It only reads what it moves. If a `Sequence` element type ever
+gains a `Drop` impl this has to change, because the moved `first` is dropped at the
+end of its arm while the original still owns it. No syntax type has one.
+
+`Separated` clones its `elements` through that impl, so it needs no loop of its own.
+`Option` has no `Clone` impl, because one would overlap the `Copy` blanket when its
+payload is `Copy`, so `std.syntax` uses a compiled-only `clone_option` helper.
+
+**The two stage modifiers.** They are removed before anything indexes the program,
+so the interpreter, its trait registry and normal builds only see the interpreted
+view. The check program's modules leave out `@interpreted_only` items and gain the
+expanded `@compiled_only` ones. They are recognized only in the standard library's
+modules, and elsewhere they are unknown modifiers. The closure-only harness mode
+(`check_run_for_with (source, false)`) has no caller, and doesn't apply this swap
+to its closure groups; nothing that uses it depends on a two-body item yet.
+
+**In-place assignment.** A field place loads the box pointer from the binding's cell
+and addresses the field inside the box, so the box and origin stay the same and an
+assignment through a `mut` parameter is visible to the caller. Dynamic code reports
+a diagnostic for a node field, as it already did for reads.
+
+**Macro code changes.** `when_clauses`, `when` and `typegroup_items` no longer clone
+their clause lists: a `Sequence` of slotted products has no `Clone`, and a move or a
+borrow is enough. `__with_origin` now takes a plain `(T, Syntax)` product, because a
+slotted parameter is a juxtaposed call and never reaches the inline lowering.
 
 The `Clone` overlap was real. `impl<T where Copy T> Clone T` and
 `impl<T> Clone (Sequence<T>)` are reported as ambiguous at a `Clone.clone` call
@@ -637,8 +645,7 @@ unless negative `!Copy` headers are consulted. Two places had to change:
 
 `typegroup_prepend` now distributes a copied modifier with `Clone.clone`
 instead of `duplicate_modifier`; the expander freshens each generated item, so
-the copies still get distinct identities. The intrinsic remains declared for
-direct callers.
+the copies still get distinct identities. `duplicate_modifier` is removed.
 
 Removing the copy exception reported the expected 33 errors across `cmp`,
 `default`, `hash`, `typegroup`, `flow`, `fmt` and `syntax`. They are fixed by
@@ -652,7 +659,9 @@ migration and are fixed with it:
   trying to move the value into itself.
 - A quotation splice reads its argument. The checker now treats a resolved
   `Splice.splice` call as non-consuming, so a borrowed binding can be spliced
-  without a clone. Repeated splices in one quotation are covered too.
+  without a clone. Repeated splices in one quotation are covered too. Only the
+  trait declared in `std.syntax` gets this: a user trait named `Splice` moves
+  its argument as usual.
 
 `@` patterns now require `Copy` for syntax too: `Expr`, `Type`, `Pattern`,
 `Item`, `Modifier` and `SyntaxNode` are negative-`Copy` aliases, so an
@@ -666,26 +675,30 @@ repeated splices with no clone. The standard library, macro fixtures and
 `staple-compiler/examples/macros.sta` are migrated. Full-suite counts and the
 closure/expansion corpus results are recorded below.
 
-The expansion gate reports 224/232 matched. The eight differences are the
-eight edited inputs: `examples/macros.sta` and
-`stdlib/{cmp,default,flow,fmt,hash,syntax,typegroup}.sta`. Every difference is
-an ownership rewrite (`move` or `Clone.clone`) plus the new `!Copy`/`Clone`
-declarations in `std.syntax`; the corpus, fixtures and every unedited standard
-library file expand exactly as before.
+The expansion gate reports 224/232 matched against the commit before this phase. The
+eight differences are the eight standard-library files whose source changed:
+`stdlib/{annotation,cmp,default,flow,fmt,hash,syntax,typegroup}.sta`. Each is an
+ownership rewrite (`move` or `Clone.clone`) or a new declaration: `Clone` and the
+`!Copy` markers in `std.syntax`, and `@syntax_node` in `std.annotation`. The corpus,
+fixtures and examples expand exactly as before, and the `@compiled_only` bodies don't
+appear in any expansion.
 
-Final verification for task 3:
+Final verification for tasks 1 to 3:
 
-- `cargo test -p staple-compiler --lib`: 523 passed, 0 failed, 3 ignored.
-- `cargo test -p staple-compiler --test compiler`: 851 passed, 0 failed.
-- `cargo test -p staple-compiler --test constructor_inference`: 6 passed.
-- `cargo test -p staple-compiler --test modules`: 123 passed;
-  `derive_default`: 11; `derive_eq`: 7; `resource_dependencies`: 25;
-  `match_patterns`: 12; `type_alias`: 11; `sum_equality`: 3; `track_caller`:
-  28; `number_literals`: 12; `hash`: 2; `dict`: 4.
+- `cargo test -p staple-compiler --no-fail-fast`: every suite passes, including
+  `--lib` with 535 passed, 0 failed, 3 ignored, and `--test compiler` with 854
+  passed, 0 failed.
+- `cargo test -p staple-compiler --test constructor_inference`: 8 passed.
 - `python3 scripts/check-macro-closures.py --mode all`: 232 inputs, 0 with
-  diagnostics, 0 distinct messages.
+  diagnostics, 0 distinct messages. It takes about 26 minutes on the development
+  machine. Run alongside the test suites, 20 inputs hit the 120 s limit, so run it
+  on its own.
 
-### Boxed representation (task 2, in progress)
+After that run, an unused method, field and parameter were removed and the table's
+comparison derive was dropped. Those edits only affect dead code, and were checked with
+`cargo check --all-targets` and the intrinsic and harness tests, not a second full run.
+
+### Boxed representation (task 2)
 
 The box works in lowering and in the IR: a node is a GC pointer to
 `(representation, origin: U64)`; construction stores origin `0`, and a direct
@@ -699,9 +712,20 @@ The whole-program JIT now runs the proof: a `Sequence<Ident<String>>` is
 constructed and matched by alternative; an `Expr`/`CallExpr` tree is
 constructed, its field is read, a changed node is rebuilt from it, and the
 result is matched; and a refinement binding (`word: Ident<"else">`) compares
-the spelling at run time. `__origin` and `__with_origin` lower inline, but no
-source test calls them because the intrinsic bindings stay private to
-`std.syntax`.
+the spelling at run time. `__origin` and `__with_origin` lower inline. The
+bindings stay private to `std.syntax`, so the tests that run them append small
+accessors to a temporary copy of the standard library.
+
+Three faults in this first version were found in review and fixed, each now with a
+compiled test:
+
+- **Refinement never tested.** The checker overwrote the pattern's alternative with
+  the refined type, so no tag test was planned, and instance materialization then
+  dropped the spelling. The checker now records the alternative and the accepted
+  spellings, and materialization keeps them.
+- **Assignment wrote to the stack.** See "In-place assignment" above.
+- **`.*` read the box pointer.** A representation or scalar read on a node returned
+  the pointer as if it were the contents. It now loads from the box.
 
 Mode gates: none became unnecessary with the boxed declarations alone. The
 copy exception goes with task 3. The `ordinary_syntax_types` gates, recursive
@@ -735,14 +759,24 @@ parameter. Tests for the annotated `def`, constructor result, top-level let,
 unannotated let, ambiguous alternative and wrong annotation are in
 `staple-compiler/tests/constructor_inference.rs`.
 
-The `Inferred` coercion shortcut is **still present**. Quotation lowering now
-annotates its generated lists as `Sequence<Syntax>`, which removed most of the
-holes, and a few standard-library macro lists carry explicit element types.
-The full standard-library inventory still reports product-to-sum coercions
-with inferred fields in generic macro helpers, so the shortcut cannot yet
-become the requested internal error. That is the next checker task.
+The checker first only handled concrete solutions, so a constructor inside a generic
+function kept `Inferred` fields and the coercion shortcut built an untagged value.
+Now only the constructor's own parameters must be solved, and a solution may name
+an enclosing function's parameter. An argument with an unsolved coercion is re-checked
+against the sum alternative it selected, so a nested constructor such as `Sequence
+(first: item, rest: Sequence ())` learns its element type. An annotation also settles
+an argument that matches two alternatives. The shortcut is now an internal error for a
+product-to-sum coercion, and the standard library's check program lowers with it.
 
-The proof runs under the whole-program harness in about 8.6 s. The expansion
+Quotation lowering annotates its generated lists as `Sequence<Syntax>`, and a few
+standard-library macro lists carry explicit element types.
+
+A borrowed argument with a coercion passed the address of the uncoerced value when
+its place was rooted in a `mut` binding, so a callee read an `Ident` box as an `Expr`
+sum. It now passes a coerced copy, as a plain `let` local already did. This wasn't
+specific to syntax, and a test covers a product argument too.
+
+The proof ran under the whole-program harness in about 8.6 s. The expansion
 comparison against the start of the phase matches 231 of 232 inputs; the only
 difference is `stdlib/annotation.sta`, which gained the `@syntax_node`
 declaration. The closure check reports 232 inputs and no diagnostics.
@@ -751,3 +785,23 @@ A separate general codegen bug found on the way is fixed: a call whose own
 result is `Never` was not treated as divergent when the surrounding expression
 had the expected non-`Never` type, so `compile_error` arms put an empty value
 into a match phi.
+
+### Collector limit found by the long-sequence test
+
+The collector's mark phase is recursive (`__staple_gc_mark_candidate` and
+`__staple_gc_scan_region` in `gc.ll`), so a collection overflows a 2 MiB stack on a
+linked list somewhere between 8,000 and 20,000 cells. The `Clone` loop isn't the cause.
+The long-clone test raises the collection threshold and clones 500,000 cells without
+collecting. A collection test runs separately at 2,000 cells. Any long linked data in any
+program has this limit, so it should be fixed in the collector with a work list, as its
+own change.
+
+### Known limits left as they are
+
+- A refinement pattern needs a sum subject. `Ident<"x">` against a bare `Ident<String>`
+  is rejected with "expected `Ident<...`", so the refinement tests match through a sum
+  such as `Expr`.
+- `x.* = ...` on a wrapper expects the wrapper's type rather than its representation.
+  This was already so before boxed nodes.
+- A `Sequence` of slotted products has no `Clone`, because products have none. Macro
+  code moves or borrows those lists.

@@ -883,11 +883,15 @@ impl LoweredCoercionPlan {
         if source == &CheckedType::Never {
             return Ok(LoweredCoercionPlan::Identity);
         }
-        // An inferred position adopts the source's type, so the runtime
-        // representation does not change. Removing this still exposes
-        // product-to-sum coercions with inferred fields in generic
-        // standard-library constructor calls.
+        // A sum alternative is chosen by its exact type, so a product with an
+        // unsolved field has no tag to inject. Treating it as unchanged would
+        // build an untagged value.
         if crate::contains_inferred_type(source) || crate::contains_inferred_type(target) {
+            if matches!(target, CheckedType::Sum(_)) && !matches!(source, CheckedType::Sum(_)) {
+                return Err(format!(
+                    "coercion from `{source}` to `{target}` has an unsolved type"
+                ));
+            }
             return Ok(LoweredCoercionPlan::Identity);
         }
         let same_nominal = matches!((source, target),
@@ -2391,8 +2395,8 @@ pub(crate) struct LoweredPatternTestPlan {
     /// The decoded value of a character-literal pattern, compared against
     /// the subject's integer representation.
     pub scalar: Option<u64>,
-    /// The spelling a refinement binding such as `Ident<"else">` requires.
-    pub refined: Option<Vec<u8>>,
+    /// The spellings a refinement pattern such as `Ident<"else">` accepts.
+    pub refined: Option<Vec<String>>,
 }
 
 impl LoweredPatternTestPlan {
@@ -2722,24 +2726,6 @@ fn pattern_plan_shape_from_kind(
         },
         LoweredPatternKind::At { .. } => PatternPlanShape::At,
     }
-}
-
-/// The spelling a refinement binding's declared type requires, as in
-/// `Ident<"else">`.
-fn refinement_spelling(ty: &staple_syntax::Type) -> Option<String> {
-    let staple_syntax::Type::Application(application) = ty else {
-        return None;
-    };
-    let staple_syntax::Type::Named(name) = application.callee.as_ref() else {
-        return None;
-    };
-    if name.namespace.is_some() || name.name != "Ident" {
-        return None;
-    }
-    let staple_syntax::Type::StringLiteral(literal) = application.argument.as_ref() else {
-        return None;
-    };
-    staple_syntax::string_literal::decode(&literal.literal).ok()
 }
 
 /// The plan-relevant shape of a syntax pattern, or a diagnostic when the
@@ -5745,11 +5731,8 @@ impl LoweredProgram {
                 }
             }
         };
-        if let Pattern::Binding(binding) = pattern
-            && module.is_refinement_pattern(syntax.id)
-            && let Some(spelling) = refinement_spelling(&binding.ty)
-        {
-            test.refined = Some(spelling.into_bytes());
+        if let Some(spellings) = module.refinement_spellings(syntax.id) {
+            test.refined = Some(spellings.to_vec());
         }
         let child_subject_type = |index: usize, child: &Pattern| {
             child_subjects
@@ -8194,7 +8177,9 @@ impl LoweredProgram {
             .and_then(|symbol| self.symbols.get(symbol))
             .map(|symbol| symbol.name.clone())
             .filter(|name| {
-                name == "__staple_syntax_origin" || name == "__staple_syntax_with_origin"
+                name == "__staple_syntax_origin"
+                    || name == "__staple_syntax_with_origin"
+                    || name == "__staple_syntax_clone_syntax"
             })
         {
                 let arguments = syntax_intrinsic_arguments(&call.argument);
@@ -8207,6 +8192,17 @@ impl LoweredProgram {
                 let value =
                     self.lower_expression(module, owner, context, arguments[0])?;
                 if name == "__staple_syntax_clone_syntax" {
+                    // Copying only the handle is a clone of an immutable arena
+                    // fragment. It would alias a structured node's box.
+                    let is_handle = self.expressions.get(value).is_some_and(|expression| {
+                        matches!(expression.value_type.desugared(), CheckedType::Opaque { .. })
+                    });
+                    if !is_handle {
+                        return Err(Diagnostic::new(
+                            call.syntax.span.clone(),
+                            "`__clone_syntax` only copies handle types",
+                        ));
+                    }
                     return Ok(LoweredExpressionKind::SyntaxClone { value });
                 }
                 if name == "__staple_syntax_origin" {
@@ -15177,8 +15173,7 @@ fn symbol_function_type(module: &TypedModule, symbol: SymbolId) -> Option<Checke
 fn syntax_intrinsic_arguments(argument: &Expression) -> Vec<&Expression> {
     match argument {
         Expression::Product(product)
-            if product.slotted
-                && product.elements.iter().all(|element| {
+            if product.elements.iter().all(|element| {
                     !element.spread && !element.named_spread && element.name.is_none()
                 }) =>
         {
