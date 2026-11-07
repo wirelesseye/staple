@@ -105,10 +105,13 @@ All of these were read from the source at `ef52149a`.
    recursive or source-carrying data type (`Ident`, `CallExpr`, `StringExpr`,
    `CharExpr`, `Sequence`, `Separated`, the delimiter types, `TypeParameter(s)`,
    and the structured `Type`, `Pattern`, `Item` and `Modifier` nodes).
-   - **Run-time representation:** a pointer to an immutable GC-allocated
+   - **Run-time representation:** a pointer to a GC-allocated
      `(representation, origin: U64)`. Constructors allocate with origin `0`.
-     Patterns and field reads load from it. A field update (`changed.argument =
-     r`) copies the box and keeps the origin.
+     Patterns and field reads load from it. A field assignment
+     (`changed.argument = r`) writes into the box in place and keeps the origin. This
+     is safe because a non-`Copy` node has one owner: a move transfers the pointer,
+     and `Clone` shares no structured box (Decision 2). `Copy` nodes may share boxes,
+     but they have no fields to assign.
    - **Front end:** the surface doesn't change. `Ident name`,
      `CallExpr (callee: a, argument: b)`, `Sequence (first, rest)` and
      `Braced (contents)` all read as they do today. Only two intrinsics see the
@@ -143,8 +146,11 @@ All of these were read from the source at `ef52149a`.
    - **`Sequence` and `Separated` are always non-`Copy`, whatever their elements.**
      `Sequence<Ident>` is non-`Copy` even though `Ident` is `Copy`. Their recursive
      representation makes structural `Copy` false, and explicit positive `Copy` impls
-     are rejected. Both are unconditionally `Clone`; the copy is the immutable
-     handle, so it does not need `Clone` on the element type.
+     are rejected. They are `Clone` when their elements are, through
+     `impl<T where Clone T> Clone Sequence<T>` and
+     `impl<Element, Separator where Clone Element, Clone Separator> Clone
+     Separated<Element, Separator>`. Generic node types such as the delimiters
+     follow the same rule.
    - **A splice borrows.** `Splice.splice` stays `T -> Syntax`, which borrows today
      and becomes `ref T -> Syntax` under the planned memory model, with no change
      to macro code. A quotation keeps Phase 2's one `Splice.splice` per distinct
@@ -167,22 +173,31 @@ All of these were read from the source at `ef52149a`.
    - **Why nodes are non-`Copy` anyway.** A deep copy should be visible where it
      happens, a node can't be duplicated by accident when it is stored or returned,
      and this matches the ownership the planned memory model gives other types.
-   - **`Clone` copies the structured nodes.** Each node has a `Clone` impl in
-     `std.syntax`, implemented through the `__clone_syntax` intrinsic. A node is an
-     immutable boxed value and a field update constructs a new box, so copying the
-     handle behaves as a deep copy: changing one clone cannot change another.
-     Copies keep their origin handles, so an unchanged clone still rebuilds to its
-     original tokens (Decision 3). The copy stops at `Syntax` and the
-     `Unstructured*` handles, whose arena fragments are immutable. `Clone` for
-     `Sequence<T>` and `Separated<T, S>` is unconditional and does not recurse, so a
-     long sequence doesn't use deep stack. `duplicate_modifier` is replaced by
-     `Clone`, since the parent renumbers syntax ids in every result.
-   - **The interpreter's copy is an identity.** `__clone_syntax` returns its
-     argument, preserving the value's hidden source; compiled lowering emits the
-     same operand, which is the same handle copy. Rebuilding a node through its
-     constructor would lose that hidden source. Until Phase 5, normal builds
-     accept what the closure check rejects, as they already do for an unannotated
-     `parse_quote`.
+   - **`Clone` is a real deep copy of the structured nodes.** Compiled, each node's
+     `Clone` impl is Staple code in `std.syntax` that allocates a new box, clones
+     each child and copies the origin with `__with_origin`. A clone shares no box
+     with the original, apart from the cases below, so an assignment to one can't
+     change the other. It costs time linear in the size of the tree, which is why it
+     is explicit.
+     - **Origins are kept.** Decision 3 compares origin handles, not box addresses, so
+       an unchanged clone still rebuilds to its original tokens.
+     - **`__with_origin` copies only the top box.** Its result shares children with
+       its argument, so it must only be given a value the caller owns and gives up, as
+       a `Clone` impl's newly built node is.
+     - **The copy stops at `Copy` nodes and handles.** `Ident` and the other `Copy`
+       types are copied as values, so their boxes may be shared. `Syntax` and the
+       `Unstructured*` types copy only the handle, because their arena fragments are
+       immutable. An inline intrinsic does that, limited to these handle types.
+     - **`Sequence` and `Separated` loop.** Their `Clone` impls build in a loop rather
+       than recursing, so a long sequence doesn't use deep stack.
+     - `duplicate_modifier` is replaced by `Clone`, since the parent renumbers syntax
+       ids in every result.
+   - **The interpreter's `Clone` stays an identity.** Rebuilding a node through its
+     constructor would lose the value's hidden source. Assigning to an interpreter
+     value must not change another binding of it, which task 3 tests. So each impl has two bodies
+     (Decision 4): the deep copy is `@compiled_only` and the identity is
+     `@interpreted_only`. Until Phase 5, normal builds accept what the closure check
+     rejects, as they already do for an unannotated `parse_quote`.
 
 3. **Mutation is detected by comparing children, not with a dirty flag.** Each
    `Splice` impl is Staple code that splices its children and asks the host to
@@ -304,7 +319,9 @@ Do this as one change, so the closure check stays clean at every commit.
   declarations only where the table contradicts them.
 - Remove the copy exception (`is_syntax_value`, `typecheck.rs:3367` and `:10923`).
   An `@` pattern on a non-`Copy` node is then an error, as for any other type.
-- Add the deep `Clone` impls, with the handle types copying only the handle.
+- Add `@interpreted_only` and `@compiled_only` (Decision 4), which this task is the
+  first to need, and the two-body `Clone` impls from Decision 2. Handle types copy
+  only the handle. Write the impls with `match` and `loop`.
 - Fix the macro code the check now rejects: the standard library's 33 known errors
   and whatever appears once they are gone, then the fixtures, the test sources and
   `staple-compiler/examples/macros.sta`. Prefer `move` on parameters and typed nodes
@@ -316,6 +333,14 @@ Do this as one change, so the closure check stays clean at every commit.
   copied freely, a `Sequence` of `Ident` and a `Sequence` of `Expr` are both non-`Copy`
   and `Clone`, a spliced borrowed binding needs no clone, and an `Expr` and an
   opaque `Syntax` value can each be spliced twice in one quotation without a clone.
+- Tests under the harness, running compiled code: `Clone.clone` of a `CallExpr` tree and
+  of a `Sequence` gives equal contents, different box addresses for every structured
+  node, and the same origins; a long `Sequence` clones without deep stack; and assigning
+  to a field of a clone, or of the original, leaves the other unchanged, including a field
+  of a nested node.
+- Tests of in-place assignment: the box address and origin stay the same, the new value
+  is read back, and an assignment through a `mut` parameter is visible to the caller. Run
+  each under the harness, and the separate-bindings case under the interpreter too.
 
 ### 4. Arena and core intrinsics
 
@@ -483,8 +508,9 @@ the same source from here on (Decision 13).
 - No host function is generic over a Staple value's layout (`__origin` and
   `__with_origin` are lowered inline, on the box pointer), and no
   `Parse` impl is excluded from the check.
-- Syntax ownership follows Decision 2: the check's copy exception is gone, and a
-  name can be spliced more than once in a quotation without a clone.
+- Syntax ownership follows Decision 2: the check's copy exception is gone, a
+  name can be spliced more than once in a quotation without a clone, and `Clone` is a
+  deep copy in compiled code.
 - `$name...` no longer exists, and a sequence splices with `$name` under both the
   interpreter and compiled code (Decision 13).
 - The wire format round-trips the corpus.
@@ -499,7 +525,7 @@ Update this section as you work (see "Rules for the implementor").
 |---|---|---|---|
 | 1. JIT harness and lowering inventory | done | `8c30bf5` | `macro_runtime/harness.rs` builds, checks, lowers and JITs the whole check program. Plain functions and empty-sequence construction run. Generic foreign intrinsics emit trapping stubs cast to each call's signature. Whole-program emit is about 6.7 s; a full harness test is about 7.5 s. |
 | 2. Boxed nodes | done | this commit | `@syntax_node` marks the node types. Lowering and codegen give them a pointer-sized box `(representation, origin)`, constructors allocate one, nominal patterns unbox them, product patterns select sum alternatives by width, field reads load the representation, and `__origin`/`__with_origin` lower inline. The proof runs: sequence and `Expr`/`CallExpr` construction, matching, field reads, a rebuilt node and a run-time `Ident<"else">` refinement. `__origin`/`__with_origin` lower but are not callable from source tests. The `Inferred` coercion shortcut still covers generic constructor calls; that work belongs to tasks 4–6. |
-| 3. Ownership of syntax | done | this commit | `Sequence<T>` and `Separated<T, S>` are always non-`Copy` and have unconditional `Clone` impls. `Clone.clone` keeps its borrowing parameter and copies through `__clone_syntax`, which the interpreter evaluates as identity. Negative `!Copy` headers exclude the `Copy` blanket in the macro trait registry, and the normal overlap check consults them before assuming an open type could be `Copy`. The check now reborrows frozen captures, a quotation splice reads its argument, and the standard library, fixtures and `examples/macros.sta` are migrated. New tests cover use-after-move, `Clone.clone`, `Ident` copying, `Sequence`/`Separated`, and repeated splices. Full-suite and corpus results are in Findings: the library and compiler suites pass, the closure check has no diagnostics over 232 inputs, and the expansion gate matches 224/232. |
+| 3. Ownership of syntax | partly done | `24dd4cf` | **Reopened:** Decision 2 now requires a real deep `Clone`, which isn't written yet. The notes below describe the earlier handle copy. `Sequence<T>` and `Separated<T, S>` are always non-`Copy` and have unconditional `Clone` impls. `Clone.clone` keeps its borrowing parameter and copies through `__clone_syntax`, which the interpreter evaluates as identity. Negative `!Copy` headers exclude the `Copy` blanket in the macro trait registry, and the normal overlap check consults them before assuming an open type could be `Copy`. The check now reborrows frozen captures, a quotation splice reads its argument, and the standard library, fixtures and `examples/macros.sta` are migrated. New tests cover use-after-move, `Clone.clone`, `Ident` copying, `Sequence`/`Separated`, and repeated splices. Full-suite and corpus results are in Findings: the library and compiler suites pass, the closure check has no diagnostics over 232 inputs, and the expansion gate matches 224/232. |
 | 4. Arena and core intrinsics | not started | | |
 | 5. Node views and rebuilding | not started | | |
 | 6. `Parse` impls | not started | | |
@@ -571,6 +597,9 @@ the test profile. This is the next blocker; it is recorded here rather than
 worked around.
 
 ### Ownership of syntax (task 3)
+
+The handle-copy `Clone` and unconditional `Sequence`/`Separated` impls described in this
+section were replaced by the deep copy in Decision 2, and that work is still to do.
 
 Conditional `Copy` is unavailable, so Decision 2 makes `Sequence<T>` and
 `Separated<T, S>` always non-`Copy`. They implement `Clone` unconditionally:
