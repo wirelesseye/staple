@@ -472,6 +472,57 @@ fn module_globals_keep_strings_closures_and_arrays_alive() {
     assert_eq!(run(&source), "1 1 1 42\n");
 }
 
+// One recursive mark frame per cell would need far more than the process's
+// stack. The list costs about 40 MiB, so the threshold is at most about 80 MiB
+// when it is complete, and the churn crosses that with every cell still live.
+// The walk then proves that no cell was freed.
+#[cfg(unix)]
+#[test]
+fn long_linked_lists_survive_collections_without_deep_stack() {
+    let source = format!(
+        "{}{}",
+        concat!(
+            "use std.cinterop.*\n",
+            "use std.ptr.*\n",
+            "use std.shared.(Shared)\n",
+            "extern \"c\" {\n",
+            "    printf: (RawPtr<CChar>, ...) -> I32\n",
+            "}\n",
+        ),
+        CHURN,
+    ) + concat!(
+        "type Chain wrap (head: I32, tail: Option<Shared<Chain>>)\n",
+        "def next = cell: Option<Shared<Chain>> => Option<Shared<Chain>> :: match cell {\n",
+        "    Some link => link.tail,\n",
+        "    None => None,\n",
+        "}\n",
+        "def head = cell: Option<Shared<Chain>> => I32 :: match cell {\n",
+        "    Some link => link.head,\n",
+        "    None => -1,\n",
+        "}\n",
+        "def check = () => () :: {\n",
+        "    let mut list: Option<Shared<Chain>> = None\n",
+        "    let mut index: I32 = 0\n",
+        "    while (index < 500000) {\n",
+        "        list = Some (Shared (Chain (head: index, tail: list)))\n",
+        "        index = index + 1\n",
+        "    }\n",
+        "    for round in (0 .. 5) { churn () }\n",
+        "    let mut cells: I32 = 0\n",
+        "    let mut intact: I32 = 0\n",
+        "    while (head list >= 0) {\n",
+        "        if (head list == 499999 - cells) { intact = intact + 1 }\n",
+        "        cells = cells + 1\n",
+        "        list = next list\n",
+        "    }\n",
+        "    printf (c_string \"%d %d\\n\", cells, intact)\n",
+        "    ()\n",
+        "}\n",
+        "check ()\n",
+    );
+    assert_eq!(run(&source), "500000 500000\n");
+}
+
 #[cfg(unix)]
 #[test]
 fn trees_recursing_through_buffers_drop_every_node_once() {
