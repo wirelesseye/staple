@@ -38,6 +38,14 @@
 @__staple_gc_sorted_count = internal global {{SIZE}} 0
 @__staple_gc_heap_low = internal global {{SIZE}} 0
 @__staple_gc_heap_high = internal global {{SIZE}} 0
+; Payloads marked but not yet scanned. Marking is iterative so that long linked
+; data cannot overflow the machine stack. The mark bit is set before a push, so
+; each allocation is pushed at most once and marking allocates nothing, which
+; bounds the depth by the allocation count. The stack is therefore sized once,
+; before marking starts, in the second half of the sorted array's block, and it
+; never grows during marking. If that block cannot be allocated the program traps.
+@__staple_gc_mark_stack = internal global ptr null
+@__staple_gc_mark_stack_count = internal global {{SIZE}} 0
 
 declare ptr @malloc({{SIZE}})
 declare ptr @calloc({{SIZE}}, {{SIZE}})
@@ -208,8 +216,8 @@ entry:
 }
 
 ; Snapshot every allocation's payload pointer in address order, and record the
-; lowest payload start and the highest payload end. The array is reused across
-; collections and grows to the live allocation count.
+; lowest payload start and the highest payload end. The array and the mark stack
+; share one block, reused across collections and grown to the allocation count.
 define internal void @__staple_gc_build_sorted() {
 entry:
   store {{SIZE}} 0, ptr @__staple_gc_sorted_count
@@ -238,10 +246,11 @@ capacity.check:
   br i1 %enough, label %fill.start, label %grow
 
 grow:
-  ; Every counted allocation occupies more than a pointer, so the byte count
+  ; Every counted allocation occupies more than two pointers, so the byte count
   ; cannot overflow.
   %old = load ptr, ptr @__staple_gc_sorted
-  %bytes = mul {{SIZE}} %count, {{PTR_BYTES}}
+  %half.bytes = mul {{SIZE}} %count, {{PTR_BYTES}}
+  %bytes = shl {{SIZE}} %half.bytes, 1
   %grown = call ptr @realloc(ptr %old, {{SIZE}} %bytes)
   %failed = icmp eq ptr %grown, null
   br i1 %failed, label %trap, label %install
@@ -249,6 +258,8 @@ grow:
 install:
   store ptr %grown, ptr @__staple_gc_sorted
   store {{SIZE}} %count, ptr @__staple_gc_sorted_capacity
+  %mark.stack = getelementptr i8, ptr %grown, {{SIZE}} %half.bytes
+  store ptr %mark.stack, ptr @__staple_gc_mark_stack
   br label %fill.start
 
 fill.start:
@@ -397,8 +408,8 @@ return:
   ret void
 }
 
-; Mark the allocation an exact or interior pointer refers to, and recursively
-; scan the object.
+; Mark the allocation an exact or interior pointer refers to, and push it for
+; __staple_gc_mark_drain to scan.
 define internal void @__staple_gc_mark_candidate({{SIZE}} %candidate) {
 entry:
   %exact = call ptr @__staple_gc_hash_lookup({{SIZE}} %candidate)
@@ -425,6 +436,35 @@ mark.check:
 mark.object:
   %marked.flags = or {{SIZE}} %flags, 1
   store {{SIZE}} %marked.flags, ptr %mark.slot
+  %stack = load ptr, ptr @__staple_gc_mark_stack
+  %count = load {{SIZE}}, ptr @__staple_gc_mark_stack_count
+  %stack.slot = getelementptr ptr, ptr %stack, {{SIZE}} %count
+  store ptr %payload, ptr %stack.slot
+  %pushed.count = add {{SIZE}} %count, 1
+  store {{SIZE}} %pushed.count, ptr @__staple_gc_mark_stack_count
+  br label %return
+
+return:
+  ret void
+}
+
+; Scan every pushed object, which pushes whatever it reaches, until none remain.
+define internal void @__staple_gc_mark_drain() {
+entry:
+  br label %loop
+
+loop:
+  %count = load {{SIZE}}, ptr @__staple_gc_mark_stack_count
+  %done = icmp eq {{SIZE}} %count, 0
+  br i1 %done, label %return, label %scan
+
+scan:
+  %popped.count = sub {{SIZE}} %count, 1
+  store {{SIZE}} %popped.count, ptr @__staple_gc_mark_stack_count
+  %stack = load ptr, ptr @__staple_gc_mark_stack
+  %stack.slot = getelementptr ptr, ptr %stack, {{SIZE}} %popped.count
+  %payload = load ptr, ptr %stack.slot
+  %header = getelementptr i8, ptr %payload, {{SIZE}} -{{HEADER_BYTES}}
   %size.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 1
   %size = load {{SIZE}}, ptr %size.slot
   call void @__staple_gc_scan_region(ptr %payload, {{SIZE}} %size)
@@ -432,7 +472,7 @@ mark.object:
   %context = load ptr, ptr %context.slot
   %context.address = ptrtoint ptr %context to {{SIZE}}
   call void @__staple_gc_mark_candidate({{SIZE}} %context.address)
-  br label %return
+  br label %loop
 
 return:
   ret void
@@ -534,12 +574,12 @@ pinned.start:
   %pinned.count = load {{SIZE}}, ptr @__staple_gc_pinned
   %any.pinned = icmp ne {{SIZE}} %pinned.count, 0
   %pinned.head = load ptr, ptr @__staple_gc_head
-  br i1 %any.pinned, label %pinned.loop, label %finalize.start
+  br i1 %any.pinned, label %pinned.loop, label %mark.drain
 
 pinned.loop:
   %pinned.header = phi ptr [ %pinned.head, %pinned.start ], [ %pinned.next, %pinned.continue ]
   %pinned.done = icmp eq ptr %pinned.header, null
-  br i1 %pinned.done, label %finalize.start, label %pinned.check
+  br i1 %pinned.done, label %mark.drain, label %pinned.check
 
 pinned.check:
   %pinned.flags.slot = getelementptr %GcHeader, ptr %pinned.header, i32 0, i32 2
@@ -558,6 +598,10 @@ pinned.continue:
   %pinned.next.slot = getelementptr %GcHeader, ptr %pinned.header, i32 0, i32 0
   %pinned.next = load ptr, ptr %pinned.next.slot
   br label %pinned.loop
+
+mark.drain:
+  call void @__staple_gc_mark_drain()
+  br label %finalize.start
 
 finalize.start:
   ; Finalizers run before sweeping, and the finalized flag prevents repeat calls.
