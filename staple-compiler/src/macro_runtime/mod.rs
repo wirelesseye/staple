@@ -5,6 +5,7 @@
 //! from [`intrinsics::TABLE`]. In tests, [`harness`] runs the checked code
 //! in-process through LLVM's JIT.
 
+pub(crate) mod arena;
 pub(crate) mod intrinsics;
 
 #[cfg(test)]

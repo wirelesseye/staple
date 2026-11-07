@@ -7,6 +7,9 @@
 //! the impl's member with the macro interpreter. Leaf nodes bottom out in the
 //! [`SyntaxIntrinsic`]s, which read tokens from a [`Value::Stream`].
 
+use super::syntax_ops::{
+    describe_position, matching_angle_close, matching_close, skip_trivia, syntax_slice,
+};
 use super::*;
 
 /// The `std.syntax` functions the compiler implements itself.
@@ -93,7 +96,7 @@ impl SyntaxIntrinsic {
     /// Whether the intrinsic's parameter is `mut`: it advances its argument in
     /// place.
     pub(super) fn takes_mut(self) -> bool {
-        matches!(self, Self::ParsePrimitive | Self::Group(_) | Self::TakeRest)
+        matches!(self, Self::ParsePrimitive | Self::Group(_))
     }
 
     /// Whether the intrinsic is generic over a call-site type argument.
@@ -558,27 +561,6 @@ pub(super) fn ok_value(value: Value) -> Value {
     Value::Nominal("Ok".to_owned(), Box::new(value))
 }
 
-/// Where the first unread token of a stream is, for diagnostics.
-fn describe_position(syntax: &Syntax, cursor: usize) -> String {
-    let tokens = syntax.tokens();
-    let Some(offset) = (cursor..tokens.len()).find(|index| !tokens[*index].kind.is_trivia()) else {
-        return "end of input".to_owned();
-    };
-    let position = syntax.token_range.start + offset;
-    let (mut line, mut column) = (1usize, 1usize);
-    for token in &syntax.token_stream()[..position] {
-        for character in token.text.chars() {
-            if character == '\n' {
-                line += 1;
-                column = 1;
-            } else {
-                column += 1;
-            }
-        }
-    }
-    format!("line {line}, column {column}")
-}
-
 /// The syntax a value stands for as a whole, for `stream` and `parse_all`.
 pub(super) fn value_syntax(value: &Value) -> Option<Syntax> {
     match value {
@@ -876,14 +858,14 @@ impl MacroExpander {
                 let (syntax, cursor) = self.stream_argument(argument, span)?;
                 let end = syntax.tokens().len();
                 let rest = syntax_slice(&syntax, cursor, end);
-                self.advance_stream(
-                    &place,
-                    Value::Stream {
-                        syntax,
-                        cursor: end,
-                    },
-                );
-                Some(Value::Syntax(SyntaxValue::Raw(rest)))
+                Some(Value::Product(
+                    vec![
+                        (None, Value::Syntax(SyntaxValue::Raw(rest))),
+                        (None, Value::Stream { syntax, cursor: end }),
+                    ]
+                    .into(),
+                    true,
+                ))
             }
             SyntaxIntrinsic::Group(kind) => {
                 let (syntax, cursor) = self.stream_argument(argument, span)?;

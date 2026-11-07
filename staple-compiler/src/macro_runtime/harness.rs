@@ -298,6 +298,44 @@ mod tests {
     }
 
     #[test]
+    fn streams_and_text_run_through_the_intrinsics() {
+        run_probes(
+            r#"
+def round_trip: () -> I32 = () => match (string_from_syntax (syntax_from_string "one two") == "one two") {
+    True => 1,
+    False => 0,
+}
+def empty_stream: () -> I32 = () => match (is_empty (stream (syntax_from_string "  "))) {
+    True => 1,
+    False => 0,
+}
+def non_empty_stream: () -> I32 = () => match (is_empty (stream (syntax_from_string "one"))) {
+    True => 0,
+    False => 1,
+}
+def parses_all: () -> I32 = () => match (Parse.parse_all.<Syntax> (syntax_from_string "one two")) {
+    Ok value => match (string_from_syntax value == "one two") { True => 1, False => 0 },
+    ParseError _ => 0,
+}
+def direct_error: () -> I32 = () => {
+    let input = stream (syntax_from_string "one two")
+    let error = error_at ...(input; "unexpected syntax")
+    match error {
+        ParseError (message) => match (message == "unexpected syntax at line 1, column 1") { True => 1, False => 0 },
+    }
+}
+"#,
+            &[
+                ("round_trip", 1),
+                ("empty_stream", 1),
+                ("non_empty_stream", 1),
+                ("parses_all", 1),
+                ("direct_error", 1),
+            ],
+        );
+    }
+
+    #[test]
     fn refinement_patterns_compare_the_spelling() {
         run_probes(
             r#"

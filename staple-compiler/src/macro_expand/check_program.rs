@@ -977,6 +977,8 @@ mod tests {
     fn the_macro_runtime_intrinsics_are_a_closed_list() {
         assert!(super::super::is_macro_runtime_intrinsic("__quote"));
         assert!(super::super::is_macro_runtime_intrinsic("stream"));
+        assert!(super::super::is_macro_runtime_intrinsic("__take_rest"));
+        assert!(super::super::is_macro_runtime_intrinsic("__text_copy"));
         assert!(!super::super::is_macro_runtime_intrinsic("__splice_nod"));
     }
 

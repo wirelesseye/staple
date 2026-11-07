@@ -2647,6 +2647,7 @@ impl NameResolver {
             "Item",
             "Syntax",
             "SyntaxNode",
+            "ParseStream",
         ] {
             // Checking macro code as ordinary code, only the handle types are
             // opaque; the rest are data types like any other.
@@ -2659,6 +2660,7 @@ impl NameResolver {
                         | "UnstructuredModifier"
                         | "UnstructuredItem"
                         | "UnstructuredPattern"
+                        | "ParseStream"
                 )
             {
                 continue;

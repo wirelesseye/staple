@@ -12,8 +12,14 @@ mod parse;
 mod scan;
 mod stage_items;
 mod staged;
+pub(crate) mod syntax_ops;
 mod templates;
 mod traits;
+
+use syntax_ops::{
+    append_syntax_tokens, is_structured_product_type, item_syntax, matches_single_token,
+    matching_angle_close, matching_close, root_hygiene, skip_trivia, syntax_slice,
+};
 
 use crate::program::source_location_at;
 use crate::{FloatType, IntegerType, ModuleId, Program, ResolvedMacro};
@@ -897,46 +903,6 @@ fn splice_hygiene(value: &SyntaxValue, syntax: &Syntax) -> Option<(usize, u64)> 
         return None;
     }
     root_hygiene(syntax)
-}
-
-fn root_hygiene(syntax: &Syntax) -> Option<(usize, u64)> {
-    if syntax.tokens().iter().any(|token| token.hygiene.is_some()) {
-        return None;
-    }
-    syntax.definition_module().zip(syntax.expansion_mark)
-}
-
-fn append_syntax_tokens(
-    output: &mut Vec<staple_syntax::SyntaxToken>,
-    syntax: &Syntax,
-    hygiene: Option<(usize, u64)>,
-) {
-    let mut occurrences = HashMap::<String, usize>::new();
-    for token in syntax.tokens() {
-        let mut token = token.clone();
-        if token.hygiene.is_none() && !token.kind.is_trivia() {
-            token.hygiene = hygiene;
-        }
-        if token.origin.is_none() && !token.kind.is_trivia() {
-            let occurrence = occurrences.entry(token.text.clone()).or_default();
-            token.origin = syntax
-                .identifier_origins
-                .iter()
-                .filter(|(name, _)| name == &token.text)
-                .nth(*occurrence)
-                .map(|(_, origin)| origin.clone())
-                .or_else(|| match &syntax.span {
-                    Span::User { source, .. } => Some(Span::User {
-                        source: source.clone(),
-                        range: token.span.clone(),
-                        location: None,
-                    }),
-                    Span::Compiler => None,
-                });
-            *occurrence += 1;
-        }
-        output.push(token);
-    }
 }
 
 /// Collects the source of every file-backed module, keyed by the source name
@@ -11406,19 +11372,6 @@ fn match_syntax_fragment(
     Some(Value::Syntax(syntax_value))
 }
 
-/// Whether `ty` is exposed as a structured `ProductType`: a plain comma
-/// product without spreads, a variadic marker, or `mut`/`move` elements. Every
-/// other type is an `UnstructuredType`.
-fn is_structured_product_type(ty: &Type) -> bool {
-    matches!(ty, Type::Product(product)
-        if !product.slotted
-            && !product.variadic
-            && product
-                .elements
-                .iter()
-                .all(|element| !element.spread && !element.mutable && !element.moved))
-}
-
 /// Whether a parsed type belongs to the `Type` subcategory `expected`.
 fn type_category_matches(expected: &MetaType, ty: &Type) -> bool {
     match expected {
@@ -11490,14 +11443,6 @@ fn product_type_fields_value(product: &staple_syntax::ProductType) -> Value {
     Value::Sequence(fields.into())
 }
 
-fn matches_single_token(syntax: &Syntax, expected: staple_syntax::TokenKind) -> bool {
-    let mut tokens = syntax
-        .tokens()
-        .iter()
-        .filter(|token| !token.kind.is_trivia());
-    matches!(tokens.next(), Some(token) if token.kind == expected) && tokens.next().is_none()
-}
-
 fn structural_syntax_value(syntax: &Syntax, next_syntax_id: &mut usize) -> Option<SyntaxValue> {
     let tokens = syntax
         .tokens()
@@ -11565,71 +11510,12 @@ fn structural_syntax_value(syntax: &Syntax, next_syntax_id: &mut usize) -> Optio
         .map(SyntaxValue::Pattern)
 }
 
-fn skip_trivia(tokens: &[staple_syntax::SyntaxToken], mut cursor: usize, end: usize) -> usize {
-    while cursor < end && tokens[cursor].kind.is_trivia() {
-        cursor += 1;
-    }
-    cursor
-}
-
-/// Finds the token that closes the delimiter opened at `open`.
-fn matching_angle_close(tokens: &[staple_syntax::SyntaxToken], open: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut cursor = open;
-    while let Some(token) = tokens.get(cursor) {
-        match token.kind {
-            staple_syntax::TokenKind::LParen
-            | staple_syntax::TokenKind::LBracket
-            | staple_syntax::TokenKind::LBrace => {
-                cursor = matching_close(tokens, cursor)?;
-            }
-            staple_syntax::TokenKind::Operator if token.text == "<" => depth += 1,
-            staple_syntax::TokenKind::Operator if token.text == ">" => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(cursor);
-                }
-            }
-            _ => {}
-        }
-        cursor += 1;
-    }
-    None
-}
-
-fn matching_close(tokens: &[staple_syntax::SyntaxToken], open: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    for (index, token) in tokens.iter().enumerate().skip(open) {
-        match token.kind {
-            staple_syntax::TokenKind::LParen
-            | staple_syntax::TokenKind::LBracket
-            | staple_syntax::TokenKind::LBrace => depth += 1,
-            staple_syntax::TokenKind::RParen
-            | staple_syntax::TokenKind::RBracket
-            | staple_syntax::TokenKind::RBrace => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(index);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 fn candidate_ends(
     tokens: &[staple_syntax::SyntaxToken],
     cursor: usize,
     end: usize,
 ) -> impl Iterator<Item = usize> + '_ {
     (cursor + 1..=end).filter(|candidate| !tokens[candidate - 1].kind.is_trivia())
-}
-
-fn syntax_slice(parent: &Syntax, start: usize, end: usize) -> Syntax {
-    let mut syntax = parent.clone();
-    syntax.token_range = parent.token_range.start + start..parent.token_range.start + end;
-    syntax
 }
 
 fn match_macro_arguments(
@@ -15699,45 +15585,6 @@ fn block_item_supported(item: &Item) -> bool {
         | Item::MacroDeclaration(_)
         | Item::TraitDeclaration(_)
         | Item::TraitImplementation(_) => false,
-    }
-}
-
-fn item_syntax(item: &Item) -> &Syntax {
-    match item {
-        Item::Modified(value) => &value.syntax,
-        Item::VisibilityMacroInvocation(value) => &value.syntax,
-        Item::VisibilitySplice(value) => &value.syntax,
-        Item::RepeatedItemSplice(value) => &value.syntax,
-        Item::UseDeclaration(value) => &value.syntax,
-        Item::Submodule(value) => &value.syntax,
-        Item::ExternBlock(value) => &value.syntax,
-        Item::TypeDeclaration(value) => &value.syntax,
-        Item::MacroDeclaration(value) => &value.syntax,
-        Item::TraitDeclaration(value) => &value.syntax,
-        Item::TraitImplementation(value) => &value.syntax,
-        value @ (Item::Binding(_)
-        | Item::PatternBinding(_)
-        | Item::Assignment(_)
-        | Item::Return(_)
-        | Item::Break(_)
-        | Item::Continue(_)
-        | Item::Expression(_)) => block_item_syntax(value),
-    }
-}
-
-fn block_item_syntax(item: &Item) -> &Syntax {
-    match item {
-        Item::Binding(value) => &value.syntax,
-        Item::PatternBinding(value) => &value.syntax,
-        Item::Assignment(value) => &value.syntax,
-        Item::Return(value) => &value.syntax,
-        Item::Break(value) => &value.syntax,
-        Item::Continue(value) => &value.syntax,
-        Item::Expression(value) => value.syntax(),
-        Item::Submodule(value) => &value.syntax,
-        Item::TypeDeclaration(value) => &value.syntax,
-        Item::UseDeclaration(value) => &value.syntax,
-        _ => unreachable!("item-only syntax helper received a declaration item"),
     }
 }
 

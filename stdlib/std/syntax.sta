@@ -1,14 +1,17 @@
 pub mod
 
+use package.buffer.(Buffer, BufferHeader, unsafe_buffer_into_raw)
 use package.char.Char
 
 use package.result.(Result, Ok)
-use package.string.(String)
+use package.string.(String, string_from_shared_bytes_unchecked, string_shared_bytes)
 use package.iterator.(Iterator, IntoIterator, FromIterator, IterStep)
 use package.iterator.IterStep.(Done, Yield)
 use package.default.(Default)
 use package.clone.Clone
 use package.option.(Option, None, Some)
+use package.ptr.RawMutPtr
+use package.shared_buffer.SharedBuffer
 
 /// Compiler-owned, compile-time-only syntax values. Identifiers and calls expose
 /// their data in the first structured-syntax slice; remaining expressions round-trip
@@ -268,15 +271,77 @@ pub type ParseStream opaque
 pub extern "staple-intrinsic" {
     /// Starts a stream at the beginning of `syntax`.
     stream: Syntax -> ParseStream
-    /// `True` when only trivia remains.
-    is_empty: ParseStream -> Bool
     /// The unconsumed rest of the stream, losslessly.
     remaining: ParseStream -> Syntax
-    /// A `ParseError` whose message names the stream's current position.
-    error_at: (ParseStream; String) -> ParseError
     /// Fails the macro being expanded, reporting `message` at its call site.
     compile_error: String -> Never
 }
+
+extern "staple-intrinsic" {
+    /// The rest of the stream, and a new stream advanced to its end.
+    __take_rest: ParseStream -> (Syntax; ParseStream)
+}
+
+@interpreted_only
+pub extern "staple-intrinsic" {
+    /// `True` when only trivia remains.
+    is_empty: ParseStream -> Bool
+    /// A `ParseError` whose message names the stream's current position.
+    error_at: (ParseStream; String) -> ParseError
+}
+
+@compiled_only
+extern "staple-intrinsic" {
+    /// `1` when only trivia remains.
+    __is_empty: ParseStream -> U8
+    /// A text handle holding `"<message> at <position>"`.
+    __error_at: (ParseStream; RawMutPtr<U8>; USize) -> U64
+    /// The number of bytes in a text handle.
+    __text_length: U64 -> USize
+    /// Copies a text handle's bytes into a buffer and returns the byte count.
+    __text_copy: (U64; RawMutPtr<U8>; USize) -> USize
+    /// Copies a byte buffer into the arena and returns its text handle.
+    __text_new: (RawMutPtr<U8>; USize) -> U64
+    /// The lossless text of a syntax fragment, as a text handle.
+    __syntax_text: Syntax -> U64
+    /// Lexes a byte buffer into a syntax fragment.
+    __syntax_from_text: (RawMutPtr<U8>; USize) -> Syntax
+}
+
+/// `True` when only trivia remains.
+@compiled_only
+pub def is_empty = input: ParseStream => Bool :: __is_empty input == 1
+
+/// Builds a `String` from a text handle. The bytes move in one copy.
+@compiled_only
+def text_string = handle: U64 => String :: {
+    let length = __text_length handle
+    let buffer: Buffer<U8> = Buffer.with_capacity length
+    let destination = Buffer.unsafe_element buffer 0
+    let written = __text_copy ...(handle; destination; length)
+    let raw = unsafe_buffer_into_raw buffer
+    BufferHeader.set_length raw written
+    string_from_shared_bytes_unchecked (SharedBuffer.unsafe_from_raw raw)
+}
+
+/// A `ParseError` whose message names the stream's current position.
+@compiled_only
+pub def error_at = (input: ParseStream; message: String) => ParseError :: {
+    let bytes = string_shared_bytes message
+    let text = __error_at ...(input; SharedBuffer.unsafe_data bytes; SharedBuffer.length bytes)
+    ParseError (text_string text)
+}
+
+/// Lexes a string into a lossless syntax fragment.
+@compiled_only
+pub def syntax_from_string = value: String => Syntax :: {
+    let bytes = string_shared_bytes value
+    __syntax_from_text ...(SharedBuffer.unsafe_data bytes; SharedBuffer.length bytes)
+}
+
+/// The lossless text of a syntax fragment.
+@compiled_only
+pub def string_from_syntax = value: Syntax => String :: text_string (__syntax_text value)
 
 /// Syntax that can be parsed from the front of a `ParseStream` at compile time.
 ///
@@ -312,7 +377,6 @@ extern "staple-intrinsic" {
     __bracketed: <C> (Syntax; C) -> Bracketed<C>
     __angled: <C> (Syntax; C) -> Angled<C>
     __braced: <C> (Syntax; C) -> Braced<C>
-    __take_rest: mut ParseStream -> Syntax
     __offset: ParseStream -> USize
     __sequence_push: <T> (Sequence<T>; T) -> Sequence<T>
 }
@@ -412,7 +476,13 @@ impl Parse Visibility { parse = mut input => __parse_primitive.<Visibility> inpu
 impl Parse SyntaxNode { parse = mut input => __parse_primitive.<SyntaxNode> input }
 
 // Everything that is left.
-impl Parse Syntax { parse = mut input => Ok (__take_rest input) }
+impl Parse Syntax {
+    parse = mut input => {
+        let (rest; next) = __take_rest input
+        input = next
+        Ok rest
+    }
+}
 // Nothing at all.
 impl Parse () { parse = mut input => Ok () }
 

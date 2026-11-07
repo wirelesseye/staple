@@ -526,7 +526,7 @@ Update this section as you work (see "Rules for the implementor").
 | 1. JIT harness and lowering inventory | done | `8c30bf5`, `fcfa409` | `macro_runtime/harness.rs` builds, checks, lowers and JITs the whole check program. Running the program's `main` first sets the collector's stack bottom, registers roots and runs module initializers, so plain functions and their globals work. Generic foreign intrinsics emit trapping stubs cast to each call's signature, and non-generic ones trap with their own name. A harness test takes about 25 s. |
 | 2. Boxed nodes | done | `8c30bf5`, `725cff0`, `fcfa409` | `@syntax_node` marks the node types. Constructors allocate a pointer-sized box `(representation, origin)`, and patterns, field reads and `.*` read through it. Refinement patterns compare the spelling at run time, including a set such as `Ident<"a" \| "b">`. Field assignment writes into the box. `__origin` and `__with_origin` lower inline and run under the harness. Generic constructors are solved in the checker, and the `Inferred` shortcut is now an internal error for a product-to-sum coercion. |
 | 3. Ownership of syntax | done | `24dd4cf`, `fcfa409` | `Sequence<T>` and `Separated<T, S>` are always non-`Copy`. `Clone` is a deep copy in compiled code and the interpreter's is an identity, using `@compiled_only` and `@interpreted_only`. Handle types copy through `__clone_syntax`, which compiled code rejects for anything else. `duplicate_modifier` is gone. The check treats a splice as a read only for the real `std.syntax` `Splice`. See Findings for the suite and corpus results. |
-| 4. Arena and core intrinsics | not started | | |
+| 4. Arena and core intrinsics | done | `ea850449` | `macro_runtime/arena.rs` keeps syntax fragments, text, parse streams and parsed nodes for one call; handles carry a generation and `reset` makes earlier handles stale. `macro_expand/syntax_ops.rs` owns the shared slicing, position, delimiter, hygiene and token-filling helpers, plus text lexing. Streams and text run through host intrinsics, with two-body `is_empty` and `error_at` where the ABI differs. See Findings. |
 | 5. Node views and rebuilding | not started | | |
 | 6. `Parse` impls | not started | | |
 | 7. Plain sequence splices | not started | | |
@@ -697,6 +697,24 @@ Final verification for tasks 1 to 3:
 After that run, an unused method, field and parameter were removed and the table's
 comparison derive was dropped. Those edits only affect dead code, and were checked with
 `cargo check --all-targets` and the intrinsic and harness tests, not a second full run.
+
+### Arena and core intrinsics (task 4)
+
+`macro_runtime/arena.rs` is the per-call store. It holds `Syntax` fragments, text, immutable parse streams and parsed AST nodes. A handle is `(generation, index)` with zero meaning "none"; `reset` clears the entries and starts a new generation, so a handle left over from an earlier call is rejected instead of naming a different value. Host-lexed fragments take their syntax ids from the arena's counter. Templates are not per-call state and are not in this arena.
+
+`macro_expand/syntax_ops.rs` now holds the helpers both engines use: `syntax_slice`, `describe_position`, `skip_trivia`, `matching_close`, `matching_angle_close`, `root_hygiene`, `append_syntax_tokens`, `is_structured_product_type`, `matches_single_token`, `item_syntax`, and a new `syntax_from_text`. The interpreter imports them and behaves as before. The expansion comparison against the start of this task matches 231 of 232 inputs; the only difference is `stdlib/syntax.sta`, which gained the items below. Against the phase-start baseline the earlier six standard-library differences from tasks 2 and 3 remain.
+
+Three ABI shapes needed a decision:
+
+- **`ParseStream` was not a syntax handle.** It was absent from the builtin type list in `resolve.rs`, so codegen had no by-value representation for it. It is now registered like `Syntax` and the `Unstructured*` types, represented as a `U64`.
+- **A native extern cannot update a `mut` argument.** Intrinsic and native-extern calls evaluate arguments by value, so the old `__take_rest: mut ParseStream -> Syntax` could not be implemented by a host function. It now takes a stream and returns `(Syntax; ParseStream)`; `Parse Syntax` assigns the advanced handle back to its `mut` binding. The interpreter returns the same product and no longer treats `__take_rest` as a `mut` intrinsic.
+- **`Bool` and `ParseError` are not ABI scalars.** `Bool` is a tagged sum, and `ParseError` is a Staple wrapper the host cannot build. `__is_empty` therefore returns a `U8`, and the compiled `is_empty` body compares it with `1`; the interpreted `is_empty` stays an extern returning `Bool`. `__error_at` returns a text handle, and the compiled `error_at` body builds the `ParseError` in Staple. Both public names have `@interpreted_only` and `@compiled_only` bodies.
+
+Text moves in whole buffers. `__text_new` copies Staple bytes into arena text; `__text_length` and `__text_copy` copy text into a Staple `Buffer`; the compiled `text_string` helper turns that buffer into a `String` through the `pub(package)` `Buffer.unsafe_element`, `BufferHeader.set_length`, `SharedBuffer.unsafe_from_raw` and `string_from_shared_bytes_unchecked`. `__syntax_text` and `__syntax_from_text` bridge syntax and text, and `syntax_from_string`/`string_from_syntax` expose the bridge to compiled macro code. `match` has no integer-literal pattern, so the `U8` result is compared with `== 1`.
+
+The compiled `Parse` leaf path still traps: `__parse_primitive` and the `__*_group` intrinsics remain unimplemented until task 6 replaces them. The core path is covered by the harness test `streams_and_text_run_through_the_intrinsics`, which runs `stream`, `is_empty`, `Parse.parse_all.<Syntax>` through `__take_rest`, `error_at` and both text directions in compiled code. Rust unit tests cover the arena, every stream and text intrinsic (including `remaining` and `__offset`), and the extracted syntax helpers without compiled code.
+
+Final verification: `cargo test -p staple-compiler --no-fail-fast` passes every suite, including the library tests (551 passed, 0 failed, 3 ignored), the compiler tests (854 passed, 0 failed) and `constructor_inference` (8 passed). The new unit tests are 7 for the arena, 9 for the intrinsics and 3 for the syntax helpers. The expansion gate matches 231 of 232 inputs against the start of this task; the only difference is `stdlib/syntax.sta`. `scripts/check-macro-closures.py --mode all` reports 232 inputs, 0 with diagnostics, 0 distinct messages.
 
 ### Boxed representation (task 2)
 
