@@ -714,7 +714,7 @@ Text moves in whole buffers. `__text_new` copies Staple bytes into arena text; `
 
 The compiled `Parse` leaf path still traps: `__parse_primitive` and the `__*_group` intrinsics remain unimplemented until task 6 replaces them. The core path is covered by the harness test `streams_and_text_run_through_the_intrinsics`, which runs `stream`, `is_empty`, `Parse.parse_all.<Syntax>` through `__take_rest`, `error_at` and both text directions in compiled code. Rust unit tests cover the arena, every stream and text intrinsic (including `remaining` and `__offset`), and the extracted syntax helpers without compiled code.
 
-Final verification: `cargo test -p staple-compiler --no-fail-fast` passes every suite, including the library tests (551 passed, 0 failed, 3 ignored), the compiler tests (854 passed, 0 failed) and `constructor_inference` (8 passed). The new unit tests are 7 for the arena, 9 for the intrinsics and 3 for the syntax helpers. The expansion gate matches 231 of 232 inputs against the start of this task; the only difference is `stdlib/syntax.sta`. `scripts/check-macro-closures.py --mode all` reports 232 inputs, 0 with diagnostics, 0 distinct messages.
+Final verification: `cargo test -p staple-compiler --no-fail-fast` passes every suite, including the library tests (552 passed, 0 failed, 3 ignored), the compiler tests (854 passed, 0 failed) and `constructor_inference` (8 passed). The new unit tests are 7 for the arena, 9 for the intrinsics and 3 for the syntax helpers. The expansion gate matches 231 of 232 inputs against the start of this task; the only difference is `stdlib/syntax.sta`. `scripts/check-macro-closures.py --mode all` reports 232 inputs, 0 with diagnostics, 0 distinct messages.
 
 ### Boxed representation (task 2)
 
