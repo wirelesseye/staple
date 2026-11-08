@@ -290,6 +290,12 @@ pub extern "staple-intrinsic" {
     error_at: (ParseStream; String) -> ParseError
 }
 
+@interpreted_only
+extern "staple-intrinsic" {
+    __sequence_push: <T> (Sequence<T>; T) -> Sequence<T>
+    __sequence_reverse: <T> Sequence<T> -> Sequence<T>
+}
+
 @compiled_only
 extern "staple-intrinsic" {
     /// `1` when only trivia remains.
@@ -378,7 +384,6 @@ extern "staple-intrinsic" {
     __angled: <C> (Syntax; C) -> Angled<C>
     __braced: <C> (Syntax; C) -> Braced<C>
     __offset: ParseStream -> USize
-    __sequence_push: <T> (Sequence<T>; T) -> Sequence<T>
 }
 
 // Compiler building blocks for quotations. A quotation is checked as a call of
@@ -443,7 +448,10 @@ extern "staple-intrinsic" {
     __unstructured_modifier: Syntax -> UnstructuredModifier
     __empty_syntax: () -> Syntax
     __syntax_is_empty: Syntax -> U8
-    __syntax_is_zero: Syntax -> U8
+    __same_syntax: (Syntax; Syntax) -> U8
+    __syntax_or_origin: (Syntax; Syntax) -> Syntax
+    __join_separated_syntax: (Syntax; Syntax; Syntax; U8) -> Syntax
+    __append_separator_syntax: (Syntax; Syntax) -> Syntax
     /// The `Pattern` alternative a fragment names.
     __classify_pattern: Syntax -> U8
     __binding_pattern_name: Syntax -> Syntax
@@ -619,7 +627,39 @@ impl<T where Splice T> Splice Sequence<T> {
                 },
             }
         }
-        joined
+        __syntax_or_origin ...(__origin value; joined)
+    }
+}
+
+@compiled_only
+pub def separated_elements_syntax = <Element, Separator where Splice Element, Splice Separator> (move elements: Sequence<Element>; separator: Separator; trailing: Bool) => Syntax :: {
+    let separator_syntax = Splice.splice separator
+    let mut joined = __empty_syntax ()
+    let mut first: U8 = 1
+    let mut cursor: Sequence<Element> = elements
+    loop {
+        match cursor {
+            Sequence () => { break },
+            Sequence (element, rest) => {
+                joined = __join_separated_syntax ...(joined; Splice.splice element; separator_syntax; first)
+                first = 0
+                cursor = rest
+            },
+        }
+    }
+    match trailing {
+        True => __append_separator_syntax ...(joined; separator_syntax),
+        False => joined,
+    }
+}
+
+@compiled_only
+impl<Element, Separator where Splice Element, Splice Separator, Clone Element> Splice Separated<Element, Separator> {
+    splice = value => {
+        let origin = __origin value
+        let elements = Clone.clone value.elements
+        let joined = separated_elements_syntax ...(elements; value.separator; value.trailing)
+        __syntax_or_origin ...(origin; joined)
     }
 }
 
@@ -726,7 +766,7 @@ pub def product_type_from_syntax = syntax: Syntax => ProductType :: {
             },
         }
     }
-    __with_origin (ProductType fields, syntax)
+    ProductType (__with_origin (fields, syntax))
 }
 
 @compiled_only
@@ -752,12 +792,54 @@ impl Splice ProductTypeField {
 }
 
 @compiled_only
-impl Splice ProductType {
-    splice = value => match (__syntax_is_zero (__origin value) == 1) {
-        True => syntax_from_string "()",
-        False => __origin value,
+def product_type_fields_syntax = move fields: Sequence<ProductTypeField> => Syntax :: {
+    let mut joined = __empty_syntax ()
+    let mut first: U8 = 1
+    let mut cells = fields
+    loop {
+        match cells {
+            Sequence () => { break },
+            Sequence (field, rest) => {
+                joined = __join_field_syntax ...(joined; Splice.splice field; first)
+                first = 0
+                cells = rest
+            },
+        }
     }
+    joined
 }
+
+@compiled_only
+def sequence_origin_of = <T> (value: Sequence<T>) => Syntax :: __origin value
+
+@compiled_only
+def product_type_syntax_of = (value: ProductType) => Syntax :: {
+    let origin = sequence_origin_of value.*
+    __product_type_syntax ...(origin; product_type_fields_syntax (Clone.clone value.*))
+}
+
+@compiled_only
+impl Splice ProductType {
+    splice = value => product_type_syntax_of value
+}
+
+/// Whether two handles name the same syntax fragment. A round trip that
+/// returns its input keeps its original handle, not just its text.
+@compiled_only
+pub def same_syntax = (left: Syntax; right: Syntax) => Bool :: __same_syntax ...(left; right) == 1
+
+/// `value` with `origin` attached as its hidden origin. For macros that build
+/// syntax values by hand and want the rebuild to reuse the original fragment.
+@compiled_only
+pub def sequence_with_origin = <T> (value: Sequence<T>; origin: Syntax) => Sequence<T> :: __with_origin (value, origin)
+
+/// `value` with `origin` attached as its hidden origin.
+@compiled_only
+pub def separated_with_origin = <Element, Separator> (value: Separated<Element, Separator>; origin: Syntax) => Separated<Element, Separator> :: __with_origin (value, origin)
+
+/// `value` with `origin` attached as its hidden origin.
+@compiled_only
+pub def parenthesized_with_origin = (value: Parenthesized<Syntax>; origin: Syntax) => Parenthesized<Syntax> :: __with_origin (value, origin)
 
 @compiled_only
 impl Splice Type {
@@ -1307,7 +1389,7 @@ impl !Copy MacroCallMetadata {}
 impl<T> Iterator Sequence<T> {
     type Item = T
     next = move sequence => match sequence {
-        Sequence () => Done (Sequence ()),
+        Sequence () => Done (Sequence<T> :: Sequence ()),
         Sequence (first, rest) => Yield (first, rest),
     }
 }
@@ -1321,9 +1403,38 @@ impl<T> Default (Sequence<T>) {
     default = () => Sequence ()
 }
 
+@interpreted_only
+def sequence_reverse = <T> (move sequence: Sequence<T>) => Sequence<T> :: __sequence_reverse sequence
+
+@compiled_only
+def sequence_reverse = <T> (move sequence: Sequence<T>) => Sequence<T> :: {
+    let mut result: Sequence<T> = Sequence ()
+    let mut cursor = sequence
+    loop {
+        match cursor {
+            Sequence () => { break },
+            Sequence (first, rest) => {
+                result = Sequence (first: first, rest: result)
+                cursor = rest
+            },
+        }
+    }
+    result
+}
+
+@interpreted_only
+def sequence_push = <T> (move sequence: Sequence<T>; move item: T) => Sequence<T> :: __sequence_push ...(sequence; item)
+
+@compiled_only
+def sequence_push = <T> (move sequence: Sequence<T>; move item: T) => Sequence<T> :: {
+    let mut reversed: Sequence<T> = sequence_reverse sequence
+    reversed = Sequence (first: item, rest: reversed)
+    sequence_reverse reversed
+}
+
 impl<T> FromIterator Sequence<T> T {
     insert = (move sequence: Sequence<T>; move item: T) => Sequence<T> ::
-        __sequence_push ...(sequence; item)
+        sequence_push ...(sequence; item)
 }
 
 // Elements until the stream ends or `T` stops parsing.
@@ -1338,12 +1449,12 @@ impl<T where Parse T> Parse Sequence<T> {
                 Ok first => {
                     if (__offset fork == start) { break }
                     input = fork
-                    elements = __sequence_push ...(elements; first)
+                    elements = Sequence (first: first, rest: elements)
                 },
                 ParseError _ => { break },
             }
         }
-        Ok elements
+        Ok (sequence_reverse elements)
     }
 }
 
@@ -1359,13 +1470,13 @@ impl<T where Parse T> Parse Separated<T, Comma> {
             let first = Parse.parse.<T> fork?
             if (__offset fork == start) { break }
             input = fork
-            elements = __sequence_push ...(elements; first)
+            elements = Sequence (first: first, rest: elements)
             trailing = False
             if (is_empty input) { break }
             let _ = Parse.parse.<Comma> input?
             trailing = True
         }
-        Ok (Separated (separator: Comma, elements: elements, trailing: trailing))
+        Ok (Separated (separator: Comma, elements: sequence_reverse elements, trailing: trailing))
     }
 }
 

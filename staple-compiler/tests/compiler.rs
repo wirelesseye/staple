@@ -19141,6 +19141,38 @@ fn parse_reads_sequences_options_and_separated_bodies() {
 }
 
 #[test]
+fn parse_reads_single_element_sequences_and_separated() {
+    let source = format!(
+        "{PARSE_IMPORTS}{}",
+        concat!(
+            "macro one = () => {\n",
+            "    let syntax = quote { (a) }\n",
+            "    match (Parse.parse_all.<Parenthesized<Sequence<Ident<String>>>> syntax) {\n",
+            "        Ok Parenthesized (Sequence (first, rest)) => parse_quote { $first },\n",
+            "        Ok _ => parse_quote { missing },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "macro one_sep = () => {\n",
+            "    let syntax = quote { (a) }\n",
+            "    match (Parse.parse_all.<Parenthesized<Separated<Ident<String>, Comma>>> syntax) {\n",
+            "        Ok Parenthesized (Separated (_, Sequence (first, rest), trailing)) => parse_quote { $first },\n",
+            "        Ok _ => parse_quote { missing },\n",
+            "        ParseError (message) => panic message,\n",
+            "    }\n",
+            "}\n",
+            "let a = 5\n",
+            "let single: I32 = one ()\n",
+            "let separated: I32 = one_sep ()\n",
+        )
+    );
+    let compact = expanded_compact(&source);
+    assert!(compact.contains("letsingle:I32=a"), "{compact}");
+    assert!(compact.contains("letseparated:I32=a"), "{compact}");
+    type_check(&source);
+}
+
+#[test]
 fn parse_forks_backtrack_and_commit() {
     let source = format!(
         "{PARSE_IMPORTS}{}",

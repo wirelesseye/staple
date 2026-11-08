@@ -390,6 +390,33 @@ def type_parameters_round_trip: () -> I32 = () => {
     let syntax = syntax_from_string "<T>"
     text_is (Splice.splice (type_parameters_from_syntax syntax)) "<T>"
 }
+def constructed_field_splice: () -> I32 = () => {
+    let field = product_type_field_from_syntax (syntax_from_string "x: I32")
+    text_is (Splice.splice field) "x: I32"
+}
+def constructed_fields_one: () -> I32 = () => {
+    let x = product_type_field_from_syntax (syntax_from_string "x: I32")
+    let tail: Sequence<ProductTypeField> = Sequence ()
+    let fields: Sequence<ProductTypeField> = Sequence (first: x, rest: tail)
+    text_is (Splice.splice fields) "x: I32"
+}
+def splice_product_sum: () -> I32 = () => {
+    let x = product_type_field_from_syntax (syntax_from_string "x: I32")
+    let tail: Sequence<ProductTypeField> = Sequence ()
+    let fields: Sequence<ProductTypeField> = Sequence (first: x, rest: tail)
+    let value: Type = ProductType fields
+    let product: ProductType = match value { node: ProductType => node, _ => ProductType (Sequence ()) }
+    text_is (Splice.splice product) "(x: I32)"
+}
+def constructed_product_fields: () -> I32 = () => {
+    let x = product_type_field_from_syntax (syntax_from_string "x: I32")
+    let y = product_type_field_from_syntax (syntax_from_string "y: I32")
+    let tail: Sequence<ProductTypeField> = Sequence ()
+    let middle: Sequence<ProductTypeField> = Sequence (first: y, rest: tail)
+    let fields: Sequence<ProductTypeField> = Sequence (first: x, rest: middle)
+    let value: Type = ProductType fields
+    text_is (Splice.splice value) "(x: I32, y: I32)"
+}
 def product_round_trip: () -> I32 = () => {
     let syntax = syntax_from_string "(x: I32, y: I32)"
     text_is (Splice.splice (type_from_syntax syntax)) "(x: I32, y: I32)"
@@ -437,6 +464,14 @@ def constructed_type_parameters: () -> I32 = () => {
     let value: TypeParameters = TypeParameters (parameters: parameters, declaration: header, arguments: arguments, bounds: syntax_from_string "")
     text_is (Splice.splice value) "<T>"
 }
+def from_iterator_one: () -> I32 = () => {
+    let a: Ident = Ident "a"
+    let tail: Sequence<Ident> = Sequence ()
+    let seed: Sequence<Ident> = Sequence (first: a, rest: tail)
+    let copy = Clone.clone seed
+    let sequence = FromIterator.insert_all.<Sequence<Ident>, Ident, Sequence<Ident>> seed copy
+    text_is (Splice.splice sequence) "aa"
+}
 def constructed_sequence: () -> I32 = () => {
     let a: Ident<String> = Ident "a"
     let b: Ident<String> = Ident "b"
@@ -444,6 +479,105 @@ def constructed_sequence: () -> I32 = () => {
     let middle: Sequence<Ident<String>> = Sequence (first: b, rest: tail)
     let sequence: Sequence<Ident<String>> = Sequence (first: a, rest: middle)
     text_is (Splice.splice sequence) "ab"
+}
+def same_expr: () -> I32 = () => {
+    let syntax = syntax_from_string "f x"
+    match (same_syntax (Splice.splice (expr_from_syntax syntax)) syntax) { True => 1, False => 0 }
+}
+def same_type: () -> I32 = () => {
+    let syntax = syntax_from_string "I32"
+    match (same_syntax (Splice.splice (type_from_syntax syntax)) syntax) { True => 1, False => 0 }
+}
+def same_pattern: () -> I32 = () => {
+    let syntax = syntax_from_string "x"
+    match (same_syntax (Splice.splice (pattern_from_syntax syntax)) syntax) { True => 1, False => 0 }
+}
+def same_item: () -> I32 = () => {
+    let syntax = syntax_from_string "type Foo = I32"
+    match (same_syntax (Splice.splice (item_from_syntax syntax)) syntax) { True => 1, False => 0 }
+}
+def same_modified_item: () -> I32 = () => {
+    let syntax = syntax_from_string "@mark type Foo = I32"
+    match (same_syntax (Splice.splice (item_from_syntax syntax)) syntax) { True => 1, False => 0 }
+}
+def same_modifier: () -> I32 = () => {
+    let syntax = syntax_from_string "@mark"
+    match (same_syntax (Splice.splice (modifier_from_syntax syntax)) syntax) { True => 1, False => 0 }
+}
+def same_type_body: () -> I32 = () => {
+    let syntax = syntax_from_string "= I32"
+    match (same_syntax (Splice.splice (type_body_from_syntax syntax)) syntax) { True => 1, False => 0 }
+}
+def same_type_parameters: () -> I32 = () => {
+    let syntax = syntax_from_string "<T>"
+    match (same_syntax (Splice.splice (type_parameters_from_syntax syntax)) syntax) { True => 1, False => 0 }
+}
+def same_type_parameter: () -> I32 = () => {
+    let syntax = syntax_from_string "T"
+    match (same_syntax (Splice.splice (type_parameter_from_syntax syntax)) syntax) { True => 1, False => 0 }
+}
+def same_product: () -> I32 = () => {
+    let syntax = syntax_from_string "(x: I32, y: I32)"
+    match (same_syntax (Splice.splice (type_from_syntax syntax)) syntax) { True => 1, False => 0 }
+}
+def same_delimiter: () -> I32 = () => {
+    let origin = syntax_from_string "(x)"
+    let contents = syntax_from_string "x"
+    let value = parenthesized_with_origin ...(Parenthesized contents; origin)
+    match (same_syntax (Splice.splice value) origin) { True => 1, False => 0 }
+}
+def same_syntax_node: () -> I32 = () => {
+    let syntax = syntax_from_string "f x"
+    let value: SyntaxNode = expr_from_syntax syntax
+    match (same_syntax (Splice.splice value) syntax) { True => 1, False => 0 }
+}
+def same_sequence: () -> I32 = () => {
+    let a: Ident<String> = Ident "a"
+    let b: Ident<String> = Ident "b"
+    let tail: Sequence<Ident<String>> = Sequence ()
+    let middle: Sequence<Ident<String>> = Sequence (first: b, rest: tail)
+    let sequence: Sequence<Ident<String>> = Sequence (first: a, rest: middle)
+    let origin = syntax_from_string "a b"
+    let value = sequence_with_origin ...(sequence; origin)
+    match (same_syntax (Splice.splice value) origin) { True => 1, False => 0 }
+}
+def separated_elements_only: () -> I32 = () => {
+    let a: Ident<String> = Ident "a"
+    let b: Ident<String> = Ident "b"
+    let tail: Sequence<Ident<String>> = Sequence ()
+    let middle: Sequence<Ident<String>> = Sequence (first: b, rest: tail)
+    let elements: Sequence<Ident<String>> = Sequence (first: a, rest: middle)
+    let joined = separated_elements_syntax ...(elements; Comma; False)
+    text_is joined "a,b"
+}
+def separated_text: () -> I32 = () => {
+    let a: Ident<String> = Ident "a"
+    let b: Ident<String> = Ident "b"
+    let tail: Sequence<Ident<String>> = Sequence ()
+    let middle: Sequence<Ident<String>> = Sequence (first: b, rest: tail)
+    let elements: Sequence<Ident<String>> = Sequence (first: a, rest: middle)
+    let value: Separated<Ident<String>, Comma> = Separated (separator: Comma, elements: elements, trailing: False)
+    text_is (Splice.splice value) "a,b"
+}
+def same_separated: () -> I32 = () => {
+    let a: Ident<String> = Ident "a"
+    let b: Ident<String> = Ident "b"
+    let tail: Sequence<Ident<String>> = Sequence ()
+    let middle: Sequence<Ident<String>> = Sequence (first: b, rest: tail)
+    let elements: Sequence<Ident<String>> = Sequence (first: a, rest: middle)
+    let value: Separated<Ident<String>, Comma> = Separated (separator: Comma, elements: elements, trailing: False)
+    let origin = syntax_from_string "a,b"
+    let value = separated_with_origin ...(value; origin)
+    match (same_syntax (Splice.splice value) origin) { True => 1, False => 0 }
+}
+def constructed_separated: () -> I32 = () => {
+    let a: Ident<String> = Ident "a"
+    let b: Ident<String> = Ident "b"
+    let tail: Sequence<Ident<String>> = Sequence ()
+    let middle: Sequence<Ident<String>> = Sequence (first: b, rest: tail)
+    let elements: Sequence<Ident<String>> = Sequence (first: a, rest: middle)
+    let value: Separated<Ident<String>, Comma> = Separated (separator: Comma, elements: elements, trailing: False)
+    text_is (Splice.splice value) "a,b"
 }
 def punctuation: () -> I32 = () => {
     let comma = Splice.splice Comma
@@ -465,6 +599,10 @@ def punctuation: () -> I32 = () => {
                 ("item_round_trip", 1),
                 ("modifier_round_trip", 1),
                 ("type_parameters_round_trip", 1),
+                ("constructed_field_splice", 1),
+                ("constructed_fields_one", 1),
+                ("splice_product_sum", 1),
+                ("constructed_product_fields", 1),
                 ("product_round_trip", 1),
                 ("delimiter_round_trip", 1),
                 ("syntax_node_sum", 1),
@@ -473,7 +611,25 @@ def punctuation: () -> I32 = () => {
                 ("constructed_modifier", 1),
                 ("constructed_item", 1),
                 ("constructed_type_parameters", 1),
+                ("from_iterator_one", 1),
                 ("constructed_sequence", 1),
+                ("same_expr", 1),
+                ("same_type", 1),
+                ("same_pattern", 1),
+                ("same_item", 1),
+                ("same_modified_item", 1),
+                ("same_modifier", 1),
+                ("same_type_body", 1),
+                ("same_type_parameters", 1),
+                ("same_type_parameter", 1),
+                ("same_product", 1),
+                ("same_delimiter", 1),
+                ("same_syntax_node", 1),
+                ("same_sequence", 1),
+                ("separated_elements_only", 1),
+                ("separated_text", 1),
+                ("same_separated", 1),
+                ("constructed_separated", 1),
                 ("punctuation", 1),
             ],
         );

@@ -82,8 +82,9 @@ pub(crate) const INTRINSICS: &[Intrinsic] = &[
     intrinsic!("__angled", "__staple_syntax_angled"),
     intrinsic!("__braced", "__staple_syntax_braced"),
     intrinsic!("__take_rest", "__staple_syntax_take_rest", take_rest),
-    intrinsic!("__offset", "__staple_syntax_offset", offset),
     intrinsic!("__sequence_push", "__staple_syntax_sequence_push"),
+    intrinsic!("__sequence_reverse", "__staple_syntax_sequence_reverse"),
+    intrinsic!("__offset", "__staple_syntax_offset", offset),
     intrinsic!("__quote", "__staple_syntax_quote"),
     intrinsic!("__splice_node", "__staple_syntax_splice_node"),
     intrinsic!("__splice_join", "__staple_syntax_splice_join"),
@@ -228,9 +229,24 @@ pub(crate) const INTRINSICS: &[Intrinsic] = &[
         syntax_is_empty
     ),
     intrinsic!(
-        "__syntax_is_zero",
-        "__staple_syntax_syntax_is_zero",
-        syntax_is_zero
+        "__same_syntax",
+        "__staple_syntax_same_syntax",
+        same_syntax
+    ),
+    intrinsic!(
+        "__syntax_or_origin",
+        "__staple_syntax_syntax_or_origin",
+        syntax_or_origin
+    ),
+    intrinsic!(
+        "__join_separated_syntax",
+        "__staple_syntax_join_separated_syntax",
+        join_separated_syntax
+    ),
+    intrinsic!(
+        "__append_separator_syntax",
+        "__staple_syntax_append_separator_syntax",
+        append_separator_syntax
     ),
     intrinsic!(
         "__classify_pattern",
@@ -505,8 +521,9 @@ pub(crate) fn symbol_name(name: &str) -> &'static str {
         "__angled" => "__staple_syntax_angled",
         "__braced" => "__staple_syntax_braced",
         "__take_rest" => "__staple_syntax_take_rest",
-        "__offset" => "__staple_syntax_offset",
         "__sequence_push" => "__staple_syntax_sequence_push",
+        "__sequence_reverse" => "__staple_syntax_sequence_reverse",
+        "__offset" => "__staple_syntax_offset",
         "__quote" => "__staple_syntax_quote",
         "__splice_node" => "__staple_syntax_splice_node",
         "__splice_join" => "__staple_syntax_splice_join",
@@ -547,7 +564,10 @@ pub(crate) fn symbol_name(name: &str) -> &'static str {
         "__unstructured_modifier" => "__staple_syntax_unstructured_modifier",
         "__empty_syntax" => "__staple_syntax_empty_syntax",
         "__syntax_is_empty" => "__staple_syntax_syntax_is_empty",
-        "__syntax_is_zero" => "__staple_syntax_syntax_is_zero",
+        "__same_syntax" => "__staple_syntax_same_syntax",
+        "__syntax_or_origin" => "__staple_syntax_syntax_or_origin",
+        "__join_separated_syntax" => "__staple_syntax_join_separated_syntax",
+        "__append_separator_syntax" => "__staple_syntax_append_separator_syntax",
         "__classify_pattern" => "__staple_syntax_classify_pattern",
         "__binding_pattern_name" => "__staple_syntax_binding_pattern_name",
         "__nominal_pattern_parts" => "__staple_syntax_nominal_pattern_parts",
@@ -790,9 +810,59 @@ extern "C" fn syntax_is_empty(syntax: u64) -> u8 {
     u8::from(syntax_value(syntax).tokens().is_empty())
 }
 
-/// `1` when a syntax handle is the zero "none" handle.
-extern "C" fn syntax_is_zero(syntax: u64) -> u8 {
-    u8::from(syntax == 0)
+/// `1` when two syntax handles are the same handle.
+extern "C" fn same_syntax(left: u64, right: u64) -> u8 {
+    u8::from(left == right)
+}
+
+/// Returns `origin` when its non-trivia tokens match `candidate`'s, otherwise
+/// `candidate`.
+extern "C" fn syntax_or_origin(origin: u64, candidate: u64) -> u64 {
+    let candidate_syntax = syntax_value(candidate);
+    if origin != 0 {
+        let origin_syntax = syntax_value(origin);
+        let original: Vec<&str> = origin_syntax
+            .tokens()
+            .iter()
+            .filter(|token| !token.kind.is_trivia())
+            .map(|token| token.text.as_str())
+            .collect();
+        let rebuilt: Vec<&str> = candidate_syntax
+            .tokens()
+            .iter()
+            .filter(|token| !token.kind.is_trivia())
+            .map(|token| token.text.as_str())
+            .collect();
+        if original == rebuilt {
+            return origin;
+        }
+    }
+    candidate
+}
+
+/// Appends one separated element, with a separator between elements.
+extern "C" fn join_separated_syntax(joined: u64, element: u64, separator: u64, first: u8) -> u64 {
+    let element_syntax = syntax_value(element);
+    if first != 0 {
+        return element;
+    }
+    let joined_syntax = syntax_value(joined);
+    let separator_syntax = syntax_value(separator);
+    let mut tokens = Vec::new();
+    append_syntax_tokens(&mut tokens, &joined_syntax, None);
+    append_syntax_tokens(&mut tokens, &separator_syntax, None);
+    append_syntax_tokens(&mut tokens, &element_syntax, None);
+    finish_syntax(0, None, tokens)
+}
+
+/// Appends a trailing separator.
+extern "C" fn append_separator_syntax(joined: u64, separator: u64) -> u64 {
+    let joined_syntax = syntax_value(joined);
+    let separator_syntax = syntax_value(separator);
+    let mut tokens = Vec::new();
+    append_syntax_tokens(&mut tokens, &joined_syntax, None);
+    append_syntax_tokens(&mut tokens, &separator_syntax, None);
+    finish_syntax(0, None, tokens)
 }
 
 /// The lossless text of a syntax fragment, as a text handle.
@@ -1185,6 +1255,20 @@ extern "C" fn product_type_field_parts(syntax: u64) -> Triple {
     })
 }
 
+/// The syntax without its leading and trailing trivia.
+fn trimmed_syntax(syntax: &Syntax) -> Syntax {
+    let tokens = syntax.tokens();
+    let first = tokens
+        .iter()
+        .position(|token| !token.kind.is_trivia())
+        .unwrap_or(0);
+    let last = tokens
+        .iter()
+        .rposition(|token| !token.kind.is_trivia())
+        .map_or(first, |last| last + 1);
+    syntax_slice(syntax, first, last)
+}
+
 fn product_field(syntax: &Syntax) -> staple_syntax::TypeElement {
     let text = format!("({})", syntax.text());
     let mut next = 0;
@@ -1220,14 +1304,18 @@ extern "C" fn product_type_field_name(syntax: u64) -> u64 {
 extern "C" fn product_type_field_type(syntax: u64) -> u64 {
     let syntax = syntax_value(syntax);
     let field = product_field(&syntax);
-    arena::with_arena(|arena| arena.insert_syntax(field.ty.syntax().clone()).into())
+    let ty = trimmed_syntax(field.ty.syntax());
+    arena::with_arena(|arena| arena.insert_syntax(ty).into())
 }
 
 extern "C" fn product_type_field_default(syntax: u64) -> u64 {
     let syntax = syntax_value(syntax);
     let field = product_field(&syntax);
     arena::with_arena(|arena| match field.default {
-        Some(default) => arena.insert_syntax(default.syntax().clone()).into(),
+        Some(default) => {
+            let default = trimmed_syntax(default.syntax());
+            arena.insert_syntax(default).into()
+        }
         None => {
             let empty = Syntax::synthetic(SyntaxId(arena.next_syntax_id()), Span::Compiler);
             arena.insert_syntax(empty).into()
@@ -1253,7 +1341,9 @@ extern "C" fn join_field_syntax(joined: u64, field: u64, first: u8) -> u64 {
 /// unchanged.
 extern "C" fn product_type_syntax(origin: u64, fields: u64) -> u64 {
     let fields_syntax = syntax_value(fields);
-    let origin_syntax = (origin != 0).then(|| syntax_value(origin));
+    let origin_syntax = (origin != 0)
+        .then(|| syntax_value(origin))
+        .filter(|syntax| !syntax.tokens().is_empty());
     if let Some(syntax) = &origin_syntax {
         let tokens = syntax.tokens();
         let first = tokens
@@ -1264,11 +1354,15 @@ extern "C" fn product_type_syntax(origin: u64, fields: u64) -> u64 {
             .iter()
             .rposition(|token| !token.kind.is_trivia())
             .unwrap_or(first);
-        let original: Vec<&str> = tokens[first + 1..last]
-            .iter()
-            .filter(|token| !token.kind.is_trivia())
-            .map(|token| token.text.as_str())
-            .collect();
+        let original: Vec<&str> = if first < last {
+            tokens[first + 1..last]
+                .iter()
+                .filter(|token| !token.kind.is_trivia())
+                .map(|token| token.text.as_str())
+                .collect()
+        } else {
+            Vec::new()
+        };
         let rebuilt: Vec<&str> = fields_syntax
             .tokens()
             .iter()
@@ -1948,7 +2042,20 @@ extern "C" fn delimiter_syntax(origin: u64, kind: u8, contents: u64) -> u64 {
             .iter()
             .rposition(|token| !token.kind.is_trivia())
             .unwrap_or(first);
-        if syntax_slice(syntax, first + 1, last).tokens() == contents_syntax.tokens() {
+        let inner = syntax_slice(syntax, first + 1, last);
+        let original: Vec<&str> = inner
+            .tokens()
+            .iter()
+            .filter(|token| !token.kind.is_trivia())
+            .map(|token| token.text.as_str())
+            .collect();
+        let rebuilt: Vec<&str> = contents_syntax
+            .tokens()
+            .iter()
+            .filter(|token| !token.kind.is_trivia())
+            .map(|token| token.text.as_str())
+            .collect();
+        if original == rebuilt {
             return origin;
         }
     }
@@ -2691,6 +2798,12 @@ mod tests {
             "__punctuation_syntax",
             "__type_parameter_parts",
             "__type_parameters_parts",
+            "__same_syntax",
+            "__syntax_or_origin",
+            "__join_separated_syntax",
+            "__append_separator_syntax",
+            "__join_field_syntax",
+            "__sequence_reverse",
         ] {
             assert!(lookup(name).is_some(), "{name}");
         }

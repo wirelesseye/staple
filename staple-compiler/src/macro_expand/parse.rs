@@ -29,6 +29,7 @@ pub(super) enum SyntaxIntrinsic {
     TakeRest,
     Offset,
     SequencePush,
+    SequenceReverse,
     CloneSyntax,
     /// A float companion intrinsic (`__f64_floor`, `__f32_from_bits`, ...),
     /// so `const` initializers fold them with the results LLVM produces at
@@ -64,6 +65,7 @@ impl SyntaxIntrinsic {
             "__take_rest" => Self::TakeRest,
             "__offset" => Self::Offset,
             "__sequence_push" => Self::SequencePush,
+            "__sequence_reverse" => Self::SequenceReverse,
             "__clone_syntax" => Self::CloneSyntax,
             _ => return None,
         })
@@ -790,6 +792,10 @@ impl MacroExpander {
                 ))))
             }
             SyntaxIntrinsic::CloneSyntax => Some(argument),
+            SyntaxIntrinsic::Offset => {
+                let (_, cursor) = self.stream_argument(argument, span)?;
+                Some(Value::Integer(cursor as i128, None))
+            }
             SyntaxIntrinsic::SequencePush => {
                 let Value::Product(mut values, _) = argument else {
                     return None;
@@ -804,9 +810,12 @@ impl MacroExpander {
                 sequence.push(item);
                 Some(Value::Sequence(sequence))
             }
-            SyntaxIntrinsic::Offset => {
-                let (_, cursor) = self.stream_argument(argument, span)?;
-                Some(Value::Integer(cursor as i128, None))
+            SyntaxIntrinsic::SequenceReverse => {
+                let Value::Sequence(mut sequence) = argument else {
+                    return None;
+                };
+                sequence.storage().reverse();
+                Some(Value::Sequence(sequence))
             }
             SyntaxIntrinsic::Float(intrinsic) => {
                 self.eval_float_intrinsic(intrinsic, argument, span)

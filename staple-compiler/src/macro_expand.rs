@@ -4027,10 +4027,13 @@ impl MacroExpander {
                 }
                 return CompileType::Unknown;
             }
-            if self
+            if let Some(intrinsic) = self
                 .lookup_helper(module, &name.name)
                 .and_then(|helper| self.helper_intrinsic(&helper))
-                == Some(SyntaxIntrinsic::SequencePush)
+                && matches!(
+                    intrinsic,
+                    SyntaxIntrinsic::SequencePush | SyntaxIntrinsic::SequenceReverse
+                )
             {
                 for argument in &arguments {
                     self.check_compile_expression(module, argument, environment, None);
@@ -14375,8 +14378,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
         // destructures below.
         Pattern::Product(product)
             if product.elements.len() == 1
-                && !matches!(&value, Value::Product(values, _) if values.len() == 1)
-                && !matches!(&value, Value::Sequence(values) if values.len() == 1) =>
+                && !matches!(&value, Value::Product(values, _) if values.len() == 1) =>
         {
             bind_pattern(&product.elements[0], value, environment)
         }
