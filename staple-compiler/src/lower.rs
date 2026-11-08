@@ -1115,6 +1115,8 @@ pub(crate) enum LoweredExpressionKind {
     SyntaxClone { value: ExpressionId },
     /// The hidden origin of a boxed syntax node.
     SyntaxOrigin { value: ExpressionId },
+    /// The spelling stored in an identifier box, as a `String`.
+    SyntaxIdentSpelling { value: ExpressionId },
     /// A boxed syntax node with a replacement origin.
     SyntaxWithOrigin {
         value: ExpressionId,
@@ -8180,6 +8182,7 @@ impl LoweredProgram {
                 name == "__staple_syntax_origin"
                     || name == "__staple_syntax_with_origin"
                     || name == "__staple_syntax_clone_syntax"
+                    || name == "__staple_syntax_ident_spelling"
             })
         {
                 let arguments = syntax_intrinsic_arguments(&call.argument);
@@ -8207,6 +8210,9 @@ impl LoweredProgram {
                 }
                 if name == "__staple_syntax_origin" {
                     return Ok(LoweredExpressionKind::SyntaxOrigin { value });
+                }
+                if name == "__staple_syntax_ident_spelling" {
+                    return Ok(LoweredExpressionKind::SyntaxIdentSpelling { value });
                 }
                 let Some(origin) = arguments.get(1) else {
                     return Err(Diagnostic::new(
@@ -11106,6 +11112,7 @@ impl LoweredProgram {
                 LoweredExpressionKind::String(_)
                 | LoweredExpressionKind::SyntaxClone { .. }
                 | LoweredExpressionKind::SyntaxOrigin { .. }
+                | LoweredExpressionKind::SyntaxIdentSpelling { .. }
                 | LoweredExpressionKind::SyntaxWithOrigin { .. } => {}
                 LoweredExpressionKind::Integer(integer) => {
                     let width = integer_literal_bit_width(integer.integer_type);
@@ -12677,7 +12684,8 @@ impl LoweredProgram {
                 self.visit_owned_expression(repeated.expression, reached);
             }
             LoweredExpressionKind::SyntaxClone { value }
-            | LoweredExpressionKind::SyntaxOrigin { value } => {
+            | LoweredExpressionKind::SyntaxOrigin { value }
+            | LoweredExpressionKind::SyntaxIdentSpelling { value } => {
                 self.visit_owned_expression(*value, reached);
             }
             LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {
@@ -13527,7 +13535,8 @@ impl LoweredProgram {
                 self.collect_loop_expression(repeated.expression, depth, reached, diagnostics);
             }
             LoweredExpressionKind::SyntaxClone { value }
-            | LoweredExpressionKind::SyntaxOrigin { value } => {
+            | LoweredExpressionKind::SyntaxOrigin { value }
+            | LoweredExpressionKind::SyntaxIdentSpelling { value } => {
                 self.collect_loop_expression(*value, depth, reached, diagnostics);
             }
             LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {
@@ -23521,6 +23530,7 @@ mod tests {
             LoweredExpressionKind::Access(_) => "access".to_owned(),
             LoweredExpressionKind::SyntaxClone { .. } => "syntax-clone".to_owned(),
             LoweredExpressionKind::SyntaxOrigin { .. } => "syntax-origin".to_owned(),
+            LoweredExpressionKind::SyntaxIdentSpelling { .. } => "syntax-ident-spelling".to_owned(),
             LoweredExpressionKind::SyntaxWithOrigin { .. } => "syntax-with-origin".to_owned(),
             LoweredExpressionKind::Product(_) => "product".to_owned(),
             LoweredExpressionKind::RepeatedProduct(_) => "repeated-product".to_owned(),

@@ -336,6 +336,150 @@ def direct_error: () -> I32 = () => {
     }
 
     #[test]
+    fn node_views_round_trip_and_rebuild() {
+        run_probes(
+            r#"
+def text_is: (Syntax; String) -> I32 = (syntax; expected) => match (string_from_syntax syntax == expected) {
+    True => 1,
+    False => 0,
+}
+def expr_round_trip: () -> I32 = () => {
+    let syntax = syntax_from_string "f x"
+    text_is (Splice.splice (expr_from_syntax syntax)) "f x"
+}
+def constructed_call: () -> I32 = () => {
+    let call: CallExpr = CallExpr (callee: Ident "f", argument: Ident "x")
+    text_is (Splice.splice call) "f x"
+}
+def changed_call: () -> I32 = () => {
+    let syntax = syntax_from_string "f x"
+    let value = expr_from_syntax syntax
+    let call: CallExpr = match value { node: CallExpr => node, _ => CallExpr (callee: Ident "f", argument: Ident "x") }
+    let mut changed = call
+    changed.argument = Ident "y"
+    text_is (Splice.splice changed) "f y"
+}
+def type_round_trip: () -> I32 = () => {
+    let syntax = syntax_from_string "I32"
+    text_is (Splice.splice (type_from_syntax syntax)) "I32"
+}
+def constructed_product: () -> I32 = () => {
+    let empty: Sequence<ProductTypeField> = Sequence ()
+    let ty: Type = ProductType empty
+    text_is (Splice.splice ty) "()"
+}
+def pattern_round_trip: () -> I32 = () => {
+    let syntax = syntax_from_string "x"
+    text_is (Splice.splice (pattern_from_syntax syntax)) "x"
+}
+def constructed_pattern: () -> I32 = () => {
+    let name: Ident<String> = Ident "Some"
+    let argument: Pattern = BindingPattern (Ident "x")
+    let pattern: Pattern = NominalPattern (name: name, argument: argument)
+    text_is (Splice.splice pattern) "Some x"
+}
+def item_round_trip: () -> I32 = () => {
+    let syntax = syntax_from_string "type Foo = I32"
+    text_is (Splice.splice (item_from_syntax syntax)) "type Foo = I32"
+}
+def modifier_round_trip: () -> I32 = () => {
+    let syntax = syntax_from_string "@mark"
+    text_is (Splice.splice (modifier_from_syntax syntax)) "@mark"
+}
+def type_parameters_round_trip: () -> I32 = () => {
+    let syntax = syntax_from_string "<T>"
+    text_is (Splice.splice (type_parameters_from_syntax syntax)) "<T>"
+}
+def product_round_trip: () -> I32 = () => {
+    let syntax = syntax_from_string "(x: I32, y: I32)"
+    text_is (Splice.splice (type_from_syntax syntax)) "(x: I32, y: I32)"
+}
+def delimiter_round_trip: () -> I32 = () => {
+    let contents = syntax_from_string "x"
+    let value: Parenthesized<Syntax> = Parenthesized contents
+    text_is (Splice.splice value) "(x)"
+}
+def syntax_node_sum: () -> I32 = () => {
+    let value: SyntaxNode = Ident "x"
+    text_is (Splice.splice value) "x"
+}
+def type_body_round_trip: () -> I32 = () => {
+    let syntax = syntax_from_string "= I32"
+    text_is (Splice.splice (type_body_from_syntax syntax)) "= I32"
+}
+def modified_item_round_trip: () -> I32 = () => {
+    let syntax = syntax_from_string "@mark type Foo = I32"
+    text_is (Splice.splice (item_from_syntax syntax)) "@mark type Foo = I32"
+}
+def constructed_modifier: () -> I32 = () => {
+    let namespace: Sequence<Ident<String>> = Sequence ()
+    let name: Ident<String> = Ident "mark"
+    let value: Modifier = ModifierCall (namespace: namespace, name: name, argument: None)
+    text_is (Splice.splice value) "@mark"
+}
+def constructed_item: () -> I32 = () => {
+    let name: Ident<String> = Ident "Foo"
+    let declared_type = type_from_syntax (syntax_from_string "Foo")
+    let type_parameters: Sequence<Ident<String>> = Sequence ()
+    let resources: Sequence<ResourceDependency> = Sequence ()
+    let value: Item = TypeDeclarationItem (name: name, declared_type: declared_type, type_parameters: type_parameters, body: None, resource_dependencies: resources)
+    text_is (Splice.splice value) "type Foo"
+}
+def constructed_type_parameters: () -> I32 = () => {
+    let name: Ident<String> = Ident "T"
+    let declaration = syntax_from_string "T"
+    let argument = type_from_syntax (syntax_from_string "T")
+    let parameter: TypeParameter = TypeParameter (name: name, default: None, declaration: declaration, argument: argument)
+    let tail: Sequence<TypeParameter> = Sequence ()
+    let parameters: Sequence<TypeParameter> = Sequence (first: parameter, rest: tail)
+    let header = syntax_from_string "<T>"
+    let arguments = Clone.clone header
+    let value: TypeParameters = TypeParameters (parameters: parameters, declaration: header, arguments: arguments, bounds: syntax_from_string "")
+    text_is (Splice.splice value) "<T>"
+}
+def constructed_sequence: () -> I32 = () => {
+    let a: Ident<String> = Ident "a"
+    let b: Ident<String> = Ident "b"
+    let tail: Sequence<Ident<String>> = Sequence ()
+    let middle: Sequence<Ident<String>> = Sequence (first: b, rest: tail)
+    let sequence: Sequence<Ident<String>> = Sequence (first: a, rest: middle)
+    text_is (Splice.splice sequence) "ab"
+}
+def punctuation: () -> I32 = () => {
+    let comma = Splice.splice Comma
+    let equals = Splice.splice Equals
+    let arrow = Splice.splice FatArrow
+    let public: Visibility = Public
+    let visibility = Splice.splice public
+    text_is comma ","
+}
+"#,
+            &[
+                ("expr_round_trip", 1),
+                ("constructed_call", 1),
+                ("changed_call", 1),
+                ("type_round_trip", 1),
+                ("constructed_product", 1),
+                ("pattern_round_trip", 1),
+                ("constructed_pattern", 1),
+                ("item_round_trip", 1),
+                ("modifier_round_trip", 1),
+                ("type_parameters_round_trip", 1),
+                ("product_round_trip", 1),
+                ("delimiter_round_trip", 1),
+                ("syntax_node_sum", 1),
+                ("type_body_round_trip", 1),
+                ("modified_item_round_trip", 1),
+                ("constructed_modifier", 1),
+                ("constructed_item", 1),
+                ("constructed_type_parameters", 1),
+                ("constructed_sequence", 1),
+                ("punctuation", 1),
+            ],
+        );
+    }
+
+    #[test]
     fn refinement_patterns_compare_the_spelling() {
         run_probes(
             r#"

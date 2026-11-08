@@ -969,7 +969,8 @@ impl<'a> LoweredWalker<'a> {
             | super::LoweredExpressionKind::Float(_)
             | super::LoweredExpressionKind::CString(_) => {}
             super::LoweredExpressionKind::SyntaxClone { value }
-            | super::LoweredExpressionKind::SyntaxOrigin { value } => {
+            | super::LoweredExpressionKind::SyntaxOrigin { value }
+            | super::LoweredExpressionKind::SyntaxIdentSpelling { value } => {
                 self.walk_expression(value)?;
             }
             super::LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {

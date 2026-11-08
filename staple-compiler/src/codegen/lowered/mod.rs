@@ -3859,6 +3859,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .load_syntax_node_origin(pointer, representation_type)
                     .map(|origin| origin.as_any_value_enum())
             }
+            LoweredExpressionKind::SyntaxIdentSpelling { value } => {
+                self.emit_expression(owner, *value, environment)
+            }
             LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {
                 let value_expression = self
                     .view

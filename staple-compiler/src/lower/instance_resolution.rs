@@ -3369,6 +3369,10 @@ impl<'a> ParameterCollector<'a> {
                 self.family("expression.syntax-origin");
                 self.collect_expression(*value);
             }
+            LoweredExpressionKind::SyntaxIdentSpelling { value } => {
+                self.family("expression.syntax-ident-spelling");
+                self.collect_expression(*value);
+            }
             LoweredExpressionKind::SyntaxWithOrigin { value, origin } => {
                 self.family("expression.syntax-with-origin");
                 self.collect_expression(*value);

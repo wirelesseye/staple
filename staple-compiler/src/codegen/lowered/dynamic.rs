@@ -9022,6 +9022,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let value = match expression.kind {
             LoweredExpressionKind::SyntaxClone { .. }
             | LoweredExpressionKind::SyntaxOrigin { .. }
+            | LoweredExpressionKind::SyntaxIdentSpelling { .. }
             | LoweredExpressionKind::SyntaxWithOrigin { .. } => {
                 return Err(Diagnostic::new(
                     expression.origin.span.clone(),

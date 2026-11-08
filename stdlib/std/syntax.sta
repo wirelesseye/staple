@@ -397,48 +397,739 @@ extern "staple-intrinsic" {
     __clone_syntax: <T> T -> T
 }
 
+@compiled_only
+extern "staple-intrinsic" {
+    /// The `Expr` alternative a fragment names.
+    __classify_expr: Syntax -> U8
+    /// The callee and argument of a call expression.
+    __call_parts: Syntax -> (Syntax; Syntax)
+    /// The spelling of an identifier, as a text handle.
+    __ident_text: Syntax -> U64
+    /// The spelling stored in an identifier box, as a `String`.
+    __ident_spelling: <S> S -> String
+    /// The decoded contents of a string-literal expression.
+    __string_expr_text: Syntax -> U64
+    /// The code point of a character-literal expression.
+    __char_expr_char: Syntax -> U32
+    /// An unstructured expression handle for a fragment.
+    __unstructured_expr: Syntax -> UnstructuredExpr
+    __unstructured_expr_syntax: UnstructuredExpr -> Syntax
+    __unstructured_type_syntax: UnstructuredType -> Syntax
+    __unstructured_pattern_syntax: UnstructuredPattern -> Syntax
+    __unstructured_item_syntax: UnstructuredItem -> Syntax
+    __unstructured_modifier_syntax: UnstructuredModifier -> Syntax
+    /// Rebuilds a call expression, or returns its origin when unchanged.
+    __call_syntax: (Syntax; Syntax; Syntax) -> Syntax
+    /// Rebuilds an identifier, or returns its origin when unchanged.
+    __ident_syntax: (Syntax; U64) -> Syntax
+    /// Rebuilds a string-literal expression, or returns its origin when unchanged.
+    __string_expr_syntax: (Syntax; U64) -> Syntax
+    /// Rebuilds a character-literal expression, or returns its origin when unchanged.
+    __char_expr_syntax: (Syntax; U32) -> Syntax
+    /// The `Type` alternative a fragment names.
+    __classify_type: Syntax -> U8
+    __product_type_field_count: Syntax -> USize
+    __product_type_field: (Syntax; USize) -> Syntax
+    __product_type_field_parts: Syntax -> (Syntax; Syntax; Syntax)
+    __product_type_field_name: Syntax -> Syntax
+    __product_type_field_type: Syntax -> Syntax
+    __product_type_field_default: Syntax -> Syntax
+    __product_type_syntax: (Syntax; Syntax) -> Syntax
+    __join_field_syntax: (Syntax; Syntax; U8) -> Syntax
+    __product_type_field_syntax: (Syntax; Syntax; Syntax) -> Syntax
+    __unstructured_type: Syntax -> UnstructuredType
+    __unstructured_pattern: Syntax -> UnstructuredPattern
+    __unstructured_item: Syntax -> UnstructuredItem
+    __unstructured_modifier: Syntax -> UnstructuredModifier
+    __empty_syntax: () -> Syntax
+    __syntax_is_empty: Syntax -> U8
+    __syntax_is_zero: Syntax -> U8
+    /// The `Pattern` alternative a fragment names.
+    __classify_pattern: Syntax -> U8
+    __binding_pattern_name: Syntax -> Syntax
+    __nominal_pattern_parts: Syntax -> (Syntax; Syntax)
+    __binding_pattern_syntax: (Syntax; Syntax) -> Syntax
+    __nominal_pattern_syntax: (Syntax; Syntax; Syntax) -> Syntax
+    __sequence_syntax: (Syntax; Syntax; Syntax) -> Syntax
+    __classify_item: Syntax -> U8
+    __modified_item_parts: Syntax -> (USize; Syntax)
+    __modified_item_modifier: (Syntax; USize) -> Syntax
+    __type_declaration_parts: Syntax -> (Syntax; Syntax; USize; Syntax; USize)
+    __type_declaration_name: Syntax -> Syntax
+    __type_declaration_declared_type: Syntax -> Syntax
+    __type_declaration_type_parameter_count: Syntax -> USize
+    __type_declaration_body: Syntax -> Syntax
+    __type_declaration_resource_count: Syntax -> USize
+    __type_declaration_type_parameter: (Syntax; USize) -> Syntax
+    __type_declaration_resource: (Syntax; USize) -> (Syntax; U8)
+    __classify_modifier: Syntax -> U8
+    __modifier_call_parts: Syntax -> (USize; Syntax; Syntax)
+    __modifier_call_namespace_count: Syntax -> USize
+    __modifier_call_name: Syntax -> Syntax
+    __modifier_call_argument: Syntax -> Syntax
+    __modifier_call_namespace: (Syntax; USize) -> Syntax
+    __classify_type_body: Syntax -> U8
+    __type_body_parts: Syntax -> (Syntax; Syntax)
+    __delimiter_contents: Syntax -> Syntax
+    __delimiter_syntax: (Syntax; U8; Syntax) -> Syntax
+    __visibility_kind: Syntax -> U8
+    __visibility_syntax: U8 -> Syntax
+    __punctuation_syntax: U8 -> Syntax
+    __modified_item_syntax: (Syntax; Syntax; Syntax) -> Syntax
+    __type_declaration_syntax: (Syntax; Syntax; Syntax; Syntax; Syntax; Syntax) -> Syntax
+    __modifier_call_syntax: (Syntax; Syntax; Syntax; Syntax) -> Syntax
+    __type_body_syntax: (Syntax; U8; Syntax; Syntax) -> Syntax
+    __alias_body_syntax: (Syntax; Syntax) -> Syntax
+    __wrapper_body_syntax: (Syntax; Syntax; Syntax) -> Syntax
+    __from_body_syntax: (Syntax; Syntax; Syntax) -> Syntax
+    __type_parameter_parts: Syntax -> (Syntax; Syntax; Syntax; Syntax)
+    __type_parameter_name: Syntax -> Syntax
+    __type_parameter_default: Syntax -> Syntax
+    __type_parameter_declaration: Syntax -> Syntax
+    __type_parameter_argument: Syntax -> Syntax
+    __type_parameter_syntax: (Syntax; Syntax; Syntax; Syntax; Syntax) -> Syntax
+    __type_parameters_parts: Syntax -> (USize; Syntax; Syntax; Syntax)
+    __type_parameters_count: Syntax -> USize
+    __type_parameters_declaration: Syntax -> Syntax
+    __type_parameters_arguments: Syntax -> Syntax
+    __type_parameters_bounds: Syntax -> Syntax
+    __type_parameters_parameter: (Syntax; USize) -> Syntax
+    __type_parameters_syntax: (Syntax; Syntax; Syntax; Syntax; Syntax) -> Syntax
+    __resource_dependency_syntax: (Syntax; U8) -> Syntax
+}
+
 /// Syntax that a quotation can splice with `$name`.
 pub trait Splice T {
     splice: T -> Syntax
 }
 
 impl Splice Syntax { splice = value => __clone_syntax value }
+@interpreted_only
 impl Splice SyntaxNode { splice = value => __splice_node.<SyntaxNode> value }
+@interpreted_only
 impl Splice Expr { splice = value => __splice_node.<Expr> value }
+@interpreted_only
 impl Splice CallExpr { splice = value => __splice_node.<CallExpr> value }
+@interpreted_only
 impl Splice StringExpr { splice = value => __splice_node.<StringExpr> value }
+@interpreted_only
 impl Splice CharExpr { splice = value => __splice_node.<CharExpr> value }
+@interpreted_only
 impl Splice UnstructuredExpr { splice = value => __splice_node.<UnstructuredExpr> value }
+@compiled_only
+impl Splice UnstructuredExpr { splice = value => __unstructured_expr_syntax value }
+@interpreted_only
 impl Splice Type { splice = value => __splice_node.<Type> value }
+@interpreted_only
 impl Splice ProductType { splice = value => __splice_node.<ProductType> value }
+@interpreted_only
 impl Splice UnstructuredType { splice = value => __splice_node.<UnstructuredType> value }
+@compiled_only
+impl Splice UnstructuredType { splice = value => __unstructured_type_syntax value }
+@interpreted_only
 impl Splice Pattern { splice = value => __splice_node.<Pattern> value }
+@interpreted_only
 impl Splice BindingPattern { splice = value => __splice_node.<BindingPattern> value }
+@interpreted_only
 impl Splice NominalPattern { splice = value => __splice_node.<NominalPattern> value }
+@interpreted_only
 impl Splice UnstructuredPattern { splice = value => __splice_node.<UnstructuredPattern> value }
+@compiled_only
+impl Splice UnstructuredPattern { splice = value => __unstructured_pattern_syntax value }
+@interpreted_only
 impl Splice Item { splice = value => __splice_node.<Item> value }
+@interpreted_only
 impl Splice ModifiedItem { splice = value => __splice_node.<ModifiedItem> value }
+@interpreted_only
 impl Splice TypeDeclarationItem { splice = value => __splice_node.<TypeDeclarationItem> value }
+@interpreted_only
 impl Splice UnstructuredItem { splice = value => __splice_node.<UnstructuredItem> value }
+@compiled_only
+impl Splice UnstructuredItem { splice = value => __unstructured_item_syntax value }
+@interpreted_only
 impl Splice Modifier { splice = value => __splice_node.<Modifier> value }
+@interpreted_only
 impl Splice ModifierCall { splice = value => __splice_node.<ModifierCall> value }
+@interpreted_only
 impl Splice UnstructuredModifier { splice = value => __splice_node.<UnstructuredModifier> value }
+@compiled_only
+impl Splice UnstructuredModifier { splice = value => __unstructured_modifier_syntax value }
+@interpreted_only
 impl Splice Visibility { splice = value => __splice_node.<Visibility> value }
+@interpreted_only
 impl Splice Comma { splice = value => __splice_node.<Comma> value }
+@interpreted_only
 impl Splice Equals { splice = value => __splice_node.<Equals> value }
+@interpreted_only
 impl Splice FatArrow { splice = value => __splice_node.<FatArrow> value }
+@interpreted_only
+impl Splice ProductTypeField { splice = value => __splice_node.<ProductTypeField> value }
+@interpreted_only
+impl Splice ResourceDependency { splice = value => __splice_node.<ResourceDependency> value }
+@interpreted_only
+impl<Element, Separator> Splice Separated<Element, Separator> { splice = value => __splice_node.<Separated<Element, Separator>> value }
+@interpreted_only
 impl Splice TypeParameter { splice = value => __splice_node.<TypeParameter> value }
+@interpreted_only
 impl Splice TypeParameters { splice = value => __splice_node.<TypeParameters> value }
+@interpreted_only
 impl Splice TypeBody { splice = value => __splice_node.<TypeBody> value }
+@interpreted_only
 impl<S where S <: String> Splice Ident<S> { splice = value => __splice_node.<Ident<S>> value }
+@interpreted_only
 impl<C> Splice Parenthesized<C> { splice = value => __splice_node.<Parenthesized<C>> value }
+@interpreted_only
 impl<C> Splice Bracketed<C> { splice = value => __splice_node.<Bracketed<C>> value }
+@interpreted_only
 impl<C> Splice Braced<C> { splice = value => __splice_node.<Braced<C>> value }
+@interpreted_only
 impl<C> Splice Angled<C> { splice = value => __splice_node.<Angled<C>> value }
 // A sequence splices as its elements in order, which is what `$name...` needs.
 // The bound is what makes splicing a sequence of anything else a type error.
+@interpreted_only
 impl<T where Splice T> Splice Sequence<T> {
     splice = items => __splice_join.<T> items
+}
+
+@compiled_only
+impl<T where Splice T> Splice Sequence<T> {
+    splice = value => {
+        let origin = __origin value
+        let mut reversed: Sequence<T> = Sequence ()
+        let mut cursor: Sequence<T> = __with_origin (value, origin)
+        loop {
+            let cell_origin = __origin cursor
+            match cursor {
+                Sequence () => { break },
+                Sequence (first, rest) => {
+                    reversed = __with_origin (Sequence (first: first, rest: reversed), cell_origin)
+                    cursor = rest
+                },
+            }
+        }
+        let mut joined = __empty_syntax ()
+        let mut cells = reversed
+        loop {
+            let cell_origin = __origin cells
+            match cells {
+                Sequence () => { break },
+                Sequence (first, rest) => {
+                    joined = __sequence_syntax ...(cell_origin; Splice.splice first; joined)
+                    cells = rest
+                },
+            }
+        }
+        joined
+    }
+}
+
+@compiled_only
+pub def expr_from_syntax = syntax: Syntax => Expr :: match (__classify_expr syntax == 0) {
+    True => {
+        let spelling: String = text_string (__ident_text syntax)
+        let node: Ident<String> = __with_origin (Ident<String> :: Ident spelling, syntax)
+        node
+    },
+    False => match (__classify_expr syntax == 1) {
+        True => {
+            let (callee; argument) = __call_parts syntax
+            let node: CallExpr = __with_origin (CallExpr (callee: expr_from_syntax callee, argument: expr_from_syntax argument), syntax)
+            node
+        },
+        False => match (__classify_expr syntax == 2) {
+            True => {
+                let node: StringExpr = __with_origin (StringExpr (text_string (__string_expr_text syntax)), syntax)
+                node
+            },
+            False => match (__classify_expr syntax == 3) {
+                True => {
+                    let node: CharExpr = __with_origin (CharExpr (Char.from_u32_unchecked (__char_expr_char syntax)), syntax)
+                    node
+                },
+                False => __unstructured_expr syntax,
+            },
+        },
+    },
+}
+
+@compiled_only
+impl Splice Expr {
+    splice = value => match value {
+        node: Ident<String> => Splice.splice node,
+        node: CallExpr => Splice.splice node,
+        node: StringExpr => Splice.splice node,
+        node: CharExpr => Splice.splice node,
+        node: UnstructuredExpr => Splice.splice node,
+    }
+}
+
+@compiled_only
+impl Splice CallExpr {
+    splice = value => __call_syntax ...(__origin value; Splice.splice value.callee; Splice.splice value.argument)
+}
+
+@compiled_only
+impl<S where S <: String> Splice Ident<S> {
+    splice = value => {
+        let bytes = string_shared_bytes (__ident_spelling value.*)
+        __ident_syntax ...(__origin value; __text_new ...(SharedBuffer.unsafe_data bytes; SharedBuffer.length bytes))
+    }
+}
+
+@compiled_only
+impl Splice StringExpr {
+    splice = value => {
+        let bytes = string_shared_bytes value.*
+        __string_expr_syntax ...(__origin value; __text_new ...(SharedBuffer.unsafe_data bytes; SharedBuffer.length bytes))
+    }
+}
+
+@compiled_only
+impl Splice CharExpr {
+    splice = value => __char_expr_syntax ...(__origin value; Char.to_u32 value.*)
+}
+
+@compiled_only
+pub def ident_from_syntax = syntax: Syntax => Ident<String> :: {
+    let spelling: String = text_string (__ident_text syntax)
+    __with_origin (Ident<String> :: Ident spelling, syntax)
+}
+
+@compiled_only
+pub def product_type_field_from_syntax = syntax: Syntax => ProductTypeField :: {
+    let name = __product_type_field_name syntax
+    let field_type = __product_type_field_type syntax
+    let default = __product_type_field_default syntax
+    let name_value: Option<Ident<String>> = match (__syntax_is_empty name == 1) {
+        True => None,
+        False => Some (ident_from_syntax name),
+    }
+    let default_value: Option<Expr> = match (__syntax_is_empty default == 1) {
+        True => None,
+        False => Some (expr_from_syntax default),
+    }
+    ProductTypeField (name: name_value, field_type: type_from_syntax field_type, default: default_value)
+}
+
+@compiled_only
+pub def product_type_from_syntax = syntax: Syntax => ProductType :: {
+    let count = __product_type_field_count syntax
+    let mut fields: Sequence<ProductTypeField> = Sequence ()
+    let mut index = count
+    loop {
+        match (index == 0) {
+            True => { break },
+            False => {
+                index = index - 1
+                let field = __product_type_field ...(syntax; index)
+                fields = Sequence (first: product_type_field_from_syntax field, rest: fields)
+            },
+        }
+    }
+    __with_origin (ProductType fields, syntax)
+}
+
+@compiled_only
+pub def type_from_syntax = syntax: Syntax => Type :: match (__classify_type syntax == 0) {
+    True => product_type_from_syntax syntax,
+    False => __unstructured_type syntax,
+}
+
+@compiled_only
+impl Splice ProductTypeField {
+    splice = value => {
+        let name = match value.name {
+            None => __empty_syntax (),
+            Some ident => Splice.splice ident,
+        }
+        let field_type = Splice.splice value.field_type
+        let default = match value.default {
+            None => __empty_syntax (),
+            Some expression => Splice.splice expression,
+        }
+        __product_type_field_syntax ...(name; field_type; default)
+    }
+}
+
+@compiled_only
+impl Splice ProductType {
+    splice = value => match (__syntax_is_zero (__origin value) == 1) {
+        True => syntax_from_string "()",
+        False => __origin value,
+    }
+}
+
+@compiled_only
+impl Splice Type {
+    splice = value => match value {
+        node: ProductType => Splice.splice node,
+        node: UnstructuredType => Splice.splice node,
+    }
+}
+
+@compiled_only
+pub def binding_pattern_from_syntax = syntax: Syntax => BindingPattern :: {
+    __with_origin (BindingPattern (ident_from_syntax syntax), syntax)
+}
+
+@compiled_only
+pub def nominal_pattern_from_syntax = syntax: Syntax => NominalPattern :: {
+    let (name; argument) = __nominal_pattern_parts syntax
+    __with_origin (NominalPattern (name: ident_from_syntax name, argument: pattern_from_syntax argument), syntax)
+}
+
+@compiled_only
+pub def pattern_from_syntax = syntax: Syntax => Pattern :: match (__classify_pattern syntax == 0) {
+    True => binding_pattern_from_syntax syntax,
+    False => match (__classify_pattern syntax == 1) {
+        True => nominal_pattern_from_syntax syntax,
+        False => __unstructured_pattern syntax,
+    },
+}
+
+@compiled_only
+impl Splice BindingPattern {
+    splice = value => __binding_pattern_syntax ...(__origin value; Splice.splice value.*)
+}
+
+@compiled_only
+impl Splice NominalPattern {
+    splice = value => __nominal_pattern_syntax ...(__origin value; Splice.splice value.name; Splice.splice value.argument)
+}
+
+@compiled_only
+impl Splice Pattern {
+    splice = value => match value {
+        node: BindingPattern => Splice.splice node,
+        node: NominalPattern => Splice.splice node,
+        node: UnstructuredPattern => Splice.splice node,
+    }
+}
+
+@compiled_only
+pub def visibility_from_syntax = syntax: Syntax => Visibility :: match (__visibility_kind syntax == 0) {
+    True => Private,
+    False => match (__visibility_kind syntax == 1) {
+        True => Package,
+        False => Public,
+    },
+}
+
+@compiled_only
+pub def modifier_call_from_syntax = syntax: Syntax => ModifierCall :: {
+    let namespace_count = __modifier_call_namespace_count syntax
+    let name = __modifier_call_name syntax
+    let argument = __modifier_call_argument syntax
+    let mut namespace: Sequence<Ident<String>> = Sequence ()
+    let mut index = namespace_count
+    loop {
+        match (index == 0) {
+            True => { break },
+            False => {
+                index = index - 1
+                let part = __modifier_call_namespace ...(syntax; index)
+                namespace = Sequence (first: ident_from_syntax part, rest: namespace)
+            },
+        }
+    }
+    let argument_value: Option<Syntax> = match (__syntax_is_empty argument == 1) {
+        True => None,
+        False => Some argument,
+    }
+    __with_origin (ModifierCall (namespace: namespace, name: ident_from_syntax name, argument: argument_value), syntax)
+}
+
+@compiled_only
+pub def modifier_from_syntax = syntax: Syntax => Modifier :: match (__classify_modifier syntax == 0) {
+    True => modifier_call_from_syntax syntax,
+    False => __unstructured_modifier syntax,
+}
+
+@compiled_only
+pub def type_body_from_syntax = syntax: Syntax => TypeBody :: match (__classify_type_body syntax == 0) {
+    True => {
+        let (_representation; underlying) = __type_body_parts syntax
+        __with_origin (AliasBody (type_from_syntax underlying), syntax)
+    },
+    False => match (__classify_type_body syntax == 1) {
+        True => {
+            let (representation; underlying) = __type_body_parts syntax
+            __with_origin (WrapperBody (visibility_from_syntax representation, type_from_syntax underlying), syntax)
+        },
+        False => match (__classify_type_body syntax == 2) {
+            True => {
+                let (representation; underlying) = __type_body_parts syntax
+                __with_origin (FromBody (visibility_from_syntax representation, type_from_syntax underlying), syntax)
+            },
+            False => OpaqueBody,
+        },
+    },
+}
+
+@compiled_only
+pub def type_parameter_from_syntax = syntax: Syntax => TypeParameter :: {
+    let name = __type_parameter_name syntax
+    let default = __type_parameter_default syntax
+    let declaration = __type_parameter_declaration syntax
+    let argument = __type_parameter_argument syntax
+    let default_value: Option<Type> = match (__syntax_is_empty default == 1) {
+        True => None,
+        False => Some (type_from_syntax default),
+    }
+    __with_origin (TypeParameter (name: ident_from_syntax name, default: default_value, declaration: declaration, argument: type_from_syntax argument), syntax)
+}
+
+@compiled_only
+pub def type_parameters_from_syntax = syntax: Syntax => TypeParameters :: {
+    let count = __type_parameters_count syntax
+    let declaration = __type_parameters_declaration syntax
+    let arguments = __type_parameters_arguments syntax
+    let bounds = __type_parameters_bounds syntax
+    let mut parameters: Sequence<TypeParameter> = Sequence ()
+    let mut index = count
+    loop {
+        match (index == 0) {
+            True => { break },
+            False => {
+                index = index - 1
+                let parameter = __type_parameters_parameter ...(syntax; index)
+                parameters = Sequence (first: type_parameter_from_syntax parameter, rest: parameters)
+            },
+        }
+    }
+    __with_origin (TypeParameters (parameters: parameters, declaration: declaration, arguments: arguments, bounds: bounds), syntax)
+}
+
+
+
+
+
+@compiled_only
+pub def type_declaration_from_syntax = syntax: Syntax => TypeDeclarationItem :: {
+    let name = __type_declaration_name syntax
+    let declared_type = __type_declaration_declared_type syntax
+    let type_parameter_count = __type_declaration_type_parameter_count syntax
+    let body = __type_declaration_body syntax
+    let resource_count = __type_declaration_resource_count syntax
+    let mut type_parameters: Sequence<Ident<String>> = Sequence ()
+    let mut index = type_parameter_count
+    loop {
+        match (index == 0) {
+            True => { break },
+            False => {
+                index = index - 1
+                let parameter = __type_declaration_type_parameter ...(syntax; index)
+                type_parameters = Sequence (first: ident_from_syntax parameter, rest: type_parameters)
+            },
+        }
+    }
+    let body_value: Option<TypeBody> = match (__syntax_is_empty body == 1) {
+        True => None,
+        False => Some (type_body_from_syntax body),
+    }
+    let mut resources: Sequence<ResourceDependency> = Sequence ()
+    let mut index = resource_count
+    loop {
+        match (index == 0) {
+            True => { break },
+            False => {
+                index = index - 1
+                let (resource_type; mutable) = __type_declaration_resource ...(syntax; index)
+                let dependency = ResourceDependency (resource_type: type_from_syntax resource_type, mutable: mutable == 1)
+                resources = Sequence (first: dependency, rest: resources)
+            },
+        }
+    }
+    __with_origin (TypeDeclarationItem (name: ident_from_syntax name, declared_type: type_from_syntax declared_type, type_parameters: type_parameters, body: body_value, resource_dependencies: resources), syntax)
+}
+
+@compiled_only
+pub def modified_item_from_syntax = syntax: Syntax => ModifiedItem :: {
+    let (count; item) = __modified_item_parts syntax
+    let mut modifiers: Sequence<Modifier> = Sequence ()
+    let mut index = count
+    loop {
+        match (index == 0) {
+            True => { break },
+            False => {
+                index = index - 1
+                let modifier = __modified_item_modifier ...(syntax; index)
+                modifiers = Sequence (first: modifier_from_syntax modifier, rest: modifiers)
+            },
+        }
+    }
+    __with_origin (ModifiedItem (modifiers: modifiers, item: item_from_syntax item), syntax)
+}
+
+@compiled_only
+pub def item_from_syntax = syntax: Syntax => Item :: match (__classify_item syntax == 0) {
+    True => modified_item_from_syntax syntax,
+    False => match (__classify_item syntax == 1) {
+        True => type_declaration_from_syntax syntax,
+        False => __unstructured_item syntax,
+    },
+}
+
+@compiled_only
+impl Splice Visibility {
+    splice = value => match value {
+        Private => __visibility_syntax 0,
+        Package => __visibility_syntax 1,
+        Public => __visibility_syntax 2,
+    }
+}
+
+@compiled_only
+impl Splice Comma { splice = _ => __punctuation_syntax 0 }
+@compiled_only
+impl Splice Equals { splice = _ => __punctuation_syntax 1 }
+@compiled_only
+impl Splice FatArrow { splice = _ => __punctuation_syntax 2 }
+
+@compiled_only
+impl Splice ModifierCall {
+    splice = value => {
+        let argument = match value.argument {
+            None => __empty_syntax (),
+            Some argument => Splice.splice argument,
+        }
+        __modifier_call_syntax ...(__origin value; Splice.splice value.namespace; Splice.splice value.name; argument)
+    }
+}
+
+@compiled_only
+impl Splice Modifier {
+    splice = value => match value {
+        node: ModifierCall => Splice.splice node,
+        node: UnstructuredModifier => Splice.splice node,
+    }
+}
+
+@compiled_only
+impl Splice ModifiedItem {
+    splice = value => __modified_item_syntax ...(__origin value; Splice.splice value.modifiers; Splice.splice value.item)
+}
+
+@compiled_only
+impl Splice ResourceDependency {
+    splice = value => __resource_dependency_syntax ...(Splice.splice value.resource_type; match value.mutable { True => 1, False => 0 })
+}
+
+@compiled_only
+impl Splice TypeDeclarationItem {
+    splice = value => {
+        let body = match value.body {
+            None => __empty_syntax (),
+            Some body => Splice.splice body,
+        }
+        __type_declaration_syntax ...(__origin value; Splice.splice value.name; Splice.splice value.declared_type; Splice.splice value.type_parameters; body; Splice.splice value.resource_dependencies)
+    }
+}
+
+@compiled_only
+impl Splice SyntaxNode {
+    splice = value => match value {
+        node: Ident<String> => Splice.splice node,
+        node: CallExpr => Splice.splice node,
+        node: StringExpr => Splice.splice node,
+        node: CharExpr => Splice.splice node,
+        node: UnstructuredExpr => Splice.splice node,
+        node: ProductType => Splice.splice node,
+        node: UnstructuredType => Splice.splice node,
+        node: BindingPattern => Splice.splice node,
+        node: NominalPattern => Splice.splice node,
+        node: UnstructuredPattern => Splice.splice node,
+        node: ModifiedItem => Splice.splice node,
+        node: TypeDeclarationItem => Splice.splice node,
+        node: UnstructuredItem => Splice.splice node,
+        node: Private => __visibility_syntax 0,
+        node: Package => __visibility_syntax 1,
+        node: Public => __visibility_syntax 2,
+        node: Comma => Splice.splice node,
+        node: Equals => Splice.splice node,
+        node: FatArrow => Splice.splice node,
+        node: TypeParameter => Splice.splice node,
+        node: TypeParameters => Splice.splice node,
+        node: Angled<Syntax> => Splice.splice node,
+        node: Parenthesized<Syntax> => Splice.splice node,
+        node: Bracketed<Syntax> => Splice.splice node,
+        node: Braced<Syntax> => Splice.splice node,
+    }
+}
+
+@compiled_only
+impl Splice Item {
+    splice = value => match value {
+        node: ModifiedItem => Splice.splice node,
+        node: TypeDeclarationItem => Splice.splice node,
+        node: UnstructuredItem => Splice.splice node,
+    }
+}
+
+@compiled_only
+impl<Element where Splice Element> Splice AliasBody<Element> {
+    splice = value => __alias_body_syntax ...(__origin value; Splice.splice value.*)
+}
+
+@compiled_only
+impl<Representation, Element where Splice Representation, Splice Element> Splice WrapperBody<Representation, Element> {
+    splice = value => __wrapper_body_syntax ...(__origin value; Splice.splice value.0; Splice.splice value.1)
+}
+
+@compiled_only
+impl<Representation, Element where Splice Representation, Splice Element> Splice FromBody<Representation, Element> {
+    splice = value => __from_body_syntax ...(__origin value; Splice.splice value.0; Splice.splice value.1)
+}
+
+@compiled_only
+impl Splice OpaqueBody {
+    splice = _ => syntax_from_string "opaque"
+}
+
+@compiled_only
+impl Splice TypeBody {
+    splice = value => match value {
+        node: AliasBody<Type> => Splice.splice node,
+        node: WrapperBody<Visibility, Type> => Splice.splice node,
+        node: FromBody<Visibility, Type> => Splice.splice node,
+        node: OpaqueBody => Splice.splice node,
+    }
+}
+
+@compiled_only
+impl Splice TypeParameter {
+    splice = value => {
+        let default = match value.default {
+            None => __empty_syntax (),
+            Some ty => Splice.splice ty,
+        }
+        __type_parameter_syntax ...(__origin value; Splice.splice value.name; default; value.declaration; Splice.splice value.argument)
+    }
+}
+
+@compiled_only
+impl Splice TypeParameters {
+    splice = value => __type_parameters_syntax ...(__origin value; Splice.splice value.parameters; value.declaration; value.arguments; value.bounds)
+}
+
+@compiled_only
+impl<C where Splice C> Splice Parenthesized<C> {
+    splice = value => __delimiter_syntax ...(__origin value; 0; Splice.splice value.*)
+}
+
+@compiled_only
+impl<C where Splice C> Splice Bracketed<C> {
+    splice = value => __delimiter_syntax ...(__origin value; 1; Splice.splice value.*)
+}
+
+@compiled_only
+impl<C where Splice C> Splice Angled<C> {
+    splice = value => __delimiter_syntax ...(__origin value; 2; Splice.splice value.*)
+}
+
+@compiled_only
+impl<C where Splice C> Splice Braced<C> {
+    splice = value => __delimiter_syntax ...(__origin value; 3; Splice.splice value.*)
 }
 
 // Leaf syntax nodes: each consumes the longest node the grammar accepts from
