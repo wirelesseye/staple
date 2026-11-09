@@ -36,6 +36,23 @@ pub(crate) enum NodeKind {
     TypeBody,
 }
 
+/// The outcome of one host parse, kept in the arena so the host can return it
+/// as a single handle. Every field is a handle or a status, so the ABI needs no
+/// multi-field product.
+#[derive(Clone, Default)]
+pub(crate) struct ParseOutcome {
+    pub(crate) status: u64,
+    pub(crate) tag: u64,
+    /// The parsed syntax, or a group's source syntax.
+    pub(crate) syntax: u64,
+    /// A leaf's advanced stream, or a group's contents stream.
+    pub(crate) stream: u64,
+    /// A group's outer stream advanced past the group.
+    pub(crate) next: u64,
+    /// A text handle holding a failure message.
+    pub(crate) error: u64,
+}
+
 /// One value a handle can name.
 #[derive(Clone)]
 enum Entry {
@@ -44,6 +61,7 @@ enum Entry {
     /// A cursor into a syntax fragment. A stream is immutable: copying its
     /// handle forks it, and advancing allocates a new stream.
     Stream { fragment: u64, offset: usize },
+    Parse(ParseOutcome),
 }
 
 /// A handle into the arena. Zero means "none"; every other value names an
@@ -125,6 +143,17 @@ impl Arena {
         })
     }
 
+    pub(crate) fn insert_parse(&mut self, outcome: ParseOutcome) -> Handle {
+        self.insert(Entry::Parse(outcome))
+    }
+
+    pub(crate) fn parse_outcome(&self, handle: Handle) -> Option<&ParseOutcome> {
+        match self.entry(handle)? {
+            Entry::Parse(outcome) => Some(outcome),
+            _ => None,
+        }
+    }
+
     fn insert(&mut self, entry: Entry) -> Handle {
         let index = self.entries.len();
         self.entries.push(entry);
@@ -190,6 +219,11 @@ impl Arena {
         let id = self.next_syntax_id;
         self.next_syntax_id += 1;
         id
+    }
+
+    /// Returns the next syntax id after a parser consumed a range of them.
+    pub(crate) fn set_next_syntax_id(&mut self, next: usize) {
+        self.next_syntax_id = next;
     }
 }
 

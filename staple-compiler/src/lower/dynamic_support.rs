@@ -192,6 +192,8 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::StringAdd
         | IntrinsicFunction::SizeOf
         | IntrinsicFunction::AlignOf
+        | IntrinsicFunction::SyntaxIdentSpelling
+        | IntrinsicFunction::SyntaxSpellingValue
         | IntrinsicFunction::NeedsDrop
         | IntrinsicFunction::GcAllocate
         | IntrinsicFunction::GcRelease

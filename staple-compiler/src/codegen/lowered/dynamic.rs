@@ -4679,6 +4679,33 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     Diagnostic::new(span.clone(), "string intrinsic result is not a value")
                 })?
             }
+            crate::IntrinsicFunction::SyntaxIdentSpelling => {
+                let value_type = intrinsic_type(0)
+                    .cloned()
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "spelling intrinsic has no type"))?;
+                let spelling = if crate::contains_type_parameter(&value_type) {
+                    String::new()
+                } else {
+                    match value_type.desugared() {
+                        CheckedType::String => String::new(),
+                        CheckedType::StringLiteralSet(values) => {
+                            values.first().cloned().unwrap_or_default()
+                        }
+                        other => {
+                            return Err(Diagnostic::new(
+                                span.clone(),
+                                format!(
+                                    "an identifier spelling must be a string type, found {other:?}"
+                                ),
+                            ));
+                        }
+                    }
+                };
+                self.backend
+                    .build_string_literal(&spelling)
+                    .as_basic_value_enum()
+            }
+            crate::IntrinsicFunction::SyntaxSpellingValue => values[0],
             crate::IntrinsicFunction::NumericConvert { from, to } => self
                 .backend
                 .build_numeric_conversion(from, to, values[0])?

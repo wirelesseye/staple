@@ -17,8 +17,9 @@ mod templates;
 mod traits;
 
 use syntax_ops::{
-    append_syntax_tokens, is_structured_product_type, item_syntax, matches_single_token,
-    matching_angle_close, matching_close, root_hygiene, skip_trivia, syntax_slice,
+    LeafKind, ParsedLeaf, append_syntax_tokens, is_structured_product_type, item_syntax,
+    matches_single_token, matching_angle_close, matching_close, parse_leaf, root_hygiene,
+    skip_trivia, syntax_slice,
 };
 
 use crate::program::source_location_at;
@@ -1938,8 +1939,19 @@ pub(crate) fn expand_program_checked(
             }
             snapshot.retain(|item| !stages.interpreted.contains(&item.syntax().id));
             expander.expand_compile_time_items(module, &mut snapshot);
-            snapshot.append(&mut compiled_items[module_index]);
-            check.modules[module_index] = snapshot;
+            // Compiled `Parse` implementations go before the shared items.
+            // Appending them puts the generic `Option`, `Sequence`,
+            // `Separated` and product impls before the concrete leaf impls;
+            // obligations with inferred arguments then revisit the standard
+            // library's functions and the check becomes several times slower.
+            let mut compiled = std::mem::take(&mut compiled_items[module_index]);
+            let (mut parse_impls, rest): (Vec<_>, Vec<_>) = compiled.drain(..).partition(|item| {
+                matches!(item, Item::TraitImplementation(implementation)
+                    if implementation.trait_name.name == "Parse")
+            });
+            parse_impls.append(&mut snapshot);
+            parse_impls.extend(rest);
+            check.modules[module_index] = parse_impls;
         }
         items.retain(|item| {
             !matches!(item,
@@ -11226,7 +11238,7 @@ fn match_syntax_fragment(
         }
         MetaType::TypeParameter | MetaType::TypeParameters => {
             let (value, consumed) =
-                parse_parameter_syntax(expected, syntax, next_syntax_id).ok()?;
+                parse_parameter_syntax(expected, syntax, next_syntax_id)?;
             return (skip_trivia(syntax.tokens(), consumed, syntax.tokens().len())
                 == syntax.tokens().len())
             .then_some(value);
@@ -14902,16 +14914,10 @@ fn parameter_node(parameter: &staple_syntax::TypeParameter) -> Value {
     })
 }
 
-fn parse_parameter_syntax(
-    expected: &MetaType,
-    syntax: &Syntax,
-    next: &mut usize,
-) -> Result<(Value, usize), staple_syntax::ParseError> {
-    if *expected == MetaType::TypeParameter {
-        let (parameter, consumed) = staple_syntax::parse_type_parameter_prefix(syntax, next)?;
-        return Ok((parameter_node(&parameter), consumed));
-    }
-    let (parameters, consumed) = staple_syntax::parse_type_parameters_prefix(syntax, next)?;
+/// The `TypeParameters` value a parsed declaration header stands for. The
+/// `arguments` field holds only the ordinary parameters, without defaults or
+/// bounds, so rebuilding the header can apply the type.
+fn type_parameters_value(parameters: staple_syntax::TypeParameters) -> Value {
     let mut argument_tokens = Vec::new();
     let tokens = parameters.syntax.tokens();
     let punctuation = |kind, text: &str| {
@@ -14997,14 +15003,31 @@ fn parse_parameter_syntax(
             Value::Syntax(SyntaxValue::Raw(parameters.bounds)),
         ),
     ];
-    Ok((
-        Value::Syntax(SyntaxValue::Parameters {
-            kind: MetaType::TypeParameters,
-            syntax: parameters.syntax,
-            fields,
-        }),
-        consumed,
-    ))
+    Value::Syntax(SyntaxValue::Parameters {
+        kind: MetaType::TypeParameters,
+        syntax: parameters.syntax,
+        fields,
+    })
+}
+
+/// Parses a declaration header shaped as a macro argument.
+fn parse_parameter_syntax(
+    expected: &MetaType,
+    syntax: &Syntax,
+    next: &mut usize,
+) -> Option<(Value, usize)> {
+    let kind = match expected {
+        MetaType::TypeParameter => LeafKind::TypeParameter,
+        MetaType::TypeParameters => LeafKind::TypeParameters,
+        _ => return None,
+    };
+    let (leaf, consumed) = parse_leaf(kind, None, syntax, next).ok()?;
+    let value = match leaf {
+        ParsedLeaf::TypeParameter(parameter) => parameter_node(&parameter),
+        ParsedLeaf::TypeParameters(parameters) => type_parameters_value(parameters),
+        _ => return None,
+    };
+    Some((value, consumed))
 }
 
 fn type_parameter_pattern_type(parameter: &staple_syntax::TypeParameterPattern) -> Type {

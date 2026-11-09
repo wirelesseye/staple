@@ -8,7 +8,8 @@
 //! [`SyntaxIntrinsic`]s, which read tokens from a [`Value::Stream`].
 
 use super::syntax_ops::{
-    describe_position, matching_angle_close, matching_close, skip_trivia, syntax_slice,
+    GroupKind, LeafFailure, LeafKind, describe_position, matching_close, parse_group, parse_leaf,
+    skip_trivia, syntax_slice,
 };
 use super::*;
 
@@ -574,6 +575,39 @@ pub(super) fn value_syntax(value: &Value) -> Option<Syntax> {
     }
 }
 
+/// The shared leaf kind and identifier spelling a `Parse` target names.
+fn primitive_leaf_kind(target: &MetaType) -> Option<(LeafKind, Option<&str>)> {
+    Some(match target {
+        MetaType::Expr => (LeafKind::Expr, None),
+        MetaType::CallExpr => (LeafKind::CallExpr, None),
+        MetaType::CharExpr => (LeafKind::CharExpr, None),
+        MetaType::StringExpr => (LeafKind::StringExpr, None),
+        MetaType::UnstructuredExpr => (LeafKind::UnstructuredExpr, None),
+        MetaType::Type => (LeafKind::Type, None),
+        MetaType::ProductType => (LeafKind::ProductType, None),
+        MetaType::UnstructuredType => (LeafKind::UnstructuredType, None),
+        MetaType::Pattern => (LeafKind::Pattern, None),
+        MetaType::BindingPattern => (LeafKind::BindingPattern, None),
+        MetaType::NominalPattern => (LeafKind::NominalPattern, None),
+        MetaType::Item => (LeafKind::Item, None),
+        MetaType::ModifiedItem => (LeafKind::ModifiedItem, None),
+        MetaType::TypeDeclarationItem => (LeafKind::TypeDeclarationItem, None),
+        MetaType::UnstructuredItem => (LeafKind::UnstructuredItem, None),
+        MetaType::Modifier => (LeafKind::Modifier, None),
+        MetaType::ModifierCall => (LeafKind::ModifierCall, None),
+        MetaType::UnstructuredModifier => (LeafKind::UnstructuredModifier, None),
+        MetaType::TypeBody => (LeafKind::TypeBody, None),
+        MetaType::TypeParameter => (LeafKind::TypeParameter, None),
+        MetaType::TypeParameters => (LeafKind::TypeParameters, None),
+        MetaType::Ident(spelling) => (LeafKind::Ident, spelling.as_deref()),
+        MetaType::Comma => (LeafKind::Comma, None),
+        MetaType::Equals => (LeafKind::Equals, None),
+        MetaType::FatArrow => (LeafKind::FatArrow, None),
+        MetaType::Visibility => (LeafKind::Visibility, None),
+        _ => return None,
+    })
+}
+
 impl MacroExpander {
     /// Whether `named` (written in `module`) names the `Parse` trait.
     pub(super) fn names_parse_trait(
@@ -605,7 +639,15 @@ impl MacroExpander {
                     || implementation.arguments.iter().any(type_contains_syntax)
             }
             Item::ExternBlock(block) => {
-                Some(module) == self.syntax_module && block.abi == "\"staple-intrinsic\""
+                // A block whose bindings the host implements is compile-time
+                // only. A block of compiler intrinsics stays declared in the
+                // normal program too, so resolution can register it.
+                Some(module) == self.syntax_module
+                    && block.abi == "\"staple-intrinsic\""
+                    && block
+                        .bindings
+                        .iter()
+                        .any(|binding| is_macro_runtime_intrinsic(&binding.name))
             }
             Item::Modified(modified) => self.is_compile_time_parse_item(module, &modified.item),
             _ => false,
@@ -878,55 +920,21 @@ impl MacroExpander {
             }
             SyntaxIntrinsic::Group(kind) => {
                 let (syntax, cursor) = self.stream_argument(argument, span)?;
-                let tokens = syntax.tokens();
-                let (open, close_kind, name) = match kind {
-                    DelimiterKind::Parenthesized => (
-                        staple_syntax::TokenKind::LParen,
-                        staple_syntax::TokenKind::RParen,
-                        "parenthesized",
-                    ),
-                    DelimiterKind::Bracketed => (
-                        staple_syntax::TokenKind::LBracket,
-                        staple_syntax::TokenKind::RBracket,
-                        "bracketed",
-                    ),
-                    DelimiterKind::Angled => (
-                        staple_syntax::TokenKind::Operator,
-                        staple_syntax::TokenKind::Operator,
-                        "angle-bracketed",
-                    ),
-                    DelimiterKind::Braced => (
-                        staple_syntax::TokenKind::LBrace,
-                        staple_syntax::TokenKind::RBrace,
-                        "braced",
-                    ),
+                let kind = match kind {
+                    DelimiterKind::Parenthesized => GroupKind::Parenthesized,
+                    DelimiterKind::Bracketed => GroupKind::Bracketed,
+                    DelimiterKind::Angled => GroupKind::Angled,
+                    DelimiterKind::Braced => GroupKind::Braced,
                 };
-                let first = skip_trivia(tokens, cursor, tokens.len());
-                let close = (first < tokens.len() && tokens[first].kind == open)
-                    .then(|| {
-                        if kind == DelimiterKind::Angled {
-                            (tokens[first].text == "<")
-                                .then(|| matching_angle_close(tokens, first))
-                                .flatten()
-                        } else {
-                            matching_close(tokens, first)
-                        }
-                    })
-                    .flatten()
-                    .filter(|close| tokens[*close].kind == close_kind);
-                let Some(close) = close else {
-                    return Some(parse_error_value(&format!(
-                        "expected {name} syntax at {}",
-                        describe_position(&syntax, cursor)
-                    )));
+                let (source, inner, next) = match parse_group(kind, &syntax, cursor) {
+                    Ok(parts) => parts,
+                    Err(message) => return Some(parse_error_value(&message)),
                 };
-                let source = syntax_slice(&syntax, first, close + 1);
-                let inner = syntax_slice(&syntax, first + 1, close);
                 self.advance_stream(
                     &place,
                     Value::Stream {
                         syntax,
-                        cursor: close + 1,
+                        cursor: next,
                     },
                 );
                 Some(ok_value(Value::Product(
@@ -1042,7 +1050,6 @@ impl MacroExpander {
         let end = syntax.tokens().len();
         let rest = syntax_slice(&syntax, cursor, end);
         let tokens = rest.tokens();
-        let first = skip_trivia(tokens, 0, tokens.len());
         let fail = |message: Option<String>| {
             let mut text = format!("expected {}", format_meta_type(target));
             if let Some(message) = message {
@@ -1052,218 +1059,69 @@ impl MacroExpander {
             text.push_str(&format!(" at {}", describe_position(&syntax, cursor)));
             Some(parse_error_value(&text))
         };
-        let token_slice = |from: usize, to: usize| syntax_slice(&rest, from, to);
-        // The node, and how many of the rest's tokens it used.
-        let (value, consumed): (Value, usize) = match target {
-            MetaType::Expr
-            | MetaType::CallExpr
-            | MetaType::CharExpr
-            | MetaType::StringExpr
-            | MetaType::UnstructuredExpr => {
-                match staple_syntax::parse_expression_prefix(&rest, &mut self.next_syntax_id) {
-                    Ok((expression, consumed)) => {
-                        let value = SyntaxValue::from_expression(expression);
-                        let accepted = match target {
-                            MetaType::CallExpr => matches!(value, SyntaxValue::Call(_)),
-                            MetaType::CharExpr => {
-                                matches!(value, SyntaxValue::Unstructured(Expression::Char(_)))
-                            }
-                            MetaType::StringExpr => {
-                                matches!(value, SyntaxValue::Unstructured(Expression::String(_)))
-                            }
-                            MetaType::UnstructuredExpr => {
-                                matches!(value, SyntaxValue::Unstructured(_))
-                            }
-                            _ => true,
-                        };
-                        if !accepted {
-                            return fail(None);
-                        }
-                        (Value::Syntax(value), consumed)
-                    }
-                    Err(error) => return fail(Some(error.message)),
-                }
-            }
-            MetaType::Type | MetaType::ProductType | MetaType::UnstructuredType => {
-                match staple_syntax::parse_type_prefix(&rest, &mut self.next_syntax_id) {
-                    Ok((ty, _)) if !type_category_matches(target, &ty) => return fail(None),
-                    Ok((ty, consumed)) => (Value::Syntax(SyntaxValue::Type(ty)), consumed),
-                    Err(error) => return fail(Some(error.message)),
-                }
-            }
-            MetaType::Pattern | MetaType::BindingPattern | MetaType::NominalPattern => {
-                match staple_syntax::parse_pattern_prefix(&rest, &mut self.next_syntax_id) {
-                    Ok((pattern, consumed)) => {
-                        if matches!(target, MetaType::BindingPattern)
-                            && !matches!(pattern, Pattern::Binding(_))
-                            || matches!(target, MetaType::NominalPattern)
-                                && !matches!(pattern, Pattern::Nominal(_))
-                        {
-                            return fail(None);
-                        }
-                        (Value::Syntax(SyntaxValue::Pattern(pattern)), consumed)
-                    }
-                    Err(error) => return fail(Some(error.message)),
-                }
-            }
-            MetaType::Item
-            | MetaType::ModifiedItem
-            | MetaType::TypeDeclarationItem
-            | MetaType::UnstructuredItem => {
-                match staple_syntax::parse_item_prefix(&rest, &mut self.next_syntax_id) {
-                    Ok((item, consumed)) => {
-                        if matches!(target, MetaType::ModifiedItem)
-                            && !matches!(item, Item::Modified(_))
-                            || matches!(target, MetaType::TypeDeclarationItem)
-                                && !matches!(item, Item::TypeDeclaration(_))
-                            || matches!(target, MetaType::UnstructuredItem)
-                                && matches!(item, Item::Modified(_) | Item::TypeDeclaration(_))
-                        {
-                            return fail(None);
-                        }
-                        (Value::Syntax(SyntaxValue::Item(Box::new(item))), consumed)
-                    }
-                    Err(error) => return fail(Some(error.message)),
-                }
-            }
-            MetaType::Modifier | MetaType::ModifierCall | MetaType::UnstructuredModifier => {
-                match staple_syntax::parse_modifier_prefix(&rest, &mut self.next_syntax_id) {
-                    Ok((invocation, _))
-                        if matches!(target, MetaType::UnstructuredModifier)
-                            && invocation.doc.is_none()
-                            || matches!(target, MetaType::ModifierCall)
-                                && invocation.doc.is_some() =>
-                    {
-                        return fail(None);
-                    }
-                    Ok((invocation, consumed)) => (
-                        Value::Syntax(SyntaxValue::Modifier(OpaqueModifier {
-                            invocation,
-                            enclosing: None,
-                        })),
-                        consumed,
-                    ),
-                    Err(error) => return fail(Some(error.message)),
-                }
-            }
-            MetaType::TypeParameter | MetaType::TypeParameters => {
-                match parse_parameter_syntax(target, &rest, &mut self.next_syntax_id) {
-                    Ok(result) => result,
-                    Err(error) => return fail(Some(error.message)),
-                }
-            }
-            MetaType::TypeBody => {
-                match staple_syntax::parse_type_body_prefix(&rest, &mut self.next_syntax_id) {
-                    Ok((body, consumed)) => (type_body_value(&body), consumed),
-                    Err(error) => return fail(Some(error.message)),
-                }
-            }
-            MetaType::Ident(spelling) => {
-                let token = tokens.get(first);
-                match token {
-                    Some(token)
-                        if token.kind == staple_syntax::TokenKind::Identifier
-                            && spelling
-                                .as_ref()
-                                .is_none_or(|expected| expected == &token.text) =>
-                    {
-                        (
-                            Value::Syntax(SyntaxValue::Ident(staple_syntax::NameExpression {
-                                syntax: token_slice(first, first + 1),
-                                name: token.text.clone(),
-                            })),
-                            first + 1,
-                        )
-                    }
-                    _ => return fail(None),
-                }
-            }
-            MetaType::Comma | MetaType::Equals | MetaType::FatArrow => {
-                let kind = match target {
-                    MetaType::Comma => staple_syntax::TokenKind::Comma,
-                    MetaType::Equals => staple_syntax::TokenKind::Equals,
-                    _ => staple_syntax::TokenKind::FatArrow,
-                };
-                if tokens.get(first).is_none_or(|token| token.kind != kind) {
-                    return fail(None);
-                }
-                let syntax = token_slice(first, first + 1);
-                (
-                    Value::Syntax(match target {
-                        MetaType::Comma => SyntaxValue::Comma(syntax),
-                        MetaType::Equals => SyntaxValue::Equals(syntax),
-                        _ => SyntaxValue::FatArrow(syntax),
-                    }),
-                    first + 1,
-                )
-            }
-            MetaType::Visibility => {
-                use staple_syntax::TokenKind;
-                if tokens
-                    .get(first)
-                    .is_some_and(|token| token.kind == TokenKind::Pub)
-                {
-                    let mut end = first + 1;
-                    let mut kind = VisibilityKind::Public;
-                    let next = skip_trivia(tokens, end, tokens.len());
-                    if tokens
-                        .get(next)
-                        .is_some_and(|token| token.kind == TokenKind::LParen)
-                        && let Some(close) = matching_close(tokens, next)
-                    {
-                        let inner = tokens[next + 1..close]
-                            .iter()
-                            .filter(|token| !token.kind.is_trivia())
-                            .collect::<Vec<_>>();
-                        if matches!(inner.as_slice(), [token] if token.kind == TokenKind::Package) {
-                            kind = VisibilityKind::Package;
-                            end = close + 1;
-                        }
-                    }
-                    (
-                        Value::Syntax(SyntaxValue::Visibility(VisibilitySyntax {
-                            syntax: token_slice(first, end),
-                            kind,
-                        })),
-                        end,
-                    )
-                } else {
-                    // Nothing written means private; nothing is consumed.
-                    (
-                        Value::Syntax(SyntaxValue::Visibility(private_visibility())),
-                        0,
-                    )
-                }
-            }
-            MetaType::SyntaxNode => {
-                let Some(token) = tokens.get(first) else {
-                    return fail(None);
-                };
-                let end = match token.kind {
-                    staple_syntax::TokenKind::LParen
-                    | staple_syntax::TokenKind::LBracket
-                    | staple_syntax::TokenKind::LBrace => match matching_close(tokens, first) {
-                        Some(close) => close + 1,
-                        None => return fail(None),
-                    },
-                    _ => first + 1,
-                };
-                let atom = token_slice(first, end);
-                match structural_syntax_value(&atom, &mut self.next_syntax_id) {
-                    Some(value) => (Value::Syntax(value), end),
+        let (value, consumed) = if *target == MetaType::SyntaxNode {
+            let first = skip_trivia(tokens, 0, tokens.len());
+            let Some(token) = tokens.get(first) else {
+                return fail(None);
+            };
+            let end = match token.kind {
+                staple_syntax::TokenKind::LParen
+                | staple_syntax::TokenKind::LBracket
+                | staple_syntax::TokenKind::LBrace => match matching_close(tokens, first) {
+                    Some(close) => close + 1,
                     None => return fail(None),
-                }
+                },
+                _ => first + 1,
+            };
+            let atom = syntax_slice(&rest, first, end);
+            match structural_syntax_value(&atom, &mut self.next_syntax_id) {
+                Some(value) => (Value::Syntax(value), end),
+                None => return fail(None),
             }
-            other => {
+        } else {
+            let Some((kind, spelling)) = primitive_leaf_kind(target) else {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     format!(
                         "`__parse_primitive` cannot parse `{}`",
-                        format_meta_type(other)
+                        format_meta_type(target)
                     ),
                 ));
                 return None;
-            }
+            };
+            let (leaf, consumed) =
+                match parse_leaf(kind, spelling, &rest, &mut self.next_syntax_id) {
+                    Ok(parsed) => parsed,
+                    Err(LeafFailure::Mismatch) => return fail(None),
+                    Err(LeafFailure::Parse(message)) => return fail(Some(message)),
+                };
+            let value = match leaf {
+                ParsedLeaf::Expression(expression) => {
+                    Value::Syntax(SyntaxValue::from_expression(expression))
+                }
+                ParsedLeaf::Type(ty) => Value::Syntax(SyntaxValue::Type(ty)),
+                ParsedLeaf::Pattern(pattern) => Value::Syntax(SyntaxValue::Pattern(pattern)),
+                ParsedLeaf::Item(item) => Value::Syntax(SyntaxValue::Item(Box::new(item))),
+                ParsedLeaf::Modifier(invocation) => {
+                    Value::Syntax(SyntaxValue::Modifier(OpaqueModifier {
+                        invocation,
+                        enclosing: None,
+                    }))
+                }
+                ParsedLeaf::TypeBody(body) => type_body_value(&body),
+                ParsedLeaf::TypeParameter(parameter) => parameter_node(&parameter),
+                ParsedLeaf::TypeParameters(parameters) => type_parameters_value(parameters),
+                ParsedLeaf::Ident(ident) => Value::Syntax(SyntaxValue::Ident(ident)),
+                ParsedLeaf::Punctuation(kind, syntax) => Value::Syntax(match kind {
+                    LeafKind::Comma => SyntaxValue::Comma(syntax),
+                    LeafKind::Equals => SyntaxValue::Equals(syntax),
+                    _ => SyntaxValue::FatArrow(syntax),
+                }),
+                ParsedLeaf::Visibility(visibility) => {
+                    Value::Syntax(SyntaxValue::Visibility(visibility))
+                }
+            };
+            (value, consumed)
         };
         // Syntax quoted by a macro resolves where it was quoted, as
         // `parse_quote` does; tokens from a caller keep the caller's context.

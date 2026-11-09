@@ -8043,6 +8043,8 @@ impl TypeChecker {
                     .unwrap_or(CheckedType::Error),
                 crate::IntrinsicFunction::SizeOf
                 | crate::IntrinsicFunction::AlignOf
+                | crate::IntrinsicFunction::SyntaxIdentSpelling
+                | crate::IntrinsicFunction::SyntaxSpellingValue
                 | crate::IntrinsicFunction::NeedsDrop
                 | crate::IntrinsicFunction::GcAllocate
                 | crate::IntrinsicFunction::GcRelease

@@ -14,7 +14,8 @@ use staple_syntax::{
 
 use super::arena::{self, Handle, Node, NodeKind};
 use crate::macro_expand::syntax_ops::{
-    append_syntax_tokens, describe_position, is_structured_product_type,
+    GroupKind, LeafFailure, LeafKind, append_syntax_tokens, describe_position,
+    is_structured_product_type, parse_group, parse_leaf, parse_syntax_node_atom,
     syntax_from_text as lex_syntax_from_text, syntax_slice,
 };
 
@@ -73,6 +74,38 @@ pub(crate) const INTRINSICS: &[Intrinsic] = &[
     intrinsic!("remaining", "__staple_syntax_remaining", remaining),
     intrinsic!("compile_error", "__staple_syntax_compile_error"),
     intrinsic!("__parse_primitive", "__staple_syntax_parse_primitive"),
+    intrinsic!("__parse_leaf", "__staple_syntax_parse_leaf", parse_leaf_intrinsic),
+    intrinsic!("__parse_group", "__staple_syntax_parse_group", parse_group_intrinsic),
+    intrinsic!(
+        "__parse_result_status",
+        "__staple_syntax_parse_result_status",
+        parse_result_status
+    ),
+    intrinsic!(
+        "__parse_result_tag",
+        "__staple_syntax_parse_result_tag",
+        parse_result_tag
+    ),
+    intrinsic!(
+        "__parse_result_syntax",
+        "__staple_syntax_parse_result_syntax",
+        parse_result_syntax
+    ),
+    intrinsic!(
+        "__parse_result_stream",
+        "__staple_syntax_parse_result_stream",
+        parse_result_stream
+    ),
+    intrinsic!(
+        "__parse_result_next",
+        "__staple_syntax_parse_result_next",
+        parse_result_next
+    ),
+    intrinsic!(
+        "__parse_result_error",
+        "__staple_syntax_parse_result_error",
+        parse_result_error
+    ),
     intrinsic!("__parenthesized_group", "__staple_syntax_parenthesized_group"),
     intrinsic!("__bracketed_group", "__staple_syntax_bracketed_group"),
     intrinsic!("__angled_group", "__staple_syntax_angled_group"),
@@ -512,6 +545,14 @@ pub(crate) fn symbol_name(name: &str) -> &'static str {
         "remaining" => "__staple_syntax_remaining",
         "compile_error" => "__staple_syntax_compile_error",
         "__parse_primitive" => "__staple_syntax_parse_primitive",
+        "__parse_leaf" => "__staple_syntax_parse_leaf",
+        "__parse_group" => "__staple_syntax_parse_group",
+        "__parse_result_status" => "__staple_syntax_parse_result_status",
+        "__parse_result_tag" => "__staple_syntax_parse_result_tag",
+        "__parse_result_syntax" => "__staple_syntax_parse_result_syntax",
+        "__parse_result_stream" => "__staple_syntax_parse_result_stream",
+        "__parse_result_next" => "__staple_syntax_parse_result_next",
+        "__parse_result_error" => "__staple_syntax_parse_result_error",
         "__parenthesized_group" => "__staple_syntax_parenthesized_group",
         "__bracketed_group" => "__staple_syntax_bracketed_group",
         "__angled_group" => "__staple_syntax_angled_group",
@@ -901,6 +942,179 @@ extern "C" fn syntax_from_text(bytes: *const u8, length: usize) -> u64 {
     })
 }
 
+
+// --- parsing ----------------------------------------------------------------
+
+/// The `__parse_leaf` kind that reads a whole `SyntaxNode` atom rather than a
+/// single leaf category.
+const SYNTAX_NODE_KIND: u8 = 27;
+
+fn leaf_kind(code: u8) -> Option<LeafKind> {
+    Some(match code {
+        1 => LeafKind::Expr,
+        2 => LeafKind::CallExpr,
+        3 => LeafKind::CharExpr,
+        4 => LeafKind::StringExpr,
+        5 => LeafKind::UnstructuredExpr,
+        6 => LeafKind::Type,
+        7 => LeafKind::ProductType,
+        8 => LeafKind::UnstructuredType,
+        9 => LeafKind::Pattern,
+        10 => LeafKind::BindingPattern,
+        11 => LeafKind::NominalPattern,
+        12 => LeafKind::Item,
+        13 => LeafKind::ModifiedItem,
+        14 => LeafKind::TypeDeclarationItem,
+        15 => LeafKind::UnstructuredItem,
+        16 => LeafKind::Modifier,
+        17 => LeafKind::ModifierCall,
+        18 => LeafKind::UnstructuredModifier,
+        19 => LeafKind::TypeBody,
+        20 => LeafKind::TypeParameter,
+        21 => LeafKind::TypeParameters,
+        22 => LeafKind::Ident,
+        23 => LeafKind::Comma,
+        24 => LeafKind::Equals,
+        25 => LeafKind::FatArrow,
+        26 => LeafKind::Visibility,
+        _ => return None,
+    })
+}
+
+fn group_kind(code: u8) -> Option<GroupKind> {
+    Some(match code {
+        0 => GroupKind::Parenthesized,
+        1 => GroupKind::Bracketed,
+        2 => GroupKind::Angled,
+        3 => GroupKind::Braced,
+        _ => return None,
+    })
+}
+
+/// Parses one leaf from a stream. `spelling` is a text handle for an
+/// identifier's required spelling, or zero to accept any. The outcome handle
+/// carries the status, the parsed syntax, the advanced stream and an error text.
+extern "C" fn parse_leaf_intrinsic(stream: u64, kind: u8, spelling: u64) -> u64 {
+    let (fragment, offset) = stream_parts(stream);
+    let syntax = syntax_value(fragment);
+    let rest = syntax_slice(&syntax, offset, syntax.tokens().len());
+    let spelling = (spelling != 0)
+        .then(|| String::from_utf8(text_bytes(spelling)).expect("identifier spelling is UTF-8"))
+        .filter(|spelling| !spelling.is_empty());
+    let name = if kind == SYNTAX_NODE_KIND {
+        "SyntaxNode".to_owned()
+    } else {
+        match leaf_kind(kind) {
+            Some(leaf) => leaf.display(spelling.as_deref()),
+            None => panic!("unknown parse leaf kind {kind}"),
+        }
+    };
+    let position = describe_position(&syntax, offset);
+    arena::with_arena(|arena| {
+        let mut next = arena.next_syntax_id();
+        let outcome = if kind == SYNTAX_NODE_KIND {
+            parse_syntax_node_atom(&rest, &mut next)
+                .map(|(atom, syntax, consumed)| (u64::from(atom.tag()), syntax, consumed))
+        } else {
+            let leaf = leaf_kind(kind).expect("the leaf kind was checked above");
+            parse_leaf(leaf, spelling.as_deref(), &rest, &mut next)
+                .map(|(leaf, consumed)| (1, leaf.into_syntax(), consumed))
+        };
+        arena.set_next_syntax_id(next);
+        let outcome = match outcome {
+            Ok((tag, syntax, consumed)) => {
+                let syntax = arena.insert_syntax(syntax).into();
+                let stream = arena.insert_stream(fragment.into(), offset + consumed).into();
+                arena::ParseOutcome {
+                    status: 1,
+                    tag,
+                    syntax,
+                    stream,
+                    next: 0,
+                    error: 0,
+                }
+            }
+            Err(LeafFailure::Mismatch) => {
+                let message = format!("expected {name} at {position}");
+                arena::ParseOutcome {
+                    error: arena.insert_text(message.into_bytes()).into(),
+                    ..Default::default()
+                }
+            }
+            Err(LeafFailure::Parse(detail)) => {
+                let message = format!("expected {name}: {detail} at {position}");
+                arena::ParseOutcome {
+                    error: arena.insert_text(message.into_bytes()).into(),
+                    ..Default::default()
+                }
+            }
+        };
+        arena.insert_parse(outcome).into()
+    })
+}
+
+/// Reads one delimited group. The outcome handle carries its source, a stream
+/// over its contents, and the outer stream advanced past the group.
+extern "C" fn parse_group_intrinsic(stream: u64, kind: u8) -> u64 {
+    let (fragment, offset) = stream_parts(stream);
+    let syntax = syntax_value(fragment);
+    let group = group_kind(kind).expect("a known group kind");
+    arena::with_arena(|arena| {
+        let mut next = arena.next_syntax_id();
+        let parsed = parse_group(group, &syntax, offset);
+        arena.set_next_syntax_id(next);
+        let outcome = match parsed {
+            Ok((source, inner, next_offset)) => {
+                let source = arena.insert_syntax(source).into();
+                let inner_fragment = arena.insert_syntax(inner);
+                let contents = arena.insert_stream(inner_fragment, 0).into();
+                let next = arena.insert_stream(fragment.into(), next_offset).into();
+                arena::ParseOutcome {
+                    status: 1,
+                    tag: 0,
+                    syntax: source,
+                    stream: contents,
+                    next,
+                    error: 0,
+                }
+            }
+            Err(message) => arena::ParseOutcome {
+                error: arena.insert_text(message.into_bytes()).into(),
+                ..Default::default()
+            },
+        };
+        arena.insert_parse(outcome).into()
+    })
+}
+
+fn parse_outcome(result: u64) -> arena::ParseOutcome {
+    arena::with_arena(|arena| arena.parse_outcome(result.into()).cloned())
+        .unwrap_or_else(|| panic!("parse result handle {result:#x} is not live"))
+}
+
+extern "C" fn parse_result_status(result: u64) -> u64 {
+    parse_outcome(result).status
+}
+
+extern "C" fn parse_result_tag(result: u64) -> u64 {
+    parse_outcome(result).tag
+}
+
+extern "C" fn parse_result_syntax(result: u64) -> u64 {
+    parse_outcome(result).syntax
+}
+
+extern "C" fn parse_result_stream(result: u64) -> u64 {
+    parse_outcome(result).stream
+}
+
+extern "C" fn parse_result_next(result: u64) -> u64 {
+    parse_outcome(result).next
+}
+
+extern "C" fn parse_result_error(result: u64) -> u64 {
+    parse_outcome(result).error
+}
 
 // --- node views -------------------------------------------------------------
 

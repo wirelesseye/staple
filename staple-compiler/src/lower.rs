@@ -14516,6 +14516,8 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::CallerColumn
         | Intrinsic::SizeOf
         | Intrinsic::AlignOf
+        | Intrinsic::SyntaxIdentSpelling
+        | Intrinsic::SyntaxSpellingValue
         | Intrinsic::NeedsDrop
         | Intrinsic::GcAllocate
         | Intrinsic::GcRelease

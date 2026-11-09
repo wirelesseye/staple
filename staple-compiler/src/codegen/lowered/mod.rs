@@ -9208,6 +9208,40 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .const_int(align as u64, false)
                     .as_any_value_enum())
             }
+            IntrinsicFunction::SyntaxIdentSpelling => {
+                let value_type = intrinsic_type_argument(call, 0, &span)?;
+                let spelling = if crate::contains_type_parameter(&value_type) {
+                    String::new()
+                } else {
+                    match value_type.desugared() {
+                        CheckedType::String => String::new(),
+                        CheckedType::StringLiteralSet(values) => {
+                            values.first().cloned().unwrap_or_default()
+                        }
+                        other => {
+                            return Err(Diagnostic::new(
+                                span,
+                                format!(
+                                    "an identifier spelling must be a string type, found {other:?}"
+                                ),
+                            ));
+                        }
+                    }
+                };
+                Ok(self
+                    .backend
+                    .build_string_literal(&spelling)
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::SyntaxSpellingValue => {
+                let [BasicMetadataValueEnum::PointerValue(value)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "an identifier spelling must be a String",
+                    ));
+                };
+                Ok(value.as_any_value_enum())
+            }
             IntrinsicFunction::NeedsDrop => {
                 let value_type = intrinsic_type_argument(call, 0, &span)?;
                 let needs_drop = self.view.concrete_needs_drop(&value_type);

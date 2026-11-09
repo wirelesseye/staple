@@ -616,6 +616,10 @@ pub enum IntrinsicFunction {
     CallerColumn,
     SizeOf,
     AlignOf,
+    /// The spelling an `Ident<Spelling>` parse target names, as `String`.
+    SyntaxIdentSpelling,
+    /// Reinterprets a `String` as a syntax identifier's spelling parameter.
+    SyntaxSpellingValue,
     NeedsDrop,
     GcAllocate,
     GcRelease,
@@ -2860,6 +2864,16 @@ impl NameResolver {
         for (module, name, intrinsic) in [
             ("std.alloc", "__size_of", IntrinsicFunction::SizeOf),
             ("std.alloc", "__align_of", IntrinsicFunction::AlignOf),
+            (
+                "std.syntax",
+                "__ident_type_spelling",
+                IntrinsicFunction::SyntaxIdentSpelling,
+            ),
+            (
+                "std.syntax",
+                "__ident_spelling_value",
+                IntrinsicFunction::SyntaxSpellingValue,
+            ),
             ("std.alloc", "__needs_drop", IntrinsicFunction::NeedsDrop),
             ("std.alloc", "__gc_allocate", IntrinsicFunction::GcAllocate),
             ("std.alloc", "__gc_release", IntrinsicFunction::GcRelease),

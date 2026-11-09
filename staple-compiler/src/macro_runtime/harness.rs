@@ -336,6 +336,195 @@ def direct_error: () -> I32 = () => {
     }
 
     #[test]
+    fn parse_implementations_run_in_compiled_code() {
+        run_probes(
+            r#"
+def expr_is_greedy: () -> I32 = () => {
+    let mut input = stream (syntax_from_string "a + b, c")
+    let value: Expr = match (Parse.parse.<Expr> input) {
+        Ok value => value,
+        ParseError _ => Ident "missing",
+    }
+    match (string_from_syntax (Splice.splice value) == "a + b") {
+        True => match (string_from_syntax (remaining input) == ", c") { True => 1, False => 0 },
+        False => 0,
+    }
+}
+def option_backtracks: () -> I32 = () => {
+    let mut input = stream (syntax_from_string "y")
+    let absent: Option<Ident<"x">> = None
+    let value: Option<Ident<"x">> = match (Parse.parse.<Option<Ident<"x">>> input) {
+        Ok value => value,
+        ParseError _ => absent,
+    }
+    match value {
+        None => match (string_from_syntax (remaining input) == "y") { True => 1, False => 0 },
+        Some _ => 0,
+    }
+}
+def comma_product_allows_one_trailing_comma: () -> I32 = () => {
+    let parsed: Result<(Ident<String>, Ident<String>), ParseError> =
+        Parse.parse_all.<(Ident<String>, Ident<String>)> (syntax_from_string "a, b,")
+    match parsed {
+        Ok (first, second) => match (first.* == "a") {
+            True => match (second.* == "b") { True => 1, False => 0 },
+            False => 0,
+        },
+        ParseError _ => 0,
+    }
+}
+def syntax_node_reads_one_atom: () -> I32 = () => {
+    let mut input = stream (syntax_from_string "(a b) c")
+    let node: SyntaxNode = match (Parse.parse.<SyntaxNode> input) {
+        Ok value => value,
+        ParseError _ => Comma,
+    }
+    match (string_from_syntax (Splice.splice node) == "(a b)") {
+        True => match (string_from_syntax (remaining input) == " c") { True => 1, False => 0 },
+        False => 0,
+    }
+}
+def fork_commits: () -> I32 = () => {
+    let mut input = stream (syntax_from_string "a b")
+    let mut fork = input
+    let first: Ident<String> = match (Parse.parse.<Ident<String>> fork) {
+        Ok value => value,
+        ParseError _ => Ident "missing",
+    }
+    input = fork
+    let second: Ident<String> = match (Parse.parse.<Ident<String>> input) {
+        Ok value => value,
+        ParseError _ => Ident "missing",
+    }
+    match (first.* == "a") {
+        True => match (second.* == "b") { True => 1, False => 0 },
+        False => 0,
+    }
+}
+def failed_parse_leaves_the_stream: () -> I32 = () => {
+    let mut input = stream (syntax_from_string "=")
+    match (Parse.parse.<Ident<String>> input) {
+        Ok _ => 0,
+        ParseError _ => match (string_from_syntax (remaining input) == "=") { True => 1, False => 0 },
+    }
+}
+def delimiter_parses: () -> I32 = () => {
+    let parsed: Result<Parenthesized<Sequence<Ident<String>>>, ParseError> =
+        Parse.parse_all.<Parenthesized<Sequence<Ident<String>>>> (syntax_from_string "(a b)")
+    match parsed {
+        Ok value => match (string_from_syntax (Splice.splice value) == "(a b)") { True => 1, False => 0 },
+        ParseError _ => 0,
+    }
+}
+def sequence_parses: () -> I32 = () => {
+    let parsed: Result<Sequence<Ident<String>>, ParseError> =
+        Parse.parse_all.<Sequence<Ident<String>>> (syntax_from_string "a b c")
+    match parsed {
+        Ok value => match (string_from_syntax (Splice.splice value) == "a b c") { True => 1, False => 0 },
+        ParseError _ => 0,
+    }
+}
+def separated_parses: () -> I32 = () => {
+    let parsed: Result<Separated<Ident<String>, Comma>, ParseError> =
+        Parse.parse_all.<Separated<Ident<String>, Comma>> (syntax_from_string "a, b,")
+    match parsed {
+        Ok value => match (string_from_syntax (Splice.splice value) == "a,b,") { True => 1, False => 0 },
+        ParseError _ => 0,
+    }
+}
+def visibility_parses: () -> I32 = () => {
+    let parsed: Result<Visibility, ParseError> =
+        Parse.parse_all.<Visibility> (syntax_from_string "pub(package)")
+    match parsed {
+        Ok value => match value { Package => 1, Public => 0, Private => 0 },
+        ParseError _ => 0,
+    }
+}
+def type_parses: () -> I32 = () => {
+    let parsed: Result<Type, ParseError> = Parse.parse_all.<Type> (syntax_from_string "I32")
+    match parsed {
+        Ok value => match (string_from_syntax (Splice.splice value) == "I32") { True => 1, False => 0 },
+        ParseError _ => 0,
+    }
+}
+def pattern_parses: () -> I32 = () => {
+    let parsed: Result<Pattern, ParseError> = Parse.parse_all.<Pattern> (syntax_from_string "Some x")
+    match parsed {
+        Ok value => match (string_from_syntax (Splice.splice value) == "Some x") { True => 1, False => 0 },
+        ParseError _ => 0,
+    }
+}
+def item_parses: () -> I32 = () => {
+    let parsed: Result<Item, ParseError> = Parse.parse_all.<Item> (syntax_from_string "type Foo = I32")
+    match parsed {
+        Ok value => match (string_from_syntax (Splice.splice value) == "type Foo = I32") { True => 1, False => 0 },
+        ParseError _ => 0,
+    }
+}
+def modifier_parses: () -> I32 = () => {
+    let parsed: Result<Modifier, ParseError> = Parse.parse_all.<Modifier> (syntax_from_string "@mark")
+    match parsed {
+        Ok value => match (string_from_syntax (Splice.splice value) == "@mark") { True => 1, False => 0 },
+        ParseError _ => 0,
+    }
+}
+def bracketed_parses: () -> I32 = () => {
+    let parsed: Result<Bracketed<Sequence<Ident<String>>>, ParseError> =
+        Parse.parse_all.<Bracketed<Sequence<Ident<String>>>> (syntax_from_string "[a b]")
+    match parsed {
+        Ok value => match (string_from_syntax (Splice.splice value) == "[a b]") { True => 1, False => 0 },
+        ParseError _ => 0,
+    }
+}
+def identifier_spelling_is_checked: () -> I32 = () => {
+    match (Parse.parse_all.<Ident<"else">> (syntax_from_string "other")) {
+        Ok _ => 0,
+        ParseError (message) => match (message == "expected Ident<\"else\"> at line 1, column 1") {
+            True => 1,
+            False => 0,
+        },
+    }
+}
+def identifier_spelling_accepts_its_name: () -> I32 = () => {
+    match (Parse.parse_all.<Ident<"else">> (syntax_from_string "else")) {
+        Ok value => match (string_from_syntax (Splice.splice value) == "else") { True => 1, False => 0 },
+        ParseError _ => 0,
+    }
+}
+def parse_errors_name_the_position: () -> I32 = () => {
+    match (Parse.parse_all.<Equals> (syntax_from_string "not-equals")) {
+        Ok _ => 0,
+        ParseError (message) => match (message == "expected Equals at line 1, column 1") {
+            True => 1,
+            False => 0,
+        },
+    }
+}
+"#,
+            &[
+                ("expr_is_greedy", 1),
+                ("option_backtracks", 1),
+                ("fork_commits", 1),
+                ("failed_parse_leaves_the_stream", 1),
+                ("delimiter_parses", 1),
+                ("sequence_parses", 1),
+                ("separated_parses", 1),
+                ("visibility_parses", 1),
+                ("type_parses", 1),
+                ("pattern_parses", 1),
+                ("item_parses", 1),
+                ("modifier_parses", 1),
+                ("bracketed_parses", 1),
+                ("comma_product_allows_one_trailing_comma", 1),
+                ("syntax_node_reads_one_atom", 1),
+                ("identifier_spelling_is_checked", 1),
+                ("identifier_spelling_accepts_its_name", 1),
+                ("parse_errors_name_the_position", 1),
+            ],
+        );
+    }
+
+    #[test]
     fn node_views_round_trip_and_rebuild() {
         run_probes(
             r#"
