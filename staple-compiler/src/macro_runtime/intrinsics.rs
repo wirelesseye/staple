@@ -12,7 +12,7 @@ use staple_syntax::{
     Expression, Item, Span, Syntax, SyntaxId, SyntaxToken, TokenKind, string_literal,
 };
 
-use super::arena::{self, Handle};
+use super::arena::{self, Handle, Node, NodeKind};
 use crate::macro_expand::syntax_ops::{
     append_syntax_tokens, describe_position, is_structured_product_type,
     syntax_from_text as lex_syntax_from_text, syntax_slice,
@@ -797,6 +797,25 @@ extern "C" fn text_copy(text: u64, destination: *mut u8, capacity: usize) -> usi
     })
 }
 
+/// What a rebuild compares to decide that a token is unchanged: its kind, text
+/// and hygiene. Hygiene decides what a name refers to, so a child replaced by
+/// the same text from another context is a change. Trivia and positions are
+/// left out: copying a token records where it came from, so a rebuilt node that
+/// writes the same tokens returns its origin even though they were copied.
+type TokenKey<'a> = (&'a TokenKind, &'a str, Option<(usize, u64)>);
+
+fn token_key(token: &SyntaxToken) -> TokenKey<'_> {
+    (&token.kind, token.text.as_str(), token.hygiene)
+}
+
+/// Whether two token runs have the same non-trivia tokens, by [`token_key`].
+fn same_tokens(left: &[SyntaxToken], right: &[SyntaxToken]) -> bool {
+    left.iter()
+        .filter(|token| !token.kind.is_trivia())
+        .map(token_key)
+        .eq(right.iter().filter(|token| !token.kind.is_trivia()).map(token_key))
+}
+
 /// A syntax fragment with no tokens.
 extern "C" fn empty_syntax() -> u64 {
     arena::with_arena(|arena| {
@@ -821,17 +840,17 @@ extern "C" fn syntax_or_origin(origin: u64, candidate: u64) -> u64 {
     let candidate_syntax = syntax_value(candidate);
     if origin != 0 {
         let origin_syntax = syntax_value(origin);
-        let original: Vec<&str> = origin_syntax
+        let original: Vec<TokenKey<'_>> = origin_syntax
             .tokens()
             .iter()
             .filter(|token| !token.kind.is_trivia())
-            .map(|token| token.text.as_str())
+            .map(token_key)
             .collect();
-        let rebuilt: Vec<&str> = candidate_syntax
+        let rebuilt: Vec<TokenKey<'_>> = candidate_syntax
             .tokens()
             .iter()
             .filter(|token| !token.kind.is_trivia())
-            .map(|token| token.text.as_str())
+            .map(token_key)
             .collect();
         if original == rebuilt {
             return origin;
@@ -885,41 +904,127 @@ extern "C" fn syntax_from_text(bytes: *const u8, length: usize) -> u64 {
 
 // --- node views -------------------------------------------------------------
 
+/// Parses a syntax handle as `kind`, once per call. Every accessor of a node
+/// asks about the same fragment, so caching keeps a view linear in its size.
+/// The parse starts its syntax ids at zero, as every parse of the fragment does,
+/// so the child fragments compare equal across accessors.
+fn parsed<T>(handle: u64, kind: NodeKind, read: impl FnOnce(Option<&Node>) -> T) -> T {
+    let cached = arena::with_arena(|arena| arena.parsed(handle.into(), kind).is_some());
+    if !cached {
+        let syntax = syntax_value(handle);
+        let mut next = 0;
+        let node = match kind {
+            NodeKind::Expression => staple_syntax::parse_expression_fragment(&syntax, &mut next)
+                .ok()
+                .map(Node::Expression),
+            NodeKind::Type => staple_syntax::parse_type_fragment(&syntax, false, &mut next)
+                .ok()
+                .map(Node::Type),
+            NodeKind::Pattern => staple_syntax::parse_pattern_fragment(&syntax, false, &mut next)
+                .ok()
+                .map(Node::Pattern),
+            NodeKind::Item => staple_syntax::parse_item_fragment(&syntax, &mut next)
+                .ok()
+                .map(|item| Node::Item(Box::new(item))),
+            NodeKind::Modifier => staple_syntax::parse_modifier_fragment(&syntax, &mut next)
+                .ok()
+                .map(Node::Modifier),
+            NodeKind::TypeBody => staple_syntax::parse_type_body_fragment(&syntax, &mut next)
+                .ok()
+                .map(Node::TypeBody),
+        };
+        arena::with_arena(|arena| arena.set_parsed(handle.into(), kind, node));
+    }
+    arena::with_arena(|arena| read(arena.parsed(handle.into(), kind).flatten()))
+}
+
+fn cached_expression(handle: u64) -> Result<Expression, ()> {
+    parsed(handle, NodeKind::Expression, |node| match node {
+        Some(Node::Expression(expression)) => Ok(expression.clone()),
+        _ => Err(()),
+    })
+}
+
+fn cached_type(handle: u64) -> Result<staple_syntax::Type, ()> {
+    parsed(handle, NodeKind::Type, |node| match node {
+        Some(Node::Type(ty)) => Ok(ty.clone()),
+        _ => Err(()),
+    })
+}
+
+fn cached_pattern(handle: u64) -> Result<staple_syntax::Pattern, ()> {
+    parsed(handle, NodeKind::Pattern, |node| match node {
+        Some(Node::Pattern(pattern)) => Ok(pattern.clone()),
+        _ => Err(()),
+    })
+}
+
+fn cached_item(handle: u64) -> Result<Item, ()> {
+    parsed(handle, NodeKind::Item, |node| match node {
+        Some(Node::Item(item)) => Ok((**item).clone()),
+        _ => Err(()),
+    })
+}
+
+fn cached_modifier(handle: u64) -> Result<staple_syntax::ModifierInvocation, ()> {
+    parsed(handle, NodeKind::Modifier, |node| match node {
+        Some(Node::Modifier(modifier)) => Ok(modifier.clone()),
+        _ => Err(()),
+    })
+}
+
+fn cached_type_body(handle: u64) -> Result<staple_syntax::TypeBody, ()> {
+    parsed(handle, NodeKind::TypeBody, |node| match node {
+        Some(Node::TypeBody(body)) => Ok(body.clone()),
+        _ => Err(()),
+    })
+}
+
 /// The `Expr` alternative a fragment names. `0` is `Ident`, `1` `CallExpr`,
 /// `2` `StringExpr`, `3` `CharExpr`, and `4` `UnstructuredExpr`.
 extern "C" fn classify_expr(syntax: u64) -> u8 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    match staple_syntax::parse_expression_fragment(&syntax, &mut next) {
-        Ok(Expression::Name(_)) => 0,
-        Ok(Expression::Call(_)) => 1,
-        Ok(Expression::String(_)) => 2,
-        Ok(Expression::Char(_)) => 3,
+    parsed(syntax, NodeKind::Expression, |node| match node {
+        Some(Node::Expression(Expression::Name(_))) => 0,
+        Some(Node::Expression(Expression::Call(_))) => 1,
+        Some(Node::Expression(Expression::String(_))) => 2,
+        Some(Node::Expression(Expression::Char(_))) => 3,
         _ => 4,
-    }
+    })
 }
 
 /// The callee and argument of a call expression.
+///
+/// The call's parse moves into its children's cache entries, so reading a
+/// nested call parses the whole expression once. The children's fragments are
+/// kept as the call's parts for [`call_syntax`].
 extern "C" fn call_parts(syntax: u64) -> Pair {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    let Expression::Call(call) =
-        staple_syntax::parse_expression_fragment(&syntax, &mut next)
-            .expect("call_parts requires a call expression")
-    else {
+    parsed(syntax, NodeKind::Expression, |_| ());
+    let node = arena::with_arena(|arena| arena.take_parsed(syntax.into(), NodeKind::Expression));
+    let Some(Node::Expression(Expression::Call(call))) = node else {
         panic!("call_parts requires a call expression");
     };
-    arena::with_arena(|arena| Pair {
-        first: arena.insert_syntax(call.callee.syntax().clone()).into(),
-        second: arena.insert_syntax(call.argument.syntax().clone()).into(),
+    let staple_syntax::CallExpression { callee, argument, .. } = call;
+    let (callee, argument) = (*callee, *argument);
+    arena::with_arena(|arena| {
+        let callee_syntax = callee.syntax().clone();
+        let argument_syntax = argument.syntax().clone();
+        let first = arena.insert_syntax(callee_syntax.clone());
+        let second = arena.insert_syntax(argument_syntax.clone());
+        arena.set_parts(syntax.into(), vec![callee_syntax, argument_syntax]);
+        arena.set_parsed(first, NodeKind::Expression, Some(Node::Expression(callee)));
+        arena.set_parsed(second, NodeKind::Expression, Some(Node::Expression(argument)));
+        Pair {
+            first: first.into(),
+            second: second.into(),
+        }
     })
 }
 
 /// The spelling of an identifier, as a text handle.
 extern "C" fn ident_text(syntax: u64) -> u64 {
+    let handle = syntax;
     let syntax = syntax_value(syntax);
-    let mut next = 0;
-    let text = match staple_syntax::parse_expression_fragment(&syntax, &mut next) {
+    let text = match cached_expression(handle) {
         Ok(Expression::Name(name)) => name.name,
         _ => syntax
             .tokens()
@@ -933,10 +1038,9 @@ extern "C" fn ident_text(syntax: u64) -> u64 {
 
 /// The decoded contents of a string-literal expression, as a text handle.
 extern "C" fn string_expr_text(syntax: u64) -> u64 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
+    let handle = syntax;
     let Expression::String(string) =
-        staple_syntax::parse_expression_fragment(&syntax, &mut next)
+        cached_expression(handle)
             .expect("string_expr_text requires a string expression")
     else {
         panic!("string_expr_text requires a string expression");
@@ -947,10 +1051,9 @@ extern "C" fn string_expr_text(syntax: u64) -> u64 {
 
 /// The code point of a character-literal expression.
 extern "C" fn char_expr_char(syntax: u64) -> u32 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
+    let handle = syntax;
     let Expression::Char(character) =
-        staple_syntax::parse_expression_fragment(&syntax, &mut next)
+        cached_expression(handle)
             .expect("char_expr_char requires a character expression")
     else {
         panic!("char_expr_char requires a character expression");
@@ -1018,13 +1121,25 @@ fn syntax_from_parts(origin: Option<&Syntax>, parts: &[(u64, Option<Vec<SyntaxTo
     })
 }
 
+/// `syntax`'s token range within `origin`'s tokens. A child of the origin is
+/// either a slice of the same token stream, or a node from parsing the origin
+/// as a fragment, whose stream is a copy of the origin's tokens.
+fn range_in(origin: &Syntax, syntax: &Syntax) -> Option<std::ops::Range<usize>> {
+    let range = if origin.shares_token_stream(syntax) {
+        let base = origin.token_range.start;
+        syntax.token_range.start.checked_sub(base)?..syntax.token_range.end.checked_sub(base)?
+    } else if *syntax.tokens == *origin.tokens() {
+        syntax.token_range.clone()
+    } else {
+        return None;
+    };
+    (range.start <= range.end && range.end <= origin.tokens().len()).then_some(range)
+}
+
 /// The tokens between two child syntax slices of the same origin.
 fn between_tokens(origin: &Syntax, left: &Syntax, right: &Syntax) -> Option<Vec<SyntaxToken>> {
-    if !origin.shares_token_stream(left) || !origin.shares_token_stream(right) {
-        return None;
-    }
-    let start = left.token_range.end;
-    let end = right.token_range.start;
+    let start = range_in(origin, left)?.end;
+    let end = range_in(origin, right)?.start;
     (start <= end).then(|| origin.tokens()[start..end].to_vec())
 }
 
@@ -1036,22 +1151,47 @@ extern "C" fn call_syntax(origin: u64, callee: u64, argument: u64) -> u64 {
     let mut origin_syntax = None;
     if origin != 0 {
         let syntax = syntax_value(origin);
-        let mut next = 0;
-        if let Ok(Expression::Call(call)) =
-            staple_syntax::parse_expression_fragment(&syntax, &mut next)
-        {
-            if call.callee.syntax() == &callee_syntax && call.argument.syntax() == &argument_syntax {
+        let parts = arena::with_arena(|arena| arena.parts(origin.into()).map(<[Syntax]>::to_vec))
+            .or_else(|| match cached_expression(origin) {
+                Ok(Expression::Call(call)) => {
+                    Some(vec![call.callee.syntax().clone(), call.argument.syntax().clone()])
+                }
+                _ => None,
+            });
+        if let Some([original_callee, original_argument]) = parts.as_deref() {
+            if original_callee == &callee_syntax && original_argument == &argument_syntax {
                 return origin;
             }
-            let separator = between_tokens(&syntax, call.callee.syntax(), call.argument.syntax());
+            // The argument's leading trivia is part of the original argument,
+            // so it joins the separator when the argument is replaced.
+            let separator = between_tokens(&syntax, original_callee, original_argument).map(
+                |mut separator| {
+                    separator.extend(
+                        original_argument
+                            .tokens()
+                            .iter()
+                            .take_while(|token| token.kind.is_trivia())
+                            .cloned(),
+                    );
+                    separator
+                },
+            );
             return arena::with_arena(|arena| {
                 let mut tokens = Vec::new();
                 append_syntax_tokens(&mut tokens, &callee_syntax, None);
                 match &separator {
-                    Some(separator) => tokens.extend(separator.iter().cloned()),
-                    None => tokens.push(single_space()),
+                    Some(separator) if !separator.is_empty() => {
+                        tokens.extend(separator.iter().cloned());
+                        let mut argument = Vec::new();
+                        append_syntax_tokens(&mut argument, &argument_syntax, None);
+                        let leading = argument.iter().take_while(|token| token.kind.is_trivia()).count();
+                        tokens.extend(argument.into_iter().skip(leading));
+                    }
+                    _ => {
+                        tokens.push(single_space());
+                        append_syntax_tokens(&mut tokens, &argument_syntax, None);
+                    }
                 }
-                append_syntax_tokens(&mut tokens, &argument_syntax, None);
                 let mut result = Syntax::synthetic(
                     SyntaxId(arena.next_syntax_id()),
                     syntax.span.clone(),
@@ -1117,10 +1257,9 @@ extern "C" fn ident_syntax(origin: u64, text: u64) -> u64 {
 extern "C" fn string_expr_syntax(origin: u64, text: u64) -> u64 {
     let text = String::from_utf8(text_bytes(text)).expect("string text is UTF-8");
     let origin_syntax = (origin != 0).then(|| syntax_value(origin));
-    if let Some(syntax) = &origin_syntax {
-        let mut next = 0;
+    if let Some(_) = &origin_syntax {
         if let Ok(Expression::String(string)) =
-            staple_syntax::parse_expression_fragment(syntax, &mut next)
+            cached_expression(origin)
             && string_literal::decode(&string.literal).ok().as_deref() == Some(&text)
         {
             return origin;
@@ -1148,10 +1287,9 @@ extern "C" fn string_expr_syntax(origin: u64, text: u64) -> u64 {
 extern "C" fn char_expr_syntax(origin: u64, value: u32) -> u64 {
     let character = char::from_u32(value).expect("a valid character code point");
     let origin_syntax = (origin != 0).then(|| syntax_value(origin));
-    if let Some(syntax) = &origin_syntax {
-        let mut next = 0;
+    if let Some(_) = &origin_syntax {
         if let Ok(Expression::Char(existing)) =
-            staple_syntax::parse_expression_fragment(syntax, &mut next)
+            cached_expression(origin)
             && string_literal::decode_char(&existing.literal).ok() == Some(character)
         {
             return origin;
@@ -1180,9 +1318,8 @@ extern "C" fn char_expr_syntax(origin: u64, value: u32) -> u64 {
 /// The `Type` alternative a fragment names: `0` `ProductType`, `1`
 /// `UnstructuredType`.
 extern "C" fn classify_type(syntax: u64) -> u8 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    match staple_syntax::parse_type_fragment(&syntax, false, &mut next) {
+    let handle = syntax;
+    match cached_type(handle) {
         Ok(ty) if is_structured_product_type(&ty) => 0,
         _ => 1,
     }
@@ -1190,9 +1327,8 @@ extern "C" fn classify_type(syntax: u64) -> u8 {
 
 /// The number of fields in a structured product type.
 extern "C" fn product_type_field_count(syntax: u64) -> usize {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    let Ok(ty) = staple_syntax::parse_type_fragment(&syntax, false, &mut next) else {
+    let handle = syntax;
+    let Ok(ty) = cached_type(handle) else {
         panic!("product_type_field_count requires a product type");
     };
     let staple_syntax::Type::Product(product) = ty else {
@@ -1203,10 +1339,9 @@ extern "C" fn product_type_field_count(syntax: u64) -> usize {
 
 /// One field of a structured product type, as a fragment.
 extern "C" fn product_type_field(syntax: u64, index: usize) -> u64 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
+    let handle = syntax;
     let Ok(staple_syntax::Type::Product(product)) =
-        staple_syntax::parse_type_fragment(&syntax, false, &mut next)
+        cached_type(handle)
     else {
         panic!("product_type_field requires a product type");
     };
@@ -1354,20 +1489,20 @@ extern "C" fn product_type_syntax(origin: u64, fields: u64) -> u64 {
             .iter()
             .rposition(|token| !token.kind.is_trivia())
             .unwrap_or(first);
-        let original: Vec<&str> = if first < last {
+        let original: Vec<TokenKey<'_>> = if first < last {
             tokens[first + 1..last]
                 .iter()
                 .filter(|token| !token.kind.is_trivia())
-                .map(|token| token.text.as_str())
+                .map(token_key)
                 .collect()
         } else {
             Vec::new()
         };
-        let rebuilt: Vec<&str> = fields_syntax
+        let rebuilt: Vec<TokenKey<'_>> = fields_syntax
             .tokens()
             .iter()
             .filter(|token| !token.kind.is_trivia())
-            .map(|token| token.text.as_str())
+            .map(token_key)
             .collect();
         if original == rebuilt {
             return origin;
@@ -1451,9 +1586,8 @@ extern "C" fn unstructured_modifier_from_syntax(syntax: u64) -> u64 {
 /// The `Pattern` alternative a fragment names: `0` `BindingPattern`, `1`
 /// `NominalPattern`, `2` `UnstructuredPattern`.
 extern "C" fn classify_pattern(syntax: u64) -> u8 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    match staple_syntax::parse_pattern_fragment(&syntax, false, &mut next) {
+    let handle = syntax;
+    match cached_pattern(handle) {
         Ok(staple_syntax::Pattern::Binding(_)) => 0,
         Ok(staple_syntax::Pattern::Nominal(_)) => 1,
         _ => 2,
@@ -1467,10 +1601,10 @@ extern "C" fn binding_pattern_name(syntax: u64) -> u64 {
 
 /// A nominal pattern's name and argument.
 extern "C" fn nominal_pattern_parts(syntax: u64) -> Pair {
+    let handle = syntax;
     let syntax = syntax_value(syntax);
-    let mut next = 0;
     let Ok(staple_syntax::Pattern::Nominal(pattern)) =
-        staple_syntax::parse_pattern_fragment(&syntax, false, &mut next)
+        cached_pattern(handle)
     else {
         panic!("nominal_pattern_parts requires a nominal pattern");
     };
@@ -1514,9 +1648,8 @@ extern "C" fn nominal_pattern_syntax(origin: u64, name: u64, argument: u64) -> u
     let mut origin_syntax = None;
     if origin != 0 {
         let syntax = syntax_value(origin);
-        let mut next = 0;
         if let Ok(staple_syntax::Pattern::Nominal(pattern)) =
-            staple_syntax::parse_pattern_fragment(&syntax, false, &mut next)
+            cached_pattern(origin)
         {
             let origin_name = pattern
                 .argument
@@ -1558,20 +1691,32 @@ extern "C" fn nominal_pattern_syntax(origin: u64, name: u64, argument: u64) -> u
 
 
 /// Rebuilds one sequence cell from its element and spliced rest. The origin is
-/// the suffix starting at this cell; unchanged children return it.
+/// the suffix starting at this cell; unchanged children return it. Without an
+/// origin, or when the origin has no run of trivia between the two, the
+/// element and the rest are separated by a space so their tokens stay apart
+/// when the text is read again.
 extern "C" fn sequence_syntax(origin: u64, first: u64, rest: u64) -> u64 {
     let first_syntax = syntax_value(first);
     let rest_syntax = syntax_value(rest);
-    let origin_syntax = (origin != 0).then(|| syntax_value(origin));
-    let Some(origin_syntax) = origin_syntax else {
-        return syntax_from_parts(None, &[(first, None), (rest, None)]);
+    let spaced = |origin: Option<&Syntax>| {
+        let mut parts = vec![(first, None)];
+        if !first_syntax.tokens().is_empty() && !rest_syntax.tokens().is_empty() {
+            parts.push((0, Some(vec![single_space()])));
+        }
+        parts.push((rest, None));
+        syntax_from_parts(origin, &parts)
     };
+    let Some(origin_syntax) = (origin != 0).then(|| syntax_value(origin)) else {
+        return spaced(None);
+    };
+    let mut joined = first_syntax.tokens().to_vec();
+    joined.extend(rest_syntax.tokens().iter().cloned());
+    if same_tokens(origin_syntax.tokens(), &joined) {
+        return origin;
+    }
     let origin_text = origin_syntax.text();
     let first_text = first_syntax.text();
     let rest_text = rest_syntax.text();
-    if origin_text == format!("{first_text}{rest_text}") {
-        return origin;
-    }
     if origin_text.starts_with(&first_text) && origin_text.ends_with(&rest_text) {
         let first_end = first_text.len();
         let rest_start = origin_text.len() - rest_text.len();
@@ -1585,14 +1730,15 @@ extern "C" fn sequence_syntax(origin: u64, first: u64, rest: u64) -> u64 {
                     separator.push(token.clone());
                 }
             }
-            let mut parts = vec![(first, None), (0, Some(separator)), (rest, None)];
-            if parts[1].1.as_ref().is_some_and(Vec::is_empty) {
-                parts.remove(1);
+            if !separator.is_empty() {
+                return syntax_from_parts(
+                    Some(&origin_syntax),
+                    &[(first, None), (0, Some(separator)), (rest, None)],
+                );
             }
-            return syntax_from_parts(Some(&origin_syntax), &parts);
         }
     }
-    syntax_from_parts(Some(&origin_syntax), &[(first, None), (rest, None)])
+    spaced(Some(&origin_syntax))
 }
 
 
@@ -1601,9 +1747,8 @@ extern "C" fn sequence_syntax(origin: u64, first: u64, rest: u64) -> u64 {
 /// The `Item` alternative a fragment names: `0` `ModifiedItem`, `1`
 /// `TypeDeclarationItem`, `2` `UnstructuredItem`.
 extern "C" fn classify_item(syntax: u64) -> u8 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    match staple_syntax::parse_item_fragment(&syntax, &mut next) {
+    let handle = syntax;
+    match cached_item(handle) {
         Ok(Item::Modified(_)) => 0,
         Ok(Item::TypeDeclaration(_)) => 1,
         _ => 2,
@@ -1612,9 +1757,8 @@ extern "C" fn classify_item(syntax: u64) -> u8 {
 
 /// The modifiers and item of a modified item.
 extern "C" fn modified_item_parts(syntax: u64) -> CountHandle {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    let Ok(Item::Modified(modified)) = staple_syntax::parse_item_fragment(&syntax, &mut next)
+    let handle = syntax;
+    let Ok(Item::Modified(modified)) = cached_item(handle)
     else {
         panic!("modified_item_parts requires a modified item");
     };
@@ -1626,9 +1770,8 @@ extern "C" fn modified_item_parts(syntax: u64) -> CountHandle {
 
 /// One modifier of a modified item.
 extern "C" fn modified_item_modifier(syntax: u64, index: usize) -> u64 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    let Ok(Item::Modified(modified)) = staple_syntax::parse_item_fragment(&syntax, &mut next)
+    let handle = syntax;
+    let Ok(Item::Modified(modified)) = cached_item(handle)
     else {
         panic!("modified_item_modifier requires a modified item");
     };
@@ -1642,10 +1785,9 @@ extern "C" fn modified_item_modifier(syntax: u64, index: usize) -> u64 {
 /// A type declaration's name, declared type, parameter count, body and
 /// resource-dependency count.
 extern "C" fn type_declaration_parts(syntax: u64) -> TypeDeclarationParts {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
+    let handle = syntax;
     let Ok(Item::TypeDeclaration(declaration)) =
-        staple_syntax::parse_item_fragment(&syntax, &mut next)
+        cached_item(handle)
     else {
         panic!("type_declaration_parts requires a type declaration");
     };
@@ -1685,10 +1827,9 @@ extern "C" fn type_declaration_parts(syntax: u64) -> TypeDeclarationParts {
 
 /// A type declaration's name.
 extern "C" fn type_declaration_name(syntax: u64) -> u64 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
+    let handle = syntax;
     let Ok(Item::TypeDeclaration(declaration)) =
-        staple_syntax::parse_item_fragment(&syntax, &mut next)
+        cached_item(handle)
     else {
         panic!("type_declaration_name requires a type declaration");
     };
@@ -1697,10 +1838,9 @@ extern "C" fn type_declaration_name(syntax: u64) -> u64 {
 
 /// A type declaration's declared type, as a fragment.
 extern "C" fn type_declaration_declared_type(syntax: u64) -> u64 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
+    let handle = syntax;
     let Ok(Item::TypeDeclaration(declaration)) =
-        staple_syntax::parse_item_fragment(&syntax, &mut next)
+        cached_item(handle)
     else {
         panic!("type_declaration_declared_type requires a type declaration");
     };
@@ -1723,10 +1863,9 @@ extern "C" fn type_declaration_declared_type(syntax: u64) -> u64 {
 
 /// The number of type parameters of a type declaration.
 extern "C" fn type_declaration_type_parameter_count(syntax: u64) -> usize {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
+    let handle = syntax;
     let Ok(Item::TypeDeclaration(declaration)) =
-        staple_syntax::parse_item_fragment(&syntax, &mut next)
+        cached_item(handle)
     else {
         panic!("type_declaration_type_parameter_count requires a type declaration");
     };
@@ -1735,10 +1874,9 @@ extern "C" fn type_declaration_type_parameter_count(syntax: u64) -> usize {
 
 /// A type declaration's body, or an empty fragment when it has none.
 extern "C" fn type_declaration_body(syntax: u64) -> u64 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
+    let handle = syntax;
     let Ok(Item::TypeDeclaration(declaration)) =
-        staple_syntax::parse_item_fragment(&syntax, &mut next)
+        cached_item(handle)
     else {
         panic!("type_declaration_body requires a type declaration");
     };
@@ -1753,10 +1891,9 @@ extern "C" fn type_declaration_body(syntax: u64) -> u64 {
 
 /// The number of resource dependencies of a type declaration.
 extern "C" fn type_declaration_resource_count(syntax: u64) -> usize {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
+    let handle = syntax;
     let Ok(Item::TypeDeclaration(declaration)) =
-        staple_syntax::parse_item_fragment(&syntax, &mut next)
+        cached_item(handle)
     else {
         panic!("type_declaration_resource_count requires a type declaration");
     };
@@ -1768,10 +1905,9 @@ extern "C" fn type_declaration_resource_count(syntax: u64) -> usize {
 
 /// One type parameter of a type declaration, as its name fragment.
 extern "C" fn type_declaration_type_parameter(syntax: u64, index: usize) -> u64 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
+    let handle = syntax;
     let Ok(Item::TypeDeclaration(declaration)) =
-        staple_syntax::parse_item_fragment(&syntax, &mut next)
+        cached_item(handle)
     else {
         panic!("type_declaration_type_parameter requires a type declaration");
     };
@@ -1790,10 +1926,9 @@ extern "C" fn type_declaration_type_parameter(syntax: u64, index: usize) -> u64 
 
 /// One resource dependency of a type declaration: its type and mutability.
 extern "C" fn type_declaration_resource(syntax: u64, index: usize) -> HandleFlag {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
+    let handle = syntax;
     let Ok(Item::TypeDeclaration(declaration)) =
-        staple_syntax::parse_item_fragment(&syntax, &mut next)
+        cached_item(handle)
     else {
         panic!("type_declaration_resource requires a type declaration");
     };
@@ -1811,9 +1946,8 @@ extern "C" fn type_declaration_resource(syntax: u64, index: usize) -> HandleFlag
 /// The `Modifier` alternative a fragment names: `0` `ModifierCall`, `1`
 /// `UnstructuredModifier`.
 extern "C" fn classify_modifier(syntax: u64) -> u8 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    match staple_syntax::parse_modifier_fragment(&syntax, &mut next) {
+    let handle = syntax;
+    match cached_modifier(handle) {
         Ok(invocation) if invocation.doc.is_none() => 0,
         _ => 1,
     }
@@ -1821,9 +1955,8 @@ extern "C" fn classify_modifier(syntax: u64) -> u8 {
 
 /// A modifier call's namespace count, name and argument (zero when absent).
 extern "C" fn modifier_call_parts(syntax: u64) -> ModifierCallParts {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    let Ok(invocation) = staple_syntax::parse_modifier_fragment(&syntax, &mut next) else {
+    let handle = syntax;
+    let Ok(invocation) = cached_modifier(handle) else {
         panic!("modifier_call_parts requires a modifier");
     };
     let tokens = invocation.syntax.tokens();
@@ -1871,9 +2004,8 @@ extern "C" fn modifier_call_parts(syntax: u64) -> ModifierCallParts {
 
 /// The number of namespace segments of a modifier call.
 extern "C" fn modifier_call_namespace_count(syntax: u64) -> usize {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    let Ok(invocation) = staple_syntax::parse_modifier_fragment(&syntax, &mut next) else {
+    let handle = syntax;
+    let Ok(invocation) = cached_modifier(handle) else {
         panic!("modifier_call_namespace_count requires a modifier");
     };
     invocation
@@ -1884,9 +2016,8 @@ extern "C" fn modifier_call_namespace_count(syntax: u64) -> usize {
 
 /// The name of a modifier call.
 extern "C" fn modifier_call_name(syntax: u64) -> u64 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    let Ok(invocation) = staple_syntax::parse_modifier_fragment(&syntax, &mut next) else {
+    let handle = syntax;
+    let Ok(invocation) = cached_modifier(handle) else {
         panic!("modifier_call_name requires a modifier");
     };
     let tokens = invocation.syntax.tokens();
@@ -1914,9 +2045,8 @@ extern "C" fn modifier_call_name(syntax: u64) -> u64 {
 
 /// The argument of a modifier call, or an empty fragment when absent.
 extern "C" fn modifier_call_argument(syntax: u64) -> u64 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    let Ok(invocation) = staple_syntax::parse_modifier_fragment(&syntax, &mut next) else {
+    let handle = syntax;
+    let Ok(invocation) = cached_modifier(handle) else {
         panic!("modifier_call_argument requires a modifier");
     };
     arena::with_arena(|arena| match &invocation.argument {
@@ -1943,9 +2073,8 @@ extern "C" fn modifier_call_argument(syntax: u64) -> u64 {
 
 /// One namespace segment of a modifier call.
 extern "C" fn modifier_call_namespace(syntax: u64, index: usize) -> u64 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    let Ok(invocation) = staple_syntax::parse_modifier_fragment(&syntax, &mut next) else {
+    let handle = syntax;
+    let Ok(invocation) = cached_modifier(handle) else {
         panic!("modifier_call_namespace requires a modifier");
     };
     let tokens = invocation.syntax.tokens();
@@ -1972,9 +2101,8 @@ extern "C" fn modifier_call_namespace(syntax: u64, index: usize) -> u64 {
 /// The `TypeBody` alternative a fragment names: `0` alias, `1` wrapper, `2`
 /// from, `3` opaque.
 extern "C" fn classify_type_body(syntax: u64) -> u8 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    match staple_syntax::parse_type_body_fragment(&syntax, &mut next) {
+    let handle = syntax;
+    match cached_type_body(handle) {
         Ok(body) => match body.kind {
             staple_syntax::TypeBodyKind::Alias => 0,
             staple_syntax::TypeBodyKind::Wrapper => 1,
@@ -1988,9 +2116,8 @@ extern "C" fn classify_type_body(syntax: u64) -> u8 {
 /// A type body's representation visibility and underlying type (zero when
 /// absent).
 extern "C" fn type_body_parts(syntax: u64) -> Pair {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    let Ok(body) = staple_syntax::parse_type_body_fragment(&syntax, &mut next) else {
+    let handle = syntax;
+    let Ok(body) = cached_type_body(handle) else {
         panic!("type_body_parts requires a type body");
     };
     arena::with_arena(|arena| {
@@ -2043,17 +2170,17 @@ extern "C" fn delimiter_syntax(origin: u64, kind: u8, contents: u64) -> u64 {
             .rposition(|token| !token.kind.is_trivia())
             .unwrap_or(first);
         let inner = syntax_slice(syntax, first + 1, last);
-        let original: Vec<&str> = inner
+        let original: Vec<TokenKey<'_>> = inner
             .tokens()
             .iter()
             .filter(|token| !token.kind.is_trivia())
-            .map(|token| token.text.as_str())
+            .map(token_key)
             .collect();
-        let rebuilt: Vec<&str> = contents_syntax
+        let rebuilt: Vec<TokenKey<'_>> = contents_syntax
             .tokens()
             .iter()
             .filter(|token| !token.kind.is_trivia())
-            .map(|token| token.text.as_str())
+            .map(token_key)
             .collect();
         if original == rebuilt {
             return origin;
@@ -2098,9 +2225,8 @@ extern "C" fn delimiter_syntax(origin: u64, kind: u8, contents: u64) -> u64 {
 /// The visibility kind a fragment names: `0` private, `1` package, `2`
 /// public.
 extern "C" fn visibility_kind(syntax: u64) -> u8 {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    match staple_syntax::parse_expression_fragment(&syntax, &mut next) {
+    let handle = syntax;
+    match cached_expression(handle) {
         Ok(Expression::VisibilityArgument(visibility)) => match visibility.kind {
             staple_syntax::VisibilityKind::Private => 0,
             staple_syntax::VisibilityKind::Package => 1,
@@ -2145,16 +2271,16 @@ fn literal_tokens(text: &str) -> Vec<SyntaxToken> {
 /// the rebuilt text is unchanged.
 fn finish_syntax(origin: u64, origin_syntax: Option<&Syntax>, tokens: Vec<SyntaxToken>) -> u64 {
     if let Some(syntax) = origin_syntax {
-        let rebuilt: Vec<&str> = tokens
+        let rebuilt: Vec<TokenKey<'_>> = tokens
             .iter()
             .filter(|token| !token.kind.is_trivia())
-            .map(|token| token.text.as_str())
+            .map(token_key)
             .collect();
-        let original: Vec<&str> = syntax
+        let original: Vec<TokenKey<'_>> = syntax
             .tokens()
             .iter()
             .filter(|token| !token.kind.is_trivia())
-            .map(|token| token.text.as_str())
+            .map(token_key)
             .collect();
         if original == rebuilt {
             return origin;
@@ -2190,6 +2316,14 @@ extern "C" fn modified_item_syntax(origin: u64, modifiers: u64, item: u64) -> u6
 }
 
 /// Rebuilds a type declaration item.
+///
+/// With an origin, each part is written back into the origin's tokens in place:
+/// an unchanged part keeps its tokens, and everything the Staple value does not
+/// model (visibility, bounds, defaults, comments and spacing) is kept as written.
+/// The type parameter list is kept whole while its names are the same, and
+/// rewritten as plain names when they change. `declared_type` is not written:
+/// it is the name applied to the parameters, which the name and parameters
+/// already say.
 extern "C" fn type_declaration_syntax(
     origin: u64,
     name: u64,
@@ -2198,41 +2332,212 @@ extern "C" fn type_declaration_syntax(
     body: u64,
     resources: u64,
 ) -> u64 {
+    let _ = declared_type;
     let name = syntax_value(name);
     let type_parameters = syntax_value(type_parameters);
     let body = syntax_value(body);
     let resources = syntax_value(resources);
-    let origin_syntax = (origin != 0).then(|| syntax_value(origin));
+    if origin != 0
+        && let Some(rebuilt) =
+            type_declaration_in_origin(origin, &name, &type_parameters, &body, &resources)
+    {
+        return rebuilt;
+    }
     let mut tokens = literal_tokens("type ");
     append_syntax_tokens(&mut tokens, &name, None);
     if !type_parameters.tokens().is_empty() {
-        tokens.push(SyntaxToken {
-            kind: TokenKind::Operator,
-            text: "<".to_owned(),
-            span: 0..0,
-            origin: None,
-            hygiene: None,
-        });
+        tokens.extend(literal_tokens("<"));
         append_syntax_tokens(&mut tokens, &type_parameters, None);
-        tokens.push(SyntaxToken {
-            kind: TokenKind::Operator,
-            text: ">".to_owned(),
-            span: 0..0,
-            origin: None,
-            hygiene: None,
-        });
+        tokens.extend(literal_tokens(">"));
+    }
+    if !resources.tokens().is_empty() {
+        tokens.extend(literal_tokens(" with {"));
+        append_syntax_tokens(&mut tokens, &resources, None);
+        tokens.extend(literal_tokens("}"));
     }
     if !body.tokens().is_empty() {
         tokens.push(single_space());
         append_syntax_tokens(&mut tokens, &body, None);
     }
-    if !resources.tokens().is_empty() {
-        tokens.extend(literal_tokens(" with { "));
-        append_syntax_tokens(&mut tokens, &resources, None);
-        tokens.extend(literal_tokens(" }"));
+    finish_syntax(0, None, tokens)
+}
+
+/// One edit to an origin's tokens: replace `start..end` with `tokens`.
+struct TokenEdit {
+    start: usize,
+    end: usize,
+    tokens: Vec<SyntaxToken>,
+}
+
+
+/// The start of the trivia run that ends at `index`.
+fn trivia_start(tokens: &[SyntaxToken], index: usize) -> usize {
+    let mut start = index;
+    while start > 0 && tokens[start - 1].kind.is_trivia() {
+        start -= 1;
     }
-    let _ = declared_type;
-    finish_syntax(origin, origin_syntax.as_ref(), tokens)
+    start
+}
+
+fn next_significant(tokens: &[SyntaxToken], from: usize) -> Option<usize> {
+    (from..tokens.len()).find(|&index| !tokens[index].kind.is_trivia())
+}
+
+fn type_declaration_in_origin(
+    origin: u64,
+    name: &Syntax,
+    type_parameters: &Syntax,
+    body: &Syntax,
+    resources: &Syntax,
+) -> Option<u64> {
+    let Ok(Item::TypeDeclaration(declaration)) = cached_item(origin) else {
+        return None;
+    };
+    let origin_syntax = syntax_value(origin);
+    let tokens = origin_syntax.tokens();
+    let mut edits = Vec::new();
+
+    let name_range = range_in(&origin_syntax, &declaration.name_syntax)?;
+    if !same_tokens(&tokens[name_range.clone()], name.tokens()) {
+        edits.push(TokenEdit {
+            start: name_range.start,
+            end: name_range.end,
+            tokens: name.tokens().to_vec(),
+        });
+    }
+
+    // The parameter list follows the name, after an effect parameter if any.
+    let mut after_name = name_range.end;
+    if let Some(open) = next_significant(tokens, after_name)
+        && tokens[open].kind == TokenKind::LBrace
+        && declaration.type_parameters.iter().any(|parameter| {
+            matches!(parameter, staple_syntax::TypeParameterPattern::Effect(_))
+        })
+    {
+        after_name = crate::macro_expand::syntax_ops::matching_close(tokens, open)? + 1;
+    }
+    let angle = next_significant(tokens, after_name)
+        .filter(|&open| tokens[open].kind == TokenKind::Operator && tokens[open].text == "<")
+        .filter(|_| !declaration.type_parameters.is_empty());
+    let parameter_range = match angle {
+        Some(open) => {
+            let close = crate::macro_expand::syntax_ops::matching_angle_close(tokens, open)?;
+            Some(open..close + 1)
+        }
+        None => None,
+    };
+    let original_names: Vec<String> = declaration
+        .type_parameters
+        .iter()
+        .map(|parameter| parameter.names().first().copied().unwrap_or("").to_owned())
+        .collect();
+    let given_names: Vec<&str> = type_parameters
+        .tokens()
+        .iter()
+        .filter(|token| !token.kind.is_trivia() && token.kind != TokenKind::Comma)
+        .map(|token| token.text.as_str())
+        .collect();
+    if original_names != given_names {
+        let mut written = Vec::new();
+        if !type_parameters.tokens().is_empty() {
+            written.extend(literal_tokens("<"));
+            append_syntax_tokens(&mut written, type_parameters, None);
+            written.extend(literal_tokens(">"));
+        }
+        let (start, end) = match &parameter_range {
+            Some(range) => (range.start, range.end),
+            None => (after_name, after_name),
+        };
+        edits.push(TokenEdit { start, end, tokens: written });
+    }
+
+    match &declaration.resource_dependencies {
+        Some(effects) => {
+            let mut range = range_in(&origin_syntax, &effects.syntax)?;
+            let open = (range.start..range.end).find(|&index| tokens[index].kind == TokenKind::LBrace)?;
+            let close = crate::macro_expand::syntax_ops::matching_close(tokens, open)?;
+            if !same_tokens(&tokens[open + 1..close], resources.tokens()) {
+                if let Some(keyword) = tokens[..range.start]
+                    .iter()
+                    .rposition(|token| !token.kind.is_trivia())
+                    .filter(|&index| tokens[index].text == "with")
+                {
+                    range.start = range.start.min(keyword);
+                }
+                if resources.tokens().is_empty() {
+                    edits.push(TokenEdit {
+                        start: trivia_start(tokens, range.start),
+                        end: range.end.max(close + 1),
+                        tokens: Vec::new(),
+                    });
+                } else {
+                    edits.push(TokenEdit {
+                        start: open + 1,
+                        end: close,
+                        tokens: resources.tokens().to_vec(),
+                    });
+                }
+            }
+        }
+        None if !resources.tokens().is_empty() => {
+            let at = parameter_range.as_ref().map_or(after_name, |range| range.end);
+            let mut written = literal_tokens(" with {");
+            append_syntax_tokens(&mut written, resources, None);
+            written.extend(literal_tokens("}"));
+            edits.push(TokenEdit { start: at, end: at, tokens: written });
+        }
+        None => {}
+    }
+
+    match &declaration.body {
+        Some(original) => {
+            let range = range_in(&origin_syntax, &original.syntax)?;
+            if !same_tokens(&tokens[range.clone()], body.tokens()) {
+                let start = if body.tokens().is_empty() {
+                    trivia_start(tokens, range.start)
+                } else {
+                    range.start
+                };
+                edits.push(TokenEdit { start, end: range.end, tokens: body.tokens().to_vec() });
+            }
+        }
+        None if !body.tokens().is_empty() => {
+            let at = tokens
+                .iter()
+                .rposition(|token| !token.kind.is_trivia())
+                .map_or(tokens.len(), |index| index + 1);
+            let mut written = vec![single_space()];
+            append_syntax_tokens(&mut written, body, None);
+            edits.push(TokenEdit { start: at, end: at, tokens: written });
+        }
+        None => {}
+    }
+
+    if edits.is_empty() {
+        return Some(origin);
+    }
+    edits.sort_by_key(|edit| (edit.start, edit.end));
+    let mut rebuilt = Vec::new();
+    let mut cursor = 0;
+    for mut edit in edits {
+        if edit.start < cursor {
+            return None;
+        }
+        if edit.start < edit.end && !edit.tokens.is_empty() {
+            // A part's leading trivia separates it from what comes before, so
+            // the origin's stays and the replacement's is dropped.
+            while edit.start < edit.end && tokens[edit.start].kind.is_trivia() {
+                edit.start += 1;
+            }
+            let leading = edit.tokens.iter().take_while(|token| token.kind.is_trivia()).count();
+            edit.tokens.drain(..leading);
+        }
+        rebuilt.extend(tokens[cursor..edit.start].iter().cloned());
+        rebuilt.extend(edit.tokens);
+        cursor = edit.end;
+    }
+    rebuilt.extend(tokens[cursor..].iter().cloned());
+    Some(finish_syntax(origin, Some(&origin_syntax), rebuilt))
 }
 
 /// Rebuilds a modifier call.
@@ -2646,6 +2951,51 @@ mod tests {
             .iter()
             .map(|token| token.text.as_str())
             .collect()
+    }
+
+    #[test]
+    fn a_rebuild_with_the_same_text_but_other_hygiene_is_new() {
+        with_syntax("x", |origin| {
+            let mut candidate = syntax_value(origin);
+            let mut tokens = candidate.tokens().to_vec();
+            tokens[0].hygiene = Some((3, 7));
+            candidate.tokens = Arc::from(tokens);
+            candidate.token_range = 0..candidate.tokens.len();
+            let candidate = with_arena(|arena| u64::from(arena.insert_syntax(candidate)));
+            assert_eq!(syntax_or_origin(origin, candidate), candidate);
+            let respelled = with_arena(|arena| {
+                let mut next = 100;
+                let syntax = crate::macro_expand::syntax_ops::syntax_from_text(" x ", &mut next);
+                u64::from(arena.insert_syntax(syntax))
+            });
+            assert_eq!(syntax_or_origin(origin, respelled), origin);
+        });
+    }
+
+    #[test]
+    fn nested_calls_are_parsed_once() {
+        with_syntax("f a b c", |syntax| {
+            assert_eq!(classify_expr(syntax), 1);
+            let parts = call_parts(syntax);
+            assert!(with_arena(|arena| {
+                arena.parsed(parts.first.into(), NodeKind::Expression).is_some()
+            }));
+            assert_eq!(classify_expr(parts.first), 1);
+            assert_eq!(call_syntax(syntax, parts.first, parts.second), syntax);
+        });
+    }
+
+    #[test]
+    fn sequence_cells_without_an_origin_are_spaced() {
+        reset();
+        let mut next = 0;
+        let (a, b) = with_arena(|arena| {
+            let a = crate::macro_expand::syntax_ops::syntax_from_text("a", &mut next);
+            let b = crate::macro_expand::syntax_ops::syntax_from_text("b", &mut next);
+            (u64::from(arena.insert_syntax(a)), u64::from(arena.insert_syntax(b)))
+        });
+        assert_eq!(syntax_text_of(sequence_syntax(0, a, b)), "a b");
+        assert_eq!(syntax_text_of(sequence_syntax(0, a, empty_syntax())), "a");
     }
 
     #[test]

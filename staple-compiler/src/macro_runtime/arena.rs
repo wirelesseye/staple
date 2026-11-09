@@ -8,12 +8,13 @@
 //! Quotation templates are not per-call state and live outside this arena.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use staple_syntax::{Expression, Item, ModifierInvocation, Pattern, Syntax, Type, TypeBody};
 
-/// A parsed AST node the runtime keeps alongside its source fragment.
+/// A fragment parsed as one grammar category. The arena keeps it beside the
+/// fragment's handle, so asking several questions of one fragment parses it once.
 #[derive(Clone)]
-#[allow(dead_code)] // Parsed-node handles arrive with the node views.
 pub(crate) enum Node {
     Expression(Expression),
     Type(Type),
@@ -21,6 +22,18 @@ pub(crate) enum Node {
     Item(Box<Item>),
     Modifier(ModifierInvocation),
     TypeBody(TypeBody),
+}
+
+/// The grammar category a fragment was parsed as. One fragment can be read as
+/// more than one category, so the parse cache is keyed by both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum NodeKind {
+    Expression,
+    Type,
+    Pattern,
+    Item,
+    Modifier,
+    TypeBody,
 }
 
 /// One value a handle can name.
@@ -31,7 +44,6 @@ enum Entry {
     /// A cursor into a syntax fragment. A stream is immutable: copying its
     /// handle forks it, and advancing allocates a new stream.
     Stream { fragment: u64, offset: usize },
-    Node(Node),
 }
 
 /// A handle into the arena. Zero means "none"; every other value names an
@@ -77,6 +89,12 @@ pub(crate) struct Arena {
     entries: Vec<Entry>,
     generation: u32,
     next_syntax_id: usize,
+    /// Parses of syntax handles; `None` records that the fragment is not of
+    /// that category.
+    parsed: HashMap<(u64, NodeKind), Option<Node>>,
+    /// The child fragments a part accessor handed out for a handle, so a
+    /// rebuild compares against them without parsing the origin again.
+    parts: HashMap<u64, Vec<Syntax>>,
 }
 
 impl Arena {
@@ -87,6 +105,8 @@ impl Arena {
     /// Ends the current call and makes every outstanding handle stale.
     pub(crate) fn reset(&mut self) {
         self.entries.clear();
+        self.parsed.clear();
+        self.parts.clear();
         self.generation = self.generation.wrapping_add(1);
     }
 
@@ -103,11 +123,6 @@ impl Arena {
             fragment: fragment.0,
             offset,
         })
-    }
-
-    #[allow(dead_code)] // Parsed-node handles arrive with the node views.
-    pub(crate) fn insert_node(&mut self, node: Node) -> Handle {
-        self.insert(Entry::Node(node))
     }
 
     fn insert(&mut self, entry: Entry) -> Handle {
@@ -144,12 +159,30 @@ impl Arena {
         }
     }
 
-    #[allow(dead_code)] // Parsed-node handles arrive with the node views.
-    pub(crate) fn node(&self, handle: Handle) -> Option<&Node> {
-        match self.entry(handle)? {
-            Entry::Node(node) => Some(node),
-            _ => None,
-        }
+    /// The cached parse of a syntax handle as `kind`: `None` when it has not
+    /// been parsed, `Some(None)` when it is not of that category.
+    pub(crate) fn parsed(&self, handle: Handle, kind: NodeKind) -> Option<Option<&Node>> {
+        self.parsed
+            .get(&(handle.0, kind))
+            .map(Option::as_ref)
+    }
+
+    pub(crate) fn set_parsed(&mut self, handle: Handle, kind: NodeKind, node: Option<Node>) {
+        self.parsed.insert((handle.0, kind), node);
+    }
+
+    /// Removes and returns a cached parse, so its children can be moved out
+    /// rather than copied.
+    pub(crate) fn take_parsed(&mut self, handle: Handle, kind: NodeKind) -> Option<Node> {
+        self.parsed.remove(&(handle.0, kind)).flatten()
+    }
+
+    pub(crate) fn set_parts(&mut self, handle: Handle, parts: Vec<Syntax>) {
+        self.parts.insert(handle.0, parts);
+    }
+
+    pub(crate) fn parts(&self, handle: Handle) -> Option<&[Syntax]> {
+        self.parts.get(&handle.0).map(Vec::as_slice)
     }
 
     /// The next syntax id for a fragment the host lexes itself.
@@ -234,14 +267,28 @@ mod tests {
     }
 
     #[test]
-    fn parsed_nodes_round_trip() {
+    fn parses_are_cached_per_kind_and_cleared_by_reset() {
         let mut arena = Arena::new();
         let mut next = 0;
         let source = fragment("one", &mut next);
         let expression = staple_syntax::parse_expression_fragment(&source, &mut next).unwrap();
-        let handle = arena.insert_node(Node::Expression(expression));
-        assert!(matches!(arena.node(handle), Some(Node::Expression(_))));
-        assert_eq!(arena.syntax(handle), None);
+        let handle = arena.insert_syntax(source.clone());
+        assert!(arena.parsed(handle, NodeKind::Expression).is_none());
+        arena.set_parsed(handle, NodeKind::Expression, Some(Node::Expression(expression)));
+        arena.set_parsed(handle, NodeKind::Item, None);
+        assert!(matches!(
+            arena.parsed(handle, NodeKind::Expression),
+            Some(Some(Node::Expression(_)))
+        ));
+        assert!(matches!(arena.parsed(handle, NodeKind::Item), Some(None)));
+        arena.set_parts(handle, vec![source]);
+        assert_eq!(arena.parts(handle).map(<[Syntax]>::len), Some(1));
+        assert!(arena.take_parsed(handle, NodeKind::Expression).is_some());
+        assert!(arena.parsed(handle, NodeKind::Expression).is_none());
+        arena.set_parsed(handle, NodeKind::Type, None);
+        arena.reset();
+        assert!(arena.parsed(handle, NodeKind::Type).is_none());
+        assert!(arena.parts(handle).is_none());
     }
 
     #[test]
@@ -250,7 +297,6 @@ mod tests {
         assert_eq!(arena.syntax(Handle::NONE), None);
         assert_eq!(arena.text(Handle::NONE), None);
         assert_eq!(arena.stream(Handle::NONE), None);
-        assert!(arena.node(Handle::NONE).is_none());
     }
 
     #[test]

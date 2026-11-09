@@ -470,7 +470,7 @@ def from_iterator_one: () -> I32 = () => {
     let seed: Sequence<Ident> = Sequence (first: a, rest: tail)
     let copy = Clone.clone seed
     let sequence = FromIterator.insert_all.<Sequence<Ident>, Ident, Sequence<Ident>> seed copy
-    text_is (Splice.splice sequence) "aa"
+    text_is (Splice.splice sequence) "a a"
 }
 def constructed_sequence: () -> I32 = () => {
     let a: Ident<String> = Ident "a"
@@ -478,7 +478,7 @@ def constructed_sequence: () -> I32 = () => {
     let tail: Sequence<Ident<String>> = Sequence ()
     let middle: Sequence<Ident<String>> = Sequence (first: b, rest: tail)
     let sequence: Sequence<Ident<String>> = Sequence (first: a, rest: middle)
-    text_is (Splice.splice sequence) "ab"
+    text_is (Splice.splice sequence) "a b"
 }
 def same_expr: () -> I32 = () => {
     let syntax = syntax_from_string "f x"
@@ -631,6 +631,84 @@ def punctuation: () -> I32 = () => {
                 ("same_separated", 1),
                 ("constructed_separated", 1),
                 ("punctuation", 1),
+            ],
+        );
+    }
+
+    /// Parsed items and modifiers carry more than their Staple values model.
+    /// An unchanged one comes back as its own handle, and a changed one keeps
+    /// what it doesn't model.
+    #[test]
+    fn rebuilt_items_keep_what_their_values_do_not_model() {
+        // The shared parser recurses on a long application, so a debug-build
+        // test thread overflows somewhere below 300 arguments before any view
+        // code runs.
+        let chain = format!("f{}", " a".repeat(150));
+        run_probes(
+            &format!(
+                r#"
+def text_is: (Syntax; String) -> I32 = (syntax; expected) => match (string_from_syntax syntax == expected) {{
+    True => 1,
+    False => 0,
+}}
+def same_item_text: String -> I32 = text => {{
+    let syntax = syntax_from_string text
+    match (same_syntax (Splice.splice (item_from_syntax syntax)) syntax) {{ True => 1, False => 0 }}
+}}
+def declaration_of: String -> TypeDeclarationItem = text => match (item_from_syntax (syntax_from_string text)) {{
+    node: TypeDeclarationItem => node,
+    _ => panic "not a type declaration",
+}}
+def generic_declaration: () -> I32 = () => same_item_text "type Pair<A, B> = (A, B)"
+def public_declaration: () -> I32 = () => same_item_text "pub type Foo = I32"
+def resource_declaration: () -> I32 = () => same_item_text "type A with {{B, C}}"
+def bounded_declaration: () -> I32 = () => same_item_text "type Box<T where Copy T> = T"
+def namespaced_modifier: () -> I32 = () => {{
+    let syntax = syntax_from_string "@std.annotation.sized_opaque"
+    match (same_syntax (Splice.splice (modifier_from_syntax syntax)) syntax) {{ True => 1, False => 0 }}
+}}
+def renamed_declaration: () -> I32 = () => {{
+    let mut declaration = declaration_of "pub type Box<T where Copy T> = T"
+    declaration.name = Ident "Bin"
+    text_is (Splice.splice declaration) "pub type Bin<T where Copy T> = T"
+}}
+def renamed_parameters: () -> I32 = () => {{
+    let mut declaration = declaration_of "type Pair<A, B> = (A, B)"
+    let tail: Sequence<Ident<String>> = Sequence ()
+    let second: Sequence<Ident<String>> = Sequence (first: Ident "D", rest: tail)
+    declaration.type_parameters = Sequence (first: Ident "C", rest: second)
+    text_is (Splice.splice declaration) "type Pair<C, D> = (A, B)"
+}}
+def dropped_resources: () -> I32 = () => {{
+    let mut declaration = declaration_of "pub type A with {{B, C}}"
+    declaration.resource_dependencies = Sequence ()
+    text_is (Splice.splice declaration) "pub type A"
+}}
+def constructed_generic_declaration: () -> I32 = () => {{
+    let tail: Sequence<Ident<String>> = Sequence ()
+    let second: Sequence<Ident<String>> = Sequence (first: Ident "B", rest: tail)
+    let parameters: Sequence<Ident<String>> = Sequence (first: Ident "A", rest: second)
+    let resources: Sequence<ResourceDependency> = Sequence ()
+    let value = TypeDeclarationItem (name: Ident "Pair", declared_type: type_from_syntax (syntax_from_string "Pair<A, B>"), type_parameters: parameters, body: None, resource_dependencies: resources)
+    text_is (Splice.splice value) "type Pair<A, B>"
+}}
+def long_call_chain: () -> I32 = () => {{
+    let syntax = syntax_from_string "{chain}"
+    match (same_syntax (Splice.splice (expr_from_syntax syntax)) syntax) {{ True => 1, False => 0 }}
+}}
+"#
+            ),
+            &[
+                ("generic_declaration", 1),
+                ("public_declaration", 1),
+                ("resource_declaration", 1),
+                ("bounded_declaration", 1),
+                ("namespaced_modifier", 1),
+                ("renamed_declaration", 1),
+                ("renamed_parameters", 1),
+                ("dropped_resources", 1),
+                ("constructed_generic_declaration", 1),
+                ("long_call_chain", 1),
             ],
         );
     }

@@ -653,13 +653,37 @@ pub def separated_elements_syntax = <Element, Separator where Splice Element, Sp
     }
 }
 
+/// The spliced elements of a borrowed sequence, with `separator` between them.
+/// Like the `Sequence` splice, it walks a copy of the top cell and moves down
+/// the original's cells, reading what it moves.
 @compiled_only
-impl<Element, Separator where Splice Element, Splice Separator, Clone Element> Splice Separated<Element, Separator> {
+def join_spliced = <T where Splice T> (elements: Sequence<T>; separator: Syntax) => Syntax :: {
+    let mut joined = __empty_syntax ()
+    let mut first: U8 = 1
+    let mut cursor: Sequence<T> = __with_origin (elements, __origin elements)
+    loop {
+        match cursor {
+            Sequence () => { break },
+            Sequence (element, rest) => {
+                joined = __join_separated_syntax ...(joined; Splice.splice element; separator; first)
+                first = 0
+                cursor = rest
+            },
+        }
+    }
+    joined
+}
+
+@compiled_only
+impl<Element, Separator where Splice Element, Splice Separator> Splice Separated<Element, Separator> {
     splice = value => {
-        let origin = __origin value
-        let elements = Clone.clone value.elements
-        let joined = separated_elements_syntax ...(elements; value.separator; value.trailing)
-        __syntax_or_origin ...(origin; joined)
+        let separator = Splice.splice value.separator
+        let joined = join_spliced ...(value.elements; separator)
+        let written = match value.trailing {
+            True => __append_separator_syntax ...(joined; separator),
+            False => joined,
+        }
+        __syntax_or_origin ...(__origin value; written)
     }
 }
 
@@ -1075,7 +1099,8 @@ impl Splice ModifierCall {
             None => __empty_syntax (),
             Some argument => Splice.splice argument,
         }
-        __modifier_call_syntax ...(__origin value; Splice.splice value.namespace; Splice.splice value.name; argument)
+        let namespace = join_spliced ...(value.namespace; syntax_from_string ".")
+        __modifier_call_syntax ...(__origin value; namespace; Splice.splice value.name; argument)
     }
 }
 
@@ -1104,7 +1129,9 @@ impl Splice TypeDeclarationItem {
             None => __empty_syntax (),
             Some body => Splice.splice body,
         }
-        __type_declaration_syntax ...(__origin value; Splice.splice value.name; Splice.splice value.declared_type; Splice.splice value.type_parameters; body; Splice.splice value.resource_dependencies)
+        let type_parameters = join_spliced ...(value.type_parameters; syntax_from_string ", ")
+        let resources = join_spliced ...(value.resource_dependencies; syntax_from_string ", ")
+        __type_declaration_syntax ...(__origin value; Splice.splice value.name; Splice.splice value.declared_type; type_parameters; body; resources)
     }
 }
 
