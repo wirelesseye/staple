@@ -528,7 +528,7 @@ Update this section as you work (see "Rules for the implementor").
 | 3. Ownership of syntax | done | `24dd4cf`, `fcfa409` | `Sequence<T>` and `Separated<T, S>` are always non-`Copy`. `Clone` is a deep copy in compiled code and the interpreter's is an identity, using `@compiled_only` and `@interpreted_only`. Handle types copy through `__clone_syntax`, which compiled code rejects for anything else. `duplicate_modifier` is gone. The check treats a splice as a read only for the real `std.syntax` `Splice`. See Findings for the suite and corpus results. |
 | 4. Arena and core intrinsics | done | `b1207bf8` | `macro_runtime/arena.rs` keeps syntax fragments, text, parse streams and parsed nodes for one call; handles carry a generation and `reset` makes earlier handles stale. `macro_expand/syntax_ops.rs` owns the shared slicing, position, delimiter, hygiene and token-filling helpers, plus text lexing. Streams and text run through host intrinsics, with two-body `is_empty` and `error_at` where the ABI differs. See Findings. |
 | 5. Node views and rebuilding | done | `e9f38d44`, `ead6c8a8` | Non-generic classification, part and rebuild intrinsics cover expressions, types, patterns, items, modifiers, type bodies, type parameters, delimiters, visibility and punctuation. `@compiled_only` `from_syntax` functions attach origins, and compiled `Splice` impls return the origin for unchanged nodes. Sequence construction is Staple code, compiled `Splice Separated` is implemented, constructed non-empty products rebuild, and the harness asserts same-handle round trips. `__ident_spelling` is an inline intrinsic that reads an identifier box as a `String`. See Findings. |
-| 6. `Parse` impls | not started | | |
+| 6. `Parse` impls | done | `1416a3f9` | The interpreter and compiled code share one leaf parser, so grammar and diagnostics agree. Compiled leaves and groups return an arena result handle; `Ident<S>` reads `S`'s spelling with a compiler intrinsic. The check gets fixed-arity product impls while the interpreter keeps the variadic ones, and `is_variadic_parse_impl` is gone. The harness checks 18 parse behaviors, including exact error messages. See Findings. |
 | 7. Plain sequence splices | not started | | |
 | 8. Quotations | not started | | |
 | 9. Arguments and results | not started | | |
@@ -748,6 +748,110 @@ A review found that the first version rebuilt common parsed nodes wrongly even w
 The shared parser in `staple-syntax` recurses on a long application: in a debug-build test thread with a 2 MiB stack it overflows on `f a a …` somewhere below 300 arguments, before any view code runs. That limit is the parser's and is not addressed here. Constructed identifiers still carry no hygiene; Decision 11 gives them the call context's, which arrives with the call context.
 
 Verification of the fixes: `cargo test -p staple-compiler --no-fail-fast` passes every suite, including the library tests (559 passed, 0 failed, 3 ignored) and the compiler tests (855 passed, 0 failed). The expansion comparison against the end of the first task 5 commit matches all 232 inputs, so the interpreter's output did not change. `scripts/check-macro-closures.py --mode all --timeout 600` reports 232 inputs, 0 with diagnostics, 0 distinct messages.
+
+### `Parse` impls (task 6)
+
+The interpreter and the syntax runtime now read leaf nodes through the same
+parser. `syntax_ops::parse_leaf` maps a `LeafKind` and an optional identifier
+spelling to one of the structured nodes, `parse_group` reads a delimited group,
+and `parse_syntax_node_atom` chooses the `SyntaxNode` alternative. The
+interpreter's `__parse_primitive` path builds its `Value` from those results,
+and the host maps the same kinds from the numbers the compiled `std.syntax`
+implementations pass. The accepted grammar and the
+`expected <type>[: <detail>] at <position>` messages therefore have one source.
+
+The compiled implementations are:
+
+- `@compiled_only` impls for every leaf category: expressions and their
+  structured alternatives, types, patterns, items, modifiers, type bodies,
+  type parameters, punctuation, visibility, and `SyntaxNode`.
+- `@interpreted_only` copies of the old `__parse_primitive` impls remain for
+  the interpreter. Delimiter impls also have two bodies: interpreted ones keep
+  `__parenthesized_group` and `__parenthesized`, while compiled ones use
+  `__parse_group` and construct the node with `__with_origin`.
+- `Parse Syntax`, `Parse ()`, `Parse Option<T>`, `Parse Sequence<T>`, and
+  `Parse Separated<T, Comma>` are shared, because they only call other `Parse`
+  members and the two-body `is_empty`/`error_at`/sequence helpers.
+- The interpreter keeps the variadic product impls as
+  `@interpreted_only`. The check gets fixed-arity slotted and comma impls for
+  arity 2 through 8, `@compiled_only`. `is_variadic_parse_impl` is removed, so
+  the check sees every compiled `Parse` impl. A product with more than 8
+  elements has no implementation; the corpus and the standard library use at
+  most 3 (`Separated<(Ident; Equals; Expr), Comma>`). Comma products keep the
+  old optional-separator behavior: a missing separator is reported as the next
+  element when the stream has ended, and an adjacent element as a missing
+  comma.
+- `Ident<S>` uses `__ident_type_spelling: <S> () -> String`, a compiler
+  intrinsic that returns the literal spelling once `S` is specialized and an
+  empty string for `String`. `__ident_spelling_value: <S> String -> S` types
+  the parsed spelling; the box already stores a `String` for every `S`. The
+  Phase 2 rejection ("trait implementation target must be fully concrete") no
+  longer reproduces now that the syntax data types are ordinary boxed types,
+  so the impl checks as written.
+
+**Host result shape.** A parse returns one arena result handle, not a
+multi-field product. A host function returning a five-`U64` product crashed
+the JIT with `SIGBUS` whenever it was called from a trait method, even when the
+host returned a constant; the same shape is not called elsewhere from a trait
+method. `__parse_result_status`, `_tag`, `_syntax`, `_stream`, `_next`, and
+`_error` read the outcome. Each is a scalar return, so the ABI carries only
+scalars and handles. Phase 4 should either keep this shape for parse entry
+points or fix the product-return ABI before sharing more multi-field results.
+
+**Compiled impl placement.** The compiled `Parse` impls are placed before the
+shared items in the check module instead of being appended with the other
+compiled items. Appending them made `staple check` on a standard library file
+take about 104 s instead of 7 s: the shared generic `Parse Option`,
+`Sequence` and `Separated` impls and the product impls were then consulted
+before the concrete leaf impls, and obligations with inferred arguments
+revisited the standard library's own functions. Putting the concrete compiled
+impls first brings a file to about 29 s; the remaining difference is the extra
+impls themselves. This is an ordering sensitivity in trait obligation
+resolution, not a Parse-specific cost, and Phase 4's whole-library check should
+keep the concrete impls first.
+
+The compiler-intrinsic declarations must stay visible to the normal resolver,
+so `is_compile_time_parse_item` now keeps a `staple-intrinsic` block in
+`std.syntax` when none of its bindings is a macro-runtime intrinsic. Blocks
+whose bindings the host implements are still dropped with the other
+compile-time items.
+
+Tests: `macro_runtime::harness::tests::parse_implementations_run_in_compiled_code`
+runs 18 probes under the harness. It covers expression greediness, `Option`
+backtracking, explicit fork and commit, a failed parse leaving the stream
+alone, delimiter parsing, `Sequence`, `Separated` with a trailing comma, comma
+products, `SyntaxNode` atoms, accepted and rejected `Ident<"else">` spellings,
+and the exact `expected Equals ...` and `expected Ident<"else"> ...` messages.
+The interpreter's `parse_*` compiler tests cover the same behaviors and are
+unchanged, which is the comparison for this task. The full suite and the
+closure/corpus checks are recorded below.
+
+Cost: with the concrete compiled impls first, the parse test with 18 probes
+takes about 51 s at the default collection threshold, close to the 50 s of a
+plain `run_probes` test at the end of task 5. Appending the compiled impls had
+made the same parse test take about 220 s. This is the check program's cost,
+not a per-call cost.
+
+Verification:
+
+- `cargo test -p staple-compiler --test compiler`: 855 passed, 0 failed.
+  `cargo test -p staple-compiler --test compiler parse_`: 26 passed.
+- `cargo test -p staple-compiler --lib macro_runtime::harness -- --test-threads=1`:
+  17 passed, 0 failed, 1 ignored (846.39 s for 18 tests).
+- `cargo test -p staple-compiler --lib -- --skip macro_runtime::harness --test-threads=2`:
+  543 passed, 0 failed, 2 ignored (1631.53 s). The other integration suites
+  (`allocation` through `unique_gc`) also pass.
+- `scripts/check-macro-closures.py --mode all --timeout 600`: 232 inputs, 0
+  with diagnostics, 0 distinct messages. The run used one worker at a time so
+  a single check's peak memory could not crowd out the machine; worker count
+  does not change which inputs are checked.
+- Expansion comparison against the end of task 5: 231 of 232 inputs match;
+  the only difference is `stdlib/syntax.sta`, which gained the declarations
+  and compiled impls. Against the start of the phase: 224 of 232 match, and
+  the eight differences are the standard-library files whose source changed in
+  tasks 2, 3 and 6 (`annotation`, `cmp`, `default`, `flow`, `fmt`, `hash`,
+  `syntax`, `typegroup`). The interpreter's expansion of corpus, examples and
+  fixtures is unchanged.
 
 ### Boxed representation (task 2)
 
