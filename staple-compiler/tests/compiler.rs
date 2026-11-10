@@ -8667,7 +8667,7 @@ fn diagnoses_invalid_item_macro_outputs_and_placements() {
     for (source, expected) in [
         (
             "macro invalid: Expr -> Item = value => parse_quote { $value }\ninvalid 1\n",
-            "quotation cannot be interpreted as Item",
+            "`$value` on its own line is an item splice and requires `Item` or `Sequence<Item>`",
         ),
         (
             "macro emit = value: Expr => parse_quote { let generated = $value }\nlet result = emit 1\n",
@@ -9874,22 +9874,15 @@ fn diagnoses_recursive_macro_expansion() {
 }
 
 #[test]
-fn rejects_repeated_splices_with_a_specific_diagnostic() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let program = ProgramLoader::new()
-        .with_standard_library_root(root.join("stdlib"))
-        .load_source(
-            &with_syntax_imports("macro many = values => parse_quote { $values... }\nmany 1\n"),
-            root,
-        )
-        .expect("source should parse");
-    let diagnostics = NameResolver::new()
-        .resolve_program(program)
-        .expect_err_diagnostics("repeated splice should be reserved");
+fn rejects_splice_ellipsis_without_a_spread_operand() {
+    let diagnostics =
+        resolve_result("macro many: Expr -> Expr = values => parse_quote { $values... }\nmany 1\n")
+            .expect_err_diagnostics("a spread needs an operand");
+    assert!(!diagnostics.is_empty());
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message == "repeated splices are not supported yet")
+            .all(|d| !d.message.contains("repeated splice"))
     );
 }
 
@@ -20263,7 +20256,8 @@ fn compile_time_sequence_collect() {
         use std.syntax.*
         macro emit = xs: Sequence<Ident> => {
             let names: Sequence<Ident> = xs |> map (x => x) |> collect
-            parse_quote { ($names...,) }
+            let product = Parenthesized (Separated (separator: Comma, elements: names, trailing: True))
+            parse_quote { $product }
         }
         let a = 1
         let b = 2
@@ -21095,5 +21089,187 @@ let original: String = "text"
 def changed: I32 -> I32 = number => number
 let picked: I32 = pick (original 1)
 "#,
+    );
+}
+
+#[test]
+fn plain_item_splices_preserve_trees_and_visibility() {
+    type_check(
+        r#"
+        use std.syntax.*
+        macro emit: Expr -> Sequence<Item> = _: Expr => {
+            let items: Sequence<Item> = parse_quote { type First = I32 }
+            parse_quote {
+                type Before = I32
+                $items
+            }
+        }
+        macro surround: Expr -> Sequence<Item> = _: Expr => {
+            let item: Item = parse_quote { type Second = I32 }
+            let empty: Sequence<Item> = Sequence ()
+            parse_quote {
+                $empty
+                $item
+                type After = I32
+            }
+        }
+        macro singleton: Expr -> Sequence<Item> = _: Expr => {
+            let items: Sequence<Item> = parse_quote { type Third = I32 }
+            parse_quote { $items }
+        }
+        macro empty: Expr -> Sequence<Item> = _: Expr => {
+            let items: Sequence<Item> = Sequence ()
+            parse_quote { $items }
+        }
+        macro visible: (Visibility; Ident) -> Item = (visibility; name) => parse_quote {
+            $visibility type $name = I32
+        }
+        macro @identity: move Item -> Item = move item => item
+        macro modified: Expr -> Item = _: Expr => {
+            let item: Item = parse_quote { type Modified = I32 }
+            parse_quote { @identity $item }
+        }
+        modified ()
+        emit ()
+        surround ()
+        singleton ()
+        empty ()
+        visible pub Fourth
+        let a: First = 1
+        let b: Second = 2
+        let c: Third = 3
+        let d: Fourth = 4
+        let e: Modified = 5
+    "#,
+    );
+}
+
+#[test]
+fn plain_splices_construct_comma_products_and_type_parameters() {
+    type_check(
+        r#"
+        use std.syntax.*
+        macro product: Parenthesized<Separated<Expr, Comma>> -> Expr = input => match input {
+            Parenthesized (Separated (separator, elements, trailing)) => {
+                let value = Parenthesized (Separated (separator: separator, elements: elements, trailing: trailing))
+                parse_quote { $value }
+            },
+        }
+        let empty: () = product ()
+        let scalar: I32 = product (1)
+        let singleton: (I32,) = product (1,)
+        let pair: (I32, I32) = product (1, 2)
+        let trailing: (I32, I32) = product (1, 2,)
+        macro declare: Expr -> Item = _: Expr => {
+            let a = Ident "A"
+            let b = Ident "B"
+            let names = Sequence (first: a, rest: Sequence (first: b, rest: Sequence ()))
+            let parameters = Separated (separator: Comma, elements: names, trailing: False)
+            parse_quote { type Pair<$parameters> wrap (A, B) }
+        }
+        macro declare_one: Expr -> Item = _: Expr => {
+            let parameter = Ident "T"
+            parse_quote { type Single<$parameter> wrap T }
+        }
+        declare ()
+        declare_one ()
+        let p: Pair<I32, I32> = Pair (1, 2)
+        let s: Single<I32> = Single 1
+    "#,
+    );
+    let diagnostics = resolve_result(r#"
+        macro invalid: Expr -> Expr = _: Expr => {
+            let elements: Sequence<Expr> = Sequence ()
+            let value = Parenthesized (Separated (separator: Comma, elements: elements, trailing: True))
+            parse_quote { $value }
+        }
+        invalid ()
+    "#).expect_err_diagnostics("an empty list with a trailing comma writes invalid `(,)` syntax");
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("an empty `Separated` value cannot have a trailing separator")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn plain_splices_leave_ellipsis_for_spread_calls() {
+    type_check(
+        r#"
+        use std.syntax.*
+        def f: (I32; I32; I32) -> I32 = (a; b; c) => a + b + c
+        macro spliced: Expr -> Expr = _: Expr => {
+            let a: Expr = parse_quote { 1 }
+            let b: Expr = parse_quote { (2, 3) }
+            parse_quote { f $a ...$b }
+        }
+        macro named: Expr -> Expr = _: Expr => {
+            let a: Expr = parse_quote { 1 }
+            parse_quote { { let pair = (2, 3); f $a ...pair } }
+        }
+        let first: I32 = spliced ()
+        let second: I32 = named ()
+    "#,
+    );
+}
+
+#[test]
+fn plain_splices_report_unsupported_interpreter_positions() {
+    for (result, element, body, position) in [
+        ("Expr", "Expr", "($values)", "expression"),
+        ("Type", "Type", "$values", "type"),
+        ("Pattern", "Pattern", "$values", "pattern"),
+    ] {
+        let source = format!(
+            "macro bad: Expr -> Expr = _: Expr => {{ let values: Sequence<{element}> = Sequence (); let result: {result} = parse_quote {{ {body} }}; parse_quote {{ 1 }} }}\nbad ()\n"
+        );
+        let diagnostics =
+            resolve_result(&source).expect_err_diagnostics("bare list splice should fail");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains(&format!("in {position} position"))),
+            "{diagnostics:?}"
+        );
+    }
+    let diagnostics = resolve_result(r#"
+        macro @identity: move Item -> Item = move item => item
+        macro bad: Expr -> Item = _: Expr => {
+            let items: Sequence<Item> = parse_quote { type Example }
+            parse_quote { @identity $items }
+        }
+        bad ()
+    "#).expect_err_diagnostics("a nested modifier target must be one item");
+    assert!(diagnostics.iter().any(|d| d.message.contains("in nested item position")), "{diagnostics:?}");
+    let diagnostics = resolve_result(
+        r#"
+        macro bad: Visibility -> Sequence<Item> = visibility => parse_quote {
+            $visibility
+            type Example
+        }
+        bad pub
+    "#,
+    )
+    .expect_err_diagnostics("visibility on its own line is an item splice");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("on its own line is an item splice")),
+        "{diagnostics:?}"
+    );
+    let diagnostics = resolve_result(
+        r#"
+        macro bad: Expr -> Sequence<Item> = _: Expr => {
+            let values = Sequence (first: 1, rest: Sequence ())
+            parse_quote { $values }
+        }
+        bad ()
+    "#,
+    )
+    .expect_err_diagnostics("a sequence must contain items");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("non-item value")),
+        "{diagnostics:?}"
     );
 }

@@ -319,8 +319,24 @@ Opaque fragments may contain empty input, punctuation, comments, or temporarily
 malformed grammar and may be spliced into a later `parse_quote` for contextual
 interpretation. A raw `Syntax` result entering ordinary expression or item
 source is reparsed for that placement. `$name` splices a captured value while
-preserving its hygiene. `$items...` splices a `Sequence<Item>` in an item-list
-position.
+preserving its hygiene. A `Sequence` splices its elements side by side, with
+spaces between them; a `Separated` writes its separators. An empty sequence
+inserts nothing. For a comma product, construct
+`Parenthesized (Separated (separator: Comma, elements: parts, trailing: False))`
+and splice that whole value with `$name`.
+
+In an item list, `$name` ending its line, or followed by `}` or the end of the
+list, is an item splice: an `Item` inserts one item and a `Sequence<Item>`
+inserts its elements. With a declaration after it on the same line, it is a
+visibility splice, as in `$visibility type Name`.
+
+The interpreter supports bare lists in item lists and type-parameter lists
+only. A type-parameter splice takes an `Ident` or a
+`Separated<Ident<String>, Comma>`. Bare `Sequence` and `Separated` values in
+other tree positions report an interpreter error naming the position; compiled
+macros can splice their tokens there. Delimited values such as the product
+above work in the interpreter too. `...` after a splice is an ordinary spread
+token and requires an operand; `$name...` alone is an error.
 
 ##### Parsing syntax with `Parse`
 
@@ -682,7 +698,7 @@ are not automatically applied after the call has produced its result.
 
 Quotations may contain multiple items and return `Sequence<Item>`. Such a
 sequence can replace a top-level macro invocation or be inserted into an inline
-module with `$items...`. Identifier syntax may be spliced into generated module
+module with `$items`. Identifier syntax may be spliced into generated module
 and type names. `parse_quote` type quotations are selected contextually by an
 annotated compile-time binding or `Type :: expression`:
 
@@ -732,10 +748,10 @@ evaluation steps. Syntax
 values are compile-time-only. This release supports `parse_quote`-driven
 contextual expression, type, pattern, item, and item-sequence quotation;
 `quote`'s opaque fragments; structured identifier and call expressions;
-scalar splices; repeated item and product-expression splices; streaming `Parse`
+scalar splices; plain item-list splices and delimited comma lists; streaming `Parse`
 of syntax; and ordinary trait and companion calls, including iterator pipes.
 It also supports opaque item input through modifier macros and atomic visibility
-syntax. General repeated type and pattern splices,
+syntax. Bare lists in type and pattern positions,
 function-style item input, item inspection, and structured access to other
 expression forms remain future work.
 
@@ -869,7 +885,7 @@ quotation is a call:
 - `parse_quote { … }` is `Parse.parse_quote (id, splices)`, which parses the
   fragment as the `T` the context expects, through `Parse.parse_all`. A type
   with no `Parse` implementation cannot be the result of a `parse_quote`.
-- `$name` and `$name...` are `Splice.splice name`, one per distinct name in
+- `$name` is `Splice.splice name`, one per distinct name in
   a quotation, in order of first use. `Splice` is declared in `std.syntax`
   and implemented for every syntax type and for `Sequence<T>` when `T`
   implements it, so splicing a value that is not syntax is a type error.

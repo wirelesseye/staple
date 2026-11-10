@@ -163,7 +163,6 @@ pub enum QuoteTemplate {
 pub struct SpliceExpression {
     pub syntax: Syntax,
     pub name: String,
-    pub repeated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

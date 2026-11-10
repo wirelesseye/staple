@@ -153,9 +153,6 @@ impl fmt::Display for Type {
             Self::Array(array) => write!(formatter, "({} ^ {})", array.element, array.count),
             Self::Splice(splice) => {
                 write!(formatter, "${}", splice.name)?;
-                if splice.repeated {
-                    formatter.write_str("...")?;
-                }
                 Ok(())
             }
         }

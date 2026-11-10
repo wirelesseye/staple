@@ -231,7 +231,7 @@ impl QuoteLowering<'_> {
             }
             Item::MacroDeclaration(_)
             | Item::VisibilityMacroInvocation(_)
-            | Item::RepeatedItemSplice(_)
+            | Item::ItemSplice(_)
             | Item::Continue(_)
             | Item::TypeDeclaration(_)
             | Item::UseDeclaration(_) => {}

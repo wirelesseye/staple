@@ -47,7 +47,7 @@ pub(super) fn rewrite_items(items: &mut [Item], references: &References) {
             | Item::Modified(_)
             | Item::VisibilityMacroInvocation(_)
             | Item::VisibilitySplice(_)
-            | Item::RepeatedItemSplice(_) => {}
+            | Item::ItemSplice(_) => {}
         }
     }
 }

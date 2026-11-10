@@ -441,7 +441,11 @@ fn lexes_number_literals_radixes_separators_and_suffixes() {
     }
 
     for source in [
-        "pair.0", "x.0.1", "1.field", "1._x", "pair.0\nx.0.1\n1.field\n1._x\n",
+        "pair.0",
+        "x.0.1",
+        "1.field",
+        "1._x",
+        "pair.0\nx.0.1\n1.field\n1._x\n",
     ] {
         let text = staple_syntax::lex(source)
             .iter()
@@ -1493,23 +1497,26 @@ fn rejects_curried_macro_parameter_chains() {
 }
 
 #[test]
-fn reserves_repeated_splice_syntax() {
-    let root = parse("macro many = values => quote { $values... }\n")
-        .expect("reserved repeated splice should parse");
+fn plain_item_splices_follow_line_boundaries() {
+    let root = parse("macro many = values => quote { companion Example {\n$items\n$visibility type Visible\n$last } }\n").unwrap();
     let Item::MacroDeclaration(declaration) = &root.items[0] else {
-        panic!("expected macro declaration");
+        panic!("macro")
     };
     let Some(Expression::Function(function)) = &declaration.value else {
-        panic!("expected macro function");
+        panic!("function")
     };
     let Expression::Quote(quote) = function.body.as_ref() else {
-        panic!("expected quote");
+        panic!("quote")
     };
-    assert!(matches!(
-        &quote.template,
-        staple_syntax::QuoteTemplate::Expression(template)
-            if matches!(template.as_ref(), Expression::Splice(splice) if splice.repeated)
-    ));
+    let staple_syntax::QuoteTemplate::Item(item) = &quote.template else {
+        panic!("item")
+    };
+    let Item::Submodule(module) = item.as_ref() else {
+        panic!("companion")
+    };
+    assert!(matches!(module.module.items[0], Item::ItemSplice(_)));
+    assert!(matches!(module.module.items[1], Item::VisibilitySplice(_)));
+    assert!(matches!(module.module.items[2], Item::ItemSplice(_)));
 }
 
 #[test]
@@ -4681,4 +4688,48 @@ fn parses_macro_modifier_vocabulary() {
     assert!(
         parse("macro emit modifiers (@traced, @traced): Expr -> Expr = value => value").is_err()
     );
+}
+
+#[test]
+fn ellipsis_after_a_splice_begins_an_ordinary_spread() {
+    for operand in ["$b", "pair"] {
+        let root = parse(&format!(
+            "macro spread = a => quote {{ f $a ...{operand} }}\n"
+        ))
+        .unwrap();
+        let Item::MacroDeclaration(declaration) = &root.items[0] else {
+            panic!("macro")
+        };
+        let Some(Expression::Function(function)) = &declaration.value else {
+            panic!("function")
+        };
+        let Expression::Quote(quote) = function.body.as_ref() else {
+            panic!("quote")
+        };
+        let staple_syntax::QuoteTemplate::Expression(expression) = &quote.template else {
+            panic!("expression")
+        };
+        let Expression::Call(call) = expression.as_ref() else {
+            panic!("spread call")
+        };
+        assert!(call.spread);
+        let Expression::Call(callee) = call.callee.as_ref() else {
+            panic!("first call")
+        };
+        assert!(matches!(callee.argument.as_ref(), Expression::Splice(value) if value.name == "a"));
+    }
+    let root = parse("macro incomplete = a => quote { $a... }\n").unwrap();
+    let Item::MacroDeclaration(declaration) = &root.items[0] else {
+        panic!("macro")
+    };
+    let Some(Expression::Function(function)) = &declaration.value else {
+        panic!("function")
+    };
+    let Expression::Quote(quote) = function.body.as_ref() else {
+        panic!("quote")
+    };
+    assert!(matches!(quote.template, staple_syntax::QuoteTemplate::Raw));
+    let error = staple_syntax::parse_expression_template_fragment(&quote.contents, &mut 1000)
+        .expect_err("a spread needs an operand");
+    assert!(error.message.contains("expression"), "{error:?}");
 }

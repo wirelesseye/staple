@@ -97,7 +97,7 @@ let (before, after) = replace_argument (increment 1) 41
 let constructed: I32 = call_increment 41
 
 // A top-level macro can generate several items in source order. Sequence<Item>
-// is also the type used by repeated `$items...` splices inside item lists.
+// is also the type used by plain `$items` splices inside item lists.
 macro generate_pair: Expr -> Sequence<Item> = value => parse_quote {
     let first_generated: I32 = $value
     let second_generated: I32 = first_generated + 1

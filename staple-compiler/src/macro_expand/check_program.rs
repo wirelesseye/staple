@@ -873,8 +873,8 @@ mod tests {
             // A modifier macro, a refinement pattern, and a splice of a sequence.
             "macro @mark: move Item -> Sequence<Item> = move item => Sequence (first: item, rest: Sequence ())\n",
             "macro words: (Expr; Sequence<Expr>) -> Expr = (first; rest) => match first {\n",
-            "    else_word: Ident<\"else\"> => parse_quote { ($rest...) },\n",
-            "    other => parse_quote { ($other, $rest...) },\n",
+            "    else_word: Ident<\"else\"> => { let value = Parenthesized (Separated (separator: Comma, elements: Clone.clone rest, trailing: False)); parse_quote { $value } },\n",
+            "    other => { let elements = Sequence (first: Clone.clone other, rest: Clone.clone rest); let value = Parenthesized (Separated (separator: Comma, elements: elements, trailing: False)); parse_quote { $value } },\n",
             "}\n",
             "def main = () => 0\n",
         ));
@@ -1163,6 +1163,27 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.contains("an `@` pattern requires a Copy value")),
             "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn a_sequence_of_non_syntax_values_cannot_be_spliced() {
+        let diagnostics = check_all(concat!(
+            "macro bad: Expr -> Syntax = _: Expr => {\n",
+            "    let values: Sequence<I32> = Sequence (first: 1, rest: Sequence ())\n",
+            "    quote { $values }\n",
+            "}\n",
+        ));
+        assert!(
+            !diagnostics.is_empty(),
+            "non-syntax elements must have no Splice impl"
+        );
+        assert!(
+            diagnostics.iter().any(|message| {
+                message.contains("no trait implementation or matching bound is available")
+            }),
+            "{}",
+            diagnostics.join("\n")
         );
     }
 

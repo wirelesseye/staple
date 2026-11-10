@@ -234,7 +234,7 @@ impl DeclarationCollector<'_> {
                 self.expression(&value.expression)
             }
             Item::VisibilitySplice(value) => self.item(&value.item),
-            Item::RepeatedItemSplice(_) => {}
+            Item::ItemSplice(_) => {}
             Item::Submodule(value) => {
                 if let Some(id) = self
                     .resolved
@@ -583,7 +583,7 @@ impl Collector<'_> {
                 self.expression(&value.expression)
             }
             Item::VisibilitySplice(value) => self.item(&value.item),
-            Item::RepeatedItemSplice(_) => {}
+            Item::ItemSplice(_) => {}
             Item::UseDeclaration(value) => self.use_declaration(value),
             Item::Submodule(value) => {
                 if let Some(id) = self

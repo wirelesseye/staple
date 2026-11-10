@@ -236,7 +236,7 @@ pub macro typegroup
                 let group_item = typegroup_apply_modifiers (modifiers, base)
                 let companion_item: Item = parse_quote {
                     companion $group {
-                        $items...
+                        $items
                     }
                 }
                 Sequence (
@@ -262,7 +262,7 @@ pub macro typegroup
                 let group_item = typegroup_apply_modifiers (modifiers, base)
                 let companion_item: Item = parse_quote {
                     companion $group {
-                        $items...
+                        $items
                     }
                 }
                 Sequence (

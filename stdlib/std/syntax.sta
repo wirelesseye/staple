@@ -616,7 +616,7 @@ impl<C> Splice Bracketed<C> { splice = value => __splice_node.<Bracketed<C>> val
 impl<C> Splice Braced<C> { splice = value => __splice_node.<Braced<C>> value }
 @interpreted_only
 impl<C> Splice Angled<C> { splice = value => __splice_node.<Angled<C>> value }
-// A sequence splices as its elements in order, which is what `$name...` needs.
+// A sequence splices its elements side by side with `$name`.
 // The bound is what makes splicing a sequence of anything else a type error.
 @interpreted_only
 impl<T where Splice T> Splice Sequence<T> {

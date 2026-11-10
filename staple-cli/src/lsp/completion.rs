@@ -863,7 +863,7 @@ impl Collector<'_> {
             | Item::Break(_)
             | Item::Continue(_)
             | Item::Expression(_)) => self.block_item(item, module_index),
-            Item::RepeatedItemSplice(_) | Item::UseDeclaration(_) | Item::TypeDeclaration(_) => {}
+            Item::ItemSplice(_) | Item::UseDeclaration(_) | Item::TypeDeclaration(_) => {}
         }
     }
 

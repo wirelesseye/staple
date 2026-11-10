@@ -418,12 +418,24 @@ impl DelimitedSyntaxValue {
                     DelimitedValueContents::Sequence(values) => {
                         values.into_iter().map(|value| (None, value)).collect()
                     }
-                    DelimitedValueContents::Separated { elements, .. } => {
-                        return separated_parenthesized(self.syntax, elements, &mut generated);
+                    DelimitedValueContents::Separated {
+                        elements, trailing, ..
+                    } => {
+                        return separated_parenthesized(
+                            self.syntax,
+                            elements,
+                            trailing,
+                            &mut generated,
+                        );
                     }
                     DelimitedValueContents::Product(values) => {
                         let elements = values.into_iter().map(|(_, value)| value).collect();
-                        return separated_parenthesized(self.syntax, elements, &mut generated);
+                        return separated_parenthesized(
+                            self.syntax,
+                            elements,
+                            true,
+                            &mut generated,
+                        );
                     }
                 };
                 let mut expressions = values
@@ -830,9 +842,10 @@ fn set_named_product_field(values: &mut Vec<(Option<String>, Value)>, name: Stri
 fn separated_parenthesized(
     syntax: Syntax,
     elements: Vec<Value>,
+    trailing: bool,
     generated: &mut impl Iterator<Item = Syntax>,
 ) -> Option<Expression> {
-    let elements = elements
+    let mut elements = elements
         .into_iter()
         .map(|value| match value {
             Value::Syntax(value) => Some(staple_syntax::ProductElement {
@@ -846,6 +859,9 @@ fn separated_parenthesized(
             _ => None,
         })
         .collect::<Option<Vec<_>>>()?;
+    if elements.len() == 1 && !trailing {
+        return Some(elements.remove(0).value);
+    }
     Some(Expression::Product(staple_syntax::ProductExpression {
         slotted: false,
         syntax,
@@ -1566,7 +1582,7 @@ fn desugar_item(item: &mut Item, next_syntax_id: &mut usize, ops_module: StdModu
                 desugar_item(item, next_syntax_id, ops_module);
             }
         }
-        Item::RepeatedItemSplice(_)
+        Item::ItemSplice(_)
         | Item::Continue(_)
         | Item::TypeDeclaration(_)
         | Item::UseDeclaration(_) => {}
@@ -4885,10 +4901,10 @@ impl MacroExpander {
             ));
             return;
         }
-        if let Item::RepeatedItemSplice(splice) = item {
+        if let Item::ItemSplice(splice) = item {
             self.diagnostics.push(Diagnostic::new(
                 splice.syntax.span.clone(),
-                "repeated item splices are only available while evaluating `quote`",
+                "item splices are only available while evaluating `quote`",
             ));
             return;
         }
@@ -4983,7 +4999,7 @@ impl MacroExpander {
             | Item::Modified(_)
             | Item::VisibilityMacroInvocation(_)
             | Item::VisibilitySplice(_)
-            | Item::RepeatedItemSplice(_)
+            | Item::ItemSplice(_)
             | Item::Submodule(_)
             | Item::UseDeclaration(_)
             | Item::TypeDeclaration(_) => {}
@@ -9654,8 +9670,13 @@ impl MacroExpander {
                 }
                 alpha_rename_item(&mut item, mark);
                 freshen_item(self, &mut item, module, mark);
-                substitute_item(&mut item, environment, &mut self.diagnostics)?;
-                Some(SyntaxValue::Item(Box::new(item)))
+                let mut items = vec![item];
+                substitute_item_list(&mut items, environment, &mut self.diagnostics)?;
+                if items.len() == 1 {
+                    Some(SyntaxValue::Item(Box::new(items.remove(0))))
+                } else {
+                    Some(SyntaxValue::Items(items))
+                }
             }
             staple_syntax::QuoteTemplate::Items(templates) => {
                 let mut items = templates.clone();
@@ -9868,7 +9889,43 @@ impl MacroExpander {
 
         let mark = self.next_mark;
         self.next_mark += 1;
-        let value = self.instantiate_quote(module, &quote.template, environment, mark)?;
+        // A lone splice parses as an expression before the item-list grammar
+        // gets a turn. Its contextual category decides whether it inserts items.
+        let contextual_template;
+        let template = if matches!(expected, MetaType::Item)
+            || matches!(expected, MetaType::Sequence(element) if **element == MetaType::Item)
+        {
+            if let staple_syntax::QuoteTemplate::Expression(expression) = &quote.template
+                && let Expression::Splice(splice) = expression.as_ref()
+            {
+                contextual_template = staple_syntax::QuoteTemplate::Item(Box::new(Item::ItemSplice(
+                    staple_syntax::ItemSplice {
+                        syntax: splice.syntax.clone(),
+                        name: splice.name.clone(),
+                    },
+                )));
+                &contextual_template
+            } else {
+                &quote.template
+            }
+        } else if *expected == MetaType::Expr
+            && matches!(quote.template, staple_syntax::QuoteTemplate::Raw)
+        {
+            let expression = staple_syntax::parse_expression_template_fragment(
+                &quote.contents,
+                &mut self.next_syntax_id,
+            )
+            .map_err(|error| {
+                self.diagnostics
+                    .push(Diagnostic::new(quote.contents.span.clone(), error.message));
+            })
+            .ok()?;
+            contextual_template = staple_syntax::QuoteTemplate::Expression(Box::new(expression));
+            &contextual_template
+        } else {
+            &quote.template
+        };
+        let value = self.instantiate_quote(module, template, environment, mark)?;
         let valid = match expected {
             MetaType::SyntaxNode => !matches!(value, SyntaxValue::Items(_) | SyntaxValue::Raw(_)),
             MetaType::Expr => value.to_expression().is_some(),
@@ -10009,12 +10066,7 @@ impl MacroExpander {
                 cursor += 1;
                 continue;
             }
-            let mut end = name_at + 1;
-            let repeated =
-                end < input.len() && input[end].kind == staple_syntax::TokenKind::Ellipsis;
-            if repeated {
-                end += 1;
-            }
+            let end = name_at + 1;
             let name = &input[name_at].text;
             let Some(value) = environment.get(name).map(EnvironmentBinding::get) else {
                 self.diagnostics.push(Diagnostic::new(
@@ -10024,18 +10076,18 @@ impl MacroExpander {
                 return None;
             };
             match value {
-                Value::Syntax(SyntaxValue::Items(items)) if repeated => {
+                Value::Syntax(SyntaxValue::Items(items)) => {
                     for item in items {
                         let syntax = item_syntax(&item);
                         append_syntax_tokens(&mut output, syntax, root_hygiene(syntax));
                     }
                 }
-                Value::Sequence(values) if repeated => {
+                Value::Sequence(values) => {
                     for value in values {
                         let Value::Syntax(value) = value else {
                             self.diagnostics.push(Diagnostic::new(
                                 contents.span.clone(),
-                                format!("repeated splice `${name}...` requires `Sequence<Item>`"),
+                                format!("splice `${name}` requires syntax elements"),
                             ));
                             return None;
                         };
@@ -10043,7 +10095,7 @@ impl MacroExpander {
                         append_syntax_tokens(&mut output, syntax, splice_hygiene(&value, syntax));
                     }
                 }
-                Value::Syntax(value) if !repeated => {
+                Value::Syntax(value) => {
                     let Some(syntax) = value.syntax() else {
                         self.diagnostics.push(Diagnostic::new(
                             contents.span.clone(),
@@ -10056,11 +10108,7 @@ impl MacroExpander {
                 _ => {
                     self.diagnostics.push(Diagnostic::new(
                         contents.span.clone(),
-                        if repeated {
-                            format!("repeated splice `${name}...` requires `Sequence<Item>`")
-                        } else {
-                            format!("splice `${name}` does not contain syntax")
-                        },
+                        format!("splice `${name}` does not contain syntax"),
                     ));
                     return None;
                 }
@@ -15257,14 +15305,15 @@ fn substitute_splices(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Expression> {
     if let Expression::Splice(splice) = expression {
-        if splice.repeated {
-            diagnostics.push(Diagnostic::new(
-                splice.syntax.span.clone(),
-                "repeated splices are not supported yet",
-            ));
-            return None;
-        }
         return match environment.get(&splice.name).map(EnvironmentBinding::get) {
+            Some(Value::Sequence(_) | Value::Separated { .. }) => {
+                diagnostics.push(Diagnostic::new(
+                    splice.syntax.span.clone(),
+                    format!("interpreter cannot splice a Sequence or Separated in expression position: `${}`", splice.name),
+                ));
+                None
+            }
+
             Some(Value::Syntax(expression)) => match expression.clone().into_expression() {
                 Some(expression) => Some(expression),
                 None => {
@@ -15327,14 +15376,10 @@ fn substitute_splices(
             }
         }
         Expression::Loop(loop_) => {
-            for item in &mut loop_.body.items {
-                substitute_block_item(item, environment, diagnostics)?;
-            }
+            substitute_item_list(&mut loop_.body.items, environment, diagnostics)?;
         }
         Expression::Coro(coro) => {
-            for item in &mut coro.body.items {
-                substitute_block_item(item, environment, diagnostics)?;
-            }
+            substitute_item_list(&mut coro.body.items, environment, diagnostics)?;
         }
         Expression::Await(await_) => {
             *await_.operand = substitute_splices(&await_.operand, environment, diagnostics)?;
@@ -15352,41 +15397,15 @@ fn substitute_splices(
         Expression::With(with) => {
             substitute_type(&mut with.resource, environment, diagnostics)?;
             *with.value = substitute_splices(&with.value, environment, diagnostics)?;
-            for item in &mut with.body.items {
-                substitute_block_item(item, environment, diagnostics)?;
-            }
+            substitute_item_list(&mut with.body.items, environment, diagnostics)?;
         }
         Expression::Block(block) => {
-            for item in &mut block.items {
-                substitute_block_item(item, environment, diagnostics)?;
-            }
+            substitute_item_list(&mut block.items, environment, diagnostics)?;
         }
         Expression::Product(product) => {
-            let mut expanded = Vec::new();
-            for mut element in std::mem::take(&mut product.elements) {
-                if let Expression::Splice(splice) = &element.value
-                    && splice.repeated
-                    && let Some(Value::Sequence(values)) =
-                        environment.get(&splice.name).map(EnvironmentBinding::get)
-                {
-                    for value in values {
-                        let Value::Syntax(syntax) = value else {
-                            diagnostics.push(Diagnostic::new(
-                                splice.syntax.span.clone(),
-                                "a repeated expression splice requires syntax values",
-                            ));
-                            return None;
-                        };
-                        let mut entry = element.clone();
-                        entry.value = syntax.into_expression()?;
-                        expanded.push(entry);
-                    }
-                } else {
-                    element.value = substitute_splices(&element.value, environment, diagnostics)?;
-                    expanded.push(element);
-                }
+            for element in &mut product.elements {
+                element.value = substitute_splices(&element.value, environment, diagnostics)?;
             }
-            product.elements = expanded;
         }
         Expression::RepeatedProduct(repeated) => {
             *repeated.value = substitute_splices(&repeated.value, environment, diagnostics)?;
@@ -15530,7 +15549,7 @@ fn item_output_supported(item: &Item) -> bool {
     match item {
         Item::Modified(modified) => item_output_supported(&modified.item),
         Item::VisibilitySplice(splice) => item_output_supported(&splice.item),
-        Item::RepeatedItemSplice(_) => true,
+        Item::ItemSplice(_) => true,
         Item::VisibilityMacroInvocation(_) => true,
         Item::ExternBlock(_)
         | Item::TypeDeclaration(_)
@@ -15553,7 +15572,7 @@ fn modifier_target_supported(item: &Item) -> bool {
         Item::Modified(modified) => modifier_target_supported(&modified.item),
         Item::VisibilityMacroInvocation(_) => true,
         Item::VisibilitySplice(splice) => modifier_target_supported(&splice.item),
-        Item::RepeatedItemSplice(_) => false,
+        Item::ItemSplice(_) => false,
         Item::ExternBlock(_)
         | Item::TypeDeclaration(_)
         | Item::TraitDeclaration(_)
@@ -15619,7 +15638,7 @@ fn block_item_supported(item: &Item) -> bool {
         Item::Modified(_)
         | Item::VisibilityMacroInvocation(_)
         | Item::VisibilitySplice(_)
-        | Item::RepeatedItemSplice(_)
+        | Item::ItemSplice(_)
         | Item::ExternBlock(_)
         | Item::MacroDeclaration(_)
         | Item::TraitDeclaration(_)
@@ -15720,14 +15739,18 @@ fn substitute_type(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<()> {
     if let Type::Splice(splice) = ty {
-        if splice.repeated {
-            diagnostics.push(Diagnostic::new(
-                splice.syntax.span.clone(),
-                "repeated splices are not supported yet",
-            ));
-            return None;
-        }
         return match environment.get(&splice.name).map(EnvironmentBinding::get) {
+            Some(Value::Sequence(_) | Value::Separated { .. }) => {
+                diagnostics.push(Diagnostic::new(
+                    splice.syntax.span.clone(),
+                    format!(
+                        "interpreter cannot splice a Sequence or Separated in type position: `${}`",
+                        splice.name
+                    ),
+                ));
+                None
+            }
+
             Some(Value::Syntax(SyntaxValue::Type(value))) => {
                 *ty = value;
                 Some(())
@@ -15875,14 +15898,15 @@ fn substitute_pattern(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<()> {
     if let Pattern::Splice(splice) = pattern {
-        if splice.repeated {
-            diagnostics.push(Diagnostic::new(
-                splice.syntax.span.clone(),
-                "repeated splices are not supported yet",
-            ));
-            return None;
-        }
         return match environment.get(&splice.name).map(EnvironmentBinding::get) {
+            Some(Value::Sequence(_) | Value::Separated { .. }) => {
+                diagnostics.push(Diagnostic::new(
+                    splice.syntax.span.clone(),
+                    format!("interpreter cannot splice a Sequence or Separated in pattern position: `${}`", splice.name),
+                ));
+                None
+            }
+
             Some(Value::Syntax(SyntaxValue::Pattern(value))) => {
                 *pattern = value;
                 Some(())
@@ -16003,7 +16027,36 @@ fn substitute_item(
                 substitute_splices(&invocation.expression, environment, diagnostics)?;
         }
         Item::VisibilitySplice(_) => unreachable!(),
-        Item::RepeatedItemSplice(_) => unreachable!("repeated item splices expand as lists"),
+        Item::ItemSplice(splice) => {
+            // A modifier's target is one item, rather than an item list.
+            match environment.get(&splice.name).map(EnvironmentBinding::get) {
+                Some(Value::Syntax(SyntaxValue::Item(replacement))) => *item = *replacement,
+                Some(
+                    Value::Sequence(_)
+                    | Value::Separated { .. }
+                    | Value::Syntax(SyntaxValue::Items(_)),
+                ) => {
+                    diagnostics.push(Diagnostic::new(
+                        splice.syntax.span.clone(),
+                        format!(
+                            "interpreter cannot splice a Sequence or Separated in nested item position: `${}`",
+                            splice.name
+                        ),
+                    ));
+                    return None;
+                }
+                _ => {
+                    diagnostics.push(Diagnostic::new(
+                        splice.syntax.span.clone(),
+                        format!(
+                            "splice `${}` in nested item position requires `Item`",
+                            splice.name
+                        ),
+                    ));
+                    return None;
+                }
+            }
+        }
         Item::ExternBlock(block) => {
             for binding in &mut block.bindings {
                 substitute_binding(binding, environment, diagnostics)?;
@@ -16188,26 +16241,34 @@ fn substitute_item_list(
 ) -> Option<()> {
     let mut substituted = Vec::new();
     for mut item in std::mem::take(items) {
-        if let Item::RepeatedItemSplice(splice) = item {
+        if let Item::ItemSplice(splice) = item {
             let value = environment.get(&splice.name).map(EnvironmentBinding::get);
-            let Some(Value::Sequence(values)) = value else {
-                diagnostics.push(Diagnostic::new(
-                    splice.syntax.span,
-                    format!(
-                        "repeated item splice `${}` requires `Sequence<Item>`",
-                        splice.name
-                    ),
-                ));
-                return None;
+            let values = match value {
+                Some(Value::Syntax(SyntaxValue::Item(item))) => {
+                    substituted.push(*item);
+                    continue;
+                }
+                Some(Value::Sequence(values)) => values,
+                Some(Value::Syntax(SyntaxValue::Items(items))) => {
+                    substituted.extend(items);
+                    continue;
+                }
+                _ => {
+                    diagnostics.push(Diagnostic::new(
+                        splice.syntax.span,
+                        format!(
+                            "`${}` on its own line is an item splice and requires `Item` or `Sequence<Item>`",
+                            splice.name
+                        ),
+                    ));
+                    return None;
+                }
             };
             for value in values {
                 let Value::Syntax(SyntaxValue::Item(item)) = value else {
                     diagnostics.push(Diagnostic::new(
                         splice.syntax.span.clone(),
-                        format!(
-                            "repeated item splice `${}` contains a non-item value",
-                            splice.name
-                        ),
+                        format!("item splice `${}` contains a non-item value", splice.name),
                     ));
                     return None;
                 };
@@ -16234,28 +16295,29 @@ fn substitute_type_parameter_list(
             continue;
         };
         let value = environment.get(&splice.name).map(EnvironmentBinding::get);
-        let Some(Value::Sequence(values)) = value else {
-            let actual = match value {
-                None => "an unknown value",
-                Some(Value::Product(_, _)) => "a product",
-                Some(Value::Syntax(_)) => "syntax",
-                Some(_) => "another compile-time value",
-            };
-            diagnostics.push(Diagnostic::new(
-                splice.syntax.span,
-                format!(
-                    "type-parameter splice `${}...` requires `Sequence<Ident<String>>`, but contains {actual}",
-                    splice.name,
-                ),
-            ));
-            return None;
+        let values = match value {
+            Some(Value::Syntax(SyntaxValue::Ident(identifier))) => {
+                vec![Value::Syntax(SyntaxValue::Ident(identifier))]
+            }
+            Some(Value::Separated {
+                elements,
+                separator,
+                ..
+            }) if matches!(*separator, Value::Syntax(SyntaxValue::Comma(_))) => elements,
+            _ => {
+                diagnostics.push(Diagnostic::new(
+                    splice.syntax.span,
+                    format!("type-parameter splice `${}` requires `Ident` or `Separated<Ident<String>, Comma>`", splice.name),
+                ));
+                return None;
+            }
         };
         for value in values {
             let Value::Syntax(SyntaxValue::Ident(identifier)) = value else {
                 diagnostics.push(Diagnostic::new(
                     splice.syntax.span.clone(),
                     format!(
-                        "type-parameter splice `${}...` contains a non-identifier value",
+                        "type-parameter splice `${}` contains a non-identifier value",
                         splice.name
                     ),
                 ));
@@ -16322,7 +16384,7 @@ fn alpha_rename_item(item: &mut Item, mark: u64) {
             alpha_rename_expression(&mut invocation.expression, mark, &mut scopes);
         }
         Item::VisibilitySplice(splice) => alpha_rename_item(&mut splice.item, mark),
-        Item::RepeatedItemSplice(_) => {}
+        Item::ItemSplice(_) => {}
         Item::ExternBlock(block) => {
             for binding in &mut block.bindings {
                 if let Some(value) = &mut binding.value {
@@ -16896,7 +16958,7 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
             expander.freshen_syntax(&mut splice.syntax, module, mark);
             freshen_item(expander, &mut splice.item, module, mark);
         }
-        Item::RepeatedItemSplice(splice) => {
+        Item::ItemSplice(splice) => {
             expander.freshen_syntax(&mut splice.syntax, module, mark);
         }
         Item::ExternBlock(block) => {

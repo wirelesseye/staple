@@ -173,7 +173,7 @@ impl Collector<'_> {
                 self.collect_expression_declarations(&value.expression)
             }
             Item::VisibilitySplice(value) => self.collect_item_declarations(&value.item),
-            Item::RepeatedItemSplice(_) => {}
+            Item::ItemSplice(_) => {}
             Item::Submodule(submodule) => self.collect_module_declarations(&submodule.module),
             Item::ExternBlock(block) => {
                 for binding in &block.bindings {
@@ -543,7 +543,7 @@ impl Collector<'_> {
                 self.expression(&value.expression)
             }
             Item::VisibilitySplice(value) => self.item(&value.item),
-            Item::RepeatedItemSplice(_) => {}
+            Item::ItemSplice(_) => {}
             Item::Submodule(submodule) => {
                 // A `companion` header names the type it extends, so it hovers
                 // as the type declaration rather than as `mod Switch`.

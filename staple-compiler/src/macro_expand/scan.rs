@@ -211,7 +211,7 @@ impl Scanner {
                 self.expression(&invocation.expression);
             }
             Item::VisibilitySplice(splice) => self.item(&splice.item),
-            Item::RepeatedItemSplice(_) | Item::UseDeclaration(_) | Item::Continue(_) => {}
+            Item::ItemSplice(_) | Item::UseDeclaration(_) | Item::Continue(_) => {}
             Item::Submodule(submodule) => {
                 self.scoped(|scanner| {
                     scanner.generics(&submodule.type_parameters);

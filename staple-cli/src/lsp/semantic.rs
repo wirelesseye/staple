@@ -310,7 +310,7 @@ impl<'a> Classifier<'a> {
                 self.mark_last(&value.syntax, &value.name, VARIABLE, 0, 1);
                 self.item(&value.item, resolved);
             }
-            Item::RepeatedItemSplice(value) => {
+            Item::ItemSplice(value) => {
                 self.mark_last(&value.syntax, &value.name, VARIABLE, 0, 1);
             }
             Item::UseDeclaration(value) => {

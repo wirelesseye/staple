@@ -575,7 +575,7 @@ Update this section as you work (see "Rules for the implementor").
 | 4. Arena and core intrinsics | done | `b1207bf8` | `macro_runtime/arena.rs` keeps syntax fragments, text, parse streams and parsed nodes for one call; handles carry a generation and `reset` makes earlier handles stale. `macro_expand/syntax_ops.rs` owns the shared slicing, position, delimiter, hygiene and token-filling helpers, plus text lexing. Streams and text run through host intrinsics, with two-body `is_empty` and `error_at` where the ABI differs. See Findings. |
 | 5. Node views and rebuilding | done | `e9f38d44`, `ead6c8a8` | Non-generic classification, part and rebuild intrinsics cover expressions, types, patterns, items, modifiers, type bodies, type parameters, delimiters, visibility and punctuation. `@compiled_only` `from_syntax` functions attach origins, and compiled `Splice` impls return the origin for unchanged nodes. Sequence construction is Staple code, compiled `Splice Separated` is implemented, constructed non-empty products rebuild, and the harness asserts same-handle round trips. `__ident_spelling` is an inline intrinsic that reads an identifier box as a `String`. See Findings. |
 | 6. `Parse` impls | done | `1416a3f9`, `5ed41520` | The interpreter and compiled code share one leaf parser, so grammar and diagnostics agree. Compiled leaves and groups return an arena result handle; `Ident<S>` reads `S`'s spelling with a compiler intrinsic. The check gets fixed-arity product impls while the interpreter keeps the variadic ones, and `is_variadic_parse_impl` is gone. The harness checks 21 parse behaviors, including exact error messages and same-handle list round trips. Parsed lists carry origins, and a spelling set is a code generation error. See Findings. |
-| 7. Plain sequence splices | not started | `a5c17c65` | The raw-token experiment failed because interpreter values don't carry current tokens. Decision 13 is revised: the interpreter keeps tree substitution with an item-list line rule, and comma lists use `Separated`. See Findings. |
+| 7. Plain sequence splices | done | this commit | Tree substitution uses the line rule for item splices; type parameters accept identifiers or comma lists. Repeated markers are removed, uses and documentation are migrated, and interpreter, closure and expansion checks pass. See Findings. |
 | 8. Quotations | not started | | |
 | 9. Arguments and results | not started | | |
 | 10. Wire format | not started | | |
@@ -1095,7 +1095,7 @@ cells at the default collection threshold.
 
 ### Plain sequence splice experiment (task 7)
 
-Task 7 is blocked at its required interpreter proof. Following Decision 13,
+The initial task 7 experiment was blocked at its required interpreter proof. Following the original Decision 13,
 an experiment added `Value::Sequence` and `SyntaxValue::Items` to
 `quote_contains_raw_splice` and let `substitute_raw_quote` append sequence
 elements for a plain `$name`. The old ellipsis consumption was kept only for
@@ -1122,12 +1122,13 @@ Routing existing `typegroup` sequences through that path therefore changes
 expansion even before removing `...`. Identifier origins and root hygiene do
 not reconstruct the missing substituted tokens.
 
-Per Decision 13's instruction to stop if the experiment fails, the experimental
-code and failing test were removed. Task 7 needs a revised design for obtaining
+Per the original Decision 13's instruction to stop if the experiment fails, the experimental
+code and failing test were removed. At that point task 7 needed a revised design for obtaining
 current tokens from interpreter syntax values while preserving substitutions,
 trivia and hygiene before the source migration can proceed. Retaining `...`
-is not the proposed solution. The compiler, standard library, language reference
-and accepted splice syntax remain at the end of task 6.
+was not the proposed solution. At the end of that experiment the compiler,
+standard library, language reference and accepted splice syntax remained at the
+end of task 6.
 
 Verification after removing the experiment: the existing compiler test
 `contextual_item_sequence_quotes_flatten_empty_single_and_multiple_results`
@@ -1164,3 +1165,94 @@ an item-list splice by its line. Commas come from the value's type: a
 it inside its delimiter. Raw-token substitution
 for sequences is no longer part of the design.
 
+
+### Plain sequence splices (task 7)
+
+The revised design is implemented with tree substitution. `ItemSplice` replaces
+`RepeatedItemSplice`; in an item list a splice that ends its line, or precedes
+`}` or the end, inserts items. A declaration after it on the same line remains
+a visibility splice. An item splice accepts one `Item`, a `Sequence<Item>` or
+an empty sequence. A lone quotation splice parses as an expression first, so
+an `Item` or `Sequence<Item>` context reinterprets it as an item splice.
+Blocks and companion/module bodies use the same list substitution. A final
+review found that a modifier before an item splice reached the old unreachable
+arm for repeated list splices. In that nested position a single `Item` now
+substitutes normally, and a `Sequence` or `Separated` gets a diagnostic naming
+the nested item position. The interpreter regression cases cover both paths.
+
+Type-parameter splices accept an `Ident` or a comma-separated list of identifiers.
+`derived_debug_implementation` now builds a `Separated` from an explicit clone
+of its borrowed parameter sequence. The test-only comma-product splices now
+construct `Parenthesized (Separated (...))` and splice the whole value. The
+migrated closure-check fixture clones its borrowed expressions and sequences
+before constructing its comma list.
+
+`SpliceExpression.repeated`, the product-element expansion path and all splice
+ellipsis consumption are removed. In a quotation, `f $a ...$b` and
+`f $a ...pair` now parse as ordinary spread calls. An incomplete expression
+quotation such as `$name...` reports the expression parser's error. Raw `quote`
+fragments remain allowed to hold incomplete grammar. There is no new raw-token
+fallback for a sequence in a contextual quotation: bare `Sequence` and
+`Separated` values in expression, type or pattern positions give an interpreter
+diagnostic naming the position. A visibility on its own line gives the
+item-splice diagnostic.
+
+A constructed parenthesized comma list with one element and no trailing comma
+now becomes that expression, matching `(a)` in compiled output; with a trailing
+comma it is a singleton product. Empty lists without a trailing comma remain
+unit. The existing constructor already rejects an empty list with a trailing
+separator, which would otherwise write invalid `(,)`; a regression test now
+covers that diagnostic as well.
+
+Verification:
+
+- `cargo check --workspace`: passes, including the LSP consumers of the renamed
+  AST variant.
+- `cargo test -p staple-syntax`: 208 passed (29 unit tests, 2 formatter tests and
+  177 parser tests). No Staple formatter command was run or added.
+- Compiler integration tests: all 859 cases pass. The broad run passed 858 and
+  exposed an old expected diagnostic for `parse_quote { $value }` in an `Item`
+  context. That case now expects the required own-line item-splice diagnostic
+  and passes on its targeted rerun. Final targeted runs also cover the spread
+  error and all constructed comma-list cases, including the empty/trailing
+  constructor rejection.
+- `cargo test -p staple-compiler --test derive_default`: 11 passed, including
+  the migrated `macros_inspect_product_type_fields` output test.
+- The lowering rejection test passes. The negative closure test for
+  `Sequence<I32>` passes with the existing missing-trait-implementation
+  diagnostic. Its first assertion had incorrectly required `Splice` in the
+  diagnostic's text; the compiler was already rejecting the value.
+- All 30 check-program cases are verified: the broad run passed the other 29,
+  and the corrected `Sequence<I32>` diagnostic assertion passes on its targeted
+  rerun. This includes the migrated comma-list fixture, every macro fixture,
+  and checking the standard library as its own package.
+- `scripts/check-macro-closures.py --mode all --timeout 600`: 232 inputs,
+  0 with diagnostics, 0 distinct messages, using four workers.
+- The final release build and workspace check pass. The seven focused compiler
+  tests were rerun after the nested-item fix, and the release CLI now accepts
+  the modifier-before-splice probe that previously panicked.
+
+Expansion comparison uses 232 inputs, all expanding successfully. Against an
+exact baseline built from `259ca3fd`, 230 match byte for byte. The two expected
+source differences are the comment in `examples/macros.sta` and the two
+`$items...` quotation templates in `stdlib/typegroup.sta`, now `$items`.
+Generated typegroup and derive-debug output is unchanged. A refreshed capture
+with the final release binary after the nested-item fix matches the earlier
+capture for all 232 inputs, with no non-zero exits. The baseline capture
+uses the archived standard library, examples and fixtures, reusing the current
+corpus source dump because no corpus source changed.
+
+Against the saved start-of-phase capture (`/tmp/exp-baseline`), 223 of 232 match.
+The differences are the example comment above and the same eight changed
+standard-library sources already recorded under task 6 (`annotation`, `cmp`,
+`default`, `flow`, `fmt`, `hash`, `syntax`, `typegroup`). There are no unexplained
+generated-code differences. The older `/tmp/staple-task7-before` capture also
+predates intervening `std.syntax` changes; comparison against the exact
+`259ca3fd` baseline removes those from the task's difference list.
+
+Cost check: release `staple check` with `STAPLE_CHECK_MACRO_CLOSURES=all` on
+`stdlib/std/char.sta` took 61.72 s user CPU / 4.63 s system CPU before, and
+62.20 s user CPU / 4.46 s system CPU after. Wall times were 108.27 s and
+106.83 s under concurrent test load. This does not show a material checking
+cost change. The corpus check uses four workers and a 600 s per-input timeout
+on the 16 GiB, eight-CPU development machine.

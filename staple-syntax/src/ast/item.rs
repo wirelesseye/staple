@@ -27,7 +27,7 @@ impl Item {
             Item::Modified(value) => &value.syntax,
             Item::VisibilityMacroInvocation(value) => &value.syntax,
             Item::VisibilitySplice(value) => &value.syntax,
-            Item::RepeatedItemSplice(value) => &value.syntax,
+            Item::ItemSplice(value) => &value.syntax,
             Item::UseDeclaration(value) => &value.syntax,
             Item::Submodule(value) => &value.syntax,
             Item::ExternBlock(value) => &value.syntax,
@@ -52,7 +52,7 @@ pub enum Item {
     Modified(ModifiedItem),
     VisibilityMacroInvocation(VisibilityMacroInvocation),
     VisibilitySplice(VisibilitySplice),
-    RepeatedItemSplice(RepeatedItemSplice),
+    ItemSplice(ItemSplice),
     UseDeclaration(UseDeclaration),
     Submodule(Submodule),
     ExternBlock(ExternBlock),
@@ -70,7 +70,7 @@ pub enum Item {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepeatedItemSplice {
+pub struct ItemSplice {
     pub syntax: Syntax,
     pub name: String,
 }

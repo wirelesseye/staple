@@ -13,7 +13,8 @@ pub use diagnostic::*;
 pub use formatter::{format_source, format_token_stream};
 pub use lexer::lex;
 pub use parser::{
-    parse, parse_at, parse_expression_fragment, parse_expression_prefix, parse_item_fragment,
+    parse, parse_at, parse_expression_fragment, parse_expression_prefix,
+    parse_expression_template_fragment, parse_item_fragment,
     parse_item_list_fragment, parse_item_prefix, parse_modifier_fragment, parse_modifier_prefix,
     parse_pattern_fragment, parse_pattern_prefix, parse_pattern_template_fragment,
     parse_type_body_fragment, parse_type_body_prefix, parse_type_fragment,

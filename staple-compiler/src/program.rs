@@ -2643,7 +2643,7 @@ fn find_block_submodules_in_item(item: &Item, out: &mut Vec<Submodule>) {
             find_block_submodules_in_expression(&invocation.expression, out)
         }
         Item::VisibilitySplice(splice) => find_block_submodules_in_item(&splice.item, out),
-        Item::RepeatedItemSplice(_)
+        Item::ItemSplice(_)
         | Item::UseDeclaration(_)
         | Item::Submodule(_)
         | Item::TypeDeclaration(_) => {}
@@ -2814,7 +2814,7 @@ fn find_block_use_declarations_in_item(item: &Item, out: &mut Vec<UseDeclaration
             find_block_use_declarations_in_expression(&invocation.expression, out)
         }
         Item::VisibilitySplice(splice) => find_block_use_declarations_in_item(&splice.item, out),
-        Item::RepeatedItemSplice(_)
+        Item::ItemSplice(_)
         | Item::UseDeclaration(_)
         | Item::Submodule(_)
         | Item::TypeDeclaration(_) => {}

@@ -46,8 +46,9 @@ def derived_debug_implementation = (
             }
         },
         _ => {
+            let parameter_list = Separated (separator: Comma, elements: Clone.clone parameters, trailing: False)
             parse_quote {
-                impl<$parameters... where Debug $representation> Debug $target {
+                impl<$parameter_list where Debug $representation> Debug $target {
                     fmt = ($value_pattern, mut formatter) => {
                         formatter |> write $name_expression
                         formatter |> write " "

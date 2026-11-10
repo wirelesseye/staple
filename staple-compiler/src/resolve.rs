@@ -3710,7 +3710,7 @@ impl NameResolver {
                     Item::Modified(_)
                     | Item::VisibilityMacroInvocation(_)
                     | Item::VisibilitySplice(_)
-                    | Item::RepeatedItemSplice(_)
+                    | Item::ItemSplice(_)
                     | Item::UseDeclaration(_) => {}
                 }
             }
@@ -4950,7 +4950,7 @@ impl NameResolver {
                 | Item::Modified(_)
                 | Item::VisibilityMacroInvocation(_)
                 | Item::VisibilitySplice(_)
-                | Item::RepeatedItemSplice(_)
+                | Item::ItemSplice(_)
                 | Item::Submodule(_)
                 | Item::TypeDeclaration(_)
                 | Item::MacroDeclaration(_)
@@ -5182,7 +5182,7 @@ impl NameResolver {
             Item::Modified(_)
             | Item::VisibilityMacroInvocation(_)
             | Item::VisibilitySplice(_)
-            | Item::RepeatedItemSplice(_)
+            | Item::ItemSplice(_)
             | Item::UseDeclaration(_)
             | Item::Submodule(_) => {}
             Item::ExternBlock(block) => {
@@ -9058,7 +9058,7 @@ fn find_block_type_declarations_in_item<'a>(item: &'a Item, out: &mut Vec<&'a Ty
             find_block_type_declarations_in_expression(&invocation.expression, out)
         }
         Item::VisibilitySplice(splice) => find_block_type_declarations_in_item(&splice.item, out),
-        Item::RepeatedItemSplice(_)
+        Item::ItemSplice(_)
         | Item::UseDeclaration(_)
         | Item::Submodule(_)
         | Item::TypeDeclaration(_) => {}

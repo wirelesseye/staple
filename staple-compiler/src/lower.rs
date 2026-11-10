@@ -4502,10 +4502,10 @@ impl LoweredProgram {
                     "unexpanded visibility splice reached lowering",
                 ));
             }
-            Item::RepeatedItemSplice(splice) => {
+            Item::ItemSplice(splice) => {
                 return Err(Diagnostic::new(
                     splice.syntax.span.clone(),
-                    "unexpanded repeated item splice reached lowering",
+                    "unexpanded item splice reached lowering",
                 ));
             }
             // A surviving visibility-macro invocation is the marker left by a
@@ -19689,7 +19689,6 @@ mod tests {
             Expression::Splice(SpliceExpression {
                 syntax: syntax.clone(),
                 name: "value".to_owned(),
-                repeated: false,
             }),
         ));
         expressions.push(("Name", name_expression("value")));
@@ -27370,15 +27369,15 @@ mod tests {
         let mut program = LoweredProgram::default();
         assert!(program.snapshot(&module).is_empty());
 
-        let splice = Item::RepeatedItemSplice(staple_syntax::RepeatedItemSplice {
+        let splice = Item::ItemSplice(staple_syntax::ItemSplice {
             syntax: staple_syntax::Syntax::compiler(),
             name: "items".to_owned(),
         });
         let owner = ExpressionOwner::Module(ModuleId(0));
         let diagnostic = program
             .lower_item(&module, owner, ExpressionContext::Primary, &splice)
-            .expect_err("a repeated item splice should be rejected");
-        assert!(diagnostic.message.contains("repeated item splice"));
+            .expect_err("an item splice should be rejected");
+        assert!(diagnostic.message.contains("item splice"));
 
         let splice = Item::VisibilitySplice(staple_syntax::VisibilitySplice {
             syntax: staple_syntax::Syntax::compiler(),

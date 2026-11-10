@@ -330,6 +330,17 @@ pub fn parse_pattern_template_fragment(
     })
 }
 
+/// Reinterprets quotation contents as an expression template, permitting splices.
+pub fn parse_expression_template_fragment(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<Expression, ParseError> {
+    parse_fragment(syntax, false, next_syntax_id, |grammar| {
+        grammar.quote_depth += 1;
+        grammar.parse_expression()
+    })
+}
+
 /// Reinterprets original tokens as exactly one expression.
 pub fn parse_expression_fragment(
     syntax: &Syntax,
@@ -813,9 +824,15 @@ impl Grammar {
                     "expected a visibility splice name after `$`",
                 )?
                 .text;
-            if self.eat(TokenKind::Ellipsis) {
+            let name_end = self.tokens[self.position - 1].span.end;
+            let next = self.next_non_trivia(self.position);
+            let next_token = self.tokens.get(next);
+            let ends_line = self.source
+                [name_end..next_token.map_or(name_end, |token| token.span.start)]
+                .contains('\n');
+            if ends_line || matches!(self.peek(), None | Some(TokenKind::RBrace)) {
                 self.newline_terminates_expression = previous;
-                return Ok(Item::RepeatedItemSplice(crate::RepeatedItemSplice {
+                return Ok(Item::ItemSplice(crate::ItemSplice {
                     syntax: self.syntax(item_start),
                     name,
                 }));
@@ -2447,14 +2464,9 @@ impl Grammar {
             let name = self
                 .expect(TokenKind::Identifier, "expected a splice name after `$`")?
                 .text;
-            self.expect(
-                TokenKind::Ellipsis,
-                "type-parameter sequence splices require `...`",
-            )?;
             return Ok(TypeParameterPattern::Splice(SpliceExpression {
                 syntax: self.syntax(start),
                 name,
-                repeated: true,
             }));
         }
         if self.eat(TokenKind::LParen) {
@@ -2654,11 +2666,10 @@ impl Grammar {
             let name = self
                 .expect(TokenKind::Identifier, "expected a splice name after `$`")?
                 .text;
-            let repeated = self.eat(TokenKind::Ellipsis);
+
             return Ok(Pattern::Splice(SpliceExpression {
                 syntax: self.syntax(start),
                 name,
-                repeated,
             }));
         }
         let mutable = self.eat(TokenKind::Mut);
@@ -3263,11 +3274,10 @@ impl Grammar {
                     name: format!("${item}"),
                 }));
             }
-            let repeated = self.eat(TokenKind::Ellipsis);
+
             return Ok(Type::Splice(SpliceExpression {
                 syntax: self.syntax(start),
                 name,
-                repeated,
             }));
         }
         if self.eat(TokenKind::Underscore) {
@@ -4057,8 +4067,8 @@ impl Grammar {
                                 return Err(ParseError {
                                     offset: token.span.start,
                                     location: self.location(token.span.start),
-                                    message:
-                                        "a product index must be plain decimal digits".to_owned(),
+                                    message: "a product index must be plain decimal digits"
+                                        .to_owned(),
                                 });
                             }
                             Accessor::Index(token.text)
@@ -4175,11 +4185,10 @@ impl Grammar {
                 let name = self
                     .expect(TokenKind::Identifier, "expected a splice name after `$`")?
                     .text;
-                let repeated = self.eat(TokenKind::Ellipsis);
+
                 Ok(Expression::Splice(SpliceExpression {
                     syntax: self.syntax(start),
                     name,
-                    repeated,
                 }))
             }
             Some(TokenKind::Dollar) => Err(self.error("splices are only allowed inside `quote`")),
