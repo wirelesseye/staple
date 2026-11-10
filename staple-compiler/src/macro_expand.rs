@@ -2085,6 +2085,9 @@ struct MacroExpander {
     /// interpreted like an ordinary function — its body calls extern `c`
     /// functions that have no compile-time meaning.
     standard_library_process: Option<ModuleId>,
+    /// `std.clone`, whose `Clone.clone` returns its argument's type when
+    /// compile-time code is checked.
+    standard_library_clone: Option<ModuleId>,
     /// Call-site spans of the macro/modifier invocations currently being
     /// evaluated, innermost last. A diagnostic raised while interpreting a
     /// macro's body (such as a compile-time `panic`) should point at where
@@ -2292,6 +2295,11 @@ impl MacroExpander {
                     .path
                     .ends_with(std::path::Path::new("std/process.sta"))
             })
+            .map(|module| module.id);
+        let standard_library_clone = program
+            .modules()
+            .iter()
+            .find(|module| module.path.ends_with(std::path::Path::new("std/clone.sta")))
             .map(|module| module.id);
 
         let mut next_syntax_id = program
@@ -3170,6 +3178,7 @@ impl MacroExpander {
                 })
                 .unwrap_or_default(),
             standard_library_process,
+            standard_library_clone,
             suppress_expansion_trailer: false,
             checked_compile_helpers: HashSet::new(),
             checking_compile_helpers: HashSet::new(),
@@ -4016,12 +4025,17 @@ impl MacroExpander {
                     expected,
                 );
             }
-            if self
-                .trait_member(module, &call.callee, |name| environment.contains_key(name))
-                .is_some()
+            if let Some((traits::TraitKey(trait_module, trait_name), member)) =
+                self.trait_member(module, &call.callee, |name| environment.contains_key(name))
             {
-                self.check_compile_expression(module, &call.argument, environment, None);
-                return CompileType::Unknown;
+                let argument =
+                    self.check_compile_expression(module, &call.argument, environment, None);
+                // `Clone.clone` copies its argument, so the copy has its type.
+                // Helpers match on a copy of a borrowed syntax value.
+                let is_clone = Some(trait_module) == self.standard_library_clone
+                    && trait_name == "Clone"
+                    && member == "clone";
+                return if is_clone { argument } else { CompileType::Unknown };
             }
             if let Expression::TypeApplication(application) = call.callee.as_ref() {
                 return self.check_type_applied_call(module, call, application, environment);
