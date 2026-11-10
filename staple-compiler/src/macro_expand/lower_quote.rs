@@ -159,7 +159,10 @@ impl QuoteLowering<'_> {
             syntax: self.syntax(like),
             literal: id.to_string(),
         });
-        let arguments = self.product(like, true, vec![(None, template), (None, list)]);
+        // `__quote` takes a plain product, while `Parse.parse_quote` takes two
+        // slots, which the call spreads into consecutive arguments.
+        let slotted = quote.kind == QuoteKind::ParseQuote;
+        let arguments = self.product(like, slotted, vec![(None, template), (None, list)]);
         let callee = match quote.kind {
             QuoteKind::Quote => self.name(like, "__quote"),
             QuoteKind::ParseQuote => {
@@ -171,10 +174,9 @@ impl QuoteLowering<'_> {
                 })
             }
         };
-        // The two slots are passed as consecutive arguments.
         let call = self.call(like, callee, arguments);
         match call {
-            Expression::Call(mut call) => {
+            Expression::Call(mut call) if slotted => {
                 call.spread = true;
                 Expression::Call(call)
             }

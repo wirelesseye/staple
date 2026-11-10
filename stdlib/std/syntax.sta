@@ -293,7 +293,7 @@ pub extern "staple-intrinsic" {
 
 @interpreted_only
 extern "staple-intrinsic" {
-    __sequence_push: <T> (Sequence<T>; T) -> Sequence<T>
+    __sequence_push: <T> (Sequence<T>, T) -> Sequence<T>
     __sequence_reverse: <T> Sequence<T> -> Sequence<T>
 }
 
@@ -302,24 +302,24 @@ extern "staple-intrinsic" {
     /// `1` when only trivia remains.
     __is_empty: ParseStream -> U8
     /// A text handle holding `"<message> at <position>"`.
-    __error_at: (ParseStream; RawMutPtr<U8>; USize) -> U64
+    __error_at: (ParseStream, RawMutPtr<U8>, USize) -> U64
     /// The number of bytes in a text handle.
     __text_length: U64 -> USize
     /// Copies a text handle's bytes into a buffer and returns the byte count.
-    __text_copy: (U64; RawMutPtr<U8>; USize) -> USize
+    __text_copy: (U64, RawMutPtr<U8>, USize) -> USize
     /// Copies a byte buffer into the arena and returns its text handle.
-    __text_new: (RawMutPtr<U8>; USize) -> U64
+    __text_new: (RawMutPtr<U8>, USize) -> U64
     /// The lossless text of a syntax fragment, as a text handle.
     __syntax_text: Syntax -> U64
     /// Lexes a byte buffer into a syntax fragment.
-    __syntax_from_text: (RawMutPtr<U8>; USize) -> Syntax
+    __syntax_from_text: (RawMutPtr<U8>, USize) -> Syntax
     /// Parses one leaf category from a stream. The kind codes are the ones
     /// the compiled `Parse` implementations pass. The result handle carries
     /// the status, the parsed syntax, the advanced stream and an error text.
-    __parse_leaf: (ParseStream; U8; U64) -> U64
+    __parse_leaf: (ParseStream, U8, U64) -> U64
     /// Parses a delimited group. Kinds are `(0; 1; 2; 3)` for `()`, `[]`,
     /// `<>`, and `{}`.
-    __parse_group: (ParseStream; U8) -> U64
+    __parse_group: (ParseStream, U8) -> U64
     __parse_result_status: U64 -> U64
     /// The `SyntaxNode` alternative a successful atom named.
     __parse_result_tag: U64 -> U64
@@ -331,7 +331,7 @@ extern "staple-intrinsic" {
     __parse_result_error: U64 -> U64
     /// The tokens read between two cursors over one fragment, without the
     /// trivia at either end.
-    __stream_span: (ParseStream; ParseStream) -> Syntax
+    __stream_span: (ParseStream, ParseStream) -> Syntax
 }
 
 /// `True` when only trivia remains.
@@ -344,7 +344,7 @@ def text_string = handle: U64 => String :: {
     let length = __text_length handle
     let buffer: Buffer<U8> = Buffer.with_capacity length
     let destination = Buffer.unsafe_element buffer 0
-    let written = __text_copy ...(handle; destination; length)
+    let written = __text_copy (handle, destination, length)
     let raw = unsafe_buffer_into_raw buffer
     BufferHeader.set_length raw written
     string_from_shared_bytes_unchecked (SharedBuffer.unsafe_from_raw raw)
@@ -354,7 +354,7 @@ def text_string = handle: U64 => String :: {
 @compiled_only
 pub def error_at = (input: ParseStream; message: String) => ParseError :: {
     let bytes = string_shared_bytes message
-    let text = __error_at ...(input; SharedBuffer.unsafe_data bytes; SharedBuffer.length bytes)
+    let text = __error_at (input, SharedBuffer.unsafe_data bytes, SharedBuffer.length bytes)
     ParseError (text_string text)
 }
 
@@ -362,7 +362,7 @@ pub def error_at = (input: ParseStream; message: String) => ParseError :: {
 @compiled_only
 pub def syntax_from_string = value: String => Syntax :: {
     let bytes = string_shared_bytes value
-    __syntax_from_text ...(SharedBuffer.unsafe_data bytes; SharedBuffer.length bytes)
+    __syntax_from_text (SharedBuffer.unsafe_data bytes, SharedBuffer.length bytes)
 }
 
 /// The lossless text of a syntax fragment.
@@ -385,7 +385,7 @@ pub trait Parse T {
     /// fragment's id and the syntax spliced into it, as a `T`. A fragment that is
     /// not one fails the macro being expanded.
     parse_quote: (U64; Sequence<Syntax>) -> T = (fragment; splices) =>
-        match (Parse.parse_all.<T> (__quote ...(fragment; splices))) {
+        match (Parse.parse_all.<T> (__quote (fragment, splices))) {
             Ok value => value,
             ParseError (message) => compile_error message,
         }
@@ -399,10 +399,10 @@ extern "staple-intrinsic" {
     __bracketed_group: mut ParseStream -> Result<(Syntax; ParseStream), ParseError>
     __angled_group: mut ParseStream -> Result<(Syntax; ParseStream), ParseError>
     __braced_group: mut ParseStream -> Result<(Syntax; ParseStream), ParseError>
-    __parenthesized: <C> (Syntax; C) -> Parenthesized<C>
-    __bracketed: <C> (Syntax; C) -> Bracketed<C>
-    __angled: <C> (Syntax; C) -> Angled<C>
-    __braced: <C> (Syntax; C) -> Braced<C>
+    __parenthesized: <C> (Syntax, C) -> Parenthesized<C>
+    __bracketed: <C> (Syntax, C) -> Bracketed<C>
+    __angled: <C> (Syntax, C) -> Angled<C>
+    __braced: <C> (Syntax, C) -> Braced<C>
     __offset: ParseStream -> USize
 }
 
@@ -419,7 +419,7 @@ extern "staple-intrinsic" {
 // `__quote` (or `__parse_quote`) with the id of its fragment and the values it
 // splices, each turned into syntax by `Splice`.
 extern "staple-intrinsic" {
-    __quote: (U64; Sequence<Syntax>) -> Syntax
+    __quote: (U64, Sequence<Syntax>) -> Syntax
     __splice_node: <T> T -> Syntax
     __splice_join: <T> Sequence<T> -> Syntax
     /// The hidden origin stored with a syntax node.
@@ -453,81 +453,81 @@ extern "staple-intrinsic" {
     __unstructured_item_syntax: UnstructuredItem -> Syntax
     __unstructured_modifier_syntax: UnstructuredModifier -> Syntax
     /// Rebuilds a call expression, or returns its origin when unchanged.
-    __call_syntax: (Syntax; Syntax; Syntax) -> Syntax
+    __call_syntax: (Syntax, Syntax, Syntax) -> Syntax
     /// Rebuilds an identifier, or returns its origin when unchanged.
-    __ident_syntax: (Syntax; U64) -> Syntax
+    __ident_syntax: (Syntax, U64) -> Syntax
     /// Rebuilds a string-literal expression, or returns its origin when unchanged.
-    __string_expr_syntax: (Syntax; U64) -> Syntax
+    __string_expr_syntax: (Syntax, U64) -> Syntax
     /// Rebuilds a character-literal expression, or returns its origin when unchanged.
-    __char_expr_syntax: (Syntax; U32) -> Syntax
+    __char_expr_syntax: (Syntax, U32) -> Syntax
     /// The `Type` alternative a fragment names.
     __classify_type: Syntax -> U8
     __product_type_field_count: Syntax -> USize
-    __product_type_field: (Syntax; USize) -> Syntax
+    __product_type_field: (Syntax, USize) -> Syntax
     __product_type_field_name: Syntax -> Syntax
     __product_type_field_type: Syntax -> Syntax
     __product_type_field_default: Syntax -> Syntax
-    __product_type_syntax: (Syntax; Syntax) -> Syntax
-    __join_field_syntax: (Syntax; Syntax; U8) -> Syntax
-    __product_type_field_syntax: (Syntax; Syntax; Syntax) -> Syntax
+    __product_type_syntax: (Syntax, Syntax) -> Syntax
+    __join_field_syntax: (Syntax, Syntax, U8) -> Syntax
+    __product_type_field_syntax: (Syntax, Syntax, Syntax) -> Syntax
     __unstructured_type: Syntax -> UnstructuredType
     __unstructured_pattern: Syntax -> UnstructuredPattern
     __unstructured_item: Syntax -> UnstructuredItem
     __unstructured_modifier: Syntax -> UnstructuredModifier
     __empty_syntax: () -> Syntax
     __syntax_is_empty: Syntax -> U8
-    __same_syntax: (Syntax; Syntax) -> U8
-    __syntax_or_origin: (Syntax; Syntax) -> Syntax
-    __join_separated_syntax: (Syntax; Syntax; Syntax; U8) -> Syntax
-    __append_separator_syntax: (Syntax; Syntax) -> Syntax
+    __same_syntax: (Syntax, Syntax) -> U8
+    __syntax_or_origin: (Syntax, Syntax) -> Syntax
+    __join_separated_syntax: (Syntax, Syntax, Syntax, U8) -> Syntax
+    __append_separator_syntax: (Syntax, Syntax) -> Syntax
     /// The `Pattern` alternative a fragment names.
     __classify_pattern: Syntax -> U8
     __binding_pattern_name: Syntax -> Syntax
     __nominal_pattern_parts: Syntax -> (Syntax; Syntax)
-    __binding_pattern_syntax: (Syntax; Syntax) -> Syntax
-    __nominal_pattern_syntax: (Syntax; Syntax; Syntax) -> Syntax
-    __sequence_syntax: (Syntax; Syntax; Syntax) -> Syntax
+    __binding_pattern_syntax: (Syntax, Syntax) -> Syntax
+    __nominal_pattern_syntax: (Syntax, Syntax, Syntax) -> Syntax
+    __sequence_syntax: (Syntax, Syntax, Syntax) -> Syntax
     __classify_item: Syntax -> U8
     __modified_item_parts: Syntax -> (USize; Syntax)
-    __modified_item_modifier: (Syntax; USize) -> Syntax
+    __modified_item_modifier: (Syntax, USize) -> Syntax
     __type_declaration_name: Syntax -> Syntax
     __type_declaration_declared_type: Syntax -> Syntax
     __type_declaration_type_parameter_count: Syntax -> USize
     __type_declaration_body: Syntax -> Syntax
     __type_declaration_resource_count: Syntax -> USize
-    __type_declaration_type_parameter: (Syntax; USize) -> Syntax
-    __type_declaration_resource: (Syntax; USize) -> (Syntax; U8)
+    __type_declaration_type_parameter: (Syntax, USize) -> Syntax
+    __type_declaration_resource: (Syntax, USize) -> (Syntax; U8)
     __classify_modifier: Syntax -> U8
     __modifier_call_namespace_count: Syntax -> USize
     __modifier_call_name: Syntax -> Syntax
     __modifier_call_argument: Syntax -> Syntax
-    __modifier_call_namespace: (Syntax; USize) -> Syntax
+    __modifier_call_namespace: (Syntax, USize) -> Syntax
     __classify_type_body: Syntax -> U8
     __type_body_parts: Syntax -> (Syntax; Syntax)
     __delimiter_contents: Syntax -> Syntax
-    __delimiter_syntax: (Syntax; U8; Syntax) -> Syntax
+    __delimiter_syntax: (Syntax, U8, Syntax) -> Syntax
     __visibility_kind: Syntax -> U8
     __visibility_syntax: U8 -> Syntax
     __punctuation_syntax: U8 -> Syntax
-    __modified_item_syntax: (Syntax; Syntax; Syntax) -> Syntax
-    __type_declaration_syntax: (Syntax; Syntax; Syntax; Syntax; Syntax; Syntax) -> Syntax
-    __modifier_call_syntax: (Syntax; Syntax; Syntax; Syntax) -> Syntax
-    __type_body_syntax: (Syntax; U8; Syntax; Syntax) -> Syntax
-    __alias_body_syntax: (Syntax; Syntax) -> Syntax
-    __wrapper_body_syntax: (Syntax; Syntax; Syntax) -> Syntax
-    __from_body_syntax: (Syntax; Syntax; Syntax) -> Syntax
+    __modified_item_syntax: (Syntax, Syntax, Syntax) -> Syntax
+    __type_declaration_syntax: (Syntax, Syntax, Syntax, Syntax, Syntax, Syntax) -> Syntax
+    __modifier_call_syntax: (Syntax, Syntax, Syntax, Syntax) -> Syntax
+    __type_body_syntax: (Syntax, U8, Syntax, Syntax) -> Syntax
+    __alias_body_syntax: (Syntax, Syntax) -> Syntax
+    __wrapper_body_syntax: (Syntax, Syntax, Syntax) -> Syntax
+    __from_body_syntax: (Syntax, Syntax, Syntax) -> Syntax
     __type_parameter_name: Syntax -> Syntax
     __type_parameter_default: Syntax -> Syntax
     __type_parameter_declaration: Syntax -> Syntax
     __type_parameter_argument: Syntax -> Syntax
-    __type_parameter_syntax: (Syntax; Syntax; Syntax; Syntax; Syntax) -> Syntax
+    __type_parameter_syntax: (Syntax, Syntax, Syntax, Syntax, Syntax) -> Syntax
     __type_parameters_count: Syntax -> USize
     __type_parameters_declaration: Syntax -> Syntax
     __type_parameters_arguments: Syntax -> Syntax
     __type_parameters_bounds: Syntax -> Syntax
-    __type_parameters_parameter: (Syntax; USize) -> Syntax
-    __type_parameters_syntax: (Syntax; Syntax; Syntax; Syntax; Syntax) -> Syntax
-    __resource_dependency_syntax: (Syntax; U8) -> Syntax
+    __type_parameters_parameter: (Syntax, USize) -> Syntax
+    __type_parameters_syntax: (Syntax, Syntax, Syntax, Syntax, Syntax) -> Syntax
+    __resource_dependency_syntax: (Syntax, U8) -> Syntax
 }
 
 /// Syntax that a quotation can splice with `$name`.
@@ -646,12 +646,12 @@ impl<T where Splice T> Splice Sequence<T> {
             match cells {
                 Sequence () => { break },
                 Sequence (first, rest) => {
-                    joined = __sequence_syntax ...(cell_origin; Splice.splice first; joined)
+                    joined = __sequence_syntax (cell_origin, Splice.splice first, joined)
                     cells = rest
                 },
             }
         }
-        __syntax_or_origin ...(__origin value; joined)
+        __syntax_or_origin (__origin value, joined)
     }
 }
 
@@ -665,14 +665,14 @@ pub def separated_elements_syntax = <Element, Separator where Splice Element, Sp
         match cursor {
             Sequence () => { break },
             Sequence (element, rest) => {
-                joined = __join_separated_syntax ...(joined; Splice.splice element; separator_syntax; first)
+                joined = __join_separated_syntax (joined, Splice.splice element, separator_syntax, first)
                 first = 0
                 cursor = rest
             },
         }
     }
     match trailing {
-        True => __append_separator_syntax ...(joined; separator_syntax),
+        True => __append_separator_syntax (joined, separator_syntax),
         False => joined,
     }
 }
@@ -689,7 +689,7 @@ def join_spliced = <T where Splice T> (elements: Sequence<T>; separator: Syntax)
         match cursor {
             Sequence () => { break },
             Sequence (element, rest) => {
-                joined = __join_separated_syntax ...(joined; Splice.splice element; separator; first)
+                joined = __join_separated_syntax (joined, Splice.splice element, separator, first)
                 first = 0
                 cursor = rest
             },
@@ -704,10 +704,10 @@ impl<Element, Separator where Splice Element, Splice Separator> Splice Separated
         let separator = Splice.splice value.separator
         let joined = join_spliced ...(value.elements; separator)
         let written = match value.trailing {
-            True => __append_separator_syntax ...(joined; separator),
+            True => __append_separator_syntax (joined, separator),
             False => joined,
         }
-        __syntax_or_origin ...(__origin value; written)
+        __syntax_or_origin (__origin value, written)
     }
 }
 
@@ -753,14 +753,14 @@ impl Splice Expr {
 
 @compiled_only
 impl Splice CallExpr {
-    splice = value => __call_syntax ...(__origin value; Splice.splice value.callee; Splice.splice value.argument)
+    splice = value => __call_syntax (__origin value, Splice.splice value.callee, Splice.splice value.argument)
 }
 
 @compiled_only
 impl<S where S <: String> Splice Ident<S> {
     splice = value => {
         let bytes = string_shared_bytes (__ident_spelling value.*)
-        __ident_syntax ...(__origin value; __text_new ...(SharedBuffer.unsafe_data bytes; SharedBuffer.length bytes))
+        __ident_syntax (__origin value, __text_new (SharedBuffer.unsafe_data bytes, SharedBuffer.length bytes))
     }
 }
 
@@ -768,13 +768,13 @@ impl<S where S <: String> Splice Ident<S> {
 impl Splice StringExpr {
     splice = value => {
         let bytes = string_shared_bytes value.*
-        __string_expr_syntax ...(__origin value; __text_new ...(SharedBuffer.unsafe_data bytes; SharedBuffer.length bytes))
+        __string_expr_syntax (__origin value, __text_new (SharedBuffer.unsafe_data bytes, SharedBuffer.length bytes))
     }
 }
 
 @compiled_only
 impl Splice CharExpr {
-    splice = value => __char_expr_syntax ...(__origin value; Char.to_u32 value.*)
+    splice = value => __char_expr_syntax (__origin value, Char.to_u32 value.*)
 }
 
 @compiled_only
@@ -809,7 +809,7 @@ pub def product_type_from_syntax = syntax: Syntax => ProductType :: {
             True => { break },
             False => {
                 index = index - 1
-                let field = __product_type_field ...(syntax; index)
+                let field = __product_type_field (syntax, index)
                 fields = Sequence (first: product_type_field_from_syntax field, rest: fields)
             },
         }
@@ -835,7 +835,7 @@ impl Splice ProductTypeField {
             None => __empty_syntax (),
             Some expression => Splice.splice expression,
         }
-        __product_type_field_syntax ...(name; field_type; default)
+        __product_type_field_syntax (name, field_type, default)
     }
 }
 
@@ -848,7 +848,7 @@ def product_type_fields_syntax = move fields: Sequence<ProductTypeField> => Synt
         match cells {
             Sequence () => { break },
             Sequence (field, rest) => {
-                joined = __join_field_syntax ...(joined; Splice.splice field; first)
+                joined = __join_field_syntax (joined, Splice.splice field, first)
                 first = 0
                 cells = rest
             },
@@ -863,7 +863,7 @@ def sequence_origin_of = <T> (value: Sequence<T>) => Syntax :: __origin value
 @compiled_only
 def product_type_syntax_of = (value: ProductType) => Syntax :: {
     let origin = sequence_origin_of value.*
-    __product_type_syntax ...(origin; product_type_fields_syntax (Clone.clone value.*))
+    __product_type_syntax (origin, product_type_fields_syntax (Clone.clone value.*))
 }
 
 @compiled_only
@@ -874,7 +874,7 @@ impl Splice ProductType {
 /// Whether two handles name the same syntax fragment. A round trip that
 /// returns its input keeps its original handle, not just its text.
 @compiled_only
-pub def same_syntax = (left: Syntax; right: Syntax) => Bool :: __same_syntax ...(left; right) == 1
+pub def same_syntax = (left: Syntax; right: Syntax) => Bool :: __same_syntax (left, right) == 1
 
 /// `value` with `origin` attached as its hidden origin. For macros that build
 /// syntax values by hand and want the rebuild to reuse the original fragment.
@@ -919,12 +919,12 @@ pub def pattern_from_syntax = syntax: Syntax => Pattern :: match (__classify_pat
 
 @compiled_only
 impl Splice BindingPattern {
-    splice = value => __binding_pattern_syntax ...(__origin value; Splice.splice value.*)
+    splice = value => __binding_pattern_syntax (__origin value, Splice.splice value.*)
 }
 
 @compiled_only
 impl Splice NominalPattern {
-    splice = value => __nominal_pattern_syntax ...(__origin value; Splice.splice value.name; Splice.splice value.argument)
+    splice = value => __nominal_pattern_syntax (__origin value, Splice.splice value.name, Splice.splice value.argument)
 }
 
 @compiled_only
@@ -957,7 +957,7 @@ pub def modifier_call_from_syntax = syntax: Syntax => ModifierCall :: {
             True => { break },
             False => {
                 index = index - 1
-                let part = __modifier_call_namespace ...(syntax; index)
+                let part = __modifier_call_namespace (syntax, index)
                 namespace = Sequence (first: ident_from_syntax part, rest: namespace)
             },
         }
@@ -1022,7 +1022,7 @@ pub def type_parameters_from_syntax = syntax: Syntax => TypeParameters :: {
             True => { break },
             False => {
                 index = index - 1
-                let parameter = __type_parameters_parameter ...(syntax; index)
+                let parameter = __type_parameters_parameter (syntax, index)
                 parameters = Sequence (first: type_parameter_from_syntax parameter, rest: parameters)
             },
         }
@@ -1048,7 +1048,7 @@ pub def type_declaration_from_syntax = syntax: Syntax => TypeDeclarationItem :: 
             True => { break },
             False => {
                 index = index - 1
-                let parameter = __type_declaration_type_parameter ...(syntax; index)
+                let parameter = __type_declaration_type_parameter (syntax, index)
                 type_parameters = Sequence (first: ident_from_syntax parameter, rest: type_parameters)
             },
         }
@@ -1064,7 +1064,7 @@ pub def type_declaration_from_syntax = syntax: Syntax => TypeDeclarationItem :: 
             True => { break },
             False => {
                 index = index - 1
-                let (resource_type; mutable) = __type_declaration_resource ...(syntax; index)
+                let (resource_type; mutable) = __type_declaration_resource (syntax, index)
                 let dependency = ResourceDependency (resource_type: type_from_syntax resource_type, mutable: mutable == 1)
                 resources = Sequence (first: dependency, rest: resources)
             },
@@ -1083,7 +1083,7 @@ pub def modified_item_from_syntax = syntax: Syntax => ModifiedItem :: {
             True => { break },
             False => {
                 index = index - 1
-                let modifier = __modified_item_modifier ...(syntax; index)
+                let modifier = __modified_item_modifier (syntax, index)
                 modifiers = Sequence (first: modifier_from_syntax modifier, rest: modifiers)
             },
         }
@@ -1124,7 +1124,7 @@ impl Splice ModifierCall {
             Some argument => Splice.splice argument,
         }
         let namespace = join_spliced ...(value.namespace; syntax_from_string ".")
-        __modifier_call_syntax ...(__origin value; namespace; Splice.splice value.name; argument)
+        __modifier_call_syntax (__origin value, namespace, Splice.splice value.name, argument)
     }
 }
 
@@ -1138,12 +1138,12 @@ impl Splice Modifier {
 
 @compiled_only
 impl Splice ModifiedItem {
-    splice = value => __modified_item_syntax ...(__origin value; Splice.splice value.modifiers; Splice.splice value.item)
+    splice = value => __modified_item_syntax (__origin value, Splice.splice value.modifiers, Splice.splice value.item)
 }
 
 @compiled_only
 impl Splice ResourceDependency {
-    splice = value => __resource_dependency_syntax ...(Splice.splice value.resource_type; match value.mutable { True => 1, False => 0 })
+    splice = value => __resource_dependency_syntax (Splice.splice value.resource_type, match value.mutable { True => 1, False => 0 })
 }
 
 @compiled_only
@@ -1155,7 +1155,7 @@ impl Splice TypeDeclarationItem {
         }
         let type_parameters = join_spliced ...(value.type_parameters; syntax_from_string ", ")
         let resources = join_spliced ...(value.resource_dependencies; syntax_from_string ", ")
-        __type_declaration_syntax ...(__origin value; Splice.splice value.name; Splice.splice value.declared_type; type_parameters; body; resources)
+        __type_declaration_syntax (__origin value, Splice.splice value.name, Splice.splice value.declared_type, type_parameters, body, resources)
     }
 }
 
@@ -1201,17 +1201,17 @@ impl Splice Item {
 
 @compiled_only
 impl<Element where Splice Element> Splice AliasBody<Element> {
-    splice = value => __alias_body_syntax ...(__origin value; Splice.splice value.*)
+    splice = value => __alias_body_syntax (__origin value, Splice.splice value.*)
 }
 
 @compiled_only
 impl<Representation, Element where Splice Representation, Splice Element> Splice WrapperBody<Representation, Element> {
-    splice = value => __wrapper_body_syntax ...(__origin value; Splice.splice value.0; Splice.splice value.1)
+    splice = value => __wrapper_body_syntax (__origin value, Splice.splice value.0, Splice.splice value.1)
 }
 
 @compiled_only
 impl<Representation, Element where Splice Representation, Splice Element> Splice FromBody<Representation, Element> {
-    splice = value => __from_body_syntax ...(__origin value; Splice.splice value.0; Splice.splice value.1)
+    splice = value => __from_body_syntax (__origin value, Splice.splice value.0, Splice.splice value.1)
 }
 
 @compiled_only
@@ -1236,33 +1236,33 @@ impl Splice TypeParameter {
             None => __empty_syntax (),
             Some ty => Splice.splice ty,
         }
-        __type_parameter_syntax ...(__origin value; Splice.splice value.name; default; value.declaration; Splice.splice value.argument)
+        __type_parameter_syntax (__origin value, Splice.splice value.name, default, value.declaration, Splice.splice value.argument)
     }
 }
 
 @compiled_only
 impl Splice TypeParameters {
-    splice = value => __type_parameters_syntax ...(__origin value; Splice.splice value.parameters; value.declaration; value.arguments; value.bounds)
+    splice = value => __type_parameters_syntax (__origin value, Splice.splice value.parameters, value.declaration, value.arguments, value.bounds)
 }
 
 @compiled_only
 impl<C where Splice C> Splice Parenthesized<C> {
-    splice = value => __delimiter_syntax ...(__origin value; 0; Splice.splice value.*)
+    splice = value => __delimiter_syntax (__origin value, 0, Splice.splice value.*)
 }
 
 @compiled_only
 impl<C where Splice C> Splice Bracketed<C> {
-    splice = value => __delimiter_syntax ...(__origin value; 1; Splice.splice value.*)
+    splice = value => __delimiter_syntax (__origin value, 1, Splice.splice value.*)
 }
 
 @compiled_only
 impl<C where Splice C> Splice Angled<C> {
-    splice = value => __delimiter_syntax ...(__origin value; 2; Splice.splice value.*)
+    splice = value => __delimiter_syntax (__origin value, 2, Splice.splice value.*)
 }
 
 @compiled_only
 impl<C where Splice C> Splice Braced<C> {
-    splice = value => __delimiter_syntax ...(__origin value; 3; Splice.splice value.*)
+    splice = value => __delimiter_syntax (__origin value, 3, Splice.splice value.*)
 }
 
 // Leaf syntax nodes: each consumes the longest node the grammar accepts from
@@ -1394,7 +1394,7 @@ def syntax_node_from_syntax = (tag: U64; syntax: Syntax) => SyntaxNode :: {
 @compiled_only
 impl Parse Expr {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 1; 0)
+        let result = __parse_leaf (input, 1, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1409,7 +1409,7 @@ impl Parse Expr {
 @compiled_only
 impl Parse CallExpr {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 2; 0)
+        let result = __parse_leaf (input, 2, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1424,7 +1424,7 @@ impl Parse CallExpr {
 @compiled_only
 impl Parse CharExpr {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 3; 0)
+        let result = __parse_leaf (input, 3, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1439,7 +1439,7 @@ impl Parse CharExpr {
 @compiled_only
 impl Parse StringExpr {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 4; 0)
+        let result = __parse_leaf (input, 4, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1454,7 +1454,7 @@ impl Parse StringExpr {
 @compiled_only
 impl Parse UnstructuredExpr {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 5; 0)
+        let result = __parse_leaf (input, 5, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1469,7 +1469,7 @@ impl Parse UnstructuredExpr {
 @compiled_only
 impl Parse Type {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 6; 0)
+        let result = __parse_leaf (input, 6, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1484,7 +1484,7 @@ impl Parse Type {
 @compiled_only
 impl Parse ProductType {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 7; 0)
+        let result = __parse_leaf (input, 7, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1499,7 +1499,7 @@ impl Parse ProductType {
 @compiled_only
 impl Parse UnstructuredType {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 8; 0)
+        let result = __parse_leaf (input, 8, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1514,7 +1514,7 @@ impl Parse UnstructuredType {
 @compiled_only
 impl Parse Pattern {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 9; 0)
+        let result = __parse_leaf (input, 9, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1529,7 +1529,7 @@ impl Parse Pattern {
 @compiled_only
 impl Parse BindingPattern {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 10; 0)
+        let result = __parse_leaf (input, 10, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1544,7 +1544,7 @@ impl Parse BindingPattern {
 @compiled_only
 impl Parse NominalPattern {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 11; 0)
+        let result = __parse_leaf (input, 11, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1559,7 +1559,7 @@ impl Parse NominalPattern {
 @compiled_only
 impl Parse Item {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 12; 0)
+        let result = __parse_leaf (input, 12, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1574,7 +1574,7 @@ impl Parse Item {
 @compiled_only
 impl Parse ModifiedItem {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 13; 0)
+        let result = __parse_leaf (input, 13, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1589,7 +1589,7 @@ impl Parse ModifiedItem {
 @compiled_only
 impl Parse TypeDeclarationItem {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 14; 0)
+        let result = __parse_leaf (input, 14, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1604,7 +1604,7 @@ impl Parse TypeDeclarationItem {
 @compiled_only
 impl Parse UnstructuredItem {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 15; 0)
+        let result = __parse_leaf (input, 15, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1619,7 +1619,7 @@ impl Parse UnstructuredItem {
 @compiled_only
 impl Parse Modifier {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 16; 0)
+        let result = __parse_leaf (input, 16, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1634,7 +1634,7 @@ impl Parse Modifier {
 @compiled_only
 impl Parse ModifierCall {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 17; 0)
+        let result = __parse_leaf (input, 17, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1649,7 +1649,7 @@ impl Parse ModifierCall {
 @compiled_only
 impl Parse UnstructuredModifier {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 18; 0)
+        let result = __parse_leaf (input, 18, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1664,7 +1664,7 @@ impl Parse UnstructuredModifier {
 @compiled_only
 impl Parse TypeBody {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 19; 0)
+        let result = __parse_leaf (input, 19, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1679,7 +1679,7 @@ impl Parse TypeBody {
 @compiled_only
 impl Parse TypeParameter {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 20; 0)
+        let result = __parse_leaf (input, 20, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1694,7 +1694,7 @@ impl Parse TypeParameter {
 @compiled_only
 impl Parse TypeParameters {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 21; 0)
+        let result = __parse_leaf (input, 21, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1709,7 +1709,7 @@ impl Parse TypeParameters {
 @compiled_only
 impl Parse Comma {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 23; 0)
+        let result = __parse_leaf (input, 23, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1724,7 +1724,7 @@ impl Parse Comma {
 @compiled_only
 impl Parse Equals {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 24; 0)
+        let result = __parse_leaf (input, 24, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1739,7 +1739,7 @@ impl Parse Equals {
 @compiled_only
 impl Parse FatArrow {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 25; 0)
+        let result = __parse_leaf (input, 25, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1754,7 +1754,7 @@ impl Parse FatArrow {
 @compiled_only
 impl Parse Visibility {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 26; 0)
+        let result = __parse_leaf (input, 26, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1772,8 +1772,8 @@ impl<S where S <: String> Parse Ident<S> {
     parse = mut input => {
         let expected = __ident_type_spelling.<S> ()
         let bytes = string_shared_bytes expected
-        let spelling = __text_new ...(SharedBuffer.unsafe_data bytes; SharedBuffer.length bytes)
-        let result = __parse_leaf ...(input; 22; spelling)
+        let spelling = __text_new (SharedBuffer.unsafe_data bytes, SharedBuffer.length bytes)
+        let result = __parse_leaf (input, 22, spelling)
         match (__parse_result_status result == 1) {
             True => {
                 let syntax = __parse_result_syntax result
@@ -1790,7 +1790,7 @@ impl<S where S <: String> Parse Ident<S> {
 @compiled_only
 impl Parse SyntaxNode {
     parse = mut input => {
-        let result = __parse_leaf ...(input; 27; 0)
+        let result = __parse_leaf (input, 27, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let tag = __parse_result_tag result
@@ -1810,7 +1810,7 @@ impl<C where Parse C> Parse Parenthesized<C> {
         let mut contents = inner
         let value = Parse.parse.<C> contents?
         if (is_empty contents) {
-            Ok (__parenthesized.<C> ...(source; value))
+            Ok (__parenthesized.<C> (source, value))
         } else {
             error_at ...(contents; "unexpected syntax")
         }
@@ -1820,7 +1820,7 @@ impl<C where Parse C> Parse Parenthesized<C> {
 @compiled_only
 impl<C where Parse C> Parse Parenthesized<C> {
     parse = mut input => {
-        let result = __parse_group ...(input; 0)
+        let result = __parse_group (input, 0)
         match (__parse_result_status result == 1) {
             True => {
                 let source = __parse_result_syntax result
@@ -1848,7 +1848,7 @@ impl<C where Parse C> Parse Bracketed<C> {
         let mut contents = inner
         let value = Parse.parse.<C> contents?
         if (is_empty contents) {
-            Ok (__bracketed.<C> ...(source; value))
+            Ok (__bracketed.<C> (source, value))
         } else {
             error_at ...(contents; "unexpected syntax")
         }
@@ -1858,7 +1858,7 @@ impl<C where Parse C> Parse Bracketed<C> {
 @compiled_only
 impl<C where Parse C> Parse Bracketed<C> {
     parse = mut input => {
-        let result = __parse_group ...(input; 1)
+        let result = __parse_group (input, 1)
         match (__parse_result_status result == 1) {
             True => {
                 let source = __parse_result_syntax result
@@ -1886,7 +1886,7 @@ impl<C where Parse C> Parse Angled<C> {
         let mut contents = inner
         let value = Parse.parse.<C> contents?
         if (is_empty contents) {
-            Ok (__angled.<C> ...(source; value))
+            Ok (__angled.<C> (source, value))
         } else {
             error_at ...(contents; "unexpected syntax")
         }
@@ -1896,7 +1896,7 @@ impl<C where Parse C> Parse Angled<C> {
 @compiled_only
 impl<C where Parse C> Parse Angled<C> {
     parse = mut input => {
-        let result = __parse_group ...(input; 2)
+        let result = __parse_group (input, 2)
         match (__parse_result_status result == 1) {
             True => {
                 let source = __parse_result_syntax result
@@ -1924,7 +1924,7 @@ impl<C where Parse C> Parse Braced<C> {
         let mut contents = inner
         let value = Parse.parse.<C> contents?
         if (is_empty contents) {
-            Ok (__braced.<C> ...(source; value))
+            Ok (__braced.<C> (source, value))
         } else {
             error_at ...(contents; "unexpected syntax")
         }
@@ -1934,7 +1934,7 @@ impl<C where Parse C> Parse Braced<C> {
 @compiled_only
 impl<C where Parse C> Parse Braced<C> {
     parse = mut input => {
-        let result = __parse_group ...(input; 3)
+        let result = __parse_group (input, 3)
         match (__parse_result_status result == 1) {
             True => {
                 let source = __parse_result_syntax result
@@ -2460,7 +2460,7 @@ def sequence_reverse = <T> (move sequence: Sequence<T>) => Sequence<T> :: {
 }
 
 @interpreted_only
-def sequence_push = <T> (move sequence: Sequence<T>; move item: T) => Sequence<T> :: __sequence_push ...(sequence; item)
+def sequence_push = <T> (move sequence: Sequence<T>; move item: T) => Sequence<T> :: __sequence_push (sequence, item)
 
 @compiled_only
 def sequence_push = <T> (move sequence: Sequence<T>; move item: T) => Sequence<T> :: {
@@ -2557,7 +2557,7 @@ impl<T where Parse T> Parse Sequence<T> {
                     match starts {
                         Sequence () => { break },
                         Sequence (start, earlier) => {
-                            cells = __with_origin (Sequence (first: first, rest: cells), __stream_span ...(start; input))
+                            cells = __with_origin (Sequence (first: first, rest: cells), __stream_span (start, input))
                             starts = earlier
                         },
                     }
@@ -2604,7 +2604,7 @@ impl<T where Parse T> Parse Separated<T, Comma> {
             }
         }
         let list: Separated<T, Comma> = Separated (separator: Comma, elements: sequence_reverse elements, trailing: trailing)
-        Ok (__with_origin (list, __stream_span ...(begin; input)))
+        Ok (__with_origin (list, __stream_span (begin, input)))
     }
 }
 

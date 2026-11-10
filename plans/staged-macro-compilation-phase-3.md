@@ -546,6 +546,21 @@ Update this section as you work (see "Rules for the implementor").
 
 ## Findings
 
+### Intrinsic parameters
+
+The `std.syntax` intrinsics with several parameters take a plain product, as
+`std.alloc`'s `__checked_mul` does, and are called as `__text_copy (handle,
+destination, length)` rather than spread from a slotted product (this commit).
+The `External` call route already passes a plain product's elements as
+consecutive native arguments, inline intrinsics read any unnamed product, and
+the interpreter accepts either product kind, so only the 44 declarations, the
+call sites and the generated `__quote` call changed. The public `error_at`,
+the slotted `Parse.parse_quote` and the slotted intrinsic results such as
+`__take_rest`'s are unchanged. All workspace suites pass (2317 tests), the
+expansion matches the previous capture for 231 of 232 inputs (the only
+difference is the `__quote` call in `stdlib/syntax.sta`), and the closure
+check reports 0 diagnostics.
+
 ### Lowering inventory (task 1)
 
 The standard-library check program lowered for the first time after these
