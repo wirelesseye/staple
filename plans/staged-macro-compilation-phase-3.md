@@ -266,20 +266,43 @@ All of these were read from the source at `ef52149a`.
 13. **A sequence splices with a plain `$name`.** `$name...` is removed, with no alias.
     - The value's type already says it is a sequence. `Splice` is implemented for
       `Sequence<T>`, and `$name` and `$name...` already lower to the same
-      `Splice.splice name`. The elements are placed side by side either way, with no
-      separators, and an empty sequence inserts nothing.
-    - `...` only works in item lists, type-parameter lists and raw-token substitution,
-      so removing it makes a sequence work in every position.
+      `Splice.splice name`.
+    - **A `Sequence` splices side by side, and a comma list uses `Separated`.**
+      The compiled `Splice` impls already work this way: a `Sequence` joins its
+      elements with a space (two items on one line still parse), and a
+      `Separated` writes its separator between elements. The interpreter gives
+      `$name...` a third meaning today: in a product, such as `($parts...)`, each
+      element becomes its own comma-separated product element. Only tests use
+      it, and it is dropped. Code that wants commas builds a `Separated` and
+      splices it inside its delimiter, as
+      `Parenthesized (Separated (separator: Comma, elements: parts, trailing: False))`.
+      The interpreter already turns that value into a product, and compiled code
+      writes `(a, b, c)`.
     - It also frees `...` for spreading. The parser ignores the space before it, so
       `f $a ...$b` is read as a repeated splice and rejected today.
-    - The grammar conflict is only in the interpreter. It parses `$name` followed by an
-      item as a visibility splice (`$visibility type ...`), and it doesn't accept
-      `$items` at the end of an item list. Compiled quotations fill in tokens before
-      parsing, so they don't have this conflict.
-    - The interpreter should send a quotation that splices a sequence through its
-      existing raw-token substitution, chosen from the value as
-      `quote_contains_raw_splice` does for raw fragments. Task 7 starts by proving this.
-      If it fails, stop and raise the design again. Don't keep `...` to work around it.
+    - **The interpreter keeps substituting trees.** It doesn't switch to raw-token
+      substitution. An interpreter value's tokens are not its current value: a
+      quotation substituted as a tree keeps its template's `$name` tokens, and a
+      constructed node (`Ident`, `CallExpr`, `StringExpr`, ...) has synthetic
+      syntax with no tokens at all, so the raw path drops it. The task 7
+      experiment failed for this reason (see Findings). The interpreter is
+      deleted in Phase 6, so it isn't worth making every value carry current
+      tokens.
+    - **The template grammar decides an item-list splice by its line.** In an
+      item list, `$name` with an item after it on the same line stays a visibility
+      splice (`$visibility type ...`). `$name` that ends its line, or comes before
+      `}` or the end, is an item splice. The value decides how many items it
+      gives: an `Item` gives one, a `Sequence<Item>` gives its elements, and an
+      empty sequence gives none. This is syntax, so the resolver, the closure
+      check and the check program read templates the same way without values.
+      Compiled quotations fill tokens before parsing and don't need the rule.
+    - **Where the interpreter splices a list.** Besides item lists, the tree path
+      takes a plain `$name` in a type-parameter list: an `Ident` gives one
+      parameter, and a `Separated<Ident<String>, Comma>` gives its elements. A
+      bare `Sequence` or `Separated` anywhere else, such as `f $args` or
+      `($parts)`, is an interpreter error that names the position. Compiled
+      macros accept it. This is a known difference until Phase 6, like the
+      closure check's.
 
 ## Tasks
 
@@ -389,37 +412,59 @@ Do this as one change, so the closure check stays clean at every commit.
 Do this as one change with its own commit, so the interpreter and compiled code accept
 the same source from here on (Decision 13).
 
-- Start with the interpreter (`staple-compiler/src/macro_expand.rs`). Route a quotation
-  that splices a sequence through raw-token substitution, and prove these cases before
-  going on: `$items` at the end of an item list, `$items` followed by another item, and
-  `$visibility type ...` still working as a visibility splice. Today, replacing
-  `$items...` in `stdlib/std/typegroup.sta` fails with "quotation requires a contextual
-  syntax type", so the template parse has to change as well.
-- Remove `...` from splices: `SpliceExpression.repeated`, `Item::RepeatedItemSplice` and
-  everything that matches on it, the `...` requirement on type-parameter splices in
-  `staple-syntax/src/parser.rs`, and the `Ellipsis` check in `substitute_raw_quote`. A
-  `...` after a splice is then an ordinary token.
-- Migrate the uses: `stdlib/std/typegroup.sta` (2), `stdlib/std/fmt.sta` (1),
-  `staple-compiler/src/macro_expand/check_program.rs`,
-  `staple-compiler/tests/compiler.rs`, `staple-compiler/tests/derive_default.rs` and
-  `staple-compiler/examples/macros.sta`.
+- Start with the interpreter template grammar in `staple-syntax/src/parser.rs`.
+  `$name` in an item list that ends its line, or comes before `}` or the end, is an
+  item splice; with an item after it on the same line, it stays a visibility splice.
+  Rename `Item::RepeatedItemSplice` to `Item::ItemSplice`. A type-parameter splice
+  no longer needs `...`. Then teach `substitute_item_list` to take an `Item` as well
+  as a `Sequence<Item>`, `substitute_type_parameter_list` to take an `Ident` or a
+  `Separated<Ident<String>, Comma>` (Decision 13). Prove these before going on: `$items` at the end of an item list,
+  `$items` followed by another item, an empty sequence, a single `Item`, and
+  `$visibility type ...` still working as a visibility splice.
+- Remove `...` from splices: `SpliceExpression.repeated`, the repeated-product path in
+  `substitute_splices`, the "repeated splices are not supported yet" diagnostics, and
+  the `Ellipsis` handling in `substitute_raw_quote`. A `...` after a splice is then an
+  ordinary token. `substitute_raw_quote` keeps taking raw fragments, type parameters
+  and `quote` results as it does today. A `Sequence` value there still splices its
+  elements' tokens side by side.
+- Report a `Sequence` or `Separated` spliced anywhere else as an interpreter error that
+  names the position. Don't add a raw-token fallback for it.
+- An item splice whose value is neither an `Item` nor a `Sequence<Item>`, such as a
+  `Visibility` left alone on its line, is an error that says `$name` on its own line
+  is an item splice.
+- `separated_parenthesized` always builds a product, but compiled code writes `(a)` for
+  one element without a trailing comma, which parses as `a`. Make the interpreter
+  match the tokens.
+- Migrate the uses:
+  - `stdlib/std/typegroup.sta` (2): `$items...` becomes `$items`.
+  - `stdlib/std/fmt.sta` (1): build a `Separated<Ident<String>, Comma>` from
+    `parameters` and splice it in the type-parameter list.
+  - `staple-compiler/src/macro_expand/check_program.rs` (`($rest...)`,
+    `($other, $rest...)`), `staple-compiler/tests/compiler.rs` (`($names...,)` and
+    the repeated-splice diagnostic test) and `staple-compiler/tests/derive_default.rs`
+    (`($parts...)`): each builds a `Parenthesized` around a `Separated` and splices
+    it whole, and the expected output stays the same.
+  - `staple-compiler/examples/macros.sta` and the comment above `Splice Sequence` in
+    `stdlib/std/syntax.sta`.
 - Update `Staple.md`, which describes `$items...` in the syntax-values section, the
-  multi-item quotation section and the `Splice` lowering section. Remove the wording that
-  ties sequence splices to item lists.
+  multi-item quotation section and the `Splice` lowering section. Say that a `Sequence`
+  splices side by side and a `Separated` with its separators, and give the item-list
+  line rule. Remove the wording that ties sequence splices to item lists.
 - Replace `reserves_repeated_splice_syntax` (`staple-syntax/tests/parser.rs`) and
   `rejects_repeated_splices_with_a_specific_diagnostic`
   (`staple-compiler/tests/compiler.rs`), which test the old syntax.
 - Tests:
-  - A `Sequence` of `Item`, `Ident`, `Expr`, `Type` and `Pattern` spliced with `$name`
-    in the positions the grammar allows, and in a type-parameter list.
-  - An empty sequence.
+  - The item-list cases above, in the interpreter and as parsed syntax.
+  - A `Parenthesized<Separated<Expr, Comma>>` spliced with zero, one and several
+    elements, with and without a trailing comma, and a `Separated<Ident<String>, Comma>`
+    as a type-parameter list.
+  - A `Sequence` spliced outside the supported lists, reported by the interpreter.
   - `f $a ...$b` and `f $a ...pair` spreading in the generated code.
   - `$name...` with nothing to spread being a parse error.
   - A sequence of something that isn't syntax being rejected, by the interpreter and by
     the closure check.
-  - Hygiene of spliced elements. The item-list path used to substitute trees rather than
-    tokens, so `typegroup` and `derive_debug` expansions must match the output from
-    before this change. Record any difference in Findings.
+  - `typegroup` and `derive_debug` expansions match the output from before this change,
+    since they still go through tree substitution. Record any difference in Findings.
 
 ### 8. Quotations
 
@@ -432,8 +477,9 @@ the same source from here on (Decision 13).
   splices. `Parse.parse_quote` needs no change.
 - Tests: hygiene in the same way the macro tests check it (a quoted name resolving
   in the macro's module, a spliced one at the call site), each result category,
-  spaced splices, a repeated `Ident` and `Expr` splice, and a sequence spliced with
-  `$items`.
+  spaced splices, a repeated `Ident` and `Expr` splice, a sequence spliced with
+  `$items`, a `Parenthesized<Separated<Expr, Comma>>`, and a `Sequence` in an
+  expression position that the interpreter rejects (Decision 13).
 
 ### 9. Arguments and results
 
@@ -529,7 +575,7 @@ Update this section as you work (see "Rules for the implementor").
 | 4. Arena and core intrinsics | done | `b1207bf8` | `macro_runtime/arena.rs` keeps syntax fragments, text, parse streams and parsed nodes for one call; handles carry a generation and `reset` makes earlier handles stale. `macro_expand/syntax_ops.rs` owns the shared slicing, position, delimiter, hygiene and token-filling helpers, plus text lexing. Streams and text run through host intrinsics, with two-body `is_empty` and `error_at` where the ABI differs. See Findings. |
 | 5. Node views and rebuilding | done | `e9f38d44`, `ead6c8a8` | Non-generic classification, part and rebuild intrinsics cover expressions, types, patterns, items, modifiers, type bodies, type parameters, delimiters, visibility and punctuation. `@compiled_only` `from_syntax` functions attach origins, and compiled `Splice` impls return the origin for unchanged nodes. Sequence construction is Staple code, compiled `Splice Separated` is implemented, constructed non-empty products rebuild, and the harness asserts same-handle round trips. `__ident_spelling` is an inline intrinsic that reads an identifier box as a `String`. See Findings. |
 | 6. `Parse` impls | done | `1416a3f9`, `5ed41520` | The interpreter and compiled code share one leaf parser, so grammar and diagnostics agree. Compiled leaves and groups return an arena result handle; `Ident<S>` reads `S`'s spelling with a compiler intrinsic. The check gets fixed-arity product impls while the interpreter keeps the variadic ones, and `is_variadic_parse_impl` is gone. The harness checks 21 parse behaviors, including exact error messages and same-handle list round trips. Parsed lists carry origins, and a spelling set is a code generation error. See Findings. |
-| 7. Plain sequence splices | blocked | `a5c17c65` | The required raw-token substitution experiment breaks `typegroup` expansion: substituted AST nodes still carry template tokens. No implementation changes retained; see Findings. |
+| 7. Plain sequence splices | not started | `a5c17c65` | The raw-token experiment failed because interpreter values don't carry current tokens. Decision 13 is revised: the interpreter keeps tree substitution with an item-list line rule, and comma lists use `Separated`. See Findings. |
 | 8. Quotations | not started | | |
 | 9. Arguments and results | not started | | |
 | 10. Wire format | not started | | |
@@ -1092,3 +1138,29 @@ Comparison with `/tmp/exp-baseline`, the saved start-of-phase capture, matches
 recorded under task 6. There are no retained compiler or standard-library
 changes to compare. The full test suite and closure check were not rerun for
 this plan-only commit; their last results remain those recorded under task 6.
+
+#### Review of the experiment
+
+The finding holds, and the raw path fails more widely than it records:
+
+- **Constructed nodes have no tokens.** `construct_syntax` gives `Ident`,
+  `CallExpr`, `StringExpr`, `CharExpr` and the pattern constructors
+  `Syntax::synthetic` syntax, so `append_syntax_tokens` copies nothing for
+  them. Any quotation that goes through the raw path, which already includes
+  one with a raw fragment splice, drops a constructed value without a
+  diagnostic.
+- **Products give `$name...` a third meaning.** Tree substitution expands
+  `($parts...)` into one comma-separated product element per item.
+  `derive_default.rs`'s `@describe` test depends on it (its output is
+  `("x", "=", ...)`), and `check_program.rs` and `compiler.rs` use it.
+  The raw path and the compiled `Splice` impls place elements side by side. So
+  Decision 13's "the elements are placed side by side either way" was only true
+  of the raw path. Only tests use the product meaning, so it is dropped rather
+  than carried over to plain `$name`.
+
+The revised Decision 13 keeps tree substitution in the interpreter and decides
+an item-list splice by its line. Commas come from the value's type: a
+`Separated` writes them, as compiled code already does, and a quotation splices
+it inside its delimiter. Raw-token substitution
+for sequences is no longer part of the design.
+
