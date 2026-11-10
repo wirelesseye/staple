@@ -529,7 +529,7 @@ Update this section as you work (see "Rules for the implementor").
 | 4. Arena and core intrinsics | done | `b1207bf8` | `macro_runtime/arena.rs` keeps syntax fragments, text, parse streams and parsed nodes for one call; handles carry a generation and `reset` makes earlier handles stale. `macro_expand/syntax_ops.rs` owns the shared slicing, position, delimiter, hygiene and token-filling helpers, plus text lexing. Streams and text run through host intrinsics, with two-body `is_empty` and `error_at` where the ABI differs. See Findings. |
 | 5. Node views and rebuilding | done | `e9f38d44`, `ead6c8a8` | Non-generic classification, part and rebuild intrinsics cover expressions, types, patterns, items, modifiers, type bodies, type parameters, delimiters, visibility and punctuation. `@compiled_only` `from_syntax` functions attach origins, and compiled `Splice` impls return the origin for unchanged nodes. Sequence construction is Staple code, compiled `Splice Separated` is implemented, constructed non-empty products rebuild, and the harness asserts same-handle round trips. `__ident_spelling` is an inline intrinsic that reads an identifier box as a `String`. See Findings. |
 | 6. `Parse` impls | done | `1416a3f9` | The interpreter and compiled code share one leaf parser, so grammar and diagnostics agree. Compiled leaves and groups return an arena result handle; `Ident<S>` reads `S`'s spelling with a compiler intrinsic. The check gets fixed-arity product impls while the interpreter keeps the variadic ones, and `is_variadic_parse_impl` is gone. The harness checks 18 parse behaviors, including exact error messages. See Findings. |
-| 7. Plain sequence splices | not started | | |
+| 7. Plain sequence splices | blocked | this commit | The required raw-token substitution experiment breaks `typegroup` expansion: substituted AST nodes still carry template tokens. No implementation changes retained; see Findings. |
 | 8. Quotations | not started | | |
 | 9. Arguments and results | not started | | |
 | 10. Wire format | not started | | |
@@ -958,3 +958,49 @@ cells at the default collection threshold.
   This was already so before boxed nodes.
 - A `Sequence` of slotted products has no `Clone`, because products have none. Macro
   code moves or borrows those lists.
+
+### Plain sequence splice experiment (task 7)
+
+Task 7 is blocked at its required interpreter proof. Following Decision 13,
+an experiment added `Value::Sequence` and `SyntaxValue::Items` to
+`quote_contains_raw_splice` and let `substitute_raw_quote` append sequence
+elements for a plain `$name`. The old ellipsis consumption was kept only for
+this experiment, so the existing standard-library source could still load
+before migration. No syntax variants or standard-library uses were removed.
+
+A compiler test constructed an item sequence inside an `Expr -> Sequence<Item>`
+macro, spliced it after a declaration and before a declaration in separate
+macros, and also exercised `$visibility type $name = I32`. Running
+`cargo test -p staple-compiler --test compiler
+plain_sequence_splices_in_item_lists_preserve_visibility -- --nocapture`
+failed during standard-library resolution, before those cases could pass:
+`ConversionError` had no accessible companion member `OutOfRange`, and the
+sum built by `typegroup_sum` reported unknown types `OutOfRange`,
+`PrecisionLoss`, `NonFinite` and `InvalidNumber`.
+
+The raw path cannot currently treat a structured node's backing tokens as its
+current value. `substitute_identifier` changes the AST name and records an
+identifier origin, but does not replace its `$variant` template tokens.
+`substitute_item_list` previously inserted the resulting AST directly;
+`substitute_raw_quote` instead copies `item_syntax(item).tokens()` through
+`append_syntax_tokens` and reparses them. That discards the substituted tree.
+Routing existing `typegroup` sequences through that path therefore changes
+expansion even before removing `...`. Identifier origins and root hygiene do
+not reconstruct the missing substituted tokens.
+
+Per Decision 13's instruction to stop if the experiment fails, the experimental
+code and failing test were removed. Task 7 needs a revised design for obtaining
+current tokens from interpreter syntax values while preserving substitutions,
+trivia and hygiene before the source migration can proceed. Retaining `...`
+is not the proposed solution. The compiler, standard library, language reference
+and accepted splice syntax remain at the end of task 6.
+
+Verification after removing the experiment: the existing compiler test
+`contextual_item_sequence_quotes_flatten_empty_single_and_multiple_results`
+passes, and the existing debug CLI checks `stdlib/std/convert.sta` successfully.
+An expansion capture with that CLI has 232 inputs and no non-zero exits.
+Comparison with `/tmp/exp-baseline`, the saved start-of-phase capture, matches
+224 of 232 inputs: the same eight edited standard-library files already
+recorded under task 6. There are no retained compiler or standard-library
+changes to compare. The full test suite and closure check were not rerun for
+this plan-only commit; their last results remain those recorded under task 6.
