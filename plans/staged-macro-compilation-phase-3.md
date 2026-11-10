@@ -528,7 +528,7 @@ Update this section as you work (see "Rules for the implementor").
 | 3. Ownership of syntax | done | `24dd4cf`, `fcfa409` | `Sequence<T>` and `Separated<T, S>` are always non-`Copy`. `Clone` is a deep copy in compiled code and the interpreter's is an identity, using `@compiled_only` and `@interpreted_only`. Handle types copy through `__clone_syntax`, which compiled code rejects for anything else. `duplicate_modifier` is gone. The check treats a splice as a read only for the real `std.syntax` `Splice`. See Findings for the suite and corpus results. |
 | 4. Arena and core intrinsics | done | `b1207bf8` | `macro_runtime/arena.rs` keeps syntax fragments, text, parse streams and parsed nodes for one call; handles carry a generation and `reset` makes earlier handles stale. `macro_expand/syntax_ops.rs` owns the shared slicing, position, delimiter, hygiene and token-filling helpers, plus text lexing. Streams and text run through host intrinsics, with two-body `is_empty` and `error_at` where the ABI differs. See Findings. |
 | 5. Node views and rebuilding | done | `e9f38d44`, `ead6c8a8` | Non-generic classification, part and rebuild intrinsics cover expressions, types, patterns, items, modifiers, type bodies, type parameters, delimiters, visibility and punctuation. `@compiled_only` `from_syntax` functions attach origins, and compiled `Splice` impls return the origin for unchanged nodes. Sequence construction is Staple code, compiled `Splice Separated` is implemented, constructed non-empty products rebuild, and the harness asserts same-handle round trips. `__ident_spelling` is an inline intrinsic that reads an identifier box as a `String`. See Findings. |
-| 6. `Parse` impls | done | `1416a3f9` | The interpreter and compiled code share one leaf parser, so grammar and diagnostics agree. Compiled leaves and groups return an arena result handle; `Ident<S>` reads `S`'s spelling with a compiler intrinsic. The check gets fixed-arity product impls while the interpreter keeps the variadic ones, and `is_variadic_parse_impl` is gone. The harness checks 18 parse behaviors, including exact error messages. See Findings. |
+| 6. `Parse` impls | done | `1416a3f9`, this commit | The interpreter and compiled code share one leaf parser, so grammar and diagnostics agree. Compiled leaves and groups return an arena result handle; `Ident<S>` reads `S`'s spelling with a compiler intrinsic. The check gets fixed-arity product impls while the interpreter keeps the variadic ones, and `is_variadic_parse_impl` is gone. The harness checks 21 parse behaviors, including exact error messages and same-handle list round trips. Parsed lists carry origins, and a spelling set is a code generation error. See Findings. |
 | 7. Plain sequence splices | blocked | this commit | The required raw-token substitution experiment breaks `typegroup` expansion: substituted AST nodes still carry template tokens. No implementation changes retained; see Findings. |
 | 8. Quotations | not started | | |
 | 9. Arguments and results | not started | | |
@@ -769,9 +769,10 @@ The compiled implementations are:
   the interpreter. Delimiter impls also have two bodies: interpreted ones keep
   `__parenthesized_group` and `__parenthesized`, while compiled ones use
   `__parse_group` and construct the node with `__with_origin`.
-- `Parse Syntax`, `Parse ()`, `Parse Option<T>`, `Parse Sequence<T>`, and
-  `Parse Separated<T, Comma>` are shared, because they only call other `Parse`
-  members and the two-body `is_empty`/`error_at`/sequence helpers.
+- `Parse Syntax`, `Parse ()` and `Parse Option<T>` are shared, because they
+  only call other `Parse` members and the two-body `is_empty`/`error_at`
+  helpers. `Parse Sequence<T>` and `Parse Separated<T, Comma>` have two
+  bodies since the review fixes below: the compiled ones attach origins.
 - The interpreter keeps the variadic product impls as
   `@interpreted_only`. The check gets fixed-arity slotted and comma impls for
   arity 2 through 8, `@compiled_only`. `is_variadic_parse_impl` is removed, so
@@ -852,6 +853,70 @@ Verification:
   tasks 2, 3 and 6 (`annotation`, `cmp`, `default`, `flow`, `fmt`, `hash`,
   `syntax`, `typegroup`). The interpreter's expansion of corpus, examples and
   fixtures is unchanged.
+
+#### Review fixes (task 6)
+
+A review of the first version found five faults. Each now has a test.
+
+- **Parsed lists had no origin.** `Sequence` and `Separated` values came out
+  of `Parse` without an origin, so splicing an unchanged list rebuilt it:
+  `f a,  g b // note\n, h` came back as `f a,  g b, h`, losing the comment, and
+  two items on separate lines gained a space before the line break. A new host
+  intrinsic, `__stream_span`, returns the tokens two cursors over one fragment
+  passed between them, trimmed of trivia at both ends. The compiled
+  `Parse Sequence<T>` gives each cell the span from its element to the end of
+  the list, which is the suffix origin `__sequence_syntax` expects, and the
+  compiled `Parse Separated<T, Comma>` gives the list the span it read. The
+  interpreter keeps the old bodies as `@interpreted_only`. An unchanged list
+  now splices back to its origin handle, comments and layout included. A
+  changed `Separated` element still rebuilds the whole list with plain
+  separators, since `Splice Separated` has no per-element origins.
+- **`Ident<"a" | "b">` accepted only `"a"`.** `__ident_type_spelling` took the
+  first literal of a set, so `b` failed with `expected Ident<"a">`. The
+  interpreter rejects the set, and compiled code now does too: code generation
+  reports "an identifier spelling must be one string literal" for a set, and
+  "an identifier spelling must be known when macro code is compiled" when the
+  type still names a type parameter, where it used to accept any spelling.
+  The static and dynamic code generators share the check.
+- **Unused product-returning intrinsics stayed declared.** The per-field
+  intrinsics replaced `__product_type_field_parts`,
+  `__type_declaration_parts`, `__modifier_call_parts`,
+  `__type_parameter_parts` and `__type_parameters_parts`, but these remained
+  in the table and the extern block, each returning a three- to five-field
+  product of the shape that crashes the JIT. They and their result structs are
+  removed. The ABI fault itself is not fixed.
+- **A failed `CallExpr` view built a fake node.** `call_expr_from_syntax`
+  returned `call ident` when the parsed syntax was not a call. It now panics,
+  since the shared parser only reports a call when it read one.
+- **`parse_group_intrinsic` saved an id counter it never advanced.** The group
+  parser allocates no syntax ids, so the bookkeeping is gone.
+
+Tests: `parse_implementations_run_in_compiled_code` now has 21 probes. The
+new ones check that a `Separated<Expr, Comma>` keeps an interior comment, that
+a `Sequence<Item>` keeps its line breaks and a comment between items, and that
+splicing an unchanged `Sequence` twice returns the same handle. The existing
+`Separated` probe now expects the source spacing (`a, b,`) where it expected
+the rebuilt `a,b,`. `identifier_spelling_sets_do_not_compile` checks the
+spelling-set diagnostic.
+
+Verification:
+
+- `cargo test --workspace --exclude staple --no-fail-fast` passes every
+  suite: the compiler library tests (561 passed, 0 failed, 3 ignored), the
+  compiler tests (855 passed, 0 failed), the parser tests (176 passed) and
+  every other integration suite.
+- `cargo test -p staple --bin staple`: 288 passed, 1 failed, 2 ignored. The
+  failure, `lsp::hover::tests::displays_declared_types_for_macro_helper_parameters`,
+  is not from these fixes: it fails the same way at `a5c17c65` and passes at
+  the branch's merge base, and bisecting puts it at `24dd4cf3` (task 3). One
+  of `first`, `rest`, `modifiers`, `variant` or `body` in `std.typegroup` now
+  hovers as `SyntaxNode`. Earlier verification ran only the compiler package,
+  which is why it was not recorded.
+- Expansion comparison against `a5c17c65`: 231 of 232 inputs match; the only
+  difference is `stdlib/syntax.sta`, from this change's own edits. The
+  interpreter's expansion is unchanged.
+- `scripts/check-macro-closures.py --mode all --timeout 600`: 232 inputs, 0
+  with diagnostics, 0 distinct messages.
 
 ### Boxed representation (task 2)
 

@@ -4683,24 +4683,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let value_type = intrinsic_type(0)
                     .cloned()
                     .ok_or_else(|| Diagnostic::new(span.clone(), "spelling intrinsic has no type"))?;
-                let spelling = if crate::contains_type_parameter(&value_type) {
-                    String::new()
-                } else {
-                    match value_type.desugared() {
-                        CheckedType::String => String::new(),
-                        CheckedType::StringLiteralSet(values) => {
-                            values.first().cloned().unwrap_or_default()
-                        }
-                        other => {
-                            return Err(Diagnostic::new(
-                                span.clone(),
-                                format!(
-                                    "an identifier spelling must be a string type, found {other:?}"
-                                ),
-                            ));
-                        }
-                    }
-                };
+                let spelling = super::ident_type_spelling(&value_type)
+                    .map_err(|message| Diagnostic::new(span.clone(), message))?;
                 self.backend
                     .build_string_literal(&spelling)
                     .as_basic_value_enum()

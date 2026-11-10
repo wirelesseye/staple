@@ -11,6 +11,7 @@ use package.default.(Default)
 use package.clone.Clone
 use package.option.(Option, None, Some)
 use package.ptr.RawMutPtr
+use package.process.(panic)
 use package.shared_buffer.SharedBuffer
 
 /// Compiler-owned, compile-time-only syntax values. Identifiers and calls expose
@@ -328,6 +329,9 @@ extern "staple-intrinsic" {
     /// A group's outer stream, advanced past the group.
     __parse_result_next: U64 -> ParseStream
     __parse_result_error: U64 -> U64
+    /// The tokens read between two cursors over one fragment, without the
+    /// trivia at either end.
+    __stream_span: (ParseStream; ParseStream) -> Syntax
 }
 
 /// `True` when only trivia remains.
@@ -460,7 +464,6 @@ extern "staple-intrinsic" {
     __classify_type: Syntax -> U8
     __product_type_field_count: Syntax -> USize
     __product_type_field: (Syntax; USize) -> Syntax
-    __product_type_field_parts: Syntax -> (Syntax; Syntax; Syntax)
     __product_type_field_name: Syntax -> Syntax
     __product_type_field_type: Syntax -> Syntax
     __product_type_field_default: Syntax -> Syntax
@@ -487,7 +490,6 @@ extern "staple-intrinsic" {
     __classify_item: Syntax -> U8
     __modified_item_parts: Syntax -> (USize; Syntax)
     __modified_item_modifier: (Syntax; USize) -> Syntax
-    __type_declaration_parts: Syntax -> (Syntax; Syntax; USize; Syntax; USize)
     __type_declaration_name: Syntax -> Syntax
     __type_declaration_declared_type: Syntax -> Syntax
     __type_declaration_type_parameter_count: Syntax -> USize
@@ -496,7 +498,6 @@ extern "staple-intrinsic" {
     __type_declaration_type_parameter: (Syntax; USize) -> Syntax
     __type_declaration_resource: (Syntax; USize) -> (Syntax; U8)
     __classify_modifier: Syntax -> U8
-    __modifier_call_parts: Syntax -> (USize; Syntax; Syntax)
     __modifier_call_namespace_count: Syntax -> USize
     __modifier_call_name: Syntax -> Syntax
     __modifier_call_argument: Syntax -> Syntax
@@ -515,13 +516,11 @@ extern "staple-intrinsic" {
     __alias_body_syntax: (Syntax; Syntax) -> Syntax
     __wrapper_body_syntax: (Syntax; Syntax; Syntax) -> Syntax
     __from_body_syntax: (Syntax; Syntax; Syntax) -> Syntax
-    __type_parameter_parts: Syntax -> (Syntax; Syntax; Syntax; Syntax)
     __type_parameter_name: Syntax -> Syntax
     __type_parameter_default: Syntax -> Syntax
     __type_parameter_declaration: Syntax -> Syntax
     __type_parameter_argument: Syntax -> Syntax
     __type_parameter_syntax: (Syntax; Syntax; Syntax; Syntax; Syntax) -> Syntax
-    __type_parameters_parts: Syntax -> (USize; Syntax; Syntax; Syntax)
     __type_parameters_count: Syntax -> USize
     __type_parameters_declaration: Syntax -> Syntax
     __type_parameters_arguments: Syntax -> Syntax
@@ -1339,7 +1338,7 @@ impl Parse SyntaxNode { parse = mut input => __parse_primitive.<SyntaxNode> inpu
 @compiled_only
 def call_expr_from_syntax = syntax: Syntax => CallExpr :: match (expr_from_syntax syntax) {
     node: CallExpr => node,
-    _ => CallExpr (callee: Ident "call", argument: Ident "ident"),
+    _ => panic "a call parse produced syntax that is not a call",
 }
 
 @compiled_only
@@ -2476,6 +2475,7 @@ impl<T> FromIterator Sequence<T> T {
 }
 
 // Elements until the stream ends or `T` stops parsing.
+@interpreted_only
 impl<T where Parse T> Parse Sequence<T> {
     parse = mut input => {
         let mut elements: Sequence<T> = Sequence<T> :: Sequence ()
@@ -2497,6 +2497,7 @@ impl<T where Parse T> Parse Sequence<T> {
 }
 
 // Comma-separated elements with an optional trailing comma.
+@interpreted_only
 impl<T where Parse T> Parse Separated<T, Comma> {
     parse = mut input => {
         let mut elements: Sequence<T> = Sequence<T> :: Sequence ()
@@ -2515,6 +2516,95 @@ impl<T where Parse T> Parse Separated<T, Comma> {
             trailing = True
         }
         Ok (Separated (separator: Comma, elements: sequence_reverse elements, trailing: trailing))
+    }
+}
+
+// Compiled, each cell keeps the span from its element to the end of the list
+// as its origin, so an unchanged list splices back as the text it was read
+// from, comments included.
+@compiled_only
+impl<T where Parse T> Parse Sequence<T> {
+    parse = mut input => {
+        let mut elements: Sequence<T> = Sequence<T> :: Sequence ()
+        let mut starts: Sequence<ParseStream> = Sequence<ParseStream> :: Sequence ()
+        let mut done = is_empty input
+        loop {
+            match done {
+                True => { break },
+                False => {
+                    let mut fork = input
+                    let start = __offset fork
+                    match (Parse.parse.<T> fork) {
+                        Ok first => match (__offset fork == start) {
+                            True => { done = True },
+                            False => {
+                                starts = Sequence (first: input, rest: starts)
+                                input = fork
+                                elements = Sequence (first: first, rest: elements)
+                                done = is_empty input
+                            },
+                        },
+                        ParseError _ => { done = True },
+                    }
+                },
+            }
+        }
+        let mut cells: Sequence<T> = Sequence<T> :: Sequence ()
+        loop {
+            match elements {
+                Sequence () => { break },
+                Sequence (first, rest) => {
+                    match starts {
+                        Sequence () => { break },
+                        Sequence (start, earlier) => {
+                            cells = __with_origin (Sequence (first: first, rest: cells), __stream_span ...(start; input))
+                            starts = earlier
+                        },
+                    }
+                    elements = rest
+                },
+            }
+        }
+        Ok cells
+    }
+}
+
+// Compiled, the list keeps the span it was read from as its origin.
+@compiled_only
+impl<T where Parse T> Parse Separated<T, Comma> {
+    parse = mut input => {
+        let begin = input
+        let mut elements: Sequence<T> = Sequence<T> :: Sequence ()
+        let mut trailing: Bool = False
+        let mut done = is_empty input
+        loop {
+            match done {
+                True => { break },
+                False => {
+                    let mut fork = input
+                    let start = __offset fork
+                    let first = Parse.parse.<T> fork?
+                    match (__offset fork == start) {
+                        True => { done = True },
+                        False => {
+                            input = fork
+                            elements = Sequence (first: first, rest: elements)
+                            trailing = False
+                            match (is_empty input) {
+                                True => { done = True },
+                                False => {
+                                    let _ = Parse.parse.<Comma> input?
+                                    trailing = True
+                                    done = is_empty input
+                                },
+                            }
+                        },
+                    }
+                },
+            }
+        }
+        let list: Separated<T, Comma> = Separated (separator: Comma, elements: sequence_reverse elements, trailing: trailing)
+        Ok (__with_origin (list, __stream_span ...(begin; input)))
     }
 }
 

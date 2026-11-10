@@ -118,6 +118,7 @@ pub(crate) const INTRINSICS: &[Intrinsic] = &[
     intrinsic!("__sequence_push", "__staple_syntax_sequence_push"),
     intrinsic!("__sequence_reverse", "__staple_syntax_sequence_reverse"),
     intrinsic!("__offset", "__staple_syntax_offset", offset),
+    intrinsic!("__stream_span", "__staple_syntax_stream_span", stream_span),
     intrinsic!("__quote", "__staple_syntax_quote"),
     intrinsic!("__splice_node", "__staple_syntax_splice_node"),
     intrinsic!("__splice_join", "__staple_syntax_splice_join"),
@@ -199,11 +200,6 @@ pub(crate) const INTRINSICS: &[Intrinsic] = &[
         "__product_type_field",
         "__staple_syntax_product_type_field",
         product_type_field
-    ),
-    intrinsic!(
-        "__product_type_field_parts",
-        "__staple_syntax_product_type_field_parts",
-        product_type_field_parts
     ),
     intrinsic!(
         "__product_type_field_name",
@@ -323,11 +319,6 @@ pub(crate) const INTRINSICS: &[Intrinsic] = &[
         modified_item_modifier
     ),
     intrinsic!(
-        "__type_declaration_parts",
-        "__staple_syntax_type_declaration_parts",
-        type_declaration_parts
-    ),
-    intrinsic!(
         "__type_declaration_name",
         "__staple_syntax_type_declaration_name",
         type_declaration_name
@@ -366,11 +357,6 @@ pub(crate) const INTRINSICS: &[Intrinsic] = &[
         "__classify_modifier",
         "__staple_syntax_classify_modifier",
         classify_modifier
-    ),
-    intrinsic!(
-        "__modifier_call_parts",
-        "__staple_syntax_modifier_call_parts",
-        modifier_call_parts
     ),
     intrinsic!(
         "__modifier_call_namespace_count",
@@ -463,11 +449,6 @@ pub(crate) const INTRINSICS: &[Intrinsic] = &[
         from_body_syntax
     ),
     intrinsic!(
-        "__type_parameter_parts",
-        "__staple_syntax_type_parameter_parts",
-        type_parameter_parts
-    ),
-    intrinsic!(
         "__type_parameter_name",
         "__staple_syntax_type_parameter_name",
         type_parameter_name
@@ -491,11 +472,6 @@ pub(crate) const INTRINSICS: &[Intrinsic] = &[
         "__type_parameter_syntax",
         "__staple_syntax_type_parameter_syntax",
         type_parameter_syntax
-    ),
-    intrinsic!(
-        "__type_parameters_parts",
-        "__staple_syntax_type_parameters_parts",
-        type_parameters_parts
     ),
     intrinsic!(
         "__type_parameters_count",
@@ -565,6 +541,7 @@ pub(crate) fn symbol_name(name: &str) -> &'static str {
         "__sequence_push" => "__staple_syntax_sequence_push",
         "__sequence_reverse" => "__staple_syntax_sequence_reverse",
         "__offset" => "__staple_syntax_offset",
+        "__stream_span" => "__staple_syntax_stream_span",
         "__quote" => "__staple_syntax_quote",
         "__splice_node" => "__staple_syntax_splice_node",
         "__splice_join" => "__staple_syntax_splice_join",
@@ -595,7 +572,6 @@ pub(crate) fn symbol_name(name: &str) -> &'static str {
         "__classify_type" => "__staple_syntax_classify_type",
         "__product_type_field_count" => "__staple_syntax_product_type_field_count",
         "__product_type_field" => "__staple_syntax_product_type_field",
-        "__product_type_field_parts" => "__staple_syntax_product_type_field_parts",
         "__product_type_syntax" => "__staple_syntax_product_type_syntax",
         "__join_field_syntax" => "__staple_syntax_join_field_syntax",
         "__product_type_field_syntax" => "__staple_syntax_product_type_field_syntax",
@@ -618,7 +594,6 @@ pub(crate) fn symbol_name(name: &str) -> &'static str {
         "__classify_item" => "__staple_syntax_classify_item",
         "__modified_item_parts" => "__staple_syntax_modified_item_parts",
         "__modified_item_modifier" => "__staple_syntax_modified_item_modifier",
-        "__type_declaration_parts" => "__staple_syntax_type_declaration_parts",
         "__type_declaration_name" => "__staple_syntax_type_declaration_name",
         "__type_declaration_declared_type" => "__staple_syntax_type_declaration_declared_type",
         "__type_declaration_type_parameter_count" => "__staple_syntax_type_declaration_type_parameter_count",
@@ -627,7 +602,6 @@ pub(crate) fn symbol_name(name: &str) -> &'static str {
         "__type_declaration_type_parameter" => "__staple_syntax_type_declaration_type_parameter",
         "__type_declaration_resource" => "__staple_syntax_type_declaration_resource",
         "__classify_modifier" => "__staple_syntax_classify_modifier",
-        "__modifier_call_parts" => "__staple_syntax_modifier_call_parts",
         "__modifier_call_namespace" => "__staple_syntax_modifier_call_namespace",
         "__classify_type_body" => "__staple_syntax_classify_type_body",
         "__type_body_parts" => "__staple_syntax_type_body_parts",
@@ -643,9 +617,7 @@ pub(crate) fn symbol_name(name: &str) -> &'static str {
         "__alias_body_syntax" => "__staple_syntax_alias_body_syntax",
         "__wrapper_body_syntax" => "__staple_syntax_wrapper_body_syntax",
         "__from_body_syntax" => "__staple_syntax_from_body_syntax",
-        "__type_parameter_parts" => "__staple_syntax_type_parameter_parts",
         "__type_parameter_syntax" => "__staple_syntax_type_parameter_syntax",
-        "__type_parameters_parts" => "__staple_syntax_type_parameters_parts",
         "__type_parameters_parameter" => "__staple_syntax_type_parameters_parameter",
         "__resource_dependency_syntax" => "__staple_syntax_resource_dependency_syntax",
         "__type_parameters_syntax" => "__staple_syntax_type_parameters_syntax",
@@ -679,21 +651,6 @@ struct Pair {
 }
 
 #[repr(C)]
-struct Triple {
-    first: u64,
-    second: u64,
-    third: u64,
-}
-
-#[repr(C)]
-struct Quad {
-    first: u64,
-    second: u64,
-    third: u64,
-    fourth: u64,
-}
-
-#[repr(C)]
 struct CountHandle {
     count: usize,
     handle: u64,
@@ -703,30 +660,6 @@ struct CountHandle {
 struct HandleFlag {
     handle: u64,
     flag: u8,
-}
-
-#[repr(C)]
-struct TypeDeclarationParts {
-    name: u64,
-    declared_type: u64,
-    type_parameters: usize,
-    body: u64,
-    resources: usize,
-}
-
-#[repr(C)]
-struct ModifierCallParts {
-    namespace: usize,
-    name: u64,
-    argument: u64,
-}
-
-#[repr(C)]
-struct TypeParametersParts {
-    count: usize,
-    declaration: u64,
-    arguments: u64,
-    bounds: u64,
 }
 
 /// The syntax fragment a handle names. A stale or wrong handle is a bug in the
@@ -792,6 +725,30 @@ extern "C" fn error_at(stream: u64, message: *const u8, message_length: usize) -
 /// The cursor's position within its fragment.
 extern "C" fn offset(stream: u64) -> usize {
     stream_parts(stream).1
+}
+
+/// The tokens two cursors over one fragment passed between them, without the
+/// trivia at either end. A parsed list takes this span as its origin, so an
+/// unchanged list splices back as the text it was read from.
+extern "C" fn stream_span(start: u64, end: u64) -> u64 {
+    let (fragment, start) = stream_parts(start);
+    let (end_fragment, end) = stream_parts(end);
+    assert_eq!(
+        fragment, end_fragment,
+        "a stream span needs two cursors over one fragment"
+    );
+    let syntax = syntax_value(fragment);
+    let tokens = syntax.tokens();
+    let end = end.min(tokens.len());
+    let start = (start..end)
+        .find(|index| !tokens[*index].kind.is_trivia())
+        .unwrap_or(end);
+    let end = (start..end)
+        .rev()
+        .find(|index| !tokens[*index].kind.is_trivia())
+        .map_or(start, |index| index + 1);
+    let span = syntax_slice(&syntax, start, end);
+    arena::with_arena(|arena| arena.insert_syntax(span).into())
 }
 
 #[repr(C)]
@@ -1060,10 +1017,7 @@ extern "C" fn parse_group_intrinsic(stream: u64, kind: u8) -> u64 {
     let syntax = syntax_value(fragment);
     let group = group_kind(kind).expect("a known group kind");
     arena::with_arena(|arena| {
-        let mut next = arena.next_syntax_id();
-        let parsed = parse_group(group, &syntax, offset);
-        arena.set_next_syntax_id(next);
-        let outcome = match parsed {
+        let outcome = match parse_group(group, &syntax, offset) {
             Ok((source, inner, next_offset)) => {
                 let source = arena.insert_syntax(source).into();
                 let inner_fragment = arena.insert_syntax(inner);
@@ -1566,44 +1520,6 @@ extern "C" fn product_type_field(syntax: u64, index: usize) -> u64 {
     arena::with_arena(|arena| arena.insert_syntax(field.syntax.clone()).into())
 }
 
-/// A product field's name, type and default. Zero means the field has none.
-extern "C" fn product_type_field_parts(syntax: u64) -> Triple {
-    let syntax = syntax_value(syntax);
-    let text = format!("({})", syntax.text());
-    let wrapped = arena::with_arena(|arena| {
-        let mut next = arena.next_syntax_id();
-        arena.insert_syntax(lex_syntax_from_text(&text, &mut next)).into()
-    });
-    let wrapped = syntax_value(wrapped);
-    let mut next = 0;
-    let Ok(staple_syntax::Type::Product(product)) =
-        staple_syntax::parse_type_fragment(&wrapped, false, &mut next)
-    else {
-        panic!("product_type_field_parts requires one product field");
-    };
-    let field = product
-        .elements
-        .first()
-        .expect("a product field has an element");
-    arena::with_arena(|arena| {
-        let name = field.name.as_ref().map_or(0, |name| {
-            let text = name.clone();
-            let mut next = arena.next_syntax_id();
-            let syntax = lex_syntax_from_text(&text, &mut next);
-            u64::from(arena.insert_syntax(syntax))
-        });
-        let ty = arena.insert_syntax(field.ty.syntax().clone()).into();
-        let default = field.default.as_ref().map_or(0, |default| {
-            u64::from(arena.insert_syntax(default.syntax().clone()))
-        });
-        Triple {
-            first: name,
-            second: ty,
-            third: default,
-        }
-    })
-}
-
 /// The syntax without its leading and trailing trivia.
 fn trimmed_syntax(syntax: &Syntax) -> Syntax {
     let tokens = syntax.tokens();
@@ -1996,49 +1912,6 @@ extern "C" fn modified_item_modifier(syntax: u64, index: usize) -> u64 {
     arena::with_arena(|arena| arena.insert_syntax(modifier.syntax.clone()).into())
 }
 
-/// A type declaration's name, declared type, parameter count, body and
-/// resource-dependency count.
-extern "C" fn type_declaration_parts(syntax: u64) -> TypeDeclarationParts {
-    let handle = syntax;
-    let Ok(Item::TypeDeclaration(declaration)) =
-        cached_item(handle)
-    else {
-        panic!("type_declaration_parts requires a type declaration");
-    };
-    let names: Vec<String> = declaration
-        .type_parameters
-        .iter()
-        .flat_map(staple_syntax::TypeParameterPattern::names)
-        .map(str::to_owned)
-        .collect();
-    let declared_text = if names.is_empty() {
-        declaration.name.clone()
-    } else {
-        format!("{}<{}>", declaration.name, names.join(", "))
-    };
-    arena::with_arena(|arena| {
-        let name = arena.insert_syntax(declaration.name_syntax.clone()).into();
-        let mut next = arena.next_syntax_id();
-        let declared = lex_syntax_from_text(&declared_text, &mut next);
-        let declared = arena.insert_syntax(declared).into();
-        let body = declaration
-            .body
-            .as_ref()
-            .map_or(0, |body| u64::from(arena.insert_syntax(body.syntax.clone())));
-        let resources = declaration
-            .resource_dependencies
-            .as_ref()
-            .map_or(0, |dependencies| dependencies.resources.len());
-        TypeDeclarationParts {
-            name,
-            declared_type: declared,
-            type_parameters: names.len(),
-            body,
-            resources,
-        }
-    })
-}
-
 /// A type declaration's name.
 extern "C" fn type_declaration_name(syntax: u64) -> u64 {
     let handle = syntax;
@@ -2165,55 +2038,6 @@ extern "C" fn classify_modifier(syntax: u64) -> u8 {
         Ok(invocation) if invocation.doc.is_none() => 0,
         _ => 1,
     }
-}
-
-/// A modifier call's namespace count, name and argument (zero when absent).
-extern "C" fn modifier_call_parts(syntax: u64) -> ModifierCallParts {
-    let handle = syntax;
-    let Ok(invocation) = cached_modifier(handle) else {
-        panic!("modifier_call_parts requires a modifier");
-    };
-    let tokens = invocation.syntax.tokens();
-    let segments = tokens
-        .iter()
-        .enumerate()
-        .filter(|(_, token)| !token.kind.is_trivia())
-        .skip(1)
-        .take_while(|(_, token)| token.kind != TokenKind::LParen)
-        .filter(|(_, token)| token.kind != TokenKind::Dot)
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    let namespace = invocation
-        .namespace
-        .as_deref()
-        .map(|path| path.split('.').collect::<Vec<_>>())
-        .unwrap_or_default();
-    let name_index = segments
-        .get(namespace.len())
-        .copied()
-        .unwrap_or(0);
-    arena::with_arena(|arena| {
-        let name = syntax_slice(&invocation.syntax, name_index, name_index + 1);
-        let name = arena.insert_syntax(name).into();
-        let argument = invocation.argument.as_ref().map_or(0, |argument| {
-            let tokens = argument.syntax.tokens();
-            let first = tokens
-                .iter()
-                .position(|token| !token.kind.is_trivia())
-                .unwrap_or(0);
-            let last = tokens
-                .iter()
-                .rposition(|token| !token.kind.is_trivia())
-                .unwrap_or(first);
-            let inner = syntax_slice(&argument.syntax, first + 1, last);
-            u64::from(arena.insert_syntax(inner))
-        });
-        ModifierCallParts {
-            namespace: namespace.len(),
-            name,
-            argument,
-        }
-    })
 }
 
 /// The number of namespace segments of a modifier call.
@@ -2834,48 +2658,6 @@ extern "C" fn from_body_syntax(origin: u64, representation: u64, element: u64) -
     finish_syntax(origin, origin_syntax.as_ref(), tokens)
 }
 
-/// A type parameter's name, default, declaration and argument.
-extern "C" fn type_parameter_parts(syntax: u64) -> Quad {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    let Ok((parameter, _)) = staple_syntax::parse_type_parameter_prefix(&syntax, &mut next) else {
-        panic!("type_parameter_parts requires a type parameter");
-    };
-    let name = parameter
-        .pattern
-        .names()
-        .first()
-        .copied()
-        .unwrap_or("")
-        .to_owned();
-    let mut name_syntax = parameter.pattern.syntax().clone();
-    if let Some(index) = name_syntax
-        .tokens()
-        .iter()
-        .position(|token| token.text == name)
-    {
-        name_syntax.token_range =
-            name_syntax.token_range.start + index..name_syntax.token_range.start + index + 1;
-    }
-    let argument = format!("{name}");
-    arena::with_arena(|arena| {
-        let name = arena.insert_syntax(name_syntax).into();
-        let default = parameter.default.as_ref().map_or(0, |ty| {
-            u64::from(arena.insert_syntax(ty.syntax().clone()))
-        });
-        let declaration = arena.insert_syntax(parameter.syntax.clone()).into();
-        let mut next = arena.next_syntax_id();
-        let argument = lex_syntax_from_text(&argument, &mut next);
-        let argument = arena.insert_syntax(argument).into();
-        Quad {
-            first: name,
-            second: default,
-            third: declaration,
-            fourth: argument,
-        }
-    })
-}
-
 fn type_parameter(syntax: &Syntax) -> staple_syntax::TypeParameter {
     let mut next = 0;
     staple_syntax::parse_type_parameter_prefix(syntax, &mut next)
@@ -3038,41 +2820,6 @@ extern "C" fn resource_dependency_syntax(resource_type: u64, mutable: u8) -> u64
     }
     append_syntax_tokens(&mut tokens, &resource_type, None);
     finish_syntax(0, None, tokens)
-}
-
-/// A type-parameter list's parameter count, declaration, arguments and bounds.
-extern "C" fn type_parameters_parts(syntax: u64) -> TypeParametersParts {
-    let syntax = syntax_value(syntax);
-    let mut next = 0;
-    let Ok((parameters, _)) = staple_syntax::parse_type_parameters_prefix(&syntax, &mut next)
-    else {
-        panic!("type_parameters_parts requires type parameters");
-    };
-    let arguments = {
-        let tokens = parameters.syntax.tokens();
-        let mut angles = 0usize;
-        let mut close = tokens.len();
-        for (index, token) in tokens.iter().enumerate() {
-            match token.kind {
-                TokenKind::Operator if token.text == "<" => angles += 1,
-                TokenKind::Operator if token.text == ">" => {
-                    angles = angles.saturating_sub(1);
-                    if angles == 0 {
-                        close = index + 1;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        syntax_slice(&parameters.syntax, 0, close)
-    };
-    arena::with_arena(|arena| TypeParametersParts {
-        count: parameters.parameters.len(),
-        declaration: arena.insert_syntax(parameters.syntax.clone()).into(),
-        arguments: arena.insert_syntax(arguments).into(),
-        bounds: arena.insert_syntax(parameters.bounds.clone()).into(),
-    })
 }
 
 fn type_parameters(syntax: &Syntax) -> staple_syntax::TypeParameters {
@@ -3351,17 +3098,13 @@ mod tests {
             "__sequence_syntax",
             "__classify_item",
             "__modified_item_parts",
-            "__type_declaration_parts",
             "__classify_modifier",
-            "__modifier_call_parts",
             "__classify_type_body",
             "__type_body_parts",
             "__delimiter_contents",
             "__delimiter_syntax",
             "__visibility_kind",
             "__punctuation_syntax",
-            "__type_parameter_parts",
-            "__type_parameters_parts",
             "__same_syntax",
             "__syntax_or_origin",
             "__join_separated_syntax",

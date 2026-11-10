@@ -428,7 +428,37 @@ def separated_parses: () -> I32 = () => {
     let parsed: Result<Separated<Ident<String>, Comma>, ParseError> =
         Parse.parse_all.<Separated<Ident<String>, Comma>> (syntax_from_string "a, b,")
     match parsed {
-        Ok value => match (string_from_syntax (Splice.splice value) == "a,b,") { True => 1, False => 0 },
+        Ok value => match (string_from_syntax (Splice.splice value) == "a, b,") { True => 1, False => 0 },
+        ParseError _ => 0,
+    }
+}
+def separated_keeps_its_comments: () -> I32 = () => {
+    let parsed: Result<Separated<Expr, Comma>, ParseError> =
+        Parse.parse_all.<Separated<Expr, Comma>> (syntax_from_string "f a,  g b // note\n, h")
+    match parsed {
+        Ok value => match (string_from_syntax (Splice.splice value) == "f a,  g b // note\n, h") { True => 1, False => 0 },
+        ParseError _ => 0,
+    }
+}
+def sequence_keeps_its_layout: () -> I32 = () => {
+    let parsed: Result<Sequence<Item>, ParseError> =
+        Parse.parse_all.<Sequence<Item>> (syntax_from_string "type A = I32\n// B\ntype B = I32")
+    match parsed {
+        Ok value => match (string_from_syntax (Splice.splice value) == "type A = I32\n// B\ntype B = I32") { True => 1, False => 0 },
+        ParseError _ => 0,
+    }
+}
+def unchanged_list_splices_to_one_handle: () -> I32 = () => {
+    let parsed: Result<Sequence<Ident<String>>, ParseError> =
+        Parse.parse_all.<Sequence<Ident<String>>> (syntax_from_string "a  b")
+    match parsed {
+        Ok value => {
+            let first = Splice.splice value
+            match (same_syntax ...(first; Splice.splice value)) {
+                True => match (string_from_syntax first == "a  b") { True => 1, False => 0 },
+                False => 0,
+            }
+        },
         ParseError _ => 0,
     }
 }
@@ -509,6 +539,9 @@ def parse_errors_name_the_position: () -> I32 = () => {
                 ("delimiter_parses", 1),
                 ("sequence_parses", 1),
                 ("separated_parses", 1),
+                ("separated_keeps_its_comments", 1),
+                ("sequence_keeps_its_layout", 1),
+                ("unchanged_list_splices_to_one_handle", 1),
                 ("visibility_parses", 1),
                 ("type_parses", 1),
                 ("pattern_parses", 1),
@@ -521,6 +554,32 @@ def parse_errors_name_the_position: () -> I32 = () => {
                 ("identifier_spelling_accepts_its_name", 1),
                 ("parse_errors_name_the_position", 1),
             ],
+        );
+    }
+
+    /// A union of spellings names no single identifier to accept, so code
+    /// generation rejects it instead of accepting its first member.
+    #[test]
+    fn identifier_spelling_sets_do_not_compile() {
+        let source = r#"use std.syntax.*
+def either: () -> I32 = () => match (Parse.parse_all.<Ident<"a" | "b">> (syntax_from_string "b")) {
+    Ok _ => 1,
+    ParseError _ => 0,
+}
+macro touch = () => { either () }
+"#;
+        let run = check_run_for(source);
+        let lowered = lower_run(&run).expect("the probe should lower");
+        let context = inkwell::context::Context::create();
+        let diagnostics = CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .err()
+            .expect("a spelling set should not emit");
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .to_string()
+                .contains("an identifier spelling must be one string literal, found \"a\" | \"b\"")),
+            "{diagnostics:#?}"
         );
     }
 

@@ -9210,24 +9210,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             IntrinsicFunction::SyntaxIdentSpelling => {
                 let value_type = intrinsic_type_argument(call, 0, &span)?;
-                let spelling = if crate::contains_type_parameter(&value_type) {
-                    String::new()
-                } else {
-                    match value_type.desugared() {
-                        CheckedType::String => String::new(),
-                        CheckedType::StringLiteralSet(values) => {
-                            values.first().cloned().unwrap_or_default()
-                        }
-                        other => {
-                            return Err(Diagnostic::new(
-                                span,
-                                format!(
-                                    "an identifier spelling must be a string type, found {other:?}"
-                                ),
-                            ));
-                        }
-                    }
-                };
+                let spelling = ident_type_spelling(&value_type)
+                    .map_err(|message| Diagnostic::new(span, message))?;
                 Ok(self
                     .backend
                     .build_string_literal(&spelling)
@@ -10450,6 +10434,33 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .find(|use_| use_.site == site)
             .map(|use_| use_.instance)?;
         self.instances.get(&instance).copied()
+    }
+}
+
+/// The spelling an `Ident<Spelling>` parse accepts: empty for `String`, which
+/// accepts any spelling, or the one literal of a literal type. A union of
+/// literals, or a type still waiting on a type parameter, names no single
+/// spelling.
+pub(super) fn ident_type_spelling(value_type: &CheckedType) -> Result<String, String> {
+    if crate::contains_type_parameter(value_type) {
+        return Err(format!(
+            "an identifier spelling must be known when macro code is compiled, found {value_type:?}"
+        ));
+    }
+    match value_type.desugared() {
+        CheckedType::String => Ok(String::new()),
+        CheckedType::StringLiteralSet(values) if values.len() == 1 => Ok(values[0].clone()),
+        CheckedType::StringLiteralSet(values) => Err(format!(
+            "an identifier spelling must be one string literal, found {}",
+            values
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        )),
+        other => Err(format!(
+            "an identifier spelling must be a string type, found {other:?}"
+        )),
     }
 }
 
