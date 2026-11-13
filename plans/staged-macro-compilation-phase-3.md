@@ -575,7 +575,7 @@ Update this section as you work (see "Rules for the implementor").
 | 4. Arena and core intrinsics | done | `b1207bf8` | `macro_runtime/arena.rs` keeps syntax fragments, text, parse streams and parsed nodes for one call; handles carry a generation and `reset` makes earlier handles stale. `macro_expand/syntax_ops.rs` owns the shared slicing, position, delimiter, hygiene and token-filling helpers, plus text lexing. Streams and text run through host intrinsics, with two-body `is_empty` and `error_at` where the ABI differs. See Findings. |
 | 5. Node views and rebuilding | done | `e9f38d44`, `ead6c8a8` | Non-generic classification, part and rebuild intrinsics cover expressions, types, patterns, items, modifiers, type bodies, type parameters, delimiters, visibility and punctuation. `@compiled_only` `from_syntax` functions attach origins, and compiled `Splice` impls return the origin for unchanged nodes. Sequence construction is Staple code, compiled `Splice Separated` is implemented, constructed non-empty products rebuild, and the harness asserts same-handle round trips. `__ident_spelling` is an inline intrinsic that reads an identifier box as a `String`. See Findings. |
 | 6. `Parse` impls | done | `1416a3f9`, `5ed41520` | The interpreter and compiled code share one leaf parser, so grammar and diagnostics agree. Compiled leaves and groups return an arena result handle; `Ident<S>` reads `S`'s spelling with a compiler intrinsic. The check gets fixed-arity product impls while the interpreter keeps the variadic ones, and `is_variadic_parse_impl` is gone. The harness checks 21 parse behaviors, including exact error messages and same-handle list round trips. Parsed lists carry origins, and a spelling set is a code generation error. See Findings. |
-| 7. Plain sequence splices | done | 7b1ad2cd | Tree substitution uses the line rule for item splices; type parameters accept identifiers or comma lists. Repeated markers are removed, uses and documentation are migrated, and interpreter, closure and expansion checks pass. See Findings. |
+| 7. Plain sequence splices | done | `7b1ad2cd`, this commit | Tree substitution uses the line rule for item splices; type parameters accept identifiers or comma lists. Repeated markers are removed, uses and documentation are migrated, and interpreter, closure and expansion checks pass. See Findings. |
 | 8. Quotations | not started | | |
 | 9. Arguments and results | not started | | |
 | 10. Wire format | not started | | |
@@ -1256,3 +1256,32 @@ Cost check: release `staple check` with `STAPLE_CHECK_MACRO_CLOSURES=all` on
 106.83 s under concurrent test load. This does not show a material checking
 cost change. The corpus check uses four workers and a 600 s per-input timeout
 on the 16 GiB, eight-CPU development machine.
+
+Review of task 7:
+
+- A quotation whose result is `Syntax` takes the raw token path, which rejected
+  a bare `Separated` with "does not contain syntax". It now writes each
+  element's tokens with the separator between them, plus the trailing one when
+  `trailing` is set. A parsed separator keeps its own token; one built with
+  `Comma` carries the syntax of that name, so the separator's spelling is
+  written instead. A test covers both a constructed and a parsed list, and
+  Staple.md now says bare lists work anywhere in such a quotation.
+- `rejects_splice_ellipsis_without_a_spread_operand` passed only because some
+  diagnostic appeared. It now asserts the expression parser's error. The raw
+  reparse for an `Expr` context, which produces that error instead of a
+  spanless "quotation requires a contextual syntax type", has a comment
+  saying so.
+- The closure-check fixture had lost its plain `Sequence` splice when the
+  comma lists moved to `Parenthesized (Separated (...))`. It now includes
+  `$callee $arguments` with a `Sequence<Expr>`.
+- The four unsupported-position messages share one helper and quote
+  `Sequence` and `Separated`. The tests assert the full message.
+- Unrelated reformatting in the parser and its tests is reverted, stray blank
+  lines from removing `repeated` are gone, and long lines are wrapped.
+
+Verification of the review fixes: `cargo test --workspace` passes 2324 tests.
+The only failure on the first run was the rewritten closure-check fixture, whose
+helper did not type-check as compiled code; its inline replacement passes on a
+targeted rerun. A fresh expansion capture matches the task 7 capture for all
+232 inputs, and `scripts/check-macro-closures.py --mode all --timeout 600`
+reports 232 inputs, 0 with diagnostics.

@@ -9911,6 +9911,9 @@ impl MacroExpander {
         } else if *expected == MetaType::Expr
             && matches!(quote.template, staple_syntax::QuoteTemplate::Raw)
         {
+            // A template that is neither an expression nor items stays raw,
+            // such as `$a...` with no spread operand. Reparse it as the
+            // expression it must be, so the error points into the template.
             let expression = staple_syntax::parse_expression_template_fragment(
                 &quote.contents,
                 &mut self.next_syntax_id,
@@ -10093,6 +10096,30 @@ impl MacroExpander {
                         };
                         let syntax = value.syntax()?;
                         append_syntax_tokens(&mut output, syntax, splice_hygiene(&value, syntax));
+                    }
+                }
+                Value::Separated {
+                    elements,
+                    separator,
+                    trailing,
+                } => {
+                    let Value::Syntax(separator) = separator.as_ref() else {
+                        unreachable!("a `Separated` separator is syntax")
+                    };
+                    let count = elements.len();
+                    for (index, value) in elements.into_iter().enumerate() {
+                        let Value::Syntax(value) = value else {
+                            self.diagnostics.push(Diagnostic::new(
+                                contents.span.clone(),
+                                format!("splice `${name}` requires syntax elements"),
+                            ));
+                            return None;
+                        };
+                        let syntax = value.syntax()?;
+                        append_syntax_tokens(&mut output, syntax, splice_hygiene(&value, syntax));
+                        if index + 1 < count || trailing {
+                            append_separator_tokens(&mut output, separator);
+                        }
                     }
                 }
                 Value::Syntax(value) => {
@@ -15299,6 +15326,45 @@ fn match_pattern(pattern: &Pattern, value: &Value, environment: &mut Environment
     bind_pattern(pattern, value.clone(), environment)
 }
 
+/// Appends a separator's token. A parsed separator keeps its own token. One
+/// built with `Comma` carries the syntax of that name instead, so write the
+/// separator's spelling.
+fn append_separator_tokens(
+    output: &mut Vec<staple_syntax::SyntaxToken>,
+    separator: &SyntaxValue,
+) {
+    let (kind, text) = match separator {
+        SyntaxValue::Comma(_) => (staple_syntax::TokenKind::Comma, ","),
+        SyntaxValue::Equals(_) => (staple_syntax::TokenKind::Equals, "="),
+        SyntaxValue::FatArrow(_) => (staple_syntax::TokenKind::FatArrow, "=>"),
+        _ => unreachable!("a `Separated` separator is a separator token"),
+    };
+    let syntax = separator.syntax().expect("a separator has syntax");
+    if matches_single_token(syntax, kind) {
+        append_syntax_tokens(output, syntax, root_hygiene(syntax));
+        return;
+    }
+    output.push(staple_syntax::SyntaxToken {
+        kind,
+        text: text.to_owned(),
+        span: 0..0,
+        origin: None,
+        hygiene: root_hygiene(syntax),
+    });
+}
+
+/// The interpreter splices a `Sequence` or `Separated` only into an item list
+/// or a type-parameter list.
+fn unsupported_list_splice(syntax: &Syntax, name: &str, position: &str) -> Diagnostic {
+    Diagnostic::new(
+        syntax.span.clone(),
+        format!(
+            "the macro interpreter cannot splice a `Sequence` or `Separated` \
+             in {position} position: `${name}`"
+        ),
+    )
+}
+
 fn substitute_splices(
     expression: &Expression,
     environment: &Environment,
@@ -15307,13 +15373,9 @@ fn substitute_splices(
     if let Expression::Splice(splice) = expression {
         return match environment.get(&splice.name).map(EnvironmentBinding::get) {
             Some(Value::Sequence(_) | Value::Separated { .. }) => {
-                diagnostics.push(Diagnostic::new(
-                    splice.syntax.span.clone(),
-                    format!("interpreter cannot splice a Sequence or Separated in expression position: `${}`", splice.name),
-                ));
+                diagnostics.push(unsupported_list_splice(&splice.syntax, &splice.name, "expression"));
                 None
             }
-
             Some(Value::Syntax(expression)) => match expression.clone().into_expression() {
                 Some(expression) => Some(expression),
                 None => {
@@ -15741,16 +15803,9 @@ fn substitute_type(
     if let Type::Splice(splice) = ty {
         return match environment.get(&splice.name).map(EnvironmentBinding::get) {
             Some(Value::Sequence(_) | Value::Separated { .. }) => {
-                diagnostics.push(Diagnostic::new(
-                    splice.syntax.span.clone(),
-                    format!(
-                        "interpreter cannot splice a Sequence or Separated in type position: `${}`",
-                        splice.name
-                    ),
-                ));
+                diagnostics.push(unsupported_list_splice(&splice.syntax, &splice.name, "type"));
                 None
             }
-
             Some(Value::Syntax(SyntaxValue::Type(value))) => {
                 *ty = value;
                 Some(())
@@ -15900,13 +15955,9 @@ fn substitute_pattern(
     if let Pattern::Splice(splice) = pattern {
         return match environment.get(&splice.name).map(EnvironmentBinding::get) {
             Some(Value::Sequence(_) | Value::Separated { .. }) => {
-                diagnostics.push(Diagnostic::new(
-                    splice.syntax.span.clone(),
-                    format!("interpreter cannot splice a Sequence or Separated in pattern position: `${}`", splice.name),
-                ));
+                diagnostics.push(unsupported_list_splice(&splice.syntax, &splice.name, "pattern"));
                 None
             }
-
             Some(Value::Syntax(SyntaxValue::Pattern(value))) => {
                 *pattern = value;
                 Some(())
@@ -16036,13 +16087,7 @@ fn substitute_item(
                     | Value::Separated { .. }
                     | Value::Syntax(SyntaxValue::Items(_)),
                 ) => {
-                    diagnostics.push(Diagnostic::new(
-                        splice.syntax.span.clone(),
-                        format!(
-                            "interpreter cannot splice a Sequence or Separated in nested item position: `${}`",
-                            splice.name
-                        ),
-                    ));
+                    diagnostics.push(unsupported_list_splice(&splice.syntax, &splice.name, "nested item"));
                     return None;
                 }
                 _ => {
@@ -16257,7 +16302,8 @@ fn substitute_item_list(
                     diagnostics.push(Diagnostic::new(
                         splice.syntax.span,
                         format!(
-                            "`${}` on its own line is an item splice and requires `Item` or `Sequence<Item>`",
+                            "`${}` on its own line is an item splice \
+                             and requires `Item` or `Sequence<Item>`",
                             splice.name
                         ),
                     ));
@@ -16307,7 +16353,11 @@ fn substitute_type_parameter_list(
             _ => {
                 diagnostics.push(Diagnostic::new(
                     splice.syntax.span,
-                    format!("type-parameter splice `${}` requires `Ident` or `Separated<Ident<String>, Comma>`", splice.name),
+                    format!(
+                        "type-parameter splice `${}` requires `Ident` \
+                         or `Separated<Ident<String>, Comma>`",
+                        splice.name
+                    ),
                 ));
                 return None;
             }

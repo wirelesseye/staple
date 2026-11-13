@@ -330,11 +330,12 @@ list, is an item splice: an `Item` inserts one item and a `Sequence<Item>`
 inserts its elements. With a declaration after it on the same line, it is a
 visibility splice, as in `$visibility type Name`.
 
-The interpreter supports bare lists in item lists and type-parameter lists
-only. A type-parameter splice takes an `Ident` or a
-`Separated<Ident<String>, Comma>`. Bare `Sequence` and `Separated` values in
-other tree positions report an interpreter error naming the position; compiled
-macros can splice their tokens there. Delimited values such as the product
+A quotation whose result is `Syntax` splices tokens, so bare lists work
+anywhere in it. Where a quotation builds a typed tree, the interpreter supports
+bare lists in item lists and type-parameter lists only. A type-parameter splice
+takes an `Ident` or a `Separated<Ident<String>, Comma>`. Bare `Sequence` and
+`Separated` values in other tree positions report an interpreter error naming
+the position; compiled macros can splice their tokens there. Delimited values such as the product
 above work in the interpreter too. `...` after a splice is an ordinary spread
 token and requires an operand; `$name...` alone is an error.
 

@@ -441,11 +441,7 @@ fn lexes_number_literals_radixes_separators_and_suffixes() {
     }
 
     for source in [
-        "pair.0",
-        "x.0.1",
-        "1.field",
-        "1._x",
-        "pair.0\nx.0.1\n1.field\n1._x\n",
+        "pair.0", "x.0.1", "1.field", "1._x", "pair.0\nx.0.1\n1.field\n1._x\n",
     ] {
         let text = staple_syntax::lex(source)
             .iter()
@@ -1498,21 +1494,27 @@ fn rejects_curried_macro_parameter_chains() {
 
 #[test]
 fn plain_item_splices_follow_line_boundaries() {
-    let root = parse("macro many = values => quote { companion Example {\n$items\n$visibility type Visible\n$last } }\n").unwrap();
+    let root = parse(concat!(
+        "macro many = values => quote { companion Example {\n",
+        "$items\n",
+        "$visibility type Visible\n",
+        "$last } }\n",
+    ))
+    .expect("plain item splices should parse");
     let Item::MacroDeclaration(declaration) = &root.items[0] else {
-        panic!("macro")
+        panic!("expected macro declaration");
     };
     let Some(Expression::Function(function)) = &declaration.value else {
-        panic!("function")
+        panic!("expected macro function");
     };
     let Expression::Quote(quote) = function.body.as_ref() else {
-        panic!("quote")
+        panic!("expected quote");
     };
     let staple_syntax::QuoteTemplate::Item(item) = &quote.template else {
-        panic!("item")
+        panic!("expected item template");
     };
     let Item::Submodule(module) = item.as_ref() else {
-        panic!("companion")
+        panic!("expected companion");
     };
     assert!(matches!(module.module.items[0], Item::ItemSplice(_)));
     assert!(matches!(module.module.items[1], Item::VisibilitySplice(_)));

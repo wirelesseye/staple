@@ -9878,12 +9878,11 @@ fn rejects_splice_ellipsis_without_a_spread_operand() {
     let diagnostics =
         resolve_result("macro many: Expr -> Expr = values => parse_quote { $values... }\nmany 1\n")
             .expect_err_diagnostics("a spread needs an operand");
-    assert!(!diagnostics.is_empty());
-    assert!(
-        diagnostics
-            .iter()
-            .all(|d| !d.message.contains("repeated splice"))
-    );
+    let messages = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(messages, ["expected expression", "while expanding macro `many`"]);
 }
 
 #[test]
@@ -20256,7 +20255,11 @@ fn compile_time_sequence_collect() {
         use std.syntax.*
         macro emit = xs: Sequence<Ident> => {
             let names: Sequence<Ident> = xs |> map (x => x) |> collect
-            let product = Parenthesized (Separated (separator: Comma, elements: names, trailing: True))
+            let product = Parenthesized (Separated (
+                separator: Comma,
+                elements: names,
+                trailing: True,
+            ))
             parse_quote { $product }
         }
         let a = 1
@@ -21151,7 +21154,11 @@ fn plain_splices_construct_comma_products_and_type_parameters() {
         use std.syntax.*
         macro product: Parenthesized<Separated<Expr, Comma>> -> Expr = input => match input {
             Parenthesized (Separated (separator, elements, trailing)) => {
-                let value = Parenthesized (Separated (separator: separator, elements: elements, trailing: trailing))
+                let value = Parenthesized (Separated (
+                    separator: separator,
+                    elements: elements,
+                    trailing: trailing,
+                ))
                 parse_quote { $value }
             },
         }
@@ -21180,14 +21187,38 @@ fn plain_splices_construct_comma_products_and_type_parameters() {
     let diagnostics = resolve_result(r#"
         macro invalid: Expr -> Expr = _: Expr => {
             let elements: Sequence<Expr> = Sequence ()
-            let value = Parenthesized (Separated (separator: Comma, elements: elements, trailing: True))
+            let value = Parenthesized (Separated (
+                separator: Comma,
+                elements: elements,
+                trailing: True,
+            ))
             parse_quote { $value }
         }
         invalid ()
     "#).expect_err_diagnostics("an empty list with a trailing comma writes invalid `(,)` syntax");
     assert!(
-        diagnostics.iter().any(|d| d.message.contains("an empty `Separated` value cannot have a trailing separator")),
+        diagnostics.iter().any(|d| {
+            d.message == "an empty `Separated` value cannot have a trailing separator"
+        }),
         "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn raw_quotes_write_separators_between_separated_elements() {
+    type_check(
+        r#"
+        use std.syntax.*
+        macro built: Sequence<Expr> -> Syntax = values => {
+            let list = Separated (separator: Comma, elements: Clone.clone values, trailing: False)
+            quote { ($list) }
+        }
+        macro parsed: Parenthesized<Separated<Expr, Comma>> -> Syntax = input => match input {
+            Parenthesized list => quote { (0, $list) },
+        }
+        let pair: (I32, I32) = built 1 2
+        let triple: (I32, I32, I32) = parsed (1, 2,)
+    "#,
     );
 }
 
@@ -21220,14 +21251,21 @@ fn plain_splices_report_unsupported_interpreter_positions() {
         ("Pattern", "Pattern", "$values", "pattern"),
     ] {
         let source = format!(
-            "macro bad: Expr -> Expr = _: Expr => {{ let values: Sequence<{element}> = Sequence (); let result: {result} = parse_quote {{ {body} }}; parse_quote {{ 1 }} }}\nbad ()\n"
+            "macro bad: Expr -> Expr = _: Expr => {{\n\
+             let values: Sequence<{element}> = Sequence ()\n\
+             let result: {result} = parse_quote {{ {body} }}\n\
+             parse_quote {{ 1 }}\n\
+             }}\n\
+             bad ()\n"
         );
         let diagnostics =
             resolve_result(&source).expect_err_diagnostics("bare list splice should fail");
+        let expected = format!(
+            "the macro interpreter cannot splice a `Sequence` or `Separated` \
+             in {position} position: `$values`"
+        );
         assert!(
-            diagnostics
-                .iter()
-                .any(|d| d.message.contains(&format!("in {position} position"))),
+            diagnostics.iter().any(|d| d.message == expected),
             "{diagnostics:?}"
         );
     }
@@ -21239,7 +21277,12 @@ fn plain_splices_report_unsupported_interpreter_positions() {
         }
         bad ()
     "#).expect_err_diagnostics("a nested modifier target must be one item");
-    assert!(diagnostics.iter().any(|d| d.message.contains("in nested item position")), "{diagnostics:?}");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("in nested item position: `$items`")),
+        "{diagnostics:?}"
+    );
     let diagnostics = resolve_result(
         r#"
         macro bad: Visibility -> Sequence<Item> = visibility => parse_quote {

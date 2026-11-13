@@ -2666,7 +2666,6 @@ impl Grammar {
             let name = self
                 .expect(TokenKind::Identifier, "expected a splice name after `$`")?
                 .text;
-
             return Ok(Pattern::Splice(SpliceExpression {
                 syntax: self.syntax(start),
                 name,
@@ -3274,7 +3273,6 @@ impl Grammar {
                     name: format!("${item}"),
                 }));
             }
-
             return Ok(Type::Splice(SpliceExpression {
                 syntax: self.syntax(start),
                 name,
@@ -4067,8 +4065,8 @@ impl Grammar {
                                 return Err(ParseError {
                                     offset: token.span.start,
                                     location: self.location(token.span.start),
-                                    message: "a product index must be plain decimal digits"
-                                        .to_owned(),
+                                    message:
+                                        "a product index must be plain decimal digits".to_owned(),
                                 });
                             }
                             Accessor::Index(token.text)
@@ -4185,7 +4183,6 @@ impl Grammar {
                 let name = self
                     .expect(TokenKind::Identifier, "expected a splice name after `$`")?
                     .text;
-
                 Ok(Expression::Splice(SpliceExpression {
                     syntax: self.syntax(start),
                     name,
