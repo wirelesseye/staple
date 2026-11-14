@@ -17,7 +17,7 @@ mod templates;
 mod traits;
 
 use syntax_ops::{
-    LeafKind, ParsedLeaf, append_syntax_tokens, is_structured_product_type, item_syntax,
+    LeafKind, ParsedLeaf, append_syntax_tokens, fill_quote, is_structured_product_type, item_syntax,
     matches_single_token, matching_angle_close, matching_close, parse_leaf, root_hygiene,
     skip_trivia, syntax_slice,
 };
@@ -10020,82 +10020,36 @@ impl MacroExpander {
         contents: &Syntax,
         environment: &Environment,
     ) -> Option<Syntax> {
-        let input = contents.tokens();
-        // The lossless token stream backing `contents` reconstructs the whole
-        // source file `contents` was parsed from, so a token's `span.start` is a
-        // real byte offset into it. Keep it to give the quotation-template tokens
-        // an `origin` pointing back at the macro definition, the same way spliced
-        // tokens already carry the caller's `origin`.
-        let file_source: String = contents
-            .token_stream()
-            .iter()
-            .map(|token| token.text.as_str())
-            .collect();
-        let template_origin = |token: &staple_syntax::SyntaxToken| match &contents.span {
-            Span::User { source, .. } if !token.kind.is_trivia() => Some(Span::User {
-                source: source.clone(),
-                range: token.span.clone(),
-                location: Some(source_location_at(&file_source, token.span.start)),
-            }),
-            _ => None,
-        };
         let mark = self.next_mark;
         self.next_mark += 1;
-        let push_template = |output: &mut Vec<staple_syntax::SyntaxToken>, index: usize| {
-            let mut token = input[index].clone();
-            if token.origin.is_none() {
-                token.origin = template_origin(&token);
-            }
-            if !token.kind.is_trivia() {
-                token.hygiene = Some((module.0, mark));
-            }
-            output.push(token);
-        };
-        let mut output = Vec::new();
-        let mut cursor = 0;
-        while cursor < input.len() {
-            if input[cursor].kind != staple_syntax::TokenKind::Dollar {
-                push_template(&mut output, cursor);
-                cursor += 1;
-                continue;
-            }
-            let mut name_at = cursor + 1;
-            while name_at < input.len() && input[name_at].kind.is_trivia() {
-                name_at += 1;
-            }
-            if name_at == input.len() || input[name_at].kind != staple_syntax::TokenKind::Identifier
-            {
-                push_template(&mut output, cursor);
-                cursor += 1;
-                continue;
-            }
-            let end = name_at + 1;
-            let name = &input[name_at].text;
+        let id = self.fresh_id();
+        let diagnostics = &mut self.diagnostics;
+        fill_quote(contents, module.0, mark, id, |name, output| {
             let Some(value) = environment.get(name).map(EnvironmentBinding::get) else {
-                self.diagnostics.push(Diagnostic::new(
+                diagnostics.push(Diagnostic::new(
                     contents.span.clone(),
                     format!("unknown syntax splice `${name}`"),
                 ));
-                return None;
+                return Err(());
             };
             match value {
                 Value::Syntax(SyntaxValue::Items(items)) => {
                     for item in items {
                         let syntax = item_syntax(&item);
-                        append_syntax_tokens(&mut output, syntax, root_hygiene(syntax));
+                        append_syntax_tokens(output, syntax, root_hygiene(syntax));
                     }
                 }
                 Value::Sequence(values) => {
                     for value in values {
                         let Value::Syntax(value) = value else {
-                            self.diagnostics.push(Diagnostic::new(
+                            diagnostics.push(Diagnostic::new(
                                 contents.span.clone(),
                                 format!("splice `${name}` requires syntax elements"),
                             ));
-                            return None;
+                            return Err(());
                         };
-                        let syntax = value.syntax()?;
-                        append_syntax_tokens(&mut output, syntax, splice_hygiene(&value, syntax));
+                        let syntax = value.syntax().ok_or(())?;
+                        append_syntax_tokens(output, syntax, splice_hygiene(&value, syntax));
                     }
                 }
                 Value::Separated {
@@ -10109,58 +10063,40 @@ impl MacroExpander {
                     let count = elements.len();
                     for (index, value) in elements.into_iter().enumerate() {
                         let Value::Syntax(value) = value else {
-                            self.diagnostics.push(Diagnostic::new(
+                            diagnostics.push(Diagnostic::new(
                                 contents.span.clone(),
                                 format!("splice `${name}` requires syntax elements"),
                             ));
-                            return None;
+                            return Err(());
                         };
-                        let syntax = value.syntax()?;
-                        append_syntax_tokens(&mut output, syntax, splice_hygiene(&value, syntax));
+                        let syntax = value.syntax().ok_or(())?;
+                        append_syntax_tokens(output, syntax, splice_hygiene(&value, syntax));
                         if index + 1 < count || trailing {
-                            append_separator_tokens(&mut output, separator);
+                            append_separator_tokens(output, separator);
                         }
                     }
                 }
                 Value::Syntax(value) => {
                     let Some(syntax) = value.syntax() else {
-                        self.diagnostics.push(Diagnostic::new(
+                        diagnostics.push(Diagnostic::new(
                             contents.span.clone(),
                             format!("splice `${name}` contains an item sequence"),
                         ));
-                        return None;
+                        return Err(());
                     };
-                    append_syntax_tokens(&mut output, syntax, splice_hygiene(&value, syntax));
+                    append_syntax_tokens(output, syntax, splice_hygiene(&value, syntax));
                 }
                 _ => {
-                    self.diagnostics.push(Diagnostic::new(
+                    diagnostics.push(Diagnostic::new(
                         contents.span.clone(),
                         format!("splice `${name}` does not contain syntax"),
                     ));
-                    return None;
+                    return Err(());
                 }
             }
-            cursor = end;
-        }
-        let mut offset = 0;
-        let mut source = String::new();
-        for token in &mut output {
-            let start = offset;
-            source.push_str(&token.text);
-            offset += token.text.len();
-            token.span = start..offset;
-        }
-        let source: Arc<str> = Arc::from(source);
-        let mut syntax = contents.clone();
-        syntax.id = self.fresh_id();
-        syntax.tokens = Arc::from(output);
-        syntax.token_range = 0..syntax.tokens.len();
-        syntax.span = Span::User {
-            source: Some(source),
-            range: 0..offset,
-            location: None,
-        };
-        Some(syntax.generated(module.0, mark))
+            Ok(())
+        })
+        .ok()
     }
 
     fn instantiate_type_quote(

@@ -384,7 +384,7 @@ pub trait Parse T {
     /// Parses the fragment of a `parse_quote`, which `__quote` builds from the
     /// fragment's id and the syntax spliced into it, as a `T`. A fragment that is
     /// not one fails the macro being expanded.
-    parse_quote: (U64; Sequence<Syntax>) -> T = (fragment; splices) =>
+    parse_quote: (U64; move Sequence<Syntax>) -> T = (fragment; move splices) =>
         match (Parse.parse_all.<T> (__quote (fragment, splices))) {
             Ok value => value,
             ParseError (message) => compile_error message,
@@ -416,10 +416,41 @@ extern "staple-intrinsic" {
 }
 
 // Compiler building blocks for quotations. A quotation is checked as a call of
-// `__quote` (or `__parse_quote`) with the id of its fragment and the values it
-// splices, each turned into syntax by `Splice`.
+// `__quote` (or `Parse.parse_quote`) with the id of its fragment and the values
+// it splices, one per distinct name in order of first use, each turned into
+// syntax by `Splice`.
+@interpreted_only
 extern "staple-intrinsic" {
     __quote: (U64, Sequence<Syntax>) -> Syntax
+}
+
+@compiled_only
+extern "staple-intrinsic" {
+    /// Starts filling the quotation fragment with this id.
+    __quote_begin: U64 -> U64
+    /// Gives a quotation being filled the syntax of its next splice name.
+    __quote_splice: (U64, Syntax) -> U64
+    /// The filled quotation.
+    __quote_end: U64 -> Syntax
+}
+
+@compiled_only
+def __quote = (fragment: U64, move splices: Sequence<Syntax>) => Syntax :: {
+    let quotation = __quote_begin fragment
+    let mut cursor = splices
+    loop {
+        match cursor {
+            Sequence () => { break },
+            Sequence (first, rest) => {
+                let _ = __quote_splice (quotation, first)
+                cursor = rest
+            },
+        }
+    }
+    __quote_end quotation
+}
+
+extern "staple-intrinsic" {
     __splice_node: <T> T -> Syntax
     __splice_join: <T> Sequence<T> -> Syntax
     /// The hidden origin stored with a syntax node.

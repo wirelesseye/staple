@@ -7,6 +7,7 @@
 
 pub(crate) mod arena;
 pub(crate) mod intrinsics;
+pub(crate) mod quote;
 
 #[cfg(test)]
 pub(crate) mod harness;

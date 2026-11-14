@@ -576,7 +576,7 @@ Update this section as you work (see "Rules for the implementor").
 | 5. Node views and rebuilding | done | `e9f38d44`, `ead6c8a8` | Non-generic classification, part and rebuild intrinsics cover expressions, types, patterns, items, modifiers, type bodies, type parameters, delimiters, visibility and punctuation. `@compiled_only` `from_syntax` functions attach origins, and compiled `Splice` impls return the origin for unchanged nodes. Sequence construction is Staple code, compiled `Splice Separated` is implemented, constructed non-empty products rebuild, and the harness asserts same-handle round trips. `__ident_spelling` is an inline intrinsic that reads an identifier box as a `String`. See Findings. |
 | 6. `Parse` impls | done | `1416a3f9`, `5ed41520` | The interpreter and compiled code share one leaf parser, so grammar and diagnostics agree. Compiled leaves and groups return an arena result handle; `Ident<S>` reads `S`'s spelling with a compiler intrinsic. The check gets fixed-arity product impls while the interpreter keeps the variadic ones, and `is_variadic_parse_impl` is gone. The harness checks 21 parse behaviors, including exact error messages and same-handle list round trips. Parsed lists carry origins, and a spelling set is a code generation error. See Findings. |
 | 7. Plain sequence splices | done | `7b1ad2cd`, `8a50319f` | Tree substitution uses the line rule for item splices; type parameters accept identifiers or comma lists. Repeated markers are removed, uses and documentation are migrated, and interpreter, closure and expansion checks pass. See Findings. |
-| 8. Quotations | not started | | |
+| 8. Quotations | done | this commit | Templates keep their tokens and module. Compiled `__quote` fills them with the interpreter's raw-quote code, stamping quoted tokens from the call context. Quoted nodes now rebuild to their origin. See Findings. |
 | 9. Arguments and results | not started | | |
 | 10. Wire format | not started | | |
 | 11. Compare against the interpreter | not started | | |
@@ -1285,3 +1285,55 @@ helper did not type-check as compiled code; its inline replacement passes on a
 targeted rerun. A fresh expansion capture matches the task 7 capture for all
 232 inputs, and `scripts/check-macro-closures.py --mode all --timeout 600`
 reports 232 inputs, 0 with diagnostics.
+
+### Quotations (task 8)
+
+`TemplateTable` holds a `Template` per quotation: the tokens between its braces
+and the module whose code holds it. The check program keeps the expanded
+program's module ids, so lowering records the module of the items it is
+lowering. Template ids are still assigned in lowering order.
+
+Compiled `__quote` can't be a host function as declared: its splices arrive
+as a `Sequence<Syntax>`, a GC box whose layout the host doesn't read. So it is
+`@compiled_only` Staple code that walks the list and hands each handle to
+three host functions, `__quote_begin`, `__quote_splice` and `__quote_end`. The
+interpreter keeps an `@interpreted_only` extern of the same name, which it never
+calls. `Parse.parse_quote` now takes its splices with `move`, so it can pass them
+on; the generated call always builds a fresh list, so macro code doesn't change.
+
+The interpreter's raw-quote filling moved to `syntax_ops::fill_quote`, which
+both engines call. A quoted token gets the hygiene of the module whose code
+holds the quotation and a fresh mark, and an origin back into that module's
+source. That module is the helper's when a helper in another module quotes, as
+in the interpreter, where a function value carries the module that defined it.
+Each quotation takes the call's next mark, matching the interpreter's mark per
+quotation. Spliced tokens keep the hygiene they bring. `CallContext` also
+carries the macro's module and the call site, which nothing reads yet: task 9
+needs them for results, and a constructed identifier still gets no hygiene from
+the context (Decision 11).
+
+Filled quotations exposed a gap in the node rebuilds. A rebuild compared tokens
+with their hygiene, and its own keywords and punctuation have none, so an
+unchanged quoted node never matched its origin and was rebuilt: `parse_quote {
+type A = I32 }` spliced back as `type A =  I32`. Only an identifier's hygiene
+changes what syntax means, so the comparison now ignores hygiene on every other
+token. A quoted `wrap`, `from` or `opaque` body still rebuilds, because those
+words lex as identifiers; the result is correct but not lossless. Task 11 will
+show whether that matters.
+
+Differences for task 11:
+
+- Compiled `Parse` for `Sequence<Item>` rejects `;` between items. The
+  interpreter's `parse_quote` accepts `type A = I32; type B = I32` because it
+  parses the template as an item list. The leaf parser is shared with the
+  interpreter's `Parse`, so changing it would change interpreted argument
+  parsing too.
+- A `parse_quote` result's origin is the whole filled fragment, so splicing it
+  unchanged gives the template's leading space (`" f a"`). A parsed
+  `Sequence<Item>` splices from its first item.
+
+
+Verification: `cargo test --workspace` passes 2328 tests. The expansion
+comparison matches 231 of 232 inputs; the other is `std/syntax.sta` itself,
+whose only change is `parse_quote` taking `move`. The macro closure check
+reports no diagnostics.

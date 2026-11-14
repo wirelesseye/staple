@@ -28,15 +28,40 @@ pub(super) fn splice_names(tokens: &[SyntaxToken]) -> impl Iterator<Item = &str>
         })
 }
 
-/// The text of each quotation lowered so far, by template id.
-#[derive(Default)]
+/// The names a quotation's tokens splice, in order of first use. A lowered
+/// quotation passes one value per name, in this order.
+pub(crate) fn distinct_splice_names(tokens: &[SyntaxToken]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for name in splice_names(tokens) {
+        if !names.iter().any(|known| known == name) {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
+/// One quotation's fragment.
+#[derive(Clone)]
+pub(crate) struct Template {
+    /// The tokens between the quotation's braces, with their origins and the
+    /// file they came from.
+    pub(crate) contents: Syntax,
+    /// The module whose code holds the quotation. Names the quotation writes
+    /// resolve there, even when another module's macro calls the code.
+    pub(crate) module: ModuleId,
+}
+
+/// Every quotation lowered so far, by template id.
+#[derive(Clone, Default)]
 pub(crate) struct TemplateTable {
-    pub(crate) templates: Vec<String>,
+    pub(crate) templates: Vec<Template>,
 }
 
 pub(super) struct QuoteLowering<'a> {
     /// The module that defines the functions the lowered code calls.
     pub(super) syntax_module: ModuleId,
+    /// The module whose items are being lowered.
+    pub(super) module: ModuleId,
     pub(super) next_syntax_id: &'a mut usize,
     pub(super) table: &'a mut TemplateTable,
 }
@@ -123,23 +148,15 @@ impl QuoteLowering<'_> {
         })
     }
 
-    /// The names a quotation splices, in order of first use.
-    fn splices(quote: &QuoteExpression) -> Vec<String> {
-        let mut names: Vec<String> = Vec::new();
-        for name in splice_names(quote.contents.tokens()) {
-            if !names.iter().any(|known| known == name) {
-                names.push(name.to_owned());
-            }
-        }
-        names
-    }
-
     fn lower_quote(&mut self, quote: &QuoteExpression) -> Expression {
         let like = &quote.syntax;
         let id = self.table.templates.len();
-        self.table.templates.push(quote.contents.text());
+        self.table.templates.push(Template {
+            contents: quote.contents.clone(),
+            module: self.module,
+        });
         let mut list = self.sequence(like, Vec::new());
-        for name in Self::splices(quote).into_iter().rev() {
+        for name in distinct_splice_names(quote.contents.tokens()).into_iter().rev() {
             let splice = {
                 let trait_ = self.name(like, "Splice");
                 Expression::Access(staple_syntax::AccessExpression {

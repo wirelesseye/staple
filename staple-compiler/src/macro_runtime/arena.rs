@@ -5,7 +5,8 @@
 //! handle carries the arena generation, so a value left over from an earlier
 //! call is rejected rather than read as a different fragment.
 //!
-//! Quotation templates are not per-call state and live outside this arena.
+//! Quotation templates are not per-call state and live outside this arena; a
+//! quotation being filled names its template by id.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -62,6 +63,9 @@ enum Entry {
     /// handle forks it, and advancing allocates a new stream.
     Stream { fragment: u64, offset: usize },
     Parse(ParseOutcome),
+    /// A quotation being filled: its template id and the syntax handed to it
+    /// so far, one per distinct splice name.
+    Quote { template: u64, splices: Vec<u64> },
 }
 
 /// A handle into the arena. Zero means "none"; every other value names an
@@ -150,6 +154,39 @@ impl Arena {
     pub(crate) fn parse_outcome(&self, handle: Handle) -> Option<&ParseOutcome> {
         match self.entry(handle)? {
             Entry::Parse(outcome) => Some(outcome),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn insert_quote(&mut self, template: u64) -> Handle {
+        self.insert(Entry::Quote {
+            template,
+            splices: Vec::new(),
+        })
+    }
+
+    /// Adds the next splice to a quotation being filled. Returns `false` when
+    /// `handle` is not one.
+    pub(crate) fn push_quote_splice(&mut self, handle: Handle, splice: u64) -> bool {
+        let Some(index) = handle.index() else {
+            return false;
+        };
+        if handle.generation() != self.generation {
+            return false;
+        }
+        match self.entries.get_mut(index) {
+            Some(Entry::Quote { splices, .. }) => {
+                splices.push(splice);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A quotation's template id and splices.
+    pub(crate) fn quote(&self, handle: Handle) -> Option<(u64, &[u64])> {
+        match self.entry(handle)? {
+            Entry::Quote { template, splices } => Some((*template, splices)),
             _ => None,
         }
     }

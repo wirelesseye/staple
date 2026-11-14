@@ -327,13 +327,16 @@ pub(crate) fn build_check_program_with(
     }
     let mut table = TemplateTable::default();
     if let Some(syntax_module) = program.standard_library_syntax() {
-        let mut lowering = QuoteLowering {
-            syntax_module,
-            next_syntax_id,
-            table: &mut table,
-        };
-        for item in items.iter_mut().flatten() {
-            lowering.lower_item(item);
+        for (module, module_items) in items.iter_mut().enumerate() {
+            let mut lowering = QuoteLowering {
+                syntax_module,
+                module: ModuleId(module),
+                next_syntax_id,
+                table: &mut table,
+            };
+            for item in module_items {
+                lowering.lower_item(item);
+            }
         }
     }
     (program.with_module_items(items, *next_syntax_id), table)
@@ -796,7 +799,16 @@ mod tests {
             ),
             CheckMode::Invoked,
         );
-        let templates = &built.templates.templates;
+        let entry = built.program.entry();
+        // The table also holds the standard library's quotations.
+        let templates = built
+            .templates
+            .templates
+            .iter()
+            .filter(|template| template.module == entry)
+            .map(|template| template.contents.text())
+            .collect::<Vec<_>>();
+        assert_eq!(templates.len(), 3, "{templates:?}");
         assert!(templates.contains(&" $value + $value".to_owned()), "{templates:?}");
         assert!(templates.contains(&" $value".to_owned()), "{templates:?}");
         assert!(templates.contains(&" ($value)".to_owned()), "{templates:?}");

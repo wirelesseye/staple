@@ -119,7 +119,11 @@ pub(crate) const INTRINSICS: &[Intrinsic] = &[
     intrinsic!("__sequence_reverse", "__staple_syntax_sequence_reverse"),
     intrinsic!("__offset", "__staple_syntax_offset", offset),
     intrinsic!("__stream_span", "__staple_syntax_stream_span", stream_span),
+    // Compiled `__quote` is Staple code over these three.
     intrinsic!("__quote", "__staple_syntax_quote"),
+    intrinsic!("__quote_begin", "__staple_syntax_quote_begin", super::quote::quote_begin),
+    intrinsic!("__quote_splice", "__staple_syntax_quote_splice", super::quote::quote_splice),
+    intrinsic!("__quote_end", "__staple_syntax_quote_end", super::quote::quote_end),
     intrinsic!("__splice_node", "__staple_syntax_splice_node"),
     intrinsic!("__splice_join", "__staple_syntax_splice_join"),
     intrinsic!("__clone_syntax", "__staple_syntax_clone_syntax"),
@@ -543,6 +547,9 @@ pub(crate) fn symbol_name(name: &str) -> &'static str {
         "__offset" => "__staple_syntax_offset",
         "__stream_span" => "__staple_syntax_stream_span",
         "__quote" => "__staple_syntax_quote",
+        "__quote_begin" => "__staple_syntax_quote_begin",
+        "__quote_splice" => "__staple_syntax_quote_splice",
+        "__quote_end" => "__staple_syntax_quote_end",
         "__splice_node" => "__staple_syntax_splice_node",
         "__splice_join" => "__staple_syntax_splice_join",
         "__clone_syntax" => "__staple_syntax_clone_syntax",
@@ -796,14 +803,21 @@ extern "C" fn text_copy(text: u64, destination: *mut u8, capacity: usize) -> usi
 }
 
 /// What a rebuild compares to decide that a token is unchanged: its kind, text
-/// and hygiene. Hygiene decides what a name refers to, so a child replaced by
-/// the same text from another context is a change. Trivia and positions are
-/// left out: copying a token records where it came from, so a rebuilt node that
-/// writes the same tokens returns its origin even though they were copied.
+/// and, for an identifier, its hygiene. Hygiene decides what a name refers to,
+/// so a child replaced by the same text from another context is a change.
+/// Other tokens compare without it: a quotation stamps its keywords and
+/// punctuation, while a rebuild writes its own without hygiene, and an
+/// unchanged quoted node must still return its origin. Trivia and positions
+/// are left out too: copying a token records where it came from, so a rebuilt
+/// node that writes the same tokens returns its origin even though they were
+/// copied.
 type TokenKey<'a> = (&'a TokenKind, &'a str, Option<(usize, u64)>);
 
 fn token_key(token: &SyntaxToken) -> TokenKey<'_> {
-    (&token.kind, token.text.as_str(), token.hygiene)
+    let hygiene = (token.kind == TokenKind::Identifier)
+        .then_some(token.hygiene)
+        .flatten();
+    (&token.kind, token.text.as_str(), hygiene)
 }
 
 /// Whether two token runs have the same non-trivia tokens, by [`token_key`].
@@ -2930,6 +2944,31 @@ mod tests {
                 u64::from(arena.insert_syntax(syntax))
             });
             assert_eq!(syntax_or_origin(origin, respelled), origin);
+        });
+    }
+
+    /// A quotation stamps every token it writes, but only an identifier's
+    /// hygiene decides what it means, so punctuation a rebuild writes without
+    /// hygiene still matches the quoted original.
+    #[test]
+    fn only_identifier_hygiene_makes_a_rebuild_new() {
+        with_syntax("(x)", |origin| {
+            let mut quoted = syntax_value(origin);
+            let mut tokens = quoted.tokens().to_vec();
+            for token in &mut tokens {
+                token.hygiene = Some((3, 7));
+            }
+            quoted.tokens = Arc::from(tokens);
+            quoted.token_range = 0..quoted.tokens.len();
+            let quoted = with_arena(|arena| u64::from(arena.insert_syntax(quoted)));
+            let mut rebuilt = syntax_value(quoted);
+            let mut tokens = rebuilt.tokens().to_vec();
+            tokens[0].hygiene = None;
+            tokens[2].hygiene = None;
+            rebuilt.tokens = Arc::from(tokens);
+            let rebuilt = with_arena(|arena| u64::from(arena.insert_syntax(rebuilt)));
+            assert_eq!(syntax_or_origin(quoted, rebuilt), quoted);
+            assert_eq!(syntax_or_origin(quoted, origin), origin, "the name's hygiene differs");
         });
     }
 

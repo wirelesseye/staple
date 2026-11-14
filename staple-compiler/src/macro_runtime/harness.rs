@@ -243,6 +243,11 @@ pub(crate) fn with_jit_threshold<T>(
     f(&engine)
 }
 
+/// Makes `run`'s quotation templates the ones compiled quotations fill.
+pub(crate) fn install_templates(run: &CheckRun) {
+    crate::macro_runtime::quote::install_templates(std::sync::Arc::new(run.templates.clone()));
+}
+
 /// Items of the check program's entry module.
 pub(crate) fn entry_items(run: &CheckRun) -> &[Item] {
     &run.program.module(run.program.entry()).syntax.items
@@ -285,6 +290,7 @@ mod tests {
             probes.iter().map(|(name, _)| format!("{name} ()")).collect::<Vec<_>>().join(" + "));
         let run = check_run_for(&source);
         let lowered = lower_run(&run).expect("the probes should lower");
+        install_templates(&run);
         with_jit(&lowered, |engine| {
             type Probe = unsafe extern "C" fn(*const usize) -> i32;
             for (name, expected) in probes {
@@ -1464,6 +1470,204 @@ def nested_sequence_clone: () -> I32 = () => {
                 .any(|diagnostic| diagnostic.message.contains("only copies handle types")),
             "{diagnostics:?}"
         );
+    }
+
+    #[test]
+    fn quotations_fill_every_result_category() {
+        run_probes(
+            r#"
+def text_is: (Syntax; String) -> I32 = (syntax; expected) => match (string_from_syntax syntax == expected) {
+    True => 1,
+    False => 0,
+}
+def expr_of = text: String => Expr :: expr_from_syntax (syntax_from_string text)
+def raw_result: () -> I32 = () => {
+    let value = expr_of "a + 1"
+    text_is (quote { f ($value) }) " f (a + 1)"
+}
+def expr_result: () -> I32 = () => {
+    let value = expr_of "a"
+    let result: Expr = parse_quote { f $value }
+    text_is (Splice.splice result) " f a"
+}
+def type_result: () -> I32 = () => {
+    let element = type_from_syntax (syntax_from_string "I32")
+    let result: Type = parse_quote { Option<$element> }
+    text_is (Splice.splice result) " Option<I32>"
+}
+def pattern_result: () -> I32 = () => {
+    let binding = pattern_from_syntax (syntax_from_string "x")
+    let result: Pattern = parse_quote { Some $binding }
+    text_is (Splice.splice result) " Some x"
+}
+def item_result: () -> I32 = () => {
+    let value = expr_of "a"
+    let result: Item = parse_quote { let answer = $value }
+    text_is (Splice.splice result) " let answer = a"
+}
+def items_result: () -> I32 = () => {
+    let element = type_from_syntax (syntax_from_string "I32")
+    let result: Sequence<Item> = parse_quote {
+        type A = I32
+        type B = $element
+    }
+    text_is (Splice.splice result) "type A = I32\n        type B = I32"
+}
+def unchanged_declaration: () -> I32 = () => {
+    let result: Item = parse_quote { type A = I32 }
+    text_is (Splice.splice result) " type A = I32"
+}
+def modifier_result: () -> I32 = () => {
+    let value = expr_of "a"
+    let result: Modifier = parse_quote { @mark($value) }
+    text_is (Splice.splice result) " @mark(a)"
+}
+"#,
+            &[
+                ("unchanged_declaration", 1),
+                ("raw_result", 1),
+                ("expr_result", 1),
+                ("type_result", 1),
+                ("pattern_result", 1),
+                ("item_result", 1),
+                ("items_result", 1),
+                ("modifier_result", 1),
+            ],
+        );
+    }
+
+    #[test]
+    fn quotations_fill_every_splice_shape() {
+        run_probes(
+            r#"
+def text_is: (Syntax; String) -> I32 = (syntax; expected) => match (string_from_syntax syntax == expected) {
+    True => 1,
+    False => 0,
+}
+def expr_of = text: String => Expr :: expr_from_syntax (syntax_from_string text)
+def spaced_splice: () -> I32 = () => {
+    let value = expr_of "a"
+    text_is (quote { f $ value }) " f a"
+}
+def repeated_expr: () -> I32 = () => {
+    let value = expr_of "g 1"
+    let result: Expr = parse_quote { $value + $value }
+    text_is (Splice.splice result) " g 1 + g 1"
+}
+def repeated_ident: () -> I32 = () => {
+    let name: Ident<String> = Ident "x"
+    let result: Item = parse_quote { let $name = $name }
+    text_is (Splice.splice result) " let x = x"
+}
+def item_sequence: () -> I32 = () => match (Parse.parse_all.<Sequence<Item>> (syntax_from_string "type A = I32\ntype B = I32")) {
+    Ok items => {
+        let result: Item = parse_quote { mod generated { $items } }
+        text_is (Splice.splice result) " mod generated { type A = I32\ntype B = I32 }"
+    },
+    ParseError _ => 0,
+}
+def comma_list: () -> I32 = () => match (Parse.parse_all.<Parenthesized<Separated<Expr, Comma>>> (syntax_from_string "(1, 2)")) {
+    Ok list => {
+        let result: Expr = parse_quote { f $list }
+        text_is (Splice.splice result) " f (1, 2)"
+    },
+    ParseError _ => 0,
+}
+def bare_sequence: () -> I32 = () => match (Parse.parse_all.<Sequence<Expr>> (syntax_from_string "a b")) {
+    Ok arguments => {
+        let result: Expr = parse_quote { f $arguments }
+        text_is (Splice.splice result) " f a b"
+    },
+    ParseError _ => 0,
+}
+"#,
+            &[
+                ("spaced_splice", 1),
+                ("repeated_expr", 1),
+                ("repeated_ident", 1),
+                ("item_sequence", 1),
+                ("comma_list", 1),
+                ("bare_sequence", 1),
+            ],
+        );
+    }
+
+    /// Quoted tokens resolve where the quotation was written, even in a helper
+    /// module another module's code calls, and spliced tokens keep the
+    /// caller's hygiene. Each quotation takes the call's next mark.
+    #[test]
+    fn quotations_stamp_hygiene_from_the_call() {
+        let source = r#"use std.syntax.*
+mod helper {
+    use std.syntax.*
+    pub def make = value: Syntax => Syntax :: quote { local $value }
+}
+def from_helper: () -> Syntax = () => helper.make (syntax_from_string "caller")
+def from_entry: () -> Syntax = () => {
+    let value = syntax_from_string "caller"
+    quote { local $value }
+}
+macro touch = () => {
+    let a = from_helper ()
+    let b = from_entry ()
+    0
+}
+"#;
+        let run = check_run_for(source);
+        let entry = run.program.entry();
+        let helper = run
+            .program
+            .modules()
+            .iter()
+            .map(|module| module.id)
+            .find(|&id| {
+                id != entry
+                    && run
+                        .program
+                        .module_dotted_name(id)
+                        .is_some_and(|name| name.ends_with("helper"))
+            })
+            .expect("the helper module exists");
+        let lowered = lower_run(&run).expect("the probes should lower");
+        install_templates(&run);
+        crate::macro_runtime::quote::begin_call(crate::macro_runtime::quote::CallContext {
+            next_mark: 100,
+            ..Default::default()
+        });
+        let (from_helper, from_entry) = with_jit(&lowered, |engine| {
+            type Probe = unsafe extern "C" fn(*const usize) -> u64;
+            let call = |name: &str| {
+                let symbol = instance_symbol(&lowered, name)
+                    .unwrap_or_else(|| panic!("`{name}` is instantiated"));
+                let probe = unsafe { engine.get_function::<Probe>(&symbol).unwrap() };
+                let handle = unsafe { probe.call(std::ptr::null()) };
+                crate::macro_runtime::arena::with_arena(|arena| arena.syntax(handle.into()).cloned())
+                    .expect("a quotation gives syntax")
+            };
+            (call("from_helper"), call("from_entry"))
+        });
+        assert_eq!(crate::macro_runtime::quote::next_mark(), 102);
+        for (syntax, module, mark) in [(&from_helper, helper, 100), (&from_entry, entry, 101)] {
+            assert_eq!(syntax.text(), " local caller");
+            assert_eq!(syntax.definition_module(), Some(module.0));
+            assert_eq!(syntax.expansion_mark, Some(mark));
+            let token = |text: &str| {
+                syntax
+                    .tokens()
+                    .iter()
+                    .find(|token| token.text == text)
+                    .unwrap_or_else(|| panic!("`{text}` is in the result"))
+                    .clone()
+            };
+            let local = token("local");
+            assert_eq!(local.hygiene, Some((module.0, mark)), "a quoted name");
+            assert!(
+                matches!(&local.origin, Some(staple_syntax::Span::User { location: Some(_), .. })),
+                "a quoted token points back into the macro source: {:?}",
+                local.origin
+            );
+            assert_eq!(token("caller").hygiene, None, "a spliced name keeps the caller's");
+        }
     }
 
     /// Builds the check programs of the standard library's macros and records
