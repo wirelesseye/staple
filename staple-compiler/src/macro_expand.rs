@@ -7,6 +7,7 @@ use std::{
 
 pub(crate) mod check_program;
 mod closure;
+pub(crate) mod compiled_call;
 pub(crate) mod lower_quote;
 mod parse;
 mod scan;
@@ -5531,6 +5532,7 @@ impl MacroExpander {
             module,
             &definition,
             argument,
+            invocation.argument.as_ref().map(|argument| &argument.syntax),
             current,
             invocation.syntax.span.clone(),
         );
@@ -5724,6 +5726,7 @@ impl MacroExpander {
         module: ModuleId,
         definition: &MacroDefinition,
         argument: Option<Value>,
+        argument_syntax: Option<&Syntax>,
         item: Item,
         call_span: Span,
     ) -> Option<Vec<Item>> {
@@ -5737,11 +5740,18 @@ impl MacroExpander {
         if !self.check_before_running(definition) {
             return None;
         }
+        let recorded = self.record_modifier_call(
+            definition,
+            argument.as_ref().zip(argument_syntax),
+            &item,
+            &call_span,
+        );
         self.invocation_spans.push(call_span.clone());
         self.running_macros.push(definition.declaration.syntax.id);
         let result = self.invoke_modifier_inner(module, definition, argument, item, call_span);
         self.running_macros.pop();
         self.invocation_spans.pop();
+        self.record_result(recorded, result.clone().map(SyntaxValue::Items));
         result
     }
 
@@ -6855,11 +6865,16 @@ impl MacroExpander {
         if !self.check_before_running(definition) {
             return None;
         }
+        let recorded = match definition.kind {
+            MacroKind::User(_) => self.record_call(definition, &arguments, &call_span),
+            _ => None,
+        };
         self.invocation_spans.push(call_span.clone());
         self.running_macros.push(definition.declaration.syntax.id);
         let result = self.invoke_macro_inner(definition, arguments, call_span);
         self.running_macros.pop();
         self.invocation_spans.pop();
+        self.record_result(recorded, result.clone());
         result
     }
 

@@ -248,6 +248,96 @@ pub(crate) fn install_templates(run: &CheckRun) {
     crate::macro_runtime::quote::install_templates(std::sync::Arc::new(run.templates.clone()));
 }
 
+/// One macro call made both ways.
+pub(crate) struct CallOutcome {
+    pub(crate) call: crate::macro_expand::compiled_call::RecordedCall,
+    /// The compiled result, read by the macro's result category, or why it
+    /// could not be read.
+    pub(crate) compiled: Result<crate::macro_expand::compiled_call::ExpandedSyntax, String>,
+    /// The marks the compiled call used: the first and the next unused one.
+    pub(crate) marks: (u64, u64),
+}
+
+impl CallOutcome {
+    pub(crate) fn name(&self) -> &str {
+        &self.call.declaration.name
+    }
+
+    pub(crate) fn compiled_text(&self) -> String {
+        match &self.compiled {
+            Ok(result) => result.text(),
+            Err(message) => panic!("`{}` failed: {message}", self.name()),
+        }
+    }
+
+    pub(crate) fn interpreted_text(&self) -> String {
+        self.call
+            .interpreted
+            .as_ref()
+            .unwrap_or_else(|| panic!("the interpreter expanded `{}`", self.name()))
+            .text()
+    }
+}
+
+/// The first mark compiled calls use, far from the interpreter's, so a test
+/// can tell which engine stamped a token.
+pub(crate) const FIRST_COMPILED_MARK: u64 = 1_000_000;
+
+/// Expands `source` while recording its macro calls, then makes every call of
+/// a macro `source` defines again through the macro's compiled entry function.
+pub(crate) fn compiled_calls(source: &str) -> Vec<CallOutcome> {
+    use crate::macro_expand::check_program::entry_function_name;
+    use crate::macro_expand::compiled_call::{compiled_result, record_calls};
+    use crate::macro_runtime::quote::{CallContext, begin_call, next_mark};
+
+    let (run, calls) = record_calls(|| check_run_for(source));
+    let entry = run.program.entry();
+    let calls = calls
+        .into_iter()
+        .filter(|call| call.definition_module == entry)
+        .collect::<Vec<_>>();
+    let lowered = lower_run(&run).expect("the macros should lower");
+    install_templates(&run);
+    let mut next_syntax_id = run.program.next_syntax_id();
+    with_jit(&lowered, |engine| {
+        // A function takes its closure environment first, which a top-level
+        // function doesn't use.
+        type Entry = unsafe extern "C" fn(*const usize, u64) -> u64;
+        let mut mark = FIRST_COMPILED_MARK;
+        calls
+            .into_iter()
+            .map(|call| {
+                let name = entry_function_name(&call.declaration);
+                let symbol = instance_symbol(&lowered, &crate::resolve::mangle_function_name(&name))
+                    .unwrap_or_else(|| panic!("`{name}` is instantiated"));
+                let function = unsafe { engine.get_function::<Entry>(&symbol) }
+                    .unwrap_or_else(|_| panic!("`{symbol}` is emitted"));
+                begin_call(CallContext {
+                    definition_module: call.definition_module,
+                    next_mark: mark,
+                    call_site: call.call_site.clone(),
+                    identifier_mark: None,
+                });
+                let arguments = crate::macro_runtime::args::insert_arguments(&call.arguments);
+                let result = unsafe { function.call(std::ptr::null(), arguments) };
+                let syntax = crate::macro_runtime::arena::with_arena(|arena| {
+                    arena.syntax(result.into()).cloned()
+                })
+                .expect("an entry function returns syntax");
+                crate::macro_runtime::arena::reset();
+                let marks = (mark, next_mark());
+                mark = marks.1;
+                let compiled = compiled_result(&call.result, syntax, &mut next_syntax_id);
+                CallOutcome {
+                    call,
+                    compiled,
+                    marks,
+                }
+            })
+            .collect()
+    })
+}
+
 /// Items of the check program's entry module.
 pub(crate) fn entry_items(run: &CheckRun) -> &[Item] {
     &run.program.module(run.program.entry()).syntax.items
@@ -786,8 +876,10 @@ def same_syntax_node: () -> I32 = () => {
     match (same_syntax (Splice.splice value) syntax) { True => 1, False => 0 }
 }
 def same_sequence: () -> I32 = () => {
-    let a: Ident<String> = Ident "a"
-    let b: Ident<String> = Ident "b"
+    // Constructed identifiers carry the call's hygiene, so the elements come
+    // from source to match the origin's tokens.
+    let a: Ident<String> = ident_from_syntax (syntax_from_string "a")
+    let b: Ident<String> = ident_from_syntax (syntax_from_string "b")
     let tail: Sequence<Ident<String>> = Sequence ()
     let middle: Sequence<Ident<String>> = Sequence (first: b, rest: tail)
     let sequence: Sequence<Ident<String>> = Sequence (first: a, rest: middle)
@@ -814,8 +906,8 @@ def separated_text: () -> I32 = () => {
     text_is (Splice.splice value) "a,b"
 }
 def same_separated: () -> I32 = () => {
-    let a: Ident<String> = Ident "a"
-    let b: Ident<String> = Ident "b"
+    let a: Ident<String> = ident_from_syntax (syntax_from_string "a")
+    let b: Ident<String> = ident_from_syntax (syntax_from_string "b")
     let tail: Sequence<Ident<String>> = Sequence ()
     let middle: Sequence<Ident<String>> = Sequence (first: b, rest: tail)
     let elements: Sequence<Ident<String>> = Sequence (first: a, rest: middle)
@@ -1705,5 +1797,172 @@ macro touch = () => {
             }
         }
         panic!("{}", lines.join("\n"));
+    }
+    fn outcome<'a>(outcomes: &'a [CallOutcome], name: &str) -> &'a CallOutcome {
+        outcomes
+            .iter()
+            .find(|outcome| outcome.name() == name)
+            .unwrap_or_else(|| panic!("`{name}` was called"))
+    }
+
+    #[test]
+    fn entry_functions_decode_every_argument_shape() {
+        let outcomes = compiled_calls(concat!(
+            "use std.syntax.*\n",
+            "use std.clone.Clone\n",
+            "macro ident: Ident -> Expr = name => parse_quote { $name }\n",
+            "macro keyword: Ident<\"else\"> -> Expr = word => parse_quote { $word }\n",
+            "macro grouped_expr: Expr -> Expr = value => parse_quote { ($value) }\n",
+            "macro text: StringExpr -> Expr = value => parse_quote { $value }\n",
+            "macro optional: (Ident; Option<Expr>) -> Expr = (name; value) => match value {\n",
+            "    Some found => parse_quote { $name $found },\n",
+            "    None => parse_quote { $name },\n",
+            "}\n",
+            "macro many: (Expr; Sequence<Expr>) -> Expr = (callee; arguments) => match (Clone.clone arguments) {\n",
+            "    Sequence (first, rest) => match rest {\n",
+            "        Sequence (first, rest) => parse_quote { $callee $first },\n",
+            "        Sequence () => parse_quote { $callee },\n",
+            "    },\n",
+            "    Sequence () => parse_quote { $callee () },\n",
+            "}\n",
+            "macro pair: (Ident, Expr) -> Expr = (name, value) => parse_quote { $name $value }\n",
+            "macro group: move Parenthesized<(Ident; Expr)> -> Expr = move value => match value {\n",
+            "    Parenthesized (name; inner) => parse_quote { f $inner $name },\n",
+            "}\n",
+            "macro whole_group: Parenthesized<Expr> -> Expr = value => parse_quote { f $value }\n",
+            "macro nodes: move Braced<Sequence<SyntaxNode>> -> Expr = move value => match value {\n",
+            "    Braced (Sequence (first, rest)) => parse_quote { f $first },\n",
+            "    Braced (Sequence ()) => parse_quote { f },\n",
+            "}\n",
+            "macro listed: move Parenthesized<Separated<Expr, Comma>> -> Expr = move list => match list {\n",
+            "    Parenthesized (Separated (separator, elements, trailing)) => {\n",
+            "        let rebuilt = Parenthesized (Separated (separator: separator, elements: elements, trailing: trailing))\n",
+            "        parse_quote { f $rebuilt }\n",
+            "    },\n",
+            "}\n",
+            "macro whole_list: Bracketed<Separated<Expr, Comma>> -> Expr = list => parse_quote { f $list }\n",
+            "macro raw: Braced<Syntax> -> Syntax = value => quote { g $value }\n",
+            "macro declare: (Visibility; Ident) -> Item = (visibility; name) => parse_quote { $visibility type $name = I32 }\n",
+            "macro inspect modifiers (@traced): (MacroCallMetadata; Expr) -> Item = ((modifiers, visibility); value) => match modifiers {\n",
+            "    Sequence () => parse_quote { $visibility let plain = $value },\n",
+            "    _ => parse_quote { $visibility let traced = $value },\n",
+            "}\n",
+            "macro @mark: move Item -> Sequence<Item> = move item => Sequence (first: item, rest: Sequence ())\n",
+            "macro @tagged: (Parenthesized<Expr>; Item) -> Sequence<Item> = (tag; item) => {\n",
+            "    let extra: Item = parse_quote { let tag = $tag }\n",
+            "    Sequence (first: Clone.clone item, rest: Sequence (first: extra, rest: Sequence ()))\n",
+            "}\n",
+            "let a = ident x\n",
+            "let b = keyword else\n",
+            "let c = grouped_expr (1 + 2)\n",
+            "let e = text \"hi\"\n",
+            "let f1 = optional x 1\n",
+            "let f2 = optional x\n",
+            "let g1 = many f 1 2 3\n",
+            "let g2 = many f 1\n",
+            "let g3 = many f\n",
+            "let h = pair (x, 1)\n",
+            "let i = group (x 1)\n",
+            "let i2 = whole_group ( 1 +  2 )\n",
+            "let n1 = nodes { a b c }\n",
+            "let n2 = nodes {}\n",
+            "let j1 = listed (1, 2, 3,)\n",
+            "let j2 = listed (1, 2)\n",
+            "let k = whole_list [1,  2]\n",
+            "let l = raw { 1 + 2 }\n",
+            "declare pub A1\n",
+            "declare B1\n",
+            "@traced pub inspect 1\n",
+            "pub inspect 2\n",
+            "@mark\ntype M = I32\n",
+            "@tagged(N)\ntype O = I32\n",
+        ));
+        let texts = |name: &str| {
+            outcomes
+                .iter()
+                .filter(|outcome| outcome.name() == name)
+                .map(CallOutcome::compiled_text)
+                .collect::<Vec<_>>()
+        };
+        let expected: &[(&str, &[&str])] = &[
+            ("ident", &["x"]),
+            ("keyword", &["else"]),
+            ("grouped_expr", &["((1 + 2))"]),
+            ("text", &["\"hi\""]),
+            ("optional", &["x 1", "x"]),
+            ("many", &["f 2", "f", "f ()"]),
+            ("pair", &["x 1"]),
+            // Parts of a group decode from its contents.
+            ("group", &["f 1 x"]),
+            // An unchanged group splices as it was written.
+            ("whole_group", &["f ( 1 +  2 )"]),
+            ("nodes", &["f a", "f"]),
+            // A rebuilt list keeps its trailing separator. A separator has no
+            // source, so it is written without spaces.
+            ("listed", &["f (1,2,3,)", "f (1,2)"]),
+            ("whole_list", &["f [1,  2]"]),
+            ("raw", &["g { 1 + 2 }"]),
+            ("declare", &["pub type A1 = I32", "type B1 = I32"]),
+            ("inspect", &["pub let traced = 1", "pub let plain = 2"]),
+            ("mark", &["type M = I32"]),
+            ("tagged", &["type O = I32\nlet tag = (N)"]),
+        ];
+        for (name, texts_expected) in expected {
+            assert_eq!(&texts(name), texts_expected, "`{name}`");
+        }
+        let category = |name: &str| outcome(&outcomes, name).compiled.as_ref().unwrap().category();
+        assert_eq!(category("raw"), "syntax fragment");
+        assert_eq!(category("mark"), "item sequence");
+        assert_eq!(category("declare"), "item");
+        assert_eq!(category("ident"), "expression");
+    }
+    /// The parent owns hygiene: quoted tokens take the call's marks, a
+    /// constructed identifier takes the macro's module and one mark for the
+    /// whole call, and a result gets fresh syntax ids.
+    #[test]
+    fn compiled_calls_take_hygiene_from_the_call() {
+        let source = concat!(
+            "use std.syntax.*\n",
+            "macro fresh: Expr -> Item = value => {\n",
+            "    let name = Ident \"tmp\"\n",
+            "    let first: Expr = parse_quote { $name }\n",
+            "    parse_quote { let x = $name + $name + $value + $first }\n",
+            "}\n",
+            "fresh 1\n",
+        );
+        let outcomes = compiled_calls(source);
+        let [outcome] = outcomes.as_slice() else {
+            panic!("one call was recorded, not {}", outcomes.len());
+        };
+        // `$first` keeps its quotation's leading space.
+        assert_eq!(outcome.compiled_text(), "let x = tmp + tmp + 1 +  tmp");
+        let (first, next) = outcome.marks;
+        assert_eq!(first, FIRST_COMPILED_MARK);
+        // Two quotations and the constructed identifier.
+        assert_eq!(next, first + 3);
+        let module = outcome.call.definition_module.0;
+        let tokens = outcome.compiled.as_ref().unwrap().tokens();
+        let hygiene = |text: &str| {
+            tokens
+                .iter()
+                .filter(|token| token.text == text)
+                .map(|token| token.hygiene)
+                .collect::<Vec<_>>()
+        };
+        let names = hygiene("tmp");
+        assert_eq!(names.len(), 3);
+        let Some((name_module, name_mark)) = names[0] else {
+            panic!("a constructed identifier has hygiene");
+        };
+        assert_eq!(name_module, module);
+        assert!(names.iter().all(|hygiene| *hygiene == names[0]), "{names:?}");
+        let quoted = hygiene("let").into_iter().chain(hygiene("x")).collect::<Vec<_>>();
+        assert_eq!(quoted.len(), 2);
+        assert!(quoted.iter().all(|hygiene| matches!(hygiene, Some((quoted_module, mark))
+            if *quoted_module == module && *mark != name_mark && (first..next).contains(mark))));
+        // The argument was written at the call site.
+        assert_eq!(hygiene("1"), [None]);
+        let id = outcome.compiled.as_ref().unwrap().id().expect("an item has an id");
+        assert!(id.0 >= check_run_for(source).program.next_syntax_id(), "{id:?} is renumbered");
     }
 }

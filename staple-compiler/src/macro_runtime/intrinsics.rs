@@ -124,6 +124,10 @@ pub(crate) const INTRINSICS: &[Intrinsic] = &[
     intrinsic!("__quote_begin", "__staple_syntax_quote_begin", super::quote::quote_begin),
     intrinsic!("__quote_splice", "__staple_syntax_quote_splice", super::quote::quote_splice),
     intrinsic!("__quote_end", "__staple_syntax_quote_end", super::quote::quote_end),
+    intrinsic!("__match_kind", "__staple_syntax_match_kind", super::args::match_kind),
+    intrinsic!("__match_syntax", "__staple_syntax_match_syntax", super::args::match_syntax),
+    intrinsic!("__match_count", "__staple_syntax_match_count", super::args::match_count),
+    intrinsic!("__match_child", "__staple_syntax_match_child", super::args::match_child),
     intrinsic!("__splice_node", "__staple_syntax_splice_node"),
     intrinsic!("__splice_join", "__staple_syntax_splice_join"),
     intrinsic!("__clone_syntax", "__staple_syntax_clone_syntax"),
@@ -550,6 +554,10 @@ pub(crate) fn symbol_name(name: &str) -> &'static str {
         "__quote_begin" => "__staple_syntax_quote_begin",
         "__quote_splice" => "__staple_syntax_quote_splice",
         "__quote_end" => "__staple_syntax_quote_end",
+        "__match_kind" => "__staple_syntax_match_kind",
+        "__match_syntax" => "__staple_syntax_match_syntax",
+        "__match_count" => "__staple_syntax_match_count",
+        "__match_child" => "__staple_syntax_match_child",
         "__splice_node" => "__staple_syntax_splice_node",
         "__splice_join" => "__staple_syntax_splice_join",
         "__clone_syntax" => "__staple_syntax_clone_syntax",
@@ -1419,16 +1427,34 @@ extern "C" fn ident_syntax(origin: u64, text: u64) -> u64 {
         matches!(tokens.as_slice(), [token] if token.kind == TokenKind::Identifier),
         "`{text}` is not an identifier"
     );
+    // An identifier with no origin was constructed by the macro, and takes
+    // its hygiene from the call.
+    let constructed = origin_syntax
+        .is_none()
+        .then(super::quote::constructed_identifier);
+    let mut tokens = tokens;
+    if let Some((module, mark, _)) = &constructed {
+        for token in &mut tokens {
+            if token.kind == TokenKind::Identifier {
+                token.hygiene = Some((module.0, *mark));
+            }
+        }
+    }
     arena::with_arena(|arena| {
-        let mut syntax = Syntax::synthetic(
-            SyntaxId(arena.next_syntax_id()),
-            origin_syntax.as_ref().map_or(Span::Compiler, |origin| origin.span.clone()),
-        );
+        let span = match (&origin_syntax, &constructed) {
+            (Some(origin), _) => origin.span.clone(),
+            (None, Some((_, _, call_site))) => call_site.clone(),
+            (None, None) => Span::Compiler,
+        };
+        let mut syntax = Syntax::synthetic(SyntaxId(arena.next_syntax_id()), span);
         syntax.tokens = Arc::from(tokens);
         syntax.token_range = 0..syntax.tokens.len();
         if let Some(origin) = &origin_syntax {
             syntax.definition_module = origin.definition_module;
             syntax.expansion_mark = origin.expansion_mark;
+        }
+        if let Some((module, mark, _)) = constructed {
+            syntax = syntax.generated(module.0, mark);
         }
         arena.insert_syntax(syntax).into()
     })
@@ -1449,16 +1475,34 @@ extern "C" fn string_expr_syntax(origin: u64, text: u64) -> u64 {
     }
     let literal = string_literal::encode(&text);
     let tokens = staple_syntax::lex(&literal);
+    // An identifier with no origin was constructed by the macro, and takes
+    // its hygiene from the call.
+    let constructed = origin_syntax
+        .is_none()
+        .then(super::quote::constructed_identifier);
+    let mut tokens = tokens;
+    if let Some((module, mark, _)) = &constructed {
+        for token in &mut tokens {
+            if token.kind == TokenKind::Identifier {
+                token.hygiene = Some((module.0, *mark));
+            }
+        }
+    }
     arena::with_arena(|arena| {
-        let mut syntax = Syntax::synthetic(
-            SyntaxId(arena.next_syntax_id()),
-            origin_syntax.as_ref().map_or(Span::Compiler, |origin| origin.span.clone()),
-        );
+        let span = match (&origin_syntax, &constructed) {
+            (Some(origin), _) => origin.span.clone(),
+            (None, Some((_, _, call_site))) => call_site.clone(),
+            (None, None) => Span::Compiler,
+        };
+        let mut syntax = Syntax::synthetic(SyntaxId(arena.next_syntax_id()), span);
         syntax.tokens = Arc::from(tokens);
         syntax.token_range = 0..syntax.tokens.len();
         if let Some(origin) = &origin_syntax {
             syntax.definition_module = origin.definition_module;
             syntax.expansion_mark = origin.expansion_mark;
+        }
+        if let Some((module, mark, _)) = constructed {
+            syntax = syntax.generated(module.0, mark);
         }
         arena.insert_syntax(syntax).into()
     })
@@ -1479,16 +1523,34 @@ extern "C" fn char_expr_syntax(origin: u64, value: u32) -> u64 {
     }
     let literal = string_literal::encode_char(character);
     let tokens = staple_syntax::lex(&literal);
+    // An identifier with no origin was constructed by the macro, and takes
+    // its hygiene from the call.
+    let constructed = origin_syntax
+        .is_none()
+        .then(super::quote::constructed_identifier);
+    let mut tokens = tokens;
+    if let Some((module, mark, _)) = &constructed {
+        for token in &mut tokens {
+            if token.kind == TokenKind::Identifier {
+                token.hygiene = Some((module.0, *mark));
+            }
+        }
+    }
     arena::with_arena(|arena| {
-        let mut syntax = Syntax::synthetic(
-            SyntaxId(arena.next_syntax_id()),
-            origin_syntax.as_ref().map_or(Span::Compiler, |origin| origin.span.clone()),
-        );
+        let span = match (&origin_syntax, &constructed) {
+            (Some(origin), _) => origin.span.clone(),
+            (None, Some((_, _, call_site))) => call_site.clone(),
+            (None, None) => Span::Compiler,
+        };
+        let mut syntax = Syntax::synthetic(SyntaxId(arena.next_syntax_id()), span);
         syntax.tokens = Arc::from(tokens);
         syntax.token_range = 0..syntax.tokens.len();
         if let Some(origin) = &origin_syntax {
             syntax.definition_module = origin.definition_module;
             syntax.expansion_mark = origin.expansion_mark;
+        }
+        if let Some((module, mark, _)) = constructed {
+            syntax = syntax.generated(module.0, mark);
         }
         arena.insert_syntax(syntax).into()
     })

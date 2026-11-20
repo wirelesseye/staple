@@ -27,15 +27,17 @@ use crate::macro_expand::syntax_ops::{append_syntax_tokens, fill_quote, root_hyg
 /// What the parent says about one macro call.
 #[derive(Clone, Debug)]
 pub(crate) struct CallContext {
-    /// The module that defines the macro being called.
-    #[allow(dead_code)] // Constructed identifiers and results read it.
+    /// The module that defines the macro being called. Identifiers the macro
+    /// constructs resolve there.
     pub(crate) definition_module: ModuleId,
     /// The first expansion mark the call may use. Every quotation takes the
     /// next unused one.
     pub(crate) next_mark: u64,
-    /// Where the macro was called.
-    #[allow(dead_code)] // Results and errors read it.
+    /// Where the macro was called. Constructed identifiers have this span.
     pub(crate) call_site: Span,
+    /// The mark every identifier the call constructs shares, taken when the
+    /// first one is spliced.
+    pub(crate) identifier_mark: Option<u64>,
 }
 
 impl Default for CallContext {
@@ -44,6 +46,7 @@ impl Default for CallContext {
             definition_module: ModuleId(0),
             next_mark: 1,
             call_site: Span::Compiler,
+            identifier_mark: None,
         }
     }
 }
@@ -71,6 +74,25 @@ pub(crate) fn begin_call(context: CallContext) {
 #[allow(dead_code)] // Only the test harness makes calls so far.
 pub(crate) fn next_mark() -> u64 {
     CONTEXT.with(|current| current.borrow().next_mark)
+}
+
+/// The module, mark and span of an identifier the current call constructs.
+///
+/// The interpreter gives each constructed identifier a mark of its own when
+/// it is built. Compiled code learns of one only when it is spliced, and may
+/// splice it more than once, so every identifier one call constructs shares a
+/// mark. That keeps `let $name = ...; $name` one binding.
+pub(crate) fn constructed_identifier() -> (ModuleId, u64, Span) {
+    let mark = CONTEXT.with(|current| current.borrow().identifier_mark);
+    let mark = mark.unwrap_or_else(|| {
+        let mark = take_mark();
+        CONTEXT.with(|current| current.borrow_mut().identifier_mark = Some(mark));
+        mark
+    });
+    CONTEXT.with(|current| {
+        let context = current.borrow();
+        (context.definition_module, mark, context.call_site.clone())
+    })
 }
 
 fn take_mark() -> u64 {

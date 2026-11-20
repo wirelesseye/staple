@@ -66,6 +66,13 @@ enum Entry {
     /// A quotation being filled: its template id and the syntax handed to it
     /// so far, one per distinct splice name.
     Quote { template: u64, splices: Vec<u64> },
+    /// A node of a matched macro call: its kind, its syntax handle (a
+    /// fragment's syntax or a group's source, or none) and its children.
+    Match {
+        kind: u8,
+        syntax: u64,
+        children: Vec<u64>,
+    },
 }
 
 /// A handle into the arena. Zero means "none"; every other value names an
@@ -191,6 +198,26 @@ impl Arena {
         }
     }
 
+    pub(crate) fn insert_match(&mut self, kind: u8, syntax: u64, children: Vec<u64>) -> Handle {
+        self.insert(Entry::Match {
+            kind,
+            syntax,
+            children,
+        })
+    }
+
+    /// A match node's kind, syntax handle and children.
+    pub(crate) fn match_node(&self, handle: Handle) -> Option<(u8, u64, &[u64])> {
+        match self.entry(handle)? {
+            Entry::Match {
+                kind,
+                syntax,
+                children,
+            } => Some((*kind, *syntax, children)),
+            _ => None,
+        }
+    }
+
     fn insert(&mut self, entry: Entry) -> Handle {
         let index = self.entries.len();
         self.entries.push(entry);
@@ -274,7 +301,7 @@ pub(crate) fn with_arena<T>(f: impl FnOnce(&mut Arena) -> T) -> T {
 }
 
 /// Ends the current call on this thread.
-#[allow(dead_code)] // The call boundary arrives with the entry functions.
+#[allow(dead_code)] // Only the test harness makes calls so far.
 pub(crate) fn reset() {
     with_arena(Arena::reset);
 }

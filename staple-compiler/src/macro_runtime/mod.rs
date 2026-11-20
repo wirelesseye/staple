@@ -6,6 +6,7 @@
 //! in-process through LLVM's JIT.
 
 pub(crate) mod arena;
+pub(crate) mod args;
 pub(crate) mod intrinsics;
 pub(crate) mod quote;
 

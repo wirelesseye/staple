@@ -383,6 +383,11 @@ fn convert_item(
         Item::MacroDeclaration(declaration) => {
             if let Some(function) = macro_function(declaration, next_syntax_id, syntax_module) {
                 out.push(Item::Binding(function));
+                if let Some(syntax_module) = syntax_module
+                    && let Some(entry) = entry_function(declaration, next_syntax_id, syntax_module)
+                {
+                    out.push(Item::Binding(entry));
+                }
             }
             let mut bodyless = declaration.clone();
             bodyless.value = None;
@@ -436,8 +441,269 @@ fn macro_function(
         kind: BindingKind::Def,
         mutable: false,
         signal: false,
-        name: format!("macro#{}#{}", declaration.name, declaration.syntax.id.0),
+        name: macro_function_name(declaration),
         annotation: declaration.annotation.clone(),
+        companion_target: None,
+        companion_generics: None,
+        track_caller: false,
+        value: Some(value),
+    })
+}
+
+/// The name of the function a macro overload becomes.
+pub(crate) fn macro_function_name(declaration: &MacroDeclaration) -> String {
+    format!("macro#{}#{}", declaration.name, declaration.syntax.id.0)
+}
+
+/// The name of a macro overload's entry function.
+pub(crate) fn entry_function_name(declaration: &MacroDeclaration) -> String {
+    format!("entry#{}#{}", declaration.name, declaration.syntax.id.0)
+}
+
+/// The parameter types of a macro signature, one per argument the macro takes:
+/// each slot of a slotted product, none for `()`, and otherwise the one type.
+fn signature_parameters(parameter: &staple_syntax::Type) -> Vec<&staple_syntax::Type> {
+    match parameter {
+        staple_syntax::Type::Product(product) if product.slotted => {
+            product.elements.iter().map(|element| &element.ty).collect()
+        }
+        staple_syntax::Type::Product(product) if product.elements.is_empty() => Vec::new(),
+        parameter => vec![parameter],
+    }
+}
+
+/// Builds the generated code of an entry function, with fresh syntax ids.
+struct EntryBuilder<'a> {
+    like: Syntax,
+    syntax_module: ModuleId,
+    next_syntax_id: &'a mut usize,
+}
+
+impl EntryBuilder<'_> {
+    fn syntax(&mut self) -> Syntax {
+        let mut syntax = self.like.clone();
+        syntax.id = SyntaxId(*self.next_syntax_id);
+        *self.next_syntax_id += 1;
+        syntax
+    }
+
+    /// A name that resolves in `std.syntax`, wherever the macro is.
+    fn library_syntax(&mut self) -> Syntax {
+        let mut syntax = self.syntax();
+        syntax.definition_module = Some(self.syntax_module.0);
+        syntax
+    }
+
+    fn library_name(&mut self, name: &str) -> Expression {
+        Expression::Name(staple_syntax::NameExpression {
+            syntax: self.library_syntax(),
+            name: name.to_owned(),
+        })
+    }
+
+    fn library_type(&mut self, name: &str) -> staple_syntax::Type {
+        staple_syntax::Type::Named(staple_syntax::NamedType {
+            syntax: self.library_syntax(),
+            namespace: None,
+            name: name.to_owned(),
+        })
+    }
+
+    fn member(&mut self, trait_: &str, member: &str) -> Expression {
+        let value = self.library_name(trait_);
+        Expression::Access(staple_syntax::AccessExpression {
+            syntax: self.syntax(),
+            value: Box::new(value),
+            accessor: staple_syntax::Accessor::Name(member.to_owned()),
+        })
+    }
+
+    fn call(&mut self, callee: Expression, argument: Expression) -> Expression {
+        Expression::Call(staple_syntax::CallExpression {
+            spread: false,
+            syntax: self.syntax(),
+            callee: Box::new(callee),
+            argument: Box::new(argument),
+        })
+    }
+
+    fn local(&mut self, name: &str) -> Expression {
+        Expression::Name(staple_syntax::NameExpression {
+            syntax: self.syntax(),
+            name: name.to_owned(),
+        })
+    }
+
+    /// `let name = value`.
+    fn bind(&mut self, name: &str, value: Expression) -> Item {
+        Item::Binding(Binding {
+            syntax: self.syntax(),
+            docs: Vec::new(),
+            member_modifiers: Vec::new(),
+            visibility: Visibility::Private,
+            kind: BindingKind::Let,
+            mutable: false,
+            signal: false,
+            name: name.to_owned(),
+            annotation: None,
+            companion_target: None,
+            companion_generics: None,
+            track_caller: false,
+            value: Some(value),
+        })
+    }
+
+    fn product(&mut self, slotted: bool, elements: Vec<Expression>) -> Expression {
+        let elements = elements
+            .into_iter()
+            .map(|value| staple_syntax::ProductElement {
+                syntax: self.syntax(),
+                name: None,
+                designated: false,
+                value,
+                spread: false,
+                named_spread: false,
+            })
+            .collect();
+        Expression::Product(staple_syntax::ProductExpression {
+            slotted,
+            syntax: self.syntax(),
+            elements,
+        })
+    }
+
+    /// `FromMatch.from_match.<parameter> (__match_child (arguments, index))`.
+    fn decode(&mut self, parameter: staple_syntax::Type, index: usize) -> Expression {
+        let member = self.member("FromMatch", "from_match");
+        let decoder = Expression::TypeApplication(Box::new(staple_syntax::TypeApplicationExpression {
+            syntax: self.syntax(),
+            value: Box::new(member),
+            arguments: vec![parameter],
+        }));
+        let child = self.library_name("__match_child");
+        let arguments = self.local("arguments");
+        let index = Expression::Integer(staple_syntax::IntegerExpression {
+            syntax: self.syntax(),
+            literal: index.to_string(),
+        });
+        let pair = self.product(false, vec![arguments, index]);
+        let node = self.call(child, pair);
+        self.call(decoder, node)
+    }
+}
+
+/// The entry function of a macro overload with a body and a signature.
+///
+/// The parent calls it with the call's match, a list with one node per
+/// parameter. It decodes each parameter with `FromMatch`, calls the macro's
+/// function and splices the result, so a macro whose parameters can't be
+/// decoded or whose result can't be spliced is a type error here. Each value
+/// is bound before it is passed, so a parameter that borrows a product gets a
+/// place to borrow from.
+fn entry_function(
+    declaration: &MacroDeclaration,
+    next_syntax_id: &mut usize,
+    syntax_module: ModuleId,
+) -> Option<Binding> {
+    let staple_syntax::Type::Function(signature) = declaration.annotation.as_ref()? else {
+        return None;
+    };
+    let mut builder = EntryBuilder {
+        like: declaration.syntax.clone(),
+        syntax_module,
+        next_syntax_id,
+    };
+    let mut items = Vec::new();
+    let mut decoded = Vec::new();
+    for (index, parameter) in signature_parameters(&signature.parameter).into_iter().enumerate() {
+        // The type is read again from its own tokens, so it has fresh ids and
+        // resolves where the macro wrote it.
+        let parameter = staple_syntax::parse_type_fragment(
+            parameter.syntax(),
+            false,
+            builder.next_syntax_id,
+        )
+        .ok()?;
+        let value = builder.decode(parameter, index);
+        let name = format!("parameter{index}");
+        items.push(builder.bind(&name, value));
+        decoded.push(builder.local(&name));
+    }
+    let function = Expression::Name(staple_syntax::NameExpression {
+        syntax: builder.syntax(),
+        name: macro_function_name(declaration),
+    });
+    let call = match decoded.len() {
+        0 => {
+            let unit = builder.product(false, Vec::new());
+            builder.call(function, unit)
+        }
+        1 => {
+            let argument = decoded.remove(0);
+            builder.call(function, argument)
+        }
+        _ => {
+            let slots = builder.product(true, decoded);
+            match builder.call(function, slots) {
+                Expression::Call(mut call) => {
+                    call.spread = true;
+                    Expression::Call(call)
+                }
+                call => call,
+            }
+        }
+    };
+    items.push(builder.bind("result", call));
+    let splice = builder.member("Splice", "splice");
+    let result = builder.local("result");
+    items.push(Item::Expression(builder.call(splice, result)));
+    let body = Expression::Block(staple_syntax::BlockExpression {
+        syntax: builder.syntax(),
+        items,
+    });
+    let pattern = Pattern::Binding(staple_syntax::BindingPattern {
+        syntax: builder.syntax(),
+        mutable: false,
+        moved: false,
+        name: "arguments".to_owned(),
+        resolution_name: None,
+        ty: staple_syntax::Type::Inferred(staple_syntax::InferredType::default()),
+    });
+    // A signature makes it a function of its own rather than a template that
+    // is only instantiated where it is used.
+    let parameter_type = builder.library_type("MatchNode");
+    let result_type = builder.library_type("Syntax");
+    let effects = staple_syntax::EffectSet {
+        syntax: builder.syntax(),
+        variable: None,
+        resources: Vec::new(),
+        state: Vec::new(),
+    };
+    let annotation = staple_syntax::Type::Function(staple_syntax::FunctionType {
+        syntax: builder.syntax(),
+        parameter: Box::new(parameter_type),
+        mutable_marker: None,
+        moved_marker: None,
+        effects,
+        result: Box::new(result_type),
+    });
+    let value = Expression::Function(Box::new(staple_syntax::FunctionExpression {
+        syntax: builder.syntax(),
+        generics: None,
+        pattern,
+        effect_lower_bound: None,
+        body: Box::new(body),
+    }));
+    Some(Binding {
+        syntax: builder.syntax(),
+        docs: Vec::new(),
+        member_modifiers: Vec::new(),
+        visibility: Visibility::Private,
+        kind: BindingKind::Def,
+        mutable: false,
+        signal: false,
+        name: entry_function_name(declaration),
+        annotation: Some(annotation),
         companion_target: None,
         companion_generics: None,
         track_caller: false,
@@ -686,6 +952,33 @@ mod tests {
     }
 
     #[test]
+    fn a_macro_with_a_signature_gets_an_entry_function() {
+        let built = build(
+            concat!(
+                "macro pair: (Ident; Option<Expr>) -> Expr = (name; value) => name\n",
+                "macro bare = () => 1\n",
+                "let a = pair x\nlet b = bare ()\n",
+            ),
+            CheckMode::Invoked,
+        );
+        let functions = function_names(entry_items(&built));
+        assert!(functions.iter().any(|name| name.starts_with("entry#pair#")), "{functions:?}");
+        // A macro without a signature has no parameter types to decode.
+        assert!(!functions.iter().any(|name| name.starts_with("entry#bare#")), "{functions:?}");
+        let entry = entry_items(&built)
+            .iter()
+            .find_map(|item| match item {
+                Item::Binding(binding) if binding.name.starts_with("entry#pair#") => Some(binding),
+                _ => None,
+            })
+            .expect("the entry function is kept");
+        let rendered = format!("{:?}", entry.value);
+        assert_eq!(rendered.matches("\"from_match\"").count(), 2, "{rendered}");
+        assert!(rendered.contains("spread: true"), "two slots are spread: {rendered}");
+        assert!(rendered.contains("\"splice\""), "{rendered}");
+    }
+
+    #[test]
     fn overloads_become_one_function_each() {
         let built = build(
             concat!(
@@ -812,7 +1105,12 @@ mod tests {
         assert!(templates.contains(&" $value + $value".to_owned()), "{templates:?}");
         assert!(templates.contains(&" $value".to_owned()), "{templates:?}");
         assert!(templates.contains(&" ($value)".to_owned()), "{templates:?}");
-        let rendered = format!("{:?}", entry_items(&built));
+        // Entry functions splice results, not quotations.
+        let quoting = entry_items(&built)
+            .iter()
+            .filter(|item| !matches!(item, Item::Binding(binding) if binding.name.starts_with("entry#")))
+            .collect::<Vec<_>>();
+        let rendered = format!("{quoting:?}");
         assert!(!rendered.contains("Quote("), "no quotation is left");
         assert!(rendered.contains("\"__quote\""));
         assert!(rendered.contains("\"parse_quote\""));

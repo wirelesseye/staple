@@ -2423,6 +2423,360 @@ impl<A, B, C, D, E, F, G, H where Parse A, Parse B, Parse C, Parse D, Parse E, P
         }
     }
 }
+// Macro arguments. The compiler matches a call against the macro's signature
+// and hands compiled code the match as a tree of nodes: a fragment, a list, an
+// absent option, or a delimited group with its source and contents. Each
+// parameter is decoded from its node by `FromMatch`, in the same shapes as
+// `Parse`.
+
+/// A node of a matched macro call, as a handle.
+@compiled_only
+type MatchNode = U64
+
+@compiled_only
+extern "staple-intrinsic" {
+    /// 0 for a fragment, 1 for a list, 2 for an absent option, 3 for a group.
+    __match_kind: MatchNode -> U8
+    /// A fragment's syntax, or a group's source.
+    __match_syntax: MatchNode -> Syntax
+    /// How many children a list has. A group has one, its contents.
+    __match_count: MatchNode -> USize
+    __match_child: (MatchNode, USize) -> MatchNode
+}
+
+/// Syntax that can be decoded from a matched macro argument.
+@compiled_only
+trait FromMatch T {
+    from_match: MatchNode -> T
+}
+
+/// A leaf is parsed from the fragment the compiler matched. The compiler has
+/// already checked that it is one, so a failure is the compiler's error.
+@compiled_only
+def match_leaf = <T where Parse T> node: MatchNode => T ::
+    match (Parse.parse_all.<T> (__match_syntax node)) {
+        Ok value => value,
+        ParseError (message) => compile_error message,
+    }
+
+@compiled_only
+impl FromMatch Expr { from_match = node => match_leaf.<Expr> node }
+
+@compiled_only
+impl FromMatch CallExpr { from_match = node => match_leaf.<CallExpr> node }
+
+@compiled_only
+impl FromMatch StringExpr { from_match = node => match_leaf.<StringExpr> node }
+
+@compiled_only
+impl FromMatch CharExpr { from_match = node => match_leaf.<CharExpr> node }
+
+@compiled_only
+impl FromMatch UnstructuredExpr { from_match = node => match_leaf.<UnstructuredExpr> node }
+
+@compiled_only
+impl FromMatch Type { from_match = node => match_leaf.<Type> node }
+
+@compiled_only
+impl FromMatch ProductType { from_match = node => match_leaf.<ProductType> node }
+
+@compiled_only
+impl FromMatch UnstructuredType { from_match = node => match_leaf.<UnstructuredType> node }
+
+@compiled_only
+impl FromMatch Pattern { from_match = node => match_leaf.<Pattern> node }
+
+@compiled_only
+impl FromMatch BindingPattern { from_match = node => match_leaf.<BindingPattern> node }
+
+@compiled_only
+impl FromMatch NominalPattern { from_match = node => match_leaf.<NominalPattern> node }
+
+@compiled_only
+impl FromMatch Item { from_match = node => match_leaf.<Item> node }
+
+@compiled_only
+impl FromMatch ModifiedItem { from_match = node => match_leaf.<ModifiedItem> node }
+
+@compiled_only
+impl FromMatch TypeDeclarationItem { from_match = node => match_leaf.<TypeDeclarationItem> node }
+
+@compiled_only
+impl FromMatch UnstructuredItem { from_match = node => match_leaf.<UnstructuredItem> node }
+
+@compiled_only
+impl FromMatch Modifier { from_match = node => match_leaf.<Modifier> node }
+
+@compiled_only
+impl FromMatch ModifierCall { from_match = node => match_leaf.<ModifierCall> node }
+
+@compiled_only
+impl FromMatch UnstructuredModifier { from_match = node => match_leaf.<UnstructuredModifier> node }
+
+@compiled_only
+impl FromMatch TypeBody { from_match = node => match_leaf.<TypeBody> node }
+
+@compiled_only
+impl FromMatch TypeParameter { from_match = node => match_leaf.<TypeParameter> node }
+
+@compiled_only
+impl FromMatch TypeParameters { from_match = node => match_leaf.<TypeParameters> node }
+
+@compiled_only
+impl FromMatch Visibility { from_match = node => match_leaf.<Visibility> node }
+
+@compiled_only
+impl FromMatch SyntaxNode { from_match = node => match_leaf.<SyntaxNode> node }
+
+@compiled_only
+impl<S where S <: String> FromMatch Ident<S> { from_match = node => match_leaf.<Ident<S>> node }
+
+@compiled_only
+impl FromMatch Syntax { from_match = node => __match_syntax node }
+
+@compiled_only
+impl FromMatch Comma { from_match = _ => Comma }
+
+@compiled_only
+impl FromMatch Equals { from_match = _ => Equals }
+
+@compiled_only
+impl FromMatch FatArrow { from_match = _ => FatArrow }
+
+@compiled_only
+impl FromMatch () { from_match = _ => () }
+
+@compiled_only
+impl FromMatch MacroCallMetadata {
+    from_match = node => MacroCallMetadata (
+        modifiers: FromMatch.from_match.<Sequence<Modifier>> (__match_child (node, 0)),
+        visibility: FromMatch.from_match.<Visibility> (__match_child (node, 1)),
+    )
+}
+
+@compiled_only
+impl<T where FromMatch T> FromMatch Option<T> {
+    from_match = node => match (__match_kind node == 2) {
+        True => {
+            let absent: Option<T> = None
+            absent
+        },
+        False => {
+            let found: Option<T> = Some (FromMatch.from_match.<T> node)
+            found
+        },
+    }
+}
+
+// Built from the last element, so each cell is allocated once.
+@compiled_only
+impl<T where FromMatch T> FromMatch Sequence<T> {
+    from_match = node => {
+        let mut cells: Sequence<T> = Sequence ()
+        let mut index = __match_count node
+        loop {
+            match (index == 0) {
+                True => { break },
+                False => {
+                    index = index - 1
+                    cells = Sequence (first: FromMatch.from_match.<T> (__match_child (node, index)), rest: cells)
+                },
+            }
+        }
+        cells
+    }
+}
+
+// A list of the elements, the separator, and the trailing separator or an
+// absent node.
+@compiled_only
+impl<Element, Separator where FromMatch Element, FromMatch Separator> FromMatch Separated<Element, Separator> {
+    from_match = node => {
+        let list: Separated<Element, Separator> = Separated (
+            separator: FromMatch.from_match.<Separator> (__match_child (node, 1)),
+            elements: FromMatch.from_match.<Sequence<Element>> (__match_child (node, 0)),
+            trailing: __match_kind (__match_child (node, 2)) != 2,
+        )
+        list
+    }
+}
+
+@compiled_only
+impl<C where FromMatch C> FromMatch Parenthesized<C> {
+    from_match = node => __with_origin (Parenthesized (FromMatch.from_match.<C> (__match_child (node, 0))), __match_syntax node)
+}
+
+@compiled_only
+impl<C where FromMatch C> FromMatch Bracketed<C> {
+    from_match = node => __with_origin (Bracketed (FromMatch.from_match.<C> (__match_child (node, 0))), __match_syntax node)
+}
+
+@compiled_only
+impl<C where FromMatch C> FromMatch Angled<C> {
+    from_match = node => __with_origin (Angled (FromMatch.from_match.<C> (__match_child (node, 0))), __match_syntax node)
+}
+
+@compiled_only
+impl<C where FromMatch C> FromMatch Braced<C> {
+    from_match = node => __with_origin (Braced (FromMatch.from_match.<C> (__match_child (node, 0))), __match_syntax node)
+}
+
+// Products are lists with one child per element.
+
+@compiled_only
+impl<A, B where FromMatch A, FromMatch B> FromMatch (A; B) {
+    from_match = node => (
+        FromMatch.from_match.<A> (__match_child (node, 0));
+        FromMatch.from_match.<B> (__match_child (node, 1))
+    )
+}
+
+@compiled_only
+impl<A, B, C where FromMatch A, FromMatch B, FromMatch C> FromMatch (A; B; C) {
+    from_match = node => (
+        FromMatch.from_match.<A> (__match_child (node, 0));
+        FromMatch.from_match.<B> (__match_child (node, 1));
+        FromMatch.from_match.<C> (__match_child (node, 2))
+    )
+}
+
+@compiled_only
+impl<A, B, C, D where FromMatch A, FromMatch B, FromMatch C, FromMatch D> FromMatch (A; B; C; D) {
+    from_match = node => (
+        FromMatch.from_match.<A> (__match_child (node, 0));
+        FromMatch.from_match.<B> (__match_child (node, 1));
+        FromMatch.from_match.<C> (__match_child (node, 2));
+        FromMatch.from_match.<D> (__match_child (node, 3))
+    )
+}
+
+@compiled_only
+impl<A, B, C, D, E where FromMatch A, FromMatch B, FromMatch C, FromMatch D, FromMatch E> FromMatch (A; B; C; D; E) {
+    from_match = node => (
+        FromMatch.from_match.<A> (__match_child (node, 0));
+        FromMatch.from_match.<B> (__match_child (node, 1));
+        FromMatch.from_match.<C> (__match_child (node, 2));
+        FromMatch.from_match.<D> (__match_child (node, 3));
+        FromMatch.from_match.<E> (__match_child (node, 4))
+    )
+}
+
+@compiled_only
+impl<A, B, C, D, E, F where FromMatch A, FromMatch B, FromMatch C, FromMatch D, FromMatch E, FromMatch F> FromMatch (A; B; C; D; E; F) {
+    from_match = node => (
+        FromMatch.from_match.<A> (__match_child (node, 0));
+        FromMatch.from_match.<B> (__match_child (node, 1));
+        FromMatch.from_match.<C> (__match_child (node, 2));
+        FromMatch.from_match.<D> (__match_child (node, 3));
+        FromMatch.from_match.<E> (__match_child (node, 4));
+        FromMatch.from_match.<F> (__match_child (node, 5))
+    )
+}
+
+@compiled_only
+impl<A, B, C, D, E, F, G where FromMatch A, FromMatch B, FromMatch C, FromMatch D, FromMatch E, FromMatch F, FromMatch G> FromMatch (A; B; C; D; E; F; G) {
+    from_match = node => (
+        FromMatch.from_match.<A> (__match_child (node, 0));
+        FromMatch.from_match.<B> (__match_child (node, 1));
+        FromMatch.from_match.<C> (__match_child (node, 2));
+        FromMatch.from_match.<D> (__match_child (node, 3));
+        FromMatch.from_match.<E> (__match_child (node, 4));
+        FromMatch.from_match.<F> (__match_child (node, 5));
+        FromMatch.from_match.<G> (__match_child (node, 6))
+    )
+}
+
+@compiled_only
+impl<A, B, C, D, E, F, G, H where FromMatch A, FromMatch B, FromMatch C, FromMatch D, FromMatch E, FromMatch F, FromMatch G, FromMatch H> FromMatch (A; B; C; D; E; F; G; H) {
+    from_match = node => (
+        FromMatch.from_match.<A> (__match_child (node, 0));
+        FromMatch.from_match.<B> (__match_child (node, 1));
+        FromMatch.from_match.<C> (__match_child (node, 2));
+        FromMatch.from_match.<D> (__match_child (node, 3));
+        FromMatch.from_match.<E> (__match_child (node, 4));
+        FromMatch.from_match.<F> (__match_child (node, 5));
+        FromMatch.from_match.<G> (__match_child (node, 6));
+        FromMatch.from_match.<H> (__match_child (node, 7))
+    )
+}
+
+@compiled_only
+impl<A, B where FromMatch A, FromMatch B> FromMatch (A, B) {
+    from_match = node => (
+        FromMatch.from_match.<A> (__match_child (node, 0)),
+        FromMatch.from_match.<B> (__match_child (node, 1)),
+    )
+}
+
+@compiled_only
+impl<A, B, C where FromMatch A, FromMatch B, FromMatch C> FromMatch (A, B, C) {
+    from_match = node => (
+        FromMatch.from_match.<A> (__match_child (node, 0)),
+        FromMatch.from_match.<B> (__match_child (node, 1)),
+        FromMatch.from_match.<C> (__match_child (node, 2)),
+    )
+}
+
+@compiled_only
+impl<A, B, C, D where FromMatch A, FromMatch B, FromMatch C, FromMatch D> FromMatch (A, B, C, D) {
+    from_match = node => (
+        FromMatch.from_match.<A> (__match_child (node, 0)),
+        FromMatch.from_match.<B> (__match_child (node, 1)),
+        FromMatch.from_match.<C> (__match_child (node, 2)),
+        FromMatch.from_match.<D> (__match_child (node, 3)),
+    )
+}
+
+@compiled_only
+impl<A, B, C, D, E where FromMatch A, FromMatch B, FromMatch C, FromMatch D, FromMatch E> FromMatch (A, B, C, D, E) {
+    from_match = node => (
+        FromMatch.from_match.<A> (__match_child (node, 0)),
+        FromMatch.from_match.<B> (__match_child (node, 1)),
+        FromMatch.from_match.<C> (__match_child (node, 2)),
+        FromMatch.from_match.<D> (__match_child (node, 3)),
+        FromMatch.from_match.<E> (__match_child (node, 4)),
+    )
+}
+
+@compiled_only
+impl<A, B, C, D, E, F where FromMatch A, FromMatch B, FromMatch C, FromMatch D, FromMatch E, FromMatch F> FromMatch (A, B, C, D, E, F) {
+    from_match = node => (
+        FromMatch.from_match.<A> (__match_child (node, 0)),
+        FromMatch.from_match.<B> (__match_child (node, 1)),
+        FromMatch.from_match.<C> (__match_child (node, 2)),
+        FromMatch.from_match.<D> (__match_child (node, 3)),
+        FromMatch.from_match.<E> (__match_child (node, 4)),
+        FromMatch.from_match.<F> (__match_child (node, 5)),
+    )
+}
+
+@compiled_only
+impl<A, B, C, D, E, F, G where FromMatch A, FromMatch B, FromMatch C, FromMatch D, FromMatch E, FromMatch F, FromMatch G> FromMatch (A, B, C, D, E, F, G) {
+    from_match = node => (
+        FromMatch.from_match.<A> (__match_child (node, 0)),
+        FromMatch.from_match.<B> (__match_child (node, 1)),
+        FromMatch.from_match.<C> (__match_child (node, 2)),
+        FromMatch.from_match.<D> (__match_child (node, 3)),
+        FromMatch.from_match.<E> (__match_child (node, 4)),
+        FromMatch.from_match.<F> (__match_child (node, 5)),
+        FromMatch.from_match.<G> (__match_child (node, 6)),
+    )
+}
+
+@compiled_only
+impl<A, B, C, D, E, F, G, H where FromMatch A, FromMatch B, FromMatch C, FromMatch D, FromMatch E, FromMatch F, FromMatch G, FromMatch H> FromMatch (A, B, C, D, E, F, G, H) {
+    from_match = node => (
+        FromMatch.from_match.<A> (__match_child (node, 0)),
+        FromMatch.from_match.<B> (__match_child (node, 1)),
+        FromMatch.from_match.<C> (__match_child (node, 2)),
+        FromMatch.from_match.<D> (__match_child (node, 3)),
+        FromMatch.from_match.<E> (__match_child (node, 4)),
+        FromMatch.from_match.<F> (__match_child (node, 5)),
+        FromMatch.from_match.<G> (__match_child (node, 6)),
+        FromMatch.from_match.<H> (__match_child (node, 7)),
+    )
+}
+
 impl !Copy CallExpr {}
 impl !Copy StringExpr {}
 impl !Copy CharExpr {}

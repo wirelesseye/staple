@@ -9255,7 +9255,9 @@ fn qualified_access_path(
     (!parts.is_empty()).then(|| (parts.join("."), item, definition_module, segments))
 }
 
-fn mangle_function_name(name: &str) -> String {
+/// The name a function is declared under. A name that is not an identifier,
+/// such as an operator's, is spelled in hex.
+pub(crate) fn mangle_function_name(name: &str) -> String {
     let mut characters = name.chars();
     let ordinary = characters
         .next()

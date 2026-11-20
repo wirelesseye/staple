@@ -577,7 +577,7 @@ Update this section as you work (see "Rules for the implementor").
 | 6. `Parse` impls | done | `1416a3f9`, `5ed41520` | The interpreter and compiled code share one leaf parser, so grammar and diagnostics agree. Compiled leaves and groups return an arena result handle; `Ident<S>` reads `S`'s spelling with a compiler intrinsic. The check gets fixed-arity product impls while the interpreter keeps the variadic ones, and `is_variadic_parse_impl` is gone. The harness checks 21 parse behaviors, including exact error messages and same-handle list round trips. Parsed lists carry origins, and a spelling set is a code generation error. See Findings. |
 | 7. Plain sequence splices | done | `7b1ad2cd`, `8a50319f` | Tree substitution uses the line rule for item splices; type parameters accept identifiers or comma lists. Repeated markers are removed, uses and documentation are migrated, and interpreter, closure and expansion checks pass. See Findings. |
 | 8. Quotations | done | `444cfb3b` | Templates keep their tokens and module. Compiled `__quote` fills them with the interpreter's raw-quote code, stamping quoted tokens from the call context. Quoted nodes now rebuild to their origin. See Findings. |
-| 9. Arguments and results | not started | | |
+| 9. Arguments and results | done | this commit | The expander can record each call as an `ArgTree`. `FromMatch` and a generated entry function per macro decode it, and a result handle is read back by its declared category. Constructed identifiers take hygiene from the call. See Findings. |
 | 10. Wire format | not started | | |
 | 11. Compare against the interpreter | not started | | |
 | 12. Language reference | not started | | |
@@ -1337,3 +1337,87 @@ Verification: `cargo test --workspace` passes 2328 tests. The expansion
 comparison matches 231 of 232 inputs; the other is `std/syntax.sta` itself,
 whose only change is `parse_quote` taking `move`. The macro closure check
 reports no diagnostics.
+
+### Arguments and results (task 9)
+
+The expander can record every call of a macro with a body, behind
+`compiled_call::record_calls`, which only the harness turns on, so normal
+expansion is unchanged. A call's `ArgTree` comes from the values the
+interpreter binds to the parameters, which is what `match_macro_arguments`
+leads to. A syntax value is a node holding its fragment, without the trivia
+around it, which separates an argument from the macro name rather than
+belonging to it. A delimited value is a group around its contents. An option is
+its value or absent. Sequences, products, call metadata and item lists are
+lists. A separated list is a list of its elements, its separator and its
+trailing separator, or absent. A modifier's `Parenthesized<…>` argument is
+bound by the interpreter to what is inside the parentheses, so the recording
+wraps it in a group around the argument's syntax, as its declared type says.
+
+`std.syntax` has `MatchNode` (a `U64` alias), four host functions that read a
+node, and the `FromMatch` trait, all `@compiled_only`. A leaf decodes by parsing
+its fragment with the compiled `Parse.parse_all`. The parent has already
+matched it, so a failure is the compiler's error and calls `compile_error`.
+`Syntax` takes the fragment as it is, and the punctuation types are constructed.
+Option, `Sequence`, `Separated`, the delimiters (which keep the group's source as
+their origin), slotted and comma products of arity 2 through 8, `()` and
+`MacroCallMetadata` recurse.
+
+Each macro overload with a body and a signature gets an entry function
+`entry#name#id: MatchNode -> Syntax` beside its `macro#` function. It decodes each
+parameter, calls the macro's function and splices the result. Every standard
+library and fixture macro's entry function type-checks, so the closure check
+stays clean. A macro without a signature gets none. Notes on getting it to
+run:
+
+- Each decoded parameter is bound to a local before the call. Lowering can't
+  pass a product temporary to a parameter that borrows its non-`Copy` elements
+  ("mutation-affected product argument cannot be addressed"), and a local is a
+  place to borrow from.
+- The entry function needs its own signature. Without one it is a template,
+  instantiated only where something uses it, and nothing does.
+- Its name holds `#`, so it is declared as `operator.<hex>`, as an operator is.
+  The harness looks it up through `resolve::mangle_function_name`. Like every
+  function, it takes a closure environment first.
+
+A result comes back as a syntax handle. `compiled_call::compiled_result` reads it
+by the declared category, with fresh ids from parsing:
+
+- Raw `Syntax` stays a fragment, which placement parses with a new mark, as it
+  parses an interpreted one.
+- `Sequence<Item>` is parsed as an item list.
+- Every other category goes through `match_syntax_fragment`, the interpreter's
+  reading of that category.
+
+The call context starts at the parent's next mark, and the parent continues
+from `quote::next_mark()` afterwards.
+
+A constructed identifier, one spliced with no origin, now takes the macro's
+module, the call site's span and a mark. The interpreter gives each `Ident`
+construction a mark of its own, and the module of the code that constructs it.
+Compiled code only learns of the identifier when it is spliced, and may splice it
+more than once, so every identifier one call constructs shares a mark. That keeps
+`$name` used twice one name.
+
+An interpreted result's tokens are not its value: a quotation substituted as a
+tree keeps its template's `$name` tokens (Decision 13). So the tests here check
+compiled results against written expectations, and comparing the two engines
+waits for task 11's rendered comparison.
+
+Differences for task 11:
+
+- Identifiers constructed in one call share a mark and take the macro's module,
+  where the interpreter gives each construction its own mark and the
+  constructing code's module.
+- A rebuilt `Separated` has no source for its separators, so it splices as
+  `(1,2,3,)`.
+- Where the interpreter is stricter, a test macro had to change: it can't splice
+  an `Ident` as a `let` pattern, read `value.*`, take `move` inside a slotted
+  signature, or read a `Braced<Sequence<Item>>` argument or result. The check
+  accepts all four. Only the `let` pattern splice has run compiled.
+- Constructed identifiers now carry hygiene, so they no longer match plain
+  source tokens. Two rebuild probes that built `a b` and `a,b` from `Ident`
+  values expected the origin back. They now take their elements from source.
+
+Verification: `cargo test --workspace` passes 2333 tests. The expansion
+comparison matches on all 232 inputs, and the closure check reports no
+diagnostics.
