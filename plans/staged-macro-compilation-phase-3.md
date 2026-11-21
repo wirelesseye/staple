@@ -580,7 +580,7 @@ Update this section as you work (see "Rules for the implementor").
 | 9. Arguments and results | done | `4f3e7441` | The expander can record each call as an `ArgTree`. `FromMatch` and a generated entry function per macro decode it, and a result handle is read back by its declared category. Constructed identifiers take hygiene from the call. See Findings. |
 | 10. Wire format | done | `30171644` | `macro_runtime/wire.rs` encodes a call (entry symbol, call context, argument trees), a result (fragment and next mark) and an error as one versioned, length-prefixed frame with a string table. Every corpus token round-trips with every field compared, and the B2 `@derive_eq` calls and results round-trip with their sizes recorded. See Findings. |
 | 11. Compare against the interpreter | done | `ece476a7` | `macro_runtime/compare.rs` expands a program twice, the second time with one package's macros called through their compiled entry functions and the wire encoding, and resolves, type-checks and compares both trees. The standard-library macros, the macros of every shape and the macro example agree once the fixes in Findings are in; four reparse differences stay and are normalized. Compiled calls are slower for the small control-flow macros. See Findings. |
-| 12. Language reference | not started | | |
+| 12. Language reference | done | this commit | `Staple.md` documents which syntax types are `Copy`, that parameters borrow and a splice only reads, that `Clone.clone` is a deep copy, repeated names in a quotation, how a value keeps its source, the two-through-eight product limit, and the result check for a macro without a signature. The mutation example clones its borrowed parameter. See Findings. |
 | 13. Close out | not started | | |
 
 ## Measurements
@@ -1617,3 +1617,24 @@ the release binary built from the previous commit, and
 `scripts/check-macro-closures.py --mode all` reported no diagnostics on its
 232 inputs. The workspace tests pass.
 
+### Language reference (task 12)
+
+- **Parameters borrow.** The task asked for the `let original = value; let mut
+  changed = value` example to clone. Under the check a macro parameter is
+  borrowed, so `let original = value` is already a move out of a borrowed
+  value. The example now clones the parameter and splices it, and takes its
+  replacement with `move`. Cloning the replacement instead fails in the
+  interpreter: it picks `Clone` from the value's shape, so cloning an
+  `UnstructuredExpr` into an `Expr` field reports "receiver and result types
+  disagree".
+- **A nullary macro without a signature.** A normal build already rejects
+  `macro zero = () => 0` ("macro `zero` must return `Syntax`"), so the result
+  check that task 11 added to the check program changes nothing a build
+  accepts. The reference says only that such a result must be spliceable.
+- **Examples checked.** The new mutation example and the single-evaluation
+  quotation `{ let v = $value; v + v }` were run with
+  `STAPLE_CHECK_MACRO_CLOSURES=all staple run --stdlib stdlib`, with no
+  diagnostics.
+- **Unchanged.** The interpreter's evaluation limits (128 nested macros,
+  1,000,000 steps) and the bare-list limits for tree quotations still hold and
+  stay documented.

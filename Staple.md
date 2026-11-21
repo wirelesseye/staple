@@ -319,7 +319,14 @@ Opaque fragments may contain empty input, punctuation, comments, or temporarily
 malformed grammar and may be spliced into a later `parse_quote` for contextual
 interpretation. A raw `Syntax` result entering ordinary expression or item
 source is reparsed for that placement. `$name` splices a captured value while
-preserving its hygiene. A `Sequence` splices its elements side by side, with
+preserving its hygiene. A splice only reads its value, so a spliced parameter
+or match binding stays usable afterwards, and a name may appear any number of
+times in one quotation. Each appearance writes the syntax again:
+`parse_quote { $value + $value }` generates the expression twice, so the
+generated code evaluates it twice. To evaluate it once, bind it in the
+quotation, as in `parse_quote { { let v = $value; v + v } }`. The generated
+code is then checked like any other, so an item spliced twice is a duplicate
+definition. A `Sequence` splices its elements side by side, with
 spaces between them; a `Separated` writes its separators. An empty sequence
 inserts nothing. For a comma product, construct
 `Parenthesized (Separated (separator: Comma, elements: parts, trailing: False))`
@@ -423,6 +430,12 @@ The built-in nodes implement `Parse` with ordinary `impl` items in
   require them to be used up. The result keeps the group's original syntax.
 - Products `(A; B)` and `(A, B)`, `Sequence<T>` (until the stream ends or `T`
   stops parsing), and `Separated<T, Comma>` (an optional trailing comma).
+  Products have implementations for two through eight elements, slotted or
+  comma-separated. A larger product has no implementation, which the check
+  described in [Compile-time phases](#compile-time-phases) reports, whether it
+  is a `Parse` target or a product inside a macro parameter. Group its elements
+  into nested products or use a `Sequence` instead. A macro's own slots are
+  not a product and have no such limit.
 
 A program adds its own implementations. They are ordinary Staple code that runs
 at compile time, may be generic, and recurse through `Parse.parse`:
@@ -473,11 +486,10 @@ Identifiers and calls may also be inspected, constructed, and changed as
 compile-time values:
 
 ```staple
-macro replace_argument = (value: CallExpr; replacement: Expr) => {
-    let original = value
-    let mut changed = value
+macro replace_argument = (value: CallExpr; move replacement: Expr) => {
+    let mut changed = Clone.clone value
     changed.argument = replacement
-    parse_quote { ($original, $changed) }
+    parse_quote { ($value, $changed) }
 }
 
 macro build_call = _: Expr => {
@@ -488,10 +500,36 @@ macro build_call = _: Expr => {
 ```
 
 Syntax mutation follows ordinary value semantics: changing `changed` does not
-change `original`. A `mut` syntax binding captured by a compile-time function
+change `value`. A `mut` syntax binding captured by a compile-time function
 is a shared cell, like an ordinary captured `mut` binding.
 Constructed identifiers use the macro definition's hygiene context. Syntax
 values inserted as call children retain their existing context.
+
+Syntax values follow the ordinary ownership rules, which the check described
+in [Compile-time phases](#compile-time-phases) enforces. `Ident`, `Comma`, `Equals`,
+`FatArrow`, `Visibility` and `ParseStream` are `Copy`. Everything else is not:
+`Syntax`, `Expr`, `Type`, `Pattern`, `Item`, `Modifier` and their nodes, the
+delimited syntax types, `Sequence<T>` and `Separated<T, S>`. A `Sequence` or
+`Separated` is never `Copy`, even when its elements are. A macro's parameters
+are borrowed unless declared `move`, as described in [Move and borrow
+parameters](#move-and-borrow-parameters). The example above clones the
+borrowed `value` before changing the copy, since `let mut changed = value`
+would move out of a borrowed value, and takes `replacement` with `move` so it
+can be stored without a clone. Splicing a value does not move it.
+
+`Clone.clone` is a deep copy of the structured nodes: the copy shares no node
+with the original, so assigning into one never changes the other. It takes
+time in proportion to the size of the tree, which is why it is written out.
+`Copy` nodes are copied as values, and opaque `Syntax` and the `Unstructured`
+nodes, which cannot be changed in place, are shared. `Sequence<T>` and
+`Separated<T, S>` are `Clone` when their elements are.
+
+A syntax value keeps the source it came from. Splicing a value that has not
+changed writes its original tokens, with their comments, formatting and
+positions, and so does splicing a clone of it. A node that has changed, by
+assignment or by construction, gets new tokens. Its unchanged children keep
+their own, so a diagnostic in generated code still points at the source a
+caller wrote wherever that source survives.
 
 A macro may return one item when its invocation is the entire top-level
 expression item:
@@ -888,11 +926,14 @@ quotation is a call:
   with no `Parse` implementation cannot be the result of a `parse_quote`.
 - `$name` is `Splice.splice name`, one per distinct name in
   a quotation, in order of first use. `Splice` is declared in `std.syntax`
-  and implemented for every syntax type and for `Sequence<T>` when `T`
-  implements it, so splicing a value that is not syntax is a type error.
+  and implemented for every syntax type and for `Sequence<T>` and
+  `Separated<T, S>` when their elements implement it, so splicing a value that
+  is not syntax is a type error.
 
-The check assumes no result type for a macro that does not declare one. A
-`quote` result is `Syntax`, so such a macro needs no annotation. A `parse_quote`
+The check assumes no result type for a macro that does not declare one, but
+when every parameter has a type its result must still be syntax that `Splice`
+accepts, as a declared result must. A `quote` result is `Syntax`, so such a
+macro needs no annotation. A `parse_quote`
 needs a type to parse as: declare the macro's result, as in
 `macro next: Expr -> Expr = value => parse_quote { $value + 1 }`, or ascribe the
 quotation, as in `macro next = value: Expr => Expr :: parse_quote { $value + 1 }`.
