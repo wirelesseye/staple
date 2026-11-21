@@ -315,6 +315,25 @@ files edited for the check. See the Phase 2 breakdown for the inventory.
 Make syntax values exist in compiled code.
 Breakdown and status: [`staged-macro-compilation-phase-3.md`](staged-macro-compilation-phase-3.md).
 
+**Status (2026-11-22): done.** Syntax values exist in compiled code, run
+in-process under a JIT test harness rather than a server. The syntax types
+are boxed nodes with a hidden origin. `Ident`, punctuation, `Visibility` and
+`ParseStream` are `Copy`, other nodes have a deep `Clone`, and a splice
+borrows. `$name...` is gone. Host functions over a per-call arena are listed
+in one table, and the `Parse` impls share one leaf parser with the
+interpreter. Compiled quotations are filled by the interpreter's own code.
+Each macro has a generated entry function that decodes an argument tree
+through `FromMatch`. Calls and results cross a versioned wire format. Every
+standard-library macro, a set covering every macro shape, and the macro
+example expand the same compiled as interpreted, apart from four reparse
+differences listed under Phase 5. Compiled calls are slower than the
+interpreter for small control-flow macros in an unoptimized build: about
+1.15 ms per `if` call against 110 µs. Interpreter expansion is unchanged
+apart from the standard-library and example sources edited for the ownership
+rules, the closure check is clean, and the workspace tests pass. `Staple.md`
+documents the ownership rules. What this phase leaves to Phases 4 to 6 is
+written into those sections.
+
 - Give the `std.syntax` data types a run-time representation. They are boxed
   nodes with a hidden origin slot, which solves both their infinite size and
   the source syntax that plain data would lose.
@@ -348,6 +367,39 @@ Breakdown and status: [`staged-macro-compilation-phase-3.md`](staged-macro-compi
   run `Parse` implementations through a test harness without the server.
 
 ### Phase 4: building and running phase-1 libraries
+
+What Phase 3 leaves for this phase:
+
+- **The host table.** `macro_runtime/intrinsics.rs` lists each host function as
+  a `(name, pointer)` pair, with the symbol `__staple_syntax_<name>`. The
+  library binding maps the same table that the JIT harness maps. Host functions
+  return only scalars and handles: a host function returning a five-`U64`
+  product crashed when called from a trait method (`SIGBUS`), so a parse returns
+  one result handle. Keep that shape, or fix the product-return ABI first.
+- **Entry functions are the shims.** The check program already generates one
+  entry function per macro, `(arguments: MatchNode) -> Syntax`, which decodes
+  each parameter through `FromMatch`, calls the macro and splices the result.
+  Export those, rather than writing a second shim.
+- **The wire format.** `macro_runtime/wire.rs` encodes a call, a result and an
+  error as one frame, version 1. A fragment carries its first token's offset,
+  line and column, so a reparsed fragment keeps its positions.
+- **The `exit` trap.** `compile_error` is a trapping stub in compiled code
+  today, and a panic through JIT frames aborts the process without the message.
+  The host records the message and the Staple function calls `exit`, which the
+  server must catch and turn into a diagnostic at the invocation.
+- **What the parent does with a result.** `call_compiled` in
+  `macro_expand/compiled_call.rs` renames the binders that the quotation's own
+  tokens introduce, as the interpreter does, and then gives the result the
+  parent's hygiene. The server path keeps that step in the parent.
+- **Optimize the library.** Phase 3 measured calls at
+  `OptimizationLevel::None`: a small control-flow macro's entry function takes
+  0.4–0.9 ms per call against the interpreter's 40–370 µs. Build libraries
+  optimized and measure again before the switch.
+- **Keep concrete `Parse` impls first.** The check module places the compiled
+  `Parse` impls ahead of the shared generic ones. Appending them made a
+  standard-library check take 104 s instead of 7 s, from an ordering
+  sensitivity in trait obligation resolution. A whole-library build keeps that
+  order, or fixes the sensitivity.
 
 - Synthesize the phase-1 program for a stage: its closure items plus one shim
   per macro (`extern "C"`, one symbol per macro, plus the template table).
@@ -396,6 +448,10 @@ Breakdown and status: [`staged-macro-compilation-phase-3.md`](staged-macro-compi
   name, a single-name `let $pattern = …` read back as a plain `let`, and a
   modifier's `Parenthesized<Expr>` argument spliced as `(42)` where the
   interpreter writes `42`.
+- Other known differences until the interpreter goes: the interpreter's
+  `Clone` is an identity, while compiled `Clone` is a deep copy, and only
+  compiled macros splice a bare `Sequence` or `Separated` outside item and
+  type-parameter lists.
 - Make `compiled` the default when the corpus agrees. Keep `interp` for one
   release cycle as an escape hatch.
 - The LSP uses the compiled engine with recovery. If a macro fails to compile
@@ -416,6 +472,14 @@ Breakdown and status: [`staged-macro-compilation-phase-3.md`](staged-macro-compi
   Phase 1 already added `macro_expand/{templates, scan, closure, staged}.rs`;
   consider splitting what remains into `macro_expand/{matching, hygiene}.rs`.
 - Remove `--macro-engine`.
+- Delete the `@interpreted_only` items in `std.syntax`, then the
+  `@interpreted_only` and `@compiled_only` modifiers, keeping the compiled
+  bodies unmarked.
+- Rewrite argument matching to produce `ArgTree` directly. Phase 3 builds the
+  tree from the interpreter's match values (`record_call` in
+  `macro_expand/compiled_call.rs`).
+- Remove the closure check's `ordinary_syntax_types` gates and recursive
+  stand-ins, which keep the syntax types compile-time only in normal builds.
 - Spec: replace the "Compile-time evaluation supports ..." paragraph and the
   remaining-limitations list in `Staple.md` with the phase rules. Remove the
   statements about integers having no width for dispatch, and about ranges,

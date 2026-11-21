@@ -581,7 +581,7 @@ Update this section as you work (see "Rules for the implementor").
 | 10. Wire format | done | `30171644` | `macro_runtime/wire.rs` encodes a call (entry symbol, call context, argument trees), a result (fragment and next mark) and an error as one versioned, length-prefixed frame with a string table. Every corpus token round-trips with every field compared, and the B2 `@derive_eq` calls and results round-trip with their sizes recorded. See Findings. |
 | 11. Compare against the interpreter | done | `ece476a7` | `macro_runtime/compare.rs` expands a program twice, the second time with one package's macros called through their compiled entry functions and the wire encoding, and resolves, type-checks and compares both trees. The standard-library macros, the macros of every shape and the macro example agree once the fixes in Findings are in; four reparse differences stay and are normalized. Compiled calls are slower for the small control-flow macros. See Findings. |
 | 12. Language reference | done | `10c07bd4` | `Staple.md` documents which syntax types are `Copy`, that parameters borrow and a splice only reads, that `Clone.clone` is a deep copy, repeated names in a quotation, how a value keeps its source, the two-through-eight product limit, and the result check for a macro without a signature. The mutation example clones its borrowed parameter. See Findings. |
-| 13. Close out | not started | | |
+| 13. Close out | done | this commit | Against the start of the phase, 223 of 232 inputs expand the same; the nine differences are the sources edited for this phase. The closure check is clean and the workspace tests pass. The umbrella plan has the Phase 3 status and the hand-offs to Phases 4 to 6. See Findings. |
 
 ## Measurements
 
@@ -1638,3 +1638,33 @@ the release binary built from the previous commit, and
 - **Unchanged.** The interpreter's evaluation limits (128 nested macros,
   1,000,000 steps) and the bare-list limits for tree quotations still hold and
   stay documented.
+
+### Close out (task 13)
+
+The saved start-of-phase capture was gone, so the baseline was rebuilt: a
+release binary built from `f16577cd`, the commit that added this plan,
+captured its own standard library, examples and fixtures. The current capture
+used the release binary of `e74b553e`.
+
+- **Expansion:** 223 of 232 inputs match, with no non-zero exits. The nine
+  differences are `examples/macros.sta` and the standard-library files
+  `annotation`, `cmp`, `default`, `flow`, `fmt`, `hash`, `syntax` and
+  `typegroup`. Each comes from that file's own source, edited for the
+  ownership rules, `$items`, the compiled impls and the comment on `$items`. A
+  rendered module includes its macro definitions, so those edits show up in the
+  expansion. No generated code differs.
+- **Closure check:** `scripts/check-macro-closures.py --mode all` reported no
+  diagnostics on its 232 inputs.
+- **Tests:** `cargo test --workspace --no-fail-fast` passed 2,344 tests, with 7
+  ignored and none failing.
+- **Done when:** every item holds. `compile_error` is the one gap. Its message
+  is recorded in Rust, but end to end it waits for Phase 4's `exit` trap
+  (Decision 12), as the plan said.
+- **Umbrella plan:** Phase 3 has a status paragraph. Phase 4 lists what it
+  inherits: the host table and its scalar-only results, entry functions as the
+  shims, the wire format, the `exit` trap, the parent's renaming of quoted
+  binders, an optimized build before measuring again, and the order of the
+  `Parse` impls. Phase 5 gains the `Clone` and bare-list differences. Phase 6
+  gains deleting `@interpreted_only` items and the two modifiers, producing
+  `ArgTree` straight from matching, and removing the closure check's
+  `ordinary_syntax_types` gates.
