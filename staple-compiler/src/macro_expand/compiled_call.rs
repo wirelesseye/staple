@@ -20,6 +20,7 @@ use crate::macro_runtime::args::ArgTree;
 
 /// One call of a macro with a body.
 #[derive(Clone)]
+#[allow(dead_code)] // Only tests read recorded calls so far.
 pub(crate) struct RecordedCall {
     /// The overload's declaration, which names its entry function.
     pub(crate) declaration: staple_syntax::MacroDeclaration,
@@ -57,21 +58,27 @@ pub(crate) struct ExpandedSyntax(SyntaxValue);
 
 impl ExpandedSyntax {
     /// The kind of syntax, as diagnostics name it.
+    #[allow(dead_code)] // Only tests read the category so far.
     pub(crate) fn category(&self) -> &'static str {
         syntax_category(&self.0)
+    }
+
+    /// The syntax of the root, or of each item of an item list.
+    #[allow(dead_code)] // Only tests read the syntax so far.
+    pub(crate) fn syntaxes(&self) -> Vec<Syntax> {
+        match &self.0 {
+            SyntaxValue::Items(items) => items
+                .iter()
+                .map(|item| super::syntax_ops::item_syntax(item).clone())
+                .collect(),
+            value => value.syntax().cloned().into_iter().collect(),
+        }
     }
 
     /// The syntax's tokens, without trivia.
     #[allow(dead_code)] // Only tests read the tokens so far.
     pub(crate) fn tokens(&self) -> Vec<staple_syntax::SyntaxToken> {
-        let syntaxes = match &self.0 {
-            SyntaxValue::Items(items) => items
-                .iter()
-                .map(|item| super::syntax_ops::item_syntax(item).clone())
-                .collect(),
-            value => value.syntax().cloned().into_iter().collect::<Vec<_>>(),
-        };
-        syntaxes
+        self.syntaxes()
             .iter()
             .flat_map(|syntax| syntax.tokens().iter().filter(|token| !token.kind.is_trivia()).cloned())
             .collect()
@@ -89,6 +96,7 @@ impl ExpandedSyntax {
     /// The source text of the syntax, without the trivia around it, one line
     /// per item of an item list. A node the macro built without tokens has
     /// none.
+    #[allow(dead_code)] // Only tests read the text so far.
     pub(crate) fn text(&self) -> String {
         let text = match &self.0 {
             SyntaxValue::Items(items) => items
@@ -277,6 +285,7 @@ fn separated_tree(elements: &[Value], separator: &Value, trailing: bool) -> Opti
 /// it, as it does an interpreted one. A `Sequence<Item>` is a list of items.
 /// Every other category is parsed as the interpreter parses that category's
 /// arguments.
+#[allow(dead_code)] // Only the test harness reads compiled results so far.
 pub(crate) fn compiled_result(
     result: &MetaType,
     syntax: Syntax,

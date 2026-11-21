@@ -578,7 +578,7 @@ Update this section as you work (see "Rules for the implementor").
 | 7. Plain sequence splices | done | `7b1ad2cd`, `8a50319f` | Tree substitution uses the line rule for item splices; type parameters accept identifiers or comma lists. Repeated markers are removed, uses and documentation are migrated, and interpreter, closure and expansion checks pass. See Findings. |
 | 8. Quotations | done | `444cfb3b` | Templates keep their tokens and module. Compiled `__quote` fills them with the interpreter's raw-quote code, stamping quoted tokens from the call context. Quoted nodes now rebuild to their origin. See Findings. |
 | 9. Arguments and results | done | `4f3e7441` | The expander can record each call as an `ArgTree`. `FromMatch` and a generated entry function per macro decode it, and a result handle is read back by its declared category. Constructed identifiers take hygiene from the call. See Findings. |
-| 10. Wire format | not started | | |
+| 10. Wire format | done | this commit | `macro_runtime/wire.rs` encodes a call (entry symbol, call context, argument trees), a result (fragment and next mark) and an error as one versioned, length-prefixed frame with a string table. Every corpus token round-trips with every field compared, and the B2 `@derive_eq` calls and results round-trip with their sizes recorded. See Findings. |
 | 11. Compare against the interpreter | not started | | |
 | 12. Language reference | not started | | |
 | 13. Close out | not started | | |
@@ -589,6 +589,10 @@ Update this section as you work (see "Rules for the implementor").
   on the development machine (macOS, arm64), command
   `cargo test -p staple-compiler --lib macro_runtime::harness::tests::plain_functions_run_after_initialization`.
 - **Whole-program emit:** about 6.7 s in the test profile.
+- **Wire sizes on B2** (20 × `@derive_eq` on a 50-field `wrap`): a call is
+  1881–1888 bytes, 37,699 for all 20. A result is 2636–2654 bytes, 52,924 for all
+  20, counting one frame for each of the two items a call generates. Command
+  `cargo test -p staple-compiler --lib derive_eq_calls_round_trip -- --nocapture`.
 
 ## Findings
 
@@ -1419,5 +1423,53 @@ Differences for task 11:
   values expected the origin back. They now take their elements from source.
 
 Verification: `cargo test --workspace` passes 2333 tests. The expansion
+comparison matches on all 232 inputs, and the closure check reports no
+diagnostics.
+
+### Wire format (task 10)
+
+- **Messages.** `Message::Call` carries the entry function's symbol, the
+  `CallContext` and one `ArgTree` per parameter. `Message::Result` carries the
+  fragment the entry function returned and the first mark the call didn't use.
+  `Message::Error` carries a message. How the bytes travel is left to the
+  server.
+- **Frame.** A `u32` length, then a `u32` version, a tag byte, a string table and
+  the payload. Every other integer is a LEB128 varint. Token texts, source names
+  and identifier origin names go through the table, so each distinct string
+  crosses once per frame. A token's start is stored relative to the previous
+  token's end, and its length as a signed number, so spliced token runs whose
+  spans go backwards still round-trip.
+- **What a fragment carries.** Its own tokens (the `token_range` slice, not the
+  file's whole stream), its span, `definition_module`, `expansion_mark` and
+  `identifier_origins`. Each token carries kind, text, span, origin and
+  hygiene. The node id and the `pipe_stage` and `implied` flags don't cross. They
+  describe a parsed node, and the receiver numbers the nodes it parses. A
+  decoded fragment has id 0 and a token range covering all its tokens.
+- **Token kinds** are coded by their position in `TOKEN_KINDS`. The macro that
+  writes the list also writes an exhaustive `match`, so a new `TokenKind` fails
+  to compile until it gets a code. Reordering the list needs a new version.
+- **Decoding is checked.** A short frame, another version, an unknown tag, kind
+  or flag bit, a bad string index, a count larger than the bytes left and
+  leftover payload bytes are each a `WireError`. Frames can be read back to back
+  from one buffer.
+- **Corpus round trip.** Each of the 232 comparison inputs (standard library,
+  examples, fixtures and the code generation corpus, 266,421 tokens) is lexed
+  and sent as a result twice. The first time it is sent as lexed. The second time, every other
+  token has an origin with a source and location, every third token has
+  hygiene, and the fragment has a module, the largest mark and an identifier
+  origin. Every field is compared.
+- **Recorded calls.** Expansion runs on a thread of its own with a large stack,
+  and calls are recorded on the thread that expands. A recorded call holds
+  interpreter values that are not `Send`, so the test turns each call into a
+  message on that thread. `ExpandedSyntax::syntaxes` gives a result's fragments,
+  one per item of an item list.
+- **Sizes.** A B2 call is mostly its argument: the 50-field type as a fragment.
+  The interpreter's result is two items, sent here as one frame each. A compiled
+  result is one fragment, so it saves one frame header and string table.
+- **Cleanup from task 9.** The non-test build warned about the task 9 items only
+  the harness reaches, so they are marked like the other test-only runtime
+  code. The unused `CallOutcome::interpreted_text` is removed.
+
+Verification: `cargo test --workspace` passes 2339 tests. The expansion
 comparison matches on all 232 inputs, and the closure check reports no
 diagnostics.

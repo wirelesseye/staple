@@ -36,6 +36,7 @@ impl ArgTree {
 
 /// Puts a call's parameters into the arena, as one list with a child per
 /// parameter, and returns the list's handle for the entry function.
+#[allow(dead_code)] // Only the test harness makes calls so far.
 pub(crate) fn insert_arguments(parameters: &[ArgTree]) -> u64 {
     let children = parameters.iter().map(insert).collect();
     with_arena(|arena| arena.insert_match(1, 0, children)).into()

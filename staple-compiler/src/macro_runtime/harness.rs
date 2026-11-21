@@ -269,14 +269,6 @@ impl CallOutcome {
             Err(message) => panic!("`{}` failed: {message}", self.name()),
         }
     }
-
-    pub(crate) fn interpreted_text(&self) -> String {
-        self.call
-            .interpreted
-            .as_ref()
-            .unwrap_or_else(|| panic!("the interpreter expanded `{}`", self.name()))
-            .text()
-    }
 }
 
 /// The first mark compiled calls use, far from the interpreter's, so a test
