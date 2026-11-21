@@ -579,7 +579,7 @@ Update this section as you work (see "Rules for the implementor").
 | 8. Quotations | done | `444cfb3b` | Templates keep their tokens and module. Compiled `__quote` fills them with the interpreter's raw-quote code, stamping quoted tokens from the call context. Quoted nodes now rebuild to their origin. See Findings. |
 | 9. Arguments and results | done | `4f3e7441` | The expander can record each call as an `ArgTree`. `FromMatch` and a generated entry function per macro decode it, and a result handle is read back by its declared category. Constructed identifiers take hygiene from the call. See Findings. |
 | 10. Wire format | done | `30171644` | `macro_runtime/wire.rs` encodes a call (entry symbol, call context, argument trees), a result (fragment and next mark) and an error as one versioned, length-prefixed frame with a string table. Every corpus token round-trips with every field compared, and the B2 `@derive_eq` calls and results round-trip with their sizes recorded. See Findings. |
-| 11. Compare against the interpreter | not started | | |
+| 11. Compare against the interpreter | done | this commit | `macro_runtime/compare.rs` expands a program twice, the second time with one package's macros called through their compiled entry functions and the wire encoding, and resolves, type-checks and compares both trees. The standard-library macros, the macros of every shape and the macro example agree once the fixes in Findings are in; four reparse differences stay and are normalized. Compiled calls are slower for the small control-flow macros. See Findings. |
 | 12. Language reference | not started | | |
 | 13. Close out | not started | | |
 
@@ -593,6 +593,26 @@ Update this section as you work (see "Rules for the implementor").
   1881–1888 bytes, 37,699 for all 20. A result is 2636–2654 bytes, 52,924 for all
   20, counting one frame for each of the two items a call generates. Command
   `cargo test -p staple-compiler --lib derive_eq_calls_round_trip -- --nocapture`.
+- **Call cost against the interpreter** (mean per call; compiled includes the
+  wire encoding both ways, the arguments and reading the result, but not the
+  parent reparsing it; the entry function alone in brackets; JIT at
+  `OptimizationLevel::None` in the test profile):
+
+  | Macro | Calls | Interpreted | Compiled (entry function) |
+  |---|---|---|---|
+  | `if` | 551 | 110 µs | 1.15 ms (500 µs) |
+  | `when` | 90 | 369 µs | 1.30 ms (895 µs) |
+  | `while` | 89 | 38 µs | 741 µs (417 µs) |
+  | `for` | 7 | 40 µs | 647 µs (458 µs) |
+  | `discard` | 1 | 8 µs | 76 µs (63 µs) |
+  | `typegroup` | 1 | 833 µs | 695 µs (629 µs) |
+  | `@derive_eq` | 1 | 343 µs | 338 µs (308 µs) |
+  | `@derive_hash` | 1 | 403 µs | 417 µs (382 µs) |
+  | `@derive_debug` | 1 | 219 µs | 286 µs (252 µs) |
+  | `@derive_default` | 1 | 441 µs | 312 µs (285 µs) |
+  | example macros | 1–4 each | 7–283 µs | 30–162 µs (14–137 µs) |
+
+  Command `cargo test -p staple-compiler --lib macro_runtime::compare -- --nocapture --test-threads 1`.
 
 ## Findings
 
@@ -1473,3 +1493,127 @@ diagnostics.
 Verification: `cargo test --workspace` passes 2339 tests. The expansion
 comparison matches on all 232 inputs, and the closure check reports no
 diagnostics.
+
+### Compare against the interpreter (task 11)
+
+`macro_runtime/compare.rs` has `expand_both_ways`. It expands a program with
+the interpreter, recording each call's time, then checks, lowers and JITs the
+check program of one package (the standard library's or the program's own),
+and expands the program again with `compiled_call::with_compiled_engine`. While
+an engine is installed, the expander builds the argument trees for a call of
+that package's macros and hands the call to it. The engine here encodes the
+call, decodes it as a server would, calls the entry function, and encodes and
+decodes the result. The parent reads the result by the macro's declared
+category as before. Without an engine the expander is unchanged. Both
+expansions are resolved and type-checked, which checks the spans and hygiene
+of what compiled code produced, and their trees are compared.
+
+The trees are compared as the debug form of the entry module's items without
+`Syntax` values. `staple expand`'s rendering can't be used: it reads tokens
+where a node wasn't regenerated, and a quotation the interpreter substitutes
+as a tree keeps its template's tokens, so the interpreter's own expansion of
+`@derive_debug` renders as `impl Debug $target` and fails to read back.
+
+Three tests cover the task:
+
+- `library_macros_expand_the_same_compiled`: `if`, `when`, `while`, `for`,
+  `discard`, the four derives and `typegroup`, each called from the test
+  program. Every call the standard library makes to its own macros while it
+  expands also goes through compiled code, about 740 calls.
+- `own_macros_expand_the_same_compiled`: the macros of every shape from the
+  check-program test, each called. Two are written differently. The
+  interpreter can't evaluate `keep`'s `Clone.clone` of an `Expr` ("receiver
+  and result types disagree"), so `keep` moves its argument. It can't splice a
+  sequence in expression position, so `apply` isn't compared.
+- `the_macro_example_expands_the_same_compiled`: all 13 macros of
+  `examples/macros.sta`.
+
+Each asserts which macros ran compiled and that none was left to the
+interpreter.
+
+Fixes needed for the expansions to agree:
+
+- **Macros without a signature.** A macro written `(a: Expr; b: Expr) => …` has
+  one function per slot, and `while`'s single function takes a slotted product
+  pattern. The check program now counts the slots from the lambda and gives
+  such a macro an entry function when every parameter has a type. A macro
+  with an untyped parameter still gets none. The entry function checks the
+  result as syntax, as an annotated macro's does, so a nullary macro without a
+  signature that returns something else no longer checks, even when nothing
+  calls it. The runtime tests' probe macros returned numbers and tuples and
+  now end in a syntax value.
+- **Where a fragment starts.** A fragment's spans are offsets into its whole
+  token stream, and the wire carries only the fragment's own tokens. It now
+  also carries the first token's offset, line and column. The decoder puts
+  whitespace and line breaks before the tokens that add up to them, so a
+  reparsed fragment reports its own line and column and the parser's offsets
+  stay inside its text. A fragment that starts a stream sends zeros. Nothing
+  persisted the format yet, so the version stays 1.
+- **Streams built at run time.** A stream that joins tokens from several
+  fragments kept their old spans. `syntax_ops::number_stream` numbers a new
+  stream from zero, and the rebuild intrinsics and quotation filling use it.
+  Nodes the parser builds from a fragment share a copy of the file's tokens
+  that keeps file offsets, which the interpreter never reparses but compiled
+  code does. The arena gives such a stream its own renumbered copy, keeping
+  each token's source position as its origin.
+- **Doc comments and visibility.** A doc comment reaches a macro as a `doc`
+  modifier with no tokens of its own, and a visibility's syntax need not spell
+  it. The argument tree writes a doc modifier as its comment line, line break
+  included, and a visibility as `pub`, `pub(package)` or nothing. A modifier
+  fragment holding only a doc comment now parses as that `doc` modifier, with
+  its line break, so a spliced doc comment no longer swallows the item after
+  it. Found through `typegroup` on `std.convert`.
+- **The item a modifier receives.** The interpreter takes a modifier off a
+  modified item's list, but the item keeps the syntax it was read with, so
+  compiled `@derive_eq` saw itself again and the derives after it never ran.
+  The argument now starts at the first modifier still on the item.
+- **Hygiene of results.** The parent gives each node of a compiled result the
+  context its tokens carry, as it does for a reparsed quotation, and renames
+  the names a quotation binds with that quotation's mark, as the interpreter
+  renames a template's binders. Names spliced from the caller are left alone,
+  since they may sit inside calls a later pass expands, where a rename can't
+  reach. A mark is a quotation's when a keyword or punctuation token carries
+  it; identifiers and literals the call constructs share another mark, and the
+  interpreter splices those without renaming them.
+- **A boxed syntax node in an irrefutable pattern.** `let Braced (contents) =
+  Clone.clone body` bound the box itself, so the call that used `contents`
+  failed LLVM verification. The emitter now loads the node's representation,
+  as a match arm already did. Found through `setting_value` in the example.
+
+Differences that stay. Each is written one way in the comparison's dump, and
+none changes what the code means:
+
+- **`implied`** marks a node the parser supplied, such as an omitted type. A
+  node a macro builds has it unset, and reparsing sets it. Nothing reads it.
+- **A `resolution_name` equal to the name.** The interpreter sets it on a
+  binding pattern a macro builds. The resolver uses the name when there is
+  none.
+- **A `let` of one name written with a pattern.** A quotation's
+  `let $pattern = …` is a pattern binding in the interpreter's tree and a plain
+  `let` once its text is read again.
+- **A modifier's parenthesized argument.** The interpreter binds it to what is
+  inside the parentheses, so `$value` writes `42`. Compiled code has the
+  `Parenthesized<Expr>` its type declares and writes `(42)`, which is the same
+  expression.
+
+Other findings:
+
+- **`compile_error` still aborts.** It is a trapping stub in compiled code, and
+  a panic through JIT frames aborts the test process without the message. The
+  `typegroup` failure above showed up that way. Decision 12's recording is
+  still to come.
+- **Call cost.** See Measurements. The entry function of a small control-flow
+  macro takes 0.4–0.9 ms against the interpreter's 40–370 µs per call, and the
+  rest of a compiled call (encoding, arguments, result) adds 20–650 µs. The
+  derives and `typegroup` cost about the same either way, and `setting_value`,
+  which parses, is twice as fast compiled. The JIT runs unoptimized code in a
+  test build, so these are upper bounds.
+- **Disk.** The worktree's `target` directory had grown to 226 GB of old test
+  binaries and filled the disk. `cargo clean -p` on the workspace packages
+  cleared it.
+
+Verification: `scripts/compare-expansion.py` matched all 232 inputs against
+the release binary built from the previous commit, and
+`scripts/check-macro-closures.py --mode all` reported no diagnostics on its
+232 inputs. The workspace tests pass.
+

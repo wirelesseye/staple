@@ -5748,7 +5748,13 @@ impl MacroExpander {
         );
         self.invocation_spans.push(call_span.clone());
         self.running_macros.push(definition.declaration.syntax.id);
-        let result = self.invoke_modifier_inner(module, definition, argument, item, call_span);
+        let compiled = self
+            .modifier_trees(argument.as_ref().zip(argument_syntax), &item)
+            .and_then(|arguments| self.call_compiled(definition, arguments, &call_span));
+        let result = match compiled {
+            Some(value) => value.and_then(|value| self.modifier_items(module, definition, Value::Syntax(value))),
+            None => self.invoke_modifier_inner(module, definition, argument, item, call_span),
+        };
         self.running_macros.pop();
         self.invocation_spans.pop();
         self.record_result(recorded, result.clone().map(SyntaxValue::Items));
@@ -5793,7 +5799,17 @@ impl MacroExpander {
             })()
         });
         self.quote_context = previous_context;
-        let value = evaluated?;
+        self.modifier_items(module, definition, evaluated?)
+    }
+
+    /// The items a modifier's result becomes in place of the item it
+    /// modified.
+    pub(super) fn modifier_items(
+        &mut self,
+        module: ModuleId,
+        definition: &MacroDefinition,
+        value: Value,
+    ) -> Option<Vec<Item>> {
         match value {
             Value::Syntax(SyntaxValue::Item(item)) => Some(vec![*item]),
             Value::Syntax(SyntaxValue::Items(items)) => Some(items),
@@ -5823,7 +5839,7 @@ impl MacroExpander {
                 let mark = self.next_mark;
                 self.next_mark += 1;
                 for generated in &mut items {
-                    alpha_rename_item(generated, mark);
+                    alpha_rename_item(generated, &Marks::All(mark));
                     freshen_item(self, generated, module, mark);
                 }
                 Some(items)
@@ -5936,7 +5952,7 @@ impl MacroExpander {
                 let mark = self.next_mark;
                 self.next_mark += 1;
                 for generated in &mut items {
-                    alpha_rename_item(generated, mark);
+                    alpha_rename_item(generated, &Marks::All(mark));
                     freshen_item(self, generated, module, mark);
                 }
                 if items.len() == 1 {
@@ -6345,7 +6361,7 @@ impl MacroExpander {
                     Ok(mut parsed) => {
                         let mark = self.next_mark;
                         self.next_mark += 1;
-                        alpha_rename_expression(&mut parsed, mark, &mut Vec::new());
+                        alpha_rename_expression(&mut parsed, &Marks::All(mark), &mut Vec::new());
                         self.freshen_expression(&mut parsed, module, mark);
                         SyntaxValue::from_expression(parsed)
                     }
@@ -6871,7 +6887,16 @@ impl MacroExpander {
         };
         self.invocation_spans.push(call_span.clone());
         self.running_macros.push(definition.declaration.syntax.id);
-        let result = self.invoke_macro_inner(definition, arguments, call_span);
+        let compiled = match definition.kind {
+            MacroKind::User(_) => self
+                .call_trees(definition, &arguments)
+                .and_then(|trees| self.call_compiled(definition, trees, &call_span)),
+            _ => None,
+        };
+        let result = match compiled {
+            Some(value) => value,
+            None => self.invoke_macro_inner(definition, arguments, call_span),
+        };
         self.running_macros.pop();
         self.invocation_spans.pop();
         self.record_result(recorded, result.clone());
@@ -9669,7 +9694,7 @@ impl MacroExpander {
         match template {
             staple_syntax::QuoteTemplate::Expression(template) => {
                 let mut expression = template.as_ref().clone();
-                alpha_rename_expression(&mut expression, mark, &mut Vec::new());
+                alpha_rename_expression(&mut expression, &Marks::All(mark), &mut Vec::new());
                 self.freshen_expression(&mut expression, module, mark);
                 substitute_splices(&expression, environment, &mut self.diagnostics)
                     .map(SyntaxValue::from_expression)
@@ -9683,7 +9708,7 @@ impl MacroExpander {
                     ));
                     return None;
                 }
-                alpha_rename_item(&mut item, mark);
+                alpha_rename_item(&mut item, &Marks::All(mark));
                 freshen_item(self, &mut item, module, mark);
                 let mut items = vec![item];
                 substitute_item_list(&mut items, environment, &mut self.diagnostics)?;
@@ -9705,7 +9730,7 @@ impl MacroExpander {
                     }
                 }
                 for item in &mut items {
-                    alpha_rename_item(item, mark);
+                    alpha_rename_item(item, &Marks::All(mark));
                     freshen_item(self, item, module, mark);
                 }
                 substitute_item_list(&mut items, environment, &mut self.diagnostics)?;
@@ -9991,7 +10016,7 @@ impl MacroExpander {
                 let mut expression =
                     staple_syntax::parse_expression_fragment(syntax, &mut self.next_syntax_id)
                         .ok()?;
-                alpha_rename_expression(&mut expression, mark, &mut Vec::new());
+                alpha_rename_expression(&mut expression, &Marks::All(mark), &mut Vec::new());
                 SyntaxValue::from_expression(expression)
             }
             MetaType::Type | MetaType::ProductType | MetaType::UnstructuredType => {
@@ -10010,7 +10035,7 @@ impl MacroExpander {
             MetaType::Item => {
                 let mut item =
                     staple_syntax::parse_item_fragment(syntax, &mut self.next_syntax_id).ok()?;
-                alpha_rename_item(&mut item, mark);
+                alpha_rename_item(&mut item, &Marks::All(mark));
                 SyntaxValue::Item(Box::new(item))
             }
             MetaType::Sequence(element) if **element == MetaType::Item => {
@@ -10018,7 +10043,7 @@ impl MacroExpander {
                     staple_syntax::parse_item_list_fragment(syntax, &mut self.next_syntax_id)
                         .ok()?;
                 for item in &mut items {
-                    alpha_rename_item(item, mark);
+                    alpha_rename_item(item, &Marks::All(mark));
                 }
                 SyntaxValue::Items(items)
             }
@@ -16361,7 +16386,60 @@ fn substitute_identifier(
     }
 }
 
-fn alpha_rename_item(item: &mut Item, mark: u64) {
+/// Which names a hygiene pass renames, and the mark each takes.
+enum Marks {
+    /// Every name, with one mark: a fragment the interpreter wrote.
+    All(u64),
+    /// Names a quotation of one compiled call wrote, each with its quotation's
+    /// mark, which its tokens carry. A name spliced in from the caller keeps
+    /// its own, and so does a call that a later pass expands.
+    Quoted(HashSet<u64>),
+}
+
+impl Marks {
+    fn mark(&self, syntax: &Syntax, name: &str) -> Option<u64> {
+        match self {
+            Marks::All(mark) => Some(*mark),
+            Marks::Quoted(marks) => syntax
+                .tokens()
+                .iter()
+                .find(|token| token.kind == staple_syntax::TokenKind::Identifier && token.text == name)
+                .and_then(|token| token.hygiene)
+                .map(|(_, mark)| mark)
+                .filter(|mark| marks.contains(mark)),
+        }
+    }
+
+    /// The new name of a binder, when this pass renames it.
+    fn binder(&self, syntax: &Syntax, name: &str) -> Option<String> {
+        self.mark(syntax, name).map(|mark| hygienic_name(name, mark))
+    }
+
+    /// Whether a use of `name` refers to the binder renamed to `renamed`.
+    fn refers(&self, syntax: &Syntax, name: &str, renamed: &str) -> bool {
+        match self {
+            Marks::All(_) => true,
+            Marks::Quoted(_) => self.binder(syntax, name).as_deref() == Some(renamed),
+        }
+    }
+}
+
+fn rename_binding_pattern(
+    binding: &mut staple_syntax::BindingPattern,
+    mark: &Marks,
+    names: &mut HashMap<String, String>,
+) {
+    let Some(renamed) = mark.binder(&binding.syntax, &binding.name) else {
+        return;
+    };
+    binding
+        .resolution_name
+        .get_or_insert_with(|| binding.name.clone());
+    names.insert(binding.name.clone(), renamed.clone());
+    binding.name = renamed;
+}
+
+fn alpha_rename_item(item: &mut Item, mark: &Marks) {
     let mut scopes = Vec::new();
     match item {
         Item::Modified(modified) => {
@@ -16454,29 +16532,36 @@ fn alpha_rename_item(item: &mut Item, mark: u64) {
     }
 }
 
+/// Renames the names a reparsed value binds, by its category.
+fn alpha_rename_value(value: &mut SyntaxValue, mark: &Marks) {
+    match value {
+        SyntaxValue::Item(item) => alpha_rename_item(item, mark),
+        SyntaxValue::Items(items) => {
+            for item in items {
+                alpha_rename_item(item, mark);
+            }
+        }
+        SyntaxValue::Ident(_) | SyntaxValue::Call(_) | SyntaxValue::Unstructured(_) => {
+            if let Some(mut expression) = value.to_expression() {
+                alpha_rename_expression(&mut expression, mark, &mut Vec::new());
+                *value = SyntaxValue::from_expression(expression);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn hygienic_name(name: &str, mark: u64) -> String {
     format!("{name}__macro_{mark}")
 }
 
-fn alpha_rename_pattern(pattern: &mut Pattern, mark: u64, names: &mut HashMap<String, String>) {
+fn alpha_rename_pattern(pattern: &mut Pattern, mark: &Marks, names: &mut HashMap<String, String>) {
     match pattern {
         Pattern::At(at) => {
-            at.binding
-                .resolution_name
-                .get_or_insert_with(|| at.binding.name.clone());
-            let renamed = hygienic_name(&at.binding.name, mark);
-            names.insert(at.binding.name.clone(), renamed.clone());
-            at.binding.name = renamed;
+            rename_binding_pattern(&mut at.binding, mark, names);
             alpha_rename_pattern(&mut at.pattern, mark, names);
         }
-        Pattern::Binding(binding) => {
-            binding
-                .resolution_name
-                .get_or_insert_with(|| binding.name.clone());
-            let renamed = hygienic_name(&binding.name, mark);
-            names.insert(binding.name.clone(), renamed.clone());
-            binding.name = renamed;
-        }
+        Pattern::Binding(binding) => rename_binding_pattern(binding, mark, names),
         Pattern::Product(product) => {
             for element in &mut product.elements {
                 alpha_rename_pattern(element, mark, names);
@@ -16492,12 +16577,14 @@ fn alpha_rename_pattern(pattern: &mut Pattern, mark: u64, names: &mut HashMap<St
 
 fn alpha_rename_expression(
     expression: &mut Expression,
-    mark: u64,
+    mark: &Marks,
     scopes: &mut Vec<HashMap<String, String>>,
 ) {
     match expression {
         Expression::Name(name) => {
-            if let Some(renamed) = scopes.iter().rev().find_map(|scope| scope.get(&name.name)) {
+            if let Some(renamed) = scopes.iter().rev().find_map(|scope| scope.get(&name.name))
+                && mark.refers(&name.syntax, &name.name, renamed)
+            {
                 name.name = renamed.clone();
             }
         }
@@ -16506,8 +16593,9 @@ fn alpha_rename_expression(
             alpha_rename_pattern(&mut function.pattern, mark, &mut scope);
             if let Some(effects) = &mut function.effect_lower_bound {
                 for resource in &mut effects.resources {
-                    if let Some(binding) = &mut resource.binding {
-                        let renamed = hygienic_name(&binding.name, mark);
+                    if let Some(binding) = &mut resource.binding
+                        && let Some(renamed) = mark.binder(&binding.syntax, &binding.name)
+                    {
                         scope.insert(binding.name.clone(), renamed.clone());
                         binding.name = renamed;
                     }
@@ -16612,7 +16700,7 @@ fn alpha_rename_expression(
 
 fn alpha_rename_block(
     block: &mut BlockExpression,
-    mark: u64,
+    mark: &Marks,
     scopes: &mut Vec<HashMap<String, String>>,
 ) {
     scopes.push(HashMap::new());
@@ -16622,12 +16710,13 @@ fn alpha_rename_block(
                 if let Some(value) = &mut binding.value {
                     alpha_rename_expression(value, mark, scopes);
                 }
-                let renamed = hygienic_name(&binding.name, mark);
-                scopes
-                    .last_mut()
-                    .unwrap()
-                    .insert(binding.name.clone(), renamed.clone());
-                binding.name = renamed;
+                if let Some(renamed) = mark.binder(&binding.syntax, &binding.name) {
+                    scopes
+                        .last_mut()
+                        .unwrap()
+                        .insert(binding.name.clone(), renamed.clone());
+                    binding.name = renamed;
+                }
             }
             Item::PatternBinding(binding) => {
                 alpha_rename_expression(&mut binding.value, mark, scopes);

@@ -3310,6 +3310,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             )?
                             .as_any_value_enum()
                     }
+                } else if let CheckedType::Wrapper { representation, .. } = &pattern.test.subject
+                    && pattern.test.identity == crate::LoweredPatternIdentity::SyntaxNode
+                {
+                    // A boxed syntax node binds what its box holds, as a match
+                    // arm does.
+                    let Some(BasicValueEnum::PointerValue(pointer)) = value_as_basic(value) else {
+                        return Err(unsupported("syntax node pattern value"));
+                    };
+                    let representation_type = self.backend.compile_type(representation)?;
+                    self.backend
+                        .load_syntax_node_representation(pointer, representation_type)?
+                        .as_any_value_enum()
                 } else {
                     value
                 };

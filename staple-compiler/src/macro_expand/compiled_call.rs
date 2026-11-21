@@ -8,8 +8,9 @@
 //! which [`compiled_result`] reads by the macro's declared result category.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 
-use staple_syntax::{Item, Span, Syntax};
+use staple_syntax::{Diagnostic, Item, Span, Syntax, TokenKind};
 
 use super::{
     DelimitedValueContents, MacroArgument, MacroDefinition, MacroExpander, MetaType, SyntaxValue,
@@ -33,6 +34,9 @@ pub(crate) struct RecordedCall {
     pub(crate) result: MetaType,
     /// What the interpreter's call returned, when it succeeded.
     pub(crate) interpreted: Option<ExpandedSyntax>,
+    /// How long the interpreter's call took, when it succeeded.
+    pub(crate) elapsed: Option<std::time::Duration>,
+    started: std::time::Instant,
 }
 
 thread_local! {
@@ -50,6 +54,41 @@ pub(crate) fn record_calls<T>(f: impl FnOnce() -> T) -> (T, Vec<RecordedCall>) {
 
 fn recording() -> bool {
     RECORDED.with(|recorded| recorded.borrow().is_some())
+}
+
+/// A call the expander asks compiled code to make.
+#[allow(dead_code)] // Only the test harness compiles calls so far.
+pub(crate) struct CompiledCall<'a> {
+    pub(crate) declaration: &'a staple_syntax::MacroDeclaration,
+    pub(crate) definition_module: ModuleId,
+    pub(crate) call_site: Span,
+    /// One tree per parameter.
+    pub(crate) arguments: Vec<ArgTree>,
+    /// The first expansion mark the call may use.
+    pub(crate) next_mark: u64,
+}
+
+/// Makes a call through compiled code. `None` leaves the call to the
+/// interpreter. A made call gives back its result and the first mark it didn't
+/// use, or why it failed.
+pub(crate) type CompiledEngine = Box<dyn FnMut(&CompiledCall<'_>) -> Option<Result<(Syntax, u64), String>>>;
+
+thread_local! {
+    static ENGINE: RefCell<Option<CompiledEngine>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` with `engine` making the macro calls it takes on this thread, in
+/// place of the interpreter.
+#[allow(dead_code)] // Only the test harness compiles calls so far.
+pub(crate) fn with_compiled_engine<T>(engine: CompiledEngine, f: impl FnOnce() -> T) -> T {
+    let previous = ENGINE.with(|current| current.borrow_mut().replace(engine));
+    let value = f();
+    ENGINE.with(|current| *current.borrow_mut() = previous);
+    value
+}
+
+fn compiling() -> bool {
+    ENGINE.with(|engine| engine.borrow().is_some())
 }
 
 /// What a macro produced, as the expander places it.
@@ -122,11 +161,94 @@ impl MacroExpander {
         if !recording() {
             return None;
         }
-        let mut values = Vec::with_capacity(arguments.len());
+        let arguments = self.argument_trees(definition, arguments)?;
+        self.record_trees(definition, arguments, call_span)
+    }
+
+    fn argument_trees(
+        &mut self,
+        definition: &MacroDefinition,
+        arguments: &[MacroArgument],
+    ) -> Option<Vec<ArgTree>> {
+        let mut trees = Vec::with_capacity(arguments.len());
         for (expected, argument) in definition.parameters.iter().zip(arguments) {
-            values.push(self.macro_argument_value(expected, argument.clone())?);
+            trees.push(arg_tree(&self.macro_argument_value(expected, argument.clone())?)?);
         }
-        self.record_values(definition, &values, call_span)
+        Some(trees)
+    }
+
+    /// A function-style call's argument trees, when compiled code makes calls.
+    pub(super) fn call_trees(
+        &mut self,
+        definition: &MacroDefinition,
+        arguments: &[MacroArgument],
+    ) -> Option<Vec<ArgTree>> {
+        if !compiling() {
+            return None;
+        }
+        self.argument_trees(definition, arguments)
+    }
+
+    /// A modifier call's argument trees, when compiled code makes calls.
+    pub(super) fn modifier_trees(
+        &self,
+        argument: Option<(&Value, &Syntax)>,
+        item: &Item,
+    ) -> Option<Vec<ArgTree>> {
+        if !compiling() {
+            return None;
+        }
+        modifier_arguments(argument, item)
+    }
+
+    /// Makes a call through compiled code, when it can take it. The outer
+    /// `None` leaves the call to the interpreter; the inner one is a call that
+    /// failed, with its diagnostic reported.
+    pub(super) fn call_compiled(
+        &mut self,
+        definition: &MacroDefinition,
+        arguments: Vec<ArgTree>,
+        call_span: &Span,
+    ) -> Option<Option<SyntaxValue>> {
+        let call = CompiledCall {
+            declaration: &definition.declaration,
+            definition_module: definition.key.module,
+            call_site: call_span.clone(),
+            arguments,
+            next_mark: self.next_mark,
+        };
+        let engine = ENGINE.with(|engine| engine.borrow_mut().take())?;
+        let mut engine = engine;
+        let outcome = engine(&call);
+        ENGINE.with(|current| *current.borrow_mut() = Some(engine));
+        let first_mark = self.next_mark;
+        let result = match outcome? {
+            Ok((syntax, next_mark)) => {
+                self.next_mark = next_mark;
+                compiled_result(&definition.result, syntax, &mut self.next_syntax_id)
+            }
+            Err(message) => Err(message),
+        };
+        Some(match result {
+            Ok(ExpandedSyntax(mut value)) => {
+                // The names a quotation binds take its mark, as the
+                // interpreter renames them, and each node resolves where its
+                // tokens were written: quoted ones in the macro's module,
+                // spliced ones at the caller.
+                let marks = super::Marks::Quoted(quotation_marks(&value, first_mark..self.next_mark));
+                let mark = self.next_mark;
+                super::alpha_rename_value(&mut value, &marks);
+                self.freshen_by_tokens(&mut value, definition.key.module, mark);
+                Some(value)
+            }
+            Err(message) => {
+                self.diagnostics.push(Diagnostic::new(
+                    call_span.clone(),
+                    format!("compiled macro `{}` failed: {message}", definition.key.name),
+                ));
+                None
+            }
+        })
     }
 
     /// Records a modifier call: its argument, when it has one, and the item.
@@ -144,21 +266,7 @@ impl MacroExpander {
         if !recording() {
             return None;
         }
-        let mut arguments = Vec::new();
-        if let Some((value, syntax)) = argument {
-            arguments.push(ArgTree::Group(trimmed(syntax), Box::new(arg_tree(value)?)));
-        }
-        arguments.push(ArgTree::Node(trimmed(super::syntax_ops::item_syntax(item))));
-        self.record_trees(definition, arguments, call_span)
-    }
-
-    fn record_values(
-        &mut self,
-        definition: &MacroDefinition,
-        values: &[Value],
-        call_span: &Span,
-    ) -> Option<usize> {
-        let arguments = values.iter().map(arg_tree).collect::<Option<Vec<_>>>()?;
+        let arguments = modifier_arguments(argument, item)?;
         self.record_trees(definition, arguments, call_span)
     }
 
@@ -178,6 +286,8 @@ impl MacroExpander {
                 arguments,
                 result: definition.result.clone(),
                 interpreted: None,
+                elapsed: None,
+                started: std::time::Instant::now(),
             });
             Some(calls.len() - 1)
         })
@@ -190,10 +300,44 @@ impl MacroExpander {
         };
         RECORDED.with(|recorded| {
             if let Some(call) = recorded.borrow_mut().as_mut().and_then(|calls| calls.get_mut(index)) {
+                call.elapsed = Some(call.started.elapsed());
                 call.interpreted = Some(ExpandedSyntax(result));
             }
         });
     }
+}
+
+/// A modifier call's trees: its argument, when it has one, and the item.
+///
+/// The interpreter binds a modifier's `Parenthesized<…>` argument to what is
+/// inside the parentheses. Its declared type is the group, so the tree is the
+/// group, around the argument's parenthesized syntax.
+fn modifier_arguments(argument: Option<(&Value, &Syntax)>, item: &Item) -> Option<Vec<ArgTree>> {
+    let mut arguments = Vec::new();
+    if let Some((value, syntax)) = argument {
+        arguments.push(ArgTree::Group(trimmed(syntax), Box::new(arg_tree(value)?)));
+    }
+    arguments.push(ArgTree::Node(trimmed(&modified_syntax(item)?)));
+    Some(arguments)
+}
+
+/// The fragment of the item a modifier is applied to. A modified item keeps
+/// the syntax it was read with after its outer modifiers are taken off, so
+/// the fragment starts at the first modifier still on it.
+fn modified_syntax(item: &Item) -> Option<Syntax> {
+    let Item::Modified(modified) = item else {
+        return Some(super::syntax_ops::item_syntax(item).clone());
+    };
+    let first = &modified.modifiers.first()?.syntax;
+    let whole = &modified.syntax;
+    if !std::ptr::eq(first.token_stream().as_ptr(), whole.token_stream().as_ptr())
+        || !whole.token_range.contains(&first.token_range.start)
+    {
+        return None;
+    }
+    let mut syntax = whole.clone();
+    syntax.token_range = first.token_range.start..whole.token_range.end;
+    Some(syntax)
 }
 
 /// The tree of a value the interpreter binds to a parameter.
@@ -230,6 +374,17 @@ fn arg_tree(value: &Value) -> Option<ArgTree> {
                 .map(|item| ArgTree::Node(trimmed(super::syntax_ops::item_syntax(item))))
                 .collect(),
         ),
+        // A doc comment is a modifier with no tokens of its own, and a
+        // visibility's syntax need not spell it, so both are written out.
+        Value::Syntax(SyntaxValue::Modifier(modifier)) if modifier.invocation.doc.is_some() => {
+            let doc = modifier.invocation.doc.as_deref().unwrap_or_default();
+            ArgTree::Node(written(&format!("///{doc}\n")))
+        }
+        Value::Syntax(SyntaxValue::Visibility(visibility)) => ArgTree::Node(written(match visibility.kind {
+            staple_syntax::VisibilityKind::Public => "pub",
+            staple_syntax::VisibilityKind::Package => "pub(package)",
+            staple_syntax::VisibilityKind::Private => "",
+        })),
         Value::Syntax(value) => ArgTree::Node(trimmed(value.syntax()?)),
         Value::Nominal(name, _) if name == "None" => ArgTree::Absent,
         Value::Nominal(name, value) if name == "Some" => arg_tree(value)?,
@@ -246,6 +401,55 @@ fn arg_tree(value: &Value) -> Option<ArgTree> {
         } => separated_tree(elements, separator, *trailing)?,
         _ => return None,
     })
+}
+
+/// The marks of the quotations one call made, from the result's tokens.
+///
+/// A quotation stamps every token it writes, and the identifiers and
+/// literals the call constructs share one more mark of the call. Only a
+/// quotation writes keywords and punctuation, so a mark one of those carries
+/// is a quotation's. The interpreter splices a constructed identifier without
+/// renaming it.
+fn quotation_marks(value: &SyntaxValue, marks: std::ops::Range<u64>) -> HashSet<u64> {
+    let mut quoted = HashSet::new();
+    let mut add = |syntax: &Syntax| {
+        quoted.extend(
+            syntax
+                .tokens()
+                .iter()
+                .filter(|token| {
+                    !token.kind.is_trivia()
+                        && !matches!(
+                            token.kind,
+                            TokenKind::Identifier
+                                | TokenKind::String
+                                | TokenKind::Char
+                                | TokenKind::Byte
+                                | TokenKind::Integer
+                                | TokenKind::Float
+                        )
+                })
+                .filter_map(|token| token.hygiene)
+                .map(|(_, mark)| mark)
+                .filter(|mark| marks.contains(mark)),
+        );
+    };
+    match value {
+        SyntaxValue::Items(items) => items
+            .iter()
+            .for_each(|item| add(super::syntax_ops::item_syntax(item))),
+        value => {
+            if let Some(syntax) = value.syntax() {
+                add(syntax);
+            }
+        }
+    }
+    quoted
+}
+
+/// A fragment of new tokens, for a value no source spells.
+fn written(text: &str) -> Syntax {
+    super::syntax_ops::syntax_from_text(text, &mut 0)
 }
 
 /// A fragment without the trivia around it, which separates an argument from
@@ -285,7 +489,6 @@ fn separated_tree(elements: &[Value], separator: &Value, trailing: bool) -> Opti
 /// it, as it does an interpreted one. A `Sequence<Item>` is a list of items.
 /// Every other category is parsed as the interpreter parses that category's
 /// arguments.
-#[allow(dead_code)] // Only the test harness reads compiled results so far.
 pub(crate) fn compiled_result(
     result: &MetaType,
     syntax: Syntax,
@@ -362,3 +565,4 @@ mod tests {
         assert!(read(MetaType::Sequence(Box::new(MetaType::Item)), "type =").is_err());
     }
 }
+

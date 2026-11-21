@@ -9,7 +9,10 @@
 //! Syntax crosses as token fragments, not as trees. A fragment carries its
 //! tokens, each with its kind, text, span, origin and hygiene, and the
 //! fragment's own span, definition module, expansion mark and identifier
-//! origins. The receiver parses a fragment when it needs a node, and the
+//! origins. A fragment that is a slice of a longer stream, such as an argument
+//! cut from its file, also carries where in that stream it starts, which the
+//! receiver rebuilds as trivia (see [`stream_prefix`]). The receiver parses a
+//! fragment when it needs a node, and the
 //! parent reads a result by the macro's declared category, so a node's id and
 //! its `pipe_stage` and `implied` flags don't cross: the receiver numbers the
 //! nodes it parses.
@@ -402,7 +405,7 @@ impl Writer {
     }
 
     /// flags(module, mark) span [module] [mark] origins(count (name span)*)
-    /// tokens(count token*)
+    /// offset [line column] tokens(count token*)
     ///
     /// token = kind:u8 flags(origin, hygiene):u8 text start length [origin]
     /// [module mark], with each token's start relative to the end of the
@@ -429,6 +432,24 @@ impl Writer {
             self.span(span);
         }
         let tokens = syntax.tokens();
+        // Where the slice starts in its stream: the offset, then the line and
+        // column there, or 0 alone for a fragment that starts its stream.
+        let offset = tokens.first().map_or(0, |token| token.span.start);
+        self.usize(offset);
+        if offset > 0 {
+            let before = &syntax.token_stream()[..syntax.token_range.start];
+            let (mut line, mut column) = (1usize, 1usize);
+            for character in before.iter().flat_map(|token| token.text.chars()) {
+                if character == '\n' {
+                    line += 1;
+                    column = 1;
+                } else {
+                    column += 1;
+                }
+            }
+            self.usize(line);
+            self.usize(column);
+        }
         self.usize(tokens.len());
         let mut previous_end = 0;
         for token in tokens {
@@ -489,6 +510,39 @@ impl Writer {
         self.span(&context.call_site);
         self.varint(context.identifier_mark.map_or(0, |mark| mark + 1));
     }
+}
+
+/// Trivia standing in for the part of a stream before a slice: `offset` bytes
+/// that end at `line` and `column`.
+///
+/// A token's span is an offset into the text of its whole stream, which the
+/// parser rebuilds from the stream's tokens. A slice crosses without the rest
+/// of its file, so the receiver puts this in front of it: spaces, then a
+/// newline per line before the slice, then spaces up to its column. The
+/// slice's spans keep their values, and positions in diagnostics keep their
+/// line and column.
+fn stream_prefix(offset: usize, line: usize, column: usize) -> Result<Vec<SyntaxToken>, WireError> {
+    let newlines = line.checked_sub(1).ok_or(WireError::Invalid("line", 0))?;
+    let indent = column.checked_sub(1).ok_or(WireError::Invalid("column", 0))?;
+    let filler = offset
+        .checked_sub(newlines)
+        .and_then(|rest| rest.checked_sub(indent))
+        .ok_or(WireError::Invalid("slice offset", offset as u64))?;
+    let mut tokens = Vec::new();
+    let mut start = 0;
+    for (kind, text) in [
+        (TokenKind::Whitespace, " ".repeat(filler)),
+        (TokenKind::Newline, "\n".repeat(newlines)),
+        (TokenKind::Whitespace, " ".repeat(indent)),
+    ] {
+        if text.is_empty() {
+            continue;
+        }
+        let end = start + text.len();
+        tokens.push(SyntaxToken { kind, text, span: start..end, origin: None, hygiene: None });
+        start = end;
+    }
+    Ok(tokens)
 }
 
 struct Reader<'a> {
@@ -613,8 +667,16 @@ impl<'a> Reader<'a> {
             let name = self.string()?.to_string();
             identifier_origins.push((name, self.span()?));
         }
+        let offset = self.usize()?;
+        let mut tokens = if offset > 0 {
+            let (line, column) = (self.usize()?, self.usize()?);
+            stream_prefix(offset, line, column)?
+        } else {
+            Vec::new()
+        };
+        let first = tokens.len();
         let count = self.length()?;
-        let mut tokens = Vec::with_capacity(count);
+        tokens.reserve(count);
         let mut previous_end = 0;
         for _ in 0..count {
             let code = self.byte()?;
@@ -645,7 +707,7 @@ impl<'a> Reader<'a> {
             // The receiver numbers the nodes it parses.
             id: SyntaxId(0),
             span,
-            token_range: 0..tokens.len(),
+            token_range: first..tokens.len(),
             tokens: tokens.into(),
             definition_module,
             expansion_mark,
@@ -719,11 +781,43 @@ mod tests {
             "{what}: origins"
         );
         assert_eq!(original.tokens(), decoded.tokens(), "{what}: tokens");
+        assert_eq!(decoded.token_range.end, decoded.tokens.len(), "{what}: token range");
+        // What stands in front of a slice is as long as what was in front of
+        // it, so spans index the rebuilt stream's text.
+        let prefix: usize = decoded.token_stream()[..decoded.token_range.start]
+            .iter()
+            .map(|token| token.text.len())
+            .sum();
         assert_eq!(
-            decoded.token_range,
-            0..decoded.tokens.len(),
-            "{what}: token range"
+            prefix,
+            original.tokens().first().map_or(0, |token| token.span.start),
+            "{what}: prefix"
         );
+    }
+
+    #[test]
+    fn a_slice_parses_and_reports_where_it_was() {
+        use crate::macro_expand::syntax_ops::{describe_position, syntax_slice};
+
+        let mut next = 0;
+        let file = syntax_from_text("def a = 1\n\n// é\ndef b = (x + 2) * 3\n", &mut next);
+        let start = file.tokens().iter().position(|token| token.text == "(").unwrap();
+        let end = file.tokens().iter().rposition(|token| token.text == "3").unwrap() + 1;
+        let slice = syntax_slice(&file, start, end);
+        let Message::Result { syntax: decoded, .. } =
+            round_trip(&Message::Result { syntax: slice.clone(), next_mark: 1 })
+        else {
+            panic!("a result came back as something else");
+        };
+        assert_same_fragment(&slice, &decoded, "slice");
+        assert_eq!(describe_position(&decoded, 0), describe_position(&slice, 0));
+        assert_eq!(describe_position(&decoded, 0), "line 4, column 9");
+        let parsed = staple_syntax::parse_expression_fragment(&decoded, &mut next)
+            .expect("the slice parses");
+        assert_eq!(parsed.syntax().text(), "(x + 2) * 3");
+        let original = staple_syntax::parse_expression_fragment(&slice, &mut next)
+            .expect("the original slice parses");
+        assert_eq!(parsed.syntax().span, original.syntax().span);
     }
 
     fn assert_same_tree(original: &ArgTree, decoded: &ArgTree, what: &str) {

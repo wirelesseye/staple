@@ -165,15 +165,8 @@ pub(crate) fn fill_quote<E>(
         splice(&input[name_at].text, &mut output)?;
         cursor = name_at + 1;
     }
-    let mut offset = 0;
-    let mut source = String::new();
-    for token in &mut output {
-        let start = offset;
-        source.push_str(&token.text);
-        offset += token.text.len();
-        token.span = start..offset;
-    }
-    let source: Arc<str> = Arc::from(source);
+    let offset = number_stream(&mut output);
+    let source: Arc<str> = Arc::from(output.iter().map(|token| token.text.as_str()).collect::<String>());
     let mut syntax = contents.clone();
     syntax.id = id;
     syntax.tokens = Arc::from(output);
@@ -184,6 +177,23 @@ pub(crate) fn fill_quote<E>(
         location: None,
     };
     Ok(syntax.generated(module, mark))
+}
+
+/// Gives the tokens of a new stream spans that index its own text, and returns
+/// the text's length.
+///
+/// A token's span is an offset into the text of its whole stream, which the
+/// parser rebuilds from the stream's tokens. A stream joined from other
+/// fragments has their spans until then; [`append_syntax_tokens`] has already
+/// kept where each token came from in its origin.
+pub(crate) fn number_stream(tokens: &mut [SyntaxToken]) -> usize {
+    let mut offset = 0;
+    for token in tokens {
+        let start = offset;
+        offset += token.text.len();
+        token.span = start..offset;
+    }
+    offset
 }
 
 /// Appends `syntax`'s tokens to `output`, filling in the hygiene and origin of

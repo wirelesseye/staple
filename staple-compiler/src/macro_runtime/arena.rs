@@ -10,8 +10,13 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::{Arc, Weak};
 
-use staple_syntax::{Expression, Item, ModifierInvocation, Pattern, Syntax, Type, TypeBody};
+use staple_syntax::{
+    Expression, Item, ModifierInvocation, Pattern, Span, Syntax, SyntaxToken, Type, TypeBody,
+};
+
+use crate::macro_expand::syntax_ops::number_stream;
 
 /// A fragment parsed as one grammar category. The arena keeps it beside the
 /// fragment's handle, so asking several questions of one fragment parses it once.
@@ -124,6 +129,9 @@ pub(crate) struct Arena {
     /// The child fragments a part accessor handed out for a handle, so a
     /// rebuild compares against them without parsing the origin again.
     parts: HashMap<u64, Vec<Syntax>>,
+    /// Streams whose spans [`own_offsets`] renumbered, by the stream they
+    /// replace, so the nodes of one parse share one copy.
+    renumbered: Vec<(Weak<[SyntaxToken]>, Arc<[SyntaxToken]>)>,
 }
 
 impl Arena {
@@ -136,11 +144,55 @@ impl Arena {
         self.entries.clear();
         self.parsed.clear();
         self.parts.clear();
+        self.renumbered.clear();
         self.generation = self.generation.wrapping_add(1);
     }
 
-    pub(crate) fn insert_syntax(&mut self, syntax: Syntax) -> Handle {
+    pub(crate) fn insert_syntax(&mut self, mut syntax: Syntax) -> Handle {
+        self.own_offsets(&mut syntax);
         self.insert(Entry::Syntax(syntax))
+    }
+
+    /// Makes `syntax`'s spans index its own stream's text.
+    ///
+    /// The parser builds the nodes of a fragment parse over a copy of just the
+    /// fragment's tokens, whose spans still index the whole file. Parsing such
+    /// a node again reads the text between its tokens from the copy, which
+    /// doesn't have it. Compiled code does parse nodes again, so a stream that
+    /// doesn't start at offset 0 gets fresh spans here, and each token keeps
+    /// where it came from as its origin, as joining fragments does.
+    fn own_offsets(&mut self, syntax: &mut Syntax) {
+        if syntax.token_stream().first().is_none_or(|token| token.span.start == 0) {
+            return;
+        }
+        let stream = Arc::downgrade(&syntax.tokens);
+        self.renumbered.retain(|(replaced, _)| replaced.strong_count() > 0);
+        if let Some((_, renumbered)) = self
+            .renumbered
+            .iter()
+            .find(|(replaced, _)| Weak::ptr_eq(replaced, &stream))
+        {
+            syntax.tokens = Arc::clone(renumbered);
+            return;
+        }
+        let source = match &syntax.span {
+            Span::User { source, .. } => source.clone(),
+            Span::Compiler => None,
+        };
+        let mut tokens = syntax.token_stream().to_vec();
+        for token in &mut tokens {
+            if token.origin.is_none() && !token.kind.is_trivia() {
+                token.origin = Some(Span::User {
+                    source: source.clone(),
+                    range: token.span.clone(),
+                    location: None,
+                });
+            }
+        }
+        number_stream(&mut tokens);
+        let renumbered: Arc<[SyntaxToken]> = Arc::from(tokens);
+        self.renumbered.push((stream, Arc::clone(&renumbered)));
+        syntax.tokens = renumbered;
     }
 
     pub(crate) fn insert_text(&mut self, text: impl Into<Vec<u8>>) -> Handle {

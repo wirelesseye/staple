@@ -4330,6 +4330,21 @@ fn prefix_parses_stop_where_the_grammar_stops() {
 }
 
 #[test]
+fn a_fragment_of_only_a_doc_comment_is_a_doc_modifier() {
+    // A doc comment is trivia, so a fragment holding one has no tokens to
+    // read; it is still a modifier, and its line break stays with it.
+    let mut ids = 1_000_000;
+    let syntax = delimited_fragment("let x = (\n/// One line.\n//// Not a doc.\n)\n", 0);
+    let (modifier, consumed) = parse_modifier_prefix(&syntax, &mut ids).unwrap();
+    assert_eq!(modifier.name, "doc");
+    assert_eq!(modifier.doc.as_deref(), Some(" One line."));
+    assert_eq!(consumed_text(&syntax, consumed), "\n/// One line.\n");
+
+    let syntax = delimited_fragment("let x = (\n//// Not a doc.\n)\n", 0);
+    assert!(parse_modifier_prefix(&syntax, &mut ids).is_err());
+}
+
+#[test]
 fn prefix_parsed_blocks_end_statements_at_line_breaks() {
     // A macro argument fragment starts without the source file's statement
     // context; a block inside it still ends a statement at a line break.

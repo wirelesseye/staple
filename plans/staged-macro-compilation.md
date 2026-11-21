@@ -388,6 +388,14 @@ Breakdown and status: [`staged-macro-compilation-phase-3.md`](staged-macro-compi
   in `staple-compiler/tests` (about 450 macro tests), and the examples. Compare
   the expanded syntax trees from `render_expanded_module`, normalized for
   syntax ids. Mismatches are fixed or documented as intended changes.
+  `render_expanded_module` can't render every interpreted expansion: a
+  quotation substituted as a tree keeps its template's `$name` tokens. Phase
+  3's comparison (`macro_runtime/compare.rs`) compares debug trees instead.
+- Expected differences, found in Phase 3 task 11 and normalized there: the
+  `implied` flag on parser-supplied nodes, a `resolution_name` equal to the
+  name, a single-name `let $pattern = …` read back as a plain `let`, and a
+  modifier's `Parenthesized<Expr>` argument spliced as `(42)` where the
+  interpreter writes `42`.
 - Make `compiled` the default when the corpus agrees. Keep `interp` for one
   release cycle as an escape hatch.
 - The LSP uses the compiled engine with recovery. If a macro fails to compile

@@ -15,7 +15,7 @@ use staple_syntax::{
 use super::arena::{self, Handle, Node, NodeKind};
 use crate::macro_expand::syntax_ops::{
     GroupKind, LeafFailure, LeafKind, append_syntax_tokens, describe_position,
-    is_structured_product_type, parse_group, parse_leaf, parse_syntax_node_atom,
+    is_structured_product_type, number_stream, parse_group, parse_leaf, parse_syntax_node_atom,
     syntax_from_text as lex_syntax_from_text, syntax_slice,
 };
 
@@ -1296,6 +1296,7 @@ fn syntax_from_parts(origin: Option<&Syntax>, parts: &[(u64, Option<Vec<SyntaxTo
             append_syntax_tokens(&mut tokens, &syntax, None);
         }
     }
+    number_stream(&mut tokens);
     arena::with_arena(|arena| {
         let mut syntax = Syntax::synthetic(
             SyntaxId(arena.next_syntax_id()),
@@ -1382,6 +1383,7 @@ extern "C" fn call_syntax(origin: u64, callee: u64, argument: u64) -> u64 {
                         append_syntax_tokens(&mut tokens, &argument_syntax, None);
                     }
                 }
+                number_stream(&mut tokens);
                 let mut result = Syntax::synthetic(
                     SyntaxId(arena.next_syntax_id()),
                     syntax.span.clone(),
@@ -2383,7 +2385,7 @@ fn literal_tokens(text: &str) -> Vec<SyntaxToken> {
 
 /// Builds a fragment from literal and child parts, returning the origin when
 /// the rebuilt text is unchanged.
-fn finish_syntax(origin: u64, origin_syntax: Option<&Syntax>, tokens: Vec<SyntaxToken>) -> u64 {
+fn finish_syntax(origin: u64, origin_syntax: Option<&Syntax>, mut tokens: Vec<SyntaxToken>) -> u64 {
     if let Some(syntax) = origin_syntax {
         let rebuilt: Vec<TokenKey<'_>> = tokens
             .iter()
@@ -2400,6 +2402,7 @@ fn finish_syntax(origin: u64, origin_syntax: Option<&Syntax>, tokens: Vec<Syntax
             return origin;
         }
     }
+    number_stream(&mut tokens);
     arena::with_arena(|arena| {
         let mut syntax = Syntax::synthetic(
             SyntaxId(arena.next_syntax_id()),

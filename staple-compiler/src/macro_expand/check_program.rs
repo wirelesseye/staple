@@ -416,7 +416,12 @@ fn macro_function(
     syntax_module: Option<ModuleId>,
 ) -> Option<Binding> {
     let mut value = declaration.value.clone()?;
-    if let Some(slots) = declaration.annotation.as_ref().and_then(slot_count)
+    let slots = match &declaration.annotation {
+        Some(annotation) => slot_count(annotation),
+        // Without a signature, every function the value nests is a slot.
+        None => Some(nested_functions(&value).len()),
+    };
+    if let Some(slots) = slots
         && slots > 1
     {
         merge_slots(&mut value, slots, next_syntax_id);
@@ -469,6 +474,49 @@ fn signature_parameters(parameter: &staple_syntax::Type) -> Vec<&staple_syntax::
         }
         staple_syntax::Type::Product(product) if product.elements.is_empty() => Vec::new(),
         parameter => vec![parameter],
+    }
+}
+
+/// The functions a macro's value nests, outermost first. A macro written
+/// `(a; b) => body` is parsed one function per slot, and without a signature
+/// each of them is a parameter.
+fn nested_functions(value: &Expression) -> Vec<&staple_syntax::FunctionExpression> {
+    let mut functions = Vec::new();
+    let mut current = value;
+    while let Expression::Function(function) = current {
+        functions.push(function.as_ref());
+        current = &function.body;
+    }
+    functions
+}
+
+/// The parameter types of a macro without a signature, one per slot, when
+/// every slot is typed. A slot without a type has nothing to decode. Slots are
+/// nested functions, or the elements of one function's slotted product.
+fn lambda_parameters(value: &Expression) -> Option<Vec<staple_syntax::Type>> {
+    fn typed(pattern: &Pattern) -> Option<staple_syntax::Type> {
+        match pattern {
+            Pattern::Product(product) if product.annotation.is_none() => {
+                product.elements.iter().try_for_each(|element| typed(element).map(drop))?;
+                Some(pattern.ty())
+            }
+            Pattern::Binding(_) | Pattern::Wildcard(_) | Pattern::At(_) | Pattern::Product(_) => {
+                match pattern.ty() {
+                    staple_syntax::Type::Inferred(_) => None,
+                    ty => Some(ty),
+                }
+            }
+            _ => None,
+        }
+    }
+    match nested_functions(value).as_slice() {
+        [] => None,
+        // One function can also take every slot as a slotted product.
+        [function] => match &function.pattern {
+            Pattern::Product(product) if product.slotted => product.elements.iter().map(typed).collect(),
+            pattern => Some(vec![typed(pattern)?]),
+        },
+        functions => functions.iter().map(|function| typed(&function.pattern)).collect(),
     }
 }
 
@@ -605,8 +653,12 @@ fn entry_function(
     next_syntax_id: &mut usize,
     syntax_module: ModuleId,
 ) -> Option<Binding> {
-    let staple_syntax::Type::Function(signature) = declaration.annotation.as_ref()? else {
-        return None;
+    let parameters = match (declaration.annotation.as_ref(), declaration.value.as_ref()) {
+        (Some(staple_syntax::Type::Function(signature)), _) => {
+            signature_parameters(&signature.parameter).into_iter().cloned().collect()
+        }
+        (None, Some(value)) => lambda_parameters(value)?,
+        _ => return None,
     };
     let mut builder = EntryBuilder {
         like: declaration.syntax.clone(),
@@ -615,7 +667,7 @@ fn entry_function(
     };
     let mut items = Vec::new();
     let mut decoded = Vec::new();
-    for (index, parameter) in signature_parameters(&signature.parameter).into_iter().enumerate() {
+    for (index, parameter) in parameters.iter().enumerate() {
         // The type is read again from its own tokens, so it has fresh ids and
         // resolves where the macro wrote it.
         let parameter = staple_syntax::parse_type_fragment(
@@ -956,14 +1008,14 @@ mod tests {
         let built = build(
             concat!(
                 "macro pair: (Ident; Option<Expr>) -> Expr = (name; value) => name\n",
-                "macro bare = () => 1\n",
-                "let a = pair x\nlet b = bare ()\n",
+                "macro bare = value => value\n",
+                "let a = pair x\nlet b = bare 1\n",
             ),
             CheckMode::Invoked,
         );
         let functions = function_names(entry_items(&built));
         assert!(functions.iter().any(|name| name.starts_with("entry#pair#")), "{functions:?}");
-        // A macro without a signature has no parameter types to decode.
+        // A macro with an untyped parameter has no parameter types to decode.
         assert!(!functions.iter().any(|name| name.starts_with("entry#bare#")), "{functions:?}");
         let entry = entry_items(&built)
             .iter()
@@ -1640,4 +1692,3 @@ fn merge_slots(value: &mut Expression, slots: usize, next_syntax_id: &mut usize)
     });
     *outer.body = body;
 }
-

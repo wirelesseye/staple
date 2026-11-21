@@ -368,7 +368,7 @@ mod tests {
 
     /// Compiles `source` once and runs each named zero-argument `I32` probe.
     fn run_probes(source: &str, probes: &[(&str, i32)]) {
-        let source = format!("use std.syntax.*\n{source}\nmacro touch = () => {}\n",
+        let source = format!("use std.syntax.*\n{source}\nmacro touch = () => {{\n    let _ = {}\n    syntax_from_string \"()\"\n}}\n",
             probes.iter().map(|(name, _)| format!("{name} ()")).collect::<Vec<_>>().join(" + "));
         let run = check_run_for(&source);
         let lowered = lower_run(&run).expect("the probes should lower");
@@ -654,7 +654,10 @@ def either: () -> I32 = () => match (Parse.parse_all.<Ident<"a" | "b">> (syntax_
     Ok _ => 1,
     ParseError _ => 0,
 }
-macro touch = () => { either () }
+macro touch = () => {
+    let _ = either ()
+    syntax_from_string "()"
+}
 "#;
         let run = check_run_for(source);
         let lowered = lower_run(&run).expect("the probe should lower");
@@ -1378,14 +1381,15 @@ def nested_sequence_clone: () -> I32 = () => {
     fn with_node_probes_threshold(threshold: Option<u64>, body: impl FnOnce(&Probes<'_, '_>)) {
         let library = library_with_origin_access();
         let source = format!(
-            "use std.syntax.*\nuse std.clone.Clone\n{NODE_PROBES}\nmacro touch = () => \
+            "use std.syntax.*\nuse std.clone.Clone\n{NODE_PROBES}\nmacro touch = () => {{\n    let _ = \
              (make_call (), clone_call (make_call ()), callee_is (make_call ()), \
              set_callee, make_body (), clone_body (make_body ()), body_call (make_body ()), \
              body_callee_is (make_body ()), set_body_callee, make_sequence (), \
              clone_sequence (make_sequence ()), sequence_rest (make_sequence ()), \
              sequence_callees_of (make_sequence ()), long_clone 1, nested_sequence_clone (), clone_through_collections (), \
              call_origin (make_call ()), sequence_origin (make_sequence ()), \
-             body_origin (make_body ()), with_call_origin, with_sequence_origin, with_body_origin)\n"
+             body_origin (make_body ()), with_call_origin, with_sequence_origin, with_body_origin)\n    \
+             syntax_from_string \"()\"\n}}\n"
         );
         let run = check_run_with_library(&source, &library);
         let lowered = lower_run(&run).expect("the node probes should lower");
@@ -1543,7 +1547,7 @@ def nested_sequence_clone: () -> I32 = () => {
         text.push_str("pub def clone_call_box: CallExpr -> CallExpr = value => __clone_syntax value\n");
         std::fs::write(&syntax, text).unwrap();
         let run = check_run_with_library(
-            "use std.syntax.*\nmacro touch = () => clone_call_box\n",
+            "use std.syntax.*\nmacro touch = () => {\n    let _ = clone_call_box\n    syntax_from_string \"()\"\n}\n",
             &library,
         );
         let diagnostics = lower_run(&run).err().expect("aliasing a box should not lower");
@@ -1694,7 +1698,7 @@ def from_entry: () -> Syntax = () => {
 macro touch = () => {
     let a = from_helper ()
     let b = from_entry ()
-    0
+    syntax_from_string "()"
 }
 "#;
         let run = check_run_for(source);

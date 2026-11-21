@@ -12,4 +12,6 @@ pub(crate) mod quote;
 pub(crate) mod wire;
 
 #[cfg(test)]
+pub(crate) mod compare;
+#[cfg(test)]
 pub(crate) mod harness;

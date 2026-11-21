@@ -357,7 +357,7 @@ pub fn parse_modifier_fragment(
     next_syntax_id: &mut usize,
 ) -> Result<ModifierInvocation, ParseError> {
     parse_fragment(syntax, false, next_syntax_id, |grammar| {
-        grammar.parse_modifier_invocation()
+        grammar.parse_modifier_or_doc()
     })
 }
 
@@ -495,7 +495,7 @@ pub fn parse_modifier_prefix(
     next_syntax_id: &mut usize,
 ) -> Result<(ModifierInvocation, usize), ParseError> {
     parse_fragment_with(syntax, false, next_syntax_id, false, |grammar| {
-        grammar.parse_modifier_invocation()
+        grammar.parse_modifier_or_doc()
     })
 }
 
@@ -949,6 +949,48 @@ impl Grammar {
             ));
         }
         Err(self.error("expected `package` or `)` in visibility modifier"))
+    }
+
+    /// A modifier read on its own. A fragment holding nothing but a doc
+    /// comment reads as the `doc` modifier the comment is before an item, so
+    /// a doc modifier written back out as its comment reads the same again.
+    fn parse_modifier_or_doc(&mut self) -> Result<ModifierInvocation, ParseError> {
+        if self.peek().is_none() {
+            let mut line_start = true;
+            for index in self.position..self.tokens.len() {
+                let token = &self.tokens[index];
+                match token.kind {
+                    TokenKind::Newline => line_start = true,
+                    TokenKind::Whitespace => {}
+                    TokenKind::LineComment => {
+                        if line_start
+                            && !token.text.starts_with("////")
+                            && let Some(doc) = token.text.strip_prefix("///")
+                        {
+                            let doc = doc.to_owned();
+                            // The line break ends the comment, so it stays
+                            // with it wherever the modifier is spliced.
+                            self.position = index + 1;
+                            if self.tokens.get(self.position).map(|token| token.kind)
+                                == Some(TokenKind::Newline)
+                            {
+                                self.position += 1;
+                            }
+                            return Ok(ModifierInvocation {
+                                syntax: self.syntax(index),
+                                namespace: None,
+                                name: "doc".to_owned(),
+                                argument: None,
+                                doc: Some(doc),
+                            });
+                        }
+                        line_start = false;
+                    }
+                    _ => line_start = false,
+                }
+            }
+        }
+        self.parse_modifier_invocation()
     }
 
     fn parse_modifier_invocation(&mut self) -> Result<ModifierInvocation, ParseError> {
