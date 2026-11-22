@@ -310,6 +310,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(Message, &[u8]), WireError> {
 
 /// Encodes one syntax fragment with [`WIRE_VERSION`] and its string table, for
 /// manifests and template tables.
+#[cfg_attr(not(test), allow(dead_code))] // Only manifests use these so far.
 pub(crate) fn encode_fragment(syntax: &Syntax) -> Vec<u8> {
     let mut writer = Writer::default();
     writer.fragment(syntax);
@@ -325,6 +326,7 @@ pub(crate) fn encode_fragment(syntax: &Syntax) -> Vec<u8> {
 }
 
 /// Decodes a syntax fragment written by [`encode_fragment`].
+#[cfg_attr(not(test), allow(dead_code))] // Only manifests use these so far.
 pub(crate) fn decode_fragment(bytes: &[u8]) -> Result<Syntax, WireError> {
     let mut reader = Reader {
         bytes,

@@ -149,6 +149,7 @@ fn compare_on_this_thread(source: &str, compiled: Compiled) -> Comparison {
             package,
             program,
             templates,
+            expanded: interpreted.clone(),
         })
         .expect("the compiled package has macros");
     let interpreted_diagnostics = resolve_and_check(&interpreted, analysis.next_syntax_id);

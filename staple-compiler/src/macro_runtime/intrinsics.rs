@@ -33,6 +33,10 @@ pub(crate) struct Intrinsic {
     /// implementation points at a stub that stops the program with its name.
     #[allow(dead_code)] // Only the test harness links against the table so far.
     address: *const (),
+    /// Whether `address` is a host implementation rather than the stub. An
+    /// interpreter-only declaration and its compiled replacement may share a
+    /// symbol; only the implemented entry is ever bound.
+    implemented: bool,
 }
 
 impl Intrinsic {
@@ -40,6 +44,25 @@ impl Intrinsic {
     pub(crate) fn address(self) -> usize {
         self.address as usize
     }
+
+    #[allow(dead_code)] // Only the test harness links against the table so far.
+    pub(crate) fn implemented(self) -> bool {
+        self.implemented
+    }
+}
+
+/// The entry a library or the JIT binds `symbol` to: its host
+/// implementation, or the stub when it has none.
+#[allow(dead_code)] // Used by library binding and the harness.
+pub(crate) fn binding_for(symbol: &str) -> Option<Intrinsic> {
+    let mut entries = INTRINSICS.iter().filter(|intrinsic| intrinsic.symbol == symbol);
+    let first = *entries.next()?;
+    Some(
+        std::iter::once(first)
+            .chain(entries.copied())
+            .find(|intrinsic| intrinsic.implemented)
+            .unwrap_or(first),
+    )
 }
 
 /// Builds one table entry, with a stand-in that names it.
@@ -52,6 +75,7 @@ macro_rules! intrinsic {
             name: $name,
             symbol: $symbol,
             address: missing as *const (),
+            implemented: false,
         }
     }};
     ($name:literal, $symbol:literal, $function:path) => {
@@ -59,6 +83,7 @@ macro_rules! intrinsic {
             name: $name,
             symbol: $symbol,
             address: $function as *const (),
+            implemented: true,
         }
     };
 }
@@ -769,14 +794,11 @@ extern "C" fn compile_error_intrinsic(message: *const u8, message_length: usize)
     COMPILE_ERROR.with_borrow_mut(|slot| *slot = Some(text));
 }
 
-/// Resolves a host intrinsic symbol name to its implementation address.
-/// Searches from the end so compiled overrides win over interpreted stubs.
+/// Resolves a host intrinsic symbol name to the address it binds to (see
+/// [`binding_for`]).
 #[allow(dead_code)] // Used by library binding and the server.
 pub(crate) fn resolve_intrinsic(symbol: &str) -> Option<*const c_void> {
-    INTRINSICS
-        .iter()
-        .rfind(|intrinsic| intrinsic.symbol == symbol)
-        .map(|intrinsic| intrinsic.address() as *const c_void)
+    binding_for(symbol).map(|intrinsic| intrinsic.address() as *const c_void)
 }
 
 /// The cursor's position within its fragment.
@@ -3223,6 +3245,36 @@ mod tests {
         for intrinsic in INTRINSICS {
             assert!(intrinsic.symbol.starts_with("__staple_syntax_"));
             assert!(names.insert(intrinsic.name), "duplicate {}", intrinsic.name);
+        }
+    }
+
+    #[test]
+    fn a_shared_symbol_binds_to_its_one_implementation() {
+        let mut implemented = std::collections::HashMap::new();
+        for intrinsic in INTRINSICS.iter().filter(|intrinsic| intrinsic.implemented()) {
+            assert!(
+                implemented.insert(intrinsic.symbol, intrinsic.name).is_none(),
+                "two implementations of {}",
+                intrinsic.symbol
+            );
+        }
+        for intrinsic in INTRINSICS {
+            let binding = binding_for(intrinsic.symbol).expect("every symbol binds");
+            assert_eq!(
+                binding.implemented(),
+                implemented.contains_key(intrinsic.symbol),
+                "{} binds to its implementation when it has one",
+                intrinsic.symbol
+            );
+        }
+        // An interpreter-only declaration listed before its compiled
+        // replacement doesn't shadow it.
+        for (symbol, name) in [
+            ("__staple_syntax_compile_error", "__compile_error"),
+            ("__staple_syntax_is_empty", "__is_empty"),
+            ("__staple_syntax_error_at", "__error_at"),
+        ] {
+            assert_eq!(binding_for(symbol).map(|binding| binding.name), Some(name));
         }
     }
 

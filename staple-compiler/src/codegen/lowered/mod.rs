@@ -2809,14 +2809,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let pointer = context.ptr_type(inkwell::AddressSpace::default());
         let builder = &self.backend.builder;
 
-        // Host symbols: each foreign declaration becomes an internal thunk
-        // that calls through a pointer `__staple_library_bind` fills in.
+        // Host symbols: each foreign declaration becomes a hidden thunk that
+        // calls through a pointer `__staple_library_bind` fills in. Binding
+        // returns the name of the first symbol the resolver has no address
+        // for, or null when every symbol is bound.
         let bind = self.backend.llvm_module.add_function(
             "__staple_library_bind",
-            void.fn_type(&[pointer.into()], false),
+            pointer.fn_type(&[pointer.into()], false),
             None,
         );
-        let bind_entry = context.append_basic_block(bind, "entry");
+        let mut bind_block = context.append_basic_block(bind, "entry");
         let resolve = bind
             .get_nth_param(0)
             .expect("bind has one parameter")
@@ -2845,7 +2847,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             );
             slot.set_linkage(inkwell::module::Linkage::Internal);
             slot.set_initializer(&pointer.const_null());
-            builder.position_at_end(bind_entry);
+            builder.position_at_end(bind_block);
             let spelled = builder
                 .build_global_string_ptr(name, &format!("__staple_host_name.{name}"))
                 .map_err(compiler_diagnostic)?;
@@ -2859,10 +2861,25 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .map_err(compiler_diagnostic)?
                 .try_as_basic_value()
                 .basic()
-                .expect("resolver returns a pointer");
+                .expect("resolver returns a pointer")
+                .into_pointer_value();
+            let missing = builder
+                .build_is_null(resolved, "missing")
+                .map_err(compiler_diagnostic)?;
+            let unresolved = context.append_basic_block(bind, "unresolved");
+            let bound = context.append_basic_block(bind, "bound");
+            builder
+                .build_conditional_branch(missing, unresolved, bound)
+                .map_err(compiler_diagnostic)?;
+            builder.position_at_end(unresolved);
+            builder
+                .build_return(Some(&spelled.as_pointer_value()))
+                .map_err(compiler_diagnostic)?;
+            builder.position_at_end(bound);
             builder
                 .build_store(slot.as_pointer_value(), resolved)
                 .map_err(compiler_diagnostic)?;
+            bind_block = bound;
 
             let body = context.append_basic_block(function, "entry");
             builder.position_at_end(body);
@@ -2889,8 +2906,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .as_global_value()
                 .set_visibility(inkwell::GlobalVisibility::Hidden);
         }
-        builder.position_at_end(bind_entry);
-        builder.build_return(None).map_err(compiler_diagnostic)?;
+        builder.position_at_end(bind_block);
+        builder
+            .build_return(Some(&pointer.const_null()))
+            .map_err(compiler_diagnostic)?;
 
         // The `exit` trap: `exit` longjmps back into the active entry shim.
         // Staple code has no unwinding, so the frames skipped are only
@@ -2917,9 +2936,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 void.fn_type(&[pointer.into(), int.into()], false),
                 None,
             );
-            if let Some(exit) = self.backend.llvm_module.get_function("exit")
-                && exit.count_basic_blocks() == 0
-            {
+            // Defined even when nothing in this module calls `exit`: `panic`
+            // usually lives in a prebuilt standard-library object linked into
+            // the same library, and its `exit` must bind here, not to libc.
+            let exit = self.backend.llvm_module.get_function("exit").unwrap_or_else(|| {
+                self.backend.llvm_module.add_function(
+                    "exit",
+                    void.fn_type(&[int.into()], false),
+                    None,
+                )
+            });
+            if exit.count_basic_blocks() == 0 {
                 let body = context.append_basic_block(exit, "entry");
                 builder.position_at_end(body);
                 let status = exit.get_nth_param(0).expect("exit takes a status");

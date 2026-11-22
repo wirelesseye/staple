@@ -500,8 +500,8 @@ Update this section as you work (see "Rules for the implementor").
 
 | Task | Status | Commit | Notes |
 |---|---|---|---|
-| 1. Library emission | done | `bac82ed7` | `LibrarySpec`, `__staple_library_init`, `__staple_library_bind`, `exit` trap, `__staple_entry.<n>` shims, `--emit dylib`, `@compiled_only compile_error`, and `dlopen`/`nm` tests. Internal generic trapping stubs (e.g. `__parse_primitive`) are skipped when binding host symbols. |
-| 2. Manifests and load-time mapping | done | `c10c1253` | `WIRE_VERSION` bumped to 2 with `encode_fragment`/`decode_fragment`; sidecar `.manifest` files (`manifest.rs`) store format/wire versions, `(package, path, macro, overload)` keys, shim symbols, and wire-encoded templates; `resolve` maps modules and macro declarations in the parent and reports missing keys as internal errors naming the library; cross-compilation hygiene test passes. |
+| 1. Library emission | done | `bac82ed7` | `LibrarySpec`, `__staple_library_init`, `__staple_library_bind`, `exit` trap, `__staple_entry.<n>` shims, `--emit dylib`, `@compiled_only compile_error`, and `dlopen`/`nm` tests. Internal generic trapping stubs (e.g. `__parse_primitive`) are skipped when binding host symbols. Review fixes: `exit` is always defined when trapped, bind returns the first unresolved name, shared host symbols bind to their implemented entry. See Findings. |
+| 2. Manifests and load-time mapping | done | `c10c1253` | `WIRE_VERSION` bumped to 2 with `encode_fragment`/`decode_fragment`; sidecar `.manifest` files (`manifest.rs`) store format/wire versions, `(package, path, macro, overload)` keys, shim symbols, and wire-encoded templates; `resolve` maps modules and macro declarations in the parent and reports missing keys as internal errors naming the library; cross-compilation hygiene test passes. Review fixes: keys come from the expanded program, templates drop compilation numbers. See Findings. |
 | 3. The server | not started | | |
 | 4. The client and failure handling | not started | | |
 | 5. Effects | not started | | |
@@ -539,3 +539,34 @@ _None yet._ Record:
 - the chosen optimization levels (task 11);
 - every difference between the engines with its reason (task 12);
 - anything that changes Phases 5 and 6.
+
+### Review of tasks 1 and 2
+
+- **Manifest keys come from the expanded program.** `build_manifest` counted
+  overloads in the program it was given, and the test gave it the check
+  program. A closure-only check program, which closure libraries use, declares
+  no macros at all, so the key was missing and the build failed. Keys are now
+  counted in the expanded program, which `resolve` also reads. `CheckRun` keeps
+  that program as `expanded`. A test builds a manifest from a closure-only run
+  where only the second overload is invoked.
+- **`exit` is defined whenever it is trapped.** The trap only gave `exit` a body
+  when the library's own module declared it. A closure library whose code never
+  names `exit` would have left `panic` in a linked standard-library object
+  calling libc's `exit`, ending the server.
+- **Binding reports a missing host function.** `__staple_library_bind` now
+  returns the name of the first symbol the resolver has no address for, or null.
+  Before, it stored a null pointer and the first call crashed. The test resolver
+  returns null instead of panicking across `extern "C"`, and a test checks the
+  reported name.
+- **Templates drop compilation numbers.** A manifest template no longer keeps
+  its fragment's module, mark or token hygiene. Filling a quotation overwrote
+  them anyway.
+- **Shared host symbols.** `__staple_syntax_compile_error`, `_is_empty` and
+  `_error_at` each have an interpreter-only stub entry and a compiled entry. The
+  JIT and `resolve_intrinsic` picked the compiled one only because it came
+  later in `INTRINSICS`. `binding_for` now picks the implemented entry, and a
+  test checks that each symbol has at most one implementation.
+- **Slow tests.** The two library tests take about three minutes each and are
+  `#[ignore]`d. `scripts/test-macro-libraries.sh` runs them.
+- **Warnings.** The manifest code and the fragment encoders have no non-test
+  callers yet, so they allow dead code outside tests.

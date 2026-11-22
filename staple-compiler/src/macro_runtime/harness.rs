@@ -37,6 +37,10 @@ pub(crate) struct CheckRun {
     pub(crate) package: Option<PackageId>,
     pub(crate) program: Program,
     pub(crate) templates: TemplateTable,
+    /// The expanded program the check program was built from. It shares the
+    /// check program's module ids, and it still declares every macro, which a
+    /// closure-only check program doesn't.
+    pub(crate) expanded: Program,
 }
 
 /// Expands `source` with the closure check on, and builds each package's
@@ -76,10 +80,11 @@ fn check_runs_from(
     if whole_dependencies {
         return check_programs(&program, &snapshot, &mut next)
             .into_iter()
-            .map(|(package, _macros, program, templates)| CheckRun {
+            .map(|(package, _macros, check, templates)| CheckRun {
                 package,
-                program,
+                program: check,
                 templates,
+                expanded: program.clone(),
             })
             .collect();
     }
@@ -98,7 +103,7 @@ fn check_runs_from(
                 .iter()
                 .filter(|checked| program.package_of(checked.module) == package)
                 .collect::<Vec<_>>();
-            let (program, templates) = build_check_program_with(
+            let (check, templates) = build_check_program_with(
                 &program,
                 &snapshot,
                 package,
@@ -108,8 +113,9 @@ fn check_runs_from(
             );
             CheckRun {
                 package,
-                program,
+                program: check,
                 templates,
+                expanded: program.clone(),
             }
         })
         .collect()
@@ -224,8 +230,10 @@ pub(crate) fn with_jit_threshold<T>(
         .create_jit_execution_engine(inkwell::OptimizationLevel::None)
         .expect("the JIT should start");
     for intrinsic in crate::macro_runtime::intrinsics::INTRINSICS {
-        if let Some(function) = llvm.get_function(intrinsic.symbol) {
-            engine.add_global_mapping(&function, intrinsic.address());
+        if let Some(function) = llvm.get_function(intrinsic.symbol)
+            && let Some(binding) = crate::macro_runtime::intrinsics::binding_for(intrinsic.symbol)
+        {
+            engine.add_global_mapping(&function, binding.address());
         }
     }
     // `main` sets the collector's stack bottom, registers the global roots and
@@ -2012,14 +2020,26 @@ mod library_tests {
     #[cfg(not(target_os = "macos"))]
     const RTLD_LOCAL: c_int = 0;
 
+    /// Gives the address of a host intrinsic, or null for a name the host
+    /// doesn't have, which the library's bind reports back.
     extern "C" fn resolve_host_symbol(name: *const c_char) -> *const c_void {
         let name = unsafe { CStr::from_ptr(name) };
-        let Ok(name) = name.to_str() else {
-            panic!("host symbol name is not UTF-8");
-        };
-        resolve_intrinsic(name)
-            .unwrap_or_else(|| panic!("missing host intrinsic `{name}`"))
+        name.to_str()
+            .ok()
+            .and_then(resolve_intrinsic)
+            .unwrap_or(std::ptr::null())
     }
+
+    /// A resolver missing one symbol, to check that bind names it.
+    extern "C" fn resolve_without_quote_begin(name: *const c_char) -> *const c_void {
+        let spelled = unsafe { CStr::from_ptr(name) };
+        if spelled.to_bytes() == b"__staple_syntax_quote_begin" {
+            return std::ptr::null();
+        }
+        resolve_host_symbol(name)
+    }
+
+    type Resolver = extern "C" fn(*const c_char) -> *const c_void;
 
     struct LoadedLibrary {
         handle: *mut c_void,
@@ -2045,13 +2065,21 @@ mod library_tests {
             (!symbol.is_null()).then_some(symbol)
         }
 
-        fn bind_and_init(&self) {
+        /// Binds the host symbols, returning the first name `resolve` had no
+        /// address for.
+        fn bind(&self, resolve: Resolver) -> Option<String> {
             let bind = self
                 .symbol("__staple_library_bind")
                 .expect("library exports `__staple_library_bind`");
-            let bind: unsafe extern "C" fn(extern "C" fn(*const c_char) -> *const c_void) =
+            let bind: unsafe extern "C" fn(Resolver) -> *const c_char =
                 unsafe { std::mem::transmute(bind) };
-            unsafe { bind(resolve_host_symbol) };
+            let missing = unsafe { bind(resolve) };
+            (!missing.is_null())
+                .then(|| unsafe { CStr::from_ptr(missing) }.to_string_lossy().into_owned())
+        }
+
+        fn bind_and_init(&self) {
+            assert_eq!(self.bind(resolve_host_symbol), None, "every host symbol binds");
 
             let init = self
                 .symbol("__staple_library_init")
@@ -2142,6 +2170,7 @@ mod library_tests {
     }
 
     #[test]
+    #[ignore = "builds and links a shared library; run scripts/test-macro-libraries.sh"]
     fn library_call_nm_panic_and_compile_error() {
         let source = concat!(
             "use std.process.panic\n",
@@ -2208,6 +2237,12 @@ mod library_tests {
 
         install_templates(&run);
         let library = LoadedLibrary::open(&lib_path);
+        // A resolver without an address reports the symbol instead of leaving
+        // a null slot to crash on. Binding again fills every slot.
+        assert_eq!(
+            library.bind(resolve_without_quote_begin).as_deref(),
+            Some("__staple_syntax_quote_begin")
+        );
         library.bind_and_init();
 
         // 1. Normal call matches the JIT harness.
@@ -2264,6 +2299,7 @@ mod library_tests {
     }
 
     #[test]
+    #[ignore = "builds and links a shared library; run scripts/test-macro-libraries.sh"]
     fn manifest_maps_modules_and_hygiene_across_compilations() {
         use crate::macro_runtime::manifest::{LibraryManifest, build_manifest};
 
@@ -2297,7 +2333,7 @@ mod library_tests {
         let temp = TempDir::new("manifest");
         let lib_path = build_library(&run1, vec![symbol1], &temp.0);
         let manifest = build_manifest(
-            &run1.program,
+            &run1.expanded,
             &[(module1, call1.declaration.syntax.id, "__staple_entry.0".to_owned())],
             &run1.templates,
         )

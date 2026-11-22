@@ -6,6 +6,10 @@
 //! [`ModuleId`]s or [`SyntaxId`]s. Quotation templates are stored as
 //! wire-encoded fragments alongside their defining module key.
 
+// Only tests write and read manifests until library builds and the macro
+// server use them.
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -119,7 +123,12 @@ pub(crate) fn macro_overload_key(
 }
 
 /// Builds a [`LibraryManifest`] from `(module, declaration_id, shim_symbol)`
-/// entries and `templates` in `program`.
+/// entries and `templates`.
+///
+/// `program` is the expanded program, the same kind of program
+/// [`LibraryManifest::resolve`] maps against, not a check program. A
+/// closure-only check program declares only the macros in the closure, so the
+/// overload indexes counted there would not match the ones counted at load time.
 pub(crate) fn build_manifest(
     program: &Program,
     entries: &[(ModuleId, SyntaxId, String)],
@@ -143,7 +152,7 @@ pub(crate) fn build_manifest(
         .iter()
         .map(|template| ManifestTemplate {
             module: module_key(program, template.module),
-            fragment: wire::encode_fragment(&template.contents),
+            fragment: wire::encode_fragment(&without_compilation_numbers(&template.contents)),
         })
         .collect();
     Ok(LibraryManifest {
@@ -335,6 +344,28 @@ impl LibraryManifest {
     }
 }
 
+/// A copy of a template with the module ids and marks of the compilation that
+/// built it removed. Filling a quotation stamps every token with the loading
+/// compilation's module and mark, so these numbers are never read; dropping
+/// them keeps a cached manifest free of numbers that mean something else in
+/// the next compilation.
+fn without_compilation_numbers(contents: &staple_syntax::Syntax) -> staple_syntax::Syntax {
+    let mut contents = contents.clone();
+    contents.definition_module = None;
+    contents.expansion_mark = None;
+    let tokens = contents
+        .token_stream()
+        .iter()
+        .cloned()
+        .map(|mut token| {
+            token.hygiene = None;
+            token
+        })
+        .collect::<Vec<_>>();
+    contents.tokens = std::sync::Arc::from(tokens);
+    contents
+}
+
 fn find_macro_declaration(
     program: &Program,
     module: ModuleId,
@@ -470,6 +501,63 @@ mod tests {
         let error = LibraryManifest::decode(&bad_wire, lib_path).unwrap_err();
         assert!(error.contains("libtest.dylib"), "{error}");
         assert!(error.contains("wire version"), "{error}");
+    }
+
+    #[test]
+    fn keys_come_from_the_expanded_program_of_a_closure_only_check() {
+        // Only the second overload is invoked, so a closure-only check program
+        // declares neither; the expanded program still declares both.
+        let source = concat!(
+            "use std.syntax.*\n",
+            "macro pick: Ident -> Expr = name => parse_quote { 1 }\n",
+            "macro pick: Expr -> Expr = value => parse_quote { 2 }\n",
+            "let a = pick (1 + 2)\n",
+        );
+        let (run, calls) = crate::macro_expand::compiled_call::record_calls(|| {
+            crate::macro_runtime::harness::check_run_for_with(source, false)
+        });
+        let entry = run.expanded.entry();
+        let call = calls
+            .iter()
+            .find(|call| call.definition_module == entry)
+            .expect("the entry module calls `pick`");
+        let declaration = call.declaration.syntax.id;
+        let manifest = build_manifest(
+            &run.expanded,
+            &[(entry, declaration, "__staple_entry.0".to_owned())],
+            &run.templates,
+        )
+        .expect("the manifest builds from the expanded program");
+        assert_eq!(manifest.entries[0].key.overload_index, 1);
+        let loaded = manifest
+            .resolve(&run.expanded, Path::new("/tmp/libpick.so"))
+            .expect("the manifest resolves");
+        assert_eq!(
+            loaded.entries.get(&declaration).map(String::as_str),
+            Some("__staple_entry.0")
+        );
+    }
+
+    #[test]
+    fn templates_lose_the_numbers_of_the_compilation_that_built_them() {
+        let mut contents = crate::macro_expand::syntax_ops::syntax_from_text("a + b", &mut 1);
+        contents.definition_module = Some(7);
+        contents.expansion_mark = Some(42);
+        let tokens = contents
+            .token_stream()
+            .iter()
+            .cloned()
+            .map(|mut token| {
+                token.hygiene = Some((7, 42));
+                token
+            })
+            .collect::<Vec<_>>();
+        contents.tokens = std::sync::Arc::from(tokens);
+        let stripped = without_compilation_numbers(&contents);
+        assert_eq!(stripped.definition_module, None);
+        assert_eq!(stripped.expansion_mark, None);
+        assert!(stripped.token_stream().iter().all(|token| token.hygiene.is_none()));
+        assert_eq!(stripped.text(), contents.text());
     }
 
     #[test]
