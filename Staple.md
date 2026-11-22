@@ -946,9 +946,26 @@ The check is not on by default, and it does not change what macros do.
 
 Macro code may not read files, read from standard input, spawn processes or
 seed `std.rand` from the operating system, so that expansion is deterministic
-and can be cached. Writing diagnostics to standard error is allowed. Nothing
-enforces this yet: the closure of a macro over-approximates what it calls, so a
-rule applied to the closure would report functions that never run.
+and can be cached. Writing diagnostics to standard error is allowed.
+
+When a compiled macro library is built, the compiler enforces this by walking
+the lowered call graph (including functions whose address is taken, trait
+methods, and generated artifacts) from each macro entry function and rejecting
+any reachable call to:
+
+- `std.fs` I/O operations (`metadata`, `symlink_metadata`, `exists`, `read`,
+  `read_to_string`, `write`, `write_string`, `append_string`, `copy`,
+  `create_dir`, `create_dir_all`, `remove_file`, `remove_dir`, `remove_dir_all`,
+  `rename`, `canonicalize`, `current_dir`, `read_dir`, `File.*`,
+  `DirEntry.metadata`) and their C/runtime bindings (`__staple_fs_*`, `fopen`,
+  `fclose`, `fread`, `fwrite`, `fseeko`, `ftello`, `fileno`, `fsync`, `mkdir`,
+  `rmdir`, `unlink`, `realpath`, `getcwd`);
+- standard input reading in `std.io` (`read_line`, `Stdin.read_byte`,
+  `__staple_io_read_byte`);
+- process spawning in `std.process` (`spawn`, `Command.*`, `system`, `popen`,
+  `fork`, `vfork`, `posix_spawn`, `posix_spawnp`, `exec*`);
+- OS entropy seeding in `std.rand` (`fill_entropy`, `Rng.from_entropy`,
+  `HashKey.from_entropy`, `getentropy`).
 
 #### `@track_caller` and `Location`
 

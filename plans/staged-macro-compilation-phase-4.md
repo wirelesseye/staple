@@ -504,7 +504,7 @@ Update this section as you work (see "Rules for the implementor").
 | 2. Manifests and load-time mapping | done | `c10c1253` | `WIRE_VERSION` bumped to 2 with `encode_fragment`/`decode_fragment`; sidecar `.manifest` files (`manifest.rs`) store format/wire versions, `(package, path, macro, overload)` keys, shim symbols, and wire-encoded templates; `resolve` maps modules and macro declarations in the parent and reports missing keys as internal errors naming the library; cross-compilation hygiene test passes. Review fixes: keys come from the expanded program, templates drop compilation numbers. See Findings. |
 | 3. The server | done | `5152a998` | `staple __macro-server` (`staple-cli/src/macro_server.rs`) + `macro_runtime::server` over fd 3 (`socketpair`), 256 MiB worker thread, `Hello`/`Load`/`Loaded`/`Call`/`Result`/`Error`/`Shutdown` wire messages, `INTRINSICS` FNV-1a checksum, fd 1/2 capture pipe, `RTLD_NOW | RTLD_LOCAL`, and `staple-cli/tests/macro_server.rs` integration tests. |
 | 4. The client and failure handling | done | `04eb738e` | `macro_runtime::client::MacroClient` with lazy server spawn/shutdown, lazy library reload, `STAPLE_MACRO_TIMEOUT` (default 10 s), stderr forwarding, and Decision 8 failure diagnostics (`panic`, `compile_error`, timeout, stack overflow, crash); unit and integration tests in `client.rs` and `staple-cli/tests/macro_server.rs`. |
-| 5. Effects | not started | | |
+| 5. Effects | done | | `LoweredModule::check_macro_effects` (`lower/macro_effects.rs`) walks lowered call graph (instances, taken callable values, artifacts, and extern targets) with BFS from entry functions; forbidden list documented in `Staple.md` and Findings; unit tests cover reachable file read, dead code, and stderr. |
 | 6. The quotation cycle and generated-item loops | not started | | |
 | 7. Closure libraries and the stage tower | not started | | |
 | 8. Package libraries and macro-mode objects | not started | | |
@@ -532,6 +532,24 @@ commit and the command. Include:
   libraries with `RTLD_NOW | RTLD_LOCAL` into one `staple __macro-server`
   process and alternating calls between them keeps their runtime and collector
   state separate on macOS (verified in `staple-cli/tests/macro_server.rs`).
+- **Forbidden compile-time effects list (task 5).**
+  - `std.fs` I/O operations (`metadata`, `symlink_metadata`, `exists`, `read`,
+    `read_to_string`, `write`, `write_string`, `append_string`, `copy`,
+    `create_dir`, `create_dir_all`, `remove_file`, `remove_dir`,
+    `remove_dir_all`, `rename`, `canonicalize`, `current_dir`, `read_dir`,
+    `File.*`, `DirEntry.metadata`) and externs (`__staple_fs_errno`,
+    `__staple_fs_errno_value`, `__staple_fs_open`, `__staple_fs_stat`,
+    `__staple_fs_fstat`, `__staple_fs_dir_open`, `__staple_fs_dir_next`,
+    `__staple_fs_dir_close`, `__staple_fs_rename`, `fopen`, `fclose`, `fread`,
+    `fwrite`, `fseeko`, `ftello`, `fileno`, `fsync`, `mkdir`, `rmdir`, `unlink`,
+    `realpath`, `getcwd`).
+  - `std.io` standard input reading (`read_line`, `Stdin.read_byte`,
+    `__staple_io_read_byte`).
+  - `std.process` process spawning (`spawn`, `Command.*`, `system`, `popen`,
+    `fork`, `vfork`, `posix_spawn`, `posix_spawnp`, `execve`, `execv`,
+    `execvp`, `execvpe`, `execl`, `execlp`, `execle`).
+  - `std.rand` OS seeding (`fill_entropy`, `Rng.from_entropy`,
+    `HashKey.from_entropy`, `getentropy`).
 
 Record:
 

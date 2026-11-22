@@ -53,6 +53,7 @@ pub(crate) mod graph_validation;
 mod initializer_bindings;
 mod instance_body;
 mod instance_resolution;
+mod macro_effects;
 mod runtime_call_facts;
 mod runtime_requirements;
 mod structural_artifacts;
