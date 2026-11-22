@@ -210,6 +210,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         {
             diagnostics.push(diagnostic);
         }
+        if let Some(library) = self.unit.library().cloned()
+            && let Err(diagnostic) = self.emit_library(&library)
+        {
+            diagnostics.push(diagnostic);
+        }
         if !diagnostics.is_empty() {
             return Err(diagnostics);
         }
@@ -2722,6 +2727,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .add_function("main", integer.fn_type(&[], false), None);
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
+        self.emit_set_stack_bottom()?;
+        self.emit_program_setup()?;
+        self.backend
+            .builder
+            .build_return(Some(&integer.const_zero()))
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    /// Records the current function's frame as the GC stack bottom.
+    fn emit_set_stack_bottom(&mut self) -> CodeGenerationResult<()> {
         let stack_bottom = self
             .backend
             .entry_builder()
@@ -2741,6 +2757,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_direct_call(set_stack_bottom, &[stack_bottom.into()], "")
             .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    /// Registers the global GC roots and runs every initializer in order.
+    fn emit_program_setup(&mut self) -> CodeGenerationResult<()> {
         for (id, symbol) in self.view.symbols() {
             if !symbol.global_root {
                 continue;
@@ -2761,10 +2782,250 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .build_direct_call(self.initializers[&id], &[], "initialize")
                 .map_err(compiler_diagnostic)?;
         }
+        Ok(())
+    }
+
+    /// Emits a library's `__staple_library_init`, its host bindings, its
+    /// `exit` trap, and its entry shims.
+    fn emit_library(&mut self, library: &super::LibrarySpec) -> CodeGenerationResult<()> {
+        let context = self.backend.context;
+        let void = context.void_type();
+        let init = self.backend.llvm_module.add_function(
+            "__staple_library_init",
+            void.fn_type(&[], false),
+            None,
+        );
+        let entry = context.append_basic_block(init, "entry");
+        self.backend.builder.position_at_end(entry);
+        self.emit_set_stack_bottom()?;
+        self.emit_program_setup()?;
         self.backend
             .builder
-            .build_return(Some(&integer.const_zero()))
+            .build_return(None)
             .map_err(compiler_diagnostic)?;
+
+        let word = context.i64_type();
+        let int = context.i32_type();
+        let pointer = context.ptr_type(inkwell::AddressSpace::default());
+        let builder = &self.backend.builder;
+
+        // Host symbols: each foreign declaration becomes an internal thunk
+        // that calls through a pointer `__staple_library_bind` fills in.
+        let bind = self.backend.llvm_module.add_function(
+            "__staple_library_bind",
+            void.fn_type(&[pointer.into()], false),
+            None,
+        );
+        let bind_entry = context.append_basic_block(bind, "entry");
+        let resolve = bind
+            .get_nth_param(0)
+            .expect("bind has one parameter")
+            .into_pointer_value();
+        let mut bound_hosts = std::collections::HashSet::new();
+        for name in &library.host_symbols {
+            if !bound_hosts.insert(name.as_str()) {
+                continue;
+            }
+            let Some(function) = self.backend.llvm_module.get_function(name) else {
+                continue;
+            };
+            if function.count_basic_blocks() != 0 {
+                if function.get_linkage() == Linkage::Internal {
+                    continue;
+                }
+                return Err(Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    format!("host symbol `{name}` is defined in the library"),
+                ));
+            }
+            let slot = self.backend.llvm_module.add_global(
+                pointer,
+                None,
+                &format!("__staple_host.{name}"),
+            );
+            slot.set_linkage(inkwell::module::Linkage::Internal);
+            slot.set_initializer(&pointer.const_null());
+            builder.position_at_end(bind_entry);
+            let spelled = builder
+                .build_global_string_ptr(name, &format!("__staple_host_name.{name}"))
+                .map_err(compiler_diagnostic)?;
+            let resolved = builder
+                .build_indirect_call(
+                    pointer.fn_type(&[pointer.into()], false),
+                    resolve,
+                    &[spelled.as_pointer_value().into()],
+                    "resolved",
+                )
+                .map_err(compiler_diagnostic)?
+                .try_as_basic_value()
+                .basic()
+                .expect("resolver returns a pointer");
+            builder
+                .build_store(slot.as_pointer_value(), resolved)
+                .map_err(compiler_diagnostic)?;
+
+            let body = context.append_basic_block(function, "entry");
+            builder.position_at_end(body);
+            let target = builder
+                .build_load(pointer, slot.as_pointer_value(), "host")
+                .map_err(compiler_diagnostic)?
+                .into_pointer_value();
+            let arguments = function
+                .get_params()
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<_>>();
+            let call = builder
+                .build_indirect_call(function.get_type(), target, &arguments, "")
+                .map_err(compiler_diagnostic)?;
+            match call.try_as_basic_value().basic() {
+                Some(value) => builder.build_return(Some(&value)),
+                None => builder.build_return(None),
+            }
+            .map_err(compiler_diagnostic)?;
+            // Hidden, so references from other objects in the library bind
+            // to the thunk too.
+            function
+                .as_global_value()
+                .set_visibility(inkwell::GlobalVisibility::Hidden);
+        }
+        builder.position_at_end(bind_entry);
+        builder.build_return(None).map_err(compiler_diagnostic)?;
+
+        // The `exit` trap: `exit` longjmps back into the active entry shim.
+        // Staple code has no unwinding, so the frames skipped are only
+        // Staple frames and the shim's.
+        let jump_buffer = if library.trap_exit {
+            let buffer_type = word.array_type(64);
+            let buffer = self.backend.llvm_module.add_global(
+                buffer_type,
+                None,
+                "__staple_library_jump_buffer",
+            );
+            buffer.set_linkage(inkwell::module::Linkage::Internal);
+            buffer.set_initializer(&buffer_type.const_zero());
+            buffer.set_alignment(16);
+            let code = self
+                .backend
+                .llvm_module
+                .add_global(int, None, "__staple_library_exit_code");
+            code.set_initializer(&int.const_zero());
+            // `_setjmp`/`_longjmp` skip saving the signal mask, which costs a
+            // system call per entry call on macOS.
+            let longjmp = self.backend.llvm_module.add_function(
+                "_longjmp",
+                void.fn_type(&[pointer.into(), int.into()], false),
+                None,
+            );
+            if let Some(exit) = self.backend.llvm_module.get_function("exit")
+                && exit.count_basic_blocks() == 0
+            {
+                let body = context.append_basic_block(exit, "entry");
+                builder.position_at_end(body);
+                let status = exit.get_nth_param(0).expect("exit takes a status");
+                builder
+                    .build_store(code.as_pointer_value(), status)
+                    .map_err(compiler_diagnostic)?;
+                builder
+                    .build_direct_call(
+                        longjmp,
+                        &[
+                            buffer.as_pointer_value().into(),
+                            int.const_int(1, false).into(),
+                        ],
+                        "",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                builder.build_unreachable().map_err(compiler_diagnostic)?;
+                // Hidden, not internal: `panic` usually lives in a prebuilt
+                // standard-library object, whose `exit` must bind here too.
+                exit.as_global_value()
+                    .set_visibility(inkwell::GlobalVisibility::Hidden);
+            }
+            let setjmp = self.backend.llvm_module.add_function(
+                "_setjmp",
+                int.fn_type(&[pointer.into()], false),
+                None,
+            );
+            setjmp.add_attribute(
+                inkwell::attributes::AttributeLoc::Function,
+                context.create_enum_attribute(
+                    inkwell::attributes::Attribute::get_named_enum_kind_id("returns_twice"),
+                    0,
+                ),
+            );
+            Some((buffer, setjmp))
+        } else {
+            None
+        };
+
+        for (index, symbol) in library.entries.iter().enumerate() {
+            let target = self
+                .backend
+                .llvm_module
+                .get_function(symbol)
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        format!("library entry `{symbol}` is not a defined function"),
+                    )
+                })?;
+            let expected = word.fn_type(&[pointer.into(), word.into()], false);
+            if target.get_type() != expected {
+                return Err(Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    format!("library entry `{symbol}` does not have the type `U64 -> U64`"),
+                ));
+            }
+            let shim = self.backend.llvm_module.add_function(
+                &format!("__staple_entry.{index}"),
+                word.fn_type(&[word.into()], false),
+                None,
+            );
+            let entry = context.append_basic_block(shim, "entry");
+            self.backend.builder.position_at_end(entry);
+            // The host calls in on its own stack, so each call records the
+            // frame the conservative scan starts from.
+            self.emit_set_stack_bottom()?;
+            let builder = &self.backend.builder;
+            if let Some((buffer, setjmp)) = jump_buffer {
+                let jumped = builder
+                    .build_direct_call(setjmp, &[buffer.as_pointer_value().into()], "jumped")
+                    .map_err(compiler_diagnostic)?
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("setjmp returns an int")
+                    .into_int_value();
+                let trapped = context.append_basic_block(shim, "trapped");
+                let run = context.append_basic_block(shim, "run");
+                let is_trap = builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        jumped,
+                        int.const_zero(),
+                        "is_trap",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                builder
+                    .build_conditional_branch(is_trap, trapped, run)
+                    .map_err(compiler_diagnostic)?;
+                builder.position_at_end(trapped);
+                builder
+                    .build_return(Some(&word.const_all_ones()))
+                    .map_err(compiler_diagnostic)?;
+                builder.position_at_end(run);
+            }
+            let argument = shim.get_nth_param(0).expect("shim has one parameter");
+            let result = builder
+                .build_direct_call(target, &[pointer.const_null().into(), argument.into()], "")
+                .map_err(compiler_diagnostic)?
+                .try_as_basic_value()
+                .basic()
+                .expect("entry returns a value");
+            builder
+                .build_return(Some(&result))
+                .map_err(compiler_diagnostic)?;
+        }
         Ok(())
     }
 

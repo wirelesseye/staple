@@ -58,6 +58,7 @@ def main():
     parser.add_argument("--mode", default="all", choices=["all", "1"])
     parser.add_argument("--only", help="only inputs whose name matches this regular expression")
     parser.add_argument("--limit", type=int, default=0, help="stop after this many inputs")
+    parser.add_argument("--jobs", type=int, default=2, help="maximum concurrent staple processes (default: 2)")
     parser.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args()
 
@@ -67,7 +68,7 @@ def main():
         names = sorted(name for name in inputs if not args.only or re.search(args.only, name))
         if args.limit:
             names = names[:args.limit]
-        with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+        with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
             results = list(pool.map(lambda name: check(binary, inputs[name], args.stdlib, args.mode, args.timeout), names))
 
     messages = defaultdict(lambda: {"inputs": set(), "macros": set(), "places": set(), "example": None})

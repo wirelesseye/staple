@@ -11,7 +11,7 @@ use package.default.(Default)
 use package.clone.Clone
 use package.option.(Option, None, Some)
 use package.ptr.RawMutPtr
-use package.process.(panic)
+use package.process.(exit, panic)
 use package.shared_buffer.SharedBuffer
 
 /// Compiler-owned, compile-time-only syntax values. Identifiers and calls expose
@@ -274,8 +274,6 @@ pub extern "staple-intrinsic" {
     stream: Syntax -> ParseStream
     /// The unconsumed rest of the stream, losslessly.
     remaining: ParseStream -> Syntax
-    /// Fails the macro being expanded, reporting `message` at its call site.
-    compile_error: String -> Never
 }
 
 extern "staple-intrinsic" {
@@ -289,6 +287,8 @@ pub extern "staple-intrinsic" {
     is_empty: ParseStream -> Bool
     /// A `ParseError` whose message names the stream's current position.
     error_at: (ParseStream; String) -> ParseError
+    /// Fails the macro being expanded, reporting `message` at its call site.
+    compile_error: String -> Never
 }
 
 @interpreted_only
@@ -303,6 +303,8 @@ extern "staple-intrinsic" {
     __is_empty: ParseStream -> U8
     /// A text handle holding `"<message> at <position>"`.
     __error_at: (ParseStream, RawMutPtr<U8>, USize) -> U64
+    /// Records a compile-error message in the host before exiting.
+    __compile_error: (RawMutPtr<U8>, USize) -> ()
     /// The number of bytes in a text handle.
     __text_length: U64 -> USize
     /// Copies a text handle's bytes into a buffer and returns the byte count.
@@ -356,6 +358,14 @@ pub def error_at = (input: ParseStream; message: String) => ParseError :: {
     let bytes = string_shared_bytes message
     let text = __error_at (input, SharedBuffer.unsafe_data bytes, SharedBuffer.length bytes)
     ParseError (text_string text)
+}
+
+/// Fails the macro being expanded, reporting `message` at its call site.
+@compiled_only
+pub def compile_error = message: String => Never :: {
+    let bytes = string_shared_bytes message
+    __compile_error (SharedBuffer.unsafe_data bytes, SharedBuffer.length bytes)
+    exit 1
 }
 
 /// Lexes a string into a lossless syntax fragment.

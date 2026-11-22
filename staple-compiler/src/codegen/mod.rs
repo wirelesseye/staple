@@ -113,6 +113,22 @@ pub struct EmissionUnit {
     scope: UnitScope,
     emit_main: bool,
     include_runtime: bool,
+    library: Option<LibrarySpec>,
+}
+
+/// What a shared-library unit exposes and how it reaches its host.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LibrarySpec {
+    /// Function instance symbols wrapped as C-ABI `__staple_entry.<n>`
+    /// shims, numbered in order (`0..entries.len()`). Each must have the
+    /// type `U64 -> U64`.
+    pub entries: Vec<String>,
+    /// Foreign functions the host supplies through
+    /// `__staple_library_bind(resolve)` instead of the dynamic linker.
+    pub host_symbols: Vec<String>,
+    /// Turns a call to `exit` into a return from the entry shim, which then
+    /// returns `u64::MAX` and leaves the code in `__staple_library_exit_code`.
+    pub trap_exit: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +147,7 @@ impl EmissionUnit {
             scope: UnitScope::Everything,
             emit_main: true,
             include_runtime: true,
+            library: None,
         }
     }
 
@@ -157,6 +174,7 @@ impl EmissionUnit {
             },
             emit_main: false,
             include_runtime: false,
+            library: None,
         }
     }
 
@@ -180,6 +198,20 @@ impl EmissionUnit {
     pub fn with_runtime(mut self, include_runtime: bool) -> Self {
         self.include_runtime = include_runtime;
         self
+    }
+
+    /// Makes the unit a loadable library instead of a program: no `main`, a
+    /// `__staple_library_init` that does `main`'s setup, and one C-ABI
+    /// `__staple_entry.<n>` shim per listed function instance symbol.
+    /// Each listed instance must have the type `U64 -> U64`.
+    pub fn with_library(mut self, library: LibrarySpec) -> Self {
+        self.emit_main = false;
+        self.library = Some(library);
+        self
+    }
+
+    pub(crate) fn library(&self) -> Option<&LibrarySpec> {
+        self.library.as_ref()
     }
 
     pub fn is_whole_program(&self) -> bool {

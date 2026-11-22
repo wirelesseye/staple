@@ -5,6 +5,8 @@
 //! harness and the future server read this table rather than repeating the
 //! list.
 
+use std::cell::RefCell;
+use std::ffi::c_void;
 use std::slice;
 use std::sync::Arc;
 
@@ -73,6 +75,7 @@ pub(crate) const INTRINSICS: &[Intrinsic] = &[
     intrinsic!("__error_at", "__staple_syntax_error_at", error_at),
     intrinsic!("remaining", "__staple_syntax_remaining", remaining),
     intrinsic!("compile_error", "__staple_syntax_compile_error"),
+    intrinsic!("__compile_error", "__staple_syntax_compile_error", compile_error_intrinsic),
     intrinsic!("__parse_primitive", "__staple_syntax_parse_primitive"),
     intrinsic!("__parse_leaf", "__staple_syntax_parse_leaf", parse_leaf_intrinsic),
     intrinsic!("__parse_group", "__staple_syntax_parse_group", parse_group_intrinsic),
@@ -528,6 +531,7 @@ pub(crate) fn symbol_name(name: &str) -> &'static str {
         "__error_at" => "__staple_syntax_error_at",
         "remaining" => "__staple_syntax_remaining",
         "compile_error" => "__staple_syntax_compile_error",
+        "__compile_error" => "__staple_syntax_compile_error",
         "__parse_primitive" => "__staple_syntax_parse_primitive",
         "__parse_leaf" => "__staple_syntax_parse_leaf",
         "__parse_group" => "__staple_syntax_parse_group",
@@ -735,6 +739,44 @@ extern "C" fn error_at(stream: u64, message: *const u8, message_length: usize) -
     let syntax = syntax_value(fragment);
     let text = format!("{message} at {}", describe_position(&syntax, offset));
     arena::with_arena(|arena| arena.insert_text(text.into_bytes()).into())
+}
+
+thread_local! {
+    /// The message recorded by the active call's `compile_error`, before it exits.
+    static COMPILE_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Clears any previously recorded `compile_error` message on this thread.
+#[allow(dead_code)] // Used by library calls and the server in later tasks.
+pub(crate) fn clear_compile_error() {
+    COMPILE_ERROR.with_borrow_mut(|slot| *slot = None);
+}
+
+/// Takes the `compile_error` message recorded on this thread, if any.
+#[allow(dead_code)] // Used by library calls and the server in later tasks.
+pub(crate) fn take_compile_error() -> Option<String> {
+    COMPILE_ERROR.with_borrow_mut(Option::take)
+}
+
+/// Records the `compile_error` message in the host before Staple calls `exit`.
+extern "C" fn compile_error_intrinsic(message: *const u8, message_length: usize) {
+    let text = if message_length == 0 {
+        String::new()
+    } else {
+        let bytes = unsafe { slice::from_raw_parts(message, message_length) };
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    COMPILE_ERROR.with_borrow_mut(|slot| *slot = Some(text));
+}
+
+/// Resolves a host intrinsic symbol name to its implementation address.
+/// Searches from the end so compiled overrides win over interpreted stubs.
+#[allow(dead_code)] // Used by library binding and the server.
+pub(crate) fn resolve_intrinsic(symbol: &str) -> Option<*const c_void> {
+    INTRINSICS
+        .iter()
+        .rfind(|intrinsic| intrinsic.symbol == symbol)
+        .map(|intrinsic| intrinsic.address() as *const c_void)
 }
 
 /// The cursor's position within its fragment.

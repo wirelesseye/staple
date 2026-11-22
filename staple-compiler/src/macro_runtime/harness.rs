@@ -1962,3 +1962,304 @@ macro touch = () => {
         assert!(id.0 >= check_run_for(source).program.next_syntax_id(), "{id:?} is renumbered");
     }
 }
+
+#[cfg(unix)]
+mod library_tests {
+    use std::ffi::{CStr, CString, c_char, c_int, c_void};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use super::*;
+    use crate::codegen::{CodeGenerator, EmissionUnit, LibrarySpec};
+    use crate::macro_expand::check_program::entry_function_name;
+    use crate::macro_expand::compiled_call::{compiled_result, record_calls};
+    use crate::macro_runtime::intrinsics::{
+        INTRINSICS, clear_compile_error, resolve_intrinsic, take_compile_error,
+    };
+    use crate::macro_runtime::quote::{CallContext, begin_call};
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "staple-lib-test-{label}-{}-{id}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("tempdir should be created");
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    unsafe extern "C" {
+        fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        fn dlclose(handle: *mut c_void) -> c_int;
+        fn dlerror() -> *const c_char;
+    }
+
+    const RTLD_NOW: c_int = 2;
+    #[cfg(target_os = "macos")]
+    const RTLD_LOCAL: c_int = 4;
+    #[cfg(not(target_os = "macos"))]
+    const RTLD_LOCAL: c_int = 0;
+
+    extern "C" fn resolve_host_symbol(name: *const c_char) -> *const c_void {
+        let name = unsafe { CStr::from_ptr(name) };
+        let Ok(name) = name.to_str() else {
+            panic!("host symbol name is not UTF-8");
+        };
+        resolve_intrinsic(name)
+            .unwrap_or_else(|| panic!("missing host intrinsic `{name}`"))
+    }
+
+    struct LoadedLibrary {
+        handle: *mut c_void,
+    }
+
+    impl LoadedLibrary {
+        fn open(path: &Path) -> Self {
+            let spelled =
+                CString::new(path.as_os_str().as_encoded_bytes()).expect("path has no NUL");
+            let handle = unsafe { dlopen(spelled.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
+            assert!(
+                !handle.is_null(),
+                "could not load `{}`: {}",
+                path.display(),
+                last_dlerror()
+            );
+            Self { handle }
+        }
+
+        fn symbol(&self, name: &str) -> Option<*mut c_void> {
+            let spelled = CString::new(name).ok()?;
+            let symbol = unsafe { dlsym(self.handle, spelled.as_ptr()) };
+            (!symbol.is_null()).then_some(symbol)
+        }
+
+        fn bind_and_init(&self) {
+            let bind = self
+                .symbol("__staple_library_bind")
+                .expect("library exports `__staple_library_bind`");
+            let bind: unsafe extern "C" fn(extern "C" fn(*const c_char) -> *const c_void) =
+                unsafe { std::mem::transmute(bind) };
+            unsafe { bind(resolve_host_symbol) };
+
+            let init = self
+                .symbol("__staple_library_init")
+                .expect("library exports `__staple_library_init`");
+            let init: unsafe extern "C" fn() = unsafe { std::mem::transmute(init) };
+            unsafe { init() };
+        }
+
+        fn entry(&self, index: usize) -> unsafe extern "C" fn(u64) -> u64 {
+            let symbol = self
+                .symbol(&format!("__staple_entry.{index}"))
+                .unwrap_or_else(|| panic!("library exports `__staple_entry.{index}`"));
+            unsafe { std::mem::transmute(symbol) }
+        }
+
+        fn exit_code(&self) -> i32 {
+            let symbol = self
+                .symbol("__staple_library_exit_code")
+                .expect("library exports `__staple_library_exit_code`");
+            unsafe { *(symbol as *const i32) }
+        }
+    }
+
+    impl Drop for LoadedLibrary {
+        fn drop(&mut self) {
+            unsafe {
+                dlclose(self.handle);
+            }
+        }
+    }
+
+    fn last_dlerror() -> String {
+        let message = unsafe { dlerror() };
+        if message.is_null() {
+            "unknown dlerror".to_owned()
+        } else {
+            unsafe { CStr::from_ptr(message) }
+                .to_string_lossy()
+                .into_owned()
+        }
+    }
+
+    fn link_shared_library(object: &Path, output: &Path) {
+        let linker = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
+        let mut command = Command::new(&linker);
+        command.arg(object).arg("-o").arg(output);
+        if cfg!(target_os = "macos") {
+            command.args(["-dynamiclib", "-undefined", "dynamic_lookup"]);
+        } else {
+            command.args(["-shared", "-lm"]);
+        }
+        let result = command.output().expect("linker should run");
+        assert!(
+            result.status.success(),
+            "linker failed:\n{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    fn build_library(
+        run: &CheckRun,
+        entries: Vec<String>,
+        dir: &Path,
+    ) -> PathBuf {
+        let lowered = lower_run(run).expect("check program should lower");
+        let object_path = dir.join("macro_lib.o");
+        let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+        let lib_path = dir.join(format!("libmacro.{ext}"));
+        let spec = LibrarySpec {
+            entries,
+            host_symbols: INTRINSICS
+                .iter()
+                .map(|intrinsic| intrinsic.symbol.to_owned())
+                .collect(),
+            trap_exit: true,
+        };
+        let context = inkwell::context::Context::create();
+        CodeGenerator::new(&context)
+            .emit_unit_object(
+                &lowered,
+                &EmissionUnit::whole_program().with_library(spec),
+                &object_path,
+                None,
+            )
+            .expect("library object should emit");
+        link_shared_library(&object_path, &lib_path);
+        lib_path
+    }
+
+    #[test]
+    fn library_call_nm_panic_and_compile_error() {
+        let source = concat!(
+            "use std.process.panic\n",
+            "use std.syntax.*\n",
+            "macro twice: Expr -> Expr = value => parse_quote { $value + $value }\n",
+            "macro boom: Expr -> Expr = _value => panic \"macro exploded\"\n",
+            "macro bad: Expr -> Expr = _value => compile_error \"bad macro input\"\n",
+            "let a = twice (1 + 2)\n",
+        );
+        let (run, calls) = record_calls(|| check_run_for(source));
+        let entry = run.program.entry();
+        let calls = calls
+            .into_iter()
+            .filter(|call| call.definition_module == entry)
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+
+        let lowered = lower_run(&run).expect("check program should lower");
+        let module = run.program.module(entry);
+        let mut entries = Vec::new();
+        for macro_name in ["twice", "boom", "bad"] {
+            let decl = module
+                .syntax
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    staple_syntax::Item::MacroDeclaration(decl) if decl.name == macro_name => {
+                        Some(decl)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("macro `{macro_name}` exists"));
+            let name = entry_function_name(decl);
+            let symbol = instance_symbol(&lowered, &crate::resolve::mangle_function_name(&name))
+                .unwrap_or_else(|| panic!("`{name}` is instantiated"));
+            entries.push(symbol);
+        }
+
+        let temp = TempDir::new("call");
+        let lib_path = build_library(&run, entries, &temp.0);
+
+        let nm = Command::new("nm")
+            .arg("-u")
+            .arg(&lib_path)
+            .output()
+            .expect("nm should run");
+        assert!(nm.status.success(), "nm -u failed");
+        let undefined = String::from_utf8_lossy(&nm.stdout);
+        for line in undefined.lines() {
+            let trimmed = line.trim();
+            assert!(
+                !trimmed.contains("__staple_syntax_"),
+                "library has undefined host intrinsic `{trimmed}`"
+            );
+            assert!(
+                trimmed != "exit"
+                    && trimmed != "_exit"
+                    && !trimmed.ends_with(" exit")
+                    && !trimmed.ends_with(" _exit"),
+                "library has undefined exit `{trimmed}`"
+            );
+        }
+
+        install_templates(&run);
+        let library = LoadedLibrary::open(&lib_path);
+        library.bind_and_init();
+
+        // 1. Normal call matches the JIT harness.
+        begin_call(CallContext {
+            definition_module: call.definition_module,
+            next_mark: FIRST_COMPILED_MARK,
+            call_site: call.call_site.clone(),
+            identifier_mark: None,
+        });
+        let handle = crate::macro_runtime::args::insert_arguments(&call.arguments);
+        let result_handle = unsafe { library.entry(0)(handle) };
+        assert_ne!(result_handle, u64::MAX, "call should not trap exit");
+        let syntax = crate::macro_runtime::arena::with_arena(|arena| {
+            arena.syntax(result_handle.into()).cloned()
+        })
+        .expect("an entry function returns syntax");
+        crate::macro_runtime::arena::reset();
+        let mut next_syntax_id = run.program.next_syntax_id();
+        let result = compiled_result(&call.result, syntax, &mut next_syntax_id)
+            .expect("result should decode")
+            .text();
+        let harness_outcomes = compiled_calls(source);
+        assert_eq!(result, harness_outcomes[0].compiled_text());
+
+        // 2. `panic` traps `exit 1` and returns `u64::MAX`.
+        clear_compile_error();
+        begin_call(CallContext {
+            definition_module: call.definition_module,
+            next_mark: FIRST_COMPILED_MARK,
+            call_site: call.call_site.clone(),
+            identifier_mark: None,
+        });
+        let handle = crate::macro_runtime::args::insert_arguments(&call.arguments);
+        let panic_result = unsafe { library.entry(1)(handle) };
+        crate::macro_runtime::arena::reset();
+        assert_eq!(panic_result, u64::MAX);
+        assert_eq!(library.exit_code(), 1);
+        assert_eq!(take_compile_error(), None);
+
+        // 3. `compile_error` records its message, traps `exit 1`, and returns `u64::MAX`.
+        clear_compile_error();
+        begin_call(CallContext {
+            definition_module: call.definition_module,
+            next_mark: FIRST_COMPILED_MARK,
+            call_site: call.call_site.clone(),
+            identifier_mark: None,
+        });
+        let handle = crate::macro_runtime::args::insert_arguments(&call.arguments);
+        let error_result = unsafe { library.entry(2)(handle) };
+        crate::macro_runtime::arena::reset();
+        assert_eq!(error_result, u64::MAX);
+        assert_eq!(library.exit_code(), 1);
+        assert_eq!(take_compile_error().as_deref(), Some("bad macro input"));
+    }
+}

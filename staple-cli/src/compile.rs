@@ -5,8 +5,8 @@ use std::process::{Command, ExitCode, ExitStatus};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use staple_compiler::{
-    CodeGenerator, EmissionUnit, LoweredModule, Lowerer, NameResolver, Program, ProgramLoader,
-    TypeChecker, TypedModule, expand_macros, render_expanded_module,
+    CodeGenerator, EmissionUnit, LibrarySpec, LoweredModule, Lowerer, NameResolver, Program,
+    ProgramLoader, TypeChecker, TypedModule, expand_macros, render_expanded_module,
 };
 use staple_project::{ActiveFeatures, PackageGraph};
 use staple_syntax::{Diagnostic, format_source};
@@ -19,6 +19,9 @@ enum EmitKind {
     Llvm,
     Object,
     Executable,
+    /// A loadable shared library with C-ABI shims for `--library-entry`
+    /// symbols and `__staple_library_init`.
+    SharedLibrary,
     /// Write a library package's cached objects. Selected by `staple build`
     /// on a package without an entry module; not a user-facing `--emit` kind.
     Packages,
@@ -55,6 +58,8 @@ struct Options {
     format_check: bool,
     /// Link cached per-package objects instead of one whole-program module.
     incremental: bool,
+    /// What a `--emit dylib` library exposes and binds.
+    library: LibrarySpec,
 }
 
 pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String> {
@@ -228,6 +233,16 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
                 .emit_object(&lowered, object.path(), options.target.as_deref())
                 .map_err(format_diagnostics)?;
             link_executable(&[object.path().to_owned()], &output, &options)?;
+            Ok(Outcome::Completed(None))
+        }
+        EmitKind::SharedLibrary => {
+            let output = artifact_output(&options, shared_library_extension())?;
+            let object = TemporaryArtifact::new("object", "o");
+            let unit = EmissionUnit::whole_program().with_library(options.library.clone());
+            generator
+                .emit_unit_object(&lowered, &unit, object.path(), options.target.as_deref())
+                .map_err(format_diagnostics)?;
+            link_shared_library(&[object.path().to_owned()], &output, &options)?;
             Ok(Outcome::Completed(None))
         }
         EmitKind::Packages => unreachable!("library builds return before whole-program emission"),
@@ -582,6 +597,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         no_default_features: false,
         format_check: false,
         incremental: std::env::var_os("STAPLE_INCREMENTAL").is_none_or(|value| value != "0"),
+        library: LibrarySpec::default(),
     };
     let mut positional_only = false;
     let mut emit_specified = false;
@@ -673,6 +689,24 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         }
         if !positional_only && argument == "-l" {
             options.libraries.push(next_value(&mut arguments, "-l")?);
+            continue;
+        }
+        if !positional_only && argument == "--library-entry" {
+            options.library.entries.push(utf8_value(
+                next_value(&mut arguments, "--library-entry")?,
+                "--library-entry",
+            )?);
+            continue;
+        }
+        if !positional_only && argument == "--library-host-symbol" {
+            options.library.host_symbols.push(utf8_value(
+                next_value(&mut arguments, "--library-host-symbol")?,
+                "--library-host-symbol",
+            )?);
+            continue;
+        }
+        if !positional_only && argument == "--library-trap-exit" {
+            options.library.trap_exit = true;
             continue;
         }
 
@@ -912,6 +946,7 @@ fn parse_emit(value: &OsStr) -> Result<EmitKind, String> {
         Some("llvm" | "ir") => Ok(EmitKind::Llvm),
         Some("object" | "obj") => Ok(EmitKind::Object),
         Some("executable" | "exe") => Ok(EmitKind::Executable),
+        Some("dylib") => Ok(EmitKind::SharedLibrary),
         Some("packages") => Ok(EmitKind::Packages),
         _ => Err(format!(
             "unknown emission kind `{}`; expected `llvm`, `object`, or `exe`",
@@ -1031,6 +1066,32 @@ fn executable_link_command(objects: &[PathBuf], output: &Path, options: &Options
 
 fn link_executable(objects: &[PathBuf], output: &Path, options: &Options) -> Result<(), String> {
     let mut command = executable_link_command(objects, output, options);
+    run_linker(&mut command)
+}
+
+fn shared_library_extension() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "dylib"
+    } else if cfg!(windows) {
+        "dll"
+    } else {
+        "so"
+    }
+}
+
+/// Links objects into a shared library. Host intrinsics stay undefined or are
+/// hidden-bound when the library was emitted with `--library-host-symbol`.
+fn link_shared_library(objects: &[PathBuf], output: &Path, options: &Options) -> Result<(), String> {
+    let mut command = executable_link_command(objects, output, options);
+    if cache::target_triple(options.target.as_deref()).contains("apple") {
+        command.args(["-dynamiclib", "-undefined", "dynamic_lookup"]);
+    } else {
+        command.arg("-shared");
+    }
+    run_linker(&mut command)
+}
+
+fn run_linker(command: &mut Command) -> Result<(), String> {
     let linker = command.get_program().to_owned();
     let result = command.output().map_err(|error| {
         format!(
