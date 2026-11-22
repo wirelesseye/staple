@@ -7,6 +7,7 @@
 
 pub(crate) mod arena;
 pub mod args;
+pub mod client;
 pub mod intrinsics;
 pub(crate) mod manifest;
 pub mod quote;

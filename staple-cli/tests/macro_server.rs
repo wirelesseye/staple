@@ -99,11 +99,15 @@ mod unix_tests {
         FIXTURE.get_or_init(|| {
             let dir = TempDir::new("fixture");
             let source_a = concat!(
-                "use std.process.panic\n",
+                "use std.process.(panic, trap)\n",
                 "use std.syntax.*\n",
+                "def blow: U64 -> U64 = n => (blow (n + 1)) + 1\n",
                 "macro twice: Expr -> Expr = value => parse_quote { $value + $value }\n",
                 "macro boom: Expr -> Expr = _value => panic \"macro exploded\"\n",
                 "macro bad: Expr -> Expr = _value => compile_error \"bad macro input\"\n",
+                "macro hang: Expr -> Expr = _value => loop { continue }\n",
+                "macro overflow: Expr -> Expr = _value => { let _ = blow 0; parse_quote { 1 } }\n",
+                "macro crash: Expr -> Expr = _value => trap ()\n",
                 "let a = twice (1 + 2)\n",
             );
             let source_b = concat!(
@@ -118,7 +122,7 @@ mod unix_tests {
                 &dir.0,
                 "a",
                 source_a,
-                &["twice", "boom", "bad"],
+                &["twice", "boom", "bad", "hang", "overflow", "crash"],
             );
             let lib_b = build_library(&dir.0, "b", source_b, &["wrap"]);
             Fixture {
@@ -412,5 +416,83 @@ mod unix_tests {
             let status = server.child.wait().expect("server exits");
             assert!(!status.success());
         }
+    }
+
+    #[test]
+    fn client_enforces_limits_restarts_and_formats_diagnostics() {
+        use std::time::Duration;
+        use staple_compiler::macro_runtime::client::MacroClient;
+
+        let fix = fixture();
+        let mut client = MacroClient::with_binary(PathBuf::from(env!("CARGO_BIN_EXE_staple")))
+            .with_timeout(Duration::from_millis(300));
+
+        let call_macro = |client: &mut MacroClient, info: &TestMacroCall, mark: u64| {
+            client.call(
+                &fix.lib_a.path,
+                &fix.lib_a.templates,
+                &info.entry_shim,
+                &info.name,
+                CallContext {
+                    definition_module: info.definition_module,
+                    next_mark: mark,
+                    call_site: info.call_site.clone(),
+                    identifier_mark: None,
+                },
+                info.arguments.clone(),
+            )
+        };
+
+        let twice = &fix.lib_a.calls[0];
+        let boom = &fix.lib_a.calls[1];
+        let bad = &fix.lib_a.calls[2];
+        let hang = &fix.lib_a.calls[3];
+        let overflow = &fix.lib_a.calls[4];
+        let crash = &fix.lib_a.calls[5];
+
+        // 1. Working call starts the server lazily and loads the library.
+        let (syntax, _) = call_macro(&mut client, twice, 1_000_000).expect("twice succeeds");
+        assert_eq!(syntax.text().trim(), "(1 + 2) + (1 + 2)");
+
+        // 2. `panic` diagnostic.
+        let panic_err = call_macro(&mut client, boom, 1_000_010).unwrap_err();
+        assert!(
+            panic_err.starts_with("macro `boom` panicked: macro exploded"),
+            "unexpected panic diagnostic: {panic_err}"
+        );
+
+        // 3. `compile_error` diagnostic.
+        let ce_err = call_macro(&mut client, bad, 1_000_020).unwrap_err();
+        assert_eq!(ce_err, "macro `bad` panicked: bad macro input");
+
+        // 4. Timeout kills and restarts on the next call.
+        let timeout_err = call_macro(&mut client, hang, 1_000_030).unwrap_err();
+        assert_eq!(timeout_err, "macro `hang` did not finish within 300 ms");
+        let (syntax, _) = call_macro(&mut client, twice, 1_000_040)
+            .expect("twice succeeds after timeout restart");
+        assert_eq!(syntax.text().trim(), "(1 + 2) + (1 + 2)");
+
+        // 5. Stack overflow is recognized and restarts on the next call.
+        let mut overflow_client =
+            MacroClient::with_binary(PathBuf::from(env!("CARGO_BIN_EXE_staple")))
+                .with_timeout(Duration::from_secs(10));
+        let overflow_err = call_macro(&mut overflow_client, overflow, 1_000_050).unwrap_err();
+        assert_eq!(overflow_err, "macro `overflow` overflowed its stack");
+        let (syntax, _) = call_macro(&mut overflow_client, twice, 1_000_060)
+            .expect("twice succeeds after stack overflow restart");
+        assert_eq!(syntax.text().trim(), "(1 + 2) + (1 + 2)");
+
+        // 6. Other crash (SIGTRAP / SIGILL from `trap ()`) restarts on the next call.
+        let crash_err = call_macro(&mut client, crash, 1_000_070).unwrap_err();
+        assert!(
+            crash_err.starts_with("macro `crash` crashed ("),
+            "unexpected crash diagnostic: {crash_err}"
+        );
+        let (syntax, _) = call_macro(&mut client, twice, 1_000_080)
+            .expect("twice succeeds after crash restart");
+        assert_eq!(syntax.text().trim(), "(1 + 2) + (1 + 2)");
+
+        client.shutdown();
+        overflow_client.shutdown();
     }
 }

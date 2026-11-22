@@ -244,7 +244,7 @@ impl MacroExpander {
             Err(message) => {
                 self.diagnostics.push(Diagnostic::new(
                     call_span.clone(),
-                    format!("compiled macro `{}` failed: {message}", definition.key.name),
+                    message,
                 ));
                 None
             }

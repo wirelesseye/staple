@@ -298,6 +298,8 @@ fn worker_loop(requests: mpsc::Receiver<WorkerRequest>) {
 
 #[cfg(unix)]
 mod dynamic {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
     use super::*;
 
     unsafe extern "C" {
@@ -305,11 +307,69 @@ mod dynamic {
         fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
         fn dlclose(handle: *mut c_void) -> c_int;
         fn dlerror() -> *const c_char;
-        fn pipe(fds: *mut c_int) -> c_int;
         fn dup(fd: c_int) -> c_int;
         fn dup2(oldfd: c_int, newfd: c_int) -> c_int;
         fn close(fd: c_int) -> c_int;
         fn fflush(stream: *mut c_void) -> c_int;
+        fn open(path: *const c_char, oflag: c_int, ...) -> c_int;
+        fn unlink(path: *const c_char) -> c_int;
+        fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;
+        #[link_name = "read"]
+        fn libc_read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
+        #[link_name = "write"]
+        fn libc_write(fd: c_int, buf: *const c_void, count: usize) -> isize;
+        fn signal(sig: c_int, handler: usize) -> usize;
+        fn raise(sig: c_int) -> c_int;
+    }
+
+    const SIGABRT: c_int = 6;
+    const SIG_DFL: usize = 0;
+    const O_RDWR: c_int = 2;
+    #[cfg(target_os = "macos")]
+    const O_CREAT: c_int = 0x0200;
+    #[cfg(target_os = "macos")]
+    const O_EXCL: c_int = 0x0800;
+    #[cfg(not(target_os = "macos"))]
+    const O_CREAT: c_int = 0o100;
+    #[cfg(not(target_os = "macos"))]
+    const O_EXCL: c_int = 0o200;
+    const SEEK_SET: c_int = 0;
+
+    static CAPTURE_FD: AtomicI32 = AtomicI32::new(-1);
+    static SAVED_STDERR_FD: AtomicI32 = AtomicI32::new(-1);
+    static CAPTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    extern "C" fn flush_capture_on_abort(sig: c_int) {
+        let capture_fd = CAPTURE_FD.swap(-1, Ordering::SeqCst);
+        let stderr_fd = SAVED_STDERR_FD.swap(-1, Ordering::SeqCst);
+        if capture_fd >= 0 && stderr_fd >= 0 {
+            unsafe {
+                lseek(capture_fd, 0, SEEK_SET);
+                let mut buf = [0u8; 512];
+                loop {
+                    let n = libc_read(capture_fd, buf.as_mut_ptr().cast(), buf.len());
+                    if n <= 0 {
+                        break;
+                    }
+                    let mut written = 0usize;
+                    while written < n as usize {
+                        let w = libc_write(
+                            stderr_fd,
+                            buf[written..n as usize].as_ptr().cast(),
+                            n as usize - written,
+                        );
+                        if w <= 0 {
+                            break;
+                        }
+                        written += w as usize;
+                    }
+                }
+            }
+        }
+        unsafe {
+            signal(sig, SIG_DFL);
+            raise(sig);
+        }
     }
 
     const RTLD_NOW: c_int = 2;
@@ -466,20 +526,27 @@ mod dynamic {
     }
 
     pub(super) fn capture_output<T>(f: impl FnOnce() -> T) -> (T, Vec<u8>) {
-        use std::os::fd::FromRawFd;
-
-        let mut pipe_fds = [0 as c_int; 2];
-        if unsafe { pipe(pipe_fds.as_mut_ptr()) } != 0 {
+        let seq = CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "staple-macro-capture-{}-{seq}",
+            std::process::id()
+        ));
+        let Ok(c_path) = CString::new(path.as_os_str().as_encoded_bytes()) else {
+            return (f(), Vec::new());
+        };
+        let capture_fd = unsafe { open(c_path.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o600) };
+        if capture_fd < 0 {
             return (f(), Vec::new());
         }
-        let read_end = pipe_fds[0];
-        let write_end = pipe_fds[1];
+        unsafe {
+            unlink(c_path.as_ptr());
+        }
+
         let saved_stdout = unsafe { dup(1) };
         let saved_stderr = unsafe { dup(2) };
         if saved_stdout < 0 || saved_stderr < 0 {
             unsafe {
-                close(read_end);
-                close(write_end);
+                close(capture_fd);
                 if saved_stdout >= 0 {
                     close(saved_stdout);
                 }
@@ -491,19 +558,22 @@ mod dynamic {
         }
 
         unsafe {
-            dup2(write_end, 1);
-            dup2(write_end, 2);
-            close(write_end);
+            dup2(capture_fd, 1);
+            dup2(capture_fd, 2);
         }
 
-        let reader = std::thread::spawn(move || {
-            let mut file = unsafe { std::fs::File::from_raw_fd(read_end) };
-            let mut buffer = Vec::new();
-            let _ = file.read_to_end(&mut buffer);
-            buffer
-        });
+        CAPTURE_FD.store(capture_fd, Ordering::SeqCst);
+        SAVED_STDERR_FD.store(saved_stderr, Ordering::SeqCst);
+        let prev_handler =
+            unsafe { signal(SIGABRT, flush_capture_on_abort as *const () as usize) };
 
         let result = f();
+
+        unsafe {
+            signal(SIGABRT, prev_handler);
+        }
+        CAPTURE_FD.store(-1, Ordering::SeqCst);
+        SAVED_STDERR_FD.store(-1, Ordering::SeqCst);
 
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
@@ -513,9 +583,21 @@ mod dynamic {
             dup2(saved_stderr, 2);
             close(saved_stdout);
             close(saved_stderr);
+            lseek(capture_fd, 0, SEEK_SET);
         }
 
-        let output = reader.join().unwrap_or_default();
+        let mut output = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = unsafe { libc_read(capture_fd, buf.as_mut_ptr().cast(), buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            output.extend_from_slice(&buf[..n as usize]);
+        }
+        unsafe {
+            close(capture_fd);
+        }
         (result, output)
     }
 }
