@@ -801,6 +801,38 @@ pub(crate) fn resolve_intrinsic(symbol: &str) -> Option<*const c_void> {
     binding_for(symbol).map(|intrinsic| intrinsic.address() as *const c_void)
 }
 
+/// Every distinct host symbol name in [`INTRINSICS`], for [`LibrarySpec::host_symbols`].
+pub fn host_symbols() -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    INTRINSICS
+        .iter()
+        .filter_map(|intrinsic| {
+            seen.insert(intrinsic.symbol)
+                .then(|| intrinsic.symbol.to_owned())
+        })
+        .collect()
+}
+
+/// Stable FNV-1a checksum of the `INTRINSICS` names and symbols, exchanged
+/// during the macro-server handshake.
+pub fn intrinsics_checksum() -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for intrinsic in INTRINSICS {
+        for byte in intrinsic
+            .name
+            .as_bytes()
+            .iter()
+            .chain(std::iter::once(&0))
+            .chain(intrinsic.symbol.as_bytes())
+            .chain(std::iter::once(&0))
+        {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}
+
 /// The cursor's position within its fragment.
 extern "C" fn offset(stream: u64) -> usize {
     stream_parts(stream).1

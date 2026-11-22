@@ -256,6 +256,7 @@ fn make_timed_call(
     // function doesn't use.
     type Entry = unsafe extern "C" fn(*const usize, u64) -> u64;
     let request = encode(&Message::Call {
+        library: 0,
         entry,
         context: CallContext {
             definition_module: call.definition_module,
@@ -284,9 +285,12 @@ fn make_timed_call(
     let reply = encode(&Message::Result {
         syntax,
         next_mark: next_mark(),
+        output: Vec::new(),
     });
     match decode(&reply).map_err(|error| error.to_string())?.0 {
-        Message::Result { syntax, next_mark } => Ok((syntax, next_mark)),
+        Message::Result {
+            syntax, next_mark, ..
+        } => Ok((syntax, next_mark)),
         _ => unreachable!("a result decodes as a result"),
     }
 }

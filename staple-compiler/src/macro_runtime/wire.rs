@@ -45,11 +45,18 @@ use super::quote::CallContext;
 use crate::ModuleId;
 
 /// The version every frame starts with. A receiver rejects any other.
-pub(crate) const WIRE_VERSION: u32 = 2;
+pub const WIRE_VERSION: u32 = 2;
+
+/// The server handshake protocol version.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 const CALL: u8 = 0;
 const RESULT: u8 = 1;
 const ERROR: u8 = 2;
+const HELLO: u8 = 3;
+const LOAD: u8 = 4;
+const LOADED: u8 = 5;
+const SHUTDOWN: u8 = 6;
 
 const NODE: u8 = 0;
 const LIST: u8 = 1;
@@ -146,13 +153,39 @@ token_kinds!(
     Unknown,
 );
 
+/// Why a server request or macro call failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// Handshake, library loading, binding, or protocol failure.
+    Internal,
+    /// The macro called `compile_error`.
+    CompileError,
+    /// The macro exited (e.g. `panic`), leaving its message in captured output.
+    Exit,
+}
+
 /// One message between the parent and the process that runs compiled macro
 /// code.
 #[derive(Clone, Debug)]
-pub(crate) enum Message {
+pub enum Message {
+    /// Handshake exchanged when the server starts.
+    Hello {
+        protocol_version: u32,
+        wire_version: u32,
+        intrinsics_checksum: u64,
+    },
+    /// Loads a compiled macro library and its mapped quotation templates.
+    Load {
+        path: String,
+        templates: Vec<(usize, Syntax)>,
+    },
+    /// Confirms a library is loaded and assigns its server-side handle.
+    Loaded { library: u32 },
     /// The parent asks for one macro call.
     Call {
-        /// The symbol of the macro's entry function.
+        /// The loaded library handle returned by [`Message::Loaded`].
+        library: u32,
+        /// The symbol of the macro's entry shim (`__staple_entry.<n>`).
         entry: String,
         context: CallContext,
         /// One tree per parameter, as the parent matched them.
@@ -166,14 +199,22 @@ pub(crate) enum Message {
         /// The first expansion mark the call didn't use, which the parent
         /// continues from.
         next_mark: u64,
+        /// Captured stdout/stderr written during the call.
+        output: Vec<u8>,
     },
-    /// A call failed, with the message the macro or the runtime gave.
-    Error { message: String },
+    /// A call or request failed, with its kind, message, and captured output.
+    Error {
+        kind: ErrorKind,
+        message: String,
+        output: Vec<u8>,
+    },
+    /// Cleanly terminates the server.
+    Shutdown,
 }
 
 /// Why bytes are not a message.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum WireError {
+pub enum WireError {
     /// The bytes end before the frame or a field does.
     Truncated,
     /// The frame was written for another version.
@@ -207,16 +248,40 @@ impl fmt::Display for WireError {
 }
 
 /// Encodes `message` as one frame.
-#[allow(dead_code)] // Nothing outside tests sends messages yet.
-pub(crate) fn encode(message: &Message) -> Vec<u8> {
+pub fn encode(message: &Message) -> Vec<u8> {
     let mut writer = Writer::default();
     let tag = match message {
+        Message::Hello {
+            protocol_version,
+            wire_version,
+            intrinsics_checksum,
+        } => {
+            writer.varint(u64::from(*protocol_version));
+            writer.varint(u64::from(*wire_version));
+            writer.varint(*intrinsics_checksum);
+            HELLO
+        }
+        Message::Load { path, templates } => {
+            writer.string(path);
+            writer.varint(templates.len() as u64);
+            for (module, syntax) in templates {
+                writer.usize(*module);
+                writer.fragment(syntax);
+            }
+            LOAD
+        }
+        Message::Loaded { library } => {
+            writer.varint(u64::from(*library));
+            LOADED
+        }
         Message::Call {
+            library,
             entry,
             context,
             arguments,
         } => {
-            // entry context arguments(count tree*)
+            // library entry context arguments(count tree*)
+            writer.varint(u64::from(*library));
             writer.string(entry);
             writer.context(context);
             writer.varint(arguments.len() as u64);
@@ -225,17 +290,36 @@ pub(crate) fn encode(message: &Message) -> Vec<u8> {
             }
             CALL
         }
-        Message::Result { syntax, next_mark } => {
-            // fragment next_mark
+        Message::Result {
+            syntax,
+            next_mark,
+            output,
+        } => {
+            // fragment next_mark output
             writer.fragment(syntax);
             writer.varint(*next_mark);
+            writer.varint(output.len() as u64);
+            writer.payload.extend_from_slice(output);
             RESULT
         }
-        Message::Error { message } => {
-            // message
+        Message::Error {
+            kind,
+            message,
+            output,
+        } => {
+            // kind message output
+            let kind_code = match kind {
+                ErrorKind::Internal => 0u8,
+                ErrorKind::CompileError => 1u8,
+                ErrorKind::Exit => 2u8,
+            };
+            writer.payload.push(kind_code);
             writer.string(message);
+            writer.varint(output.len() as u64);
+            writer.payload.extend_from_slice(output);
             ERROR
         }
+        Message::Shutdown => SHUTDOWN,
     };
     let mut body = Vec::with_capacity(writer.payload.len() + 64);
     body.extend_from_slice(&WIRE_VERSION.to_le_bytes());
@@ -255,11 +339,15 @@ pub(crate) fn encode(message: &Message) -> Vec<u8> {
 
 /// Decodes the frame at the start of `bytes`, and returns it with the bytes
 /// after it.
-#[allow(dead_code)] // Nothing outside tests receives messages yet.
-pub(crate) fn decode(bytes: &[u8]) -> Result<(Message, &[u8]), WireError> {
+pub fn decode(bytes: &[u8]) -> Result<(Message, &[u8]), WireError> {
     let (length, rest) = split(bytes, 4)?;
     let length = u32::from_le_bytes(length.try_into().expect("four bytes")) as usize;
     let (body, rest) = split(rest, length)?;
+    let message = decode_body(body)?;
+    Ok((message, rest))
+}
+
+fn decode_body(body: &[u8]) -> Result<Message, WireError> {
     let mut reader = Reader {
         bytes: body,
         strings: Vec::new(),
@@ -278,7 +366,37 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(Message, &[u8]), WireError> {
     }
     reader.strings = strings;
     let message = match tag {
+        HELLO => {
+            let protocol_version = u32::try_from(reader.varint()?)
+                .map_err(|_| WireError::Invalid("protocol version", 0))?;
+            let wire_version = u32::try_from(reader.varint()?)
+                .map_err(|_| WireError::Invalid("wire version", 0))?;
+            let intrinsics_checksum = reader.varint()?;
+            Message::Hello {
+                protocol_version,
+                wire_version,
+                intrinsics_checksum,
+            }
+        }
+        LOAD => {
+            let path = reader.string()?.to_string();
+            let count = reader.length()?;
+            let mut templates = Vec::with_capacity(count.min(body.len()));
+            for _ in 0..count {
+                let module = reader.length()?;
+                let syntax = reader.fragment()?;
+                templates.push((module, syntax));
+            }
+            Message::Load { path, templates }
+        }
+        LOADED => {
+            let library = u32::try_from(reader.varint()?)
+                .map_err(|_| WireError::Invalid("library handle", 0))?;
+            Message::Loaded { library }
+        }
         CALL => {
+            let library = u32::try_from(reader.varint()?)
+                .map_err(|_| WireError::Invalid("library handle", 0))?;
             let entry = reader.string()?.to_string();
             let context = reader.context()?;
             let count = reader.length()?;
@@ -287,6 +405,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(Message, &[u8]), WireError> {
                 arguments.push(reader.tree()?);
             }
             Message::Call {
+                library,
                 entry,
                 context,
                 arguments,
@@ -295,17 +414,78 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(Message, &[u8]), WireError> {
         RESULT => {
             let syntax = reader.fragment()?;
             let next_mark = reader.varint()?;
-            Message::Result { syntax, next_mark }
+            let output_len = reader.length()?;
+            let output = reader.take(output_len)?.to_vec();
+            Message::Result {
+                syntax,
+                next_mark,
+                output,
+            }
         }
-        ERROR => Message::Error {
-            message: reader.string()?.to_string(),
-        },
+        ERROR => {
+            let kind = match reader.byte()? {
+                0 => ErrorKind::Internal,
+                1 => ErrorKind::CompileError,
+                2 => ErrorKind::Exit,
+                other => return Err(WireError::Invalid("error kind", u64::from(other))),
+            };
+            let message = reader.string()?.to_string();
+            let output_len = reader.length()?;
+            let output = reader.take(output_len)?.to_vec();
+            Message::Error {
+                kind,
+                message,
+                output,
+            }
+        }
+        SHUTDOWN => Message::Shutdown,
         tag => return Err(WireError::Invalid("message tag", u64::from(tag))),
     };
     if !reader.bytes.is_empty() {
         return Err(WireError::Trailing(reader.bytes.len()));
     }
-    Ok((message, rest))
+    Ok(message)
+}
+
+/// Writes one encoded message frame to `writer`.
+pub fn write_frame(writer: &mut impl std::io::Write, message: &Message) -> std::io::Result<()> {
+    let frame = encode(message);
+    writer.write_all(&frame)?;
+    writer.flush()
+}
+
+/// Reads one encoded message frame from `reader`. Returns `Ok(None)` on clean EOF.
+pub fn read_frame(
+    reader: &mut impl std::io::Read,
+) -> Result<Option<Message>, FrameReadError> {
+    let mut length_bytes = [0u8; 4];
+    match reader.read_exact(&mut length_bytes) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(FrameReadError::Io(error)),
+    }
+    let length = u32::from_le_bytes(length_bytes) as usize;
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body).map_err(FrameReadError::Io)?;
+    decode_body(&body)
+        .map(Some)
+        .map_err(FrameReadError::Wire)
+}
+
+/// Why reading a frame from a stream failed.
+#[derive(Debug)]
+pub enum FrameReadError {
+    Io(std::io::Error),
+    Wire(WireError),
+}
+
+impl fmt::Display for FrameReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "I/O error: {error}"),
+            Self::Wire(error) => write!(f, "{error}"),
+        }
+    }
 }
 
 /// Encodes one syntax fragment with [`WIRE_VERSION`] and its string table, for
@@ -847,9 +1027,11 @@ mod tests {
         let start = file.tokens().iter().position(|token| token.text == "(").unwrap();
         let end = file.tokens().iter().rposition(|token| token.text == "3").unwrap() + 1;
         let slice = syntax_slice(&file, start, end);
-        let Message::Result { syntax: decoded, .. } =
-            round_trip(&Message::Result { syntax: slice.clone(), next_mark: 1 })
-        else {
+        let Message::Result { syntax: decoded, .. } = round_trip(&Message::Result {
+            syntax: slice.clone(),
+            next_mark: 1,
+            output: Vec::new(),
+        }) else {
             panic!("a result came back as something else");
         };
         assert_same_fragment(&slice, &decoded, "slice");
@@ -885,11 +1067,13 @@ mod tests {
         let message = Message::Result {
             syntax: syntax.clone(),
             next_mark,
+            output: Vec::new(),
         };
         match round_trip(&message) {
             Message::Result {
                 syntax: decoded,
                 next_mark: decoded_mark,
+                ..
             } => {
                 assert_same_fragment(syntax, &decoded, what);
                 assert_eq!(decoded_mark, next_mark, "{what}: next mark");
@@ -1022,6 +1206,7 @@ mod tests {
                 identifier_mark,
             };
             let message = Message::Call {
+                library: 0,
                 entry: "operator.656e747279".to_owned(),
                 context: context.clone(),
                 arguments: arguments.clone(),
@@ -1030,6 +1215,7 @@ mod tests {
                 entry,
                 context: decoded,
                 arguments: decoded_arguments,
+                ..
             } = round_trip(&message)
             else {
                 panic!("a call came back as something else");
@@ -1046,9 +1232,11 @@ mod tests {
             );
         }
         let message = Message::Error {
+            kind: ErrorKind::Internal,
             message: "expected an expression, found `)`".to_owned(),
+            output: Vec::new(),
         };
-        let Message::Error { message } = round_trip(&message) else {
+        let Message::Error { message, .. } = round_trip(&message) else {
             panic!("an error came back as something else");
         };
         assert_eq!(message, "expected an expression, found `)`");
@@ -1069,16 +1257,20 @@ mod tests {
     #[test]
     fn frames_follow_one_another() {
         let first = encode(&Message::Error {
+            kind: ErrorKind::Internal,
             message: "one".to_owned(),
+            output: Vec::new(),
         });
         let second = encode(&Message::Error {
+            kind: ErrorKind::Internal,
             message: "two".to_owned(),
+            output: Vec::new(),
         });
         let stream = [first.as_slice(), second.as_slice()].concat();
         let (message, rest) = decode(&stream).expect("the first frame decodes");
-        assert!(matches!(message, Message::Error { message } if message == "one"));
+        assert!(matches!(message, Message::Error { message, .. } if message == "one"));
         let (message, rest) = decode(rest).expect("the second frame decodes");
-        assert!(matches!(message, Message::Error { message } if message == "two"));
+        assert!(matches!(message, Message::Error { message, .. } if message == "two"));
         assert!(rest.is_empty());
     }
 
@@ -1088,6 +1280,7 @@ mod tests {
         let frame = encode(&Message::Result {
             syntax: syntax_from_text("a b", &mut next),
             next_mark: 1,
+            output: Vec::new(),
         });
         for end in 0..frame.len() {
             assert_eq!(
@@ -1158,6 +1351,7 @@ mod tests {
                     .enumerate()
                     .map(|(index, call)| {
                         let message = Message::Call {
+                            library: 0,
                             entry: crate::macro_expand::check_program::entry_function_name(
                                 &call.declaration,
                             ),
@@ -1203,6 +1397,7 @@ mod tests {
                 size += encode(&Message::Result {
                     syntax,
                     next_mark: 2_000,
+                    output: Vec::new(),
                 })
                 .len();
             }
@@ -1218,5 +1413,45 @@ mod tests {
         };
         eprintln!("derive_eq calls: {}", summary(&call_sizes));
         eprintln!("derive_eq results: {}", summary(&result_sizes));
+    }
+
+    #[test]
+    fn server_messages_round_trip() {
+        let hello = Message::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            wire_version: WIRE_VERSION,
+            intrinsics_checksum: 0x1234_5678_9abc_def0,
+        };
+        assert!(matches!(
+            round_trip(&hello),
+            Message::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                wire_version: WIRE_VERSION,
+                intrinsics_checksum: 0x1234_5678_9abc_def0,
+            }
+        ));
+
+        let mut next = 0;
+        let fragment = syntax_from_text("x + 1", &mut next);
+        let load = Message::Load {
+            path: "/tmp/libfoo.dylib".to_owned(),
+            templates: vec![(3, fragment.clone())],
+        };
+        let Message::Load { path, templates } = round_trip(&load) else {
+            panic!("expected Load");
+        };
+        assert_eq!(path, "/tmp/libfoo.dylib");
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].0, 3);
+        assert_same_fragment(&fragment, &templates[0].1, "load template");
+
+        assert!(matches!(
+            round_trip(&Message::Loaded { library: 7 }),
+            Message::Loaded { library: 7 }
+        ));
+        assert!(matches!(
+            round_trip(&Message::Shutdown),
+            Message::Shutdown
+        ));
     }
 }

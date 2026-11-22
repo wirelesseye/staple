@@ -26,18 +26,18 @@ use crate::macro_expand::syntax_ops::{append_syntax_tokens, fill_quote, root_hyg
 
 /// What the parent says about one macro call.
 #[derive(Clone, Debug)]
-pub(crate) struct CallContext {
+pub struct CallContext {
     /// The module that defines the macro being called. Identifiers the macro
     /// constructs resolve there.
-    pub(crate) definition_module: ModuleId,
+    pub definition_module: ModuleId,
     /// The first expansion mark the call may use. Every quotation takes the
     /// next unused one.
-    pub(crate) next_mark: u64,
+    pub next_mark: u64,
     /// Where the macro was called. Constructed identifiers have this span.
-    pub(crate) call_site: Span,
+    pub call_site: Span,
     /// The mark every identifier the call constructs shares, taken when the
     /// first one is spliced.
-    pub(crate) identifier_mark: Option<u64>,
+    pub identifier_mark: Option<u64>,
 }
 
 impl Default for CallContext {

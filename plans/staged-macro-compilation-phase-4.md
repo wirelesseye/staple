@@ -502,7 +502,7 @@ Update this section as you work (see "Rules for the implementor").
 |---|---|---|---|
 | 1. Library emission | done | `bac82ed7` | `LibrarySpec`, `__staple_library_init`, `__staple_library_bind`, `exit` trap, `__staple_entry.<n>` shims, `--emit dylib`, `@compiled_only compile_error`, and `dlopen`/`nm` tests. Internal generic trapping stubs (e.g. `__parse_primitive`) are skipped when binding host symbols. Review fixes: `exit` is always defined when trapped, bind returns the first unresolved name, shared host symbols bind to their implemented entry. See Findings. |
 | 2. Manifests and load-time mapping | done | `c10c1253` | `WIRE_VERSION` bumped to 2 with `encode_fragment`/`decode_fragment`; sidecar `.manifest` files (`manifest.rs`) store format/wire versions, `(package, path, macro, overload)` keys, shim symbols, and wire-encoded templates; `resolve` maps modules and macro declarations in the parent and reports missing keys as internal errors naming the library; cross-compilation hygiene test passes. Review fixes: keys come from the expanded program, templates drop compilation numbers. See Findings. |
-| 3. The server | not started | | |
+| 3. The server | done | | `staple __macro-server` (`staple-cli/src/macro_server.rs`) + `macro_runtime::server` over fd 3 (`socketpair`), 256 MiB worker thread, `Hello`/`Load`/`Loaded`/`Call`/`Result`/`Error`/`Shutdown` wire messages, `INTRINSICS` FNV-1a checksum, fd 1/2 capture pipe, `RTLD_NOW | RTLD_LOCAL`, and `staple-cli/tests/macro_server.rs` integration tests. |
 | 4. The client and failure handling | not started | | |
 | 5. Effects | not started | | |
 | 6. The quotation cycle and generated-item loops | not started | | |
@@ -528,7 +528,12 @@ commit and the command. Include:
 
 ## Findings
 
-_None yet._ Record:
+- **Two libraries can share a server (task 3).** Loading two compiled macro
+  libraries with `RTLD_NOW | RTLD_LOCAL` into one `staple __macro-server`
+  process and alternating calls between them keeps their runtime and collector
+  state separate on macOS (verified in `staple-cli/tests/macro_server.rs`).
+
+Record:
 
 - whether two libraries can share a server (task 3);
 - the forbidden list (task 5);

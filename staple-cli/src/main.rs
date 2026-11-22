@@ -6,6 +6,7 @@ mod compile;
 mod expand;
 mod fmt;
 mod lsp;
+mod macro_server;
 mod package;
 
 // The compiler allocates and frees many small type and syntax nodes; mimalloc
@@ -30,6 +31,7 @@ fn main() -> ExitCode {
 
     let result = match command {
         Some("lsp") => return lsp::run(arguments[1..].to_vec()),
+        Some("__macro-server") => return macro_server::run(&arguments[1..]),
         Some("-h") | Some("--help") | None => {
             Ok(Outcome::Completed(Some(format!("{}\n", usage()))))
         }

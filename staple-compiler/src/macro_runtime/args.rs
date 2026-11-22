@@ -12,7 +12,7 @@ use super::arena::{Handle, with_arena};
 
 /// A node of a matched macro call.
 #[derive(Clone, Debug)]
-pub(crate) enum ArgTree {
+pub enum ArgTree {
     /// One fragment, which `FromMatch` parses as the parameter's type.
     Node(Syntax),
     /// A sequence's elements, a product's fields, or the parameters of a call.
