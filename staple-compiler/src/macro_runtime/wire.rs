@@ -45,7 +45,7 @@ use super::quote::CallContext;
 use crate::ModuleId;
 
 /// The version every frame starts with. A receiver rejects any other.
-pub(crate) const WIRE_VERSION: u32 = 1;
+pub(crate) const WIRE_VERSION: u32 = 2;
 
 const CALL: u8 = 0;
 const RESULT: u8 = 1;
@@ -306,6 +306,47 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(Message, &[u8]), WireError> {
         return Err(WireError::Trailing(reader.bytes.len()));
     }
     Ok((message, rest))
+}
+
+/// Encodes one syntax fragment with [`WIRE_VERSION`] and its string table, for
+/// manifests and template tables.
+pub(crate) fn encode_fragment(syntax: &Syntax) -> Vec<u8> {
+    let mut writer = Writer::default();
+    writer.fragment(syntax);
+    let mut bytes = Vec::with_capacity(writer.payload.len() + 32);
+    bytes.extend_from_slice(&WIRE_VERSION.to_le_bytes());
+    put_varint(&mut bytes, writer.strings.len() as u64);
+    for string in &writer.strings {
+        put_varint(&mut bytes, string.len() as u64);
+        bytes.extend_from_slice(string.as_bytes());
+    }
+    bytes.extend_from_slice(&writer.payload);
+    bytes
+}
+
+/// Decodes a syntax fragment written by [`encode_fragment`].
+pub(crate) fn decode_fragment(bytes: &[u8]) -> Result<Syntax, WireError> {
+    let mut reader = Reader {
+        bytes,
+        strings: Vec::new(),
+    };
+    let version = u32::from_le_bytes(reader.take(4)?.try_into().expect("four bytes"));
+    if version != WIRE_VERSION {
+        return Err(WireError::Version(version));
+    }
+    let count = reader.length()?;
+    let mut strings = Vec::with_capacity(count.min(bytes.len()));
+    for _ in 0..count {
+        let length = reader.length()?;
+        let text = std::str::from_utf8(reader.take(length)?).map_err(|_| WireError::Utf8)?;
+        strings.push(Arc::<str>::from(text));
+    }
+    reader.strings = strings;
+    let syntax = reader.fragment()?;
+    if !reader.bytes.is_empty() {
+        return Err(WireError::Trailing(reader.bytes.len()));
+    }
+    Ok(syntax)
 }
 
 fn split(bytes: &[u8], length: usize) -> Result<(&[u8], &[u8]), WireError> {

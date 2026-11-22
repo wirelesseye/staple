@@ -2262,4 +2262,144 @@ mod library_tests {
         assert_eq!(library.exit_code(), 1);
         assert_eq!(take_compile_error().as_deref(), Some("bad macro input"));
     }
+
+    #[test]
+    fn manifest_maps_modules_and_hygiene_across_compilations() {
+        use crate::macro_runtime::manifest::{LibraryManifest, build_manifest};
+
+        let source1 = concat!(
+            "mod macros {\n",
+            "    use std.syntax.*\n",
+            "    pub macro twice: Expr -> Expr = value => {\n",
+            "        let tmp = Ident \"local\"\n",
+            "        parse_quote { { let $tmp = $value; $tmp + $value } }\n",
+            "    }\n",
+            "}\n",
+            "let a = macros.twice (1 + 2)\n",
+        );
+        let (run1, calls1) = record_calls(|| check_run_for(source1));
+        let module1 = run1
+            .program
+            .modules()
+            .iter()
+            .find(|module| module.name.as_deref() == Some("macros"))
+            .expect("macros module in compilation 1")
+            .id;
+        let call1 = calls1
+            .into_iter()
+            .find(|call| call.definition_module == module1)
+            .expect("call in compilation 1");
+        let lowered1 = lower_run(&run1).expect("compilation 1 lowers");
+        let name1 = entry_function_name(&call1.declaration);
+        let symbol1 = instance_symbol(&lowered1, &crate::resolve::mangle_function_name(&name1))
+            .unwrap_or_else(|| panic!("`{name1}` is instantiated"));
+
+        let temp = TempDir::new("manifest");
+        let lib_path = build_library(&run1, vec![symbol1], &temp.0);
+        let manifest = build_manifest(
+            &run1.program,
+            &[(module1, call1.declaration.syntax.id, "__staple_entry.0".to_owned())],
+            &run1.templates,
+        )
+        .expect("manifest builds");
+        manifest.write_beside(&lib_path).expect("manifest writes");
+
+        // Second compilation with shifted ModuleIds and SyntaxIds.
+        let source2 = concat!(
+            "mod extra {\n",
+            "    pub let pad1 = 10\n",
+            "    pub let pad2 = 20\n",
+            "}\n",
+            "mod macros {\n",
+            "    use std.syntax.*\n",
+            "    pub macro twice: Expr -> Expr = value => {\n",
+            "        let tmp = Ident \"local\"\n",
+            "        parse_quote { { let $tmp = $value; $tmp + $value } }\n",
+            "    }\n",
+            "}\n",
+            "let a = macros.twice (1 + 2)\n",
+        );
+        let (program2, calls2) = record_calls(|| {
+            let loaded = ProgramLoader::new()
+                .with_standard_library_root(standard_library_root())
+                .load_source(source2, &workspace_root())
+                .expect("source2 loads");
+            let (expanded, _, _) =
+                crate::macro_expand::expand_program_checked(loaded, true, None, false)
+                    .expect("source2 expands");
+            expanded
+        });
+        let module2 = program2
+            .modules()
+            .iter()
+            .find(|module| module.name.as_deref() == Some("macros"))
+            .expect("macros module in compilation 2")
+            .id;
+        assert_ne!(module1, module2, "ModuleId must differ across compilations");
+        let call2 = calls2
+            .into_iter()
+            .find(|call| call.definition_module == module2)
+            .expect("call in compilation 2");
+        assert_ne!(
+            call1.declaration.syntax.id, call2.declaration.syntax.id,
+            "SyntaxId must differ across compilations"
+        );
+
+        let decoded_manifest = LibraryManifest::read_beside(&lib_path).expect("manifest reads");
+        let loaded = decoded_manifest
+            .resolve(&program2, &lib_path)
+            .expect("manifest resolves against compilation 2");
+        assert_eq!(
+            loaded.entries.get(&call2.declaration.syntax.id).map(String::as_str),
+            Some("__staple_entry.0")
+        );
+
+        crate::macro_runtime::quote::install_templates(std::sync::Arc::new(loaded.templates));
+        let library = LoadedLibrary::open(&lib_path);
+        library.bind_and_init();
+        let shim = library.entry(0);
+
+        begin_call(CallContext {
+            definition_module: call2.definition_module,
+            next_mark: FIRST_COMPILED_MARK,
+            call_site: call2.call_site.clone(),
+            identifier_mark: None,
+        });
+        let handle = crate::macro_runtime::args::insert_arguments(&call2.arguments);
+        let result_handle = unsafe { shim(handle) };
+        assert_ne!(result_handle, u64::MAX, "call should not trap exit");
+        let syntax = crate::macro_runtime::arena::with_arena(|arena| {
+            arena.syntax(result_handle.into()).cloned()
+        })
+        .expect("an entry function returns syntax");
+        crate::macro_runtime::arena::reset();
+        let mut next_syntax_id = program2.next_syntax_id();
+        let expanded = compiled_result(&call2.result, syntax, &mut next_syntax_id)
+            .expect("result should decode");
+        assert_eq!(expanded.text(), "{ let local = (1 + 2); local + (1 + 2) }");
+        let local_hygiene = expanded
+            .tokens()
+            .iter()
+            .filter(|token| token.text == "local")
+            .map(|token| token.hygiene)
+            .collect::<Vec<_>>();
+        assert_eq!(local_hygiene.len(), 2);
+        assert!(
+            local_hygiene
+                .iter()
+                .all(|hygiene| matches!(hygiene, Some((module, _)) if *module == module2.0)),
+            "expected compilation 2 module {}, got {local_hygiene:?}",
+            module2.0
+        );
+        let let_hygiene = expanded
+            .tokens()
+            .iter()
+            .find(|token| token.text == "let")
+            .and_then(|token| token.hygiene);
+        assert!(
+            matches!(let_hygiene, Some((module, _)) if module == module2.0),
+            "expected quotation hygiene from compilation 2 module {}, got {let_hygiene:?}",
+            module2.0
+        );
+    }
 }

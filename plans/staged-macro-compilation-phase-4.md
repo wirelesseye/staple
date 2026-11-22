@@ -501,7 +501,7 @@ Update this section as you work (see "Rules for the implementor").
 | Task | Status | Commit | Notes |
 |---|---|---|---|
 | 1. Library emission | done | `bac82ed7` | `LibrarySpec`, `__staple_library_init`, `__staple_library_bind`, `exit` trap, `__staple_entry.<n>` shims, `--emit dylib`, `@compiled_only compile_error`, and `dlopen`/`nm` tests. Internal generic trapping stubs (e.g. `__parse_primitive`) are skipped when binding host symbols. |
-| 2. Manifests and load-time mapping | not started | | |
+| 2. Manifests and load-time mapping | done | | `WIRE_VERSION` bumped to 2 with `encode_fragment`/`decode_fragment`; sidecar `.manifest` files (`manifest.rs`) store format/wire versions, `(package, path, macro, overload)` keys, shim symbols, and wire-encoded templates; `resolve` maps modules and macro declarations in the parent and reports missing keys as internal errors naming the library; cross-compilation hygiene test passes. |
 | 3. The server | not started | | |
 | 4. The client and failure handling | not started | | |
 | 5. Effects | not started | | |
