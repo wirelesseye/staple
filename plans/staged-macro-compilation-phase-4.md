@@ -500,7 +500,7 @@ Update this section as you work (see "Rules for the implementor").
 
 | Task | Status | Commit | Notes |
 |---|---|---|---|
-| 1. Library emission | done | | `LibrarySpec`, `__staple_library_init`, `__staple_library_bind`, `exit` trap, `__staple_entry.<n>` shims, `--emit dylib`, `@compiled_only compile_error`, and `dlopen`/`nm` tests. Internal generic trapping stubs (e.g. `__parse_primitive`) are skipped when binding host symbols. |
+| 1. Library emission | done | `bac82ed7` | `LibrarySpec`, `__staple_library_init`, `__staple_library_bind`, `exit` trap, `__staple_entry.<n>` shims, `--emit dylib`, `@compiled_only compile_error`, and `dlopen`/`nm` tests. Internal generic trapping stubs (e.g. `__parse_primitive`) are skipped when binding host symbols. |
 | 2. Manifests and load-time mapping | not started | | |
 | 3. The server | not started | | |
 | 4. The client and failure handling | not started | | |
