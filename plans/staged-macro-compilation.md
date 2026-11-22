@@ -140,8 +140,9 @@ the same choice rust-analyzer made with `proc-macro-srv`.
   pointers at startup. Since the server already contains `staple-syntax`, the
   syntax intrinsics are plain Rust functions over real `Syntax` trees, and the
   child needs no extra runtime library.
-- One server runs per compiler invocation (or per LSP session). Requests are
-  batched by expansion round.
+- One server runs per compiler invocation (or per LSP session). Requests go
+  one at a time, since one costs about 7–10 µs (Phase 4 decided against
+  batching).
 - An in-process mode that loads the same library can be added later as an
   optimization for trusted, cached libraries such as the standard library's. It
   is not part of this plan. Phase 0 found that an LLVM JIT is no faster to
@@ -368,6 +369,11 @@ written into those sections.
 
 ### Phase 4: building and running phase-1 libraries
 
+Breakdown and status: [`staged-macro-compilation-phase-4.md`](staged-macro-compilation-phase-4.md).
+The breakdown changes three proposals here: requests are not batched,
+effects are enforced by reachability from the entry functions rather than by a
+restricted runtime, and the hidden `--macro-engine` flag arrives in this phase.
+
 What Phase 3 leaves for this phase:
 
 - **The host table.** `macro_runtime/intrinsics.rs` lists each host function as
@@ -432,8 +438,9 @@ What Phase 3 leaves for this phase:
 
 ### Phase 5: switch over
 
-- Add `--macro-engine=interp|compiled` (hidden). The compiled engine expands in
-  stage order through the server, and template macros stay in the parent.
+- Phase 4 adds the hidden `--macro-engine=interp|compiled`. The compiled engine
+  expands in stage order through the server, and template macros stay in the
+  parent.
   With the compiled engine, normal builds start enforcing syntax ownership, so
   user macros that reuse a non-`Copy` value without a clone stop compiling.
 - Differential testing: run both engines on the standard library, every test
