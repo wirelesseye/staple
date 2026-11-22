@@ -2790,19 +2790,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     fn emit_library(&mut self, library: &super::LibrarySpec) -> CodeGenerationResult<()> {
         let context = self.backend.context;
         let void = context.void_type();
-        let init = self.backend.llvm_module.add_function(
-            "__staple_library_init",
-            void.fn_type(&[], false),
-            None,
-        );
-        let entry = context.append_basic_block(init, "entry");
-        self.backend.builder.position_at_end(entry);
-        self.emit_set_stack_bottom()?;
-        self.emit_program_setup()?;
-        self.backend
-            .builder
-            .build_return(None)
-            .map_err(compiler_diagnostic)?;
 
         let word = context.i64_type();
         let int = context.i32_type();
@@ -2985,6 +2972,46 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         } else {
             None
         };
+
+        // Initialization runs the program's setup, which can `panic` like any
+        // other code, so it sets the jump buffer too. It returns 0 once setup
+        // finishes, or 1 when setup called `exit`.
+        let init = self.backend.llvm_module.add_function(
+            "__staple_library_init",
+            int.fn_type(&[], false),
+            None,
+        );
+        let entry = context.append_basic_block(init, "entry");
+        self.backend.builder.position_at_end(entry);
+        self.emit_set_stack_bottom()?;
+        if let Some((buffer, setjmp)) = jump_buffer {
+            let builder = &self.backend.builder;
+            let jumped = builder
+                .build_direct_call(setjmp, &[buffer.as_pointer_value().into()], "jumped")
+                .map_err(compiler_diagnostic)?
+                .try_as_basic_value()
+                .basic()
+                .expect("setjmp returns an int")
+                .into_int_value();
+            let trapped = context.append_basic_block(init, "trapped");
+            let run = context.append_basic_block(init, "run");
+            let is_trap = builder
+                .build_int_compare(inkwell::IntPredicate::NE, jumped, int.const_zero(), "is_trap")
+                .map_err(compiler_diagnostic)?;
+            builder
+                .build_conditional_branch(is_trap, trapped, run)
+                .map_err(compiler_diagnostic)?;
+            builder.position_at_end(trapped);
+            builder
+                .build_return(Some(&int.const_int(1, false)))
+                .map_err(compiler_diagnostic)?;
+            builder.position_at_end(run);
+        }
+        self.emit_program_setup()?;
+        self.backend
+            .builder
+            .build_return(Some(&int.const_zero()))
+            .map_err(compiler_diagnostic)?;
 
         for (index, symbol) in library.entries.iter().enumerate() {
             let target = self

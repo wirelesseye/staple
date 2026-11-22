@@ -946,26 +946,25 @@ The check is not on by default, and it does not change what macros do.
 
 Macro code may not read files, read from standard input, spawn processes or
 seed `std.rand` from the operating system, so that expansion is deterministic
-and can be cached. Writing diagnostics to standard error is allowed.
+and can be cached.
 
-When a compiled macro library is built, the compiler enforces this by walking
-the lowered call graph (including functions whose address is taken, trait
-methods, and generated artifacts) from each macro entry function and rejecting
-any reachable call to:
+Most of this follows from effects: a macro's code runs with no effects, so it
+can't call a function that requires `IO`, as every `std` function that reads a
+file, reads standard input or draws operating-system randomness does. A macro
+reports a problem with `panic` or `compile_error`, which write to standard
+error.
 
-- `std.fs` I/O operations (`metadata`, `symlink_metadata`, `exists`, `read`,
-  `read_to_string`, `write`, `write_string`, `append_string`, `copy`,
-  `create_dir`, `create_dir_all`, `remove_file`, `remove_dir`, `remove_dir_all`,
-  `rename`, `canonicalize`, `current_dir`, `read_dir`, `File.*`,
-  `DirEntry.metadata`) and their C/runtime bindings (`__staple_fs_*`, `fopen`,
-  `fclose`, `fread`, `fwrite`, `fseeko`, `ftello`, `fileno`, `fsync`, `mkdir`,
-  `rmdir`, `unlink`, `realpath`, `getcwd`);
-- standard input reading in `std.io` (`read_line`, `Stdin.read_byte`,
-  `__staple_io_read_byte`);
-- process spawning in `std.process` (`spawn`, `Command.*`, `system`, `popen`,
-  `fork`, `vfork`, `posix_spawn`, `posix_spawnp`, `exec*`);
-- OS entropy seeding in `std.rand` (`fill_entropy`, `Rng.from_entropy`,
-  `HashKey.from_entropy`, `getentropy`).
+Foreign functions require no effects, so they are checked separately. When
+macros are compiled to native code, a macro is rejected if its code can reach:
+
+- a foreign function the standard library doesn't declare, such as one a
+  package binds itself with `extern "c"`;
+- one of the standard library's own bindings for files (`std.fs`), standard
+  input (`std.io`) or operating-system randomness (`std.rand`).
+
+Only code the macro can actually run counts, including functions it passes as
+values; a function nothing calls doesn't. The interpreter that runs macros by
+default doesn't check this.
 
 #### `@track_caller` and `Location`
 

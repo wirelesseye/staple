@@ -213,6 +213,9 @@ All of these were read from the source at `bba16df7`, unless they name the spike
      ``macro `m` reaches `std.fs.read_file`, which macro code can't use``.
    - The forbidden set is a list of `std` functions and extern bindings, kept
      next to the effects rule in `Staple.md`.
+   - A list of names can't cover foreign functions a package declares itself,
+     so any reachable foreign function the standard library doesn't declare is
+     also rejected (changed in the review of task 5; see Findings).
    - Report it when the library is built, not when a call reaches it.
 10. **Optimize by measurement.** Phase 0 found that codegen runs no IR pass
     pipeline. Add one for libraries, and choose the level from task 11's
@@ -502,9 +505,9 @@ Update this section as you work (see "Rules for the implementor").
 |---|---|---|---|
 | 1. Library emission | done | `bac82ed7` | `LibrarySpec`, `__staple_library_init`, `__staple_library_bind`, `exit` trap, `__staple_entry.<n>` shims, `--emit dylib`, `@compiled_only compile_error`, and `dlopen`/`nm` tests. Internal generic trapping stubs (e.g. `__parse_primitive`) are skipped when binding host symbols. Review fixes: `exit` is always defined when trapped, bind returns the first unresolved name, shared host symbols bind to their implemented entry. See Findings. |
 | 2. Manifests and load-time mapping | done | `c10c1253` | `WIRE_VERSION` bumped to 2 with `encode_fragment`/`decode_fragment`; sidecar `.manifest` files (`manifest.rs`) store format/wire versions, `(package, path, macro, overload)` keys, shim symbols, and wire-encoded templates; `resolve` maps modules and macro declarations in the parent and reports missing keys as internal errors naming the library; cross-compilation hygiene test passes. Review fixes: keys come from the expanded program, templates drop compilation numbers. See Findings. |
-| 3. The server | done | `5152a998` | `staple __macro-server` (`staple-cli/src/macro_server.rs`) + `macro_runtime::server` over fd 3 (`socketpair`), 256 MiB worker thread, `Hello`/`Load`/`Loaded`/`Call`/`Result`/`Error`/`Shutdown` wire messages, `INTRINSICS` FNV-1a checksum, fd 1/2 capture pipe, `RTLD_NOW | RTLD_LOCAL`, and `staple-cli/tests/macro_server.rs` integration tests. |
-| 4. The client and failure handling | done | `04eb738e` | `macro_runtime::client::MacroClient` with lazy server spawn/shutdown, lazy library reload, `STAPLE_MACRO_TIMEOUT` (default 10 s), stderr forwarding, and Decision 8 failure diagnostics (`panic`, `compile_error`, timeout, stack overflow, crash); unit and integration tests in `client.rs` and `staple-cli/tests/macro_server.rs`. |
-| 5. Effects | done | `c103ada8` | `LoweredModule::check_macro_effects` (`lower/macro_effects.rs`) walks lowered call graph (instances, taken callable values, artifacts, and extern targets) with BFS from entry functions; forbidden list documented in `Staple.md` and Findings; unit tests cover reachable file read, dead code, and stderr. |
+| 3. The server | done | `5152a998` | `staple __macro-server` (`staple-cli/src/macro_server.rs`) + `macro_runtime::server` over fd 3 (`socketpair`), 256 MiB worker thread, `Hello`/`Load`/`Loaded`/`Call`/`Result`/`Error`/`Shutdown` wire messages, `INTRINSICS` FNV-1a checksum, fd 1/2 capture pipe, `RTLD_NOW | RTLD_LOCAL`, and `staple-cli/tests/macro_server.rs` integration tests. Review fixes: initialization traps `exit` and runs under output capture, loading a loaded image again doesn't rerun its initialization, one capture file per server. See Findings. |
+| 4. The client and failure handling | done | `04eb738e` | `macro_runtime::client::MacroClient` with lazy server spawn/shutdown, lazy library reload, `STAPLE_MACRO_TIMEOUT` (default 10 s), stderr forwarding, and Decision 8 failure diagnostics (`panic`, `compile_error`, timeout, stack overflow, crash); unit and integration tests in `client.rs` and `staple-cli/tests/macro_server.rs`. Review fixes: libraries are registered with `MacroClient::load`, load failures and timeouts are reported at the macro, crash output is forwarded, the server's standard output is closed, `exit n` reads as an exit. See Findings. |
+| 5. Effects | done | `c103ada8` | `LoweredModule::check_macro_effects` (`lower/macro_effects.rs`) walks lowered call graph (instances, taken callable values, artifacts, and extern targets) with BFS from entry functions; forbidden list documented in `Staple.md` and Findings; unit tests cover reachable file read, dead code, and stderr. Review fixes: foreign functions `std` doesn't declare are rejected, the list drops names `std` doesn't have, chains keep the function that calls a foreign function, `Staple.md` no longer claims enforcement. Not called yet: libraries are first built in tasks 7 and 8. See Findings. |
 | 6. The quotation cycle and generated-item loops | not started | | |
 | 7. Closure libraries and the stage tower | not started | | |
 | 8. Package libraries and macro-mode objects | not started | | |
@@ -545,9 +548,10 @@ commit and the command. Include:
     `realpath`, `getcwd`).
   - `std.io` standard input reading (`read_line`, `Stdin.read_byte`,
     `__staple_io_read_byte`).
-  - `std.process` process spawning (`spawn`, `Command.*`, `system`, `popen`,
-    `fork`, `vfork`, `posix_spawn`, `posix_spawnp`, `execve`, `execv`,
-    `execvp`, `execvpe`, `execl`, `execlp`, `execle`).
+  - `std.process` has no process spawning, so it adds nothing. Spawning
+    needs a foreign function the standard library doesn't declare, and those
+    are all rejected. (The first version listed `spawn`, `Command.*` and C
+    names, none of which `std` has.)
   - `std.rand` OS seeding (`fill_entropy`, `Rng.from_entropy`,
     `HashKey.from_entropy`, `getentropy`).
 
@@ -593,3 +597,64 @@ Record:
   `#[ignore]`d. `scripts/test-macro-libraries.sh` runs them.
 - **Warnings.** The manifest code and the fragment encoders have no non-test
   callers yet, so they allow dead code outside tests.
+
+### Review of tasks 3 to 5
+
+- **A `panic` during initialization.** `__staple_library_init` runs the
+  library's top-level code, but only the entry shims set the `exit` trap's
+  jump buffer, so a `panic` there jumped to an unset buffer and crashed the
+  server. Initialization now sets the buffer and returns 1 when it exited. The
+  server runs it under output capture and replies with an exit error, which
+  the client reports at the macro being called, as it does a call's. A test
+  builds a library whose setup panics in a value the interpreter never
+  evaluates.
+- **Loading is part of the call.** A load that timed out or crashed was
+  reported as an internal read error with no macro named. It now gets the
+  same timeout and crash diagnostics as a call. Its timeout is at least the
+  default 10 s, since mapping a large library can take longer than a short
+  test timeout.
+- **Libraries are registered per compilation.** The client kept libraries by
+  path and sent their templates only on the first load. Templates carry the
+  module numbers of one compilation, so a long-lived client, such as the
+  language server's, would have filled quotations with stale modules.
+  `MacroClient::load` now registers a library with its templates and returns
+  a handle. Each compilation registers its libraries again.
+- **The same image loaded twice.** Loading a path already loaded gives back
+  the image in the process, and the server then bound and initialized it a
+  second time. It now shares the image under a new handle without either.
+  A library file rewritten in place would still give the old image, so tasks
+  7 and 9 must write libraries to new paths named by their fingerprint and
+  never rewrite one.
+- **Foreign functions.** A macro's code runs with no effects, so it can't call
+  the `std` functions that need `IO`, which every file, standard-input and
+  entropy function does. Foreign functions need no effect, so they were the
+  real way out, and a list of names only covered `std`'s own: any package can
+  declare `extern "c" { open: ... }`. Any reachable foreign function `std`
+  doesn't declare is now rejected. The forbidden names are still checked, as
+  a second line for `std`'s own bindings.
+- **Chains through a foreign call.** The chain printer replaced the function
+  that calls a foreign function with the foreign function's name, so
+  `m -> helper -> open` read as `m -> open`. The old test expected the short
+  chain.
+- **The forbidden list and `Staple.md`.** The list named `std.process.spawn`,
+  `Command.*` and C spawning functions that `std` doesn't have, and
+  `Staple.md` documented them. `Staple.md` also said the check runs when a
+  library is built, but nothing calls it until tasks 7 and 8. It now
+  describes the rule, says the interpreter doesn't check it, and notes that
+  `panic` and `compile_error` are how a macro writes to standard error, since
+  `eprintln` needs `IO`.
+- **Smaller fixes.**
+  - `exit 3` read as ``macro `m` panicked: macro exited with status 3``; it is
+    now ``macro `m` exited with status 3``.
+  - The server's standard error after a crash, which holds what the macro
+    wrote, is forwarded without the runtime's overflow message.
+  - The server's standard output is closed, since all macro output is
+    captured.
+  - One unlinked capture file per server, truncated per call, instead of
+    one created and deleted per call.
+  - The client writes forwarded output to a sink, standard error by default,
+    so tests can check it.
+- **Tests added.** Output from a call that succeeds reaches the sink with
+  the macro's label, `exit 3`, a panic during initialization, and two
+  handles on one library. Macros can't write to standard error without
+  `panic`, so the successful-output test uses a C binding to `putchar`.

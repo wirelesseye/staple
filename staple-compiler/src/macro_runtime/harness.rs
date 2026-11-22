@@ -2084,8 +2084,8 @@ mod library_tests {
             let init = self
                 .symbol("__staple_library_init")
                 .expect("library exports `__staple_library_init`");
-            let init: unsafe extern "C" fn() = unsafe { std::mem::transmute(init) };
-            unsafe { init() };
+            let init: unsafe extern "C" fn() -> i32 = unsafe { std::mem::transmute(init) };
+            assert_eq!(unsafe { init() }, 0, "initialization finishes without `exit`");
         }
 
         fn entry(&self, index: usize) -> unsafe extern "C" fn(u64) -> u64 {

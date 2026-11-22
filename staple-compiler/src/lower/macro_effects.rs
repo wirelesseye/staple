@@ -5,6 +5,11 @@
 //! taken as a [`LoweredCallableValue`], trait methods, and generated artifacts)
 //! from each macro entry function finds only the forbidden functions and extern
 //! bindings that the macro can actually reach.
+//!
+//! A list of names can only cover the standard library's own bindings: any
+//! package can declare `extern "c" { open: ... }`. So macro code may reach a
+//! foreign function only if the standard library declares it, and only if it
+//! isn't one of the forbidden ones below.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -51,18 +56,16 @@ pub(crate) const FORBIDDEN_FUNCTIONS: &[&str] = &[
     // std.io (standard input)
     "std.io.read_line",
     "std.io.Stdin.read_byte",
-    // std.process (process spawning)
-    "std.process.spawn",
-    "std.process.Command.spawn",
-    "std.process.Command.output",
-    "std.process.Command.status",
     // std.rand (OS entropy seeding)
     "std.rand.fill_entropy",
     "std.rand.Rng.from_entropy",
     "std.rand.HashKey.from_entropy",
 ];
 
-/// Foreign (`extern`) bindings that compiled macro code may not reach.
+/// Foreign (`extern`) bindings declared by the standard library that compiled
+/// macro code may not reach. `std.process` has no process spawning, so it adds
+/// nothing here; foreign functions declared outside the standard library are
+/// rejected whatever their names.
 pub(crate) const FORBIDDEN_EXTERNS: &[&str] = &[
     // std.fs
     "__staple_fs_errno",
@@ -89,20 +92,6 @@ pub(crate) const FORBIDDEN_EXTERNS: &[&str] = &[
     "getcwd",
     // std.io (standard input)
     "__staple_io_read_byte",
-    // std.process (process spawning)
-    "system",
-    "popen",
-    "fork",
-    "vfork",
-    "posix_spawn",
-    "posix_spawnp",
-    "execve",
-    "execv",
-    "execvp",
-    "execvpe",
-    "execl",
-    "execlp",
-    "execle",
     // std.rand (OS entropy seeding)
     "getentropy",
 ];
@@ -113,6 +102,11 @@ impl LoweredModule {
     /// Each reached target is reported once per macro, with its shortest chain.
     pub fn check_macro_effects(&self, entries: &[(&str, &str, Span)]) -> Vec<Diagnostic> {
         let view = self.program.emission_view();
+        let standard_library = self
+            .packages()
+            .iter()
+            .find(|package| package.name == "std")
+            .map(|package| package.id);
         let by_symbol: HashMap<&str, FunctionInstanceId> = view
             .instances()
             .map(|(id, instance)| (instance.name.as_str(), id))
@@ -123,7 +117,14 @@ impl LoweredModule {
             let Some(&entry_id) = by_symbol.get(entry_symbol) else {
                 continue;
             };
-            check_entry_reachability(&view, macro_name, entry_id, span, &mut diagnostics);
+            check_entry_reachability(
+                &view,
+                standard_library,
+                macro_name,
+                entry_id,
+                span,
+                &mut diagnostics,
+            );
         }
         diagnostics
     }
@@ -131,6 +132,7 @@ impl LoweredModule {
 
 fn check_entry_reachability(
     view: &super::emission::EmissionView<'_>,
+    standard_library: Option<staple_project::PackageId>,
     macro_name: &str,
     entry_id: FunctionInstanceId,
     span: &Span,
@@ -155,7 +157,7 @@ fn check_entry_reachability(
             && is_forbidden_function(&qualified)
         {
             if reported.insert(qualified.clone()) {
-                let chain = format_chain(view, entry_id, current_id, &parent, Some(&qualified));
+                let chain = format_chain(view, entry_id, current_id, &parent, None);
                 diagnostics.push(Diagnostic::new(
                     span.clone(),
                     format!("macro `{macro_name}` reaches {chain}, which macro code can't use"),
@@ -177,16 +179,25 @@ fn check_entry_reachability(
                 }
             }
             for symbol_id in externs {
-                if let Some(symbol) = view.symbol(symbol_id)
-                    && is_forbidden_extern(&symbol.name)
-                    && reported.insert(symbol.name.clone())
-                {
+                let Some(symbol) = view.symbol(symbol_id) else {
+                    continue;
+                };
+                let declared_by_std = standard_library.is_some()
+                    && view.module_package(symbol.module) == standard_library;
+                let reason = if !declared_by_std {
+                    ", a foreign function the standard library doesn't declare,"
+                } else if is_forbidden_extern(&symbol.name) {
+                    ","
+                } else {
+                    continue;
+                };
+                if reported.insert(symbol.name.clone()) {
                     let chain =
                         format_chain(view, entry_id, current_id, &parent, Some(&symbol.name));
                     diagnostics.push(Diagnostic::new(
                         span.clone(),
                         format!(
-                            "macro `{macro_name}` reaches {chain}, which macro code can't use"
+                            "macro `{macro_name}` reaches {chain}{reason} which macro code can't use"
                         ),
                     ));
                 }
@@ -261,12 +272,14 @@ fn decode_hex(hex: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+/// The chain from the entry to `end_id`, then `callee` when `end_id` calls a
+/// foreign function. The entry and the macro function it wraps are left out.
 fn format_chain(
     view: &super::emission::EmissionView<'_>,
     entry_id: FunctionInstanceId,
     end_id: FunctionInstanceId,
     parent: &HashMap<FunctionInstanceId, Option<FunctionInstanceId>>,
-    terminal_override: Option<&str>,
+    callee: Option<&str>,
 ) -> String {
     let mut nodes = Vec::new();
     let mut cursor = Some(end_id);
@@ -276,25 +289,14 @@ fn format_chain(
     }
     nodes.reverse();
 
-    let mut steps = Vec::new();
-    for (index, &id) in nodes.iter().enumerate() {
-        if id == entry_id {
-            continue;
-        }
-        let is_last = index + 1 == nodes.len();
-        if is_last && let Some(name) = terminal_override {
-            steps.push(format!("`{name}`"));
-            continue;
-        }
-        if let Some(instance) = view.instance(id)
-            && let Some(name) = instance_qualified_name(view, instance)
-        {
-            steps.push(format!("`{name}`"));
-        }
-    }
-    if steps.is_empty()
-        && let Some(name) = terminal_override
-    {
+    let mut steps: Vec<String> = nodes
+        .into_iter()
+        .filter(|&id| id != entry_id)
+        .filter_map(|id| view.instance(id))
+        .filter_map(|instance| instance_qualified_name(view, instance))
+        .map(|name| format!("`{name}`"))
+        .collect();
+    if let Some(name) = callee {
         steps.push(format!("`{name}`"));
     }
     steps.join(" -> ")
@@ -349,60 +351,92 @@ mod tests {
         (expanded, lowered)
     }
 
+    /// The effects reported for each macro of `source`'s entry module.
+    fn macro_effects(source: &str, macros: &[&str]) -> Vec<(String, Vec<String>)> {
+        let (expanded, lowered) = lower_check_program(source);
+        let entry_module = expanded.entry();
+        macros
+            .iter()
+            .map(|macro_name| {
+                let decl = expanded
+                    .module(entry_module)
+                    .syntax
+                    .items
+                    .iter()
+                    .find_map(|item| match item {
+                        staple_syntax::Item::MacroDeclaration(decl) if decl.name == *macro_name => {
+                            Some(decl)
+                        }
+                        _ => None,
+                    })
+                    .expect("macro exists");
+                let mangled = crate::resolve::mangle_function_name(&entry_function_name(decl));
+                let symbol = lowered
+                    .planned_instance_names(&mangled)
+                    .into_iter()
+                    .next()
+                    .expect("entry lowered");
+                let messages = lowered
+                    .check_macro_effects(&[(macro_name, &symbol, Span::Compiler)])
+                    .into_iter()
+                    .map(|diagnostic| diagnostic.message)
+                    .collect();
+                (macro_name.to_string(), messages)
+            })
+            .collect()
+    }
+
     #[test]
-    fn rejects_reachable_forbidden_extern_and_accepts_dead_code_and_stderr() {
+    fn macro_effects_follow_reachable_code() {
+        // A macro's entry function has no effects, so it can't call `std`
+        // functions that need `IO`. A foreign function needs no effect, which
+        // is how macro code could reach the operating system.
         let source = concat!(
             "use std.process.panic\n",
             "use std.syntax.*\n",
-            "extern \"c\" { __staple_fs_errno: () -> I32 }\n",
-            "def open_helper = () => () :: {\n",
-            "    let _ = __staple_fs_errno ()\n",
+            "extern \"c\" { open: (I32, I32) -> I32 }\n",
+            "def open_file = () => () :: {\n",
+            "    let _ = open (0, 0)\n",
             "}\n",
-            "def dead_helper = () => () :: {\n",
-            "    let _ = __staple_fs_errno ()\n",
+            "def never_called = () => () :: open_file ()\n",
+            "macro own_binding: Expr -> Expr = value => {\n",
+            "    let _ = open (0, 0)\n",
+            "    parse_quote { $value }\n",
             "}\n",
-            "macro bad_reader: Expr -> Expr = _value => {\n",
-            "    open_helper ()\n",
-            "    parse_quote { 1 }\n",
+            "macro through_helper: Expr -> Expr = value => {\n",
+            "    open_file ()\n",
+            "    parse_quote { $value }\n",
             "}\n",
-            "macro ok_stderr: Expr -> Expr = _value => panic \"diagnostic on stderr\"\n",
+            "macro fails: Expr -> Expr = _value => panic \"bad input\"\n",
             "let x = 1\n",
         );
-        let (expanded, lowered) = lower_check_program(source);
-        let entry_module = expanded.entry();
-        let entry_for = |macro_name: &str| {
-            let decl = expanded
-                .module(entry_module)
-                .syntax
-                .items
-                .iter()
-                .find_map(|item| match item {
-                    staple_syntax::Item::MacroDeclaration(decl) if decl.name == macro_name => {
-                        Some(decl)
-                    }
-                    _ => None,
-                })
-                .expect("macro exists");
-            let mangled = crate::resolve::mangle_function_name(&entry_function_name(decl));
-            lowered
-                .planned_instance_names(&mangled)
-                .into_iter()
-                .next()
-                .expect("entry lowered")
-        };
-
-        let bad_sym = entry_for("bad_reader");
-        let ok_sym = entry_for("ok_stderr");
-
-        let bad_diags = lowered.check_macro_effects(&[("bad_reader", &bad_sym, Span::Compiler)]);
-        assert_eq!(bad_diags.len(), 1, "{bad_diags:?}");
+        let effects = macro_effects(source, &["own_binding", "through_helper", "fails"]);
         assert_eq!(
-            bad_diags[0].message,
-            "macro `bad_reader` reaches `__staple_fs_errno`, which macro code can't use"
+            effects,
+            vec![
+                (
+                    "own_binding".to_owned(),
+                    vec![
+                        "macro `own_binding` reaches `open`, a foreign function the standard \
+                         library doesn't declare, which macro code can't use"
+                            .to_owned()
+                    ],
+                ),
+                (
+                    "through_helper".to_owned(),
+                    vec![
+                        "macro `through_helper` reaches `open_file` -> `open`, a foreign \
+                         function the standard library doesn't declare, which macro code \
+                         can't use"
+                            .to_owned()
+                    ],
+                ),
+                // `panic` writes to standard error through the standard
+                // library's own bindings, which is allowed, and `never_called`
+                // reaches `open` only from dead code.
+                ("fails".to_owned(), Vec::new()),
+            ]
         );
-
-        let ok_diags = lowered.check_macro_effects(&[("ok_stderr", &ok_sym, Span::Compiler)]);
-        assert!(ok_diags.is_empty(), "{ok_diags:?}");
     }
 
     #[test]

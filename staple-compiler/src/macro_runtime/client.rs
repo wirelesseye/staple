@@ -4,8 +4,12 @@
 //! for the compiler invocation, enforces per-call timeouts, forwards captured
 //! output to standard error, and restarts the server after a timeout or crash
 //! (reloading libraries lazily).
+//!
+//! A library is registered with [`MacroClient::load`], which returns a
+//! [`LibraryHandle`]. Its templates carry the module numbers of the
+//! compilation that registered it, so each compilation registers its
+//! libraries again rather than reusing another compilation's handles.
 
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -21,15 +25,27 @@ use super::wire::{
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// A library registered with [`MacroClient::load`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LibraryHandle(usize);
+
+struct RegisteredLibrary {
+    path: PathBuf,
+    templates: Vec<(usize, Syntax)>,
+    /// The handle the running server gave it, if the server has loaded it.
+    /// Cleared whenever the server restarts.
+    server_handle: Option<u32>,
+}
+
 /// Client for a lazily started `staple __macro-server` child process.
 pub struct MacroClient {
     server_binary: PathBuf,
     timeout: Duration,
     #[cfg(unix)]
     process: Option<unix::RunningServer>,
-    /// Server-assigned library handles for paths already loaded into the
-    /// current server process. Cleared whenever the server restarts.
-    loaded: HashMap<PathBuf, u32>,
+    libraries: Vec<RegisteredLibrary>,
+    /// Where captured macro output goes, standard error by default.
+    output: Box<dyn Write + Send>,
 }
 
 impl MacroClient {
@@ -49,8 +65,27 @@ impl MacroClient {
             timeout,
             #[cfg(unix)]
             process: None,
-            loaded: HashMap::new(),
+            libraries: Vec::new(),
+            output: Box::new(std::io::stderr()),
         }
+    }
+
+    /// Sends captured macro output to `output` instead of standard error.
+    pub fn with_output(mut self, output: Box<dyn Write + Send>) -> Self {
+        self.output = output;
+        self
+    }
+
+    /// Registers the library at `library_path` with its templates, already
+    /// mapped to this compilation's modules. The server loads it on the first
+    /// call that needs it, and again after a restart.
+    pub fn load(&mut self, library_path: &Path, templates: Vec<(usize, Syntax)>) -> LibraryHandle {
+        self.libraries.push(RegisteredLibrary {
+            path: library_path.to_path_buf(),
+            templates,
+            server_handle: None,
+        });
+        LibraryHandle(self.libraries.len() - 1)
     }
 
     /// Overrides the per-call timeout.
@@ -60,12 +95,10 @@ impl MacroClient {
     }
 
     /// Runs one macro call in the server, starting the server and loading
-    /// `library_path` lazily if needed.
-    #[allow(clippy::too_many_arguments)]
+    /// the library lazily if needed.
     pub fn call(
         &mut self,
-        library_path: &Path,
-        templates: &[(usize, Syntax)],
+        library: LibraryHandle,
         entry: &str,
         macro_name: &str,
         context: CallContext,
@@ -73,25 +106,11 @@ impl MacroClient {
     ) -> Result<(Syntax, u64), String> {
         #[cfg(unix)]
         {
-            self.call_unix(
-                library_path,
-                templates,
-                entry,
-                macro_name,
-                context,
-                arguments,
-            )
+            self.call_unix(library, entry, macro_name, context, arguments)
         }
         #[cfg(not(unix))]
         {
-            let _ = (
-                library_path,
-                templates,
-                entry,
-                macro_name,
-                context,
-                arguments,
-            );
+            let _ = (library, entry, macro_name, context, arguments);
             Err("compiled macro server is only supported on Unix".to_owned())
         }
     }
@@ -100,8 +119,54 @@ impl MacroClient {
     pub fn shutdown(&mut self) {
         #[cfg(unix)]
         if let Some(process) = self.process.take() {
-            self.loaded.clear();
+            self.forget_server_handles();
             process.shutdown();
+        }
+    }
+
+    fn forget_server_handles(&mut self) {
+        for library in &mut self.libraries {
+            library.server_handle = None;
+        }
+    }
+
+    /// Writes captured output, each line labeled with the macro.
+    fn forward_output(&mut self, macro_name: &str, output: &[u8]) {
+        if output.is_empty() {
+            return;
+        }
+        let text = String::from_utf8_lossy(output);
+        for line in text.lines() {
+            let _ = writeln!(self.output, "macro `{macro_name}`: {line}");
+        }
+        let _ = self.output.flush();
+    }
+
+    /// The diagnostic for an error reply to a call or to the load it needed.
+    fn error_reply(
+        &mut self,
+        macro_name: &str,
+        kind: ErrorKind,
+        message: String,
+        output: Vec<u8>,
+    ) -> String {
+        match kind {
+            ErrorKind::CompileError => {
+                self.forward_output(macro_name, &output);
+                format!("macro `{macro_name}` panicked: {message}")
+            }
+            ErrorKind::Exit => {
+                let (panic_message, rest) = split_panic_output(&output);
+                self.forward_output(macro_name, &rest);
+                match panic_message {
+                    Some(detail) => format!("macro `{macro_name}` panicked: {detail}"),
+                    None => format!("macro `{macro_name}` {message}"),
+                }
+            }
+            ErrorKind::Internal => {
+                self.forward_output(macro_name, &output);
+                format!("internal error in macro `{macro_name}`: {message}")
+            }
         }
     }
 }
@@ -141,18 +206,6 @@ fn format_timeout(timeout: Duration) -> String {
     } else {
         format!("{} ms", timeout.as_millis().max(1))
     }
-}
-
-fn forward_output(macro_name: &str, output: &[u8]) {
-    if output.is_empty() {
-        return;
-    }
-    let text = String::from_utf8_lossy(output);
-    let mut stderr = std::io::stderr().lock();
-    for line in text.lines() {
-        let _ = writeln!(stderr, "macro `{macro_name}`: {line}");
-    }
-    let _ = stderr.flush();
 }
 
 /// Splits captured output into an extracted panic message (if a `"panic: ..."`
@@ -230,7 +283,12 @@ mod unix {
             let child_fd = fds[1];
 
             let mut command = Command::new(binary);
-            command.arg("__macro-server").stderr(Stdio::piped());
+            // Macro output is captured per call, so nothing the server
+            // writes belongs on the compiler's standard output.
+            command
+                .arg("__macro-server")
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
             unsafe {
                 command.pre_exec(move || {
                     if child_fd != 3 {
@@ -385,89 +443,77 @@ mod unix {
             if self.process.is_none() {
                 let server = RunningServer::spawn(&self.server_binary, self.timeout)?;
                 self.process = Some(server);
-                self.loaded.clear();
+                self.forget_server_handles();
             }
             Ok(self.process.as_mut().expect("server just started"))
         }
 
-        fn load_library(
+        /// Ends the server after a failed exchange and returns how it ended.
+        /// Its standard error holds what the macro wrote before a crash, so
+        /// that goes to the output, without the runtime's overflow message.
+        fn end_server(
             &mut self,
-            library_path: &Path,
-            templates: &[(usize, Syntax)],
-        ) -> Result<u32, String> {
-            if let Some(&handle) = self.loaded.get(library_path)
-                && self.process.is_some()
-            {
-                return Ok(handle);
-            }
-            let path = library_path.to_string_lossy().into_owned();
-            let load_timeout = DEFAULT_TIMEOUT.max(self.timeout);
-            let server = self.ensure_server()?;
-            let _ = server.stream.set_read_timeout(Some(load_timeout));
-            write_frame(
-                &mut server.stream,
-                &Message::Load {
-                    path,
-                    templates: templates.to_vec(),
-                },
-            )
-            .map_err(|error| format!("internal error: could not send Load to macro server: {error}"))?;
-
-            let reply = match read_frame(&mut server.stream) {
-                Ok(reply) => reply,
-                Err(error) => {
-                    let server = self.process.take().expect("server active");
-                    self.loaded.clear();
-                    let _ = server.kill_and_collect_stderr();
-                    return Err(format!(
-                        "internal error: could not read Load reply from macro server: {error}"
-                    ));
-                }
+            macro_name: &str,
+            kill: bool,
+        ) -> (Option<std::process::ExitStatus>, Vec<u8>) {
+            let Some(server) = self.process.take() else {
+                return (None, Vec::new());
             };
-            match reply {
-                Some(Message::Loaded { library }) => {
-                    self.loaded.insert(library_path.to_path_buf(), library);
-                    Ok(library)
-                }
-                Some(Message::Error { message, .. }) => Err(format!("internal error: {message}")),
-                Some(other) => Err(format!(
-                    "internal error: unexpected reply to Load from macro server: {other:?}"
-                )),
-                None => {
-                    let server = self.process.take().expect("server active");
-                    self.loaded.clear();
-                    let _ = server.wait_and_collect_stderr();
-                    Err("internal error: macro server exited while loading library".to_owned())
-                }
+            self.forget_server_handles();
+            let (status, stderr) = if kill {
+                server.kill_and_collect_stderr()
+            } else {
+                server.wait_and_collect_stderr()
+            };
+            let mut shown = String::new();
+            for line in String::from_utf8_lossy(&stderr)
+                .lines()
+                .filter(|line| !is_overflow_message(line))
+            {
+                shown.push_str(line);
+                shown.push('\n');
             }
+            self.forward_output(macro_name, shown.as_bytes());
+            (status, stderr)
         }
 
-        pub(super) fn call_unix(
+        /// The diagnostic for a reply that never came: a timeout or a crash.
+        fn failed_exchange(
             &mut self,
-            library_path: &Path,
-            templates: &[(usize, Syntax)],
-            entry: &str,
             macro_name: &str,
-            context: CallContext,
-            arguments: Vec<ArgTree>,
-        ) -> Result<(Syntax, u64), String> {
-            let library = self.load_library(library_path, templates)?;
-            let timeout = self.timeout;
-            let server = self.process.as_mut().expect("server loaded library");
-            let _ = server.stream.set_read_timeout(Some(timeout));
+            error: Option<FrameReadError>,
+            timeout: Duration,
+        ) -> String {
+            let timed_out = matches!(
+                &error,
+                Some(FrameReadError::Io(io)) if matches!(
+                    io.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                )
+            );
+            if timed_out {
+                self.end_server(macro_name, true);
+                return format!(
+                    "macro `{macro_name}` did not finish within {}",
+                    format_timeout(timeout)
+                );
+            }
+            let (status, stderr) = self.end_server(macro_name, false);
+            let detail = error.map(|error| error.to_string());
+            classify_disconnect(macro_name, status, &stderr, detail.as_deref())
+        }
 
-            if let Err(error) = write_frame(
-                &mut server.stream,
-                &Message::Call {
-                    library,
-                    entry: entry.to_owned(),
-                    context,
-                    arguments,
-                },
-            ) {
-                let server = self.process.take().expect("server active");
-                self.loaded.clear();
-                let (status, stderr) = server.wait_and_collect_stderr();
+        /// Sends a request and reads its reply within `timeout`.
+        fn exchange(
+            &mut self,
+            macro_name: &str,
+            request: &Message,
+            timeout: Duration,
+        ) -> Result<Message, String> {
+            let server = self.ensure_server()?;
+            let _ = server.stream.set_read_timeout(Some(timeout));
+            if let Err(error) = write_frame(&mut server.stream, request) {
+                let (status, stderr) = self.end_server(macro_name, false);
                 return Err(classify_disconnect(
                     macro_name,
                     status,
@@ -475,77 +521,91 @@ mod unix {
                     Some(&error.to_string()),
                 ));
             }
-
+            let server = self.process.as_mut().expect("server is running");
             match read_frame(&mut server.stream) {
-                Ok(Some(Message::Result {
-                    syntax,
-                    next_mark,
-                    output,
-                })) => {
-                    forward_output(macro_name, &output);
-                    Ok((syntax, next_mark))
+                Ok(Some(reply)) => Ok(reply),
+                Ok(None) => Err(self.failed_exchange(macro_name, None, timeout)),
+                Err(error) => Err(self.failed_exchange(macro_name, Some(error), timeout)),
+            }
+        }
+
+        /// Loads `library` into the running server if it isn't loaded yet.
+        /// Loading runs the library's top-level code, so its failures and
+        /// output are reported at the macro being called. Loading also maps
+        /// the library, so it gets at least the default timeout even when
+        /// calls get less.
+        fn ensure_loaded(&mut self, library: LibraryHandle, macro_name: &str) -> Result<u32, String> {
+            if self.process.is_some()
+                && let Some(handle) = self.libraries[library.0].server_handle
+            {
+                return Ok(handle);
+            }
+            let registered = &self.libraries[library.0];
+            let request = Message::Load {
+                path: registered.path.to_string_lossy().into_owned(),
+                templates: registered.templates.clone(),
+            };
+            let timeout = DEFAULT_TIMEOUT.max(self.timeout);
+            match self.exchange(macro_name, &request, timeout)? {
+                Message::Loaded { library: handle } => {
+                    self.libraries[library.0].server_handle = Some(handle);
+                    Ok(handle)
                 }
-                Ok(Some(Message::Error {
+                Message::Error {
                     kind,
                     message,
                     output,
-                })) => match kind {
-                    ErrorKind::CompileError => {
-                        forward_output(macro_name, &output);
-                        Err(format!("macro `{macro_name}` panicked: {message}"))
-                    }
-                    ErrorKind::Exit => {
-                        let (panic_msg, rest) = split_panic_output(&output);
-                        forward_output(macro_name, &rest);
-                        let detail = panic_msg.unwrap_or(message);
-                        Err(format!("macro `{macro_name}` panicked: {detail}"))
-                    }
-                    ErrorKind::Internal => {
-                        forward_output(macro_name, &output);
-                        Err(format!("internal error in macro `{macro_name}`: {message}"))
-                    }
-                },
-                Ok(Some(other)) => {
-                    let server = self.process.take().expect("server active");
-                    self.loaded.clear();
-                    let _ = server.kill_and_collect_stderr();
+                } => Err(self.error_reply(macro_name, kind, message, output)),
+                other => {
+                    self.end_server(macro_name, true);
                     Err(format!(
-                        "internal error: unexpected reply for macro `{macro_name}`: {other:?}"
-                    ))
-                }
-                Ok(None) => {
-                    let server = self.process.take().expect("server active");
-                    self.loaded.clear();
-                    let (status, stderr) = server.wait_and_collect_stderr();
-                    Err(classify_disconnect(macro_name, status, &stderr, None))
-                }
-                Err(FrameReadError::Io(error))
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    let server = self.process.take().expect("server active");
-                    self.loaded.clear();
-                    let _ = server.kill_and_collect_stderr();
-                    Err(format!(
-                        "macro `{macro_name}` did not finish within {}",
-                        format_timeout(timeout)
-                    ))
-                }
-                Err(error) => {
-                    let server = self.process.take().expect("server active");
-                    self.loaded.clear();
-                    let (status, stderr) = server.wait_and_collect_stderr();
-                    Err(classify_disconnect(
-                        macro_name,
-                        status,
-                        &stderr,
-                        Some(&error.to_string()),
+                        "internal error: unexpected reply to Load from macro server: {other:?}"
                     ))
                 }
             }
         }
+
+        pub(super) fn call_unix(
+            &mut self,
+            library: LibraryHandle,
+            entry: &str,
+            macro_name: &str,
+            context: CallContext,
+            arguments: Vec<ArgTree>,
+        ) -> Result<(Syntax, u64), String> {
+            let handle = self.ensure_loaded(library, macro_name)?;
+            let request = Message::Call {
+                library: handle,
+                entry: entry.to_owned(),
+                context,
+                arguments,
+            };
+            match self.exchange(macro_name, &request, self.timeout)? {
+                Message::Result {
+                    syntax,
+                    next_mark,
+                    output,
+                } => {
+                    self.forward_output(macro_name, &output);
+                    Ok((syntax, next_mark))
+                }
+                Message::Error {
+                    kind,
+                    message,
+                    output,
+                } => Err(self.error_reply(macro_name, kind, message, output)),
+                other => {
+                    self.end_server(macro_name, true);
+                    Err(format!(
+                        "internal error: unexpected reply for macro `{macro_name}`: {other:?}"
+                    ))
+                }
+            }
+        }
+    }
+
+    fn is_overflow_message(line: &str) -> bool {
+        line.contains("overflowed its stack") || line.contains("fatal runtime error: stack overflow")
     }
 
     pub(super) fn classify_crash(

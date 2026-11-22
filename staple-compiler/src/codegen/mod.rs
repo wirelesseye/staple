@@ -127,7 +127,8 @@ pub struct LibrarySpec {
     /// `__staple_library_bind(resolve)` instead of the dynamic linker.
     pub host_symbols: Vec<String>,
     /// Turns a call to `exit` into a return from the entry shim, which then
-    /// returns `u64::MAX` and leaves the code in `__staple_library_exit_code`.
+    /// returns `u64::MAX`, or from `__staple_library_init`, which then returns
+    /// 1. Either leaves the code in `__staple_library_exit_code`.
     pub trap_exit: bool,
 }
 
@@ -201,7 +202,8 @@ impl EmissionUnit {
     }
 
     /// Makes the unit a loadable library instead of a program: no `main`, a
-    /// `__staple_library_init` that does `main`'s setup, and one C-ABI
+    /// `__staple_library_init` that does `main`'s setup and returns 0, or 1
+    /// when the setup called a trapped `exit`, and one C-ABI
     /// `__staple_entry.<n>` shim per listed function instance symbol.
     /// Each listed instance must have the type `U64 -> U64`.
     pub fn with_library(mut self, library: LibrarySpec) -> Self {

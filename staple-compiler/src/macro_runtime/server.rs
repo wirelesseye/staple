@@ -260,18 +260,14 @@ fn worker_loop(requests: mpsc::Receiver<WorkerRequest>) {
                 templates,
                 reply,
             } => {
-                let response = match LoadedLibrary::load(&path, templates) {
+                let response = match LoadedLibrary::load(&path, templates, &libraries) {
                     Ok(library) => {
                         let id = u32::try_from(libraries.len())
                             .expect("loaded library count fits in u32");
                         libraries.push(library);
                         Message::Loaded { library: id }
                     }
-                    Err(message) => Message::Error {
-                        kind: ErrorKind::Internal,
-                        message,
-                        output: Vec::new(),
-                    },
+                    Err(error) => error,
                 };
                 let _ = reply.send(response);
             }
@@ -318,6 +314,7 @@ mod dynamic {
         fn libc_read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
         #[link_name = "write"]
         fn libc_write(fd: c_int, buf: *const c_void, count: usize) -> isize;
+        fn ftruncate(fd: c_int, length: i64) -> c_int;
         fn signal(sig: c_int, handler: usize) -> usize;
         fn raise(sig: c_int) -> c_int;
     }
@@ -337,7 +334,9 @@ mod dynamic {
 
     static CAPTURE_FD: AtomicI32 = AtomicI32::new(-1);
     static SAVED_STDERR_FD: AtomicI32 = AtomicI32::new(-1);
-    static CAPTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// The unlinked file every call's output goes to, opened on first use and
+    /// truncated before each call. Only the worker thread captures.
+    static CAPTURE_FILE: AtomicI32 = AtomicI32::new(-1);
 
     extern "C" fn flush_capture_on_abort(sig: c_int) {
         let capture_fd = CAPTURE_FD.swap(-1, Ordering::SeqCst);
@@ -393,12 +392,30 @@ mod dynamic {
         templates: Arc<TemplateTable>,
     }
 
+    fn internal(message: String) -> Message {
+        Message::Error {
+            kind: ErrorKind::Internal,
+            message,
+            output: Vec::new(),
+        }
+    }
+
     impl LoadedLibrary {
-        pub(super) fn load(path: &str, templates: Vec<(usize, Syntax)>) -> Result<Self, String> {
-            let spelled = CString::new(path).map_err(|error| error.to_string())?;
+        /// Loads `path`, or reuses its image when `loaded` already has it.
+        ///
+        /// Loading a path again gives the image already in the process, so
+        /// a library loaded again with a new compilation's templates gets a
+        /// new handle sharing that image, without binding or initializing it
+        /// a second time.
+        pub(super) fn load(
+            path: &str,
+            templates: Vec<(usize, Syntax)>,
+            loaded: &[LoadedLibrary],
+        ) -> Result<Self, Message> {
+            let spelled = CString::new(path).map_err(|error| internal(error.to_string()))?;
             let handle = unsafe { dlopen(spelled.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
             if handle.is_null() {
-                return Err(format!("could not load `{path}`: {}", last_dlerror()));
+                return Err(internal(format!("could not load `{path}`: {}", last_dlerror())));
             }
             let table = TemplateTable {
                 templates: templates
@@ -418,6 +435,9 @@ mod dynamic {
             library.exit_code = library
                 .symbol("__staple_library_exit_code")
                 .map(|ptr| ptr as *const i32);
+            if loaded.iter().any(|other| other.handle == handle) {
+                return Ok(library);
+            }
             if let Some(bind) = library.symbol("__staple_library_bind") {
                 let bind: unsafe extern "C" fn(
                     extern "C" fn(*const c_char) -> *const c_void,
@@ -425,17 +445,31 @@ mod dynamic {
                 let missing = unsafe { bind(resolve_host_symbol) };
                 if !missing.is_null() {
                     let name = unsafe { CStr::from_ptr(missing) }.to_string_lossy();
-                    return Err(format!(
+                    return Err(internal(format!(
                         "macro library `{path}` requires unknown host symbol `{name}`"
-                    ));
+                    )));
                 }
             }
-            let init = library
-                .symbol("__staple_library_init")
-                .ok_or_else(|| format!("macro library `{path}` has no `__staple_library_init`"))?;
-            let init: unsafe extern "C" fn() = unsafe { std::mem::transmute(init) };
-            unsafe { init() };
+            let init = library.symbol("__staple_library_init").ok_or_else(|| {
+                internal(format!("macro library `{path}` has no `__staple_library_init`"))
+            })?;
+            let init: unsafe extern "C" fn() -> i32 = unsafe { std::mem::transmute(init) };
+            // Initialization runs the library's top-level code, so its output
+            // and a `panic` in it are reported like a call's.
+            let (status, output) = capture_output(|| unsafe { init() });
+            if status != 0 {
+                arena::reset();
+                return Err(Message::Error {
+                    kind: ErrorKind::Exit,
+                    message: format!("exited with status {}", library.exit_status()),
+                    output,
+                });
+            }
             Ok(library)
+        }
+
+        fn exit_status(&self) -> i32 {
+            self.exit_code.map(|ptr| unsafe { *ptr }).unwrap_or(1)
         }
 
         fn symbol(&self, name: &str) -> Option<*mut c_void> {
@@ -475,13 +509,9 @@ mod dynamic {
                         output,
                     };
                 }
-                let code = self
-                    .exit_code
-                    .map(|ptr| unsafe { *ptr })
-                    .unwrap_or(1);
                 return Message::Error {
                     kind: ErrorKind::Exit,
-                    message: format!("macro exited with status {code}"),
+                    message: format!("exited with status {}", self.exit_status()),
                     output,
                 };
             }
@@ -525,28 +555,39 @@ mod dynamic {
         }
     }
 
-    pub(super) fn capture_output<T>(f: impl FnOnce() -> T) -> (T, Vec<u8>) {
-        let seq = CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "staple-macro-capture-{}-{seq}",
-            std::process::id()
-        ));
-        let Ok(c_path) = CString::new(path.as_os_str().as_encoded_bytes()) else {
-            return (f(), Vec::new());
-        };
-        let capture_fd = unsafe { open(c_path.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o600) };
-        if capture_fd < 0 {
-            return (f(), Vec::new());
+    /// The capture file, emptied for a new call, or `None` when it can't be
+    /// opened.
+    fn capture_file() -> Option<c_int> {
+        let mut fd = CAPTURE_FILE.load(Ordering::Relaxed);
+        if fd < 0 {
+            let path = std::env::temp_dir()
+                .join(format!("staple-macro-capture-{}", std::process::id()));
+            let c_path = CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+            fd = unsafe { open(c_path.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o600) };
+            if fd < 0 {
+                return None;
+            }
+            unsafe {
+                unlink(c_path.as_ptr());
+            }
+            CAPTURE_FILE.store(fd, Ordering::Relaxed);
         }
         unsafe {
-            unlink(c_path.as_ptr());
+            ftruncate(fd, 0);
+            lseek(fd, 0, SEEK_SET);
         }
+        Some(fd)
+    }
+
+    pub(super) fn capture_output<T>(f: impl FnOnce() -> T) -> (T, Vec<u8>) {
+        let Some(capture_fd) = capture_file() else {
+            return (f(), Vec::new());
+        };
 
         let saved_stdout = unsafe { dup(1) };
         let saved_stderr = unsafe { dup(2) };
         if saved_stdout < 0 || saved_stderr < 0 {
             unsafe {
-                close(capture_fd);
                 if saved_stdout >= 0 {
                     close(saved_stdout);
                 }
@@ -595,9 +636,6 @@ mod dynamic {
             }
             output.extend_from_slice(&buf[..n as usize]);
         }
-        unsafe {
-            close(capture_fd);
-        }
         (result, output)
     }
 }
@@ -609,8 +647,16 @@ mod dynamic {
     pub(super) struct LoadedLibrary;
 
     impl LoadedLibrary {
-        pub(super) fn load(_path: &str, _templates: Vec<(usize, Syntax)>) -> Result<Self, String> {
-            Err("macro server is only supported on Unix".to_owned())
+        pub(super) fn load(
+            _path: &str,
+            _templates: Vec<(usize, Syntax)>,
+            _loaded: &[LoadedLibrary],
+        ) -> Result<Self, Message> {
+            Err(Message::Error {
+                kind: ErrorKind::Internal,
+                message: "macro server is only supported on Unix".to_owned(),
+                output: Vec::new(),
+            })
         }
 
         pub(super) fn call(
