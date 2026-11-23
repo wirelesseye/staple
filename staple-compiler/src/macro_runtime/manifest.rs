@@ -65,7 +65,7 @@ pub(crate) struct ManifestTemplate {
 
 /// Sidecar manifest written beside a compiled macro shared library.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LibraryManifest {
+pub struct LibraryManifest {
     pub(crate) format_version: u32,
     pub(crate) wire_version: u32,
     pub(crate) entries: Vec<ManifestEntry>,
@@ -74,13 +74,25 @@ pub(crate) struct LibraryManifest {
 
 /// A manifest resolved against the current compilation's [`Program`].
 #[derive(Clone)]
-pub(crate) struct LoadedManifest {
+pub struct LoadedManifest {
     /// Maps each macro declaration's `SyntaxId` in the current compilation to
     /// its `__staple_entry.<n>` shim symbol in the library.
-    pub(crate) entries: HashMap<SyntaxId, String>,
+    pub entries: HashMap<SyntaxId, String>,
     /// The library's quotation templates, with `ModuleId`s mapped to the
     /// current compilation.
-    pub(crate) templates: TemplateTable,
+    pub templates: TemplateTable,
+}
+
+impl LoadedManifest {
+    /// Returns `(module_id, template_syntax)` pairs formatted for
+    /// [`crate::macro_runtime::client::MacroClient::load`].
+    pub fn client_templates(&self) -> Vec<(usize, staple_syntax::Syntax)> {
+        self.templates
+            .templates
+            .iter()
+            .map(|template| (template.module.0, template.contents.clone()))
+            .collect()
+    }
 }
 
 /// Returns the manifest path beside `library_path`.
@@ -129,7 +141,7 @@ pub(crate) fn macro_overload_key(
 /// [`LibraryManifest::resolve`] maps against, not a check program. A
 /// closure-only check program declares only the macros in the closure, so the
 /// overload indexes counted there would not match the ones counted at load time.
-pub(crate) fn build_manifest(
+pub fn build_manifest(
     program: &Program,
     entries: &[(ModuleId, SyntaxId, String)],
     templates: &TemplateTable,
@@ -262,14 +274,14 @@ impl LibraryManifest {
     }
 
     /// Writes this manifest next to `library_path`.
-    pub(crate) fn write_beside(&self, library_path: &Path) -> Result<(), String> {
+    pub fn write_beside(&self, library_path: &Path) -> Result<(), String> {
         let path = manifest_path(library_path);
         std::fs::write(&path, self.encode())
             .map_err(|error| format!("could not write `{}`: {error}", path.display()))
     }
 
     /// Reads and decodes the manifest next to `library_path`.
-    pub(crate) fn read_beside(library_path: &Path) -> Result<Self, String> {
+    pub fn read_beside(library_path: &Path) -> Result<Self, String> {
         let path = manifest_path(library_path);
         let bytes = std::fs::read(&path)
             .map_err(|error| format!("could not read `{}`: {error}", path.display()))?;
@@ -277,7 +289,7 @@ impl LibraryManifest {
     }
 
     /// Maps this manifest's module keys, macro keys, and templates to `program`.
-    pub(crate) fn resolve(
+    pub fn resolve(
         &self,
         program: &Program,
         library_path: &Path,

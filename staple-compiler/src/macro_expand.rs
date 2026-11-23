@@ -1824,6 +1824,10 @@ pub(crate) fn expand_program_checked(
 ) -> Result<(Program, MacroAnalysis, Vec<Diagnostic>), Vec<Diagnostic>> {
     let stages = stage_items::separate(&mut program);
     let mut expander = MacroExpander::new(&program);
+    if compiled_call::compiling() {
+        expander.compiled_only_items = stages.compiled.clone();
+        expander.interpreted_only_items = stages.interpreted.clone();
+    }
     expander.validate_definitions();
     for module in program.modules() {
         for item in &module.syntax.items {
@@ -2183,6 +2187,18 @@ struct MacroExpander {
     macros_ready: HashSet<MacroKey>,
     /// Macros whose readiness failed with a cycle, already reported.
     macros_failed: HashSet<MacroKey>,
+    /// Pre-walk snapshot of `Program` used to build closure-only check
+    /// programs and library manifests when a [`MacroBackend`] is active.
+    program_shell: Option<Program>,
+    /// Macro declarations whose closure libraries have already been prepared
+    /// by the active [`MacroBackend`].
+    prepared_macros: HashSet<SyntaxId>,
+    /// `@compiled_only` items separated before the walk, spliced into closure
+    /// check programs when a [`MacroBackend`] is active.
+    compiled_only_items: Vec<(ModuleId, Item)>,
+    /// `@interpreted_only` item IDs separated before the walk, excluded from
+    /// closure check programs when a [`MacroBackend`] is active.
+    interpreted_only_items: HashSet<SyntaxId>,
     /// Chains of macros and items that each needed the next, back to the first.
     cycles: Vec<Vec<String>>,
     /// The order macros became ready in.
@@ -3136,6 +3152,10 @@ impl MacroExpander {
             stage_stack: Vec::new(),
             macros_ready: HashSet::new(),
             macros_failed: HashSet::new(),
+            program_shell: compiled_call::compiling().then(|| program.clone()),
+            prepared_macros: HashSet::new(),
+            compiled_only_items: Vec::new(),
+            interpreted_only_items: HashSet::new(),
             cycles: Vec::new(),
             macro_ready_order: Vec::new(),
             running_macros: Vec::new(),
@@ -5751,9 +5771,12 @@ impl MacroExpander {
         );
         self.invocation_spans.push(call_span.clone());
         self.running_macros.push(definition.declaration.syntax.id);
-        let compiled = self
-            .modifier_trees(argument.as_ref().zip(argument_syntax), &item)
-            .and_then(|arguments| self.call_compiled(definition, arguments, &call_span));
+        let compiled = if definition.is_template && compiled_call::strict_compiled_mode() {
+            None
+        } else {
+            self.modifier_trees(argument.as_ref().zip(argument_syntax), &item)
+                .and_then(|arguments| self.call_compiled(definition, arguments, &call_span))
+        };
         let result = match compiled {
             Some(value) => value.and_then(|value| self.modifier_items(module, definition, Value::Syntax(value))),
             None => self.invoke_modifier_inner(module, definition, argument, item, call_span),
@@ -5788,6 +5811,11 @@ impl MacroExpander {
             self.quote_context.take()
         };
         let evaluated = evaluated.unwrap_or_else(|| {
+            assert!(
+                !compiled_call::strict_compiled_mode(),
+                "macro modifier `{}` body ran in the interpreter under --macro-engine=compiled",
+                definition.key.name
+            );
             (|| {
                 let mut value =
                     self.eval_expression(definition.key.module, body, &mut Environment::new())?;
@@ -6891,9 +6919,31 @@ impl MacroExpander {
         self.invocation_spans.push(call_span.clone());
         self.running_macros.push(definition.declaration.syntax.id);
         let compiled = match definition.kind {
-            MacroKind::User(_) => self
-                .call_trees(definition, &arguments)
-                .and_then(|trees| self.call_compiled(definition, trees, &call_span)),
+            MacroKind::User(_)
+                if !(definition.is_template && compiled_call::strict_compiled_mode()) =>
+            {
+                let trees = self.call_trees(definition, &arguments);
+                if trees.is_none() && compiled_call::strict_compiled_mode() {
+                    panic!(
+                        "call_trees returned None for macro `{}` (arity {}, args {})",
+                        definition.key.name,
+                        definition.parameters.len(),
+                        arguments.len()
+                    );
+                }
+                trees.and_then(|trees| {
+                    let result = self.call_compiled(definition, trees, &call_span);
+                    if result.is_none() && compiled_call::strict_compiled_mode() {
+                        panic!(
+                            "call_compiled returned None for macro `{}` (decl {:?}, prepared={})",
+                            definition.key.name,
+                            definition.declaration.syntax.id,
+                            self.prepared_macros.contains(&definition.declaration.syntax.id)
+                        );
+                    }
+                    result
+                })
+            }
             _ => None,
         };
         let result = match compiled {
@@ -6972,6 +7022,11 @@ impl MacroExpander {
                         return self.macro_result_value(definition, instantiated?);
                     }
                 }
+                assert!(
+                    !compiled_call::strict_compiled_mode(),
+                    "macro `{}` body ran in the interpreter under --macro-engine=compiled",
+                    definition.key.name
+                );
                 let previous_context = if quote_result_type(&definition.result) {
                     self.quote_context.replace(definition.result.clone())
                 } else {
@@ -15889,9 +15944,16 @@ fn substitute_type(
             }
         }
         Type::Sum(sum) => {
-            for alternative in &mut sum.alternatives {
-                substitute_type(alternative, environment, diagnostics)?;
+            let mut flattened = Vec::with_capacity(sum.alternatives.len());
+            for mut alternative in std::mem::take(&mut sum.alternatives) {
+                substitute_type(&mut alternative, environment, diagnostics)?;
+                if let Type::Sum(nested) = alternative {
+                    flattened.extend(nested.alternatives);
+                } else {
+                    flattened.push(alternative);
+                }
             }
+            sum.alternatives = flattened;
         }
         Type::Function(function) => {
             substitute_type(&mut function.parameter, environment, diagnostics)?;

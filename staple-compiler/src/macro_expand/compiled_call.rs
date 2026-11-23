@@ -10,14 +10,15 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 
-use staple_syntax::{Diagnostic, Item, Span, Syntax, TokenKind};
+use staple_syntax::{Diagnostic, Item, Span, Syntax, SyntaxId, TokenKind};
 
+use super::lower_quote::TemplateTable;
 use super::{
     DelimitedValueContents, MacroArgument, MacroDefinition, MacroExpander, MetaType, SyntaxValue,
     Value, match_syntax_fragment, syntax_category,
 };
-use crate::ModuleId;
 use crate::macro_runtime::args::ArgTree;
+use crate::{ModuleId, Program};
 
 /// One call of a macro with a body.
 #[derive(Clone)]
@@ -57,38 +58,94 @@ fn recording() -> bool {
 }
 
 /// A call the expander asks compiled code to make.
-#[allow(dead_code)] // Only the test harness compiles calls so far.
-pub(crate) struct CompiledCall<'a> {
-    pub(crate) declaration: &'a staple_syntax::MacroDeclaration,
-    pub(crate) definition_module: ModuleId,
-    pub(crate) call_site: Span,
+pub struct CompiledCall<'a> {
+    pub declaration: &'a staple_syntax::MacroDeclaration,
+    pub definition_module: ModuleId,
+    pub call_site: Span,
     /// One tree per parameter.
-    pub(crate) arguments: Vec<ArgTree>,
+    pub arguments: Vec<ArgTree>,
     /// The first expansion mark the call may use.
-    pub(crate) next_mark: u64,
+    pub next_mark: u64,
 }
 
-/// Makes a call through compiled code. `None` leaves the call to the
-/// interpreter. A made call gives back its result and the first mark it didn't
-/// use, or why it failed.
-pub(crate) type CompiledEngine = Box<dyn FnMut(&CompiledCall<'_>) -> Option<Result<(Syntax, u64), String>>>;
+/// A closure-only check program ready to be lowered, emitted, linked, and loaded
+/// into a macro library.
+pub struct ClosureLibraryRequest<'a> {
+    /// The expanded-so-far program, for resolving manifest keys and templates.
+    pub program: &'a Program,
+    /// The closure-only check program for the requested macros.
+    pub check_program: Program,
+    /// Quotation templates collected when building `check_program`.
+    pub templates: TemplateTable,
+    /// `(module, declaration_id, entry_function_name)` for each macro in this request.
+    pub entries: Vec<(ModuleId, SyntaxId, String)>,
+    /// The next syntax id after `check_program` was built, for `NameResolver::pre_expanded`.
+    pub next_syntax_id: usize,
+}
+
+/// Backend that compiles/loads macro libraries and executes compiled macro calls.
+pub trait MacroBackend: Send {
+    /// Makes the compiled library for the macros in `request` available,
+    /// returning the `SyntaxId`s of the macro declarations that are now ready.
+    fn prepare(&mut self, request: ClosureLibraryRequest<'_>) -> Result<Vec<SyntaxId>, String>;
+
+    /// Executes one macro call through compiled code. Returning `None` leaves
+    /// the call to the interpreter (allowed only when strict compiled mode is
+    /// off, as in the comparison harness).
+    fn call(&mut self, call: &CompiledCall<'_>) -> Option<Result<(Syntax, u64), String>>;
+}
+
+pub(crate) struct ActiveBackend {
+    backend: Box<dyn MacroBackend>,
+    strict: bool,
+}
 
 thread_local! {
-    static ENGINE: RefCell<Option<CompiledEngine>> = const { RefCell::new(None) };
+    static ENGINE: RefCell<Option<ActiveBackend>> = const { RefCell::new(None) };
 }
 
-/// Runs `f` with `engine` making the macro calls it takes on this thread, in
-/// place of the interpreter.
-#[allow(dead_code)] // Only the test harness compiles calls so far.
-pub(crate) fn with_compiled_engine<T>(engine: CompiledEngine, f: impl FnOnce() -> T) -> T {
-    let previous = ENGINE.with(|current| current.borrow_mut().replace(engine));
+pub(crate) fn take_backend() -> Option<ActiveBackend> {
+    ENGINE.with(|engine| engine.borrow_mut().take())
+}
+
+pub(crate) fn restore_backend(active: Option<ActiveBackend>) {
+    ENGINE.with(|engine| *engine.borrow_mut() = active);
+}
+
+/// Runs `f` with `backend` making the macro calls it takes on this thread.
+///
+/// When `strict` is `true`, no non-template macro body or helper may fall back
+/// to the interpreter.
+pub fn with_macro_backend<T>(
+    backend: Box<dyn MacroBackend>,
+    strict: bool,
+    f: impl FnOnce() -> T,
+) -> T {
+    let previous = ENGINE.with(|current| {
+        current
+            .borrow_mut()
+            .replace(ActiveBackend { backend, strict })
+    });
     let value = f();
     ENGINE.with(|current| *current.borrow_mut() = previous);
     value
 }
 
-fn compiling() -> bool {
+pub(super) fn compiling() -> bool {
     ENGINE.with(|engine| engine.borrow().is_some())
+}
+
+pub(super) fn strict_compiled_mode() -> bool {
+    ENGINE.with(|engine| engine.borrow().as_ref().is_some_and(|active| active.strict))
+}
+
+pub(super) fn prepare_compiled_library(
+    request: ClosureLibraryRequest<'_>,
+) -> Option<Result<Vec<SyntaxId>, String>> {
+    let mut active = ENGINE.with(|engine| engine.borrow_mut().take())?;
+    let result = active.backend.prepare(request);
+    ENGINE.with(|current| *current.borrow_mut() = Some(active));
+    Some(result)
 }
 
 /// What a macro produced, as the expander places it.
@@ -217,10 +274,9 @@ impl MacroExpander {
             arguments,
             next_mark: self.next_mark,
         };
-        let engine = ENGINE.with(|engine| engine.borrow_mut().take())?;
-        let mut engine = engine;
-        let outcome = engine(&call);
-        ENGINE.with(|current| *current.borrow_mut() = Some(engine));
+        let mut active = ENGINE.with(|engine| engine.borrow_mut().take())?;
+        let outcome = active.backend.call(&call);
+        ENGINE.with(|current| *current.borrow_mut() = Some(active));
         let first_mark = self.next_mark;
         let result = match outcome? {
             Ok((syntax, next_mark)) => {
@@ -388,6 +444,33 @@ fn arg_tree(value: &Value) -> Option<ArgTree> {
         Value::Syntax(value) => ArgTree::Node(trimmed(value.syntax()?)),
         Value::Nominal(name, _) if name == "None" => ArgTree::Absent,
         Value::Nominal(name, value) if name == "Some" => arg_tree(value)?,
+        Value::Nominal(name, value) if name == "AliasBody" => {
+            let Value::Syntax(ty) = value.as_ref() else {
+                return None;
+            };
+            ArgTree::Node(written(&format!("= {}", ty.syntax()?.text())))
+        }
+        Value::Nominal(name, value) if name == "WrapperBody" || name == "FromBody" => {
+            let keyword = if name == "WrapperBody" { "wrap" } else { "from" };
+            let Value::Product(fields, _) = value.as_ref() else {
+                return None;
+            };
+            let mut elements = fields.iter();
+            let (_, Value::Syntax(SyntaxValue::Visibility(vis))) = elements.next()? else {
+                return None;
+            };
+            let (_, Value::Syntax(ty)) = elements.next()? else {
+                return None;
+            };
+            let vis_text = match vis.kind {
+                staple_syntax::VisibilityKind::Public => "pub ",
+                staple_syntax::VisibilityKind::Package => "pub(package) ",
+                staple_syntax::VisibilityKind::Private => "",
+            };
+            let ty_text = ty.syntax()?.text();
+            ArgTree::Node(written(&format!("{keyword} {vis_text}{ty_text}")))
+        }
+        Value::Nominal(name, _) if name == "OpaqueBody" => ArgTree::Node(written("opaque")),
         Value::Sequence(values) => {
             ArgTree::List(values.iter().map(arg_tree).collect::<Option<_>>()?)
         }
@@ -399,7 +482,25 @@ fn arg_tree(value: &Value) -> Option<ArgTree> {
             separator,
             trailing,
         } => separated_tree(elements, separator, *trailing)?,
-        _ => return None,
+        other => {
+            if strict_compiled_mode() {
+                let kind = match other {
+                    Value::Syntax(s) => format!("Syntax({})", s.syntax().is_some()),
+                    Value::Nominal(name, _) => format!("Nominal({name})"),
+                    Value::Integer(..) => "Integer".to_owned(),
+                    Value::String(s) => format!("String({s:?})"),
+                    Value::Char(_) => "Char".to_owned(),
+                    Value::Float(..) => "Float".to_owned(),
+                    Value::Stream { .. } => "Stream".to_owned(),
+                    Value::Product(..) => "Product".to_owned(),
+                    Value::Sequence(..) => "Sequence".to_owned(),
+                    Value::Separated { .. } => "Separated".to_owned(),
+                    _ => "Other".to_owned(),
+                };
+                panic!("arg_tree unhandled Value::{kind}");
+            }
+            return None;
+        }
     })
 }
 

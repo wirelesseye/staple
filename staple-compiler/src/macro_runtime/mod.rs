@@ -9,7 +9,7 @@ pub(crate) mod arena;
 pub mod args;
 pub mod client;
 pub mod intrinsics;
-pub(crate) mod manifest;
+pub mod manifest;
 pub mod quote;
 pub mod server;
 pub mod wire;
@@ -18,6 +18,12 @@ pub mod wire;
 pub(crate) mod compare;
 #[cfg(test)]
 pub(crate) mod harness;
+
+/// Finds the concrete instance symbol a source function's name lowered to.
+pub fn instance_symbol(lowered: &crate::LoweredModule, name: &str) -> Option<String> {
+    let mangled = crate::resolve::mangle_function_name(name);
+    lowered.planned_instance_names(&mangled).into_iter().next()
+}
 
 /// Recorded call metadata returned by [`prepare_macro_library_object`] for
 /// integration tests.

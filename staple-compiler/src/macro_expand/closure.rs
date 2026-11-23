@@ -323,6 +323,25 @@ impl ClosureIndex {
                 }
             }
         }
+        for namespace in program.modules().iter().filter(|module| module.namespace) {
+            for block in program.companion_blocks(namespace.id) {
+                if block == namespace.id {
+                    continue;
+                }
+                let block_own = index.own[block.0].clone();
+                for (name, ids) in block_own {
+                    for id in ids {
+                        add_name(&mut index.own[namespace.id.0], &name, id);
+                    }
+                }
+                let block_modifiers = index.own_modifiers[block.0].clone();
+                for (name, ids) in block_modifiers {
+                    for id in ids {
+                        add_name(&mut index.own_modifiers[namespace.id.0], &name, id);
+                    }
+                }
+            }
+        }
         index.rebuild(use_kinds, imported_modules);
         index
     }
@@ -962,6 +981,30 @@ impl ClosureIndex {
         let scan = Scan::expression(expression, &[], self.std_modules);
         let seed = Rc::new(self.resolve_scan(lookup, module, None, &scan));
         self.close(lookup, None, seed, is_template)
+    }
+
+    /// The closure items referenced by a list of `(module, item)` pairs
+    /// (such as `@compiled_only` items spliced into closure check programs).
+    pub(super) fn closure_of_items(
+        &mut self,
+        lookup: &Lookup,
+        items: &[(ModuleId, Item)],
+        is_template: &dyn Fn(ItemId) -> bool,
+    ) -> BTreeSet<ItemId> {
+        let mut combined = Resolved::default();
+        for (module, item) in items {
+            let scan = Scan::item(item, self.std_modules);
+            let resolved = self.resolve_scan(lookup, *module, None, &scan);
+            combined.items.extend(resolved.items);
+            combined.macros.extend(resolved.macros);
+            combined.modifiers.extend(resolved.modifiers);
+            combined.quoted.extend(resolved.quoted);
+            combined.quoted_macros.extend(resolved.quoted_macros);
+            combined.unresolved.extend(resolved.unresolved);
+            combined.methods.extend(resolved.methods);
+        }
+        self.close(lookup, None, Rc::new(combined), is_template)
+            .items
     }
 
     fn close(

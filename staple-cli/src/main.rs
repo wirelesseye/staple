@@ -6,6 +6,7 @@ mod compile;
 mod expand;
 mod fmt;
 mod lsp;
+mod macro_backend;
 mod macro_server;
 mod package;
 
@@ -116,6 +117,7 @@ fn uses_file_mode(arguments: &[OsString]) -> bool {
                     | "--package-root"
                     | "--package-name"
                     | "--features"
+                    | "--macro-engine"
             ) {
                 iterator.next();
             }

@@ -5125,12 +5125,14 @@ impl TypeChecker {
     }
 
     fn collect_traits(&mut self, module: &ResolvedModule) {
+        let partial_stdlib = module.ordinary_syntax_types();
         match self.natural_trait.and_then(|id| module.traits().get(&id)) {
             Some(natural)
                 if natural.declaration.visibility == staple_syntax::Visibility::Public
                     && natural.declaration.type_parameters.len() == 1
                     && natural.parameters.len() == 1
                     && natural.declaration.members.is_empty() => {}
+            None if partial_stdlib => {}
             _ => self.diagnostics.push(Diagnostic::new(
                 Span::Compiler,
                 "standard library must declare public empty trait `Natural`",
@@ -5142,6 +5144,7 @@ impl TypeChecker {
                     && sized.declaration.type_parameters.len() == 1
                     && sized.parameters.len() == 1
                     && sized.declaration.members.is_empty() => {}
+            None if partial_stdlib => {}
             _ => self.diagnostics.push(Diagnostic::new(
                 Span::Compiler,
                 "standard library must declare public empty trait `Sized`",
@@ -5153,6 +5156,7 @@ impl TypeChecker {
                     && copy.declaration.type_parameters.len() == 1
                     && copy.parameters.len() == 1
                     && copy.declaration.members.is_empty() => {}
+            None if partial_stdlib => {}
             _ => self.diagnostics.push(Diagnostic::new(
                 Span::Compiler,
                 "standard library must declare public empty trait `Copy`",
@@ -5165,6 +5169,7 @@ impl TypeChecker {
                     && drop.parameters.len() == 1
                     && drop.declaration.members.len() == 1
                     && drop.declaration.members[0].name == "cleanup" => {}
+            None if partial_stdlib => {}
             _ => self.diagnostics.push(Diagnostic::new(
                 Span::Compiler,
                 "standard library must declare public trait `Drop` with one `cleanup` member",
@@ -5177,6 +5182,7 @@ impl TypeChecker {
                     && default.parameters.len() == 1
                     && default.declaration.members.len() == 1
                     && default.declaration.members[0].name == "default" => {}
+            None if partial_stdlib => {}
             _ => self.diagnostics.push(Diagnostic::new(
                 Span::Compiler,
                 "standard library must declare public trait `Default` with one `default` member",
@@ -5186,19 +5192,20 @@ impl TypeChecker {
             (self.index_trait, "Index", "index"),
             (self.mutate_index_trait, "MutateIndex", "mutate_index"),
         ] {
-            let valid = trait_id
-                .and_then(|id| module.traits().get(&id))
-                .is_some_and(|resolved| {
-                    resolved.declaration.visibility == staple_syntax::Visibility::Public
-                        && resolved.parameters.len() == 3
-                        && resolved.declaration.members.len() == 1
-                        && resolved.declaration.members[0].name == member_name
-                        && resolved.declaration.associated_types.len() == 1
-                        && resolved.functional_dependencies.len() == 1
-                        && resolved.functional_dependencies[0].determinants
-                            == resolved.parameters[..2]
-                        && resolved.functional_dependencies[0].dependent == resolved.parameters[2]
-                });
+            let resolved = trait_id.and_then(|id| module.traits().get(&id));
+            if resolved.is_none() && partial_stdlib {
+                continue;
+            }
+            let valid = resolved.is_some_and(|resolved| {
+                resolved.declaration.visibility == staple_syntax::Visibility::Public
+                    && resolved.parameters.len() == 3
+                    && resolved.declaration.members.len() == 1
+                    && resolved.declaration.members[0].name == member_name
+                    && resolved.declaration.associated_types.len() == 1
+                    && resolved.functional_dependencies.len() == 1
+                    && resolved.functional_dependencies[0].determinants == resolved.parameters[..2]
+                    && resolved.functional_dependencies[0].dependent == resolved.parameters[2]
+            });
             if !valid {
                 self.diagnostics.push(Diagnostic::new(
                     Span::Compiler,
@@ -5212,19 +5219,20 @@ impl TypeChecker {
             (self.iterator_trait, "Iterator", "next"),
             (self.into_iterator_trait, "IntoIterator", "into_iterator"),
         ] {
-            let valid = trait_id
-                .and_then(|id| module.traits().get(&id))
-                .is_some_and(|resolved| {
-                    resolved.declaration.visibility == staple_syntax::Visibility::Public
-                        && resolved.parameters.len() == 2
-                        && resolved.declaration.members.len() == 1
-                        && resolved.declaration.members[0].name == member_name
-                        && resolved.declaration.associated_types.len() == 1
-                        && resolved.functional_dependencies.len() == 1
-                        && resolved.functional_dependencies[0].determinants
-                            == resolved.parameters[..1]
-                        && resolved.functional_dependencies[0].dependent == resolved.parameters[1]
-                });
+            let resolved = trait_id.and_then(|id| module.traits().get(&id));
+            if resolved.is_none() && partial_stdlib {
+                continue;
+            }
+            let valid = resolved.is_some_and(|resolved| {
+                resolved.declaration.visibility == staple_syntax::Visibility::Public
+                    && resolved.parameters.len() == 2
+                    && resolved.declaration.members.len() == 1
+                    && resolved.declaration.members[0].name == member_name
+                    && resolved.declaration.associated_types.len() == 1
+                    && resolved.functional_dependencies.len() == 1
+                    && resolved.functional_dependencies[0].determinants == resolved.parameters[..1]
+                    && resolved.functional_dependencies[0].dependent == resolved.parameters[1]
+            });
             if !valid {
                 self.diagnostics.push(Diagnostic::new(
                     Span::Compiler,
@@ -20464,6 +20472,11 @@ impl TypeChecker {
                 let guarded = match &callee {
                     CheckedType::TypeConstructor { id, .. } => {
                         module.recursive_construction(*id).is_some()
+                            || (self.ordinary_syntax_types
+                                && self
+                                    .type_declarations
+                                    .get(id)
+                                    .is_some_and(|declaration| declaration.recursive_constructor))
                             || self.type_parameters_are_indirect(module, *id)
                     }
                     _ => false,

@@ -509,7 +509,7 @@ Update this section as you work (see "Rules for the implementor").
 | 4. The client and failure handling | done | `04eb738e` | `macro_runtime::client::MacroClient` with lazy server spawn/shutdown, lazy library reload, `STAPLE_MACRO_TIMEOUT` (default 10 s), stderr forwarding, and Decision 8 failure diagnostics (`panic`, `compile_error`, timeout, stack overflow, crash); unit and integration tests in `client.rs` and `staple-cli/tests/macro_server.rs`. Review fixes: libraries are registered with `MacroClient::load`, load failures and timeouts are reported at the macro, crash output is forwarded, the server's standard output is closed, `exit n` reads as an exit. See Findings. |
 | 5. Effects | done | `c103ada8` | `LoweredModule::check_macro_effects` (`lower/macro_effects.rs`) walks lowered call graph (instances, taken callable values, artifacts, and extern targets) with BFS from entry functions; forbidden list documented in `Staple.md` and Findings; unit tests cover reachable file read, dead code, and stderr. Review fixes: foreign functions `std` doesn't declare are rejected, the list drops names `std` doesn't have, chains keep the function that calls a foreign function, `Staple.md` no longer claims enforcement. Not called yet: libraries are first built in tasks 7 and 8. See Findings. |
 | 6. The quotation cycle and generated-item loops | done | `1d473565` | `Expression::Quote` in `macro_expand/scan.rs` now records `__quote`/`Parse.parse_quote`, `Sequence`, and `Splice`; `StdModules` carries `syntax`. Rewrote `if`/`when`/`for`/`while` to `match`/`loop` across `std.syntax` and all stdlib modules reached by `if`/syntax runtime; `check-macro-closures.py --mode all --jobs 2` passes (232 inputs, 0 diagnostics). `compare-expansion.py` against `88fdea78` matches 218/232 (only the 14 edited stdlib modules differ). Unit tests added in `closure.rs`. See Findings. |
-| 7. Closure libraries and the stage tower | not started | | |
+| 7. Closure libraries and the stage tower | done | | |
 | 8. Package libraries and macro-mode objects | not started | | |
 | 9. Caching | not started | | |
 | 10. Build cost | not started | | |
@@ -706,3 +706,53 @@ Record:
   - Added `quoting_macro_closure_includes_quote_runtime_and_splice_impls` and
     `standard_library_has_no_macro_closure_cycles` in
     `staple-compiler/src/macro_expand/closure.rs` (`11 passed; 0 failed; 1 ignored`).
+
+### Task 7: Closure libraries and the stage tower
+
+- **Standard-library compiled bootstrap.** Building `stdlib` from scratch with
+  `--macro-engine=compiled` (`STAPLE_MACRO_STATS=1 /usr/bin/time -p`) built
+  **3 closure libraries** in `32.854s` (`lib #0: if`, `lib #1: when`,
+  `lib #2: typegroup`) and completed in `43.60s` real (`37.30s` user, `1.65s`
+  sys). Because stdlib's own expansion only invokes those 3 non-template macros,
+  no extra batching of already-expanded macros was needed.
+- **`std.convert` `ConversionError` cycle.** `std.string`/`std.number` in `if`'s
+  closure depend on `ConversionError`, which previously used `typegroup`. Rewrote
+  `ConversionError` in `stdlib/std/convert.sta` by hand as `companion ConversionError`
+  + `pub type ConversionError from ...` and removed `use package.typegroup.(typegroup)`.
+- **Closure-only check programs (`whole_dependencies = false`).** Running the
+  real stage tower in `MacroExpander::make_ready` exposed several gaps in
+  closure-only check programs and the compiled macro runtime:
+  - `CheckSnapshot.modules` must be `Vec::new()` so `Submodule` and
+    `UseDeclaration` fall back to `shell`; `ClosureIndex::build` must index
+    companion blocks on `namespace == true` modules; `keep_import` must check
+    `defined[target]` for `UseKind::Dotted` single-item imports; and
+    `expand_in_walk` must record per-binding expansions for multi-binding
+    `Item::ExternBlock`s.
+  - `prepare_compiled_macro` settles `compiled_only_items` closures before
+    building `groups`, expands `Item::Modified` (`@syntax_node`), filters
+    `@interpreted_only`, and splices `@compiled_only` items (`Parse` and
+    `Splice` impls first); `resolve.rs` and `typecheck.rs` tolerate partial
+    stdlib in `ordinary_syntax_types` programs.
+  - `NameResolver::resolve_on_thread` transfers the `ENGINE` `MacroBackend` into
+    the 256 MiB worker thread and restores it on `.join()`.
+  - `codegen/lowered/mod.rs` uses the argument pattern's `test.subject` when
+    unboxing `@syntax_node` wrappers (instead of the outer `Wrapper.representation`,
+    which can be `Opaque` in recursive syntax types); `macro_expand.rs`
+    flattens substituted `Type::Sum` alternatives in `substitute_type` so
+    `typegroup_sum` matches between interpreted and compiled.
+  - `wire.rs` (`Message::Load` template `ModuleId` decoding), `intrinsics.rs`
+    (`sequence_syntax` newline separator for item sequences and doc-comment
+    modifier fallback), `compiled_call.rs` (`AliasBody`/`WrapperBody`/`FromBody`/`OpaqueBody`
+    in `arg_tree`), and `staple-syntax/src/parser.rs` (`parse_modifier_or_doc`
+    nested `if` avoiding an `opt-level = 3` let-chain miscompilation on
+    `rustc 1.96.0`).
+- **Verification.**
+  - `cargo test -p staple --test compiled_macros -- --test-threads=1`: `3 passed; 0 failed`
+    (`user_package_macro_used_in_same_module`, `user_package_macro_closure_uses_earlier_macro`,
+    `stdlib_builds_with_compiled_engine`).
+  - `cargo test -p staple-compiler --lib macro_expand::closure::tests:: -- --test-threads=2`:
+    `11 passed; 0 failed; 1 ignored`.
+  - `cargo test -p staple-compiler --lib macro_runtime::compare::tests:: -- --test-threads=1`:
+    `3 passed; 0 failed`.
+  - `scripts/check-macro-closures.py --staple target/release/staple --mode all --jobs 2`:
+    `232 inputs, 0 with diagnostics, 0 distinct messages`.

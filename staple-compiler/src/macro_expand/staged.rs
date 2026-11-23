@@ -131,7 +131,151 @@ impl MacroExpander {
     fn make_ready(&mut self, definition: &MacroDefinition, call_span: &Span) -> Result<(), ()> {
         let start = definition.declaration.syntax.id;
         let closure = self.settle(call_span, |expander| expander.macro_closure(start))?;
-        self.macro_closures.insert(start, closure);
+        self.macro_closures.insert(start, closure.clone());
+        self.prepare_compiled_macro(definition, &closure, call_span)?;
+        Ok(())
+    }
+
+    fn prepare_compiled_macro(
+        &mut self,
+        definition: &MacroDefinition,
+        closure: &MacroClosure,
+        call_span: &Span,
+    ) -> Result<(), ()> {
+        let start = definition.declaration.syntax.id;
+        if !super::compiled_call::compiling()
+            || definition.is_template
+            || !matches!(definition.kind, super::MacroKind::User(_))
+            || self.prepared_macros.contains(&start)
+        {
+            return Ok(());
+        }
+        let Some(shell) = self.program_shell.clone() else {
+            return Ok(());
+        };
+        let extra_items = if self.compiled_only_items.is_empty() {
+            std::collections::BTreeSet::new()
+        } else {
+            self.settle(call_span, |expander| {
+                let lookup = Lookup {
+                    scopes: &expander.scopes,
+                    parents: &expander.parent_modules,
+                    companions: &expander.companion_modules,
+                };
+                let templates = &expander.template_items;
+                MacroClosure {
+                    items: expander.closure.closure_of_items(
+                        &lookup,
+                        &expander.compiled_only_items,
+                        &|item| templates.contains(&item),
+                    ),
+                    macros_used: std::collections::BTreeSet::new(),
+                }
+            })?
+            .items
+        };
+        let mut wanted_items = closure.items.clone();
+        wanted_items.extend(extra_items);
+        let mut groups = HashMap::new();
+        for id in &wanted_items {
+            if groups.contains_key(id) {
+                continue;
+            }
+            let Some(indexed) = self.closure.items.get(id) else {
+                continue;
+            };
+            let (module, position) = (indexed.module, indexed.position);
+            let mut items = self.closure.group_of(*id).as_ref().clone();
+            items.retain(|item| !self.interpreted_only_items.contains(&item.syntax().id));
+            let mut expanded_items = Vec::with_capacity(items.len());
+            for mut item in items {
+                if matches!(item, Item::Modified(_)) {
+                    self.expand_item(module, &mut item, 0);
+                    if let Some(generated) = self.emitted_items.take() {
+                        expanded_items.extend(self.expand_generated_items(module, generated, 1));
+                    } else {
+                        expanded_items.push(item);
+                    }
+                } else {
+                    expanded_items.push(item);
+                }
+            }
+            let mut items = expanded_items;
+            self.expand_compile_time_items(module, &mut items);
+            groups.insert(
+                *id,
+                super::check_program::ClosureGroup {
+                    module,
+                    position,
+                    items,
+                },
+            );
+        }
+        let checked = super::check_program::CheckedMacro {
+            name: definition.key.name.clone(),
+            module: definition.key.module,
+            closure: super::closure::MacroClosure {
+                items: wanted_items,
+                macros_used: closure.macros_used.clone(),
+            },
+        };
+        let package = shell.package_of(definition.key.module);
+        let snapshot = super::check_program::CheckSnapshot {
+            modules: Vec::new(),
+            groups,
+            compile_time: HashMap::new(),
+            macros: vec![checked],
+        };
+        let (mut check_program, templates) = super::check_program::build_check_program_with(
+            &shell,
+            &snapshot,
+            package,
+            &[&snapshot.macros[0]],
+            &mut self.next_syntax_id,
+            false,
+        );
+        if !self.compiled_only_items.is_empty() {
+            let compiled = self.compiled_only_items.clone();
+            let mut per_module: Vec<Vec<Item>> = vec![Vec::new(); check_program.modules().len()];
+            for (module, mut item) in compiled {
+                self.expand_item(module, &mut item, 1);
+                per_module[module.0].push(item);
+            }
+            for (module_index, compiled_items) in per_module.into_iter().enumerate() {
+                if compiled_items.is_empty() {
+                    continue;
+                }
+                let (mut parse_impls, rest): (Vec<_>, Vec<_>) =
+                    compiled_items.into_iter().partition(|item| {
+                        matches!(item, Item::TraitImplementation(implementation)
+                            if matches!(implementation.trait_name.name.as_str(), "Parse" | "Splice"))
+                    });
+                let module_items = &mut check_program.modules_mut()[module_index].syntax.items;
+                parse_impls.append(module_items);
+                parse_impls.extend(rest);
+                *module_items = parse_impls;
+            }
+        }
+        let entry_name = super::check_program::entry_function_name(&definition.declaration);
+        let request = super::compiled_call::ClosureLibraryRequest {
+            program: &shell,
+            check_program,
+            templates,
+            entries: vec![(definition.key.module, start, entry_name)],
+            next_syntax_id: self.next_syntax_id,
+        };
+        if let Some(result) = super::compiled_call::prepare_compiled_library(request) {
+            match result {
+                Ok(ready_ids) => {
+                    self.prepared_macros.extend(ready_ids);
+                }
+                Err(message) => {
+                    self.diagnostics
+                        .push(Diagnostic::new(call_span.clone(), message));
+                    return Err(());
+                }
+            }
+        }
         Ok(())
     }
 
@@ -391,6 +535,19 @@ impl MacroExpander {
                     Some(Item::Binding(binding)) if binding_is_compile_time_helper(binding)
                 );
             self.finish_unit_output(id, expanded, complete, false);
+            if let Some(Item::ExternBlock(block)) = output.first()
+                && block.bindings.len() > 1
+            {
+                for binding in &block.bindings {
+                    let mut single = block.clone();
+                    single.bindings = vec![binding.clone()];
+                    self.closure.record_expansion(
+                        binding.syntax.id,
+                        Rc::new(vec![Item::ExternBlock(single)]),
+                        true,
+                    );
+                }
+            }
         }
         output
     }

@@ -383,7 +383,7 @@ fn decode_body(body: &[u8]) -> Result<Message, WireError> {
             let count = reader.length()?;
             let mut templates = Vec::with_capacity(count.min(body.len()));
             for _ in 0..count {
-                let module = reader.length()?;
+                let module = reader.usize()?;
                 let syntax = reader.fragment()?;
                 templates.push((module, syntax));
             }

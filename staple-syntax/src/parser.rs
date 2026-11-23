@@ -963,26 +963,25 @@ impl Grammar {
                     TokenKind::Newline => line_start = true,
                     TokenKind::Whitespace => {}
                     TokenKind::LineComment => {
-                        if line_start
-                            && !token.text.starts_with("////")
-                            && let Some(doc) = token.text.strip_prefix("///")
-                        {
-                            let doc = doc.to_owned();
-                            // The line break ends the comment, so it stays
-                            // with it wherever the modifier is spliced.
-                            self.position = index + 1;
-                            if self.tokens.get(self.position).map(|token| token.kind)
-                                == Some(TokenKind::Newline)
-                            {
-                                self.position += 1;
+                        if line_start && !token.text.starts_with("////") {
+                            if let Some(doc) = token.text.strip_prefix("///") {
+                                let doc = doc.to_owned();
+                                // The line break ends the comment, so it stays
+                                // with it wherever the modifier is spliced.
+                                self.position = index + 1;
+                                if self.tokens.get(self.position).map(|token| token.kind)
+                                    == Some(TokenKind::Newline)
+                                {
+                                    self.position += 1;
+                                }
+                                return Ok(ModifierInvocation {
+                                    syntax: self.syntax(index),
+                                    namespace: None,
+                                    name: "doc".to_owned(),
+                                    argument: None,
+                                    doc: Some(doc),
+                                });
                             }
-                            return Ok(ModifierInvocation {
-                                syntax: self.syntax(index),
-                                namespace: None,
-                                name: "doc".to_owned(),
-                                argument: None,
-                                doc: Some(doc),
-                            });
                         }
                         line_start = false;
                     }

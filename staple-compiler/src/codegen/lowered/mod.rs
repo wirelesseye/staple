@@ -3633,7 +3633,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let Some(BasicValueEnum::PointerValue(pointer)) = value_as_basic(value) else {
                         return Err(unsupported("syntax node pattern value"));
                     };
-                    let representation_type = self.backend.compile_type(representation)?;
+                    let representation = self
+                        .view
+                        .pattern(owner, *argument)
+                        .map(|argument| argument.test.subject.clone())
+                        .unwrap_or_else(|| representation.as_ref().clone());
+                    let representation_type = self.backend.compile_type(&representation)?;
                     self.backend
                         .load_syntax_node_representation(pointer, representation_type)?
                         .as_any_value_enum()
@@ -5765,7 +5770,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             "syntax node match value has an invalid representation",
                         ));
                     };
-                    let representation_type = self.backend.compile_type(representation)?;
+                    let representation = self
+                        .view
+                        .pattern(owner, *argument)
+                        .map(|argument| argument.test.subject.clone())
+                        .unwrap_or_else(|| representation.as_ref().clone());
+                    let representation_type = self.backend.compile_type(&representation)?;
                     let representation = self.backend.load_syntax_node_representation(
                         pointer,
                         representation_type,

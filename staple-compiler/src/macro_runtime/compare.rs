@@ -7,13 +7,14 @@
 //! resolved and type-checked, so names a macro generated must resolve where
 //! its hygiene says.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::macro_expand::check_program::{CheckMode, check_programs, entry_function_name};
-use crate::macro_expand::compiled_call::{CompiledCall, record_calls, with_compiled_engine};
+use crate::macro_expand::compiled_call::{
+    ClosureLibraryRequest, CompiledCall, MacroBackend, record_calls, with_macro_backend,
+};
 use crate::macro_runtime::harness::{
     CheckRun, install_templates, lower_run, standard_library_root, with_jit, workspace_root,
 };
@@ -182,37 +183,56 @@ fn compare_on_this_thread(source: &str, compiled: Compiled) -> Comparison {
                 Some((name, address))
             })
             .collect::<HashMap<_, _>>();
-        let made = Rc::new(RefCell::new(Vec::new()));
-        let entry_times = Rc::new(RefCell::new(Vec::new()));
-        let left = Rc::new(RefCell::new(Vec::new()));
-        let engine = {
-            let made = made.clone();
-            let entry_times = entry_times.clone();
-            let left = left.clone();
-            let modules = (0..program.modules().len())
-                .map(crate::ModuleId)
-                .filter(|module| program.package_of(*module) == package)
-                .collect::<Vec<_>>();
-            Box::new(move |call: &CompiledCall<'_>| {
-                if !modules.contains(&call.definition_module) {
+        let made = Arc::new(Mutex::new(Vec::new()));
+        let entry_times = Arc::new(Mutex::new(Vec::new()));
+        let left = Arc::new(Mutex::new(Vec::new()));
+        struct HarnessBackend {
+            modules: Vec<crate::ModuleId>,
+            addresses: HashMap<String, usize>,
+            made: Arc<Mutex<Vec<(String, Duration)>>>,
+            entry_times: Arc<Mutex<Vec<(String, Duration)>>>,
+            left: Arc<Mutex<Vec<String>>>,
+        }
+        impl MacroBackend for HarnessBackend {
+            fn prepare(
+                &mut self,
+                _request: ClosureLibraryRequest<'_>,
+            ) -> Result<Vec<staple_syntax::SyntaxId>, String> {
+                Ok(Vec::new())
+            }
+            fn call(&mut self, call: &CompiledCall<'_>) -> Option<Result<(staple_syntax::Syntax, u64), String>> {
+                if !self.modules.contains(&call.definition_module) {
                     return None;
                 }
                 let name = entry_function_name(call.declaration);
-                let Some(address) = addresses.get(&name).copied() else {
-                    left.borrow_mut().push(call.declaration.name.clone());
+                let Some(address) = self.addresses.get(&name).copied() else {
+                    self.left.lock().unwrap().push(call.declaration.name.clone());
                     return None;
                 };
                 let started = Instant::now();
                 let (outcome, entry) = make_call(address, name, call);
-                made.borrow_mut()
+                self.made
+                    .lock()
+                    .unwrap()
                     .push((call.declaration.name.clone(), started.elapsed()));
-                entry_times
-                    .borrow_mut()
+                self.entry_times
+                    .lock()
+                    .unwrap()
                     .push((call.declaration.name.clone(), entry));
                 Some(outcome)
-            })
-        };
-        let (expanded, analysis, diagnostics) = with_compiled_engine(engine, || {
+            }
+        }
+        let backend = Box::new(HarnessBackend {
+            modules: (0..program.modules().len())
+                .map(crate::ModuleId)
+                .filter(|module| program.package_of(*module) == package)
+                .collect(),
+            addresses,
+            made: made.clone(),
+            entry_times: entry_times.clone(),
+            left: left.clone(),
+        });
+        let (expanded, analysis, diagnostics) = with_macro_backend(backend, false, || {
             crate::macro_expand::expand_program_checked(program.clone(), false, None, false)
         })
         .unwrap_or_else(|diagnostics| panic!("compiled calls expand the source: {diagnostics:?}"));
@@ -226,10 +246,10 @@ fn compare_on_this_thread(source: &str, compiled: Compiled) -> Comparison {
             compiled: tree_dump(&expanded),
             interpreted_diagnostics,
             compiled_diagnostics,
-            compiled_calls: made.take(),
-            entry_calls: entry_times.take(),
+            compiled_calls: std::mem::take(&mut *made.lock().unwrap()),
+            entry_calls: std::mem::take(&mut *entry_times.lock().unwrap()),
             interpreted_calls,
-            left_to_the_interpreter: left.take(),
+            left_to_the_interpreter: std::mem::take(&mut *left.lock().unwrap()),
         }
     })
 }

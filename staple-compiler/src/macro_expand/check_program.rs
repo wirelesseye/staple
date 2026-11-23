@@ -314,10 +314,19 @@ pub(crate) fn build_check_program_with(
                 {
                     let mut declaration = declaration.clone();
                     let target = check_import_target(program, module.id, &declaration, &module_names);
-                    if let Some(target) = target
-                        && !keep_import(&mut declaration.kind, &defined[target.0])
-                    {
-                        continue;
+                    if let Some(target) = target {
+                        let keep = match (&declaration.kind, declaration.path.last()) {
+                            (UseKind::Dotted, Some(last))
+                                if program.module_dotted_name(target).as_deref()
+                                    != Some(dotted_import_path(program, module.id, &declaration).as_str()) =>
+                            {
+                                defined[target.0].contains(last)
+                            }
+                            _ => keep_import(&mut declaration.kind, &defined[target.0]),
+                        };
+                        if !keep {
+                            continue;
+                        }
                     }
                     kept.push(Item::UseDeclaration(declaration));
                 }
@@ -779,6 +788,21 @@ fn defined_names<'a>(items: impl Iterator<Item = &'a Item>) -> HashSet<String> {
 /// `package` name the importing package's own modules, which the loader does
 /// not resolve through `Program::imported_module`; matching the dotted module
 /// names covers those and any other package-rooted path.
+fn dotted_import_path(
+    program: &Program,
+    source: ModuleId,
+    declaration: &staple_syntax::UseDeclaration,
+) -> String {
+    let mut parts = declaration.path.clone();
+    if parts.first().is_some_and(|part| part == "package")
+        && let Some(package) = program.package_of(source)
+        && let Some(graph) = program.package_graph()
+    {
+        parts[0] = graph.package(package).name.clone();
+    }
+    parts.join(".")
+}
+
 fn check_import_target(
     program: &Program,
     source: ModuleId,

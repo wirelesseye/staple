@@ -34,7 +34,11 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 pub use codegen::*;
 pub use expansion_render::render_expanded_module;
 pub use lower::*;
+pub use macro_expand::compiled_call::{
+    ClosureLibraryRequest, CompiledCall, MacroBackend, with_macro_backend,
+};
 pub use macro_expand::expand_macros;
+pub use macro_expand::lower_quote::TemplateTable;
 pub use program::*;
 pub use resolve::*;
 pub use typecheck::*;

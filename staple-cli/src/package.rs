@@ -29,6 +29,7 @@ struct Options {
     all_features: bool,
     no_default_features: bool,
     incremental: bool,
+    macro_engine: crate::macro_backend::MacroEngine,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -138,6 +139,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         all_features: false,
         no_default_features: false,
         incremental: true,
+        macro_engine: crate::macro_backend::MacroEngine::Interp,
     };
 
     if mode == Mode::New {
@@ -222,6 +224,20 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         }
         if argument == "--no-incremental" {
             options.incremental = false;
+            continue;
+        }
+        if argument == "--macro-engine" {
+            options.macro_engine = crate::macro_backend::parse_macro_engine(&utf8_value(
+                next_value(&mut arguments, "--macro-engine")?,
+                "--macro-engine",
+            )?)?;
+            continue;
+        }
+        if let Some(value) = argument
+            .to_str()
+            .and_then(|text| text.strip_prefix("--macro-engine="))
+        {
+            options.macro_engine = crate::macro_backend::parse_macro_engine(value)?;
             continue;
         }
         if argument == "-L" {
@@ -461,6 +477,9 @@ fn compiler_argv(package: &Package, options: &Options, output: Option<&Path>) ->
     }
     if !options.incremental {
         arguments.push("--no-incremental".into());
+    }
+    if options.macro_engine == crate::macro_backend::MacroEngine::Compiled {
+        arguments.push("--macro-engine=compiled".into());
     }
     if let Some(target) = &options.target {
         arguments.push("--target".into());

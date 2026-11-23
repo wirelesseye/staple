@@ -53,7 +53,7 @@ pub(crate) struct Template {
 
 /// Every quotation lowered so far, by template id.
 #[derive(Clone, Default)]
-pub(crate) struct TemplateTable {
+pub struct TemplateTable {
     pub(crate) templates: Vec<Template>,
 }
 

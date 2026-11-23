@@ -60,6 +60,8 @@ struct Options {
     incremental: bool,
     /// What a `--emit dylib` library exposes and binds.
     library: LibrarySpec,
+    /// Which macro execution engine to use.
+    macro_engine: crate::macro_backend::MacroEngine,
 }
 
 pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String> {
@@ -130,7 +132,9 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
     };
 
     if options.mode == Mode::Expand {
-        let expanded = expand_macros(program).map_err(format_diagnostics)?;
+        let expanded = run_with_macro_engine(&options, || {
+            expand_macros(program).map_err(format_diagnostics)
+        })?;
         let rendered = render_expanded_module(&expanded).map_err(|error| error.to_string())?;
         return match &options.output {
             Some(output) => {
@@ -145,7 +149,7 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
     // Dropped by name resolution, but incremental builds fingerprint from it.
     let graph = program.package_graph().cloned();
     let active_features = program.active_features().clone();
-    let module = compile_program(program)?;
+    let module = run_with_macro_engine(&options, || compile_program(program))?;
     if options.mode == Mode::Check {
         return Ok(Outcome::Completed(None));
     }
@@ -598,6 +602,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         format_check: false,
         incremental: std::env::var_os("STAPLE_INCREMENTAL").is_none_or(|value| value != "0"),
         library: LibrarySpec::default(),
+        macro_engine: crate::macro_backend::MacroEngine::Interp,
     };
     let mut positional_only = false;
     let mut emit_specified = false;
@@ -709,6 +714,13 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             options.library.trap_exit = true;
             continue;
         }
+        if !positional_only && argument == "--macro-engine" {
+            options.macro_engine = crate::macro_backend::parse_macro_engine(&utf8_value(
+                next_value(&mut arguments, "--macro-engine")?,
+                "--macro-engine",
+            )?)?;
+            continue;
+        }
 
         let text = argument.to_string_lossy();
         if !positional_only && let Some(value) = text.strip_prefix("--emit=") {
@@ -730,6 +742,8 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             options.manifest_path = Some(PathBuf::from(value));
         } else if !positional_only && let Some(value) = text.strip_prefix("--features=") {
             add_features(&mut options.features, value)?;
+        } else if !positional_only && let Some(value) = text.strip_prefix("--macro-engine=") {
+            options.macro_engine = crate::macro_backend::parse_macro_engine(value)?;
         } else if !positional_only && text.starts_with("-L") && text.len() > 2 {
             options.library_paths.push(PathBuf::from(&text[2..]));
         } else if !positional_only && text.starts_with("-l") && text.len() > 2 {
@@ -978,6 +992,24 @@ fn compile(source: &str) -> Result<TypedModule, String> {
     compile_program(program)
 }
 
+fn run_with_macro_engine<T>(
+    options: &Options,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    match options.macro_engine {
+        crate::macro_backend::MacroEngine::Interp => f(),
+        crate::macro_backend::MacroEngine::Compiled => {
+            let backend = crate::macro_backend::CliMacroBackend::new(
+                options.target.clone(),
+                options.linker.clone(),
+                options.library_paths.clone(),
+                options.libraries.clone(),
+            )?;
+            staple_compiler::with_macro_backend(Box::new(backend), true, f)
+        }
+    }
+}
+
 fn compile_program(program: Program) -> Result<TypedModule, String> {
     let module = NameResolver::new()
         .resolve_program(program)
@@ -1069,7 +1101,7 @@ fn link_executable(objects: &[PathBuf], output: &Path, options: &Options) -> Res
     run_linker(&mut command)
 }
 
-fn shared_library_extension() -> &'static str {
+pub(crate) fn shared_library_extension() -> &'static str {
     if cfg!(target_os = "macos") {
         "dylib"
     } else if cfg!(windows) {
@@ -1077,6 +1109,43 @@ fn shared_library_extension() -> &'static str {
     } else {
         "so"
     }
+}
+
+pub(crate) fn link_shared_library_paths(
+    objects: &[PathBuf],
+    output: &Path,
+    target: Option<&str>,
+    linker: Option<&OsStr>,
+    library_paths: &[PathBuf],
+    libraries: &[OsString],
+) -> Result<(), String> {
+    let linker = linker
+        .map(OsStr::to_owned)
+        .or_else(|| std::env::var_os("CC"))
+        .unwrap_or_else(|| "cc".into());
+    let mut command = Command::new(&linker);
+    command.args(objects).arg("-o").arg(output);
+    if let Some(target) = target {
+        command.arg(format!("--target={target}"));
+    }
+    for path in library_paths {
+        command.arg("-L").arg(path);
+    }
+    for library in libraries {
+        command.arg("-l").arg(library);
+    }
+    if cache::target_triple(target)
+        .split('-')
+        .any(|component| component == "linux")
+    {
+        command.arg("-lm");
+    }
+    if cache::target_triple(target).contains("apple") {
+        command.args(["-dynamiclib", "-undefined", "dynamic_lookup"]);
+    } else {
+        command.arg("-shared");
+    }
+    run_linker(&mut command)
 }
 
 /// Links objects into a shared library. Host intrinsics stay undefined or are

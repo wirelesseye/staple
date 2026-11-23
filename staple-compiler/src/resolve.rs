@@ -1901,7 +1901,10 @@ impl NameResolver {
     }
 
     /// A resolver for a program that macro expansion has already run over.
-    pub(crate) fn pre_expanded(next_syntax_id: usize) -> Self {
+    /// Resolves a program whose macros have already been expanded (such as a
+    /// closure check program), skipping macro expansion and treating
+    /// `std.syntax` types as ordinary types.
+    pub fn pre_expanded(next_syntax_id: usize) -> Self {
         Self {
             pre_expanded: Some(next_syntax_id),
             ..Self::default()
@@ -1955,11 +1958,24 @@ impl NameResolver {
         program: Program,
         recovering: bool,
     ) -> std::thread::Result<Result<(ResolvedModule, Vec<Diagnostic>), Vec<Diagnostic>>> {
-        std::thread::Builder::new()
+        let backend = crate::macro_expand::compiled_call::take_backend();
+        let joined = std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
-            .spawn(move || self.resolve_program_inner(program, recovering))
+            .spawn(move || {
+                crate::macro_expand::compiled_call::restore_backend(backend);
+                let result = self.resolve_program_inner(program, recovering);
+                let backend = crate::macro_expand::compiled_call::take_backend();
+                (result, backend)
+            })
             .expect("name resolution thread should spawn")
-            .join()
+            .join();
+        match joined {
+            Ok((result, backend)) => {
+                crate::macro_expand::compiled_call::restore_backend(backend);
+                Ok(result)
+            }
+            Err(payload) => Err(payload),
+        }
     }
 
     /// Resolves `program`, returning the module with the diagnostics of the
@@ -3200,7 +3216,7 @@ impl NameResolver {
             }
         }
         for (index, (module, companion, name, _)) in declarations.iter().enumerate() {
-            if loaded.contains(module) && !found.contains(&index) {
+            if !self.ordinary_syntax_types && loaded.contains(module) && !found.contains(&index) {
                 let name = companion
                     .map_or_else(|| name.clone(), |companion| format!("{companion}.{name}"));
                 self.diagnostics.push(Diagnostic::new(
@@ -3304,10 +3320,12 @@ impl NameResolver {
         primitive: PrimitiveMacro,
     ) {
         let Some(ids) = self.declared_macros[module.0].get(name).cloned() else {
-            self.diagnostics.push(Diagnostic::new(
-                Span::Compiler,
-                format!("standard library `std.cinterop` does not declare macro `{name}`"),
-            ));
+            if !self.ordinary_syntax_types {
+                self.diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    format!("standard library `std.cinterop` does not declare macro `{name}`"),
+                ));
+            }
             return;
         };
         let [id] = ids.as_slice() else {
@@ -3334,10 +3352,12 @@ impl NameResolver {
         builtin: BuiltinType,
     ) {
         let Some(id) = self.interfaces[module.0].types.get(name).copied() else {
-            self.diagnostics.push(Diagnostic::new(
-                Span::Compiler,
-                format!("standard library `{module_name}` does not export `{name}`"),
-            ));
+            if !self.ordinary_syntax_types {
+                self.diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    format!("standard library `{module_name}` does not export `{name}`"),
+                ));
+            }
             return;
         };
         let declaration = &self.type_declarations[&id];

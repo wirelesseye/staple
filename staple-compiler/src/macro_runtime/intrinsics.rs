@@ -1092,8 +1092,18 @@ extern "C" fn parse_leaf_intrinsic(stream: u64, kind: u8, spelling: u64) -> u64 
                 .map(|(atom, syntax, consumed)| (u64::from(atom.tag()), syntax, consumed))
         } else {
             let leaf = leaf_kind(kind).expect("the leaf kind was checked above");
-            parse_leaf(leaf, spelling.as_deref(), &rest, &mut next)
-                .map(|(leaf, consumed)| (1, leaf.into_syntax(), consumed))
+            let parsed = parse_leaf(leaf, spelling.as_deref(), &rest, &mut next);
+            let parsed = if parsed.is_err()
+                && matches!(leaf, LeafKind::Modifier | LeafKind::UnstructuredModifier)
+                && rest.tokens().iter().all(|token| token.kind.is_trivia())
+                && offset > 0
+            {
+                parse_leaf(leaf, spelling.as_deref(), &syntax, &mut next)
+                    .map(|(parsed, _)| (parsed, 0))
+            } else {
+                parsed
+            };
+            parsed.map(|(leaf, consumed)| (1, leaf.into_syntax(), consumed))
         };
         arena.set_next_syntax_id(next);
         let outcome = match outcome {
@@ -1374,6 +1384,16 @@ fn single_space() -> SyntaxToken {
     SyntaxToken {
         kind: TokenKind::Whitespace,
         text: " ".to_owned(),
+        span: 0..0,
+        origin: None,
+        hygiene: None,
+    }
+}
+
+fn single_newline() -> SyntaxToken {
+    SyntaxToken {
+        kind: TokenKind::Newline,
+        text: "\n".to_owned(),
         span: 0..0,
         origin: None,
         hygiene: None,
@@ -2005,7 +2025,32 @@ extern "C" fn sequence_syntax(origin: u64, first: u64, rest: u64) -> u64 {
     let spaced = |origin: Option<&Syntax>| {
         let mut parts = vec![(first, None)];
         if !first_syntax.tokens().is_empty() && !rest_syntax.tokens().is_empty() {
-            parts.push((0, Some(vec![single_space()])));
+            let starts_item = rest_syntax
+                .tokens()
+                .iter()
+                .find(|token| !matches!(token.kind, TokenKind::Whitespace | TokenKind::Newline))
+                .is_some_and(|token| {
+                    matches!(token.kind, TokenKind::LineComment)
+                        || matches!(
+                            token.text.as_str(),
+                            "pub"
+                                | "type"
+                                | "def"
+                                | "trait"
+                                | "impl"
+                                | "macro"
+                                | "companion"
+                                | "extern"
+                                | "use"
+                                | "mod"
+                        )
+                });
+            let sep = if starts_item {
+                single_newline()
+            } else {
+                single_space()
+            };
+            parts.push((0, Some(vec![sep])));
         }
         parts.push((rest, None));
         syntax_from_parts(origin, &parts)
@@ -3344,6 +3389,22 @@ mod tests {
         ] {
             assert!(lookup(name).is_some(), "{name}");
         }
+    }
+
+    #[test]
+    fn parse_doc_modifier_from_text() {
+        let syn = crate::macro_expand::syntax_ops::syntax_from_text(
+            "/// An operating system file operation failed.\n",
+            &mut 0,
+        );
+        let mut next = 1;
+        let res = crate::macro_expand::syntax_ops::parse_leaf(
+            crate::macro_expand::syntax_ops::LeafKind::Modifier,
+            None,
+            &syn,
+            &mut next,
+        );
+        assert!(res.is_ok(), "err={:?}", res.err());
     }
 
     #[test]
