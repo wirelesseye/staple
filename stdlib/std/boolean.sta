@@ -50,51 +50,51 @@ impl Debug False {
 pub type Bool = True | False
 
 impl Display Bool {
-    fmt = (value, mut formatter) => formatter |> write (if value { "True" } else { "False" })
+    fmt = (value, mut formatter) => formatter |> write (match value { True => "True", False => "False" })
 }
 
 impl Not Bool {
-    not = value => if value { False } else { True }
+    not = value => match value { True => False, False => True }
 }
 
 impl Convert Bool I8 {
-    convert = move value => if value { 1 } else { 0 }
+    convert = move value => match value { True => 1, False => 0 }
 }
 
 impl Convert Bool I16 {
-    convert = move value => if value { 1 } else { 0 }
+    convert = move value => match value { True => 1, False => 0 }
 }
 
 impl Convert Bool I32 {
-    convert = move value => if value { 1 } else { 0 }
+    convert = move value => match value { True => 1, False => 0 }
 }
 
 impl Convert Bool I64 {
-    convert = move value => if value { 1 } else { 0 }
+    convert = move value => match value { True => 1, False => 0 }
 }
 
 impl Convert Bool U8 {
-    convert = move value => if value { 1 } else { 0 }
+    convert = move value => match value { True => 1, False => 0 }
 }
 
 impl Convert Bool U16 {
-    convert = move value => if value { 1 } else { 0 }
+    convert = move value => match value { True => 1, False => 0 }
 }
 
 impl Convert Bool U32 {
-    convert = move value => if value { 1 } else { 0 }
+    convert = move value => match value { True => 1, False => 0 }
 }
 
 impl Convert Bool U64 {
-    convert = move value => if value { 1 } else { 0 }
+    convert = move value => match value { True => 1, False => 0 }
 }
 
 impl Convert Bool ISize {
-    convert = move value => if value { 1 } else { 0 }
+    convert = move value => match value { True => 1, False => 0 }
 }
 
 impl Convert Bool USize {
-    convert = move value => if value { 1 } else { 0 }
+    convert = move value => match value { True => 1, False => 0 }
 }
 
 impl Convert Bool String { convert = move value => ToString.to_string value }

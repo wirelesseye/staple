@@ -629,6 +629,18 @@ impl Scanner {
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Quote(quote) => {
+                match quote.kind {
+                    staple_syntax::QuoteKind::Quote => {
+                        self.standard("__quote", self.modules.syntax);
+                    }
+                    staple_syntax::QuoteKind::ParseQuote => {
+                        self.standard("Parse", self.modules.syntax);
+                    }
+                }
+                self.standard("Sequence", self.modules.syntax);
+                if !super::lower_quote::distinct_splice_names(quote.contents.tokens()).is_empty() {
+                    self.standard("Splice", self.modules.syntax);
+                }
                 self.quote_depth += 1;
                 match &quote.template {
                     staple_syntax::QuoteTemplate::Expression(value) => self.expression(value),

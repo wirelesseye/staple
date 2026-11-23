@@ -17,12 +17,15 @@ pub type Char wrap U32
 
 companion Char {
     /// Returns None for surrogates and values above U+10FFFF.
-    pub def from_u32 = value: U32 => Option<Char> :: {
-        if (value > 1114111) { None } else {
-            if (value >= 55296) {
-                if (value <= 57343) { None } else { Some (Char value) }
-            } else { Some (Char value) }
-        }
+    pub def from_u32 = value: U32 => Option<Char> :: match (value > 1114111) {
+        True => None,
+        False => match (value >= 55296) {
+            True => match (value <= 57343) {
+                True => None,
+                False => Some (Char value),
+            },
+            False => Some (Char value),
+        },
     }
 
     // The caller must guarantee that value is a Unicode scalar value.
@@ -32,36 +35,57 @@ companion Char {
     pub def to_u32 = Char value => U32 :: value
 
     /// Returns the number of bytes in the UTF-8 encoding (1 through 4).
-    pub def len_utf8 = Char value => USize :: when {
-        value < 128 => 1,
-        value < 2048 => 2,
-        value < 65536 => 3,
-        else => 4,
+    pub def len_utf8 = Char value => USize :: match (value < 128) {
+        True => 1,
+        False => match (value < 2048) {
+            True => 2,
+            False => match (value < 65536) {
+                True => 3,
+                False => 4,
+            },
+        },
     }
 
     /// Returns whether this scalar is in U+0000 through U+007F.
     pub def is_ascii = Char value => Bool :: value < 128
 
     /// Unicode White_Space (25 scalar values).
-    pub def is_whitespace = Char value => Bool :: when {
-        value >= 9 => when {
-            value <= 13 => True,
-            value == 32 => True,
-            value == 133 => True,
-            value == 160 => True,
-            value == 5760 => True,
-            value >= 8192 => when {
-                value <= 8202 => True,
-                value == 8232 => True,
-                value == 8233 => True,
-                value == 8239 => True,
-                value == 8287 => True,
-                value == 12288 => True,
-                else => False,
+    pub def is_whitespace = Char value => Bool :: match (value >= 9) {
+        True => match (value <= 13) {
+            True => True,
+            False => match (value == 32) {
+                True => True,
+                False => match (value == 133) {
+                    True => True,
+                    False => match (value == 160) {
+                        True => True,
+                        False => match (value == 5760) {
+                            True => True,
+                            False => match (value >= 8192) {
+                                True => match (value <= 8202) {
+                                    True => True,
+                                    False => match (value == 8232) {
+                                        True => True,
+                                        False => match (value == 8233) {
+                                            True => True,
+                                            False => match (value == 8239) {
+                                                True => True,
+                                                False => match (value == 8287) {
+                                                    True => True,
+                                                    False => value == 12288,
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                                False => False,
+                            },
+                        },
+                    },
+                },
             },
-            else => False,
         },
-        else => False,
+        False => False,
     }
 
     /// Creates a string containing this scalar.
@@ -70,13 +94,13 @@ companion Char {
         StringBuilder.push builder value
         StringBuilder.finish builder
     }
-    pub def is_ascii_digit = Char value => Bool :: if (value >= 48) { value <= 57 } else { False }
-    pub def is_ascii_uppercase = Char value => Bool :: if (value >= 65) { value <= 90 } else { False }
-    pub def is_ascii_lowercase = Char value => Bool :: if (value >= 97) { value <= 122 } else { False }
-    pub def is_ascii_alphabetic = value: Char => Bool :: if (is_ascii_uppercase value) { True } else { is_ascii_lowercase value }
-    pub def is_ascii_alphanumeric = value: Char => Bool :: if (is_ascii_digit value) { True } else { is_ascii_alphabetic value }
-    pub def to_ascii_uppercase = value: Char => Char :: if (is_ascii_lowercase value) { Char (to_u32 value - 32) } else { value }
-    pub def to_ascii_lowercase = value: Char => Char :: if (is_ascii_uppercase value) { Char (to_u32 value + 32) } else { value }
+    pub def is_ascii_digit = Char value => Bool :: match (value >= 48) { True => value <= 57, False => False }
+    pub def is_ascii_uppercase = Char value => Bool :: match (value >= 65) { True => value <= 90, False => False }
+    pub def is_ascii_lowercase = Char value => Bool :: match (value >= 97) { True => value <= 122, False => False }
+    pub def is_ascii_alphabetic = value: Char => Bool :: match (is_ascii_uppercase value) { True => True, False => is_ascii_lowercase value }
+    pub def is_ascii_alphanumeric = value: Char => Bool :: match (is_ascii_digit value) { True => True, False => is_ascii_alphabetic value }
+    pub def to_ascii_uppercase = value: Char => Char :: match (is_ascii_lowercase value) { True => Char (to_u32 value - 32), False => value }
+    pub def to_ascii_lowercase = value: Char => Char :: match (is_ascii_uppercase value) { True => Char (to_u32 value + 32), False => value }
 }
 
 // Copy is inherited structurally from U32.
@@ -99,23 +123,27 @@ def to_byte = value: U32 => U8 :: (TryConvert.try_convert.<U32, U8> value) |> un
 def continuation = value: U32 => U8 :: to_byte ((BitAnd.bit_and (value; 63)) + 128)
 
 // Fixed-size storage avoids an allocation for each encoded scalar.
-pub(package) def encode_utf8 = Char value => ((U8, U8, U8, U8), USize) :: when {
-    value < 128 => ((to_byte value, 0, 0, 0), 1),
-    value < 2048 => ((
-        to_byte ((ShiftRight.shift_right (value; 6)) + 192),
-        continuation value, 0, 0,
-    ), 2),
-    value < 65536 => ((
-        to_byte ((ShiftRight.shift_right (value; 12)) + 224),
-        continuation (ShiftRight.shift_right (value; 6)),
-        continuation value, 0,
-    ), 3),
-    else => ((
-        to_byte ((ShiftRight.shift_right (value; 18)) + 240),
-        continuation (ShiftRight.shift_right (value; 12)),
-        continuation (ShiftRight.shift_right (value; 6)),
-        continuation value,
-    ), 4),
+pub(package) def encode_utf8 = Char value => ((U8, U8, U8, U8), USize) :: match (value < 128) {
+    True => ((to_byte value, 0, 0, 0), 1),
+    False => match (value < 2048) {
+        True => ((
+            to_byte ((ShiftRight.shift_right (value; 6)) + 192),
+            continuation value, 0, 0,
+        ), 2),
+        False => match (value < 65536) {
+            True => ((
+                to_byte ((ShiftRight.shift_right (value; 12)) + 224),
+                continuation (ShiftRight.shift_right (value; 6)),
+                continuation value, 0,
+            ), 3),
+            False => ((
+                to_byte ((ShiftRight.shift_right (value; 18)) + 240),
+                continuation (ShiftRight.shift_right (value; 12)),
+                continuation (ShiftRight.shift_right (value; 6)),
+                continuation value,
+            ), 4),
+        },
+    },
 }
 
 impl Display Char {
@@ -125,9 +153,12 @@ impl Display Char {
 // Render non-ASCII scalars with a Unicode escape; this also makes combining
 // marks and invisible scalars unambiguous without requiring Unicode tables.
 def write_hex = (value: U32, mut formatter: Formatter) => () :: {
-    if (value >= 16) { write_hex (ShiftRight.shift_right (value; 4), formatter) }
+    match (value >= 16) {
+        True => write_hex (ShiftRight.shift_right (value; 4), formatter),
+        False => (),
+    }
     let digit = BitAnd.bit_and (value; 15)
-    let ascii = if (digit < 10) { digit + 48 } else { digit + 87 }
+    let ascii = match (digit < 10) { True => digit + 48, False => digit + 87 }
     Display.fmt (Char ascii, formatter)
 }
 
@@ -135,24 +166,38 @@ impl Debug Char {
     fmt = (value, mut formatter) => {
         let () = formatter |> write "'"
         let Char scalar = value
-        when {
-            scalar == 0 => formatter |> write "\\0",
-            scalar == 9 => formatter |> write "\\t",
-            scalar == 10 => formatter |> write "\\n",
-            scalar == 13 => formatter |> write "\\r",
-            scalar == 39 => formatter |> write "\\'",
-            scalar == 92 => formatter |> write "\\\\",
-            scalar < 32 => {
-                let () = formatter |> write "\\u{"
-                let () = write_hex (scalar, formatter)
-                let () = formatter |> write "}"
+        match (scalar == 0) {
+            True => formatter |> write "\\0",
+            False => match (scalar == 9) {
+                True => formatter |> write "\\t",
+                False => match (scalar == 10) {
+                    True => formatter |> write "\\n",
+                    False => match (scalar == 13) {
+                        True => formatter |> write "\\r",
+                        False => match (scalar == 39) {
+                            True => formatter |> write "\\'",
+                            False => match (scalar == 92) {
+                                True => formatter |> write "\\\\",
+                                False => match (scalar < 32) {
+                                    True => {
+                                        let () = formatter |> write "\\u{"
+                                        let () = write_hex (scalar, formatter)
+                                        let () = formatter |> write "}"
+                                    },
+                                    False => match (scalar >= 127) {
+                                        True => {
+                                            let () = formatter |> write "\\u{"
+                                            let () = write_hex (scalar, formatter)
+                                            let () = formatter |> write "}"
+                                        },
+                                        False => Display.fmt (value, formatter),
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
             },
-            scalar >= 127 => {
-                let () = formatter |> write "\\u{"
-                let () = write_hex (scalar, formatter)
-                let () = formatter |> write "}"
-            },
-            else => Display.fmt (value, formatter),
         }
         let () = formatter |> write "'"
     }

@@ -238,22 +238,22 @@ impl Multiply I8 {
 }
 
 impl Divide I8 {
-    divide = (left; right) => when {
-        right == 0 => panic "division by zero",
-        // Only `MIN / -1` overflows (`right + 1 == 0` tests for `-1`): `MIN`
-        // is the one negative value whose negation is still negative.
-        right + 1 == 0 && left < 0 && 0 - left < 0 => panic "integer division overflow",
-        else => __i8_divide (left, right),
+    divide = (left; right) => match (right == 0) {
+        True => panic "division by zero",
+        False => match (right + 1 == 0 && left < 0 && 0 - left < 0) {
+            True => panic "integer division overflow",
+            False => __i8_divide (left, right),
+        },
     }
 }
 
 impl Remainder I8 {
-    remainder = (left; right) => when {
-        right == 0 => panic "remainder by zero",
-        // Every remainder by `-1` (`right + 1 == 0`) is zero, and `MIN % -1`
-        // would overflow.
-        right + 1 == 0 => 0,
-        else => __i8_remainder (left, right),
+    remainder = (left; right) => match (right == 0) {
+        True => panic "remainder by zero",
+        False => match (right + 1 == 0) {
+            True => 0,
+            False => __i8_remainder (left, right),
+        },
     }
 }
 
@@ -270,22 +270,22 @@ impl Multiply I16 {
 }
 
 impl Divide I16 {
-    divide = (left; right) => when {
-        right == 0 => panic "division by zero",
-        // Only `MIN / -1` overflows (`right + 1 == 0` tests for `-1`): `MIN`
-        // is the one negative value whose negation is still negative.
-        right + 1 == 0 && left < 0 && 0 - left < 0 => panic "integer division overflow",
-        else => __i16_divide (left, right),
+    divide = (left; right) => match (right == 0) {
+        True => panic "division by zero",
+        False => match (right + 1 == 0 && left < 0 && 0 - left < 0) {
+            True => panic "integer division overflow",
+            False => __i16_divide (left, right),
+        },
     }
 }
 
 impl Remainder I16 {
-    remainder = (left; right) => when {
-        right == 0 => panic "remainder by zero",
-        // Every remainder by `-1` (`right + 1 == 0`) is zero, and `MIN % -1`
-        // would overflow.
-        right + 1 == 0 => 0,
-        else => __i16_remainder (left, right),
+    remainder = (left; right) => match (right == 0) {
+        True => panic "remainder by zero",
+        False => match (right + 1 == 0) {
+            True => 0,
+            False => __i16_remainder (left, right),
+        },
     }
 }
 
@@ -302,22 +302,22 @@ impl Multiply I32 {
 }
 
 impl Divide I32 {
-    divide = (left; right) => when {
-        right == 0 => panic "division by zero",
-        // Only `MIN / -1` overflows (`right + 1 == 0` tests for `-1`): `MIN`
-        // is the one negative value whose negation is still negative.
-        right + 1 == 0 && left < 0 && 0 - left < 0 => panic "integer division overflow",
-        else => __i32_divide (left, right),
+    divide = (left; right) => match (right == 0) {
+        True => panic "division by zero",
+        False => match (right + 1 == 0 && left < 0 && 0 - left < 0) {
+            True => panic "integer division overflow",
+            False => __i32_divide (left, right),
+        },
     }
 }
 
 impl Remainder I32 {
-    remainder = (left; right) => when {
-        right == 0 => panic "remainder by zero",
-        // Every remainder by `-1` (`right + 1 == 0`) is zero, and `MIN % -1`
-        // would overflow.
-        right + 1 == 0 => 0,
-        else => __i32_remainder (left, right),
+    remainder = (left; right) => match (right == 0) {
+        True => panic "remainder by zero",
+        False => match (right + 1 == 0) {
+            True => 0,
+            False => __i32_remainder (left, right),
+        },
     }
 }
 
@@ -334,22 +334,22 @@ impl Multiply I64 {
 }
 
 impl Divide I64 {
-    divide = (left; right) => when {
-        right == 0 => panic "division by zero",
-        // Only `MIN / -1` overflows (`right + 1 == 0` tests for `-1`): `MIN`
-        // is the one negative value whose negation is still negative.
-        right + 1 == 0 && left < 0 && 0 - left < 0 => panic "integer division overflow",
-        else => __i64_divide (left, right),
+    divide = (left; right) => match (right == 0) {
+        True => panic "division by zero",
+        False => match (right + 1 == 0 && left < 0 && 0 - left < 0) {
+            True => panic "integer division overflow",
+            False => __i64_divide (left, right),
+        },
     }
 }
 
 impl Remainder I64 {
-    remainder = (left; right) => when {
-        right == 0 => panic "remainder by zero",
-        // Every remainder by `-1` (`right + 1 == 0`) is zero, and `MIN % -1`
-        // would overflow.
-        right + 1 == 0 => 0,
-        else => __i64_remainder (left, right),
+    remainder = (left; right) => match (right == 0) {
+        True => panic "remainder by zero",
+        False => match (right + 1 == 0) {
+            True => 0,
+            False => __i64_remainder (left, right),
+        },
     }
 }
 
@@ -366,18 +366,16 @@ impl Multiply U8 {
 }
 
 impl Divide U8 {
-    divide = (left; right) => if (right == 0) {
-        panic "division by zero"
-    } else {
-        __u8_divide (left, right)
+    divide = (left; right) => match (right == 0) {
+        True => panic "division by zero",
+        False => __u8_divide (left, right),
     }
 }
 
 impl Remainder U8 {
-    remainder = (left; right) => if (right == 0) {
-        panic "remainder by zero"
-    } else {
-        __u8_remainder (left, right)
+    remainder = (left; right) => match (right == 0) {
+        True => panic "remainder by zero",
+        False => __u8_remainder (left, right),
     }
 }
 
@@ -394,18 +392,16 @@ impl Multiply U16 {
 }
 
 impl Divide U16 {
-    divide = (left; right) => if (right == 0) {
-        panic "division by zero"
-    } else {
-        __u16_divide (left, right)
+    divide = (left; right) => match (right == 0) {
+        True => panic "division by zero",
+        False => __u16_divide (left, right),
     }
 }
 
 impl Remainder U16 {
-    remainder = (left; right) => if (right == 0) {
-        panic "remainder by zero"
-    } else {
-        __u16_remainder (left, right)
+    remainder = (left; right) => match (right == 0) {
+        True => panic "remainder by zero",
+        False => __u16_remainder (left, right),
     }
 }
 
@@ -422,18 +418,16 @@ impl Multiply U32 {
 }
 
 impl Divide U32 {
-    divide = (left; right) => if (right == 0) {
-        panic "division by zero"
-    } else {
-        __u32_divide (left, right)
+    divide = (left; right) => match (right == 0) {
+        True => panic "division by zero",
+        False => __u32_divide (left, right),
     }
 }
 
 impl Remainder U32 {
-    remainder = (left; right) => if (right == 0) {
-        panic "remainder by zero"
-    } else {
-        __u32_remainder (left, right)
+    remainder = (left; right) => match (right == 0) {
+        True => panic "remainder by zero",
+        False => __u32_remainder (left, right),
     }
 }
 
@@ -450,18 +444,16 @@ impl Multiply U64 {
 }
 
 impl Divide U64 {
-    divide = (left; right) => if (right == 0) {
-        panic "division by zero"
-    } else {
-        __u64_divide (left, right)
+    divide = (left; right) => match (right == 0) {
+        True => panic "division by zero",
+        False => __u64_divide (left, right),
     }
 }
 
 impl Remainder U64 {
-    remainder = (left; right) => if (right == 0) {
-        panic "remainder by zero"
-    } else {
-        __u64_remainder (left, right)
+    remainder = (left; right) => match (right == 0) {
+        True => panic "remainder by zero",
+        False => __u64_remainder (left, right),
     }
 }
 
@@ -478,22 +470,22 @@ impl Multiply ISize {
 }
 
 impl Divide ISize {
-    divide = (left; right) => when {
-        right == 0 => panic "division by zero",
-        // Only `MIN / -1` overflows (`right + 1 == 0` tests for `-1`): `MIN`
-        // is the one negative value whose negation is still negative.
-        right + 1 == 0 && left < 0 && 0 - left < 0 => panic "integer division overflow",
-        else => __isize_divide (left, right),
+    divide = (left; right) => match (right == 0) {
+        True => panic "division by zero",
+        False => match (right + 1 == 0 && left < 0 && 0 - left < 0) {
+            True => panic "integer division overflow",
+            False => __isize_divide (left, right),
+        },
     }
 }
 
 impl Remainder ISize {
-    remainder = (left; right) => when {
-        right == 0 => panic "remainder by zero",
-        // Every remainder by `-1` (`right + 1 == 0`) is zero, and `MIN % -1`
-        // would overflow.
-        right + 1 == 0 => 0,
-        else => __isize_remainder (left, right),
+    remainder = (left; right) => match (right == 0) {
+        True => panic "remainder by zero",
+        False => match (right + 1 == 0) {
+            True => 0,
+            False => __isize_remainder (left, right),
+        },
     }
 }
 
@@ -510,18 +502,16 @@ impl Multiply USize {
 }
 
 impl Divide USize {
-    divide = (left; right) => if (right == 0) {
-        panic "division by zero"
-    } else {
-        __usize_divide (left, right)
+    divide = (left; right) => match (right == 0) {
+        True => panic "division by zero",
+        False => __usize_divide (left, right),
     }
 }
 
 impl Remainder USize {
-    remainder = (left; right) => if (right == 0) {
-        panic "remainder by zero"
-    } else {
-        __usize_remainder (left, right)
+    remainder = (left; right) => match (right == 0) {
+        True => panic "remainder by zero",
+        False => __usize_remainder (left, right),
     }
 }
 
@@ -533,15 +523,15 @@ impl BitOr I8 { bit_or = (left; right) => __i8_or (left, right) }
 impl BitXor I8 { bit_xor = (left; right) => __i8_xor (left, right) }
 impl BitNot I8 { bit_not = value => __i8_not value }
 impl ShiftLeft I8 {
-    shift_left = (left; right) => when {
-        right < 0 || right >= 8 => panic "shift count out of range",
-        else => __i8_shift_left (left, right),
+    shift_left = (left; right) => match (right < 0 || right >= 8) {
+        True => panic "shift count out of range",
+        False => __i8_shift_left (left, right),
     }
 }
 impl ShiftRight I8 {
-    shift_right = (left; right) => when {
-        right < 0 || right >= 8 => panic "shift count out of range",
-        else => __i8_shift_right (left, right),
+    shift_right = (left; right) => match (right < 0 || right >= 8) {
+        True => panic "shift count out of range",
+        False => __i8_shift_right (left, right),
     }
 }
 impl BitAnd I16 { bit_and = (left; right) => __i16_and (left, right) }
@@ -549,15 +539,15 @@ impl BitOr I16 { bit_or = (left; right) => __i16_or (left, right) }
 impl BitXor I16 { bit_xor = (left; right) => __i16_xor (left, right) }
 impl BitNot I16 { bit_not = value => __i16_not value }
 impl ShiftLeft I16 {
-    shift_left = (left; right) => when {
-        right < 0 || right >= 16 => panic "shift count out of range",
-        else => __i16_shift_left (left, right),
+    shift_left = (left; right) => match (right < 0 || right >= 16) {
+        True => panic "shift count out of range",
+        False => __i16_shift_left (left, right),
     }
 }
 impl ShiftRight I16 {
-    shift_right = (left; right) => when {
-        right < 0 || right >= 16 => panic "shift count out of range",
-        else => __i16_shift_right (left, right),
+    shift_right = (left; right) => match (right < 0 || right >= 16) {
+        True => panic "shift count out of range",
+        False => __i16_shift_right (left, right),
     }
 }
 impl BitAnd I32 { bit_and = (left; right) => __i32_and (left, right) }
@@ -565,15 +555,15 @@ impl BitOr I32 { bit_or = (left; right) => __i32_or (left, right) }
 impl BitXor I32 { bit_xor = (left; right) => __i32_xor (left, right) }
 impl BitNot I32 { bit_not = value => __i32_not value }
 impl ShiftLeft I32 {
-    shift_left = (left; right) => when {
-        right < 0 || right >= 32 => panic "shift count out of range",
-        else => __i32_shift_left (left, right),
+    shift_left = (left; right) => match (right < 0 || right >= 32) {
+        True => panic "shift count out of range",
+        False => __i32_shift_left (left, right),
     }
 }
 impl ShiftRight I32 {
-    shift_right = (left; right) => when {
-        right < 0 || right >= 32 => panic "shift count out of range",
-        else => __i32_shift_right (left, right),
+    shift_right = (left; right) => match (right < 0 || right >= 32) {
+        True => panic "shift count out of range",
+        False => __i32_shift_right (left, right),
     }
 }
 impl BitAnd I64 { bit_and = (left; right) => __i64_and (left, right) }
@@ -581,15 +571,15 @@ impl BitOr I64 { bit_or = (left; right) => __i64_or (left, right) }
 impl BitXor I64 { bit_xor = (left; right) => __i64_xor (left, right) }
 impl BitNot I64 { bit_not = value => __i64_not value }
 impl ShiftLeft I64 {
-    shift_left = (left; right) => when {
-        right < 0 || right >= 64 => panic "shift count out of range",
-        else => __i64_shift_left (left, right),
+    shift_left = (left; right) => match (right < 0 || right >= 64) {
+        True => panic "shift count out of range",
+        False => __i64_shift_left (left, right),
     }
 }
 impl ShiftRight I64 {
-    shift_right = (left; right) => when {
-        right < 0 || right >= 64 => panic "shift count out of range",
-        else => __i64_shift_right (left, right),
+    shift_right = (left; right) => match (right < 0 || right >= 64) {
+        True => panic "shift count out of range",
+        False => __i64_shift_right (left, right),
     }
 }
 impl BitAnd U8 { bit_and = (left; right) => __u8_and (left, right) }
@@ -597,15 +587,15 @@ impl BitOr U8 { bit_or = (left; right) => __u8_or (left, right) }
 impl BitXor U8 { bit_xor = (left; right) => __u8_xor (left, right) }
 impl BitNot U8 { bit_not = value => __u8_not value }
 impl ShiftLeft U8 {
-    shift_left = (left; right) => when {
-        right >= 8 => panic "shift count out of range",
-        else => __u8_shift_left (left, right),
+    shift_left = (left; right) => match (right >= 8) {
+        True => panic "shift count out of range",
+        False => __u8_shift_left (left, right),
     }
 }
 impl ShiftRight U8 {
-    shift_right = (left; right) => when {
-        right >= 8 => panic "shift count out of range",
-        else => __u8_shift_right (left, right),
+    shift_right = (left; right) => match (right >= 8) {
+        True => panic "shift count out of range",
+        False => __u8_shift_right (left, right),
     }
 }
 impl BitAnd U16 { bit_and = (left; right) => __u16_and (left, right) }
@@ -613,15 +603,15 @@ impl BitOr U16 { bit_or = (left; right) => __u16_or (left, right) }
 impl BitXor U16 { bit_xor = (left; right) => __u16_xor (left, right) }
 impl BitNot U16 { bit_not = value => __u16_not value }
 impl ShiftLeft U16 {
-    shift_left = (left; right) => when {
-        right >= 16 => panic "shift count out of range",
-        else => __u16_shift_left (left, right),
+    shift_left = (left; right) => match (right >= 16) {
+        True => panic "shift count out of range",
+        False => __u16_shift_left (left, right),
     }
 }
 impl ShiftRight U16 {
-    shift_right = (left; right) => when {
-        right >= 16 => panic "shift count out of range",
-        else => __u16_shift_right (left, right),
+    shift_right = (left; right) => match (right >= 16) {
+        True => panic "shift count out of range",
+        False => __u16_shift_right (left, right),
     }
 }
 impl BitAnd U32 { bit_and = (left; right) => __u32_and (left, right) }
@@ -629,15 +619,15 @@ impl BitOr U32 { bit_or = (left; right) => __u32_or (left, right) }
 impl BitXor U32 { bit_xor = (left; right) => __u32_xor (left, right) }
 impl BitNot U32 { bit_not = value => __u32_not value }
 impl ShiftLeft U32 {
-    shift_left = (left; right) => when {
-        right >= 32 => panic "shift count out of range",
-        else => __u32_shift_left (left, right),
+    shift_left = (left; right) => match (right >= 32) {
+        True => panic "shift count out of range",
+        False => __u32_shift_left (left, right),
     }
 }
 impl ShiftRight U32 {
-    shift_right = (left; right) => when {
-        right >= 32 => panic "shift count out of range",
-        else => __u32_shift_right (left, right),
+    shift_right = (left; right) => match (right >= 32) {
+        True => panic "shift count out of range",
+        False => __u32_shift_right (left, right),
     }
 }
 impl BitAnd U64 { bit_and = (left; right) => __u64_and (left, right) }
@@ -645,15 +635,15 @@ impl BitOr U64 { bit_or = (left; right) => __u64_or (left, right) }
 impl BitXor U64 { bit_xor = (left; right) => __u64_xor (left, right) }
 impl BitNot U64 { bit_not = value => __u64_not value }
 impl ShiftLeft U64 {
-    shift_left = (left; right) => when {
-        right >= 64 => panic "shift count out of range",
-        else => __u64_shift_left (left, right),
+    shift_left = (left; right) => match (right >= 64) {
+        True => panic "shift count out of range",
+        False => __u64_shift_left (left, right),
     }
 }
 impl ShiftRight U64 {
-    shift_right = (left; right) => when {
-        right >= 64 => panic "shift count out of range",
-        else => __u64_shift_right (left, right),
+    shift_right = (left; right) => match (right >= 64) {
+        True => panic "shift count out of range",
+        False => __u64_shift_right (left, right),
     }
 }
 impl BitAnd ISize { bit_and = (left; right) => __isize_and (left, right) }
@@ -661,15 +651,15 @@ impl BitOr ISize { bit_or = (left; right) => __isize_or (left, right) }
 impl BitXor ISize { bit_xor = (left; right) => __isize_xor (left, right) }
 impl BitNot ISize { bit_not = value => __isize_not value }
 impl ShiftLeft ISize {
-    shift_left = (left; right) => when {
-        right < 0 || (if (MemLayout.stride.<USize> () == 8) { right >= 64 } else { right >= 32 }) => panic "shift count out of range",
-        else => __isize_shift_left (left, right),
+    shift_left = (left; right) => match (right < 0 || (match (MemLayout.stride.<USize> () == 8) { True => right >= 64, False => right >= 32 })) {
+        True => panic "shift count out of range",
+        False => __isize_shift_left (left, right),
     }
 }
 impl ShiftRight ISize {
-    shift_right = (left; right) => when {
-        right < 0 || (if (MemLayout.stride.<USize> () == 8) { right >= 64 } else { right >= 32 }) => panic "shift count out of range",
-        else => __isize_shift_right (left, right),
+    shift_right = (left; right) => match (right < 0 || (match (MemLayout.stride.<USize> () == 8) { True => right >= 64, False => right >= 32 })) {
+        True => panic "shift count out of range",
+        False => __isize_shift_right (left, right),
     }
 }
 impl BitAnd USize { bit_and = (left; right) => __usize_and (left, right) }
@@ -677,15 +667,15 @@ impl BitOr USize { bit_or = (left; right) => __usize_or (left, right) }
 impl BitXor USize { bit_xor = (left; right) => __usize_xor (left, right) }
 impl BitNot USize { bit_not = value => __usize_not value }
 impl ShiftLeft USize {
-    shift_left = (left; right) => when {
-        (if (MemLayout.stride.<USize> () == 8) { right >= 64 } else { right >= 32 }) => panic "shift count out of range",
-        else => __usize_shift_left (left, right),
+    shift_left = (left; right) => match ((match (MemLayout.stride.<USize> () == 8) { True => right >= 64, False => right >= 32 })) {
+        True => panic "shift count out of range",
+        False => __usize_shift_left (left, right),
     }
 }
 impl ShiftRight USize {
-    shift_right = (left; right) => when {
-        (if (MemLayout.stride.<USize> () == 8) { right >= 64 } else { right >= 32 }) => panic "shift count out of range",
-        else => __usize_shift_right (left, right),
+    shift_right = (left; right) => match ((match (MemLayout.stride.<USize> () == 8) { True => right >= 64, False => right >= 32 })) {
+        True => panic "shift count out of range",
+        False => __usize_shift_right (left, right),
     }
 }
 
@@ -695,18 +685,22 @@ impl Eq I8 {
 }
 
 impl PartialOrd I8 {
-    partial_cmp = (left; right) => when {
-        __i8_lt (left, right) => Some (Ordering :: Ordering.Less),
-        __i8_gt (left, right) => Some (Ordering :: Ordering.Greater),
-        else => Some (Ordering :: Ordering.Equal),
+    partial_cmp = (left; right) => match (__i8_lt (left, right)) {
+        True => Some (Ordering :: Ordering.Less),
+        False => match (__i8_gt (left, right)) {
+            True => Some (Ordering :: Ordering.Greater),
+            False => Some (Ordering :: Ordering.Equal),
+        },
     }
 }
 
 impl Ord I8 {
-    cmp = (left; right) => when {
-        __i8_lt (left, right) => Ordering.Less,
-        __i8_gt (left, right) => Ordering.Greater,
-        else => Ordering.Equal,
+    cmp = (left; right) => match (__i8_lt (left, right)) {
+        True => Ordering.Less,
+        False => match (__i8_gt (left, right)) {
+            True => Ordering.Greater,
+            False => Ordering.Equal,
+        },
     }
 }
 
@@ -716,18 +710,22 @@ impl Eq I16 {
 }
 
 impl PartialOrd I16 {
-    partial_cmp = (left; right) => when {
-        __i16_lt (left, right) => Some (Ordering :: Ordering.Less),
-        __i16_gt (left, right) => Some (Ordering :: Ordering.Greater),
-        else => Some (Ordering :: Ordering.Equal),
+    partial_cmp = (left; right) => match (__i16_lt (left, right)) {
+        True => Some (Ordering :: Ordering.Less),
+        False => match (__i16_gt (left, right)) {
+            True => Some (Ordering :: Ordering.Greater),
+            False => Some (Ordering :: Ordering.Equal),
+        },
     }
 }
 
 impl Ord I16 {
-    cmp = (left; right) => when {
-        __i16_lt (left, right) => Ordering.Less,
-        __i16_gt (left, right) => Ordering.Greater,
-        else => Ordering.Equal,
+    cmp = (left; right) => match (__i16_lt (left, right)) {
+        True => Ordering.Less,
+        False => match (__i16_gt (left, right)) {
+            True => Ordering.Greater,
+            False => Ordering.Equal,
+        },
     }
 }
 
@@ -737,18 +735,22 @@ impl Eq I32 {
 }
 
 impl PartialOrd I32 {
-    partial_cmp = (left; right) => when {
-        __i32_lt (left, right) => Some (Ordering :: Ordering.Less),
-        __i32_gt (left, right) => Some (Ordering :: Ordering.Greater),
-        else => Some (Ordering :: Ordering.Equal),
+    partial_cmp = (left; right) => match (__i32_lt (left, right)) {
+        True => Some (Ordering :: Ordering.Less),
+        False => match (__i32_gt (left, right)) {
+            True => Some (Ordering :: Ordering.Greater),
+            False => Some (Ordering :: Ordering.Equal),
+        },
     }
 }
 
 impl Ord I32 {
-    cmp = (left; right) => when {
-        __i32_lt (left, right) => Ordering.Less,
-        __i32_gt (left, right) => Ordering.Greater,
-        else => Ordering.Equal,
+    cmp = (left; right) => match (__i32_lt (left, right)) {
+        True => Ordering.Less,
+        False => match (__i32_gt (left, right)) {
+            True => Ordering.Greater,
+            False => Ordering.Equal,
+        },
     }
 }
 
@@ -758,18 +760,22 @@ impl Eq I64 {
 }
 
 impl PartialOrd I64 {
-    partial_cmp = (left; right) => when {
-        __i64_lt (left, right) => Some (Ordering :: Ordering.Less),
-        __i64_gt (left, right) => Some (Ordering :: Ordering.Greater),
-        else => Some (Ordering :: Ordering.Equal),
+    partial_cmp = (left; right) => match (__i64_lt (left, right)) {
+        True => Some (Ordering :: Ordering.Less),
+        False => match (__i64_gt (left, right)) {
+            True => Some (Ordering :: Ordering.Greater),
+            False => Some (Ordering :: Ordering.Equal),
+        },
     }
 }
 
 impl Ord I64 {
-    cmp = (left; right) => when {
-        __i64_lt (left, right) => Ordering.Less,
-        __i64_gt (left, right) => Ordering.Greater,
-        else => Ordering.Equal,
+    cmp = (left; right) => match (__i64_lt (left, right)) {
+        True => Ordering.Less,
+        False => match (__i64_gt (left, right)) {
+            True => Ordering.Greater,
+            False => Ordering.Equal,
+        },
     }
 }
 
@@ -779,18 +785,22 @@ impl Eq U8 {
 }
 
 impl PartialOrd U8 {
-    partial_cmp = (left; right) => when {
-        __u8_lt (left, right) => Some (Ordering :: Ordering.Less),
-        __u8_gt (left, right) => Some (Ordering :: Ordering.Greater),
-        else => Some (Ordering :: Ordering.Equal),
+    partial_cmp = (left; right) => match (__u8_lt (left, right)) {
+        True => Some (Ordering :: Ordering.Less),
+        False => match (__u8_gt (left, right)) {
+            True => Some (Ordering :: Ordering.Greater),
+            False => Some (Ordering :: Ordering.Equal),
+        },
     }
 }
 
 impl Ord U8 {
-    cmp = (left; right) => when {
-        __u8_lt (left, right) => Ordering.Less,
-        __u8_gt (left, right) => Ordering.Greater,
-        else => Ordering.Equal,
+    cmp = (left; right) => match (__u8_lt (left, right)) {
+        True => Ordering.Less,
+        False => match (__u8_gt (left, right)) {
+            True => Ordering.Greater,
+            False => Ordering.Equal,
+        },
     }
 }
 
@@ -800,18 +810,22 @@ impl Eq U16 {
 }
 
 impl PartialOrd U16 {
-    partial_cmp = (left; right) => when {
-        __u16_lt (left, right) => Some (Ordering :: Ordering.Less),
-        __u16_gt (left, right) => Some (Ordering :: Ordering.Greater),
-        else => Some (Ordering :: Ordering.Equal),
+    partial_cmp = (left; right) => match (__u16_lt (left, right)) {
+        True => Some (Ordering :: Ordering.Less),
+        False => match (__u16_gt (left, right)) {
+            True => Some (Ordering :: Ordering.Greater),
+            False => Some (Ordering :: Ordering.Equal),
+        },
     }
 }
 
 impl Ord U16 {
-    cmp = (left; right) => when {
-        __u16_lt (left, right) => Ordering.Less,
-        __u16_gt (left, right) => Ordering.Greater,
-        else => Ordering.Equal,
+    cmp = (left; right) => match (__u16_lt (left, right)) {
+        True => Ordering.Less,
+        False => match (__u16_gt (left, right)) {
+            True => Ordering.Greater,
+            False => Ordering.Equal,
+        },
     }
 }
 
@@ -821,18 +835,22 @@ impl Eq U32 {
 }
 
 impl PartialOrd U32 {
-    partial_cmp = (left; right) => when {
-        __u32_lt (left, right) => Some (Ordering :: Ordering.Less),
-        __u32_gt (left, right) => Some (Ordering :: Ordering.Greater),
-        else => Some (Ordering :: Ordering.Equal),
+    partial_cmp = (left; right) => match (__u32_lt (left, right)) {
+        True => Some (Ordering :: Ordering.Less),
+        False => match (__u32_gt (left, right)) {
+            True => Some (Ordering :: Ordering.Greater),
+            False => Some (Ordering :: Ordering.Equal),
+        },
     }
 }
 
 impl Ord U32 {
-    cmp = (left; right) => when {
-        __u32_lt (left, right) => Ordering.Less,
-        __u32_gt (left, right) => Ordering.Greater,
-        else => Ordering.Equal,
+    cmp = (left; right) => match (__u32_lt (left, right)) {
+        True => Ordering.Less,
+        False => match (__u32_gt (left, right)) {
+            True => Ordering.Greater,
+            False => Ordering.Equal,
+        },
     }
 }
 
@@ -842,18 +860,22 @@ impl Eq U64 {
 }
 
 impl PartialOrd U64 {
-    partial_cmp = (left; right) => when {
-        __u64_lt (left, right) => Some (Ordering :: Ordering.Less),
-        __u64_gt (left, right) => Some (Ordering :: Ordering.Greater),
-        else => Some (Ordering :: Ordering.Equal),
+    partial_cmp = (left; right) => match (__u64_lt (left, right)) {
+        True => Some (Ordering :: Ordering.Less),
+        False => match (__u64_gt (left, right)) {
+            True => Some (Ordering :: Ordering.Greater),
+            False => Some (Ordering :: Ordering.Equal),
+        },
     }
 }
 
 impl Ord U64 {
-    cmp = (left; right) => when {
-        __u64_lt (left, right) => Ordering.Less,
-        __u64_gt (left, right) => Ordering.Greater,
-        else => Ordering.Equal,
+    cmp = (left; right) => match (__u64_lt (left, right)) {
+        True => Ordering.Less,
+        False => match (__u64_gt (left, right)) {
+            True => Ordering.Greater,
+            False => Ordering.Equal,
+        },
     }
 }
 
@@ -863,18 +885,22 @@ impl Eq ISize {
 }
 
 impl PartialOrd ISize {
-    partial_cmp = (left; right) => when {
-        __isize_lt (left, right) => Some (Ordering :: Ordering.Less),
-        __isize_gt (left, right) => Some (Ordering :: Ordering.Greater),
-        else => Some (Ordering :: Ordering.Equal),
+    partial_cmp = (left; right) => match (__isize_lt (left, right)) {
+        True => Some (Ordering :: Ordering.Less),
+        False => match (__isize_gt (left, right)) {
+            True => Some (Ordering :: Ordering.Greater),
+            False => Some (Ordering :: Ordering.Equal),
+        },
     }
 }
 
 impl Ord ISize {
-    cmp = (left; right) => when {
-        __isize_lt (left, right) => Ordering.Less,
-        __isize_gt (left, right) => Ordering.Greater,
-        else => Ordering.Equal,
+    cmp = (left; right) => match (__isize_lt (left, right)) {
+        True => Ordering.Less,
+        False => match (__isize_gt (left, right)) {
+            True => Ordering.Greater,
+            False => Ordering.Equal,
+        },
     }
 }
 
@@ -884,18 +910,22 @@ impl Eq USize {
 }
 
 impl PartialOrd USize {
-    partial_cmp = (left; right) => when {
-        __usize_lt (left, right) => Some (Ordering :: Ordering.Less),
-        __usize_gt (left, right) => Some (Ordering :: Ordering.Greater),
-        else => Some (Ordering :: Ordering.Equal),
+    partial_cmp = (left; right) => match (__usize_lt (left, right)) {
+        True => Some (Ordering :: Ordering.Less),
+        False => match (__usize_gt (left, right)) {
+            True => Some (Ordering :: Ordering.Greater),
+            False => Some (Ordering :: Ordering.Equal),
+        },
     }
 }
 
 impl Ord USize {
-    cmp = (left; right) => when {
-        __usize_lt (left, right) => Ordering.Less,
-        __usize_gt (left, right) => Ordering.Greater,
-        else => Ordering.Equal,
+    cmp = (left; right) => match (__usize_lt (left, right)) {
+        True => Ordering.Less,
+        False => match (__usize_gt (left, right)) {
+            True => Ordering.Greater,
+            False => Ordering.Equal,
+        },
     }
 }
 
@@ -925,11 +955,15 @@ impl Eq F32 {
 }
 
 impl PartialOrd F32 {
-    partial_cmp = (left; right) => when {
-        __f32_lt (left, right) => Some (Ordering :: Ordering.Less),
-        __f32_gt (left, right) => Some (Ordering :: Ordering.Greater),
-        __f32_equal (left, right) => Some (Ordering :: Ordering.Equal),
-        else => None,
+    partial_cmp = (left; right) => match (__f32_lt (left, right)) {
+        True => Some (Ordering :: Ordering.Less),
+        False => match (__f32_gt (left, right)) {
+            True => Some (Ordering :: Ordering.Greater),
+            False => match (__f32_equal (left, right)) {
+                True => Some (Ordering :: Ordering.Equal),
+                False => None,
+            },
+        },
     }
 }
 
@@ -959,11 +993,15 @@ impl Eq F64 {
 }
 
 impl PartialOrd F64 {
-    partial_cmp = (left; right) => when {
-        __f64_lt (left, right) => Some (Ordering :: Ordering.Less),
-        __f64_gt (left, right) => Some (Ordering :: Ordering.Greater),
-        __f64_equal (left, right) => Some (Ordering :: Ordering.Equal),
-        else => None,
+    partial_cmp = (left; right) => match (__f64_lt (left, right)) {
+        True => Some (Ordering :: Ordering.Less),
+        False => match (__f64_gt (left, right)) {
+            True => Some (Ordering :: Ordering.Greater),
+            False => match (__f64_equal (left, right)) {
+                True => Some (Ordering :: Ordering.Equal),
+                False => None,
+            },
+        },
     }
 }
 
@@ -2029,91 +2067,111 @@ impl TryConvert F64 F32 {
 
 impl TryConvert I8 Bool {
     type Error = InvalidBool
-    try_convert = move value => when {
-        value == 0 => Ok (Bool :: False),
-        value == 1 => Ok (Bool :: True),
-        else => InvalidBool,
+    try_convert = move value => match (value == 0) {
+        True => Ok (Bool :: False),
+        False => match (value == 1) {
+            True => Ok (Bool :: True),
+            False => InvalidBool,
+        },
     }
 }
 
 impl TryConvert I16 Bool {
     type Error = InvalidBool
-    try_convert = move value => when {
-        value == 0 => Ok (Bool :: False),
-        value == 1 => Ok (Bool :: True),
-        else => InvalidBool,
+    try_convert = move value => match (value == 0) {
+        True => Ok (Bool :: False),
+        False => match (value == 1) {
+            True => Ok (Bool :: True),
+            False => InvalidBool,
+        },
     }
 }
 
 impl TryConvert I32 Bool {
     type Error = InvalidBool
-    try_convert = move value => when {
-        value == 0 => Ok (Bool :: False),
-        value == 1 => Ok (Bool :: True),
-        else => InvalidBool,
+    try_convert = move value => match (value == 0) {
+        True => Ok (Bool :: False),
+        False => match (value == 1) {
+            True => Ok (Bool :: True),
+            False => InvalidBool,
+        },
     }
 }
 
 impl TryConvert I64 Bool {
     type Error = InvalidBool
-    try_convert = move value => when {
-        value == 0 => Ok (Bool :: False),
-        value == 1 => Ok (Bool :: True),
-        else => InvalidBool,
+    try_convert = move value => match (value == 0) {
+        True => Ok (Bool :: False),
+        False => match (value == 1) {
+            True => Ok (Bool :: True),
+            False => InvalidBool,
+        },
     }
 }
 
 impl TryConvert U8 Bool {
     type Error = InvalidBool
-    try_convert = move value => when {
-        value == 0 => Ok (Bool :: False),
-        value == 1 => Ok (Bool :: True),
-        else => InvalidBool,
+    try_convert = move value => match (value == 0) {
+        True => Ok (Bool :: False),
+        False => match (value == 1) {
+            True => Ok (Bool :: True),
+            False => InvalidBool,
+        },
     }
 }
 
 impl TryConvert U16 Bool {
     type Error = InvalidBool
-    try_convert = move value => when {
-        value == 0 => Ok (Bool :: False),
-        value == 1 => Ok (Bool :: True),
-        else => InvalidBool,
+    try_convert = move value => match (value == 0) {
+        True => Ok (Bool :: False),
+        False => match (value == 1) {
+            True => Ok (Bool :: True),
+            False => InvalidBool,
+        },
     }
 }
 
 impl TryConvert U32 Bool {
     type Error = InvalidBool
-    try_convert = move value => when {
-        value == 0 => Ok (Bool :: False),
-        value == 1 => Ok (Bool :: True),
-        else => InvalidBool,
+    try_convert = move value => match (value == 0) {
+        True => Ok (Bool :: False),
+        False => match (value == 1) {
+            True => Ok (Bool :: True),
+            False => InvalidBool,
+        },
     }
 }
 
 impl TryConvert U64 Bool {
     type Error = InvalidBool
-    try_convert = move value => when {
-        value == 0 => Ok (Bool :: False),
-        value == 1 => Ok (Bool :: True),
-        else => InvalidBool,
+    try_convert = move value => match (value == 0) {
+        True => Ok (Bool :: False),
+        False => match (value == 1) {
+            True => Ok (Bool :: True),
+            False => InvalidBool,
+        },
     }
 }
 
 impl TryConvert ISize Bool {
     type Error = InvalidBool
-    try_convert = move value => when {
-        value == 0 => Ok (Bool :: False),
-        value == 1 => Ok (Bool :: True),
-        else => InvalidBool,
+    try_convert = move value => match (value == 0) {
+        True => Ok (Bool :: False),
+        False => match (value == 1) {
+            True => Ok (Bool :: True),
+            False => InvalidBool,
+        },
     }
 }
 
 impl TryConvert USize Bool {
     type Error = InvalidBool
-    try_convert = move value => when {
-        value == 0 => Ok (Bool :: False),
-        value == 1 => Ok (Bool :: True),
-        else => InvalidBool,
+    try_convert = move value => match (value == 0) {
+        True => Ok (Bool :: False),
+        False => match (value == 1) {
+            True => Ok (Bool :: True),
+            False => InvalidBool,
+        },
     }
 }
 

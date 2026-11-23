@@ -42,7 +42,10 @@ companion<T> Shared<T> {
     pub def new = move value: T => Shared<T> :: {
         let pointer = Gc.allocate (MemLayout.of.<T> ()) as RawMutPtr<T>
         RawMutPtr.store pointer value
-        if (Gc.needs_drop.<T> ()) { Gc.finalize_with.<SharedCell<T>> ((pointer as RawOpaqueMutPtr) as RawMutPtr<SharedCell<T>>) }
+        match (Gc.needs_drop.<T> ()) {
+            True => Gc.finalize_with.<SharedCell<T>> ((pointer as RawOpaqueMutPtr) as RawMutPtr<SharedCell<T>>),
+            False => (),
+        }
         Shared pointer
     }
 

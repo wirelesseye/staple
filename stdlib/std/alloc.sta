@@ -47,17 +47,18 @@ companion MemLayout {
     /// computation would overflow.
     pub def array = <T> count: USize => Option<MemLayout> :: {
         let element = MemLayout.of.<T> ()
-        if (count == 0) {
-            Some (MemLayout (size: 0, align: element.align))
-        } else if (element.size == 0) {
-            Some (MemLayout (size: 0, align: element.align))
-        } else {
-            let size = __checked_mul (count, element.size)
-            if (size == 0) {
-                None
-            } else {
-                Some (MemLayout (size: size, align: element.align))
-            }
+        match (count == 0) {
+            True => Some (MemLayout (size: 0, align: element.align)),
+            False => match (element.size == 0) {
+                True => Some (MemLayout (size: 0, align: element.align)),
+                False => {
+                    let size = __checked_mul (count, element.size)
+                    match (size == 0) {
+                        True => None,
+                        False => Some (MemLayout (size: size, align: element.align)),
+                    }
+                },
+            },
         }
     }
 
@@ -65,25 +66,26 @@ companion MemLayout {
     /// the array's offset in the second result, or `None` on overflow.
     pub def extend = (header: MemLayout; tail: MemLayout) => Option<(MemLayout, USize)> :: {
         let remainder = header.size % tail.align
-        let padding: USize = if (remainder == 0) { 0 } else { tail.align - remainder }
+        let padding: USize = match (remainder == 0) { True => 0, False => tail.align - remainder }
         let offset = header.size + padding
-        if (offset < header.size) {
-            None
-        } else {
-            let size = offset + tail.size
-            if (size < offset) {
-                None
-            } else {
-                let align = if (header.align > tail.align) { header.align } else { tail.align }
-                let remainder = size % align
-                let padding: USize = if (remainder == 0) { 0 } else { align - remainder }
-                let size = size + padding
-                if (size < offset) {
-                    None
-                } else {
-                    Some (MemLayout (size: size, align: align), offset)
+        match (offset < header.size) {
+            True => None,
+            False => {
+                let size = offset + tail.size
+                match (size < offset) {
+                    True => None,
+                    False => {
+                        let align = match (header.align > tail.align) { True => header.align, False => tail.align }
+                        let remainder = size % align
+                        let padding: USize = match (remainder == 0) { True => 0, False => align - remainder }
+                        let size = size + padding
+                        match (size < offset) {
+                            True => None,
+                            False => Some (MemLayout (size: size, align: align), offset),
+                        }
+                    },
                 }
-            }
+            },
         }
     }
 

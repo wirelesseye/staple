@@ -44,7 +44,7 @@ impl<T where Hash T> Hash List<T> {
 // across in one Buffer.transfer call.
 def grow = <T> mut list: List<T> => () :: {
     let old_capacity = Buffer.capacity list.*
-    let new_capacity: USize = if (old_capacity == 0) { 4 } else { old_capacity * 2 }
+    let new_capacity: USize = match (old_capacity == 0) { True => 4, False => old_capacity * 2 }
     let mut destination: Buffer<T> = Buffer.with_capacity new_capacity
     Buffer.transfer list.* destination
     list = List destination
@@ -60,14 +60,20 @@ companion<T> List<T> {
     /// Reserves room for at least `additional` more elements.
     pub def reserve = (mut list: List<T>; additional: USize) => () :: {
         let required = length list + additional
-        if (required < length list) { panic "List capacity overflow" }
-        if (required > capacity list) {
-            let old = capacity list
-            let doubled = old * 2
-            let capacity = if (doubled > required) { doubled } else { required }
-            let mut destination: Buffer<T> = Buffer.with_capacity capacity
-            Buffer.transfer list.* destination
-            list = List destination
+        match (required < length list) {
+            True => { panic "List capacity overflow" },
+            False => (),
+        }
+        match (required > capacity list) {
+            True => {
+                let old = capacity list
+                let doubled = old * 2
+                let capacity = match (doubled > required) { True => doubled, False => required }
+                let mut destination: Buffer<T> = Buffer.with_capacity capacity
+                Buffer.transfer list.* destination
+                list = List destination
+            },
+            False => (),
         }
     }
 
@@ -84,11 +90,12 @@ companion<T> List<T> {
 
     /// Appends a value, growing the list when necessary.
     pub def push = (mut list: List<T>; move value: T) => () :: {
-        if ((list.* |> length) < (list.* |> capacity)) {
-            list.* |> push value
-        } else {
-            grow list
-            list.* |> push value
+        match ((list.* |> length) < (list.* |> capacity)) {
+            True => { list.* |> push value },
+            False => {
+                grow list
+                list.* |> push value
+            },
         }
     }
 

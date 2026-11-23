@@ -1051,6 +1051,8 @@ pub(crate) struct StdModules {
     pub fmt: Option<ModuleId>,
     /// `std.index`, defining `Index` and `MutateIndex`.
     pub index: Option<ModuleId>,
+    /// `std.syntax`, defining `__quote`, `Parse`, `Splice`, and `Sequence`.
+    pub syntax: Option<ModuleId>,
 }
 
 fn freshened_syntax(syntax: &Syntax, next_syntax_id: &mut usize) -> Syntax {
@@ -3111,6 +3113,7 @@ impl MacroExpander {
             boolean: find_module("std.boolean"),
             fmt: find_module("std.fmt"),
             index: find_module("std.index"),
+            syntax: find_module("std.syntax"),
         };
         let closure =
             ClosureIndex::build(program, &use_kinds, program.imported_modules(), std_modules);

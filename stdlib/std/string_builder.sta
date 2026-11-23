@@ -34,9 +34,9 @@ companion StringBuilder {
         let ((a, b, c, d), length) = encode_utf8 value
         List.reserve builder.* length
         List.push builder.* a
-        if (length > 1) { List.push builder.* b }
-        if (length > 2) { List.push builder.* c }
-        if (length > 3) { List.push builder.* d }
+        match (length > 1) { True => { List.push builder.* b }, False => () }
+        match (length > 2) { True => { List.push builder.* c }, False => () }
+        match (length > 3) { True => { List.push builder.* d }, False => () }
     }
 
     /// Appends a string with a bulk byte copy.

@@ -171,10 +171,9 @@ companion String {
     /// valid UTF-8.
     pub def from_utf8 = move bytes: List<U8> => Result<String, InvalidUtf8> :: {
         let shared = List.into_buffer bytes |> Buffer.into_shared_buffer
-        if (__valid_utf8 shared == 1) {
-            Ok (String shared)
-        } else {
-            InvalidUtf8
+        match (__valid_utf8 shared == 1) {
+            True => Ok (String shared),
+            False => InvalidUtf8,
         }
     }
 
@@ -208,16 +207,25 @@ impl Ord String {
         let mut at: USize = 0
         let mut result: Ordering = Ordering.Equal
         loop {
-            if (at == String.length left) {
-                result = Ord.cmp (String.length left; String.length right)
-                break
+            match (at == String.length left) {
+                True => {
+                    result = Ord.cmp (String.length left; String.length right)
+                    break
+                },
+                False => (),
             }
-            if (at == String.length right) {
-                result = Ordering.Greater
-                break
+            match (at == String.length right) {
+                True => {
+                    result = Ordering.Greater
+                    break
+                },
+                False => (),
             }
             result = Ord.cmp (byte_at left at; byte_at right at)
-            if (byte_at left at != byte_at right at) { break }
+            match (byte_at left at != byte_at right at) {
+                True => { break },
+                False => (),
+            }
             at = at + 1
         }
         result
@@ -411,12 +419,12 @@ impl TryConvert String F64 {
 
 impl TryConvert String Bool {
     type Error = InvalidBool
-    try_convert = move value => when {
-        value == "True" => Ok (Bool :: True),
-        value == "true" => Ok (Bool :: True),
-        value == "False" => Ok (Bool :: False),
-        value == "false" => Ok (Bool :: False),
-        else => InvalidBool,
+    try_convert = move value => match value {
+        "True" => Ok (Bool :: True),
+        "true" => Ok (Bool :: True),
+        "False" => Ok (Bool :: False),
+        "false" => Ok (Bool :: False),
+        _ => InvalidBool,
     }
 }
 

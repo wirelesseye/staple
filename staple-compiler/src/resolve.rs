@@ -2008,6 +2008,7 @@ impl NameResolver {
             boolean: find_module("std.boolean"),
             fmt: find_module("std.fmt"),
             index: find_module("std.index"),
+            syntax: find_module("std.syntax"),
         };
         self.standard_library_ops = ops_module.ops;
         self.standard_library_cmp = ops_module.cmp;

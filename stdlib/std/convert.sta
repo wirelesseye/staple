@@ -39,10 +39,16 @@ pub typegroup ConversionError {
     InvalidNumber,
 }
 
-pub(package) def checked_conversion = <T> move (status: U8, value: T) => Ok<T> | ConversionError :: when {
-    status == 0 => Ok value,
-    status == 1 => ConversionError.OutOfRange,
-    status == 2 => ConversionError.PrecisionLoss,
-    status == 3 => ConversionError.NonFinite,
-    else => ConversionError.InvalidNumber,
+pub(package) def checked_conversion = <T> move (status: U8, value: T) => Ok<T> | ConversionError :: match (status == 0) {
+    True => Ok value,
+    False => match (status == 1) {
+        True => ConversionError.OutOfRange,
+        False => match (status == 2) {
+            True => ConversionError.PrecisionLoss,
+            False => match (status == 3) {
+                True => ConversionError.NonFinite,
+                False => ConversionError.InvalidNumber,
+            },
+        },
+    },
 }

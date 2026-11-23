@@ -39,12 +39,9 @@ companion<T> SharedBuffer<T> {
     /// Returns an owned shared handle to an element, or `None` if out of bounds.
     /// The handle keeps the buffer allocation alive and observes replacements
     /// of the element; it does not take ownership of the element itself.
-    pub def get_shared = (buffer: SharedBuffer<T>; position: USize) => Option<Shared<T>> :: {
-        if (position < SharedBuffer.length buffer) {
-            Some (SharedBuffer.get_shared_unchecked buffer position)
-        } else {
-            None
-        }
+    pub def get_shared = (buffer: SharedBuffer<T>; position: USize) => Option<Shared<T>> :: match (position < SharedBuffer.length buffer) {
+        True => Some (SharedBuffer.get_shared_unchecked buffer position),
+        False => None,
     }
 
     /// Returns an owned shared handle to an element, trapping if out of bounds.
@@ -52,23 +49,24 @@ companion<T> SharedBuffer<T> {
     /// of the element; it does not take ownership of the element itself.
     pub def get_shared_unchecked = (buffer: SharedBuffer<T>; position: USize) =>
         Shared<T> :: {
-        if (position >= SharedBuffer.length buffer) { trap () }
+        match (position >= SharedBuffer.length buffer) {
+            True => trap (),
+            False => (),
+        }
         Shared.unsafe_from_raw (BufferHeader.element buffer.* position)
     }
 
     /// Replaces the element at a position and returns the old value; `None` if out of bounds.
-    pub def set = (mut buffer: SharedBuffer<T>; position: USize; move value: T) => Option<T> :: {
-        if (position < SharedBuffer.length buffer) {
-            Some (SharedBuffer.set_unchecked buffer position value)
-        } else {
-            None
-        }
+    pub def set = (mut buffer: SharedBuffer<T>; position: USize; move value: T) => Option<T> :: match (position < SharedBuffer.length buffer) {
+        True => Some (SharedBuffer.set_unchecked buffer position value),
+        False => None,
     }
 
     /// Replaces the element at a position and returns the old value, trapping if out of bounds.
     pub def set_unchecked = (mut buffer: SharedBuffer<T>; position: USize; move value: T) => T :: {
-        if (position >= SharedBuffer.length buffer) {
-            trap ()
+        match (position >= SharedBuffer.length buffer) {
+            True => trap (),
+            False => (),
         }
         let header = buffer.*
         let element = BufferHeader.element header position
@@ -80,18 +78,16 @@ companion<T> SharedBuffer<T> {
 
 companion<T where Copy T> SharedBuffer<T> {
     /// Copies the element at a position, or `None` if out of bounds.
-    pub def get = (buffer: SharedBuffer<T>; position: USize) => Option<T> :: {
-        if (position < SharedBuffer.length buffer) {
-            Some (SharedBuffer.get_unchecked buffer position)
-        } else {
-            None
-        }
+    pub def get = (buffer: SharedBuffer<T>; position: USize) => Option<T> :: match (position < SharedBuffer.length buffer) {
+        True => Some (SharedBuffer.get_unchecked buffer position),
+        False => None,
     }
 
     /// Copies the element at a position, trapping if out of bounds.
     pub def get_unchecked = (buffer: SharedBuffer<T>; position: USize) => T :: {
-        if (position >= SharedBuffer.length buffer) {
-            trap ()
+        match (position >= SharedBuffer.length buffer) {
+            True => trap (),
+            False => (),
         }
         let header = buffer.*
         RawMutPtr.unsafe_read (BufferHeader.element header position)
@@ -115,11 +111,12 @@ pub type SharedBufferIter<T> wrap pub (buffer: SharedBuffer<T>, index: USize)
 
 impl<T where Copy T> Iterator SharedBufferIter<T> {
     type Item = T
-    next = move SharedBufferIter (buffer, index) => if (index < SharedBuffer.length buffer) {
-        let value = SharedBuffer.get_unchecked buffer index
-        Yield (value, SharedBufferIter (buffer: buffer, index: index + 1))
-    } else {
-        Done (SharedBufferIter (buffer: buffer, index: index))
+    next = move SharedBufferIter (buffer, index) => match (index < SharedBuffer.length buffer) {
+        True => {
+            let value = SharedBuffer.get_unchecked buffer index
+            Yield (value, SharedBufferIter (buffer: buffer, index: index + 1))
+        },
+        False => Done (SharedBufferIter (buffer: buffer, index: index)),
     }
 }
 
@@ -131,20 +128,27 @@ impl<T where Copy T> IntoIterator SharedBuffer<T> {
 impl<T where Eq T> Eq SharedBuffer<T> {
     eq = (left; right) => {
         let length = SharedBuffer.length left
-        if (length == SharedBuffer.length right) {
-            let mut index: USize = 0
-            let mut equal: Bool = True
-            while (index < length) {
-                if (Eq.eq (SharedBuffer.get_shared_unchecked left index; SharedBuffer.get_shared_unchecked right index)) {
-                    index = index + 1
-                } else {
-                    equal = False
-                    break
+        match (length == SharedBuffer.length right) {
+            True => {
+                let mut index: USize = 0
+                let mut equal: Bool = True
+                loop {
+                    match (index < length) {
+                        True => match (Eq.eq (SharedBuffer.get_shared_unchecked left index; SharedBuffer.get_shared_unchecked right index)) {
+                            True => {
+                                index = index + 1
+                            },
+                            False => {
+                                equal = False
+                                break
+                            },
+                        },
+                        False => { break },
+                    }
                 }
-            }
-            equal
-        } else {
-            False
+                equal
+            },
+            False => False,
         }
     }
 }
@@ -154,9 +158,14 @@ impl<T where Hash T> Hash SharedBuffer<T> {
         let length = SharedBuffer.length buffer
         Hasher.write_usize hasher length
         let mut index: USize = 0
-        while (index < length) {
-            Hash.hash (SharedBuffer.get_shared_unchecked buffer index, hasher)
-            index = index + 1
+        loop {
+            match (index < length) {
+                True => {
+                    Hash.hash (SharedBuffer.get_shared_unchecked buffer index, hasher)
+                    index = index + 1
+                },
+                False => { break },
+            }
         }
     }
 }

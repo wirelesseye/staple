@@ -508,7 +508,7 @@ Update this section as you work (see "Rules for the implementor").
 | 3. The server | done | `5152a998` | `staple __macro-server` (`staple-cli/src/macro_server.rs`) + `macro_runtime::server` over fd 3 (`socketpair`), 256 MiB worker thread, `Hello`/`Load`/`Loaded`/`Call`/`Result`/`Error`/`Shutdown` wire messages, `INTRINSICS` FNV-1a checksum, fd 1/2 capture pipe, `RTLD_NOW | RTLD_LOCAL`, and `staple-cli/tests/macro_server.rs` integration tests. Review fixes: initialization traps `exit` and runs under output capture, loading a loaded image again doesn't rerun its initialization, one capture file per server. See Findings. |
 | 4. The client and failure handling | done | `04eb738e` | `macro_runtime::client::MacroClient` with lazy server spawn/shutdown, lazy library reload, `STAPLE_MACRO_TIMEOUT` (default 10 s), stderr forwarding, and Decision 8 failure diagnostics (`panic`, `compile_error`, timeout, stack overflow, crash); unit and integration tests in `client.rs` and `staple-cli/tests/macro_server.rs`. Review fixes: libraries are registered with `MacroClient::load`, load failures and timeouts are reported at the macro, crash output is forwarded, the server's standard output is closed, `exit n` reads as an exit. See Findings. |
 | 5. Effects | done | `c103ada8` | `LoweredModule::check_macro_effects` (`lower/macro_effects.rs`) walks lowered call graph (instances, taken callable values, artifacts, and extern targets) with BFS from entry functions; forbidden list documented in `Staple.md` and Findings; unit tests cover reachable file read, dead code, and stderr. Review fixes: foreign functions `std` doesn't declare are rejected, the list drops names `std` doesn't have, chains keep the function that calls a foreign function, `Staple.md` no longer claims enforcement. Not called yet: libraries are first built in tasks 7 and 8. See Findings. |
-| 6. The quotation cycle and generated-item loops | not started | | |
+| 6. The quotation cycle and generated-item loops | done | | `Expression::Quote` in `macro_expand/scan.rs` now records `__quote`/`Parse.parse_quote`, `Sequence`, and `Splice`; `StdModules` carries `syntax`. Rewrote `if`/`when`/`for`/`while` to `match`/`loop` across `std.syntax` and all stdlib modules reached by `if`/syntax runtime; `check-macro-closures.py --mode all --jobs 2` passes (232 inputs, 0 diagnostics). `compare-expansion.py` against `88fdea78` matches 218/232 (only the 14 edited stdlib modules differ). Unit tests added in `closure.rs`. See Findings. |
 | 7. Closure libraries and the stage tower | not started | | |
 | 8. Package libraries and macro-mode objects | not started | | |
 | 9. Caching | not started | | |
@@ -658,3 +658,51 @@ Record:
   the macro's label, `exit 3`, a panic during initialization, and two
   handles on one library. Macros can't write to standard error without
   `panic`, so the successful-output test uses a C binding to `putchar`.
+
+### Task 6: The quotation cycle and generated-item loops
+
+- **Quotation scanning (`scan.rs`, `macro_expand.rs`, `resolve.rs`).**
+  `StdModules` now holds `syntax: Option<ModuleId>` for `std.syntax`.
+  `Scanner::expression`'s `Expression::Quote` arm now calls `self.standard`
+  for `__quote` (`QuoteKind::Quote`) or `Parse` (`QuoteKind::ParseQuote`),
+  `Sequence`, and (when the quotation has splices) `Splice`.
+- **Cycles broken in the standard library.** Rewriting `if`/`when`/`for`/`while`
+  to `match` and `loop` in `std.syntax` and every item reached by `if` or the
+  syntax runtime eliminated all macro-closure cycles across:
+  - `stdlib/std/syntax.sta` (`Parse.parse_all`, `Parenthesized`, `Bracketed`,
+    `Angled`, `Braced`, `(H, ...T)`, `Sequence<T>`, `Separated<T, Comma>`)
+  - `stdlib/std/convert.sta` (`checked_conversion`)
+  - `stdlib/std/string.sta` (`from_utf8`, `impl Ord String`,
+    `impl TryConvert String Bool`)
+  - `stdlib/std/char.sta` (`from_u32`, `len_utf8`, `is_whitespace`,
+    `is_ascii_*`, `to_ascii_*`, `encode_utf8`, `write_hex`, `impl Debug Char`)
+  - `stdlib/std/number.sta` (`Divide`, `Remainder`, `ShiftLeft`, `ShiftRight`,
+    `PartialOrd`, `Ord`, `TryConvert <Int> Bool`)
+  - `stdlib/std/boolean.sta` (`Display Bool`, `Not Bool`, `Convert Bool <Int>`)
+  - `stdlib/std/cmp.sta` (`Eq.ne`)
+  - `stdlib/std/shared.sta` (`Shared.new`)
+  - `stdlib/std/alloc.sta` (`MemLayout.array`, `MemLayout.extend`)
+  - `stdlib/std/shared_buffer.sta` (`SharedBuffer`, `SharedBufferIter`,
+    `Eq SharedBuffer<T>`, `Hash SharedBuffer<T>`)
+  - `stdlib/std/buffer.sta` (`push`, `into_shared_buffer`, `transfer`,
+    `get_unchecked`, `clone_at`, `Eq Buffer<T>`, `Hash Buffer<T>`,
+    `append_raw_bytes`)
+  - `stdlib/std/list.sta` (`grow`, `reserve`, `push`)
+  - `stdlib/std/cinterop.sta` (`from_string_unchecked`, `has_interior_nul`,
+    `TryConvert String CString`, `TryConvert CString String`)
+  - `stdlib/std/string_builder.sta` (`StringBuilder.push`)
+- **Deferred to Task 7 (`typegroup ConversionError` in `std.convert`).**
+  Whether the two `typegroup ConversionError` chains in `std.convert` need
+  breaking waits for Task 7, when the standard library is expanded using the
+  compiled engine.
+- **Verification.**
+  - `scripts/check-macro-closures.py --mode all --jobs 2`: `232 inputs, 0 with
+    diagnostics, 0 distinct messages`.
+  - `scripts/compare-expansion.py` against `88fdea78`: `218/232 matched`. The
+    only 14 differing captures are the 14 edited `stdlib/*.sta` files listed
+    above, where `if`/`when`/`while` were rewritten to `match` and `loop`; all
+    corpus programs, examples, compiler test fixtures, and unedited stdlib
+    modules expanded identically.
+  - Added `quoting_macro_closure_includes_quote_runtime_and_splice_impls` and
+    `standard_library_has_no_macro_closure_cycles` in
+    `staple-compiler/src/macro_expand/closure.rs` (`11 passed; 0 failed; 1 ignored`).

@@ -104,14 +104,25 @@ companion CString {
         let bytes = string_shared_bytes value
         let length = SharedBuffer.length bytes
         let allocation_length = length + 1
-        if (allocation_length <= length) { trap () }
+        match (allocation_length <= length) {
+            True => { trap () },
+            False => (),
+        }
         let allocation = malloc allocation_length
-        if ((allocation as USize) == 0) { trap () }
+        match ((allocation as USize) == 0) {
+            True => { trap () },
+            False => (),
+        }
         let destination = allocation as RawMutPtr<U8>
         let mut index: USize = 0
-        while (index < length) {
-            RawMutPtr.store (((destination as USize) + index) as RawMutPtr<U8>) (SharedBuffer.get_unchecked bytes index)
-            index = index + 1
+        loop {
+            match (index < length) {
+                True => {
+                    RawMutPtr.store (((destination as USize) + index) as RawMutPtr<U8>) (SharedBuffer.get_unchecked bytes index)
+                    index = index + 1
+                },
+                False => { break },
+            }
         }
         RawMutPtr.store (((destination as USize) + length) as RawMutPtr<U8>) (U8 :: 0)
         CString (allocation as RawMutPtr<CChar>)
@@ -121,9 +132,17 @@ companion CString {
 def has_interior_nul = value: String => Bool :: {
     let bytes = string_shared_bytes value
     let mut index: USize = 0
-    while (index < SharedBuffer.length bytes) {
-        if (SharedBuffer.get_unchecked bytes index == 0) { return True }
-        index = index + 1
+    loop {
+        match (index < SharedBuffer.length bytes) {
+            True => {
+                match (SharedBuffer.get_unchecked bytes index == 0) {
+                    True => { return True },
+                    False => (),
+                }
+                index = index + 1
+            },
+            False => { break },
+        }
     }
     False
 }
@@ -131,10 +150,9 @@ def has_interior_nul = value: String => Bool :: {
 impl TryConvert String CString {
     type Error = InteriorNul
     try_convert = move value => {
-        if (has_interior_nul value) {
-            InteriorNul
-        } else {
-            Ok (CString.from_string_unchecked value)
+        match (has_interior_nul value) {
+            True => InteriorNul,
+            False => Ok (CString.from_string_unchecked value),
         }
     }
 }
@@ -144,10 +162,9 @@ impl TryConvert CString String {
     try_convert = move value => {
         let bytes = c_string_bytes value
         drop value
-        if (__valid_utf8 bytes == 1) {
-            Ok (string_from_shared_bytes_unchecked bytes)
-        } else {
-            InvalidUtf8
+        match (__valid_utf8 bytes == 1) {
+            True => Ok (string_from_shared_bytes_unchecked bytes),
+            False => InvalidUtf8,
         }
     }
 }

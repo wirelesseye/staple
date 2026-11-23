@@ -389,7 +389,10 @@ pub trait Parse T {
     parse_all: Syntax -> Result<T, ParseError> = syntax => {
         let mut input = stream syntax
         let value = Parse.parse.<T> input?
-        if (is_empty input) { Ok value } else { error_at ...(input; "unexpected syntax") }
+        match (is_empty input) {
+            True => Ok value,
+            False => error_at ...(input; "unexpected syntax"),
+        }
     }
     /// Parses the fragment of a `parse_quote`, which `__quote` builds from the
     /// fragment's id and the syntax spliced into it, as a `T`. A fragment that is
@@ -1850,10 +1853,9 @@ impl<C where Parse C> Parse Parenthesized<C> {
         let (source, inner) = __parenthesized_group input?
         let mut contents = inner
         let value = Parse.parse.<C> contents?
-        if (is_empty contents) {
-            Ok (__parenthesized.<C> (source, value))
-        } else {
-            error_at ...(contents; "unexpected syntax")
+        match (is_empty contents) {
+            True => Ok (__parenthesized.<C> (source, value)),
+            False => error_at ...(contents; "unexpected syntax"),
         }
     }
 }
@@ -1888,10 +1890,9 @@ impl<C where Parse C> Parse Bracketed<C> {
         let (source, inner) = __bracketed_group input?
         let mut contents = inner
         let value = Parse.parse.<C> contents?
-        if (is_empty contents) {
-            Ok (__bracketed.<C> (source, value))
-        } else {
-            error_at ...(contents; "unexpected syntax")
+        match (is_empty contents) {
+            True => Ok (__bracketed.<C> (source, value)),
+            False => error_at ...(contents; "unexpected syntax"),
         }
     }
 }
@@ -1926,10 +1927,9 @@ impl<C where Parse C> Parse Angled<C> {
         let (source, inner) = __angled_group input?
         let mut contents = inner
         let value = Parse.parse.<C> contents?
-        if (is_empty contents) {
-            Ok (__angled.<C> (source, value))
-        } else {
-            error_at ...(contents; "unexpected syntax")
+        match (is_empty contents) {
+            True => Ok (__angled.<C> (source, value)),
+            False => error_at ...(contents; "unexpected syntax"),
         }
     }
 }
@@ -1964,10 +1964,9 @@ impl<C where Parse C> Parse Braced<C> {
         let (source, inner) = __braced_group input?
         let mut contents = inner
         let value = Parse.parse.<C> contents?
-        if (is_empty contents) {
-            Ok (__braced.<C> (source, value))
-        } else {
-            error_at ...(contents; "unexpected syntax")
+        match (is_empty contents) {
+            True => Ok (__braced.<C> (source, value)),
+            False => error_at ...(contents; "unexpected syntax"),
         }
     }
 }
@@ -2042,11 +2041,12 @@ impl<H, T where Parse H, Parse T> Parse (H; ...T) {
 impl<H, T where Parse H, Parse T> Parse (H, ...T) {
     parse = mut input => {
         let head = Parse.parse.<H> input?
-        if (is_empty input) {
-            Ok (head, ...Parse.parse.<T> input?)
-        } else {
-            let _ = Parse.parse.<Comma> input?
-            Ok (head, ...Parse.parse.<T> input?)
+        match (is_empty input) {
+            True => Ok (head, ...Parse.parse.<T> input?),
+            False => {
+                let _ = Parse.parse.<Comma> input?
+                Ok (head, ...Parse.parse.<T> input?)
+            },
         }
     }
 }
@@ -2875,12 +2875,18 @@ impl<T where Parse T> Parse Sequence<T> {
     parse = mut input => {
         let mut elements: Sequence<T> = Sequence<T> :: Sequence ()
         loop {
-            if (is_empty input) { break }
+            match (is_empty input) {
+                True => { break },
+                False => (),
+            }
             let mut fork = input
             let start = __offset fork
             match (Parse.parse.<T> fork) {
                 Ok first => {
-                    if (__offset fork == start) { break }
+                    match (__offset fork == start) {
+                        True => { break },
+                        False => (),
+                    }
                     input = fork
                     elements = Sequence (first: first, rest: elements)
                 },
@@ -2898,15 +2904,24 @@ impl<T where Parse T> Parse Separated<T, Comma> {
         let mut elements: Sequence<T> = Sequence<T> :: Sequence ()
         let mut trailing: Bool = False
         loop {
-            if (is_empty input) { break }
+            match (is_empty input) {
+                True => { break },
+                False => (),
+            }
             let mut fork = input
             let start = __offset fork
             let first = Parse.parse.<T> fork?
-            if (__offset fork == start) { break }
+            match (__offset fork == start) {
+                True => { break },
+                False => (),
+            }
             input = fork
             elements = Sequence (first: first, rest: elements)
             trailing = False
-            if (is_empty input) { break }
+            match (is_empty input) {
+                True => { break },
+                False => (),
+            }
             let _ = Parse.parse.<Comma> input?
             trailing = True
         }

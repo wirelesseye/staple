@@ -1459,4 +1459,55 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn quoting_macro_closure_includes_quote_runtime_and_splice_impls() {
+        let fixture = Fixture::new("quote-runtime");
+        fixture.write(
+            "main.sta",
+            &format!(
+                "{HEADER}\
+                 macro quote_m = x: Expr => quote {{ $x }}\n\
+                 macro parse_m = x: Expr => parse_quote {{ $x }}\n"
+            ),
+        );
+        let (quote_items, _) = closure_of(&fixture, "quote_m");
+        assert!(contains(&quote_items, "__quote"), "{quote_items:?}");
+        assert!(contains(&quote_items, "Sequence"), "{quote_items:?}");
+        assert!(contains(&quote_items, "Splice"), "{quote_items:?}");
+        assert!(contains(&quote_items, "impl Splice"), "{quote_items:?}");
+
+        let (parse_items, _) = closure_of(&fixture, "parse_m");
+        assert!(contains(&parse_items, "Parse"), "{parse_items:?}");
+        assert!(contains(&parse_items, "Sequence"), "{parse_items:?}");
+        assert!(contains(&parse_items, "Splice"), "{parse_items:?}");
+        assert!(contains(&parse_items, "impl Splice"), "{parse_items:?}");
+    }
+
+    #[test]
+    fn standard_library_has_no_macro_closure_cycles() {
+        let fixture = Fixture::new("stdlib-no-cycles");
+        fixture.write(
+            "main.sta",
+            "use std.flow.(if, when, for, while)\n\
+             use std.cinterop.c_string\n\
+             pub def main = () => () :: {\n\
+                 let _s = c_string \"ok\"\n\
+                 let _x = if (True) { 1 } else { 2 }\n\
+                 let _y = when { True => 1, else => 2 }\n\
+             }\n",
+        );
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../stdlib"))
+            .load_path(&fixture.root.join("main.sta"))
+            .expect("fixture should load");
+        let (_, _, diagnostics) = crate::macro_expand::expand_program_checked(
+            program,
+            false,
+            Some(crate::macro_expand::check_program::CheckMode::All),
+            true,
+        )
+        .expect("expansion should succeed without macro closure cycles");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
 }
