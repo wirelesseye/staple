@@ -1445,6 +1445,17 @@ mod tests {
         assert_eq!(templates[0].0, 3);
         assert_same_fragment(&fragment, &templates[0].1, "load template");
 
+        // A module number is a number, not a count, so it may be larger than
+        // the bytes left in the frame.
+        let load = Message::Load {
+            path: "/tmp/libfoo.dylib".to_owned(),
+            templates: vec![(100_000, fragment.clone())],
+        };
+        let Message::Load { templates, .. } = round_trip(&load) else {
+            panic!("expected Load");
+        };
+        assert_eq!(templates[0].0, 100_000);
+
         assert!(matches!(
             round_trip(&Message::Loaded { library: 7 }),
             Message::Loaded { library: 7 }

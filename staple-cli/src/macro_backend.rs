@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -10,7 +9,7 @@ use staple_compiler::macro_runtime::quote::CallContext;
 use staple_compiler::macro_runtime::instance_symbol;
 use staple_compiler::{
     ClosureLibraryRequest, CodeGenerator, CompiledCall, EmissionUnit, LibrarySpec, Lowerer,
-    MacroBackend, NameResolver, TypeChecker,
+    MacroBackend, MacroEffectEntry, NameResolver, TypeChecker,
 };
 use staple_syntax::{Diagnostic, Span, Syntax, SyntaxId};
 
@@ -33,13 +32,14 @@ pub fn parse_macro_engine(value: &str) -> Result<MacroEngine, String> {
     }
 }
 
+/// Builds closure libraries and runs macro calls in a macro server.
+///
+/// Macro libraries run in the compiler's own process tree, so they are always
+/// built for the host, with the host's C compiler, whatever `--target`,
+/// `--linker`, `-L` and `-l` say about the program being built.
 pub struct CliMacroBackend {
     client: MacroClient,
     entries: HashMap<SyntaxId, (LibraryHandle, String)>,
-    target: Option<String>,
-    linker: Option<OsString>,
-    library_paths: Vec<PathBuf>,
-    libraries: Vec<OsString>,
     temp_dir: PathBuf,
     next_library_id: usize,
     libraries_built: Vec<Vec<String>>,
@@ -47,12 +47,7 @@ pub struct CliMacroBackend {
 }
 
 impl CliMacroBackend {
-    pub fn new(
-        target: Option<String>,
-        linker: Option<OsString>,
-        library_paths: Vec<PathBuf>,
-        libraries: Vec<OsString>,
-    ) -> Result<Self, String> {
+    pub fn new() -> Result<Self, String> {
         let client = MacroClient::new()?;
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -71,10 +66,6 @@ impl CliMacroBackend {
         Ok(Self {
             client,
             entries: HashMap::new(),
-            target,
-            linker,
-            library_paths,
-            libraries,
             temp_dir,
             next_library_id: 0,
             libraries_built: Vec::new(),
@@ -101,7 +92,10 @@ impl Drop for CliMacroBackend {
 }
 
 impl MacroBackend for CliMacroBackend {
-    fn prepare(&mut self, request: ClosureLibraryRequest<'_>) -> Result<Vec<SyntaxId>, String> {
+    fn prepare(
+        &mut self,
+        request: ClosureLibraryRequest<'_>,
+    ) -> Result<Vec<SyntaxId>, Vec<Diagnostic>> {
         let started = Instant::now();
         let mut macro_names = Vec::with_capacity(request.entries.len());
         let mut entry_meta = Vec::with_capacity(request.entries.len());
@@ -123,38 +117,38 @@ impl MacroBackend for CliMacroBackend {
             entry_meta.push((*module, *decl_id, entry_name.clone(), name, span));
         }
 
-        let resolved = NameResolver::pre_expanded(request.next_syntax_id)
-            .resolve_program(request.check_program)
-            .map_err(format_diagnostics)?;
-        let typed = TypeChecker::new()
-            .check(resolved)
-            .map_err(format_diagnostics)?;
-        let lowered = Lowerer::new().lower(&typed).map_err(format_diagnostics)?;
+        // Errors that aren't about the source are reported at the call.
+        let internal = |message: String| vec![Diagnostic::new(Span::Compiler, message)];
+
+        let resolved =
+            NameResolver::pre_expanded(request.next_syntax_id).resolve_program(request.check_program)?;
+        let typed = TypeChecker::new().check(resolved)?;
+        let lowered = Lowerer::new().lower(&typed)?;
 
         let mut entry_symbols = Vec::with_capacity(entry_meta.len());
-        let mut effect_entries = Vec::with_capacity(entry_meta.len());
         let mut manifest_entries = Vec::with_capacity(entry_meta.len());
-        for (index, (module, decl_id, entry_name, macro_name, span)) in
-            entry_meta.iter().enumerate()
-        {
+        for (index, (module, decl_id, entry_name, macro_name, _)) in entry_meta.iter().enumerate() {
             let symbol = instance_symbol(&lowered, entry_name).ok_or_else(|| {
-                format!("internal error: missing lowered entry `{entry_name}` for macro `{macro_name}`")
+                internal(format!(
+                    "internal error: missing lowered entry `{entry_name}` for macro `{macro_name}`"
+                ))
             })?;
             entry_symbols.push(symbol);
-            effect_entries.push((entry_name.as_str(), macro_name.as_str(), span.clone()));
             manifest_entries.push((*module, *decl_id, format!("__staple_entry.{index}")));
         }
 
-        let effect_symbols: Vec<(&str, &str, Span)> = effect_entries
+        let effect_entries: Vec<MacroEffectEntry<'_>> = entry_meta
             .iter()
-            .enumerate()
-            .map(|(index, (_, macro_name, span))| {
-                (entry_symbols[index].as_str(), *macro_name, span.clone())
+            .zip(&entry_symbols)
+            .map(|((_, _, _, macro_name, span), symbol)| MacroEffectEntry {
+                macro_name,
+                entry_symbol: symbol,
+                span: span.clone(),
             })
             .collect();
-        let effect_diagnostics = lowered.check_macro_effects(&effect_symbols);
+        let effect_diagnostics = lowered.check_macro_effects(&effect_entries);
         if !effect_diagnostics.is_empty() {
-            return Err(format_diagnostics(effect_diagnostics));
+            return Err(effect_diagnostics);
         }
 
         let lib_id = self.next_library_id;
@@ -176,22 +170,17 @@ impl MacroBackend for CliMacroBackend {
                 &lowered,
                 &EmissionUnit::whole_program().with_library(spec),
                 &obj_path,
-                self.target.as_deref(),
-            )
-            .map_err(format_diagnostics)?;
+                None,
+            )?;
 
-        compile::link_shared_library_paths(
-            &[obj_path],
-            &dylib_path,
-            self.target.as_deref(),
-            self.linker.as_deref(),
-            &self.library_paths,
-            &self.libraries,
-        )?;
+        compile::link_host_shared_library(&[obj_path], &dylib_path).map_err(internal)?;
 
-        let manifest = build_manifest(request.program, &manifest_entries, &request.templates)?;
-        manifest.write_beside(&dylib_path)?;
-        let loaded = manifest.resolve(request.program, &dylib_path)?;
+        let manifest = build_manifest(request.program, &manifest_entries, &request.templates)
+            .map_err(internal)?;
+        manifest.write_beside(&dylib_path).map_err(internal)?;
+        let loaded = manifest
+            .resolve(request.program, &dylib_path)
+            .map_err(internal)?;
 
         let handle = self.client.load(&dylib_path, loaded.client_templates());
         for (decl_id, shim) in loaded.entries {
@@ -220,12 +209,4 @@ impl MacroBackend for CliMacroBackend {
             call.arguments.clone(),
         ))
     }
-}
-
-fn format_diagnostics(diagnostics: Vec<Diagnostic>) -> String {
-    diagnostics
-        .into_iter()
-        .map(|diagnostic| diagnostic.to_string())
-        .collect::<Vec<_>>()
-        .join("\n")
 }

@@ -509,7 +509,7 @@ Update this section as you work (see "Rules for the implementor").
 | 4. The client and failure handling | done | `04eb738e` | `macro_runtime::client::MacroClient` with lazy server spawn/shutdown, lazy library reload, `STAPLE_MACRO_TIMEOUT` (default 10 s), stderr forwarding, and Decision 8 failure diagnostics (`panic`, `compile_error`, timeout, stack overflow, crash); unit and integration tests in `client.rs` and `staple-cli/tests/macro_server.rs`. Review fixes: libraries are registered with `MacroClient::load`, load failures and timeouts are reported at the macro, crash output is forwarded, the server's standard output is closed, `exit n` reads as an exit. See Findings. |
 | 5. Effects | done | `c103ada8` | `LoweredModule::check_macro_effects` (`lower/macro_effects.rs`) walks lowered call graph (instances, taken callable values, artifacts, and extern targets) with BFS from entry functions; forbidden list documented in `Staple.md` and Findings; unit tests cover reachable file read, dead code, and stderr. Review fixes: foreign functions `std` doesn't declare are rejected, the list drops names `std` doesn't have, chains keep the function that calls a foreign function, `Staple.md` no longer claims enforcement. Not called yet: libraries are first built in tasks 7 and 8. See Findings. |
 | 6. The quotation cycle and generated-item loops | done | `1d473565` | `Expression::Quote` in `macro_expand/scan.rs` now records `__quote`/`Parse.parse_quote`, `Sequence`, and `Splice`; `StdModules` carries `syntax`. Rewrote `if`/`when`/`for`/`while` to `match`/`loop` across `std.syntax` and all stdlib modules reached by `if`/syntax runtime; `check-macro-closures.py --mode all --jobs 2` passes (232 inputs, 0 diagnostics). `compare-expansion.py` against `88fdea78` matches 218/232 (only the 14 edited stdlib modules differ). Unit tests added in `closure.rs`. See Findings. |
-| 7. Closure libraries and the stage tower | done | `caf7d865` | |
+| 7. Closure libraries and the stage tower | done | `caf7d865` | `CliMacroBackend` (`staple-cli/src/macro_backend.rs`) behind `--macro-engine=compiled` on `build`, `check`, `run`, `compile` and `expand`; `make_ready` builds one closure library per macro from a closure-only check program. The standard library bootstraps with 3 closure libraries (`if`, `when`, `typegroup`) in about 33 s. Review fixes: the effects check runs (it was passed its arguments swapped), closure programs register generated `companion` blocks, libraries are built for the host, no compiler panics on strict-mode fallbacks, doc comments before a modifier are read in streams, item sequences break lines before modifiers and `let`, the interpreter's static check no longer gates macros with libraries. See Findings. |
 | 8. Package libraries and macro-mode objects | not started | | |
 | 9. Caching | not started | | |
 | 10. Build cost | not started | | |
@@ -756,3 +756,76 @@ Record:
     `3 passed; 0 failed`.
   - `scripts/check-macro-closures.py --staple target/release/staple --mode all --jobs 2`:
     `232 inputs, 0 with diagnostics, 0 distinct messages`.
+
+### Review of tasks 6 and 7
+
+- **The effects check never ran.** `CliMacroBackend::prepare` passed
+  `(entry_symbol, macro_name, span)` where `check_macro_effects` takes
+  `(macro_name, entry_symbol, span)`. It looked up each macro's name as a
+  symbol, found nothing and skipped the macro silently, so every library
+  passed. Entries are now a `MacroEffectEntry` struct with named fields, and an
+  entry symbol the lowered program lacks is an internal error. Chains also no
+  longer show the macro's own mangled function (`operator.6d61…`). A test
+  checks that a macro reaching its own `extern "c"` binding is rejected under
+  the compiled engine.
+- **Closure programs dropped generated modules.** A closure check program
+  takes its module structure from the program as it was before expansion, so
+  the `companion` block `typegroup` writes was only an item and its types
+  (`Shape.Circle`) didn't resolve. This, not an ordering cycle alone, is what
+  any user `typegroup` and `std.fs`'s and `std.rand`'s typegroups hit.
+  `Program::register_generated_inline_modules` now registers such blocks and
+  groups only them; grouping every block again detached the blocks whose types
+  the closure left out. The hand-written `ConversionError` stays: `if`'s
+  closure needs it before `typegroup` can run. A test builds a macro whose
+  closure uses a user `typegroup`.
+- **Libraries are built for the host.** The backend passed `--target`,
+  `--linker`, `-L` and `-l` to codegen and the linker, so cross builds made
+  libraries the compiler couldn't load. It now uses the host triple and `CC`
+  (or `cc`). Foreign libraries a package links aren't needed: macro code can't
+  reach a foreign function the standard library doesn't declare.
+- **Diagnostics from library builds.** `MacroBackend::prepare` returns
+  `Vec<Diagnostic>` instead of one string, so resolution and type errors in a
+  closure keep their own spans; one without a span is reported at the call.
+  A macro whose library failed isn't checked again by the interpreter.
+- **No panics in strict mode.** The `panic!`s for `call_trees`, `call_compiled`
+  and `arg_tree` returning `None`, and the `assert!`s on falling back to the
+  interpreter, were debugging aids reachable from user code. A call compiled
+  code can't take is now reported as ``internal error: macro `m` could not be
+  run as compiled code``, and no body runs in the interpreter.
+- **The interpreter's static check.** `check_before_running` checked every
+  macro body with the interpreter's checker before each call, under the
+  compiled engine too, so the compiled engine rejected what the interpreter
+  can't model (`typegroup` values, foreign calls), after building the library.
+  A macro with a library is now taken as checked by its library's type check.
+  A macro that is never called is still checked by the interpreter's checker,
+  until task 8's package libraries check every macro.
+- **Doc comments in modifier streams.** `parse_leaf_intrinsic` re-parsed the
+  whole fragment from its start when a modifier failed at a later offset. The
+  cause was in the parser: reading one modifier from a stream skipped a doc
+  comment before it as trivia, so `/// doc` then `@a` gave only `@a`, and the
+  trailing newline then failed to parse. `parse_modifier_prefix` now reads a
+  doc comment before the next modifier as its own `doc` modifier, and the
+  fallback is gone. Still open, under both engines: a doc comment after the
+  last modifier, or a stream holding only doc comments, reads as empty,
+  because `is_empty` counts comments as trivia.
+- **Item separators.** `sequence_syntax` starts a new line before a doc
+  comment, a modifier (`@`), `let`, `pub`, `def` or a declaration keyword, and
+  a space otherwise. An item written as a bare macro call by name still gets a
+  space; deciding by the sequence's element type would need a new intrinsic
+  argument.
+- **Compiled-only items.** Every closure library re-expanded every
+  `@compiled_only` item. They are now expanded once per compilation and
+  reused. Every library still carries all of them, since nearly every closure
+  needs the syntax runtime; task 11 measures whether trimming them is worth it.
+- **Smaller fixes.** The `MIN / -1` and `% -1` comments deleted in task 6 are
+  back in `number.sta`. A wire test covers a template module number larger
+  than the bytes left in the frame. The stage-tower test checks that
+  `double_plus_two` gets a library and that `add_one`, a quotation-only
+  template the parent expands, doesn't.
+- **Left as is.**
+  - `resolve.rs` skips the "standard library does not declare" errors for
+    every check program, not only closure-only ones. A normal compile still
+    reports a missing declaration, so nothing goes unchecked.
+  - Task 6's `match` rewrites of functions that aren't on a cycle stay.
+    Finding which can go back to `if` needs a closure check per function.
+

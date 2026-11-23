@@ -54,6 +54,7 @@ mod initializer_bindings;
 mod instance_body;
 mod instance_resolution;
 mod macro_effects;
+pub use macro_effects::MacroEffectEntry;
 mod runtime_call_facts;
 mod runtime_requirements;
 mod structural_artifacts;

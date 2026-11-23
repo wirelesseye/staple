@@ -999,12 +999,7 @@ fn run_with_macro_engine<T>(
     match options.macro_engine {
         crate::macro_backend::MacroEngine::Interp => f(),
         crate::macro_backend::MacroEngine::Compiled => {
-            let backend = crate::macro_backend::CliMacroBackend::new(
-                options.target.clone(),
-                options.linker.clone(),
-                options.library_paths.clone(),
-                options.libraries.clone(),
-            )?;
+            let backend = crate::macro_backend::CliMacroBackend::new()?;
             staple_compiler::with_macro_backend(Box::new(backend), true, f)
         }
     }
@@ -1111,36 +1106,18 @@ pub(crate) fn shared_library_extension() -> &'static str {
     }
 }
 
-pub(crate) fn link_shared_library_paths(
-    objects: &[PathBuf],
-    output: &Path,
-    target: Option<&str>,
-    linker: Option<&OsStr>,
-    library_paths: &[PathBuf],
-    libraries: &[OsString],
-) -> Result<(), String> {
-    let linker = linker
-        .map(OsStr::to_owned)
-        .or_else(|| std::env::var_os("CC"))
-        .unwrap_or_else(|| "cc".into());
+/// Links objects into a shared library for the host, with the host's C
+/// compiler (`CC`, or `cc`). Macro libraries are loaded by the compiler, so
+/// they never follow the program's target or linker options.
+pub(crate) fn link_host_shared_library(objects: &[PathBuf], output: &Path) -> Result<(), String> {
+    let linker = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
     let mut command = Command::new(&linker);
     command.args(objects).arg("-o").arg(output);
-    if let Some(target) = target {
-        command.arg(format!("--target={target}"));
-    }
-    for path in library_paths {
-        command.arg("-L").arg(path);
-    }
-    for library in libraries {
-        command.arg("-l").arg(library);
-    }
-    if cache::target_triple(target)
-        .split('-')
-        .any(|component| component == "linux")
-    {
+    let host = cache::target_triple(None);
+    if host.split('-').any(|component| component == "linux") {
         command.arg("-lm");
     }
-    if cache::target_triple(target).contains("apple") {
+    if host.contains("apple") {
         command.args(["-dynamiclib", "-undefined", "dynamic_lookup"]);
     } else {
         command.arg("-shared");

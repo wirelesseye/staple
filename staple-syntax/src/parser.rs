@@ -357,7 +357,7 @@ pub fn parse_modifier_fragment(
     next_syntax_id: &mut usize,
 ) -> Result<ModifierInvocation, ParseError> {
     parse_fragment(syntax, false, next_syntax_id, |grammar| {
-        grammar.parse_modifier_or_doc()
+        grammar.parse_modifier_or_doc(false)
     })
 }
 
@@ -495,7 +495,7 @@ pub fn parse_modifier_prefix(
     next_syntax_id: &mut usize,
 ) -> Result<(ModifierInvocation, usize), ParseError> {
     parse_fragment_with(syntax, false, next_syntax_id, false, |grammar| {
-        grammar.parse_modifier_or_doc()
+        grammar.parse_modifier_or_doc(true)
     })
 }
 
@@ -954,8 +954,12 @@ impl Grammar {
     /// A modifier read on its own. A fragment holding nothing but a doc
     /// comment reads as the `doc` modifier the comment is before an item, so
     /// a doc modifier written back out as its comment reads the same again.
-    fn parse_modifier_or_doc(&mut self) -> Result<ModifierInvocation, ParseError> {
-        if self.peek().is_none() {
+    ///
+    /// With `leading_doc`, as when modifiers are read one after another from
+    /// a stream, a doc comment before the next modifier is read first, as its
+    /// own `doc` modifier. Otherwise it would be skipped as trivia and lost.
+    fn parse_modifier_or_doc(&mut self, leading_doc: bool) -> Result<ModifierInvocation, ParseError> {
+        if leading_doc || self.peek().is_none() {
             let mut line_start = true;
             for index in self.position..self.tokens.len() {
                 let token = &self.tokens[index];
@@ -985,7 +989,9 @@ impl Grammar {
                         }
                         line_start = false;
                     }
-                    _ => line_start = false,
+                    TokenKind::BlockComment => line_start = false,
+                    // A doc comment after the next modifier belongs after it.
+                    _ => break,
                 }
             }
         }

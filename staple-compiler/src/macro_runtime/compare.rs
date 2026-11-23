@@ -197,7 +197,7 @@ fn compare_on_this_thread(source: &str, compiled: Compiled) -> Comparison {
             fn prepare(
                 &mut self,
                 _request: ClosureLibraryRequest<'_>,
-            ) -> Result<Vec<staple_syntax::SyntaxId>, String> {
+            ) -> Result<Vec<staple_syntax::SyntaxId>, Vec<staple_syntax::Diagnostic>> {
                 Ok(Vec::new())
             }
             fn call(&mut self, call: &CompiledCall<'_>) -> Option<Result<(staple_syntax::Syntax, u64), String>> {

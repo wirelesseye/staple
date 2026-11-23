@@ -1055,6 +1055,14 @@ pub(crate) struct StdModules {
     pub syntax: Option<ModuleId>,
 }
 
+/// The `@compiled_only` items every closure library carries.
+pub(crate) struct CompiledOnlyItems {
+    /// The closure items they need.
+    closure: std::collections::BTreeSet<closure::ItemId>,
+    /// The items, expanded, with their modules.
+    items: Vec<(ModuleId, Item)>,
+}
+
 fn freshened_syntax(syntax: &Syntax, next_syntax_id: &mut usize) -> Syntax {
     let mut syntax = syntax.clone();
     syntax.id = SyntaxId(*next_syntax_id);
@@ -2199,6 +2207,9 @@ struct MacroExpander {
     /// `@interpreted_only` item IDs separated before the walk, excluded from
     /// closure check programs when a [`MacroBackend`] is active.
     interpreted_only_items: HashSet<SyntaxId>,
+    /// The `@compiled_only` items as expanded, with the closure items they
+    /// need, worked out for the first closure library and reused by the rest.
+    compiled_only_expanded: Option<Rc<CompiledOnlyItems>>,
     /// Chains of macros and items that each needed the next, back to the first.
     cycles: Vec<Vec<String>>,
     /// The order macros became ready in.
@@ -3156,6 +3167,7 @@ impl MacroExpander {
             prepared_macros: HashSet::new(),
             compiled_only_items: Vec::new(),
             interpreted_only_items: HashSet::new(),
+            compiled_only_expanded: None,
             cycles: Vec::new(),
             macro_ready_order: Vec::new(),
             running_macros: Vec::new(),
@@ -3440,6 +3452,16 @@ impl MacroExpander {
         }
         if let Some(passed) = self.macro_checks.get(&definition.key) {
             return *passed;
+        }
+        // A macro with a compiled library was resolved and type-checked when
+        // the library was built, which is the real check of its code. The
+        // interpreter's static check models only what the interpreter can
+        // run, so it would reject code the library runs fine.
+        if compiled_call::strict_compiled_mode()
+            && self.prepared_macros.contains(&definition.declaration.syntax.id)
+        {
+            self.macro_checks.insert(definition.key.clone(), true);
+            return true;
         }
         if let Some(closure) = self.macro_closures.get(&definition.key.syntax) {
             self.ready_compile_items.extend(closure.items.iter().copied());
@@ -5787,6 +5809,23 @@ impl MacroExpander {
         result
     }
 
+    /// Under `--macro-engine=compiled`, no macro body runs in the interpreter:
+    /// a call compiled code couldn't take is reported instead. Returns whether
+    /// the call was refused.
+    fn refuse_interpreter(&mut self, definition: &MacroDefinition, call_span: &Span) -> bool {
+        if !compiled_call::strict_compiled_mode() {
+            return false;
+        }
+        self.diagnostics.push(Diagnostic::new(
+            call_span.clone(),
+            format!(
+                "internal error: macro `{}` could not be run as compiled code",
+                definition.key.name
+            ),
+        ));
+        true
+    }
+
     fn invoke_modifier_inner(
         &mut self,
         module: ModuleId,
@@ -5810,12 +5849,11 @@ impl MacroExpander {
         } else {
             self.quote_context.take()
         };
+        if evaluated.is_none() && self.refuse_interpreter(definition, &call_span) {
+            self.quote_context = previous_context;
+            return None;
+        }
         let evaluated = evaluated.unwrap_or_else(|| {
-            assert!(
-                !compiled_call::strict_compiled_mode(),
-                "macro modifier `{}` body ran in the interpreter under --macro-engine=compiled",
-                definition.key.name
-            );
             (|| {
                 let mut value =
                     self.eval_expression(definition.key.module, body, &mut Environment::new())?;
@@ -6922,27 +6960,8 @@ impl MacroExpander {
             MacroKind::User(_)
                 if !(definition.is_template && compiled_call::strict_compiled_mode()) =>
             {
-                let trees = self.call_trees(definition, &arguments);
-                if trees.is_none() && compiled_call::strict_compiled_mode() {
-                    panic!(
-                        "call_trees returned None for macro `{}` (arity {}, args {})",
-                        definition.key.name,
-                        definition.parameters.len(),
-                        arguments.len()
-                    );
-                }
-                trees.and_then(|trees| {
-                    let result = self.call_compiled(definition, trees, &call_span);
-                    if result.is_none() && compiled_call::strict_compiled_mode() {
-                        panic!(
-                            "call_compiled returned None for macro `{}` (decl {:?}, prepared={})",
-                            definition.key.name,
-                            definition.declaration.syntax.id,
-                            self.prepared_macros.contains(&definition.declaration.syntax.id)
-                        );
-                    }
-                    result
-                })
+                self.call_trees(definition, &arguments)
+                    .and_then(|trees| self.call_compiled(definition, trees, &call_span))
             }
             _ => None,
         };
@@ -7022,11 +7041,9 @@ impl MacroExpander {
                         return self.macro_result_value(definition, instantiated?);
                     }
                 }
-                assert!(
-                    !compiled_call::strict_compiled_mode(),
-                    "macro `{}` body ran in the interpreter under --macro-engine=compiled",
-                    definition.key.name
-                );
+                if self.refuse_interpreter(definition, &call_span) {
+                    return None;
+                }
                 let previous_context = if quote_result_type(&definition.result) {
                     self.quote_context.replace(definition.result.clone())
                 } else {

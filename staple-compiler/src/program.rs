@@ -438,6 +438,67 @@ impl Program {
         })
     }
 
+    /// Registers the top-level inline modules no module stands for yet, such
+    /// as the `companion` block a macro like `typegroup` generated, and groups
+    /// only those blocks with their types.
+    ///
+    /// For a program whose other modules are already grouped but no longer
+    /// hold every declaration, as a closure check program, where grouping
+    /// every block again would detach the blocks whose types it left out.
+    pub(crate) fn register_generated_inline_modules(&mut self, next_syntax_id: &mut usize) {
+        let mut added = HashSet::new();
+        for parent in 0..self.modules.len() {
+            let declarations = self.modules[parent]
+                .syntax
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Submodule(module)
+                        if !self.child_modules.contains_key(&module.syntax.id) =>
+                    {
+                        Some(module.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for mut declaration in declarations {
+                attach_companion_generics(&mut declaration, next_syntax_id);
+                let blanket = declaration.blanket_parameter().is_some();
+                let id = ModuleId(self.modules.len());
+                let qualified_name = format!(
+                    "{}.{}",
+                    self.modules[parent].qualified_name, declaration.name
+                );
+                self.modules.push(SourceModule {
+                    id,
+                    path: self.modules[parent].path.clone(),
+                    syntax: declaration.module,
+                    parent: Some(ModuleId(parent)),
+                    name: Some(declaration.name.clone()),
+                    visibility: declaration.visibility,
+                    qualified_name,
+                    companion: declaration.companion,
+                    blanket,
+                    detached: false,
+                    namespace: false,
+                    companion_namespace: None,
+                });
+                self.module_packages.push(self.module_packages[parent]);
+                self.children.push(HashMap::new());
+                if !declaration.companion {
+                    self.children[parent].insert(declaration.name, id);
+                }
+                self.child_modules.insert(declaration.syntax.id, id);
+                added.insert(id);
+            }
+        }
+        if added.is_empty() {
+            return;
+        }
+        self.group_companions_among(next_syntax_id, Some(&added));
+        self.next_syntax_id = self.next_syntax_id.max(*next_syntax_id);
+    }
+
     /// Registers inline modules introduced after parsing, such as macro output.
     /// `next_syntax_id` continues the identities macro expansion allocated.
     pub(crate) fn rebuild_generated_inline_modules(&mut self, next_syntax_id: &mut usize) {
@@ -513,8 +574,18 @@ impl Program {
     /// Groups `companion` blocks by the nominal types they extend; see
     /// `CompanionGrouping`.
     fn group_companions(&mut self, next_syntax_id: &mut usize) {
+        self.group_companions_among(next_syntax_id, None);
+    }
+
+    /// Groups the companion blocks in `only`, or every block when `None`.
+    fn group_companions_among(
+        &mut self,
+        next_syntax_id: &mut usize,
+        only: Option<&HashSet<ModuleId>>,
+    ) {
         let module_prelude = self.module_prelude.clone();
         CompanionGrouping {
+            only,
             modules: &mut self.modules,
             children: &mut self.children,
             module_packages: &mut self.module_packages,
@@ -3467,6 +3538,8 @@ type TypeKey = (ModuleId, String);
 /// block whose target is structural, or not found here, is detached, and
 /// name resolution attaches it to its target by identity.
 struct CompanionGrouping<'a> {
+    /// The blocks to group, or every block when `None`.
+    only: Option<&'a HashSet<ModuleId>>,
     modules: &'a mut Vec<SourceModule>,
     children: &'a mut Vec<HashMap<String, ModuleId>>,
     module_packages: &'a mut Vec<Option<staple_project::PackageId>>,
@@ -3484,6 +3557,7 @@ impl CompanionGrouping<'_> {
             .modules
             .iter()
             .filter(|module| module.companion && !module.blanket && !module.namespace)
+            .filter(|module| self.only.is_none_or(|only| only.contains(&module.id)))
             .map(|module| module.id)
             .collect::<Vec<_>>();
         for block in blocks {

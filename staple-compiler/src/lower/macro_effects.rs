@@ -96,11 +96,23 @@ pub(crate) const FORBIDDEN_EXTERNS: &[&str] = &[
     "getentropy",
 ];
 
+/// One macro entry function whose effects [`LoweredModule::check_macro_effects`]
+/// checks.
+pub struct MacroEffectEntry<'a> {
+    /// The macro's name, for diagnostics.
+    pub macro_name: &'a str,
+    /// The lowered instance symbol of the macro's entry function.
+    pub entry_symbol: &'a str,
+    /// Where diagnostics are reported.
+    pub span: Span,
+}
+
 impl LoweredModule {
-    /// Checks that none of `entries` (`(macro_name, entry_symbol, span)`) can
-    /// reach a forbidden function or extern binding in the lowered call graph.
-    /// Each reached target is reported once per macro, with its shortest chain.
-    pub fn check_macro_effects(&self, entries: &[(&str, &str, Span)]) -> Vec<Diagnostic> {
+    /// Checks that none of `entries` can reach a forbidden function or extern
+    /// binding in the lowered call graph. Each reached target is reported once
+    /// per macro, with its shortest chain. An entry symbol the program doesn't
+    /// have is an internal error, so a wrong symbol can't pass unchecked.
+    pub fn check_macro_effects(&self, entries: &[MacroEffectEntry<'_>]) -> Vec<Diagnostic> {
         let view = self.program.emission_view();
         let standard_library = self
             .packages()
@@ -113,8 +125,19 @@ impl LoweredModule {
             .collect();
 
         let mut diagnostics = Vec::new();
-        for (macro_name, entry_symbol, span) in entries {
+        for MacroEffectEntry {
+            macro_name,
+            entry_symbol,
+            span,
+        } in entries
+        {
             let Some(&entry_id) = by_symbol.get(entry_symbol) else {
+                diagnostics.push(Diagnostic::new(
+                    span.clone(),
+                    format!(
+                        "internal error: macro `{macro_name}` has no lowered entry `{entry_symbol}` to check"
+                    ),
+                ));
                 continue;
             };
             check_entry_reachability(
@@ -245,18 +268,25 @@ fn instance_qualified_name(
     if function.name.is_empty() {
         return None;
     }
-    if let Some(qualified) = function.name.strip_prefix("__staple_m") {
+    let qualified = function
+        .name
+        .strip_prefix("__staple_m")
+        .unwrap_or(&function.name);
+    // An operator or a macro's own function is named `operator.<hex>`, after
+    // the module path when it has one.
+    let (module, operator) = match qualified.rfind("operator.") {
+        Some(at) if at == 0 || qualified[..at].ends_with('.') => (&qualified[..at], &qualified[at + 9..]),
+        _ => return Some(qualified.to_owned()),
+    };
+    let Some(decoded) = decode_hex(operator) else {
         return Some(qualified.to_owned());
+    };
+    // The macro's entry and the macro function it wraps are the macro itself,
+    // which the diagnostic already names.
+    if decoded.starts_with("entry#") || decoded.starts_with("macro#") {
+        return None;
     }
-    if let Some(hex) = function.name.strip_prefix("operator.")
-        && let Some(decoded) = decode_hex(hex)
-    {
-        if decoded.starts_with("entry#") || decoded.starts_with("macro#") {
-            return None;
-        }
-        return Some(decoded);
-    }
-    Some(function.name.clone())
+    Some(format!("{module}{decoded}"))
 }
 
 fn decode_hex(hex: &str) -> Option<String> {
@@ -313,6 +343,8 @@ fn is_forbidden_extern(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use staple_syntax::Span;
+
+    use super::MacroEffectEntry;
 
     use crate::macro_expand::check_program::{CheckMode, check_programs, entry_function_name};
     use crate::{Lowerer, NameResolver, ProgramLoader, TypeChecker};
@@ -377,7 +409,11 @@ mod tests {
                     .next()
                     .expect("entry lowered");
                 let messages = lowered
-                    .check_macro_effects(&[(macro_name, &symbol, Span::Compiler)])
+                    .check_macro_effects(&[MacroEffectEntry {
+                        macro_name,
+                        entry_symbol: &symbol,
+                        span: Span::Compiler,
+                    }])
                     .into_iter()
                     .map(|diagnostic| diagnostic.message)
                     .collect();
@@ -466,7 +502,11 @@ mod tests {
             .into_iter()
             .next()
             .expect("entry lowered");
-        let diags = lowered.check_macro_effects(&[("m", &entry_sym, Span::Compiler)]);
+        let diags = lowered.check_macro_effects(&[MacroEffectEntry {
+            macro_name: "m",
+            entry_symbol: &entry_sym,
+            span: Span::Compiler,
+        }]);
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(
             diags[0].message,

@@ -240,6 +240,8 @@ impl Multiply I8 {
 impl Divide I8 {
     divide = (left; right) => match (right == 0) {
         True => panic "division by zero",
+        // Only `MIN / -1` overflows (`right + 1 == 0` tests for `-1`): `MIN`
+        // is the one negative value whose negation is still negative.
         False => match (right + 1 == 0 && left < 0 && 0 - left < 0) {
             True => panic "integer division overflow",
             False => __i8_divide (left, right),
@@ -250,6 +252,8 @@ impl Divide I8 {
 impl Remainder I8 {
     remainder = (left; right) => match (right == 0) {
         True => panic "remainder by zero",
+        // Every remainder by `-1` (`right + 1 == 0`) is zero, and `MIN % -1`
+        // would overflow.
         False => match (right + 1 == 0) {
             True => 0,
             False => __i8_remainder (left, right),
@@ -272,6 +276,8 @@ impl Multiply I16 {
 impl Divide I16 {
     divide = (left; right) => match (right == 0) {
         True => panic "division by zero",
+        // Only `MIN / -1` overflows (`right + 1 == 0` tests for `-1`): `MIN`
+        // is the one negative value whose negation is still negative.
         False => match (right + 1 == 0 && left < 0 && 0 - left < 0) {
             True => panic "integer division overflow",
             False => __i16_divide (left, right),
@@ -282,6 +288,8 @@ impl Divide I16 {
 impl Remainder I16 {
     remainder = (left; right) => match (right == 0) {
         True => panic "remainder by zero",
+        // Every remainder by `-1` (`right + 1 == 0`) is zero, and `MIN % -1`
+        // would overflow.
         False => match (right + 1 == 0) {
             True => 0,
             False => __i16_remainder (left, right),
@@ -304,6 +312,8 @@ impl Multiply I32 {
 impl Divide I32 {
     divide = (left; right) => match (right == 0) {
         True => panic "division by zero",
+        // Only `MIN / -1` overflows (`right + 1 == 0` tests for `-1`): `MIN`
+        // is the one negative value whose negation is still negative.
         False => match (right + 1 == 0 && left < 0 && 0 - left < 0) {
             True => panic "integer division overflow",
             False => __i32_divide (left, right),
@@ -314,6 +324,8 @@ impl Divide I32 {
 impl Remainder I32 {
     remainder = (left; right) => match (right == 0) {
         True => panic "remainder by zero",
+        // Every remainder by `-1` (`right + 1 == 0`) is zero, and `MIN % -1`
+        // would overflow.
         False => match (right + 1 == 0) {
             True => 0,
             False => __i32_remainder (left, right),
@@ -336,6 +348,8 @@ impl Multiply I64 {
 impl Divide I64 {
     divide = (left; right) => match (right == 0) {
         True => panic "division by zero",
+        // Only `MIN / -1` overflows (`right + 1 == 0` tests for `-1`): `MIN`
+        // is the one negative value whose negation is still negative.
         False => match (right + 1 == 0 && left < 0 && 0 - left < 0) {
             True => panic "integer division overflow",
             False => __i64_divide (left, right),
@@ -346,6 +360,8 @@ impl Divide I64 {
 impl Remainder I64 {
     remainder = (left; right) => match (right == 0) {
         True => panic "remainder by zero",
+        // Every remainder by `-1` (`right + 1 == 0`) is zero, and `MIN % -1`
+        // would overflow.
         False => match (right + 1 == 0) {
             True => 0,
             False => __i64_remainder (left, right),
@@ -472,6 +488,8 @@ impl Multiply ISize {
 impl Divide ISize {
     divide = (left; right) => match (right == 0) {
         True => panic "division by zero",
+        // Only `MIN / -1` overflows (`right + 1 == 0` tests for `-1`): `MIN`
+        // is the one negative value whose negation is still negative.
         False => match (right + 1 == 0 && left < 0 && 0 - left < 0) {
             True => panic "integer division overflow",
             False => __isize_divide (left, right),
@@ -482,6 +500,8 @@ impl Divide ISize {
 impl Remainder ISize {
     remainder = (left; right) => match (right == 0) {
         True => panic "remainder by zero",
+        // Every remainder by `-1` (`right + 1 == 0`) is zero, and `MIN % -1`
+        // would overflow.
         False => match (right + 1 == 0) {
             True => 0,
             False => __isize_remainder (left, right),

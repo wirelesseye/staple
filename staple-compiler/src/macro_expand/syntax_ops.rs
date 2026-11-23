@@ -820,3 +820,40 @@ mod tests {
         assert_eq!(matching_angle_close(tokens, 0), Some(tokens.len() - 1));
     }
 }
+
+#[cfg(test)]
+mod modifier_stream_tests {
+    use super::*;
+
+    /// The modifiers a stream over `text` gives one after another, as
+    /// `Sequence<Modifier>` reads them: until only trivia is left.
+    fn modifiers(text: &str) -> Vec<(String, Option<String>)> {
+        let syntax = syntax_from_text(text, &mut 0);
+        let tokens = syntax.tokens().len();
+        let mut next = 1;
+        let mut offset = 0;
+        let mut out = Vec::new();
+        while syntax.tokens()[offset..].iter().any(|token| !token.kind.is_trivia()) {
+            let rest = syntax_slice(&syntax, offset, tokens);
+            let Ok((ParsedLeaf::Modifier(modifier), consumed)) =
+                parse_leaf(LeafKind::Modifier, None, &rest, &mut next)
+            else {
+                panic!("no modifier at {offset} in {text:?}");
+            };
+            out.push((modifier.name, modifier.doc));
+            offset += consumed;
+        }
+        out
+    }
+
+    #[test]
+    fn a_doc_comment_before_a_modifier_is_read_first() {
+        let doc = |text: &str| ("doc".to_owned(), Some(text.to_owned()));
+        let call = |name: &str| (name.to_owned(), None);
+        assert_eq!(modifiers("/// doc\n@a\n"), vec![doc(" doc"), call("a")]);
+        assert_eq!(
+            modifiers("/// doc\n@a\n/// later\n@b\n"),
+            vec![doc(" doc"), call("a"), doc(" later"), call("b")]
+        );
+    }
+}

@@ -1093,16 +1093,6 @@ extern "C" fn parse_leaf_intrinsic(stream: u64, kind: u8, spelling: u64) -> u64 
         } else {
             let leaf = leaf_kind(kind).expect("the leaf kind was checked above");
             let parsed = parse_leaf(leaf, spelling.as_deref(), &rest, &mut next);
-            let parsed = if parsed.is_err()
-                && matches!(leaf, LeafKind::Modifier | LeafKind::UnstructuredModifier)
-                && rest.tokens().iter().all(|token| token.kind.is_trivia())
-                && offset > 0
-            {
-                parse_leaf(leaf, spelling.as_deref(), &syntax, &mut next)
-                    .map(|(parsed, _)| (parsed, 0))
-            } else {
-                parsed
-            };
             parsed.map(|(leaf, consumed)| (1, leaf.into_syntax(), consumed))
         };
         arena.set_next_syntax_id(next);
@@ -2014,6 +2004,27 @@ extern "C" fn nominal_pattern_syntax(origin: u64, name: u64, argument: u64) -> u
 }
 
 
+/// Whether `rest` must start on a line of its own after the element before
+/// it: a doc comment, a modifier, a `let`, or a declaration keyword. Items and
+/// statements end at line breaks, and no expression starts with any of these,
+/// so a space keeps expression sequences on one line. An item written as a
+/// macro call by name, such as `typegroup Name { ... }` without `pub`, still
+/// gets a space.
+fn starts_line(rest: &Syntax) -> bool {
+    rest.tokens()
+        .iter()
+        .find(|token| !matches!(token.kind, TokenKind::Whitespace | TokenKind::Newline))
+        .is_some_and(|token| {
+            matches!(
+                token.kind,
+                TokenKind::LineComment | TokenKind::At | TokenKind::Let | TokenKind::Pub | TokenKind::Def
+            ) || matches!(
+                token.text.as_str(),
+                "type" | "trait" | "impl" | "macro" | "companion" | "extern" | "use" | "mod"
+            )
+        })
+}
+
 /// Rebuilds one sequence cell from its element and spliced rest. The origin is
 /// the suffix starting at this cell; unchanged children return it. Without an
 /// origin, or when the origin has no run of trivia between the two, the
@@ -2025,27 +2036,7 @@ extern "C" fn sequence_syntax(origin: u64, first: u64, rest: u64) -> u64 {
     let spaced = |origin: Option<&Syntax>| {
         let mut parts = vec![(first, None)];
         if !first_syntax.tokens().is_empty() && !rest_syntax.tokens().is_empty() {
-            let starts_item = rest_syntax
-                .tokens()
-                .iter()
-                .find(|token| !matches!(token.kind, TokenKind::Whitespace | TokenKind::Newline))
-                .is_some_and(|token| {
-                    matches!(token.kind, TokenKind::LineComment)
-                        || matches!(
-                            token.text.as_str(),
-                            "pub"
-                                | "type"
-                                | "def"
-                                | "trait"
-                                | "impl"
-                                | "macro"
-                                | "companion"
-                                | "extern"
-                                | "use"
-                                | "mod"
-                        )
-                });
-            let sep = if starts_item {
+            let sep = if starts_line(&rest_syntax) {
                 single_newline()
             } else {
                 single_space()
@@ -3202,6 +3193,28 @@ mod tests {
         });
         assert_eq!(syntax_text_of(sequence_syntax(0, a, b)), "a b");
         assert_eq!(syntax_text_of(sequence_syntax(0, a, empty_syntax())), "a");
+    }
+
+    #[test]
+    fn items_and_modifiers_in_a_sequence_start_new_lines() {
+        reset();
+        let mut next = 0;
+        let fragment = |text: &str, next: &mut usize| {
+            with_arena(|arena| {
+                let syntax = crate::macro_expand::syntax_ops::syntax_from_text(text, next);
+                u64::from(arena.insert_syntax(syntax))
+            })
+        };
+        let first = fragment("type A", &mut next);
+        for (rest, joined) in [
+            ("@derive_eq type B", "type A\n@derive_eq type B"),
+            ("/// B.\ntype B", "type A\n/// B.\ntype B"),
+            ("let b = 1", "type A\nlet b = 1"),
+            ("pub def b = 1", "type A\npub def b = 1"),
+        ] {
+            let rest = fragment(rest, &mut next);
+            assert_eq!(syntax_text_of(sequence_syntax(0, first, rest)), joined);
+        }
     }
 
     #[test]

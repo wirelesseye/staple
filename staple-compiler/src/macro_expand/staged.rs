@@ -136,24 +136,13 @@ impl MacroExpander {
         Ok(())
     }
 
-    fn prepare_compiled_macro(
-        &mut self,
-        definition: &MacroDefinition,
-        closure: &MacroClosure,
-        call_span: &Span,
-    ) -> Result<(), ()> {
-        let start = definition.declaration.syntax.id;
-        if !super::compiled_call::compiling()
-            || definition.is_template
-            || !matches!(definition.kind, super::MacroKind::User(_))
-            || self.prepared_macros.contains(&start)
-        {
-            return Ok(());
+    /// The `@compiled_only` items and the closure items they need. They are
+    /// the same for every closure library, so they are expanded once.
+    fn compiled_only(&mut self, call_span: &Span) -> Result<Rc<CompiledOnlyItems>, ()> {
+        if let Some(cached) = &self.compiled_only_expanded {
+            return Ok(cached.clone());
         }
-        let Some(shell) = self.program_shell.clone() else {
-            return Ok(());
-        };
-        let extra_items = if self.compiled_only_items.is_empty() {
+        let closure = if self.compiled_only_items.is_empty() {
             std::collections::BTreeSet::new()
         } else {
             self.settle(call_span, |expander| {
@@ -174,6 +163,35 @@ impl MacroExpander {
             })?
             .items
         };
+        let mut items = Vec::with_capacity(self.compiled_only_items.len());
+        for (module, mut item) in self.compiled_only_items.clone() {
+            self.expand_item(module, &mut item, 1);
+            items.push((module, item));
+        }
+        let cached = Rc::new(CompiledOnlyItems { closure, items });
+        self.compiled_only_expanded = Some(cached.clone());
+        Ok(cached)
+    }
+
+    fn prepare_compiled_macro(
+        &mut self,
+        definition: &MacroDefinition,
+        closure: &MacroClosure,
+        call_span: &Span,
+    ) -> Result<(), ()> {
+        let start = definition.declaration.syntax.id;
+        if !super::compiled_call::compiling()
+            || definition.is_template
+            || !matches!(definition.kind, super::MacroKind::User(_))
+            || self.prepared_macros.contains(&start)
+        {
+            return Ok(());
+        }
+        let Some(shell) = self.program_shell.clone() else {
+            return Ok(());
+        };
+        let compiled_only = self.compiled_only(call_span)?;
+        let extra_items = compiled_only.closure.clone();
         let mut wanted_items = closure.items.clone();
         wanted_items.extend(extra_items);
         let mut groups = HashMap::new();
@@ -234,12 +252,10 @@ impl MacroExpander {
             &mut self.next_syntax_id,
             false,
         );
-        if !self.compiled_only_items.is_empty() {
-            let compiled = self.compiled_only_items.clone();
+        if !compiled_only.items.is_empty() {
             let mut per_module: Vec<Vec<Item>> = vec![Vec::new(); check_program.modules().len()];
-            for (module, mut item) in compiled {
-                self.expand_item(module, &mut item, 1);
-                per_module[module.0].push(item);
+            for (module, item) in &compiled_only.items {
+                per_module[module.0].push(item.clone());
             }
             for (module_index, compiled_items) in per_module.into_iter().enumerate() {
                 if compiled_items.is_empty() {
@@ -269,9 +285,16 @@ impl MacroExpander {
                 Ok(ready_ids) => {
                     self.prepared_macros.extend(ready_ids);
                 }
-                Err(message) => {
-                    self.diagnostics
-                        .push(Diagnostic::new(call_span.clone(), message));
+                Err(diagnostics) => {
+                    // The library build checked the macro's code, so the
+                    // interpreter's check would only report it again.
+                    self.macro_checks.insert(definition.key.clone(), false);
+                    for mut diagnostic in diagnostics {
+                        if matches!(diagnostic.span, Span::Compiler) {
+                            diagnostic.span = call_span.clone();
+                        }
+                        self.diagnostics.push(diagnostic);
+                    }
                     return Err(());
                 }
             }

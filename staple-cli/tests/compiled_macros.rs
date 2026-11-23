@@ -195,6 +195,17 @@ main ()
         String::from_utf8_lossy(&run.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n");
+    // `double_plus_two` runs compiled, with `add_one`'s call in its body
+    // expanded first. `add_one` is only a quotation, so it is a template the
+    // parent expands, and gets no library.
+    let stats = String::from_utf8_lossy(&run.stderr);
+    let has_library = |name: &str| {
+        stats
+            .lines()
+            .any(|line| line.trim_start().starts_with("lib #") && line.ends_with(&format!(": {name}")))
+    };
+    assert!(has_library("double_plus_two"), "{stats}");
+    assert!(!has_library("add_one"), "{stats}");
 
     let compile_out = temp.0.join("standalone-bin");
     let compile = staple_cmd(&pkg, &cache)
@@ -238,4 +249,100 @@ fn stdlib_builds_with_compiled_engine() {
         stderr.contains("closure libraries built"),
         "expected macro stats in stderr, got: {stderr}"
     );
+}
+
+/// Writes a package named `name` whose entry module is `source`.
+fn write_package(root: &Path, name: &str, source: &str) -> PathBuf {
+    let pkg = root.join(name);
+    fs::create_dir_all(pkg.join("src")).unwrap();
+    fs::write(
+        pkg.join("staple.kdl"),
+        format!("package \"{name}\" {{\n    entry \"src/main.sta\"\n}}\n"),
+    )
+    .unwrap();
+    fs::write(pkg.join("src/main.sta"), source).unwrap();
+    pkg
+}
+
+#[test]
+fn compiled_macros_are_checked_for_effects() {
+    let temp = TempDir::new("effects");
+    let pkg = write_package(
+        &temp.0,
+        "effects",
+        "\
+use std.syntax.*
+
+extern \"c\" { getpid: () -> I32 }
+
+def sneak = () => () :: {
+    let _ = getpid ()
+}
+
+macro sneaky: Expr -> Expr = value => {
+    sneak ()
+    parse_quote { $value }
+}
+
+pub def main = () => {
+    let _x = sneaky 1
+}
+",
+    );
+    let check = staple_cmd(&pkg, &temp.0.join("cache"))
+        .args(["check", "--macro-engine=compiled", "--stdlib"])
+        .arg(repo_root().join("stdlib"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    assert!(!check.status.success(), "check should fail: {stderr}");
+    assert!(
+        stderr.contains(
+            "macro `sneaky` reaches `effects.main.sneak` -> `getpid`, a foreign function the \
+             standard library doesn't declare, which macro code can't use"
+        ),
+        "{stderr}"
+    );
+    // The interpreter's own check doesn't report the macro a second time.
+    assert!(!stderr.contains("compile-time name `getpid`"), "{stderr}");
+}
+
+#[test]
+fn a_macro_closure_may_use_a_typegroup() {
+    let temp = TempDir::new("typegroup");
+    let pkg = write_package(
+        &temp.0,
+        "shapes",
+        "\
+use std.syntax.*
+use std.typegroup.typegroup
+
+pub typegroup Shape {
+    Circle,
+    Square,
+}
+
+def describe = () => U64 :: {
+    let _shape: Shape = Shape.Circle
+    3
+}
+
+macro choose: Expr -> Expr = value => {
+    let _n = describe ()
+    parse_quote { $value }
+}
+
+pub def main = () => {
+    let _x = choose 1
+}
+",
+    );
+    let check = staple_cmd(&pkg, &temp.0.join("cache"))
+        .args(["check", "--macro-engine=compiled", "--stdlib"])
+        .arg(repo_root().join("stdlib"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    assert!(check.status.success(), "check failed: {stderr}");
+    assert!(stderr.contains(": choose"), "{stderr}");
 }

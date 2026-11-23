@@ -348,7 +348,15 @@ pub(crate) fn build_check_program_with(
             }
         }
     }
-    (program.with_module_items(items, *next_syntax_id), table)
+    let mut check_program = program.with_module_items(items, *next_syntax_id);
+    if closure_only {
+        // The structure comes from the program as it was before expansion, so
+        // a module a macro generated, such as the `companion` block
+        // `typegroup` writes, is only an item in its group. Register it as
+        // expansion does.
+        check_program.register_generated_inline_modules(next_syntax_id);
+    }
+    (check_program, table)
 }
 
 /// The packages `package` depends on, transitively, and the package itself.

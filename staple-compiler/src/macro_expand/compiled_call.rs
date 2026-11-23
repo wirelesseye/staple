@@ -86,8 +86,13 @@ pub struct ClosureLibraryRequest<'a> {
 /// Backend that compiles/loads macro libraries and executes compiled macro calls.
 pub trait MacroBackend: Send {
     /// Makes the compiled library for the macros in `request` available,
-    /// returning the `SyntaxId`s of the macro declarations that are now ready.
-    fn prepare(&mut self, request: ClosureLibraryRequest<'_>) -> Result<Vec<SyntaxId>, String>;
+    /// returning the `SyntaxId`s of the macro declarations that are now ready,
+    /// or the diagnostics that stopped it. A diagnostic with no source span is
+    /// reported at the call that needed the library.
+    fn prepare(
+        &mut self,
+        request: ClosureLibraryRequest<'_>,
+    ) -> Result<Vec<SyntaxId>, Vec<Diagnostic>>;
 
     /// Executes one macro call through compiled code. Returning `None` leaves
     /// the call to the interpreter (allowed only when strict compiled mode is
@@ -141,7 +146,7 @@ pub(super) fn strict_compiled_mode() -> bool {
 
 pub(super) fn prepare_compiled_library(
     request: ClosureLibraryRequest<'_>,
-) -> Option<Result<Vec<SyntaxId>, String>> {
+) -> Option<Result<Vec<SyntaxId>, Vec<Diagnostic>>> {
     let mut active = ENGINE.with(|engine| engine.borrow_mut().take())?;
     let result = active.backend.prepare(request);
     ENGINE.with(|current| *current.borrow_mut() = Some(active));
@@ -482,25 +487,7 @@ fn arg_tree(value: &Value) -> Option<ArgTree> {
             separator,
             trailing,
         } => separated_tree(elements, separator, *trailing)?,
-        other => {
-            if strict_compiled_mode() {
-                let kind = match other {
-                    Value::Syntax(s) => format!("Syntax({})", s.syntax().is_some()),
-                    Value::Nominal(name, _) => format!("Nominal({name})"),
-                    Value::Integer(..) => "Integer".to_owned(),
-                    Value::String(s) => format!("String({s:?})"),
-                    Value::Char(_) => "Char".to_owned(),
-                    Value::Float(..) => "Float".to_owned(),
-                    Value::Stream { .. } => "Stream".to_owned(),
-                    Value::Product(..) => "Product".to_owned(),
-                    Value::Sequence(..) => "Sequence".to_owned(),
-                    Value::Separated { .. } => "Separated".to_owned(),
-                    _ => "Other".to_owned(),
-                };
-                panic!("arg_tree unhandled Value::{kind}");
-            }
-            return None;
-        }
+        _ => return None,
     })
 }
 
