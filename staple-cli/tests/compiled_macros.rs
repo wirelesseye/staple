@@ -48,12 +48,72 @@ fn copy_dir_all(src: &Path, dst: &Path) {
     }
 }
 
-fn staple_cmd(cwd: &Path, cache_home: &Path) -> Command {
+fn staple_cmd(cwd: &Path, _cache_home: &Path) -> Command {
+    ensure_shared_stdlib();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_staple"));
     cmd.current_dir(cwd)
-        .env("XDG_CACHE_HOME", cache_home)
+        .env("XDG_CACHE_HOME", shared_cache())
         .env("STAPLE_MACRO_STATS", "1");
     cmd
+}
+
+/// One cache for the compiled-macro tests, so the standard library's package
+/// library is built once for the whole binary instead of once per test.
+fn shared_cache() -> &'static Path {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<PathBuf> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("compiled-macros-shared-cache");
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("shared macro cache should be created");
+        path
+    })
+}
+
+/// Builds the standard library's package library once, by expanding a trivial
+/// package that depends on it.
+fn ensure_shared_stdlib() {
+    use std::sync::OnceLock;
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let temp = TempDir::new("shared-stdlib");
+        fs::create_dir_all(temp.0.join("src")).unwrap();
+        fs::write(
+            temp.0.join("staple.kdl"),
+            "package \"shared_stdlib\" {\n    entry \"src/main.sta\"\n}\n",
+        )
+        .unwrap();
+        fs::write(temp.0.join("src/main.sta"), "pub def main = () => 0\n").unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_staple"))
+            .current_dir(&temp.0)
+            .env("XDG_CACHE_HOME", shared_cache())
+            .args(["check", "--macro-engine=compiled", "--stdlib"])
+            .arg(repo_root().join("stdlib"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "standard library macro build failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    });
+}
+
+fn package_libraries(stats: &str) -> Vec<String> {
+    stats
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("package #"))
+        .filter_map(|rest| rest.split_once(": ").map(|(_, name)| name.to_owned()))
+        .collect()
+}
+
+fn closure_libraries(stats: &str) -> Vec<String> {
+    stats
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("lib #"))
+        .filter_map(|rest| rest.split_once(": ").map(|(_, names)| names.to_owned()))
+        .collect()
 }
 
 #[test]
@@ -345,4 +405,196 @@ pub def main = () => {
     let stderr = String::from_utf8_lossy(&check.stderr);
     assert!(check.status.success(), "check failed: {stderr}");
     assert!(stderr.contains(": choose"), "{stderr}");
+}
+
+/// A package graph where `first` and `second` both use a macro from `macros`.
+fn write_dependent_packages(root: &Path) {
+    let write = |relative: &str, contents: &str| {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    };
+    write(
+        "macros/staple.kdl",
+        "package \"macros\" { kind \"library\" }\n",
+    );
+    write(
+        "macros/src/lib.sta",
+        "pub mod\nuse std.clone.Clone\nuse std.syntax.*\n\
+         pub macro double: Expr -> Expr = value => {\n\
+             let same = Clone.clone value\n\
+             parse_quote { ($same) + ($same) }\n\
+         }\n",
+    );
+    for name in ["first", "second"] {
+        write(
+            &format!("{name}/staple.kdl"),
+            &format!(
+                "package \"{name}\" {{\n    kind \"library\"\n    \
+                 dependencies {{ macros path=\"../macros\" }}\n}}\n"
+            ),
+        );
+        write(
+            &format!("{name}/src/lib.sta"),
+            "pub mod\nuse std.syntax.*\nuse macros.lib.double\n\
+             pub def doubled = (x: I32) => I32 :: double x\n",
+        );
+    }
+    write(
+        "app/staple.kdl",
+        "package \"app\" {\n    entry \"src/main.sta\"\n    dependencies {\n        \
+         first path=\"../first\"\n        second path=\"../second\"\n        \
+         macros path=\"../macros\"\n    }\n}\n",
+    );
+    write(
+        "app/src/main.sta",
+        "use std.io.println\nuse first.lib.doubled\nuse macros.lib.double\n\
+         pub def main = () => {\n\
+             let a = doubled 21\n\
+             let b = double 4\n\
+             println \"${a + b}\"\n\
+         }\n",
+    );
+}
+
+#[test]
+#[ignore = "builds package libraries; run scripts/test-macro-libraries.sh"]
+fn dependents_share_a_package_library() {
+    let temp = TempDir::new("package-shared");
+    write_dependent_packages(&temp.0);
+    let app = temp.0.join("app");
+    let check = staple_cmd(&app, &temp.0.join("cache"))
+        .args(["check", "--macro-engine=compiled", "--stdlib"])
+        .arg(repo_root().join("stdlib"))
+        .output()
+        .unwrap();
+    let stats = String::from_utf8_lossy(&check.stderr);
+    assert!(check.status.success(), "check failed: {stats}");
+
+    let packages = package_libraries(&stats);
+    assert_eq!(
+        packages.iter().filter(|name| *name == "macros").count(),
+        1,
+        "one package library for both dependents: {packages:?}"
+    );
+    assert!(packages.iter().any(|name| name == "first"), "{packages:?}");
+    assert!(packages.iter().any(|name| name == "second"), "{packages:?}");
+}
+
+#[test]
+#[ignore = "builds package libraries; run scripts/test-macro-libraries.sh"]
+fn a_changed_dependency_rebuilds_its_package_library_once() {
+    let temp = TempDir::new("package-rebuilt");
+    write_dependent_packages(&temp.0);
+    let app = temp.0.join("app");
+    let check = || {
+        staple_cmd(&app, &temp.0.join("cache"))
+            .args(["check", "--macro-engine=compiled", "--stdlib"])
+            .arg(repo_root().join("stdlib"))
+            .output()
+            .unwrap()
+    };
+    let first = check();
+    assert!(
+        first.status.success(),
+        "check failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let source = temp.0.join("macros/src/lib.sta");
+    let mut changed = fs::read_to_string(&source).unwrap();
+    changed.push_str("\n// changed\n");
+    fs::write(&source, changed).unwrap();
+
+    let second = check();
+    let stats = String::from_utf8_lossy(&second.stderr);
+    assert!(second.status.success(), "check failed: {stats}");
+    let packages = package_libraries(&stats);
+    assert_eq!(
+        packages.iter().filter(|name| *name == "macros").count(),
+        1,
+        "the changed dependency is rebuilt once: {packages:?}"
+    );
+    assert!(packages.iter().any(|name| name == "first"), "{packages:?}");
+    assert!(packages.iter().any(|name| name == "second"), "{packages:?}");
+}
+
+#[test]
+#[ignore = "builds the standard library macro library; run scripts/test-macro-libraries.sh"]
+fn a_prebuilt_standard_library_macro_library_is_used_without_a_build() {
+    // The shared cache already holds the standard library's package library.
+    ensure_shared_stdlib();
+    let temp = TempDir::new("prebuilt-stdlib");
+    let stdlib = temp.0.join("stdlib");
+    copy_dir_all(&repo_root().join("stdlib"), &stdlib);
+
+    let install = staple_cmd(&stdlib, &temp.0.join("install-cache"))
+        .args(["build", "--macro-engine=compiled", "--stdlib"])
+        .arg(&stdlib)
+        .output()
+        .unwrap();
+    assert!(
+        install.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let macros = fs::read_dir(stdlib.join("target"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path().join("macros"))
+        .find(|path| path.is_dir())
+        .expect("the prebuilt macro library is installed");
+    assert!(
+        fs::read_dir(&macros).unwrap().flatten().any(|entry| {
+            entry.path().extension().is_some_and(|extension| extension == "dylib"
+                || extension == "so")
+        }),
+        "the installed macro directory holds a library: {}",
+        macros.display()
+    );
+
+    let pkg = write_package(
+        &temp.0,
+        "prebuilt_user",
+        "\
+use std.syntax.*
+use std.flow.if
+use std.io.println
+use std.clone.Clone
+
+macro keep: Expr -> Expr = value => {
+    let same = Clone.clone value
+    parse_quote { $same }
+}
+
+pub def main = () => {
+    let x = keep 1
+    if (x == 1) { println \"ok\" } else { println \"no\" }
+}
+",
+    );
+    // A fresh cache: the standard library's library must come from the
+    // install, not from rebuilding it.
+    let fresh = temp.0.join("fresh-cache");
+    let check = Command::new(env!("CARGO_BIN_EXE_staple"))
+        .current_dir(&pkg)
+        .env("XDG_CACHE_HOME", &fresh)
+        .env("STAPLE_MACRO_STATS", "1")
+        .args(["check", "--macro-engine=compiled", "--stdlib"])
+        .arg(&stdlib)
+        .output()
+        .unwrap();
+    let stats = String::from_utf8_lossy(&check.stderr);
+    assert!(check.status.success(), "check failed: {stats}");
+    let packages = package_libraries(&stats);
+    assert!(packages.is_empty(), "the install is not rebuilt: {packages:?}");
+    let closures = closure_libraries(&stats);
+    assert!(
+        closures.iter().any(|names| names.split(", ").any(|name| name == "keep")),
+        "the user macro still gets a closure library: {closures:?}"
+    );
+    assert!(
+        !closures.iter().any(|names| names.split(", ").any(|name| name == "if")),
+        "the standard library's macros come from the install: {closures:?}"
+    );
 }

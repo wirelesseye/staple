@@ -45,6 +45,12 @@ fi
 
 "$@" build --manifest-path "$destination/staple.kdl" --stdlib "$destination"
 
+# The macro-mode object and package library every dependent loads. The
+# normal objects above are already cached, so this only adds the macro
+# library work.
+"$@" build --manifest-path "$destination/staple.kdl" --stdlib "$destination" --macro-engine=compiled
+
 echo "Prebuilt standard library objects are in $destination/target"
+echo "Its compiled macro library is in $destination/target/<host>/macros"
 echo "They are only used by the exact compiler that built them. Reinstall after"
 echo "upgrading staple, and install with the same \`staple\` you will run."

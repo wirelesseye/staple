@@ -1833,6 +1833,15 @@ pub(crate) fn expand_program_checked(
     let stages = stage_items::separate(&mut program);
     let mut expander = MacroExpander::new(&program);
     if compiled_call::compiling() {
+        // Dependency package libraries are ready before anything expands, so
+        // no macro of a dependency needs a closure library of its own.
+        let dependencies = compiled_call::begin_compiled_libraries(&program);
+        if !dependencies.is_empty() {
+            expander.diagnostics.extend(dependencies);
+            if !recovering {
+                return Err(expander.diagnostics);
+            }
+        }
         expander.compiled_only_items = stages.compiled.clone();
         expander.interpreted_only_items = stages.interpreted.clone();
     }
@@ -1944,6 +1953,23 @@ pub(crate) fn expand_program_checked(
     let own_package = program.package_of(program.entry());
     let mut check = check_mode
         .map(|mode| expander.check_snapshot(mode, own_package, program.modules().len()));
+    if check.is_some() && check_mode == Some(check_program::CheckMode::All) {
+        // A check program keeps helper bodies as code. Normal expansion leaves
+        // them as written because only the interpreter's evaluator runs them,
+        // so their macro calls are expanded here, now that every macro is
+        // ready. Dependencies are included whole, and a package library checks
+        // all of them.
+        for (module_index, parts) in &mut walked {
+            let module = program.modules()[*module_index].id;
+            for part in parts {
+                let items = Rc::make_mut(part);
+                for item in items {
+                    expander.expand_compile_time_helper(module, item);
+                    expander.expand_macro_declaration_for_check(module, item);
+                }
+            }
+        }
+    }
     let mut compiled_items = vec![Vec::new(); program.modules().len()];
     if check.is_some() {
         for (module, mut item) in stages.compiled {
@@ -1963,6 +1989,10 @@ pub(crate) fn expand_program_checked(
         if let Some(check) = &mut check {
             let mut snapshot = Vec::new();
             for item in &items {
+                if expander.expanded_check_items.contains(&item.syntax().id) {
+                    snapshot.push(item.clone());
+                    continue;
+                }
                 match check.compile_time.get(&item.syntax().id) {
                     Some(expanded) => snapshot.extend(expanded.iter().cloned()),
                     None => snapshot.push(item.clone()),
@@ -2207,9 +2237,12 @@ struct MacroExpander {
     /// `@interpreted_only` item IDs separated before the walk, excluded from
     /// closure check programs when a [`MacroBackend`] is active.
     interpreted_only_items: HashSet<SyntaxId>,
-    /// The `@compiled_only` items as expanded, with the closure items they
+    /// `@compiled_only` items as expanded, with the closure items they
     /// need, worked out for the first closure library and reused by the rest.
     compiled_only_expanded: Option<Rc<CompiledOnlyItems>>,
+    /// Helpers and macro declarations the check-program pass expanded, whose
+    /// module items replace the raw forms in `CheckSnapshot::compile_time`.
+    expanded_check_items: HashSet<SyntaxId>,
     /// Chains of macros and items that each needed the next, back to the first.
     cycles: Vec<Vec<String>>,
     /// The order macros became ready in.
@@ -3168,6 +3201,7 @@ impl MacroExpander {
             compiled_only_items: Vec::new(),
             interpreted_only_items: HashSet::new(),
             compiled_only_expanded: None,
+            expanded_check_items: HashSet::new(),
             cycles: Vec::new(),
             macro_ready_order: Vec::new(),
             running_macros: Vec::new(),

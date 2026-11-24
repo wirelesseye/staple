@@ -20,7 +20,7 @@ use crate::macro_expand::lower_quote::{Template, TemplateTable};
 use crate::{ModuleId, Program};
 
 const MANIFEST_MAGIC: &[u8; 8] = b"STAPLEMM";
-pub(crate) const MANIFEST_FORMAT_VERSION: u32 = 1;
+pub(crate) const MANIFEST_FORMAT_VERSION: u32 = 2;
 
 /// Stable identifier of a module across compilations, independent of `ModuleId`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -101,12 +101,33 @@ pub(crate) fn manifest_path(library_path: &Path) -> PathBuf {
 }
 
 /// Computes the stable [`ModuleKey`] of `module` in `program`.
+///
+/// A module in a package is named by its path relative to the package's
+/// source root, so a library built with the package as its root and one built
+/// with it as a dependency name the same module. A module outside every
+/// package keeps its qualified name.
 pub(crate) fn module_key(program: &Program, module: ModuleId) -> ModuleKey {
-    let package = program
-        .package_of(module)
-        .and_then(|id| program.package_graph().map(|graph| graph.package(id).name.clone()));
-    let path = program.module(module).qualified_name.clone();
-    ModuleKey { package, path }
+    let package_id = program.package_of(module);
+    let package = package_id.and_then(|id| program.package_graph().map(|graph| graph.package(id)));
+    let path = package
+        .and_then(|package| {
+            program
+                .module(module)
+                .path
+                .strip_prefix(package.source_root())
+                .ok()
+        })
+        .map(|path| {
+            path.components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .unwrap_or_else(|| program.module(module).qualified_name.clone());
+    ModuleKey {
+        package: package.map(|package| package.name.clone()),
+        path,
+    }
 }
 
 /// Returns the macro name and 0-based overload index of `declaration_id` within

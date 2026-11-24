@@ -14,9 +14,10 @@ use staple_syntax::{
 };
 
 use super::closure::{ItemId, MacroClosure, item_kind};
+use super::compiled_call::{PackageLibraryBuild, PackageLibraryMacro};
 use super::lower_quote::{QuoteLowering, TemplateTable};
 use super::{MacroAnalysis, MacroDefinition, MacroExpander, MacroKind};
-use crate::{ModuleId, NameResolver, Program, TypeChecker};
+use crate::{Lowerer, ModuleId, NameResolver, Program, TypeChecker};
 
 /// Which macros have their closures checked.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -70,6 +71,58 @@ impl MacroExpander {
         for item in items {
             self.expand_compile_time_item(module, item);
         }
+    }
+
+    /// Expands a compile-time helper's body, which normal expansion leaves as
+    /// written because the interpreter evaluates it on demand. A check program
+    /// keeps the helper as code, so its macro calls must be expanded first.
+    pub(super) fn expand_compile_time_helper(&mut self, module: ModuleId, item: &mut Item) {
+        if let Item::Modified(modified) = item {
+            return self.expand_compile_time_helper(module, &mut modified.item);
+        }
+        if !matches!(item, Item::Binding(binding) if super::binding_is_compile_time_helper(binding)) {
+            return;
+        }
+        self.expanded_check_items.insert(item.syntax().id);
+        let saved = self.save_state();
+        self.compile_time_depth += 1;
+        self.expand_block_item_contents(module, item, 0);
+        self.compile_time_depth -= 1;
+        self.restore_state(saved);
+    }
+
+    /// Expands a macro declaration's body for a check program, which keeps it
+    /// as the function a macro call runs rather than dropping it.
+    pub(super) fn expand_macro_declaration_for_check(&mut self, module: ModuleId, item: &mut Item) {
+        if let Item::Modified(modified) = item {
+            return self.expand_macro_declaration_for_check(module, &mut modified.item);
+        }
+        let Item::MacroDeclaration(declaration) = item else {
+            return;
+        };
+        let Some(key) = self.macro_by_item.get(&declaration.syntax.id).cloned() else {
+            return;
+        };
+        let Some(definition) = self.definitions.get(&key) else {
+            return;
+        };
+        if !matches!(definition.kind, MacroKind::User(_)) {
+            return;
+        }
+        let Some(value) = definition.declaration.value.clone() else {
+            return;
+        };
+        self.expanded_check_items.insert(declaration.syntax.id);
+        let saved = self.save_state();
+        self.compile_time_depth += 1;
+        let value = self.expand_expression(module, value, 0);
+        self.compile_time_depth -= 1;
+        self.restore_state(saved);
+        if let Some(definition) = self.definitions.get_mut(&key) {
+            definition.declaration.value = Some(value.clone());
+            definition.kind = MacroKind::User(value.clone());
+        }
+        declaration.value = Some(value);
     }
 
     fn expand_compile_time_item(&mut self, module: ModuleId, item: &mut Item) {
@@ -206,12 +259,21 @@ pub(crate) fn build_check_program(
     macros: &[&CheckedMacro],
     next_syntax_id: &mut usize,
 ) -> (Program, TemplateTable) {
-    build_check_program_with(program, snapshot, package, macros, next_syntax_id, true)
+    build_check_program_scoped(
+        program,
+        snapshot,
+        package,
+        macros,
+        next_syntax_id,
+        true,
+        false,
+    )
 }
 
 /// Like [`build_check_program`], with a choice between whole dependency
 /// packages (the closure check) and only the closure items of every package
-/// (the harness's small executable programs).
+/// (the harness's small executable programs), and between a closure-only own
+/// package and the whole of it (a package library).
 pub(crate) fn build_check_program_with(
     program: &Program,
     snapshot: &CheckSnapshot,
@@ -219,6 +281,26 @@ pub(crate) fn build_check_program_with(
     macros: &[&CheckedMacro],
     next_syntax_id: &mut usize,
     whole_dependencies: bool,
+) -> (Program, TemplateTable) {
+    build_check_program_scoped(
+        program,
+        snapshot,
+        package,
+        macros,
+        next_syntax_id,
+        whole_dependencies,
+        false,
+    )
+}
+
+fn build_check_program_scoped(
+    program: &Program,
+    snapshot: &CheckSnapshot,
+    package: Option<PackageId>,
+    macros: &[&CheckedMacro],
+    next_syntax_id: &mut usize,
+    whole_dependencies: bool,
+    whole_own_package: bool,
 ) -> (Program, TemplateTable) {
     let syntax_module = program.standard_library_syntax();
     let dependencies = package_dependencies(program, package);
@@ -228,9 +310,15 @@ pub(crate) fn build_check_program_with(
     // corpus input is a standard-library file, so it is checked whole too.
     let standard_library_package = syntax_module.and_then(|module| program.package_of(module));
     let whole = whole_dependencies
-        && (package != program.package_of(program.entry())
+        && (whole_own_package
+            || package != program.package_of(program.entry())
             || (package.is_some() && package == standard_library_package));
+    // Dependencies may be kept whole or reduced to the closure items the
+    // checked macros reach. The checked package can be whole while its
+    // dependencies are only closures: a package library checks every item of
+    // its own package but only needs the dependency code those items reach.
     let closure_only = !whole_dependencies;
+    let own_closure_only = !whole_own_package && !whole;
     let wanted = macros
         .iter()
         .flat_map(|checked| checked.closure.items.iter().copied())
@@ -252,7 +340,9 @@ pub(crate) fn build_check_program_with(
     for module in program.modules() {
         let owner = program.package_of(module.id);
         let expanded = expanded_of(module.id);
-        if closure_only || (owner == package && !whole) {
+        let closure_module = (closure_only && owner != package)
+            || (owner == package && own_closure_only);
+        if closure_module {
             let mut positioned = std::mem::take(&mut own_items[module.id.0]);
             positioned.sort_by_key(|(position, _)| *position);
             let mut kept = Vec::new();
@@ -299,19 +389,19 @@ pub(crate) fn build_check_program_with(
     for module in program.modules() {
         let expanded = expanded_of(module.id);
         let owner = program.package_of(module.id);
+        let closure_module = (closure_only && owner != package)
+            || (owner == package && own_closure_only);
         let kept = &mut items[module.id.0];
         for item in expanded {
             match item {
                 Item::Submodule(submodule) => {
                     let mut submodule = submodule.clone();
-                    if closure_only || (owner == package && !whole) {
+                    if closure_module {
                         submodule.module.items.clear();
                         kept.push(Item::Submodule(submodule));
                     }
                 }
-                Item::UseDeclaration(declaration)
-                    if closure_only || (owner == package && !whole) =>
-                {
+                Item::UseDeclaration(declaration) if closure_module => {
                     let mut declaration = declaration.clone();
                     let target = check_import_target(program, module.id, &declaration, &module_names);
                     if let Some(target) = target {
@@ -961,6 +1051,94 @@ pub(crate) fn check_programs<'a>(
             (package, macros, check, templates)
         })
         .collect()
+}
+
+/// Expands `program` and builds the macro-mode form of `package`: every macro
+/// of the package becomes a function with an entry, its dependencies stay
+/// whole, and its compile-time items are kept, so the result can be lowered
+/// into the package's macro-mode object and linked into its package library.
+pub fn prepare_package_library(
+    program: Program,
+    package: PackageId,
+) -> Result<PackageLibraryBuild, Vec<Diagnostic>> {
+    let (expanded, analysis, diagnostics) =
+        super::expand_program_checked(program, false, Some(CheckMode::All), false)?;
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
+    }
+    let Some(snapshot) = analysis.check else {
+        return Err(vec![Diagnostic::new(
+            Span::Compiler,
+            "internal error: expanding a package library kept no check snapshot",
+        )]);
+    };
+    let macros = snapshot
+        .macros
+        .iter()
+        .filter(|checked| expanded.package_of(checked.module) == Some(package))
+        .collect::<Vec<_>>();
+    let mut next_syntax_id = analysis.next_syntax_id;
+    let (check, mut templates) = build_check_program_scoped(
+        &expanded,
+        &snapshot,
+        Some(package),
+        &macros,
+        &mut next_syntax_id,
+        true,
+        true,
+    );
+    // Dependency templates belong to the dependencies' own libraries, which
+    // this library links.
+    templates
+        .templates
+        .retain(|template| expanded.package_of(template.module) == Some(package));
+    let next_syntax_id = check.next_syntax_id();
+    let resolved = NameResolver::pre_expanded(next_syntax_id).resolve_program(check)?;
+    let typed = TypeChecker::new().check(resolved)?;
+    let lowered = Lowerer::new().lower(&typed)?;
+
+    let mut found = Vec::new();
+    for module in expanded.modules() {
+        if expanded.package_of(module.id) != Some(package) {
+            continue;
+        }
+        for item in &module.syntax.items {
+            package_library_macros(item, module.id, &lowered, &mut found);
+        }
+    }
+    found.sort_by_key(|macros| (macros.module.0, macros.declaration.0));
+
+    Ok(PackageLibraryBuild {
+        expanded,
+        lowered,
+        macros: found,
+        templates,
+    })
+}
+
+/// Collects the macro declarations of one item, and of the items it wraps.
+fn package_library_macros(
+    item: &Item,
+    module: ModuleId,
+    lowered: &crate::LoweredModule,
+    out: &mut Vec<PackageLibraryMacro>,
+) {
+    match item {
+        Item::MacroDeclaration(declaration) => {
+            let entry_name = entry_function_name(declaration);
+            if let Some(entry_symbol) = crate::macro_runtime::instance_symbol(lowered, &entry_name) {
+                out.push(PackageLibraryMacro {
+                    module,
+                    declaration: declaration.syntax.id,
+                    name: declaration.name.clone(),
+                    span: declaration.syntax.span.clone(),
+                    entry_symbol,
+                });
+            }
+        }
+        Item::Modified(modified) => package_library_macros(&modified.item, module, lowered, out),
+        _ => {}
+    }
 }
 
 #[cfg(test)]

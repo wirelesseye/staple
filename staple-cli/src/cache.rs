@@ -289,21 +289,22 @@ pub struct Placement {
     pub write: Vec<Destination>,
 }
 
-fn object_name(name: &str, fingerprint: Fingerprint) -> String {
-    format!("{name}-{fingerprint}.o")
+fn artifact_name(name: &str, fingerprint: Fingerprint, extension: &str) -> String {
+    format!("{name}-{fingerprint}.{extension}")
 }
 
-/// The cached object for `name`/`fingerprint`, calling `emit` to create it
-/// (at the path it is given) when no read directory has one. `emit` writes a
-/// temporary file that is renamed into place, so concurrent builds see either
-/// no object or a complete one.
-pub fn ensure_object(
+/// The cached artifact for `name`/`fingerprint` with `extension`, calling
+/// `emit` to create it (at the path it is given) when no read directory has
+/// one. `emit` writes a temporary file that is renamed into place, so
+/// concurrent builds see either no artifact or a complete one.
+pub fn ensure_artifact(
     placement: &Placement,
     name: &str,
     fingerprint: Fingerprint,
+    extension: &str,
     emit: &mut dyn FnMut(&Path) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
-    let file = object_name(name, fingerprint);
+    let file = artifact_name(name, fingerprint, extension);
     for directory in &placement.read {
         let path = directory.join(&file);
         if path.is_file() {
@@ -315,7 +316,7 @@ pub fn ensure_object(
         let path = destination.directory.join(&file);
         let temporary = temporary_sibling(&path);
         // Creating the temporary file first finds an unwritable directory
-        // before the compiler spends time on an object it cannot store.
+        // before the compiler spends time on an artifact it cannot store.
         let probe = std::fs::create_dir_all(&destination.directory)
             .and_then(|()| std::fs::File::create_new(&temporary));
         if let Err(error) = probe {
@@ -334,28 +335,119 @@ pub fn ensure_object(
             return Err(error);
         }
         if destination.prune {
-            prune_stale(&destination.directory, name, &file);
+            prune_stale(&destination.directory, name, &file, extension);
         }
         return Ok(path);
     }
     Err(last_error)
 }
 
-/// Removes `<name>-<fingerprint>.o` files other than `keep`.
-fn prune_stale(directory: &Path, name: &str, keep: &str) {
+/// The cached object for `name`/`fingerprint`, calling `emit` to create it
+/// (at the path it is given) when no read directory has one. `emit` writes a
+/// temporary file that is renamed into place, so concurrent builds see either
+/// no object or a complete one.
+pub fn ensure_object(
+    placement: &Placement,
+    name: &str,
+    fingerprint: Fingerprint,
+    emit: &mut dyn FnMut(&Path) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    ensure_artifact(placement, name, fingerprint, "o", emit)
+}
+
+/// The cached shared library for `name`/`fingerprint`, with its `.manifest`
+/// sidecar, calling `emit` to create both beside the given temporary path.
+/// Both files are renamed into place only after `emit` succeeds.
+pub fn ensure_library(
+    placement: &Placement,
+    name: &str,
+    fingerprint: Fingerprint,
+    extension: &str,
+    emit: &mut dyn FnMut(&Path) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    let file = artifact_name(name, fingerprint, extension);
+    for directory in &placement.read {
+        let path = directory.join(&file);
+        if path.is_file() && path.with_extension("manifest").is_file() {
+            return Ok(path);
+        }
+    }
+    let mut last_error = format!("no cache directory to store `{name}` in");
+    for destination in &placement.write {
+        let path = destination.directory.join(&file);
+        let temporary = temporary_sibling(&path);
+        let temporary_manifest = temporary.with_extension("manifest");
+        let manifest = path.with_extension("manifest");
+        let probe = std::fs::create_dir_all(&destination.directory)
+            .and_then(|()| std::fs::File::create_new(&temporary));
+        if let Err(error) = probe {
+            last_error = format!(
+                "could not write to `{}`: {error}",
+                destination.directory.display()
+            );
+            continue;
+        }
+        let result = emit(&temporary).and_then(|()| {
+            std::fs::rename(&temporary, &path)
+                .map_err(|error| format!("could not create `{}`: {error}", path.display()))?;
+            if temporary_manifest.is_file() {
+                std::fs::rename(&temporary_manifest, &manifest).map_err(|error| {
+                    format!("could not create `{}`: {error}", manifest.display())
+                })?;
+            }
+            Ok(())
+        });
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(&temporary);
+            let _ = std::fs::remove_file(&temporary_manifest);
+            return Err(error);
+        }
+        if destination.prune {
+            prune_stale(&destination.directory, name, &file, extension);
+        }
+        return Ok(path);
+    }
+    Err(last_error)
+}
+
+/// Removes `<name>-<fingerprint>.<extension>` files other than `keep`, and
+/// their `.manifest` sidecars.
+fn prune_stale(directory: &Path, name: &str, keep: &str, extension: &str) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
     for entry in entries.flatten() {
         let file = entry.file_name();
         let Some(file) = file.to_str() else { continue };
-        let is_object = file
+        let is_artifact = file
             .strip_prefix(name)
             .and_then(|rest| rest.strip_prefix('-'))
-            .and_then(|rest| rest.strip_suffix(".o"))
+            .and_then(|rest| rest.strip_suffix(&format!(".{extension}")))
             .is_some_and(|hash| hash.len() == 32 && hash.bytes().all(|b| b.is_ascii_hexdigit()));
-        if is_object && file != keep {
-            let _ = std::fs::remove_file(entry.path());
+        if is_artifact {
+            if file != keep {
+                let _ = std::fs::remove_file(entry.path());
+                let _ = std::fs::remove_file(entry.path().with_extension("manifest"));
+            }
+        } else if entry
+            .path()
+            .extension()
+            .is_some_and(|other| other == "manifest")
+        {
+            let stem = entry.path().with_extension(extension);
+            let Some(stem) = stem.file_name().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let stale = stem
+                .strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .and_then(|rest| rest.strip_suffix(&format!(".{extension}")))
+                .is_some_and(|hash| {
+                    hash.len() == 32 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                });
+            if stale && stem != keep {
+                let _ = std::fs::remove_file(entry.path());
+            }
         }
     }
 }

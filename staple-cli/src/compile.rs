@@ -149,6 +149,13 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
     // Dropped by name resolution, but incremental builds fingerprint from it.
     let graph = program.package_graph().cloned();
     let active_features = program.active_features().clone();
+    // A library package's macro-mode form needs the expanded program again;
+    // it is kept only for the mode that prebuilds it.
+    let prebuild_macro_library = options.macro_engine
+        == crate::macro_backend::MacroEngine::Compiled
+        && options.emit == EmitKind::Packages
+        && options.mode == Mode::Compile;
+    let macro_program = prebuild_macro_library.then(|| program.clone());
     let module = run_with_macro_engine(&options, || compile_program(program))?;
     if options.mode == Mode::Check {
         return Ok(Outcome::Completed(None));
@@ -171,6 +178,11 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
     if options.emit == EmitKind::Packages {
         let packages = program_packages.ok_or("a library build requires a package manifest")?;
         build_library_objects(&lowered, &generator, &packages, &options)?;
+        if let Some(program) = macro_program {
+            run_with_macro_engine(&options, || {
+                staple_compiler::prebuild_package_library(&program).map_err(format_diagnostics)
+            })?;
+        }
         return Ok(Outcome::Completed(None));
     }
 

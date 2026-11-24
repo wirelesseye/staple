@@ -106,6 +106,17 @@ impl MacroExpander {
         if self.macros_failed.contains(&key) {
             return Err(());
         }
+        // A dependency's package library already holds and checked this
+        // macro, so it needs no closure of its own.
+        if compiled_call::compiled_library_available(
+            definition.key.module,
+            definition.declaration.syntax.id,
+        ) {
+            self.prepared_macros.insert(definition.declaration.syntax.id);
+            self.macro_ready_order.push(key.name.clone());
+            self.macros_ready.insert(key);
+            return Ok(true);
+        }
         let node = StageNode::Macro(key.clone());
         if self.soft_stage > 0 && self.record_cycle(&node) {
             return Ok(false);
@@ -185,6 +196,10 @@ impl MacroExpander {
             || !matches!(definition.kind, super::MacroKind::User(_))
             || self.prepared_macros.contains(&start)
         {
+            return Ok(());
+        }
+        if super::compiled_call::compiled_library_available(definition.key.module, start) {
+            self.prepared_macros.insert(start);
             return Ok(());
         }
         let Some(shell) = self.program_shell.clone() else {

@@ -35,8 +35,10 @@ pub use codegen::*;
 pub use expansion_render::render_expanded_module;
 pub use lower::*;
 pub use macro_expand::compiled_call::{
-    ClosureLibraryRequest, CompiledCall, MacroBackend, with_macro_backend,
+    ClosureLibraryRequest, CompiledCall, MacroBackend, PackageLibraryBuild, PackageLibraryMacro,
+    prebuild_package_library, with_macro_backend,
 };
+pub use macro_expand::check_program::prepare_package_library;
 pub use macro_expand::expand_macros;
 pub use macro_expand::lower_quote::TemplateTable;
 pub use program::*;

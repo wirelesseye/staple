@@ -83,8 +83,49 @@ pub struct ClosureLibraryRequest<'a> {
     pub next_syntax_id: usize,
 }
 
+/// A macro of a package library, with the entry the library exposes for it.
+pub struct PackageLibraryMacro {
+    pub module: ModuleId,
+    pub declaration: SyntaxId,
+    pub name: String,
+    pub span: Span,
+    /// The lowered entry function, wrapped by the library's `__staple_entry.<n>`.
+    pub entry_symbol: String,
+}
+
+/// An expanded package in macro mode, ready to be emitted as a package's
+/// macro-mode object and linked into its package library.
+pub struct PackageLibraryBuild {
+    /// The expanded program the entry keys and templates name.
+    pub expanded: Program,
+    pub lowered: crate::LoweredModule,
+    /// Every macro of the package that has a compiled entry, in stable order.
+    pub macros: Vec<PackageLibraryMacro>,
+    /// The package's quotation templates, keyed to its own modules.
+    pub templates: TemplateTable,
+}
+
 /// Backend that compiles/loads macro libraries and executes compiled macro calls.
 pub trait MacroBackend: Send {
+    /// Makes the package libraries of `program`'s dependencies available
+    /// before its macros expand. Called once per expansion, with the program
+    /// as it was loaded.
+    fn begin(&mut self, _program: &Program) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    /// Whether the loaded libraries already provide `declaration`, so the
+    /// expander needn't build a closure library for it.
+    fn available(&self, _module: ModuleId, _declaration: SyntaxId) -> bool {
+        false
+    }
+
+    /// Writes the macro-mode object and package library of `program`'s root
+    /// package, for a later build to load instead of rebuilding them.
+    fn prebuild(&mut self, _program: &Program) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
     /// Makes the compiled library for the macros in `request` available,
     /// returning the `SyntaxId`s of the macro declarations that are now ready,
     /// or the diagnostics that stopped it. A diagnostic with no source span is
@@ -151,6 +192,43 @@ pub(super) fn prepare_compiled_library(
     let result = active.backend.prepare(request);
     ENGINE.with(|current| *current.borrow_mut() = Some(active));
     Some(result)
+}
+
+/// Runs the backend's pre-expansion phase, if compiled code is making calls.
+pub(super) fn begin_compiled_libraries(program: &Program) -> Vec<Diagnostic> {
+    let mut active = match ENGINE.with(|engine| engine.borrow_mut().take()) {
+        Some(active) => active,
+        None => return Vec::new(),
+    };
+    let result = active.backend.begin(program);
+    ENGINE.with(|current| *current.borrow_mut() = Some(active));
+    result.err().unwrap_or_default()
+}
+
+/// Whether a loaded library already provides `declaration`.
+pub(super) fn compiled_library_available(module: ModuleId, declaration: SyntaxId) -> bool {
+    ENGINE.with(|engine| {
+        engine
+            .borrow()
+            .as_ref()
+            .is_some_and(|active| active.backend.available(module, declaration))
+    })
+}
+
+/// Builds and writes the package library of `program`'s root package.
+pub fn prebuild_package_library(program: &Program) -> Result<(), Vec<Diagnostic>> {
+    let mut active = match ENGINE.with(|engine| engine.borrow_mut().take()) {
+        Some(active) => active,
+        None => {
+            return Err(vec![Diagnostic::new(
+                Span::Compiler,
+                "internal error: no macro backend is active",
+            )]);
+        }
+    };
+    let result = active.backend.prebuild(program);
+    ENGINE.with(|current| *current.borrow_mut() = Some(active));
+    result
 }
 
 /// What a macro produced, as the expander places it.
