@@ -510,7 +510,7 @@ Update this section as you work (see "Rules for the implementor").
 | 5. Effects | done | `c103ada8` | `LoweredModule::check_macro_effects` (`lower/macro_effects.rs`) walks lowered call graph (instances, taken callable values, artifacts, and extern targets) with BFS from entry functions; forbidden list documented in `Staple.md` and Findings; unit tests cover reachable file read, dead code, and stderr. Review fixes: foreign functions `std` doesn't declare are rejected, the list drops names `std` doesn't have, chains keep the function that calls a foreign function, `Staple.md` no longer claims enforcement. Not called yet: libraries are first built in tasks 7 and 8. See Findings. |
 | 6. The quotation cycle and generated-item loops | done | `1d473565` | `Expression::Quote` in `macro_expand/scan.rs` now records `__quote`/`Parse.parse_quote`, `Sequence`, and `Splice`; `StdModules` carries `syntax`. Rewrote `if`/`when`/`for`/`while` to `match`/`loop` across `std.syntax` and all stdlib modules reached by `if`/syntax runtime; `check-macro-closures.py --mode all --jobs 2` passes (232 inputs, 0 diagnostics). `compare-expansion.py` against `88fdea78` matches 218/232 (only the 14 edited stdlib modules differ). Unit tests added in `closure.rs`. See Findings. |
 | 7. Closure libraries and the stage tower | done | `caf7d865` | `CliMacroBackend` (`staple-cli/src/macro_backend.rs`) behind `--macro-engine=compiled` on `build`, `check`, `run`, `compile` and `expand`; `make_ready` builds one closure library per macro from a closure-only check program. The standard library bootstraps with 3 closure libraries (`if`, `when`, `typegroup`) in about 33 s. Review fixes: the effects check runs (it was passed its arguments swapped), closure programs register generated `companion` blocks, libraries are built for the host, no compiler panics on strict-mode fallbacks, doc comments before a modifier are read in streams, item sequences break lines before modifiers and `let`, the interpreter's static check no longer gates macros with libraries. See Findings. |
-| 8. Package libraries and macro-mode objects | not started | | |
+| 8. Package libraries and macro-mode objects | done | `18d6147a` | `MacroBackend::begin`/`available`/`prebuild`; `prepare_package_library` lowers a whole-package macro-mode check program, emitted as a plain package object; package libraries link it with their dependencies' macro-mode objects, a shim-only library object and the runtime. Closure libraries now emit only the expanding package and link dependency objects. Macro caches live under `<package>/target/staple/<host>/macros` and `$XDG_CACHE_HOME/staple/macros`; `install-stdlib.sh` prebuilds into `<stdlib>/target/<host>/macros`. Manifest module keys are package-relative paths (format 2). Tests are `#[ignore]`d and run by `scripts/test-macro-libraries.sh` in release. See Findings. |
 | 9. Caching | not started | | |
 | 10. Build cost | not started | | |
 | 11. Optimization | not started | | |
@@ -520,7 +520,23 @@ Update this section as you work (see "Rules for the implementor").
 
 ## Measurements
 
-_None yet._ For each one, record what was measured, the result, the machine, the
+Task 8, macOS 27 on an Apple M2, `aarch64-apple-darwin`, release `staple`,
+2026-11-24, commit `18d6147a`:
+
+- Cold standard-library package library (from a trivial user package's
+  `staple check --macro-engine=compiled`, `STAPLE_MACRO_STATS=1`): 8 closure
+  libraries in 76 s, the `std` package library in 142 s; 146 s total. A warm
+  cache takes 2.2 s.
+- Prebuilding the standard library into a copy's
+  `target/<host>/macros` from the warm user cache: 37 s, 0 package libraries
+  built (the three std closure libraries for the copy's own expansion).
+- A `first`/`second`/`macros` package graph, cold: `macros` in 146 s after
+  `std`; changing `macros` rebuilds it once, then `first` and `second`
+  (146 s for all three). A warm check takes 1.7 s.
+- A user package run from a prebuilt standard library, fresh cache: 0
+  package libraries, one closure library (`keep`) in 10 s, 13 s total.
+
+For each one, record what was measured, the result, the machine, the
 commit and the command. Include:
 
 - the standard library's bootstrap: library count and total time (task 7);
@@ -828,4 +844,83 @@ Record:
     reports a missing declaration, so nothing goes unchecked.
   - Task 6's `match` rewrites of functions that aren't on a cycle stay.
     Finding which can go back to `if` needs a closure check per function.
+
+### Task 8: Package libraries and macro-mode objects
+
+- **What a package library is.** `prepare_package_library` expands a package
+  with `CheckMode::All` and builds its whole-package macro-mode check program:
+  every item of the package is kept, every macro becomes a function (and an
+  entry when its parameters are typed), and dependencies are included whole
+  for resolution and checking. The object is emitted with
+  `EmissionUnit::packages([package])`, like a normal package object, and
+  cached as `<name>-macro-<fingerprint>.o`. The package library links that
+  object, its dependencies' macro-mode objects, one **shim-only** object
+  emitted with `EmissionUnit::packages([]).with_library(spec)`, and the runtime
+  object. The shim-only object carries `__staple_library_init`, the entry
+  shims, host binding, the `exit` trap, and calls every module initializer by
+  symbol; that keeps macro-mode objects shareable without duplicate library
+  symbols. A dependency's package library is built once, before any dependent
+  expands (`MacroBackend::begin`), and its entries are mapped to the current
+  program's declarations; `MacroBackend::available` then tells the expander to
+  skip a closure for those macros.
+- **Closure libraries changed shape.** A closure library now emits only the
+  expanding package (`EmissionUnit::packages([root])`) from its closure-only
+  check program and links its dependencies' macro-mode objects and the runtime.
+  The closure check still uses `whole_dependencies = false`, so it has every
+  closure item it needs; code generation declares the dependencies' exported
+  functions and emits internal copies of their generic and local ones. This is
+  what makes the "closure libraries link the dependencies' macro-mode objects"
+  decision work without duplicate definitions.
+- **Manifest module keys are package-relative paths.** A standard-library
+  library built with the standard library as its root named modules by
+  absolute file path, because its root modules were loaded by path; the same
+  package loaded as a dependency named them by dotted name. A dependent then
+  failed with ``references unknown module `std:/.../std/cmp.sta` ``. `module_key`
+  now uses the path relative to the package's source root (package name plus
+  `std/cmp.sta`), which is stable in both builds; `MANIFEST_FORMAT_VERSION` is
+  2 so older manifests are rebuilt.
+- **Check programs expand helper and macro bodies.** A macro provided by a
+  package library never computes a closure, so its package's compile-time
+  helpers are left as written by normal expansion; the whole-package check
+  program then resolved raw `if` calls inside `std.cmp`/`std.hash` helpers and
+  failed with ``macro `if` must be invoked``. With `CheckMode::All`, expansion
+  now expands every compile-time helper body and macro declaration body before
+  assembling the check snapshot (`expand_compile_time_helper`,
+  `expand_macro_declaration_for_check`), and those items replace the raw
+  `CheckSnapshot::compile_time` entries. This is also what lets a package
+  library check a package whose macros were never invoked.
+- **`Parse` implementation order held.** Whole-package check programs are built
+  from `CheckSnapshot::modules`, which `expand_program_checked` fills with the
+  compiled `Parse` implementations before the shared items, as the check module
+  already did. No ordering regression appeared; the cost is the whole
+  dependency type check, not obligation order (see below).
+- **Cache layout and prebuild.** Macro-mode objects, libraries and manifests
+  are read from `<package>/target/staple/<host>/macros`, the installed
+  standard library's `<stdlib>/target/<host>/macros`, and
+  `$XDG_CACHE_HOME/staple/macros`, in that order; non-std dependencies write
+  the user cache. `staple build --macro-engine=compiled` on a library root
+  emits and writes its own package library, and copies it into its own macro
+  directory when it came from the user cache. `scripts/install-stdlib.sh` runs
+  a second `staple build --macro-engine=compiled` after the normal objects, so
+  a fresh install contains the macro-mode object, package library and manifest.
+  `ensure_library` renames the library and its sidecar together; a manifest
+  that does not read or resolve is removed and rebuilt.
+- **Cost.** A cold standard library package library costs about 142 s in
+  release, of which 76 s is the eight closure libraries for the standard
+  library's own expansion. Each user package library re-expands and
+  type-checks the whole standard library dependency; a three-package graph
+  with one macro costs about 146 s after the standard library. This is the
+  task 10 target; the measurements above are the baseline.
+- **Slow tests.** The three task 8 tests build package libraries and are
+  `#[ignore]`d. `scripts/test-macro-libraries.sh` runs them with
+  `cargo test --release`, because the debug `staple` type-checks the whole
+  standard library for each package library (about 50 minutes in an
+  unoptimized build, against about 2.5 minutes optimized). The compiled-macro
+  integration tests share one standard-library cache per test binary through
+  `shared_cache`, so the standard library is built once there rather than once
+  per test.
+- **Prebuilt standard library check.** Running a user package with a fresh
+  cache against a copy whose `target/<host>/macros` came from the shared cache
+  builds no package libraries; the `if` calls go to the installed `std`
+  library and only the user macro gets a closure library.
 
