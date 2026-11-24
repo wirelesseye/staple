@@ -943,5 +943,27 @@ mod tests {
         assert_ne!(base[&PackageId(1)], diff_triple[&PackageId(1)]);
         assert_ne!(base[&PackageId(1)], diff_opt[&PackageId(1)]);
         assert_ne!(base[&PackageId(1)], diff_feat[&PackageId(1)]);
+
+        // A dependency's change reaches its dependents through its own
+        // macro-mode fingerprint; a dependent's change leaves it alone.
+        let fingerprints = || {
+            package_macro_fingerprints(
+                &graph,
+                &base_features,
+                &lowered,
+                Fingerprint(1),
+                "aarch64-apple-darwin",
+                "default",
+            )
+            .unwrap()
+        };
+        scratch.write("dep/src/lib.sta", "pub def x = 2\n");
+        let dep_changed = fingerprints();
+        assert_ne!(base[&PackageId(0)], dep_changed[&PackageId(0)]);
+        assert_ne!(base[&PackageId(1)], dep_changed[&PackageId(1)]);
+        scratch.write("app/src/lib.sta", "use dep0.x\npub def main = () => x + 1\n");
+        let app_changed = fingerprints();
+        assert_eq!(dep_changed[&PackageId(0)], app_changed[&PackageId(0)]);
+        assert_ne!(dep_changed[&PackageId(1)], app_changed[&PackageId(1)]);
     }
 }

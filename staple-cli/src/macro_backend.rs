@@ -5,7 +5,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use staple_compiler::macro_runtime::client::{LibraryHandle, MacroClient};
 use staple_compiler::macro_runtime::intrinsics;
-use staple_compiler::macro_runtime::manifest::{LibraryManifest, build_manifest};
+use staple_compiler::macro_runtime::canonical::canonical_items;
+use staple_compiler::macro_runtime::manifest::{LibraryManifest, build_manifest, stable_entry_key};
 use staple_compiler::macro_runtime::quote::CallContext;
 use staple_compiler::macro_runtime::instance_symbol;
 use staple_compiler::{
@@ -78,6 +79,9 @@ pub struct CliMacroBackend {
     /// Whether the pre-expansion phase ran, so closure libraries can rely on
     /// their dependencies' macro-mode objects.
     packages_prepared: bool,
+    /// Whether this backend expands a dependency for its package library,
+    /// which keeps its closure libraries out of the dependency's directory.
+    dependency_build: bool,
 }
 
 impl CliMacroBackend {
@@ -115,6 +119,7 @@ impl CliMacroBackend {
             packages,
             prepared_packages: HashSet::new(),
             packages_prepared: false,
+            dependency_build: !report_stats,
         })
     }
 
@@ -687,7 +692,8 @@ impl MacroBackend for CliMacroBackend {
             MACRO_OPTIMIZATION_LEVEL,
         )
         .map_err(internal)?;
-        let placement = closure_placement(request.program, package, &triple);
+        let placement =
+            closure_placement(request.program, package, &triple, self.dependency_build);
 
         let mut bad_cache = false;
         if let Some(cached_path) =
@@ -998,34 +1004,45 @@ fn sanitize_artifact_component(text: &str) -> String {
         .collect()
 }
 
+/// The cache name of a closure library: the macro's name for reading, then a
+/// hash of its stable key (package, module path, macro name and overload
+/// index). Every overload has its own name, so pruning one overload's stale
+/// libraries never removes another's, and names that clean to the same text
+/// stay distinct.
 fn closure_artifact_name(
     program: &Program,
     entry_meta: &[(staple_compiler::ModuleId, SyntaxId, String, String, Span)],
 ) -> String {
-    let (module, _, _, macro_name, _) = &entry_meta[0];
-    let pkg_name = program
-        .package_of(*module)
-        .and_then(|pkg| program.package_graph().map(|g| g.package(pkg).name.as_str()))
-        .unwrap_or("standalone");
-    let mod_name = program
-        .module_dotted_name(*module)
-        .unwrap_or_else(|| "root".to_owned());
+    let (module, declaration, entry_name, macro_name, _) = &entry_meta[0];
+    let key = stable_entry_key(program, *module, *declaration).unwrap_or_else(|| {
+        let module_name = program
+            .module_dotted_name(*module)
+            .unwrap_or_else(|| "root".to_owned());
+        format!("{module_name}#{entry_name}")
+    });
+    let mut hasher = cache::Hasher::new();
+    hasher.write_str(&key);
+    let hash = hasher.finish().to_string();
     format!(
-        "closure-{}-{}-{}",
-        sanitize_artifact_component(pkg_name),
-        sanitize_artifact_component(&mod_name),
-        sanitize_artifact_component(macro_name)
+        "closure-{}-{}",
+        sanitize_artifact_component(macro_name),
+        &hash[..16]
     )
 }
 
+/// Where a closure library of `package` is read and written. Only the
+/// package a build was asked for writes its own macro directory; a dependency
+/// expanded for its package library writes the user cache, as its package
+/// library does.
 fn closure_placement(
     program: &Program,
     package: Option<PackageId>,
     triple: &str,
+    dependency_build: bool,
 ) -> Placement {
     let is_root = package.is_some() && program.package_of(program.entry()) == package;
     if let Some(package) = package {
-        return macro_placement(program, package, triple, is_root);
+        return macro_placement(program, package, triple, is_root && !dependency_build);
     }
     let user = cache::user_cache_root().map(|root| root.join("macros"));
     let mut placement = Placement::default();
@@ -1105,53 +1122,10 @@ fn closure_library_fingerprint(
             .module_dotted_name(module.id)
             .unwrap_or_else(|| "root".to_owned());
         hasher.write_str(&mod_name);
-        hash_normalized_items(&mut hasher, &module.syntax.items);
+        hasher.write_str(&canonical_items(check_program, &module.syntax.items));
     }
 
     Ok(hasher.finish())
-}
-
-/// Hashes expanded items without `SyntaxId`s, `Span`s, or `token_range`s, so
-/// identical expanded ASTs and tokens (including earlier compiled-macro results)
-/// produce the same fingerprint across runs.
-fn hash_normalized_items(hasher: &mut cache::Hasher, items: &[staple_syntax::Item]) {
-    let dump = format!("{items:#?}");
-    let mut in_syntax = 0usize;
-    let mut skip_depth = 0usize;
-    for line in dump.lines() {
-        let trimmed = line.trim();
-        if skip_depth > 0 {
-            for ch in trimmed.chars() {
-                match ch {
-                    '{' | '[' | '(' => skip_depth += 1,
-                    '}' | ']' | ')' => skip_depth = skip_depth.saturating_sub(1),
-                    _ => {}
-                }
-            }
-            continue;
-        }
-        if trimmed.ends_with("Syntax {") {
-            in_syntax += 1;
-        } else if in_syntax > 0 && (trimmed == "}" || trimmed == "},") {
-            in_syntax -= 1;
-        } else if in_syntax > 0
-            && (trimmed.starts_with("id: SyntaxId(")
-                || trimmed.starts_with("span: ")
-                || trimmed.starts_with("token_range: "))
-        {
-            let opens: usize = trimmed
-                .chars()
-                .filter(|c| matches!(c, '{' | '[' | '('))
-                .count();
-            let closes: usize = trimmed
-                .chars()
-                .filter(|c| matches!(c, '}' | ']' | ')'))
-                .count();
-            skip_depth = opens.saturating_sub(closes);
-            continue;
-        }
-        hasher.write_str(line);
-    }
 }
 
 #[cfg(test)]
@@ -1159,23 +1133,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hash_normalized_items_ignores_syntax_ids_and_spans() {
-        let module_a = staple_syntax::parse("pub def x = 1\n").unwrap();
-        let mut module_b = staple_syntax::parse("pub def x = 1\n").unwrap();
-        if let staple_syntax::Item::Binding(binding) = &mut module_b.items[0] {
-            binding.syntax.id = SyntaxId(9000);
-            binding.syntax.span = Span::Compiler;
-        }
-        let module_c = staple_syntax::parse("pub def x = 2\n").unwrap();
-
-        let mut ha = cache::Hasher::new();
-        hash_normalized_items(&mut ha, &module_a.items);
-        let mut hb = cache::Hasher::new();
-        hash_normalized_items(&mut hb, &module_b.items);
-        let mut hc = cache::Hasher::new();
-        hash_normalized_items(&mut hc, &module_c.items);
-
-        assert_eq!(ha.finish(), hb.finish());
-        assert_ne!(ha.finish(), hc.finish());
+    fn each_overload_has_its_own_closure_library_name() {
+        let program = staple_compiler::ProgramLoader::new()
+            .load_source(
+                "macro m: Expr -> Expr = x => x\nmacro m: Type -> Type = x => x\n",
+                Path::new("."),
+            )
+            .expect("program loads");
+        let module = program.entry();
+        let names = program
+            .module(module)
+            .syntax
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                staple_syntax::Item::MacroDeclaration(declaration) => Some(closure_artifact_name(
+                    &program,
+                    &[(
+                        module,
+                        declaration.syntax.id,
+                        "entry#m".to_owned(),
+                        declaration.name.clone(),
+                        Span::Compiler,
+                    )],
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names.len(), 2);
+        assert_ne!(names[0], names[1]);
+        assert!(names.iter().all(|name| name.starts_with("closure-m-")), "{names:?}");
     }
 }

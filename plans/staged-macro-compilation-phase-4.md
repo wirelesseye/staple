@@ -1001,3 +1001,39 @@ Record:
     `2 passed; 0 failed` (cold build -> warm cache reuse with 0 libraries built
     -> single-macro closure edit rebuilds only that macro and prunes stale
     files -> corrupt manifest triggers rebuild).
+
+### Review of task 9
+
+- **Closure fingerprints held compilation numbers.** `hash_normalized_items`
+  hashed a debug dump of the check program and dropped only `id`, `span` and
+  `token_range` lines. `Syntax` also prints `expansion_mark` (one counter for
+  every expansion), `definition_module` (a module number),
+  `identifier_origins` (spans) and its text with formatting, and a hygienic
+  name carries its mark as `name__macro_<n>`. Adding one `if` call to `main`,
+  which no closure contains, rebuilt a macro's library. The task 9 test missed
+  it because its edit kept the same length and added no expansion. The key
+  now hashes `macro_runtime::canonical::canonical_items` for each module:
+  every `Syntax` reduced to its `pipe_stage` flag and the name of the module
+  its names resolve in, and hygiene numbers renumbered by first appearance.
+  The expansion comparison's tree dump shares the same helpers, moved out of
+  the test-only `compare` module. The integration test now edits a macro so
+  later items move, then edits only `main` and expects no rebuild.
+- **Overloads shared a library name.** Closure libraries were named
+  `closure-<package>-<module>-<macro>`, without the overload index, and the
+  root package's directory prunes by name, so two overloads of one macro
+  removed each other's libraries on every build. Names are now
+  `closure-<macro>-<hash of the stable key>`, the key being package, module
+  path, macro name and overload index (`manifest::stable_entry_key`).
+- **Dependency builds wrote their own directories.** `closure_placement`
+  took the expanded program's entry as the root package, and a dependency
+  expanded for its package library is its own entry, so its closure libraries
+  went to `<dep>/target/staple/<host>/macros` (or the standard library's
+  install directory). Only the backend a build started writes its package's
+  directory now; a dependency's backend writes the user cache, as its package
+  library does. The shared-library test checks no dependency gets a `target`.
+- **Tests.** The macro-mode fingerprint test now changes a dependency and a
+  dependent; it previously changed neither.
+- **Left as is.** A bad cached library in a directory the compiler can't
+  write (an installed standard library) is rebuilt into the user cache, but
+  the next build reads the bad one first and rebuilds again.
+

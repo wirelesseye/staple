@@ -171,6 +171,23 @@ pub(crate) fn macro_overload_key(
     None
 }
 
+/// The stable key of the macro overload `declaration_id` in `module`, as
+/// text: package, module path, macro name and overload index. It names the
+/// same overload in every compilation, so a cache can name its library by it.
+pub fn stable_entry_key(
+    program: &Program,
+    module: ModuleId,
+    declaration_id: SyntaxId,
+) -> Option<String> {
+    let key = macro_overload_key(program, module, declaration_id)?;
+    Some(format!(
+        "{}#{}#{}",
+        key.module.display(),
+        key.macro_name,
+        key.overload_index
+    ))
+}
+
 /// Builds a [`LibraryManifest`] from `(module, declaration_id, shim_symbol)`
 /// entries and `templates`.
 ///

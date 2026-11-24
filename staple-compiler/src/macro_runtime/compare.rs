@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::macro_runtime::canonical;
 use crate::macro_expand::check_program::{CheckMode, check_programs, entry_function_name};
 use crate::macro_expand::compiled_call::{
     ClosureLibraryRequest, CompiledCall, MacroBackend, record_calls, with_macro_backend,
@@ -369,7 +370,7 @@ fn resolve_and_check(program: &Program, next_syntax_id: usize) -> Vec<String> {
 pub(crate) fn tree_dump(program: &Program) -> String {
     let dump = format!("{:#?}", program.module(program.entry()).syntax.items);
     let dump = canonical_lets(&same_resolution_names(&drop_syntax(&dump)));
-    renumber_hygiene(&single_elements(&dump))
+    canonical::renumber_hygiene(&single_elements(&dump))
 }
 
 /// Writes a parenthesized expression of one unnamed element as the element.
@@ -468,41 +469,9 @@ fn single_element(lines: &[&str], start: usize) -> Option<(Vec<String>, usize)> 
 
 /// Replaces each `Syntax { ... }` in a debug dump with its `pipe_stage` flag.
 fn drop_syntax(dump: &str) -> String {
-    let marker = "Syntax {";
-    let mut output = String::with_capacity(dump.len() / 2);
-    let mut rest = dump;
-    while let Some(position) = rest.find(marker) {
-        // `CallExpr` and the like end in `Syntax` too, so only a whole word
-        // starts a `Syntax` value.
-        let whole = rest[..position]
-            .chars()
-            .next_back()
-            .is_none_or(|character| !character.is_alphanumeric() && character != '_');
-        if !whole {
-            output.push_str(&rest[..position + marker.len()]);
-            rest = &rest[position + marker.len()..];
-            continue;
-        }
-        output.push_str(&rest[..position]);
-        let body_start = position + marker.len();
-        let end = closing_brace(&rest[body_start..]).map(|end| body_start + end);
-        let Some(end) = end else {
-            output.push_str(&rest[position..]);
-            return output;
-        };
-        let body = &rest[body_start..end];
-        let flag = |name: &str| {
-            body.split_once(&format!("{name}: "))
-                .and_then(|(_, value)| value.split([',', '\n']).next())
-                .unwrap_or("?")
-                .trim()
-                .to_owned()
-        };
-        output.push_str(&format!("Syntax {{ pipe_stage: {} }}", flag("pipe_stage")));
-        rest = &rest[end + 1..];
-    }
-    output.push_str(rest);
-    output
+    canonical::drop_syntax_with(dump, &|body| {
+        format!("Syntax {{ pipe_stage: {} }}", canonical::field(body, "pipe_stage"))
+    })
 }
 
 /// Writes a `resolution_name` that repeats the binding's name as `None`.
@@ -680,60 +649,6 @@ fn canonical_let(lines: &[&str], start: usize) -> Option<(Vec<String>, usize)> {
     canonical.extend(value);
     canonical.push(lines[end].to_owned());
     Some((canonical, end + 1))
-}
-
-/// The offset of the `}` that closes a brace already opened, skipping string
-/// literals.
-fn closing_brace(text: &str) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (offset, character) in text.char_indices() {
-        if in_string {
-            match character {
-                _ if escaped => escaped = false,
-                '\\' => escaped = true,
-                '"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match character {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' if depth == 0 => return Some(offset),
-            '}' => depth -= 1,
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Replaces every `__macro_<n>` number with its order of first appearance, as
-/// the expansion comparison script does.
-fn renumber_hygiene(text: &str) -> String {
-    let marker = "__macro_";
-    let mut numbers: HashMap<String, usize> = HashMap::new();
-    let mut output = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(position) = rest.find(marker) {
-        let (before, after) = rest.split_at(position + marker.len());
-        output.push_str(before);
-        let digits = after
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect::<String>();
-        if digits.is_empty() {
-            rest = after;
-            continue;
-        }
-        let next = numbers.len();
-        let number = *numbers.entry(digits.clone()).or_insert(next);
-        output.push_str(&number.to_string());
-        rest = &after[digits.len()..];
-    }
-    output.push_str(rest);
-    output
 }
 
 #[cfg(test)]

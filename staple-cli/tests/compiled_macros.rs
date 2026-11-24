@@ -505,6 +505,13 @@ fn dependents_share_a_package_library() {
     );
     assert!(packages.iter().any(|name| name == "first"), "{packages:?}");
     assert!(packages.iter().any(|name| name == "second"), "{packages:?}");
+    // Dependencies are built into the user cache, never their own directory.
+    for dependency in ["macros", "first", "second"] {
+        assert!(
+            !temp.0.join(dependency).join("target").exists(),
+            "`{dependency}` was written to: {stats}"
+        );
+    }
 }
 
 #[test]
@@ -706,15 +713,17 @@ macro first_macro: Expr -> Expr = value => {
     parse_quote { ($cloned) + 1 }
 }
 
+// A longer body, so every later item moves.
 macro second_macro: Expr -> Expr = value => {
     let cloned = Clone.clone value
-    parse_quote { ($cloned) + 3 }
+    let doubled = Clone.clone cloned
+    parse_quote { ($doubled) + 300 }
 }
 
 pub def main = () => {
     let a = first_macro 10
     let b = second_macro 10
-    if (a + b == 24) { println \"ok\" } else { println \"no\" }
+    if (a + b == 321) { println \"ok\" } else { println \"no\" }
 }
 ",
     )
@@ -731,6 +740,26 @@ pub def main = () => {
         third_closures,
         vec!["second_macro".to_owned()],
         "only second_macro should rebuild: {third_stats}"
+    );
+
+    // Editing only `main`, which no closure contains, rebuilds nothing, even
+    // though its new `if` call takes an expansion mark before the macros'.
+    let source = fs::read_to_string(pkg.join("src/main.sta")).unwrap();
+    let source = source.replace(
+        "pub def main = () => {\n",
+        "pub def main = () => {\n    if (1 == 1) { println \"first\" } else { println \"never\" }\n",
+    );
+    fs::write(pkg.join("src/main.sta"), source).unwrap();
+    let fourth = staple_cmd(&pkg, &cache)
+        .args(["check", "--macro-engine=compiled", "--stdlib"])
+        .arg(&stdlib)
+        .output()
+        .unwrap();
+    let fourth_stats = String::from_utf8_lossy(&fourth.stderr);
+    assert!(fourth.status.success(), "fourth check failed: {fourth_stats}");
+    assert!(
+        closure_libraries(&fourth_stats).is_empty(),
+        "an edit outside every closure rebuilds nothing: {fourth_stats}"
     );
 }
 
