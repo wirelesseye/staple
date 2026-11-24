@@ -19,6 +19,8 @@ use staple_syntax::{Diagnostic, Span, Syntax, SyntaxId};
 use crate::cache::{self, Destination, Placement};
 use crate::compile;
 
+const MACRO_OPTIMIZATION_LEVEL: &str = "default";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MacroEngine {
     #[default]
@@ -162,6 +164,7 @@ impl CliMacroBackend {
         let triple = cache::target_triple(None);
         let placement = macro_placement(program, package, &triple, write_own_directory);
         let extension = compile::shared_library_extension();
+        let mut bad_cache = false;
         if let Some((library_path, object_path)) =
             find_cached_library(&placement.read, &name, fingerprint, extension)
         {
@@ -180,6 +183,7 @@ impl CliMacroBackend {
             }
             // A library whose manifest doesn't read or resolve is not
             // trusted; a writable copy is replaced by the build below.
+            bad_cache = true;
             let _ = std::fs::remove_file(&library_path);
             let _ = std::fs::remove_file(library_path.with_extension("manifest"));
             let _ = std::fs::remove_file(&object_path);
@@ -195,7 +199,22 @@ impl CliMacroBackend {
             }
             diagnostics
         })?;
-        self.emit_package_library(program, package, &build, &placement, fingerprint, extension)?;
+        let build_placement = if bad_cache {
+            Placement {
+                read: Vec::new(),
+                write: placement.write,
+            }
+        } else {
+            placement
+        };
+        self.emit_package_library(
+            program,
+            package,
+            &build,
+            &build_placement,
+            fingerprint,
+            extension,
+        )?;
         {
             let mut stats = self.stats.lock().expect("macro stats");
             stats.package_libraries.push(name.clone());
@@ -638,6 +657,54 @@ impl MacroBackend for CliMacroBackend {
         // Errors that aren't about the source are reported at the call.
         let internal = |message: String| vec![Diagnostic::new(Span::Compiler, message)];
 
+        let package = request.program.package_of(manifest_entries_module(&entry_meta));
+        let triple = cache::target_triple(None);
+        let extension = compile::shared_library_extension();
+        let lib_name = closure_artifact_name(request.program, &entry_meta);
+        let dep_fingerprints = if let (Some(pkg), Some(graph)) =
+            (package, request.program.package_graph())
+        {
+            let mut deps = Vec::new();
+            for dep in dependency_order(graph, Some(pkg)) {
+                if dep == pkg {
+                    continue;
+                }
+                deps.push((
+                    graph.package(dep).name.clone(),
+                    self.package_fingerprint(request.program, dep)?,
+                ));
+            }
+            deps
+        } else {
+            Vec::new()
+        };
+        let fingerprint = closure_library_fingerprint(
+            request.program,
+            &request.check_program,
+            &entry_meta,
+            &dep_fingerprints,
+            &triple,
+            MACRO_OPTIMIZATION_LEVEL,
+        )
+        .map_err(internal)?;
+        let placement = closure_placement(request.program, package, &triple);
+
+        let mut bad_cache = false;
+        if let Some(cached_path) =
+            find_cached_closure_library(&placement.read, &lib_name, fingerprint, extension)
+        {
+            let loaded = LibraryManifest::read_beside(&cached_path).is_ok_and(|manifest| {
+                self.load_manifest(request.program, &cached_path, &manifest)
+                    .is_ok()
+            });
+            if loaded {
+                return Ok(request.entries.iter().map(|(_, id, _)| *id).collect());
+            }
+            bad_cache = true;
+            let _ = std::fs::remove_file(&cached_path);
+            let _ = std::fs::remove_file(cached_path.with_extension("manifest"));
+        }
+
         let resolved =
             NameResolver::pre_expanded(request.next_syntax_id).resolve_program(request.check_program)?;
         let typed = TypeChecker::new().check(resolved)?;
@@ -672,10 +739,6 @@ impl MacroBackend for CliMacroBackend {
         let lib_id = self.next_library_id;
         self.next_library_id += 1;
         let obj_path = self.temp_dir.join(format!("closure-{lib_id}.o"));
-        let dylib_path = self.temp_dir.join(format!(
-            "closure-{lib_id}.{}",
-            compile::shared_library_extension()
-        ));
 
         let spec = LibrarySpec {
             entries: entry_symbols,
@@ -684,7 +747,6 @@ impl MacroBackend for CliMacroBackend {
         };
         let context = inkwell::context::Context::create();
         let generator = CodeGenerator::new(&context);
-        let package = request.program.package_of(manifest_entries[0].0);
         let unit = if self.packages_prepared && package.is_some() {
             EmissionUnit::packages([package.expect("a package")]).with_library(spec)
         } else {
@@ -694,22 +756,33 @@ impl MacroBackend for CliMacroBackend {
 
         let mut objects = vec![obj_path];
         if self.packages_prepared {
-            if let Some(package) = package {
-                objects.extend(self.dependency_objects(request.program, package)?);
-                let placement = macro_placement(
-                    request.program,
-                    package,
-                    &cache::target_triple(None),
-                    false,
-                );
-                objects.push(self.runtime_object(&generator, &placement)?);
+            if let Some(pkg) = package {
+                objects.extend(self.dependency_objects(request.program, pkg)?);
+                let rt_placement = macro_placement(request.program, pkg, &triple, false);
+                objects.push(self.runtime_object(&generator, &rt_placement)?);
             }
         }
-        compile::link_host_shared_library(&objects, &dylib_path).map_err(internal)?;
-
         let manifest = build_manifest(request.program, &manifest_entries, &request.templates)
             .map_err(internal)?;
-        manifest.write_beside(&dylib_path).map_err(internal)?;
+        let write_placement = if bad_cache {
+            Placement {
+                read: Vec::new(),
+                write: placement.write,
+            }
+        } else {
+            placement
+        };
+        let dylib_path = cache::ensure_library(
+            &write_placement,
+            &lib_name,
+            fingerprint,
+            extension,
+            &mut |temporary_dylib| {
+                compile::link_host_shared_library(&objects, temporary_dylib)?;
+                manifest.write_beside(temporary_dylib)
+            },
+        )
+        .map_err(internal)?;
         let loaded = manifest
             .resolve(request.program, &dylib_path)
             .map_err(internal)?;
@@ -776,7 +849,8 @@ fn dependency_order(graph: &PackageGraph, root: Option<PackageId>) -> Vec<Packag
 }
 
 /// The macro-mode fingerprint of every package: the normal package fingerprint
-/// (compiler, host, sources, features and dependencies) with a macro-mode tag.
+/// inputs plus a macro-mode tag, the optimization level, and each dependency's
+/// own macro-mode fingerprint.
 fn package_macro_fingerprints(
     graph: &PackageGraph,
     active: &ActiveFeatures,
@@ -799,16 +873,14 @@ fn package_macro_fingerprints(
         .collect::<Vec<_>>();
     let identity = cache::compiler_identity()?;
     let triple = cache::target_triple(None);
-    let base = cache::package_fingerprints(graph, active, &packages, identity, &triple)?;
-    Ok(base
-        .into_iter()
-        .map(|(package, fingerprint)| {
-            let mut hasher = cache::Hasher::new();
-            hasher.write_str("macro-mode");
-            hasher.write_fingerprint(fingerprint);
-            (package, hasher.finish())
-        })
-        .collect())
+    cache::package_macro_fingerprints(
+        graph,
+        active,
+        &packages,
+        identity,
+        &triple,
+        MACRO_OPTIMIZATION_LEVEL,
+    )
 }
 
 /// Whether `package` is the standard library, whose prebuilt macros live in
@@ -906,4 +978,204 @@ fn find_cached_library(
         }
     }
     None
+}
+
+fn manifest_entries_module(
+    entry_meta: &[(staple_compiler::ModuleId, SyntaxId, String, String, Span)],
+) -> staple_compiler::ModuleId {
+    entry_meta[0].0
+}
+
+fn sanitize_artifact_component(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn closure_artifact_name(
+    program: &Program,
+    entry_meta: &[(staple_compiler::ModuleId, SyntaxId, String, String, Span)],
+) -> String {
+    let (module, _, _, macro_name, _) = &entry_meta[0];
+    let pkg_name = program
+        .package_of(*module)
+        .and_then(|pkg| program.package_graph().map(|g| g.package(pkg).name.as_str()))
+        .unwrap_or("standalone");
+    let mod_name = program
+        .module_dotted_name(*module)
+        .unwrap_or_else(|| "root".to_owned());
+    format!(
+        "closure-{}-{}-{}",
+        sanitize_artifact_component(pkg_name),
+        sanitize_artifact_component(&mod_name),
+        sanitize_artifact_component(macro_name)
+    )
+}
+
+fn closure_placement(
+    program: &Program,
+    package: Option<PackageId>,
+    triple: &str,
+) -> Placement {
+    let is_root = package.is_some() && program.package_of(program.entry()) == package;
+    if let Some(package) = package {
+        return macro_placement(program, package, triple, is_root);
+    }
+    let user = cache::user_cache_root().map(|root| root.join("macros"));
+    let mut placement = Placement::default();
+    if let Some(user) = user {
+        placement.read.push(user.clone());
+        placement.write.push(Destination {
+            directory: user,
+            prune: false,
+        });
+    }
+    placement
+}
+
+fn find_cached_closure_library(
+    read: &[PathBuf],
+    name: &str,
+    fingerprint: cache::Fingerprint,
+    extension: &str,
+) -> Option<PathBuf> {
+    let library = format!("{name}-{fingerprint}.{extension}");
+    for directory in read {
+        let library_path = directory.join(&library);
+        if library_path.is_file() && library_path.with_extension("manifest").is_file() {
+            return Some(library_path);
+        }
+    }
+    None
+}
+
+fn closure_library_fingerprint(
+    program: &Program,
+    check_program: &Program,
+    entry_meta: &[(staple_compiler::ModuleId, SyntaxId, String, String, Span)],
+    dependency_fingerprints: &[(String, cache::Fingerprint)],
+    triple: &str,
+    opt_level: &str,
+) -> Result<cache::Fingerprint, String> {
+    let identity = cache::compiler_identity()?;
+    let mut hasher = cache::Hasher::new();
+    hasher.write_str("closure-library");
+    hasher.write_str(opt_level);
+    hasher.write_fingerprint(identity);
+    hasher.write_str(triple);
+
+    let package = program.package_of(manifest_entries_module(entry_meta));
+    let mut features = package
+        .and_then(|pkg| program.active_features().get(&pkg))
+        .map(|features| features.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    features.sort();
+    hasher.write(&(features.len() as u64).to_le_bytes());
+    for feature in &features {
+        hasher.write_str(feature);
+    }
+
+    hasher.write(&(dependency_fingerprints.len() as u64).to_le_bytes());
+    for (dep_name, dep_fp) in dependency_fingerprints {
+        hasher.write_str(dep_name);
+        hasher.write_fingerprint(*dep_fp);
+    }
+
+    hasher.write(&(entry_meta.len() as u64).to_le_bytes());
+    for (module, _, entry_name, macro_name, _) in entry_meta {
+        let mod_name = program
+            .module_dotted_name(*module)
+            .unwrap_or_else(|| "root".to_owned());
+        hasher.write_str(&mod_name);
+        hasher.write_str(entry_name);
+        hasher.write_str(macro_name);
+    }
+
+    for module in check_program.modules() {
+        if module.syntax.items.is_empty() {
+            continue;
+        }
+        let mod_name = check_program
+            .module_dotted_name(module.id)
+            .unwrap_or_else(|| "root".to_owned());
+        hasher.write_str(&mod_name);
+        hash_normalized_items(&mut hasher, &module.syntax.items);
+    }
+
+    Ok(hasher.finish())
+}
+
+/// Hashes expanded items without `SyntaxId`s, `Span`s, or `token_range`s, so
+/// identical expanded ASTs and tokens (including earlier compiled-macro results)
+/// produce the same fingerprint across runs.
+fn hash_normalized_items(hasher: &mut cache::Hasher, items: &[staple_syntax::Item]) {
+    let dump = format!("{items:#?}");
+    let mut in_syntax = 0usize;
+    let mut skip_depth = 0usize;
+    for line in dump.lines() {
+        let trimmed = line.trim();
+        if skip_depth > 0 {
+            for ch in trimmed.chars() {
+                match ch {
+                    '{' | '[' | '(' => skip_depth += 1,
+                    '}' | ']' | ')' => skip_depth = skip_depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        if trimmed.ends_with("Syntax {") {
+            in_syntax += 1;
+        } else if in_syntax > 0 && (trimmed == "}" || trimmed == "},") {
+            in_syntax -= 1;
+        } else if in_syntax > 0
+            && (trimmed.starts_with("id: SyntaxId(")
+                || trimmed.starts_with("span: ")
+                || trimmed.starts_with("token_range: "))
+        {
+            let opens: usize = trimmed
+                .chars()
+                .filter(|c| matches!(c, '{' | '[' | '('))
+                .count();
+            let closes: usize = trimmed
+                .chars()
+                .filter(|c| matches!(c, '}' | ']' | ')'))
+                .count();
+            skip_depth = opens.saturating_sub(closes);
+            continue;
+        }
+        hasher.write_str(line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_normalized_items_ignores_syntax_ids_and_spans() {
+        let module_a = staple_syntax::parse("pub def x = 1\n").unwrap();
+        let mut module_b = staple_syntax::parse("pub def x = 1\n").unwrap();
+        if let staple_syntax::Item::Binding(binding) = &mut module_b.items[0] {
+            binding.syntax.id = SyntaxId(9000);
+            binding.syntax.span = Span::Compiler;
+        }
+        let module_c = staple_syntax::parse("pub def x = 2\n").unwrap();
+
+        let mut ha = cache::Hasher::new();
+        hash_normalized_items(&mut ha, &module_a.items);
+        let mut hb = cache::Hasher::new();
+        hash_normalized_items(&mut hb, &module_b.items);
+        let mut hc = cache::Hasher::new();
+        hash_normalized_items(&mut hc, &module_c.items);
+
+        assert_eq!(ha.finish(), hb.finish());
+        assert_ne!(ha.finish(), hc.finish());
+    }
 }

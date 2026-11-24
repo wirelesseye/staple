@@ -511,7 +511,7 @@ Update this section as you work (see "Rules for the implementor").
 | 6. The quotation cycle and generated-item loops | done | `1d473565` | `Expression::Quote` in `macro_expand/scan.rs` now records `__quote`/`Parse.parse_quote`, `Sequence`, and `Splice`; `StdModules` carries `syntax`. Rewrote `if`/`when`/`for`/`while` to `match`/`loop` across `std.syntax` and all stdlib modules reached by `if`/syntax runtime; `check-macro-closures.py --mode all --jobs 2` passes (232 inputs, 0 diagnostics). `compare-expansion.py` against `88fdea78` matches 218/232 (only the 14 edited stdlib modules differ). Unit tests added in `closure.rs`. See Findings. |
 | 7. Closure libraries and the stage tower | done | `caf7d865` | `CliMacroBackend` (`staple-cli/src/macro_backend.rs`) behind `--macro-engine=compiled` on `build`, `check`, `run`, `compile` and `expand`; `make_ready` builds one closure library per macro from a closure-only check program. The standard library bootstraps with 3 closure libraries (`if`, `when`, `typegroup`) in about 33 s. Review fixes: the effects check runs (it was passed its arguments swapped), closure programs register generated `companion` blocks, libraries are built for the host, no compiler panics on strict-mode fallbacks, doc comments before a modifier are read in streams, item sequences break lines before modifiers and `let`, the interpreter's static check no longer gates macros with libraries. See Findings. |
 | 8. Package libraries and macro-mode objects | done | `18d6147a`, `5e712235`, `62cdacbb` | `MacroBackend::begin`/`available`/`prebuild`; `prepare_package_library` lowers a whole-package macro-mode check program, emitted as a plain package object; package libraries link it with their dependencies' macro-mode objects, a shim-only library object and the runtime. Closure libraries now emit only the expanding package and link dependency objects. Macro caches live under `<package>/target/staple/<host>/macros` and `$XDG_CACHE_HOME/staple/macros`; `install-stdlib.sh` prebuilds into `<stdlib>/target/<host>/macros`. Manifest module keys are package-relative paths (format 2). Tests are `#[ignore]`d and run by `scripts/test-macro-libraries.sh` in release. See Findings. |
-| 9. Caching | not started | | |
+| 9. Caching | done | | |
 | 10. Build cost | not started | | |
 | 11. Optimization | not started | | |
 | 12. End to end | not started | | |
@@ -968,3 +968,36 @@ Record:
   instead of its own copy, and a no-op `map_err` is gone.
 - **Verified.** `check-macro-closures.py --mode all` at `4554b1b9`: 232
   inputs, 0 diagnostics.
+
+### Task 9: Caching
+
+- **Macro-mode dependency fingerprints.** `cache::package_macro_fingerprints`
+  now hashes `"macro-mode"`, the optimization level (`MACRO_OPTIMIZATION_LEVEL`),
+  compiler identity, host triple, package metadata, sorted active features,
+  source files, and each dependency's own macro-mode fingerprint (replacing
+  the provisional Task 8 wrapper over normal package fingerprints).
+- **Closure library fingerprinting and caching.** `CliMacroBackend::prepare`
+  computes `closure_library_fingerprint` from the optimization level, compiler
+  identity, host triple, sorted active features, dependency macro-mode
+  fingerprints, entry metadata, and normalized expanded `check_program` items
+  (`hash_normalized_items` strips `SyntaxId`s, `Span`s, and `token_range`s so
+  earlier compiled-macro results are included while compilation-specific IDs
+  are excluded).
+- **Atomic writes, manifest/version validation, and pruning.** Closure libraries
+  use `cache::ensure_library` (renaming `.manifest` before the library) and
+  `closure_placement` (`<pkg>/target/staple/<triple>/macros` with `prune: true`
+  for the root package, `$XDG_CACHE_HOME/staple/macros` with `prune: false`
+  otherwise). Both `prepare_package` and `prepare` validate `read_beside` +
+  `load_manifest` before trusting any cached library and rebuild into a
+  write-only placement if reading or resolving fails (even if the bad cache is
+  read-only).
+- **Verification.**
+  - `cargo test -p staple --bin staple macro_backend::tests`: `1 passed; 0 failed`
+    (`hash_normalized_items_ignores_syntax_ids_and_spans`).
+  - `cargo test -p staple --bin staple cache::tests`: `13 passed; 0 failed`
+    (includes `two_threads_build_the_same_library_concurrently` and
+    `macro_fingerprints_depend_on_identity_triple_features_opt_level_and_dependencies`).
+  - `cargo test --release -p staple --test compiled_macros -- --ignored --test-threads=1 second_build_reuses_cache corrupt_manifest_rebuilds_closure_library`:
+    `2 passed; 0 failed` (cold build -> warm cache reuse with 0 libraries built
+    -> single-macro closure edit rebuilds only that macro and prunes stale
+    files -> corrupt manifest triggers rebuild).

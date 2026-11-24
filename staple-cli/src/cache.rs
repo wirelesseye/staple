@@ -187,11 +187,48 @@ pub fn package_fingerprints(
     identity: Fingerprint,
     triple: &str,
 ) -> Result<HashMap<PackageId, Fingerprint>, String> {
+    package_fingerprints_with("package", None, graph, active, packages, identity, triple)
+}
+
+/// Macro-mode fingerprints for every package of `packages` (ordered
+/// dependencies first), incorporating `opt_level` and each dependency's own
+/// macro-mode fingerprint.
+pub fn package_macro_fingerprints(
+    graph: &PackageGraph,
+    active: &ActiveFeatures,
+    packages: &[LoweredPackage],
+    identity: Fingerprint,
+    triple: &str,
+    opt_level: &str,
+) -> Result<HashMap<PackageId, Fingerprint>, String> {
+    package_fingerprints_with(
+        "macro-mode",
+        Some(opt_level),
+        graph,
+        active,
+        packages,
+        identity,
+        triple,
+    )
+}
+
+fn package_fingerprints_with(
+    tag: &str,
+    opt_level: Option<&str>,
+    graph: &PackageGraph,
+    active: &ActiveFeatures,
+    packages: &[LoweredPackage],
+    identity: Fingerprint,
+    triple: &str,
+) -> Result<HashMap<PackageId, Fingerprint>, String> {
     let mut fingerprints = HashMap::new();
     for lowered in packages {
         let package = graph.package(lowered.id);
         let mut hasher = Hasher::new();
-        hasher.write_str("package");
+        hasher.write_str(tag);
+        if let Some(opt_level) = opt_level {
+            hasher.write_str(opt_level);
+        }
         hasher.write_fingerprint(identity);
         hasher.write_str(triple);
         hasher.write_str(&package.name);
@@ -784,5 +821,127 @@ mod tests {
         })
         .unwrap();
         assert!(path.starts_with(scratch.0.join("fallback")));
+    }
+
+    #[test]
+    fn two_threads_build_the_same_library_concurrently() {
+        let scratch = Scratch::new();
+        let cache = scratch.0.join("cache");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for id in 0..2 {
+            let cache = cache.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                let placement = Placement {
+                    read: vec![cache.clone()],
+                    write: vec![Destination {
+                        directory: cache,
+                        prune: false,
+                    }],
+                };
+                barrier.wait();
+                ensure_library(&placement, "closure-m", Fingerprint(9), "dylib", &mut |path| {
+                    // Stagger completion slightly so both threads race on rename.
+                    if id == 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    std::fs::write(path, b"dylib-bytes").map_err(|e| e.to_string())?;
+                    std::fs::write(path.with_extension("manifest"), b"manifest-bytes")
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap()
+            }));
+        }
+        let first = handles.remove(0).join().unwrap();
+        let second = handles.remove(0).join().unwrap();
+        assert_eq!(first, second);
+        assert_eq!(std::fs::read(&first).unwrap(), b"dylib-bytes");
+        assert_eq!(
+            std::fs::read(first.with_extension("manifest")).unwrap(),
+            b"manifest-bytes"
+        );
+        // No temporary files should remain after both atomic renames settle.
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn macro_fingerprints_depend_on_identity_triple_features_opt_level_and_dependencies() {
+        let scratch = Scratch::new();
+        scratch.write("dep/src/lib.sta", "pub def x = 1\n");
+        scratch.write("app/src/lib.sta", "use dep0.x\npub def main = () => x\n");
+        let graph = PackageGraph {
+            root: PackageId(1),
+            packages: vec![
+                package(&scratch, "dep", &[]),
+                package(&scratch, "app", &[0]),
+            ],
+        };
+        let lowered = vec![
+            LoweredPackage {
+                id: PackageId(0),
+                name: "dep".to_owned(),
+                is_root: false,
+                dependencies: Vec::new(),
+            },
+            LoweredPackage {
+                id: PackageId(1),
+                name: "app".to_owned(),
+                is_root: true,
+                dependencies: vec![PackageId(0)],
+            },
+        ];
+        let base_features = ActiveFeatures::new();
+        let base = package_macro_fingerprints(
+            &graph,
+            &base_features,
+            &lowered,
+            Fingerprint(1),
+            "aarch64-apple-darwin",
+            "default",
+        )
+        .unwrap();
+        let diff_id = package_macro_fingerprints(
+            &graph,
+            &base_features,
+            &lowered,
+            Fingerprint(2),
+            "aarch64-apple-darwin",
+            "default",
+        )
+        .unwrap();
+        let diff_triple = package_macro_fingerprints(
+            &graph,
+            &base_features,
+            &lowered,
+            Fingerprint(1),
+            "x86_64-unknown-linux-gnu",
+            "default",
+        )
+        .unwrap();
+        let diff_opt = package_macro_fingerprints(
+            &graph,
+            &base_features,
+            &lowered,
+            Fingerprint(1),
+            "aarch64-apple-darwin",
+            "O2",
+        )
+        .unwrap();
+        let mut with_feature = ActiveFeatures::new();
+        with_feature.insert(PackageId(1), ["extra".to_owned()].into_iter().collect());
+        let diff_feat = package_macro_fingerprints(
+            &graph,
+            &with_feature,
+            &lowered,
+            Fingerprint(1),
+            "aarch64-apple-darwin",
+            "default",
+        )
+        .unwrap();
+        assert_ne!(base[&PackageId(1)], diff_id[&PackageId(1)]);
+        assert_ne!(base[&PackageId(1)], diff_triple[&PackageId(1)]);
+        assert_ne!(base[&PackageId(1)], diff_opt[&PackageId(1)]);
+        assert_ne!(base[&PackageId(1)], diff_feat[&PackageId(1)]);
     }
 }

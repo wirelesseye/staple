@@ -624,3 +624,185 @@ pub def main = () => {
         "the standard library's macros come from the install: {closures:?}"
     );
 }
+
+#[test]
+#[ignore = "builds the standard library's package library; run via scripts/test-macro-libraries.sh"]
+fn second_build_reuses_cache_and_closure_change_rebuilds_only_that_macro() {
+    let temp = TempDir::new("cache-reuse");
+    let cache = temp.0.join("cache");
+    let stdlib = repo_root().join("stdlib");
+    let pkg = write_package(
+        &temp.0,
+        "cache_reuse",
+        "\
+use std.syntax.*
+use std.flow.if
+use std.io.println
+use std.clone.Clone
+
+macro first_macro: Expr -> Expr = value => {
+    let cloned = Clone.clone value
+    parse_quote { ($cloned) + 1 }
+}
+
+macro second_macro: Expr -> Expr = value => {
+    let cloned = Clone.clone value
+    parse_quote { ($cloned) + 2 }
+}
+
+pub def main = () => {
+    let a = first_macro 10
+    let b = second_macro 10
+    if (a + b == 23) { println \"ok\" } else { println \"no\" }
+}
+",
+    );
+
+    let first = staple_cmd(&pkg, &cache)
+        .args(["check", "--macro-engine=compiled", "--stdlib"])
+        .arg(&stdlib)
+        .output()
+        .unwrap();
+    let first_stats = String::from_utf8_lossy(&first.stderr);
+    assert!(first.status.success(), "first check failed: {first_stats}");
+    let first_closures = closure_libraries(&first_stats);
+    assert!(
+        first_closures.iter().any(|n| n == "first_macro"),
+        "expected first_macro in {first_closures:?}"
+    );
+    assert!(
+        first_closures.iter().any(|n| n == "second_macro"),
+        "expected second_macro in {first_closures:?}"
+    );
+
+    // Second build with identical sources loads every library from the cache.
+    let second = staple_cmd(&pkg, &cache)
+        .args(["check", "--macro-engine=compiled", "--stdlib"])
+        .arg(&stdlib)
+        .output()
+        .unwrap();
+    let second_stats = String::from_utf8_lossy(&second.stderr);
+    assert!(second.status.success(), "second check failed: {second_stats}");
+    assert!(
+        package_libraries(&second_stats).is_empty(),
+        "second build should not rebuild package libraries: {second_stats}"
+    );
+    assert!(
+        closure_libraries(&second_stats).is_empty(),
+        "second build should not rebuild closure libraries: {second_stats}"
+    );
+
+    // Changing only second_macro's closure rebuilds second_macro only and prunes its stale library.
+    fs::write(
+        pkg.join("src/main.sta"),
+        "\
+use std.syntax.*
+use std.flow.if
+use std.io.println
+use std.clone.Clone
+
+macro first_macro: Expr -> Expr = value => {
+    let cloned = Clone.clone value
+    parse_quote { ($cloned) + 1 }
+}
+
+macro second_macro: Expr -> Expr = value => {
+    let cloned = Clone.clone value
+    parse_quote { ($cloned) + 3 }
+}
+
+pub def main = () => {
+    let a = first_macro 10
+    let b = second_macro 10
+    if (a + b == 24) { println \"ok\" } else { println \"no\" }
+}
+",
+    )
+    .unwrap();
+    let third = staple_cmd(&pkg, &cache)
+        .args(["check", "--macro-engine=compiled", "--stdlib"])
+        .arg(&stdlib)
+        .output()
+        .unwrap();
+    let third_stats = String::from_utf8_lossy(&third.stderr);
+    assert!(third.status.success(), "third check failed: {third_stats}");
+    let third_closures = closure_libraries(&third_stats);
+    assert_eq!(
+        third_closures,
+        vec!["second_macro".to_owned()],
+        "only second_macro should rebuild: {third_stats}"
+    );
+}
+
+#[test]
+#[ignore = "builds the standard library's package library; run via scripts/test-macro-libraries.sh"]
+fn corrupt_manifest_rebuilds_closure_library() {
+    let temp = TempDir::new("corrupt-manifest");
+    let cache = temp.0.join("cache");
+    let stdlib = repo_root().join("stdlib");
+    let pkg = write_package(
+        &temp.0,
+        "corrupt_manifest",
+        "\
+use std.syntax.*
+use std.flow.if
+use std.io.println
+use std.clone.Clone
+
+macro keep_cached: Expr -> Expr = value => {
+    let cloned = Clone.clone value
+    parse_quote { $cloned }
+}
+
+pub def main = () => {
+    let x = keep_cached 42
+    if (x == 42) { println \"ok\" } else { println \"no\" }
+}
+",
+    );
+
+    let first = staple_cmd(&pkg, &cache)
+        .args(["check", "--macro-engine=compiled", "--stdlib"])
+        .arg(&stdlib)
+        .output()
+        .unwrap();
+    let first_stats = String::from_utf8_lossy(&first.stderr);
+    assert!(first.status.success(), "first check failed: {first_stats}");
+    assert_eq!(closure_libraries(&first_stats), vec!["keep_cached".to_owned()]);
+
+    // Corrupt every closure manifest under target/staple/*/macros.
+    let mut corrupted = 0usize;
+    let target_staple = pkg.join("target/staple");
+    for entry in fs::read_dir(&target_staple).unwrap() {
+        let macros_dir = entry.unwrap().path().join("macros");
+        if !macros_dir.is_dir() {
+            continue;
+        }
+        for file in fs::read_dir(&macros_dir).unwrap() {
+            let path = file.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) == Some("manifest")
+                && path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.contains("keep_cached"))
+            {
+                fs::write(&path, b"corrupt-manifest").unwrap();
+                corrupted += 1;
+            }
+        }
+    }
+    assert_eq!(corrupted, 1, "expected 1 keep_cached manifest to corrupt");
+
+    let second = staple_cmd(&pkg, &cache)
+        .args(["check", "--macro-engine=compiled", "--stdlib"])
+        .arg(&stdlib)
+        .output()
+        .unwrap();
+    let second_stats = String::from_utf8_lossy(&second.stderr);
+    assert!(second.status.success(), "second check failed: {second_stats}");
+    assert_eq!(
+        closure_libraries(&second_stats),
+        vec!["keep_cached".to_owned()],
+        "corrupt manifest should force rebuild: {second_stats}"
+    );
+}
