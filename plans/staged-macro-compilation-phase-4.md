@@ -813,8 +813,9 @@ Record:
   compiled engine too, so the compiled engine rejected what the interpreter
   can't model (`typegroup` values, foreign calls), after building the library.
   A macro with a library is now taken as checked by its library's type check.
-  A macro that is never called is still checked by the interpreter's checker,
-  until task 8's package libraries check every macro.
+  A macro of the package being expanded that is never called is still
+  checked by the interpreter's checker. Task 8's package libraries check
+  every macro of a dependency, but not the root package's uncalled ones.
 - **Doc comments in modifier streams.** `parse_leaf_intrinsic` re-parsed the
   whole fragment from its start when a modifier failed at a later offset. The
   cause was in the parser: reading one modifier from a stream skipped a doc
@@ -934,3 +935,36 @@ Record:
   builds no package libraries; the `if` calls go to the installed `std`
   library and only the user macro gets a closure library.
 
+### Review of task 8
+
+- **The package-library tests depended on their order.** `staple_cmd`
+  ignored its cache argument, so every test shared one cache, and package
+  fingerprints don't depend on where a package lives.
+  `dependents_share_a_package_library` and
+  `a_changed_dependency_rebuilds_its_package_library_once` build the same
+  packages, so whichever ran second found them cached. With
+  `--test-threads=1`, `dependents_share_a_package_library` failed with no
+  package libraries built. Each test now has its own cache, which starts as a
+  copy of the shared one holding only the standard library's package library.
+- **Every compiled-engine test is now ignored.** A user package's check
+  builds the standard library's package library before it expands anything,
+  so the five task 7 tests, which ran in the default `cargo test`, built it
+  with a debug compiler (about 50 minutes, see above). They are `#[ignore]`d
+  with the task 8 tests, and `scripts/test-macro-libraries.sh` runs the whole
+  `compiled_macros` binary in release.
+- **A manifest that doesn't resolve is rebuilt.** Only a manifest that
+  didn't read was removed and rebuilt; one that read but didn't resolve
+  against the program stopped the build. Both now rebuild, as this section
+  says above.
+- **Temporary manifests are unique.** `ensure_library`'s temporary library
+  name ended in the unique part (`.pkg-<fp>.so.tmp-<pid>-<nonce>-<n>`), so the
+  manifest written beside it with `with_extension` was
+  `.pkg-<fp>.so.manifest` for every build, and concurrent builds could write
+  or rename each other's. The unique part now goes before the extension. A
+  build that writes no manifest is an error instead of a library stored
+  without one, and the manifest is renamed into place first, so a library is
+  never seen without its manifest. Unit tests cover both.
+- **Smaller fixes.** `macro_backend.rs` uses `compile::format_diagnostics`
+  instead of its own copy, and a no-op `map_err` is gone.
+- **Verified.** `check-macro-closures.py --mode all` at `4554b1b9`: 232
+  inputs, 0 diagnostics.

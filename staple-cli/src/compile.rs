@@ -1169,7 +1169,7 @@ fn run_linker(command: &mut Command) -> Result<(), String> {
     ))
 }
 
-fn format_diagnostics(diagnostics: Vec<Diagnostic>) -> String {
+pub(crate) fn format_diagnostics(diagnostics: Vec<Diagnostic>) -> String {
     diagnostics
         .into_iter()
         .map(|diagnostic| diagnostic.to_string())

@@ -375,7 +375,13 @@ pub fn ensure_library(
     let mut last_error = format!("no cache directory to store `{name}` in");
     for destination in &placement.write {
         let path = destination.directory.join(&file);
-        let temporary = temporary_sibling(&path);
+        // The unique part of the temporary name goes before the extension, so
+        // the manifest `emit` writes beside it (`with_extension`) is unique
+        // to this build too.
+        let temporary = PathBuf::from(format!(
+            "{}.{extension}",
+            temporary_sibling(&path).display()
+        ));
         let temporary_manifest = temporary.with_extension("manifest");
         let manifest = path.with_extension("manifest");
         let probe = std::fs::create_dir_all(&destination.directory)
@@ -387,15 +393,17 @@ pub fn ensure_library(
             );
             continue;
         }
+        // The manifest goes into place first, so a library is never seen
+        // without one.
         let result = emit(&temporary).and_then(|()| {
-            std::fs::rename(&temporary, &path)
-                .map_err(|error| format!("could not create `{}`: {error}", path.display()))?;
-            if temporary_manifest.is_file() {
-                std::fs::rename(&temporary_manifest, &manifest).map_err(|error| {
-                    format!("could not create `{}`: {error}", manifest.display())
-                })?;
+            if !temporary_manifest.is_file() {
+                return Err(format!("no manifest was written for `{}`", path.display()));
             }
-            Ok(())
+            std::fs::rename(&temporary_manifest, &manifest).map_err(|error| {
+                format!("could not create `{}`: {error}", manifest.display())
+            })?;
+            std::fs::rename(&temporary, &path)
+                .map_err(|error| format!("could not create `{}`: {error}", path.display()))
         });
         if let Err(error) = result {
             let _ = std::fs::remove_file(&temporary);
@@ -679,6 +687,58 @@ mod tests {
             .map(|entry| entry.unwrap().path())
             .collect::<Vec<_>>();
         assert_eq!(names, vec![third]);
+    }
+
+    #[test]
+    fn a_library_and_its_manifest_are_written_from_unique_temporaries() {
+        let scratch = Scratch::new();
+        let placement = Placement {
+            read: vec![scratch.0.join("cache")],
+            write: vec![Destination {
+                directory: scratch.0.join("cache"),
+                prune: true,
+            }],
+        };
+        let mut temporaries = Vec::new();
+        let mut emit = |path: &Path| {
+            let manifest = path.with_extension("manifest");
+            temporaries.push(manifest.clone());
+            std::fs::write(path, "library").map_err(|error| error.to_string())?;
+            std::fs::write(manifest, "manifest").map_err(|error| error.to_string())
+        };
+        ensure_library(&placement, "pkg", Fingerprint(1), "so", &mut emit).unwrap();
+        let path = ensure_library(&placement, "pkg", Fingerprint(2), "so", &mut emit).unwrap();
+        // Each build's manifest has a name of its own, so concurrent builds
+        // can't write or rename each other's.
+        assert_eq!(temporaries.len(), 2);
+        assert_ne!(temporaries[0], temporaries[1]);
+        let mut names = std::fs::read_dir(scratch.0.join("cache"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, vec![path.with_extension("manifest"), path]);
+    }
+
+    #[test]
+    fn a_library_without_a_manifest_is_not_stored() {
+        let scratch = Scratch::new();
+        let placement = Placement {
+            read: Vec::new(),
+            write: vec![Destination {
+                directory: scratch.0.join("cache"),
+                prune: false,
+            }],
+        };
+        let error = ensure_library(&placement, "pkg", Fingerprint(1), "so", &mut |path| {
+            std::fs::write(path, "library").map_err(|error| error.to_string())
+        })
+        .unwrap_err();
+        assert!(error.starts_with("no manifest was written"), "{error}");
+        assert_eq!(
+            std::fs::read_dir(scratch.0.join("cache")).unwrap().count(),
+            0
+        );
     }
 
     #[test]

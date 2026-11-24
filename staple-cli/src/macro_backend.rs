@@ -165,24 +165,24 @@ impl CliMacroBackend {
         if let Some((library_path, object_path)) =
             find_cached_library(&placement.read, &name, fingerprint, extension)
         {
-            match LibraryManifest::read_beside(&library_path) {
-                Ok(manifest) => {
-                    self.load_manifest(program, &library_path, &manifest)?;
-                    let mut registry = self.packages.lock().expect("macro package registry");
-                    registry.objects.insert(name.clone(), object_path);
-                    registry.libraries.insert(name.clone(), library_path);
-                    drop(registry);
-                    self.prepared_packages.insert(name);
-                    return Ok(());
-                }
-                Err(_) => {
-                    // A library whose manifest can't be read is not trusted;
-                    // a writable copy is replaced by the build below.
-                    let _ = std::fs::remove_file(&library_path);
-                    let _ = std::fs::remove_file(library_path.with_extension("manifest"));
-                    let _ = std::fs::remove_file(&object_path);
-                }
+            // `load_manifest` fails before it loads anything, so a manifest
+            // that doesn't read or doesn't resolve leaves nothing behind.
+            let loaded = LibraryManifest::read_beside(&library_path).is_ok_and(|manifest| {
+                self.load_manifest(program, &library_path, &manifest).is_ok()
+            });
+            if loaded {
+                let mut registry = self.packages.lock().expect("macro package registry");
+                registry.objects.insert(name.clone(), object_path);
+                registry.libraries.insert(name.clone(), library_path);
+                drop(registry);
+                self.prepared_packages.insert(name);
+                return Ok(());
             }
+            // A library whose manifest doesn't read or resolve is not
+            // trusted; a writable copy is replaced by the build below.
+            let _ = std::fs::remove_file(&library_path);
+            let _ = std::fs::remove_file(library_path.with_extension("manifest"));
+            let _ = std::fs::remove_file(&object_path);
         }
 
         let started = Instant::now();
@@ -307,7 +307,7 @@ impl CliMacroBackend {
                         path,
                         None,
                     )
-                    .map_err(format_diagnostics)
+                    .map_err(compile::format_diagnostics)
             },
         )
         .map_err(|message| vec![Diagnostic::new(Span::Compiler, message)])?;
@@ -354,8 +354,7 @@ impl CliMacroBackend {
                 &EmissionUnit::packages([]).with_library(spec),
                 &shim_path,
                 None,
-            )
-            .map_err(|diagnostics| diagnostics)?;
+            )?;
 
         let mut objects = vec![object_path];
         objects.extend(dependency_objects);
@@ -463,7 +462,7 @@ impl CliMacroBackend {
         cache::ensure_object(placement, "runtime", fingerprint, &mut |path| {
             generator
                 .emit_runtime_object(path, None)
-                .map_err(format_diagnostics)
+                .map_err(compile::format_diagnostics)
         })
         .map_err(|message| vec![Diagnostic::new(Span::Compiler, message)])
     }
@@ -745,16 +744,6 @@ impl MacroBackend for CliMacroBackend {
             call.arguments.clone(),
         ))
     }
-}
-
-/// Diagnostics have already been turned into strings by the compiler APIs
-/// that return messages; this marks the places that keep them as diagnostics.
-fn format_diagnostics(diagnostics: Vec<Diagnostic>) -> String {
-    diagnostics
-        .into_iter()
-        .map(|diagnostic| diagnostic.to_string())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// `packages` and every package it depends on, dependencies first.

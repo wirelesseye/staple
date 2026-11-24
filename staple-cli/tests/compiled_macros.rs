@@ -48,17 +48,38 @@ fn copy_dir_all(src: &Path, dst: &Path) {
     }
 }
 
-fn staple_cmd(cwd: &Path, _cache_home: &Path) -> Command {
+/// A `staple` command with `cache_home` as its cache. The cache starts as a
+/// copy of the shared one, so it holds the standard library's package library
+/// but nothing another test built: package fingerprints don't depend on where
+/// a package lives, so tests sharing one cache would see each other's builds.
+fn staple_cmd(cwd: &Path, cache_home: &Path) -> Command {
     ensure_shared_stdlib();
+    if !cache_home.exists() {
+        copy_tree(shared_cache(), cache_home);
+    }
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_staple"));
     cmd.current_dir(cwd)
-        .env("XDG_CACHE_HOME", shared_cache())
+        .env("XDG_CACHE_HOME", cache_home)
         .env("STAPLE_MACRO_STATS", "1");
     cmd
 }
 
-/// One cache for the compiled-macro tests, so the standard library's package
-/// library is built once for the whole binary instead of once per test.
+/// Copies every file under `src` to `dst`.
+fn copy_tree(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).expect("destination directory should be created");
+    for entry in fs::read_dir(src).expect("source directory should be readable") {
+        let entry = entry.expect("directory entry should be readable");
+        let dst_path = dst.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_tree(&entry.path(), &dst_path);
+        } else {
+            fs::copy(entry.path(), &dst_path).expect("file should copy");
+        }
+    }
+}
+
+/// The cache the standard library's package library is built into once for
+/// the whole binary. Tests copy it rather than write to it.
 fn shared_cache() -> &'static Path {
     use std::sync::OnceLock;
     static CACHE: OnceLock<PathBuf> = OnceLock::new();
@@ -117,6 +138,7 @@ fn closure_libraries(stats: &str) -> Vec<String> {
 }
 
 #[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
 fn user_package_macro_used_in_same_module() {
     let temp = TempDir::new("same-module");
     let pkg = temp.0.join("pkg");
@@ -207,6 +229,7 @@ main ()
 }
 
 #[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
 fn user_package_macro_closure_uses_earlier_macro() {
     let temp = TempDir::new("stage-tower");
     let pkg = temp.0.join("pkg");
@@ -287,6 +310,7 @@ main ()
 }
 
 #[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
 fn stdlib_builds_with_compiled_engine() {
     let temp = TempDir::new("stdlib-build");
     let stdlib_copy = temp.0.join("stdlib");
@@ -325,6 +349,7 @@ fn write_package(root: &Path, name: &str, source: &str) -> PathBuf {
 }
 
 #[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
 fn compiled_macros_are_checked_for_effects() {
     let temp = TempDir::new("effects");
     let pkg = write_package(
@@ -368,6 +393,7 @@ pub def main = () => {
 }
 
 #[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
 fn a_macro_closure_may_use_a_typegroup() {
     let temp = TempDir::new("typegroup");
     let pkg = write_package(
