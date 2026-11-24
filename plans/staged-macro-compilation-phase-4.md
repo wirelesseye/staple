@@ -512,7 +512,7 @@ Update this section as you work (see "Rules for the implementor").
 | 7. Closure libraries and the stage tower | done | `caf7d865` | `CliMacroBackend` (`staple-cli/src/macro_backend.rs`) behind `--macro-engine=compiled` on `build`, `check`, `run`, `compile` and `expand`; `make_ready` builds one closure library per macro from a closure-only check program. The standard library bootstraps with 3 closure libraries (`if`, `when`, `typegroup`) in about 33 s. Review fixes: the effects check runs (it was passed its arguments swapped), closure programs register generated `companion` blocks, libraries are built for the host, no compiler panics on strict-mode fallbacks, doc comments before a modifier are read in streams, item sequences break lines before modifiers and `let`, the interpreter's static check no longer gates macros with libraries. See Findings. |
 | 8. Package libraries and macro-mode objects | done | `18d6147a`, `5e712235`, `62cdacbb` | `MacroBackend::begin`/`available`/`prebuild`; `prepare_package_library` lowers a whole-package macro-mode check program, emitted as a plain package object; package libraries link it with their dependencies' macro-mode objects, a shim-only library object and the runtime. Closure libraries now emit only the expanding package and link dependency objects. Macro caches live under `<package>/target/staple/<host>/macros` and `$XDG_CACHE_HOME/staple/macros`; `install-stdlib.sh` prebuilds into `<stdlib>/target/<host>/macros`. Manifest module keys are package-relative paths (format 2). Tests are `#[ignore]`d and run by `scripts/test-macro-libraries.sh` in release. See Findings. |
 | 9. Caching | done | `2dcf60b1` | `cache::package_macro_fingerprints` (dependency macro-mode fingerprints + opt level); closure library fingerprinting (`closure_library_fingerprint`, `hash_normalized_items`), atomic caching (`ensure_library`), manifest/version rebuilds, pruning, and concurrent/reuse/invalidation tests. See Findings. |
-| 10. Build cost | not started | | |
+| 10. Build cost | done | | `STAPLE_MACRO_STATS` prints each library's steps. `Copy` answers are cached in `TypedModule` and in lowering's trait selection, sum alternatives are sorted with cached keys, and the closure fingerprint prints `Syntax` compactly. A closure library takes 3.6–4.3 s (about 10 s before), the cold standard library 63 s (165 s before). Neither Phase 0 option was kept; see Findings. |
 | 11. Optimization | not started | | |
 | 12. End to end | not started | | |
 | 13. Language reference | not started | | |
@@ -535,6 +535,28 @@ Task 8, macOS 27 on an Apple M2, `aarch64-apple-darwin`, release `staple`,
   (146 s for all three). A warm check takes 1.7 s.
 - A user package run from a prebuilt standard library, fresh cache: 0
   package libraries, one closure library (`keep`) in 10 s, 13 s total.
+
+Task 10, same machine, release `staple`, 2026-11-25, `afe650d1` plus the
+task 10 changes. A user package with one macro (`keep`, which clones its
+argument and quotes it), checked with
+`XDG_CACHE_HOME=<cache> STAPLE_MACRO_STATS=1 staple check --macro-engine=compiled`:
+
+| | Before | After |
+|---|---|---|
+| Cold cache: 9 closure libraries + `std` package library | 165 s (`std` 148 s) | 63 s (`std` 56 s, closure libraries 40 s) |
+| The `keep` library alone, standard library cached | about 10 s (task 8) | 3.6 s |
+| Warm check | 3.1 s | 2.2 s |
+
+Per closure library after task 10 (seconds): building the closure program
+0.03–0.07, fingerprint 0.37–0.41, resolve 0.03, type check 1.20–1.31, lower
+1.67–1.87, codegen 0.18–0.78, link 0.03. `typegroup` is the outlier: type
+check 2.4, lower 4.2. Before: fingerprint 1.25, type check 4.0 (2.7 of it
+the ownership checker), lower 3.5.
+
+The B-series inputs call only standard-library macros, so with a cached
+standard library they build nothing: B1 0.32 s, B2 0.33 s, B3 0.81 s with
+either engine (`staple expand`). The libraries they would build are `if`
+(B1, B3: 4.2 s) and `derive_eq` (B2: 4.3 s), in the cold run above.
 
 For each one, record what was measured, the result, the machine, the
 commit and the command. Include:
@@ -1036,4 +1058,78 @@ Record:
 - **Left as is.** A bad cached library in a directory the compiler can't
   write (an installed standard library) is rebuilt into the user cache, but
   the next build reads the bad one first and rebuilds again.
+
+### Task 10: Build cost
+
+- **Measured per step.** `STAPLE_MACRO_STATS` now prints each closure
+  library's steps (building the closure program, fingerprint, resolve, type
+  check, lower, effects, codegen, runtime object, link). A closure library
+  took about 10 s, against Phase 0's 1.6–2.0 s. Type check (4.0 s) and
+  lowering (3.5 s) were the gap, not the front end's parse and resolve.
+- **`Copy` queries dominated both.** The ownership checker and lowering ask
+  whether a type is `Copy` thousands of times about a few hundred types.
+  Each answer tries every negative `Copy` and `Drop` implementation, about 46,
+  and matching one against a large `std.syntax` sum clones and normalizes
+  every alternative. Answers are now remembered:
+  - `TypedModule::is_copy_in_function` keys on the type's exact structure
+    (`copy_answer_key`), including a wrapper's representation, since a
+    recursive type can be unfolded to different depths. The module doesn't
+    change once built, `Copy` bounds are every function's, and parameter ids
+    are unique, so the answer is a function of the key. A cloned module
+    starts with an empty cache.
+  - Lowering's `TraitSelectionContext::is_copy` shares a cache on the trait
+    selection catalog, used only for types with no type parameters (the
+    request's bounds are read only through a parameter) and only for a
+    top-level query that hit no selection cycle.
+- **Sum normalization sorted with an expensive key.** `checked_type_sort_key`
+  clones the type, strips aliases and formats it, and `sort_by_key` calls it
+  O(n log n) times. Both sum normalizations now use `sort_by_cached_key`,
+  also a stable sort, so the order is unchanged.
+- **The fingerprint printed every node's text.** `canonical_items` drops
+  everything but `pipe_stage` and the definition module from each `Syntax`,
+  but did so on a full debug dump. `staple_syntax::with_compact_syntax_debug`
+  makes `Syntax` print only those fields while the dump is written: 1.25 s
+  to 0.38 s, same output.
+- **Result.** Type check is now 1.2–1.3 s, about Phase 0's 1.1–1.2 s front
+  end. Lowering is 1.7–1.9 s, against Phase 0's 0.3 s: closure programs
+  lower every reachable standard-library function, including much of
+  `std.syntax`, which Phase 0's stand-in didn't use. The rest of lowering is
+  spread over cloning instance bodies, the worklist, snapshots and cleanup
+  walks, with no single hot spot left. The cold standard library improved
+  most (165 s to 63 s), since its package library checks and lowers the
+  whole standard library.
+- **Neither Phase 0 option was kept.** Both were assessed against the code
+  rather than prototyped, because profiling showed the time was in `Copy`
+  queries and sum normalization, which the changes above fix for every build:
+  - *Check only the closure's modules against the dependencies' checked
+    interfaces.* The type checker takes one resolved program and has no
+    interface form for a dependency. Closure libraries instantiate generic
+    standard-library functions, and lowering needs their checked bodies, not
+    just signatures, so an interface would have to carry typed bodies of every
+    generic function too. That is the checked-std cache below under another
+    name. It would save at most the type-check step (1.2–1.3 s) and none of
+    lowering.
+  - *Cache the checked standard library.* Each closure program is the macro's
+    closure, a different subset of the standard library, so one checked copy
+    doesn't fit them; a cache would have to hold the whole checked standard
+    library and let a program check only its own items against it. Across
+    processes that needs a serialized `TypedModule`, and the crate has no
+    serialization and allocates type, symbol and syntax ids per session.
+    Within one process it would help only the first build after an edit that
+    touches several macros' closures. Upper bound: most of the 1.2–1.3 s type
+    check per library.
+  - Revisit both if lowering is brought near Phase 0's figure and type check
+    becomes the largest step again.
+- **Verification.**
+  - `cargo test -p staple-syntax`: all pass.
+  - `cargo test -p staple --bin staple`: 294 passed, 2 ignored.
+  - `cargo test --release -p staple --test compiled_macros -- --ignored`: 10
+    passed.
+  - `cargo test -p staple-compiler --lib`: 601 passed, 1 failed,
+    `lower::graph_validation::tests::unused_subsystems_record_no_requirement`
+    (a program with no string patterns records `LiteralComparison`). It fails
+    the same way on `afe650d1` without these changes, so it predates task 10.
+  - `scripts/check-macro-closures.py --mode all`: 232 inputs, 0 with
+    diagnostics. The expander didn't change, so `compare-expansion.py` wasn't
+    needed.
 

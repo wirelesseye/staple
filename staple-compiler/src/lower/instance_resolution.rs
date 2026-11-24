@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use staple_syntax::Diagnostic;
 
+use crate::typecheck::{CopyAnswers, copy_answer_key};
 use crate::specialization::{
     CanonicalEffectSet, CanonicalType, InstanceKey, InstanceSubstitution, canonical_evidence,
 };
@@ -1010,6 +1011,7 @@ struct TraitSelectionContext<'a> {
     program: &'a LoweredProgram,
     implementations: Arc<[CheckedTraitImplementation]>,
     implementation_ids: Arc<[LoweredTraitImplementationId]>,
+    copy_answers: Arc<CopyAnswers>,
     /// Substituted declared prerequisites in scope for this request.
     bounds: Vec<CheckedTraitBound>,
     visited: RefCell<Vec<(TraitId, Vec<CheckedType>)>>,
@@ -1027,6 +1029,9 @@ struct TraitSelectionContext<'a> {
 pub(crate) struct TraitSelectionCatalog {
     implementations: Arc<[CheckedTraitImplementation]>,
     implementation_ids: Arc<[LoweredTraitImplementationId]>,
+    /// `Copy` answers for types without type parameters, shared by every
+    /// selection against this catalog; see [`TraitSelectionContext::is_copy`].
+    copy_answers: Arc<CopyAnswers>,
 }
 
 impl TraitSelectionCatalog {
@@ -1048,6 +1053,7 @@ impl TraitSelectionCatalog {
         TraitSelectionCatalog {
             implementations: implementations.into(),
             implementation_ids: implementation_ids.into(),
+            copy_answers: Arc::default(),
         }
     }
 
@@ -1072,11 +1078,13 @@ impl<'a> TraitSelectionContext<'a> {
         let TraitSelectionCatalog {
             implementations,
             implementation_ids,
+            copy_answers,
         } = TraitSelectionCatalog::of(program);
         TraitSelectionContext {
             program,
             implementations,
             implementation_ids,
+            copy_answers,
             bounds,
             visited: RefCell::new(Vec::new()),
             cycle_hit: Cell::new(false),
@@ -1139,17 +1147,36 @@ impl<'a> TraitSelectionContext<'a> {
             .unwrap_or_else(|| format!("trait {}", trait_id.0))
     }
 
+    /// Whether `value_type` is `Copy`. Lowering asks this about the same
+    /// few hundred types many times, and each answer scans every negative
+    /// `Copy` and `Drop` implementation, so answers are remembered. Only a
+    /// type without type parameters is remembered: the request's bounds and
+    /// run-time parameters are read only through a parameter. A top-level
+    /// query that hit a selection cycle isn't remembered either, since its
+    /// answer depends on where the cycle was cut.
     fn is_copy(&self, value_type: &CheckedType) -> bool {
+        let mut key = String::new();
+        let cacheable = self.visited.borrow().is_empty()
+            && !self.cycle_hit.get()
+            && !contains_type_parameter(value_type)
+            && copy_answer_key(value_type, &mut key);
+        if cacheable && let Some(answer) = self.copy_answers.get(&key) {
+            return answer;
+        }
         let resolved = self.program.resolve_recursive_payload(value_type);
         let value_type = resolved.as_ref().unwrap_or(value_type);
-        is_copy_type(
+        let answer = is_copy_type(
             value_type,
             self.program.semantic_ids.copy_trait,
             self.program.semantic_ids.drop_trait,
             &self.implementations,
             &self.bounds,
             &|bound| self.drop_bound_holds(bound),
-        )
+        );
+        if cacheable && !self.cycle_hit.get() {
+            self.copy_answers.insert(key, answer);
+        }
+        answer
     }
 
     /// Whether a `Drop` implementation applies to a concrete

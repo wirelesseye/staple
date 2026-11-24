@@ -2447,8 +2447,237 @@ fn product_contains_alias(product: &CheckedProductType) -> bool {
     })
 }
 
+/// Remembered `Copy` answers by [`copy_answer_key`]. A copy starts empty,
+/// since the module it belongs to may change after cloning.
+#[derive(Default)]
+pub(crate) struct CopyAnswers(std::sync::Mutex<HashMap<String, bool>>);
+
+impl Clone for CopyAnswers {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl fmt::Debug for CopyAnswers {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CopyAnswers")
+    }
+}
+
+impl CopyAnswers {
+    pub(crate) fn get(&self, key: &str) -> Option<bool> {
+        self.0.lock().ok()?.get(key).copied()
+    }
+
+    pub(crate) fn insert(&self, key: String, answer: bool) {
+        if let Ok(mut answers) = self.0.lock() {
+            answers.insert(key, answer);
+        }
+    }
+}
+
+/// Writes a key that names `value_type` exactly as `Copy` sees it.
+/// Everything `is_copy_type` reads is in the key: ids, arguments, a wrapper's
+/// representation, product element names and counts, sum alternatives, and a
+/// parameter's id. It returns `false` if a type can't be named, and the
+/// answer is then worked out without the cache.
+pub(crate) fn copy_answer_key(value_type: &CheckedType, key: &mut String) -> bool {
+    use std::fmt::Write;
+    fn list(types: &[CheckedType], key: &mut String) -> bool {
+        key.push('[');
+        for value_type in types {
+            if !copy_answer_key(value_type, key) {
+                return false;
+            }
+            key.push(',');
+        }
+        key.push(']');
+        true
+    }
+    match value_type {
+        CheckedType::Alias { target, .. } => copy_answer_key(target, key),
+        CheckedType::Never => {
+            key.push_str("never");
+            true
+        }
+        CheckedType::I32 => {
+            key.push_str("i32");
+            true
+        }
+        CheckedType::I8 => {
+            key.push_str("i8");
+            true
+        }
+        CheckedType::I16 => {
+            key.push_str("i16");
+            true
+        }
+        CheckedType::I64 => {
+            key.push_str("i64");
+            true
+        }
+        CheckedType::U8 => {
+            key.push_str("u8");
+            true
+        }
+        CheckedType::U16 => {
+            key.push_str("u16");
+            true
+        }
+        CheckedType::U32 => {
+            key.push_str("u32");
+            true
+        }
+        CheckedType::U64 => {
+            key.push_str("u64");
+            true
+        }
+        CheckedType::ISize => {
+            key.push_str("isize");
+            true
+        }
+        CheckedType::USize => {
+            key.push_str("usize");
+            true
+        }
+        CheckedType::F32 => {
+            key.push_str("f32");
+            true
+        }
+        CheckedType::F64 => {
+            key.push_str("f64");
+            true
+        }
+        CheckedType::String => {
+            key.push_str("string");
+            true
+        }
+        CheckedType::CChar => {
+            key.push_str("cchar");
+            true
+        }
+        CheckedType::RawOpaquePtr => {
+            key.push_str("rawptr");
+            true
+        }
+        CheckedType::RawOpaqueMutPtr => {
+            key.push_str("rawmutptr");
+            true
+        }
+        CheckedType::NumberLiteral(value) => {
+            let _ = write!(key, "n{value}");
+            true
+        }
+        CheckedType::StringLiteralSet(values) => {
+            let _ = write!(key, "s{values:?}");
+            true
+        }
+        CheckedType::RawPtr { pointee } => {
+            key.push_str("ptr(");
+            copy_answer_key(pointee, key) && {
+                key.push(')');
+                true
+            }
+        }
+        CheckedType::RawMutPtr { pointee } => {
+            key.push_str("mutptr(");
+            copy_answer_key(pointee, key) && {
+                key.push(')');
+                true
+            }
+        }
+        CheckedType::TypeConstructor { id, arguments, .. } => {
+            let _ = write!(key, "c{}", id.0);
+            list(arguments, key)
+        }
+        CheckedType::Opaque {
+            sized,
+            id,
+            arguments,
+            ..
+        } => {
+            let _ = write!(key, "o{}{}", id.0, if *sized { "s" } else { "u" });
+            list(arguments, key)
+        }
+        // The answer is read from the representation, and a recursive type
+        // can be unfolded to different depths, so the representation is part
+        // of the key; a stand-in for the type itself is an `Opaque` of its id.
+        CheckedType::Wrapper {
+            id,
+            arguments,
+            representation,
+            introduction,
+            ..
+        } => {
+            let _ = write!(key, "w{}{introduction:?}", id.0);
+            list(arguments, key) && {
+                key.push('=');
+                copy_answer_key(representation, key)
+            }
+        }
+        CheckedType::Sum(sum) => {
+            key.push_str("sum");
+            list(&sum.alternatives, key)
+        }
+        CheckedType::Product(product) => {
+            let _ = write!(
+                key,
+                "p{}{:?}{}(",
+                product.slotted, product.spreads, product.variadic
+            );
+            for run in &product.runs {
+                let _ = write!(key, "{:?}:", run.element.name);
+                match &run.count {
+                    RunCount::Fixed(count) => {
+                        let _ = write!(key, "{count}x");
+                    }
+                    RunCount::Symbolic(count) => {
+                        key.push_str("n(");
+                        if !copy_answer_key(count, key) {
+                            return false;
+                        }
+                        key.push_str(")x");
+                    }
+                }
+                if !copy_answer_key(&run.element.value_type, key) {
+                    return false;
+                }
+                key.push(',');
+            }
+            key.push(')');
+            true
+        }
+        CheckedType::Inferred => {
+            key.push_str("inferred");
+            true
+        }
+        CheckedType::Error => {
+            key.push_str("error");
+            true
+        }
+        // Parameter ids are unique across the module, and the `Copy` bounds
+        // the answer reads are every function's, so the id names the answer.
+        CheckedType::Parameter { id, sized, .. } => {
+            let _ = write!(key, "t{}{}", id.0, if *sized { "s" } else { "u" });
+            true
+        }
+        // Rare enough that their full debug form is a cheap exact key.
+        CheckedType::Function(function) => {
+            let _ = write!(key, "f{function:?}");
+            true
+        }
+        CheckedType::Forall(scheme) => {
+            let _ = write!(key, "a{scheme:?}");
+            true
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TypedModule {
+    /// `is_copy_in_function` answers by type, which depend only on this
+    /// module's declarations and implementations once it is built.
+    copy_answers: CopyAnswers,
     type_representations: HashMap<TypeId, CheckedType>,
     structural_companion_targets: HashMap<SymbolId, CheckedType>,
     resolved: ResolvedModule,
@@ -3371,16 +3600,30 @@ impl TypedModule {
         // are globally unique, so including all active function bounds also
         // makes the enclosing `Copy T` obligation visible in the closure.
         let _ = function;
+        // Each answer scans every negative `Copy` and `Drop` implementation,
+        // and matching a large sum against one is slow. Macro code's syntax
+        // types make thousands of such queries about a few hundred types.
+        let mut key = String::new();
+        let cacheable = copy_answer_key(value_type, &mut key);
+        if cacheable
+            && let Some(answer) = self.copy_answers.get(&key)
+        {
+            return answer;
+        }
         let resolved = self.resolve_recursive_payload(value_type);
         let value_type = resolved.as_ref().unwrap_or(value_type);
-        is_copy_type(
+        let answer = is_copy_type(
             value_type,
             self.copy_trait,
             self.drop_trait,
             &self.trait_implementations,
             &self.copy_bounds,
             &|bound| self.drop_bound_holds(bound),
-        )
+        );
+        if cacheable {
+            self.copy_answers.insert(key, answer);
+        }
+        answer
     }
 
     // Layout selects opaque types through the lowered `LayoutContext`; only its
@@ -4679,6 +4922,7 @@ impl TypeChecker {
         }
 
         let typed = TypedModule {
+            copy_answers: CopyAnswers::default(),
             type_representations: self.type_representations,
             structural_companion_targets: self.structural_companion_targets,
             resolved: module,
@@ -20714,7 +20958,7 @@ impl TypeChecker {
         if flattened.len() > 1 {
             flattened.retain(|alternative| *alternative != CheckedType::Never);
         }
-        flattened.sort_by_key(checked_type_sort_key);
+        flattened.sort_by_cached_key(checked_type_sort_key);
         flattened.dedup();
         for alternative in &flattened {
             if !alternative.is_sized() || contains_inferred_type(alternative) {
@@ -23465,7 +23709,7 @@ fn normalize_substituted_sum(alternatives: Vec<CheckedType>) -> CheckedType {
     if flattened.len() > 1 {
         flattened.retain(|alternative| *alternative != CheckedType::Never);
     }
-    flattened.sort_by_key(checked_type_sort_key);
+    flattened.sort_by_cached_key(checked_type_sort_key);
     flattened.dedup();
     match flattened.len() {
         0 if contains_never => CheckedType::Never,

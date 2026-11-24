@@ -44,6 +44,9 @@ pub fn parse_macro_engine(value: &str) -> Result<MacroEngine, String> {
 #[derive(Default)]
 struct MacroStats {
     closure_libraries: Vec<Vec<String>>,
+    /// How long each step of each closure library build took, in the order
+    /// of `closure_libraries`.
+    closure_steps: Vec<Vec<(&'static str, Duration)>>,
     package_libraries: Vec<String>,
     closure_time: Duration,
     package_time: Duration,
@@ -607,6 +610,13 @@ impl Drop for CliMacroBackend {
             );
             for (index, names) in stats.closure_libraries.iter().enumerate() {
                 eprintln!("  lib #{index}: {}", names.join(", "));
+                if let Some(steps) = stats.closure_steps.get(index) {
+                    let steps = steps
+                        .iter()
+                        .map(|(step, time)| format!("{step} {:.3}s", time.as_secs_f64()))
+                        .collect::<Vec<_>>();
+                    eprintln!("    steps: {}", steps.join(", "));
+                }
             }
             for (index, name) in stats.package_libraries.iter().enumerate() {
                 eprintln!("  package #{index}: {name}");
@@ -711,10 +721,20 @@ impl MacroBackend for CliMacroBackend {
             let _ = std::fs::remove_file(cached_path.with_extension("manifest"));
         }
 
+        let mut steps = vec![("program", request.program_time)];
+        let mut step_started = started;
+        let mut step = |name: &'static str| {
+            steps.push((name, step_started.elapsed()));
+            step_started = Instant::now();
+        };
+        step("fingerprint");
         let resolved =
             NameResolver::pre_expanded(request.next_syntax_id).resolve_program(request.check_program)?;
+        step("resolve");
         let typed = TypeChecker::new().check(resolved)?;
+        step("typecheck");
         let lowered = Lowerer::new().lower(&typed)?;
+        step("lower");
 
         let mut entry_symbols = Vec::with_capacity(entry_meta.len());
         let mut manifest_entries = Vec::with_capacity(entry_meta.len());
@@ -741,6 +761,7 @@ impl MacroBackend for CliMacroBackend {
         if !effect_diagnostics.is_empty() {
             return Err(effect_diagnostics);
         }
+        step("effects");
 
         let lib_id = self.next_library_id;
         self.next_library_id += 1;
@@ -759,6 +780,7 @@ impl MacroBackend for CliMacroBackend {
             EmissionUnit::whole_program().with_library(spec)
         };
         generator.emit_unit_object(&lowered, &unit, &obj_path, None)?;
+        step("codegen");
 
         let mut objects = vec![obj_path];
         if self.packages_prepared {
@@ -768,6 +790,7 @@ impl MacroBackend for CliMacroBackend {
                 objects.push(self.runtime_object(&generator, &rt_placement)?);
             }
         }
+        step("runtime");
         let manifest = build_manifest(request.program, &manifest_entries, &request.templates)
             .map_err(internal)?;
         let write_placement = if bad_cache {
@@ -789,6 +812,7 @@ impl MacroBackend for CliMacroBackend {
             },
         )
         .map_err(internal)?;
+        step("link");
         let loaded = manifest
             .resolve(request.program, &dylib_path)
             .map_err(internal)?;
@@ -797,10 +821,12 @@ impl MacroBackend for CliMacroBackend {
         for (decl_id, shim) in loaded.entries {
             self.entries.insert(decl_id, (handle, shim));
         }
+        drop(step);
 
         {
             let mut stats = self.stats.lock().expect("macro stats");
             stats.closure_libraries.push(macro_names);
+            stats.closure_steps.push(steps);
             stats.closure_time += started.elapsed();
         }
 

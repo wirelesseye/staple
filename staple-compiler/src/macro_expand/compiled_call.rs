@@ -81,6 +81,8 @@ pub struct ClosureLibraryRequest<'a> {
     pub entries: Vec<(ModuleId, SyntaxId, String)>,
     /// The next syntax id after `check_program` was built, for `NameResolver::pre_expanded`.
     pub next_syntax_id: usize,
+    /// How long expanding the closure and building `check_program` took.
+    pub program_time: std::time::Duration,
 }
 
 /// A macro of a package library, with the entry the library exposes for it.

@@ -167,11 +167,37 @@ pub struct Syntax {
     pub identifier_origins: Vec<(String, Span)>,
 }
 
+thread_local! {
+    static COMPACT_DEBUG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with each `Syntax`'s debug form cut to `pipe_stage` and
+/// `definition_module`, the fields that change what the code means. A debug
+/// form of expanded code then describes the code and not where it came from,
+/// and is much faster to write, since a node's text repeats its children's.
+pub fn with_compact_syntax_debug<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            COMPACT_DEBUG.with(|compact| compact.set(self.0));
+        }
+    }
+    let _restore = Restore(COMPACT_DEBUG.with(|compact| compact.replace(true)));
+    f()
+}
+
 /// `tokens` is shared by every node of a file, so a derived `Debug` would
 /// print the whole file's tokens once per node. Print the node's own text;
 /// nested nodes repeat it, so full tokens would still be too large.
 impl fmt::Debug for Syntax {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if COMPACT_DEBUG.with(std::cell::Cell::get) {
+            return formatter
+                .debug_struct("Syntax")
+                .field("pipe_stage", &self.pipe_stage)
+                .field("definition_module", &self.definition_module)
+                .finish();
+        }
         formatter
             .debug_struct("Syntax")
             .field("pipe_stage", &self.pipe_stage)

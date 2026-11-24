@@ -205,6 +205,7 @@ impl MacroExpander {
         let Some(shell) = self.program_shell.clone() else {
             return Ok(());
         };
+        let program_started = std::time::Instant::now();
         let compiled_only = self.compiled_only(call_span)?;
         let extra_items = compiled_only.closure.clone();
         let mut wanted_items = closure.items.clone();
@@ -294,6 +295,7 @@ impl MacroExpander {
             templates,
             entries: vec![(definition.key.module, start, entry_name)],
             next_syntax_id: self.next_syntax_id,
+            program_time: program_started.elapsed(),
         };
         if let Some(result) = super::compiled_call::prepare_compiled_library(request) {
             match result {

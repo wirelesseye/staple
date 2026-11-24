@@ -21,7 +21,7 @@ use crate::Program;
 /// program, so it includes what earlier compiled macros produced but not
 /// where in the file the code sits or how it is formatted.
 pub fn canonical_items(program: &Program, items: &[Item]) -> String {
-    let dump = format!("{items:#?}");
+    let dump = staple_syntax::with_compact_syntax_debug(|| format!("{items:#?}"));
     let dump = drop_syntax_with(&dump, &|body| {
         let module = definition_module(body)
             .and_then(|index| program.modules().iter().find(|module| module.id.0 == index))
