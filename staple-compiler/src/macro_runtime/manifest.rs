@@ -104,15 +104,26 @@ pub(crate) fn manifest_path(library_path: &Path) -> PathBuf {
 ///
 /// A module in a package is named by its path relative to the package's
 /// source root, so a library built with the package as its root and one built
-/// with it as a dependency name the same module. A module outside every
+/// with it as a dependency name the same module. A module generated in memory,
+/// such as a `companion` block, shares its file's path, so its qualified-name
+/// suffix (`.__quote` and the like) keeps it distinct. A module outside every
 /// package keeps its qualified name.
 pub(crate) fn module_key(program: &Program, module: ModuleId) -> ModuleKey {
     let package_id = program.package_of(module);
     let package = package_id.and_then(|id| program.package_graph().map(|graph| graph.package(id)));
-    let path = package
+    // Walk up to the module whose path this one shares: a generated module's
+    // qualified name is that module's name plus one component per block.
+    let mut root = module;
+    while let Some(parent) = program.parent_module(root) {
+        if program.module(parent).path != program.module(root).path {
+            break;
+        }
+        root = parent;
+    }
+    let relative = package
         .and_then(|package| {
             program
-                .module(module)
+                .module(root)
                 .path
                 .strip_prefix(package.source_root())
                 .ok()
@@ -123,10 +134,15 @@ pub(crate) fn module_key(program: &Program, module: ModuleId) -> ModuleKey {
                 .collect::<Vec<_>>()
                 .join("/")
         })
-        .unwrap_or_else(|| program.module(module).qualified_name.clone());
+        .unwrap_or_else(|| program.module(root).qualified_name.clone());
+    let suffix = program
+        .module(module)
+        .qualified_name
+        .strip_prefix(&program.module(root).qualified_name)
+        .unwrap_or_default();
     ModuleKey {
         package: package.map(|package| package.name.clone()),
-        path,
+        path: format!("{relative}{suffix}"),
     }
 }
 
