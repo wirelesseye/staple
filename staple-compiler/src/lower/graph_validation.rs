@@ -1971,8 +1971,13 @@ pub(crate) mod tests {
 
         // The backend emits every eagerly declared standard-library template,
         // so the surfaces those bodies reference are required by every program
-        // that links the library. The test therefore checks the two surfaces
-        // no eager body references, and that adding a use adds its surface.
+        // that links the library. The test therefore checks the surface no
+        // eager body references, and that adding a use adds its surface.
+        //
+        // Literal comparison is not checked as absent: `impl TryConvert String
+        // Bool` matches on string literals (it stays free of the `when` macro
+        // so the macro closure has no cycle), so every program that links the
+        // library already reaches `memcmp`.
         let base = runtime_requirements("let answer: I32 = 1 + 2\n");
         assert!(
             base.contains(&GarbageCollector)
@@ -1986,10 +1991,6 @@ pub(crate) mod tests {
         assert!(
             !base.contains(&CoroutineRuntime),
             "a program without coroutines records no coroutine runtime: {base:?}"
-        );
-        assert!(
-            !base.contains(&LiteralComparison),
-            "a program without string patterns records no literal comparison: {base:?}"
         );
 
         let pattern = runtime_requirements(concat!(
