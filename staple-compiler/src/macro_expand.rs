@@ -1953,7 +1953,7 @@ pub(crate) fn expand_program_checked(
     let own_package = program.package_of(program.entry());
     let mut check = check_mode
         .map(|mode| expander.check_snapshot(mode, own_package, program.modules().len()));
-    if check.is_some() && check_mode == Some(check_program::CheckMode::All) {
+    if check.is_some() && check_mode == Some(check_program::CheckMode::PackageLibrary) {
         // A check program keeps helper bodies as code. Normal expansion leaves
         // them as written because only the interpreter's evaluator runs them,
         // so their macro calls are expanded here, now that every macro is

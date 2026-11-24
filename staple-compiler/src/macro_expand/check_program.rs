@@ -26,6 +26,10 @@ pub(crate) enum CheckMode {
     Invoked,
     /// Every macro declared in the program.
     All,
+    /// Every macro declared in the program, with the helper and macro bodies
+    /// expanded because the program becomes a package library's macro-mode
+    /// object. Not selected by the environment variable.
+    PackageLibrary,
 }
 
 /// Reads `STAPLE_CHECK_MACRO_CLOSURES`: `1` checks the closures of invoked
@@ -154,7 +158,7 @@ impl MacroExpander {
         // What the check itself expands below does not count as invoked.
         let invoked = self.invoked_macros.clone();
         let wanted = |definition: &MacroDefinition| {
-            mode == CheckMode::All || invoked.contains(&definition.key)
+            mode != CheckMode::Invoked || invoked.contains(&definition.key)
         };
         // The standard library is checked whole even as the program's own
         // package, as `build_check_program` does.
@@ -1062,7 +1066,7 @@ pub fn prepare_package_library(
     package: PackageId,
 ) -> Result<PackageLibraryBuild, Vec<Diagnostic>> {
     let (expanded, analysis, diagnostics) =
-        super::expand_program_checked(program, false, Some(CheckMode::All), false)?;
+        super::expand_program_checked(program, false, Some(CheckMode::PackageLibrary), false)?;
     if !diagnostics.is_empty() {
         return Err(diagnostics);
     }
