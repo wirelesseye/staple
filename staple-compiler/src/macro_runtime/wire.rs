@@ -660,16 +660,7 @@ impl Writer {
         let offset = tokens.first().map_or(0, |token| token.span.start);
         self.usize(offset);
         if offset > 0 {
-            let before = &syntax.token_stream()[..syntax.token_range.start];
-            let (mut line, mut column) = (1usize, 1usize);
-            for character in before.iter().flat_map(|token| token.text.chars()) {
-                if character == '\n' {
-                    line += 1;
-                    column = 1;
-                } else {
-                    column += 1;
-                }
-            }
+            let (line, column) = line_column_at(&syntax.tokens, syntax.token_range.start);
             self.usize(line);
             self.usize(column);
         }
@@ -744,6 +735,48 @@ impl Writer {
 /// newline per line before the slice, then spaces up to its column. The
 /// slice's spans keep their values, and positions in diagnostics keep their
 /// line and column.
+/// The line and column (both from 1, the column counted in characters) where
+/// token `index` of `stream` starts. Every macro call sends a slice of its
+/// file's stream, and scanning the stream up to the slice made a call's cost
+/// grow with its position in the file, so each stream's positions are worked
+/// out once per thread and kept while the stream lives.
+fn line_column_at(stream: &Arc<[SyntaxToken]>, index: usize) -> (usize, usize) {
+    type Positions = (std::sync::Weak<[SyntaxToken]>, Vec<(usize, usize)>);
+    thread_local! {
+        static POSITIONS: std::cell::RefCell<HashMap<usize, Positions>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    POSITIONS.with(|positions| {
+        let mut positions = positions.borrow_mut();
+        let key = Arc::as_ptr(stream).cast::<SyntaxToken>() as usize;
+        let current = positions.get(&key).is_some_and(|(weak, table)| {
+            table.len() == stream.len() + 1
+                && weak.upgrade().is_some_and(|live| Arc::ptr_eq(&live, stream))
+        });
+        if !current {
+            if positions.len() >= 256 {
+                positions.retain(|_, (weak, _)| weak.strong_count() > 0);
+            }
+            let mut table = Vec::with_capacity(stream.len() + 1);
+            let (mut line, mut column) = (1usize, 1usize);
+            table.push((line, column));
+            for token in stream.iter() {
+                for character in token.text.chars() {
+                    if character == '\n' {
+                        line += 1;
+                        column = 1;
+                    } else {
+                        column += 1;
+                    }
+                }
+                table.push((line, column));
+            }
+            positions.insert(key, (Arc::downgrade(stream), table));
+        }
+        positions[&key].1[index]
+    })
+}
+
 fn stream_prefix(offset: usize, line: usize, column: usize) -> Result<Vec<SyntaxToken>, WireError> {
     let newlines = line.checked_sub(1).ok_or(WireError::Invalid("line", 0))?;
     let indent = column.checked_sub(1).ok_or(WireError::Invalid("column", 0))?;
@@ -1043,6 +1076,33 @@ mod tests {
         let original = staple_syntax::parse_expression_fragment(&slice, &mut next)
             .expect("the original slice parses");
         assert_eq!(parsed.syntax().span, original.syntax().span);
+    }
+
+    #[test]
+    fn slices_of_one_stream_report_their_own_positions() {
+        use crate::macro_expand::syntax_ops::{describe_position, syntax_slice};
+
+        let mut next = 0;
+        let file = syntax_from_text("def a = 1\n// é\ndef b = 2\n\n  def c = 3\n", &mut next);
+        let tokens = file.tokens();
+        // The second and later slices read positions remembered for the stream.
+        for (text, expected) in [
+            ("2", "line 3, column 9"),
+            ("1", "line 1, column 9"),
+            ("c", "line 5, column 7"),
+        ] {
+            let index = tokens.iter().position(|token| token.text == text).unwrap();
+            let slice = syntax_slice(&file, index, index + 1);
+            let Message::Result { syntax: decoded, .. } = round_trip(&Message::Result {
+                syntax: slice.clone(),
+                next_mark: 1,
+                output: Vec::new(),
+            }) else {
+                panic!("a result came back as something else");
+            };
+            assert_same_fragment(&slice, &decoded, text);
+            assert_eq!(describe_position(&decoded, 0), expected, "`{text}`");
+        }
     }
 
     fn assert_same_tree(original: &ArgTree, decoded: &ArgTree, what: &str) {

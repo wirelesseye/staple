@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -10,7 +10,7 @@ use staple_compiler::macro_runtime::manifest::{LibraryManifest, build_manifest, 
 use staple_compiler::macro_runtime::quote::CallContext;
 use staple_compiler::macro_runtime::instance_symbol;
 use staple_compiler::{
-    ClosureLibraryRequest, CodeGenerator, CompiledCall, EmissionUnit, LibrarySpec, Lowerer,
+    ClosureLibraryRequest, CodeGenerator, CompiledCall, EmissionUnit, IrOptimization, LibrarySpec, Lowerer,
     MacroBackend, MacroEffectEntry, NameResolver, PackageLibraryBuild, Program, TypeChecker,
     prepare_package_library,
 };
@@ -20,7 +20,16 @@ use staple_syntax::{Diagnostic, Span, Syntax, SyntaxId};
 use crate::cache::{self, Destination, Placement};
 use crate::compile;
 
-const MACRO_OPTIMIZATION_LEVEL: &str = "default";
+/// The IR pipeline for package libraries and their macro-mode objects, which
+/// are built once per fingerprint. Task 11 measured no call-time difference
+/// between `O0`, `O1` and `O2`, since a call's time goes to the wire and the
+/// host's syntax intrinsics; `O1` makes the standard library's library 25%
+/// smaller for about 1.5 s more on a cold build, and `O2` adds nothing to it.
+const PACKAGE_OPTIMIZATION: IrOptimization = IrOptimization::O1;
+/// The IR pipeline for closure libraries, which are rebuilt after an edit to
+/// a macro's closure. `O1` made their codegen 25–35% slower and calls no
+/// faster.
+const CLOSURE_OPTIMIZATION: IrOptimization = IrOptimization::O0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MacroEngine {
@@ -50,6 +59,9 @@ struct MacroStats {
     package_libraries: Vec<String>,
     closure_time: Duration,
     package_time: Duration,
+    /// Calls per macro: how many, and their total time, including the wire
+    /// encoding both ways.
+    calls: BTreeMap<String, (u32, Duration)>,
 }
 
 /// The macro-mode objects and fingerprints of the packages prepared so far,
@@ -330,7 +342,8 @@ impl CliMacroBackend {
                 generator
                     .emit_unit_object(
                         &build.lowered,
-                        &EmissionUnit::packages([built_package]),
+                        &EmissionUnit::packages([built_package])
+                            .with_optimization(PACKAGE_OPTIMIZATION),
                         path,
                         None,
                     )
@@ -621,6 +634,13 @@ impl Drop for CliMacroBackend {
             for (index, name) in stats.package_libraries.iter().enumerate() {
                 eprintln!("  package #{index}: {name}");
             }
+            for (name, (count, time)) in &stats.calls {
+                eprintln!(
+                    "  calls: {name} {count} in {:.3}ms, {:.1}us each",
+                    time.as_secs_f64() * 1e3,
+                    time.as_secs_f64() * 1e6 / f64::from(*count)
+                );
+            }
         }
     }
 }
@@ -699,7 +719,7 @@ impl MacroBackend for CliMacroBackend {
             &entry_meta,
             &dep_fingerprints,
             &triple,
-            MACRO_OPTIMIZATION_LEVEL,
+            CLOSURE_OPTIMIZATION.name(),
         )
         .map_err(internal)?;
         let placement =
@@ -778,7 +798,8 @@ impl MacroBackend for CliMacroBackend {
             EmissionUnit::packages([package.expect("a package")]).with_library(spec)
         } else {
             EmissionUnit::whole_program().with_library(spec)
-        };
+        }
+        .with_optimization(CLOSURE_OPTIMIZATION);
         generator.emit_unit_object(&lowered, &unit, &obj_path, None)?;
         step("codegen");
 
@@ -841,13 +862,22 @@ impl MacroBackend for CliMacroBackend {
             call_site: call.call_site.clone(),
             identifier_mark: None,
         };
-        Some(self.client.call(
+        let started = Instant::now();
+        let result = self.client.call(
             handle,
             &shim,
             &call.declaration.name,
             context,
             call.arguments.clone(),
-        ))
+        );
+        let mut stats = self.stats.lock().expect("macro stats");
+        let entry = stats
+            .calls
+            .entry(call.declaration.name.clone())
+            .or_default();
+        entry.0 += 1;
+        entry.1 += started.elapsed();
+        Some(result)
     }
 }
 
@@ -911,7 +941,7 @@ fn package_macro_fingerprints(
         &packages,
         identity,
         &triple,
-        MACRO_OPTIMIZATION_LEVEL,
+        PACKAGE_OPTIMIZATION.name(),
     )
 }
 

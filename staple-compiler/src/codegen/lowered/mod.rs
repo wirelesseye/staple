@@ -245,6 +245,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 )
                 .map_err(|message| vec![invalid_module_diagnostic(message)])?;
         }
+        if let Some(pipeline) = self.unit.optimization().pipeline() {
+            self.backend
+                .llvm_module
+                .run_passes(
+                    pipeline,
+                    target_machine,
+                    inkwell::passes::PassBuilderOptions::create(),
+                )
+                .map_err(|message| vec![invalid_module_diagnostic(message)])?;
+        }
         Ok(self.backend.llvm_module)
     }
 

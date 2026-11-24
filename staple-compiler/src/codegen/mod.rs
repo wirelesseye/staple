@@ -114,6 +114,39 @@ pub struct EmissionUnit {
     emit_main: bool,
     include_runtime: bool,
     library: Option<LibrarySpec>,
+    optimization: IrOptimization,
+}
+
+/// The LLVM IR pass pipeline a unit runs before code generation. Programs
+/// run none; macro libraries choose a level (see `macro_backend`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IrOptimization {
+    /// No IR passes (only `globaldce` on a unit that isn't the whole program).
+    #[default]
+    O0,
+    /// LLVM's `default<O1>` pipeline.
+    O1,
+    /// LLVM's `default<O2>` pipeline.
+    O2,
+}
+
+impl IrOptimization {
+    /// The level's name, as written in fingerprints.
+    pub fn name(self) -> &'static str {
+        match self {
+            IrOptimization::O0 => "O0",
+            IrOptimization::O1 => "O1",
+            IrOptimization::O2 => "O2",
+        }
+    }
+
+    pub(crate) fn pipeline(self) -> Option<&'static str> {
+        match self {
+            IrOptimization::O0 => None,
+            IrOptimization::O1 => Some("default<O1>"),
+            IrOptimization::O2 => Some("default<O2>"),
+        }
+    }
 }
 
 /// What a shared-library unit exposes and how it reaches its host.
@@ -149,6 +182,7 @@ impl EmissionUnit {
             emit_main: true,
             include_runtime: true,
             library: None,
+            optimization: IrOptimization::O0,
         }
     }
 
@@ -176,6 +210,7 @@ impl EmissionUnit {
             emit_main: false,
             include_runtime: false,
             library: None,
+            optimization: IrOptimization::O0,
         }
     }
 
@@ -210,6 +245,16 @@ impl EmissionUnit {
         self.emit_main = false;
         self.library = Some(library);
         self
+    }
+
+    /// Runs `optimization`'s IR pass pipeline over the unit.
+    pub fn with_optimization(mut self, optimization: IrOptimization) -> Self {
+        self.optimization = optimization;
+        self
+    }
+
+    pub(crate) fn optimization(&self) -> IrOptimization {
+        self.optimization
     }
 
     pub(crate) fn library(&self) -> Option<&LibrarySpec> {

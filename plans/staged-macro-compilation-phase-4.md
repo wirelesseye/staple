@@ -513,7 +513,7 @@ Update this section as you work (see "Rules for the implementor").
 | 8. Package libraries and macro-mode objects | done | `18d6147a`, `5e712235`, `62cdacbb` | `MacroBackend::begin`/`available`/`prebuild`; `prepare_package_library` lowers a whole-package macro-mode check program, emitted as a plain package object; package libraries link it with their dependencies' macro-mode objects, a shim-only library object and the runtime. Closure libraries now emit only the expanding package and link dependency objects. Macro caches live under `<package>/target/staple/<host>/macros` and `$XDG_CACHE_HOME/staple/macros`; `install-stdlib.sh` prebuilds into `<stdlib>/target/<host>/macros`. Manifest module keys are package-relative paths (format 2). Tests are `#[ignore]`d and run by `scripts/test-macro-libraries.sh` in release. See Findings. |
 | 9. Caching | done | `2dcf60b1` | `cache::package_macro_fingerprints` (dependency macro-mode fingerprints + opt level); closure library fingerprinting (`closure_library_fingerprint`, `hash_normalized_items`), atomic caching (`ensure_library`), manifest/version rebuilds, pruning, and concurrent/reuse/invalidation tests. See Findings. |
 | 10. Build cost | done | `cb8650d2` | `STAPLE_MACRO_STATS` prints each library's steps. `Copy` answers are cached in `TypedModule` and in lowering's trait selection, sum alternatives are sorted with cached keys, and the closure fingerprint prints `Syntax` compactly. A closure library takes 3.6–4.3 s (about 10 s before), the cold standard library 63 s (165 s before). Neither Phase 0 option was kept; see Findings. |
-| 11. Optimization | not started | | |
+| 11. Optimization | done | | `EmissionUnit::with_optimization` runs LLVM's `default<O1>`/`default<O2>` pipeline. Package libraries and macro-mode objects use `O1`, closure libraries `O0` (`PACKAGE_OPTIMIZATION`, `CLOSURE_OPTIMIZATION` in `macro_backend.rs`); no level changed call time. `STAPLE_MACRO_STATS` prints calls per macro. The wire encoder no longer rescans a file for each call: `if` calls 665 µs to 409 µs. See Findings. |
 | 12. End to end | not started | | |
 | 13. Language reference | not started | | |
 | 14. Close out | not started | | |
@@ -557,6 +557,29 @@ The B-series inputs call only standard-library macros, so with a cached
 standard library they build nothing: B1 0.32 s, B2 0.33 s, B3 0.81 s with
 either engine (`staple expand`). The libraries they would build are `if`
 (B1, B3: 4.2 s) and `derive_eq` (B2: 4.3 s), in the cold run above.
+
+Task 11, same machine, release `staple`, 2026-11-25, `c9555524` plus the
+task 11 changes. The `keep` package above, cold and then warm, each level
+used for both package and closure libraries (set through a temporary
+override, since removed). Call times are means over a warm check, which
+expands the standard library's own calls (506 `if`, 19 `when`, 1
+`typegroup`) and includes the wire encoding both ways:
+
+| | `O0` | `O1` | `O2` |
+|---|---|---|---|
+| Cold check | 67.0 s | 65.4 s | 66.3 s |
+| `std` package library (with the closure libraries it needs) | 57.1 s | 58.6 s | 59.7 s |
+| Closure library codegen | 0.18–0.92 s | 0.19–1.25 s | 0.20–1.36 s |
+| `std` library / macro-mode object size | 687 / 758 KB | 519 / 503 KB | 518 / 501 KB |
+| `if` closure library size | 173 KB | 151 KB | 151 KB |
+| `if` call | 409 µs | 406 µs | 406 µs |
+| `when` call | 873 µs | 871 µs | 870 µs |
+| `typegroup` call | 0.39–0.44 ms | 0.40 ms | 0.40–0.45 ms |
+
+Before the encoder fix (all levels alike): `if` 665 µs, `when` 1.0 ms. A
+probe split an `if` call (600-byte frames) into 241 µs encoding in the
+parent and 419 µs waiting for the server's reply; decoding the reply took
+7 µs.
 
 For each one, record what was measured, the result, the machine, the
 commit and the command. Include:
@@ -1133,3 +1156,54 @@ Record:
     diagnostics. The expander didn't change, so `compare-expansion.py` wasn't
     needed.
 
+
+
+### Task 11: Optimization
+
+- **The pipeline.** `EmissionUnit::with_optimization(IrOptimization)` runs
+  LLVM's `default<O1>` or `default<O2>` pipeline after `globaldce`; `O0`,
+  the default for every other unit, runs none. The level's name is part of
+  the macro fingerprints, so changing it rebuilds the libraries.
+- **No level made calls faster.** Warm call times are the same at `O0`, `O1`
+  and `O2` to within 1%, although `O1` shrinks the standard library's
+  library by 25%, so the pipeline does run. A sample of the macro server
+  during a warm check finds it idle 96% of the time. A call's time goes to
+  the wire and to the syntax intrinsics, which run in the host's Rust code
+  whatever the library's level, not to the macro's own code.
+- **Chosen levels** (written in `macro_backend.rs`):
+  - Package libraries and macro-mode objects: `O1`. Decision 10 says to
+    optimize them unless that is too slow, and it costs about 1.5 s on a
+    57 s cold standard library. `O2` adds about 1 s more and nothing to the
+    size.
+  - Closure libraries: `O0`. They are rebuilt after each edit to a closure,
+    `O1` makes their codegen 25–35% slower, and calls are no faster.
+  - Revisit both once the per-call overheads below are gone and a macro's
+    own code is a large part of a call.
+- **The encoder rescanned the file for every call.** A fragment carries the
+  line and column where its slice starts, and `Writer::fragment` worked them
+  out by scanning every token before the slice. For a call deep in a large
+  standard-library module that was most of the call. Positions are now
+  worked out once per token stream and thread (`line_column_at`) and kept
+  while the stream lives: `if` calls went from 665 µs to 409 µs and `when`
+  from 1.0 ms to 0.87 ms. The bytes sent are unchanged; a new test sends
+  three slices of one stream in turn.
+- **Left for task 12: the server's side has the same cost.** The receiver
+  rebuilds a slice's position with `stream_prefix`, filler tokens as long as
+  the slice's offset, and the parser intrinsics then rebuild the text and
+  its line table from the start of that stream on each parse. Most of the
+  remaining 0.3–0.4 ms of an `if` call is there. Fixing it means letting
+  the parser start at a given line, column and offset instead of padding.
+- **Also for task 12.** `staple expand` on a single file sends no calls to
+  the server: B1–B3 make no compiled calls, and their times match the
+  interpreter's. The B-series measurements in task 12 need a package or a
+  fix.
+- **Verification.**
+  - `cargo test -p staple-compiler --lib`: 603 passed, 5 ignored (9 in
+    `macro_runtime::wire`, with the new test).
+  - `cargo test -p staple --bin staple`: 294 passed, 2 ignored.
+  - `cargo test -p staple --test macro_server`: 4 passed.
+  - `cargo test --release -p staple --test compiled_macros -- --ignored`: 10
+    passed.
+  - `scripts/check-macro-closures.py --mode all`: 232 inputs, 0 with
+    diagnostics. The interpreter's expansion didn't change, so
+    `compare-expansion.py` wasn't needed.
