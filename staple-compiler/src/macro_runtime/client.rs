@@ -46,6 +46,16 @@ pub struct MacroClient {
     libraries: Vec<RegisteredLibrary>,
     /// Where captured macro output goes, standard error by default.
     output: Box<dyn Write + Send>,
+    timings: ClientTimings,
+}
+
+/// How long the client spent starting servers and loading libraries.
+#[derive(Debug, Clone, Default)]
+pub struct ClientTimings {
+    /// Each server start, from spawning it to its `Hello`.
+    pub starts: Vec<Duration>,
+    /// Each library load, the library's initialization included.
+    pub loads: Vec<Duration>,
 }
 
 impl MacroClient {
@@ -67,7 +77,13 @@ impl MacroClient {
             process: None,
             libraries: Vec::new(),
             output: Box::new(std::io::stderr()),
+            timings: ClientTimings::default(),
         }
+    }
+
+    /// How long server starts and library loads have taken so far.
+    pub fn timings(&self) -> &ClientTimings {
+        &self.timings
     }
 
     /// Sends captured macro output to `output` instead of standard error.
@@ -441,7 +457,9 @@ mod unix {
     impl MacroClient {
         fn ensure_server(&mut self) -> Result<&mut RunningServer, String> {
             if self.process.is_none() {
+                let started = std::time::Instant::now();
                 let server = RunningServer::spawn(&self.server_binary, self.timeout)?;
+                self.timings.starts.push(started.elapsed());
                 self.process = Some(server);
                 self.forget_server_handles();
             }
@@ -546,7 +564,12 @@ mod unix {
                 templates: registered.templates.clone(),
             };
             let timeout = DEFAULT_TIMEOUT.max(self.timeout);
-            match self.exchange(macro_name, &request, timeout)? {
+            // A server start belongs to its own timing, not the load's.
+            self.ensure_server()?;
+            let started = std::time::Instant::now();
+            let reply = self.exchange(macro_name, &request, timeout)?;
+            self.timings.loads.push(started.elapsed());
+            match reply {
                 Message::Loaded { library: handle } => {
                     self.libraries[library.0].server_handle = Some(handle);
                     Ok(handle)

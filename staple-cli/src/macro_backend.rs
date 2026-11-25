@@ -23,9 +23,12 @@ use crate::compile;
 /// The IR pipeline for package libraries and their macro-mode objects, which
 /// are built once per fingerprint. Task 11 measured no call-time difference
 /// between `O0`, `O1` and `O2`, since a call's time goes to the wire and the
-/// host's syntax intrinsics; `O1` makes the standard library's library 25%
-/// smaller for about 1.5 s more on a cold build, and `O2` adds nothing to it.
-const PACKAGE_OPTIMIZATION: IrOptimization = IrOptimization::O1;
+/// host's syntax intrinsics. `O1` was chosen there and then reverted in task
+/// 12: with the standard library at `O1`, a sequence argument lost its
+/// elements partway through a run (two top-level `if`s were enough), most
+/// likely because optimized code keeps only derived pointers to objects the
+/// conservative stack scan then misses. Raise it only with that fixed.
+const PACKAGE_OPTIMIZATION: IrOptimization = IrOptimization::O0;
 /// The IR pipeline for closure libraries, which are rebuilt after an edit to
 /// a macro's closure. `O1` made their codegen 25–35% slower and calls no
 /// faster.
@@ -634,6 +637,17 @@ impl Drop for CliMacroBackend {
             for (index, name) in stats.package_libraries.iter().enumerate() {
                 eprintln!("  package #{index}: {name}");
             }
+            let timings = self.client.timings();
+            let mean = |times: &[Duration]| {
+                times.iter().sum::<Duration>().as_secs_f64() * 1e3 / times.len().max(1) as f64
+            };
+            eprintln!(
+                "  server: {} starts, {:.1}ms each; {} library loads, {:.1}ms each",
+                timings.starts.len(),
+                mean(&timings.starts),
+                timings.loads.len(),
+                mean(&timings.loads)
+            );
             for (name, (count, time)) in &stats.calls {
                 eprintln!(
                     "  calls: {name} {count} in {:.3}ms, {:.1}us each",

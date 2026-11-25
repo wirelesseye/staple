@@ -1120,6 +1120,19 @@ pub struct ProgramLoader {
     import_errors: Option<Vec<LoadDiagnostic>>,
 }
 
+/// With `STAPLE_SOURCE_DUMP` set to a directory, writes each source loaded from
+/// a string there, named by its hash, so `scripts/compare-engines.py` can run
+/// the programs tests build inline through both macro engines.
+fn dump_source(source: &str) {
+    let Some(directory) = std::env::var_os("STAPLE_SOURCE_DUMP") else {
+        return;
+    };
+    let hash = source.bytes().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    let _ = std::fs::write(Path::new(&directory).join(format!("{hash:016x}.sta")), source);
+}
+
 impl ProgramLoader {
     pub fn new() -> Self {
         Self::default()
@@ -1376,6 +1389,7 @@ impl ProgramLoader {
     }
 
     pub fn load_source(mut self, source: &str, module_root: &Path) -> Result<Program, String> {
+        dump_source(source);
         self.load_source_diagnostic(source, module_root)
             .map_err(|error| error.to_string())
     }

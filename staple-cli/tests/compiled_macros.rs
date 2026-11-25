@@ -835,3 +835,46 @@ pub def main = () => {
         "corrupt manifest should force rebuild: {second_stats}"
     );
 }
+
+/// `staple expand` on a single file makes its calls through the server, and
+/// `--tree-dump` gives the same tree with either engine.
+#[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
+fn a_single_file_expands_the_same_with_either_engine() {
+    let temp = TempDir::new("single-file");
+    let source = temp.0.join("main.sta");
+    fs::write(
+        &source,
+        "\
+use std.syntax.*
+use std.clone.Clone
+
+macro keep: Expr -> Expr = value => {
+    let same = Clone.clone value
+    parse_quote { $same }
+}
+
+let a: I32 = if True { keep 1 } else { 2 }
+let b: I32 = when { a > 1 => 3, True => keep 4 }
+",
+    )
+    .unwrap();
+    let expand = |engine: &str| {
+        let output = staple_cmd(&temp.0, &temp.0.join("cache"))
+            .args(["expand", "--tree-dump", &format!("--macro-engine={engine}"), "--stdlib"])
+            .arg(repo_root().join("stdlib"))
+            .arg(&source)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(output.status.success(), "{engine} expand failed: {stderr}");
+        (String::from_utf8_lossy(&output.stdout).into_owned(), stderr)
+    };
+    let (interpreted, _) = expand("interp");
+    let (compiled, stats) = expand("compiled");
+    assert!(stats.contains("calls: keep 2 in"), "{stats}");
+    assert!(stats.contains("calls: if "), "{stats}");
+    assert!(stats.contains("calls: when "), "{stats}");
+    assert!(compiled.contains("Match"), "{compiled}");
+    assert_eq!(interpreted, compiled);
+}

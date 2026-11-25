@@ -1792,12 +1792,21 @@ fn desugar_expression(
 /// walk over the whole program, standard library included, and helper
 /// evaluation adds further native-stack nesting.
 pub fn expand_macros(program: Program) -> Result<Program, Vec<Diagnostic>> {
-    std::thread::Builder::new()
+    // The expansion thread makes compiled calls through this thread's backend,
+    // as name resolution's thread does.
+    let backend = compiled_call::take_backend();
+    let (expanded, backend) = std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
-        .spawn(move || expand_program(program).map(|(program, _)| program))
+        .spawn(move || {
+            compiled_call::restore_backend(backend);
+            let expanded = expand_program(program).map(|(program, _)| program);
+            (expanded, compiled_call::take_backend())
+        })
         .expect("macro expansion thread should spawn")
         .join()
-        .expect("macro expansion should not panic")
+        .expect("macro expansion should not panic");
+    compiled_call::restore_backend(backend);
+    expanded
 }
 
 pub(crate) fn expand_program(

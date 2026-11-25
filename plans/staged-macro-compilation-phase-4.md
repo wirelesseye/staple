@@ -514,7 +514,7 @@ Update this section as you work (see "Rules for the implementor").
 | 9. Caching | done | `2dcf60b1` | `cache::package_macro_fingerprints` (dependency macro-mode fingerprints + opt level); closure library fingerprinting (`closure_library_fingerprint`, `hash_normalized_items`), atomic caching (`ensure_library`), manifest/version rebuilds, pruning, and concurrent/reuse/invalidation tests. See Findings. |
 | 10. Build cost | done | `cb8650d2` | `STAPLE_MACRO_STATS` prints each library's steps. `Copy` answers are cached in `TypedModule` and in lowering's trait selection, sum alternatives are sorted with cached keys, and the closure fingerprint prints `Syntax` compactly. A closure library takes 3.6–4.3 s (about 10 s before), the cold standard library 63 s (165 s before). Neither Phase 0 option was kept; see Findings. |
 | 11. Optimization | done | `6cd3e143` | `EmissionUnit::with_optimization` runs LLVM's `default<O1>`/`default<O2>` pipeline. Package libraries and macro-mode objects use `O1`, closure libraries `O0` (`PACKAGE_OPTIMIZATION`, `CLOSURE_OPTIMIZATION` in `macro_backend.rs`); no level changed call time. `STAPLE_MACRO_STATS` prints calls per macro. The wire encoder no longer rescans a file for each call: `if` calls 665 µs to 409 µs. See Findings. |
-| 12. End to end | not started | | |
+| 12. End to end | in progress | | `scripts/compare-engines.py` expands every input with both engines (`staple expand --tree-dump`, hidden) and checks it with both. Standard library, examples, fixtures and corpus: 232/232 match. Integration-test sources (`STAPLE_SOURCE_DUMP`): 1705/1847 match; the 142 differences are triaged in Findings, and most are not fixed yet. Fixed: single-file `expand` made no compiled calls; package libraries back to `O0` (`O1` corrupted a run). B1–B3, call cost, server start and restart measured. Tests pass (compiler library 603, CLI 294, server 4, compiled 11 including a new two-engine test, compiler integration all but the pre-existing `derive_eq` failure); closure check clean. |
 | 13. Language reference | not started | | |
 | 14. Close out | not started | | |
 
@@ -580,6 +580,42 @@ Before the encoder fix (all levels alike): `if` 665 µs, `when` 1.0 ms. A
 probe split an `if` call (600-byte frames) into 241 µs encoding in the
 parent and 419 µs waiting for the server's reply; decoding the reply took
 7 µs.
+
+Task 12, same machine, release `staple`, 2026-11-25, `686679d2` plus the
+task 12 changes, package and closure libraries at `O0`. Best of three; cold
+is one run with an empty `XDG_CACHE_HOME`:
+
+| | Interpreter | Compiled, cold | Compiled, warm |
+|---|---|---|---|
+| B1 (`staple expand`) | 0.33 s | 57.0 s | 0.56 s |
+| B2 | 0.34 s | 56.7 s | 0.61 s |
+| B3 | 0.81 s | 57.3 s | 1.27 s |
+| `check` of a file calling every macro in Phase 3's table | 1.38 s | | 1.72 s |
+
+A cold run builds the standard library's package library and the closure
+libraries it needs; every later run, of any program, reuses them.
+
+Per call, warm, from `STAPLE_MACRO_STATS` on that file (the standard
+library's own calls included); wire encoding both ways, not reparsing the
+result. Phase 3's interpreted figures, from its harness, for comparison:
+
+| Macro | Calls | Compiled | Phase 3 interpreted |
+|---|---|---|---|
+| `if` | 561 | 383 µs | 110 µs |
+| `when` | 119 | 379 µs | 369 µs |
+| `typegroup` | 10 | 216 µs | 833 µs |
+| `@derive_eq` | 10 | 1.5 ms | 343 µs |
+| `@derive_hash` | 10 | 273 µs | 403 µs |
+| `@derive_debug` | 10 | 308 µs | 219 µs |
+| `@derive_default` | 10 | 360 µs | 441 µs |
+
+`while`, `for` and `discard` are templates now and make no server calls.
+
+- Server start (spawn to `Hello`): 10–13 ms. Loading the standard library's
+  package library: 0.8–1.4 ms.
+- Restart after a crash: a macro that overflows its 256 MiB stack is reported
+  after 32 ms; the next call starts a new server and reloads its library in
+  10 ms (`server: 2 starts`, `3 library loads`).
 
 For each one, record what was measured, the result, the machine, the
 commit and the command. Include:
@@ -1174,7 +1210,8 @@ Record:
   - Package libraries and macro-mode objects: `O1`. Decision 10 says to
     optimize them unless that is too slow, and it costs about 1.5 s on a
     57 s cold standard library. `O2` adds about 1 s more and nothing to the
-    size.
+    size. **Reverted to `O0` in task 12**, which found `O1` corrupting a run;
+    see Task 12.
   - Closure libraries: `O0`. They are rebuilt after each edit to a closure,
     `O1` makes their codegen 25–35% slower, and calls are no faster.
   - Revisit both once the per-call overheads below are gone and a macro's
@@ -1207,3 +1244,95 @@ Record:
   - `scripts/check-macro-closures.py --mode all`: 232 inputs, 0 with
     diagnostics. The interpreter's expansion didn't change, so
     `compare-expansion.py` wasn't needed.
+
+### Task 12: End to end
+
+- **The comparison.** `scripts/compare-engines.py` runs each input through
+  `staple expand --tree-dump` and `staple check`, once with each engine, and
+  reports any difference in exit status, tree or diagnostics, writing both
+  sides under `--out`. `--tree-dump` (hidden, `expand` only) prints
+  `macro_runtime::canonical::tree_dump`, Phase 3's debug-tree form with its
+  four normalizations, moved out of the test-only `compare` module. Inputs:
+  `compare-expansion.py`'s set (standard library entries, examples, fixtures,
+  corpus) and, with `--dump-tests` or `--test-sources`, every program the
+  compiler's integration tests load from a string. `ProgramLoader::load_source`
+  writes those to `STAPLE_SOURCE_DUMP` when it is set.
+- **Single-file `expand` used the interpreter.** `expand_macros` ran on a new
+  thread without the thread-local macro backend, so `staple expand
+  --macro-engine=compiled` on a file outside a package made no compiled
+  calls, and B1–B3 measured the interpreter (task 11's finding). It now
+  carries the backend over, as name resolution's thread does. A new
+  `compiled_macros` test expands one file with both engines and compares the
+  trees.
+- **`O1` package libraries corrupted a run.** With the standard library's
+  package library at `O1`, two top-level `if`s in a file made a later `if`
+  call in `std.number.types` fail: its `Sequence` argument lost its elements
+  after `else` (`if without a branch after else`), although the wire carried
+  them. At `O0` the same input passes. The likely cause is that optimized
+  code keeps only derived pointers to objects the conservative stack scan
+  then misses; it is not confirmed. Package libraries are back at `O0`, and
+  task 11's choice is noted as reverted. Raising the level needs that found
+  first.
+- **Concurrent builds of one root package break each other.** Running the
+  standard library's entry files in parallel, each with `std` as its root
+  package, failed six with `dlopen` errors (`code signature … not valid`,
+  then `no such file`): every process writes and prunes the same
+  `<stdlib>/target/<host>/macros`, so one removes or replaces a library
+  another is loading. Run one at a time, all 45 match. Two builds of one
+  package at once (an editor and a terminal) would hit the same. Left for a
+  follow-up: pruning should leave libraries another build may be using, for
+  example recent ones.
+- **Standard library, examples, fixtures and corpus: 232/232 match** (45
+  standard-library entries run one at a time, the rest four at a time).
+- **Integration-test sources: 1705/1847 match.** 908 of the 1847 fail to
+  check with either engine, mostly tests that expect an error or load side
+  modules from another directory. The 142 differences, by kind:
+  - 78 check with the interpreter and fail with the compiled engine:
+    - 25 *no trait implementation or matching bound*: a macro without a
+      declared result type ends in `parse_quote` (or calls
+      `Parse.parse_all.<…>` without a known target), and the closure check
+      can't infer the quotation's type; the interpreter takes it from the
+      call. Declaring `: Expr -> Expr` fixes the ones tried. Language
+      decision: require the result type, or infer it from the parameter
+      type.
+    - 8 *cannot move out of a borrowed value* and 3 more ownership errors:
+      the expected Phase 5 difference (compiled builds enforce syntax
+      ownership).
+    - 7 `@derive_*` on a bodyless `type Name` fail to reparse the item
+      (`expected '<' for type parameters, … for a type body`). A bug.
+    - 3 `is_empty` (imported from `std.syntax`) is an unknown name in the
+      closure program. A bug.
+    - The rest are single cases: typed patterns and annotations the
+      interpreter accepts dynamically (`nominal pattern 'Ident' cannot match
+      Sequence<…>`, `expected 'Expr', found 'Syntax'`, `unknown type
+      'Pattern'`), and `typegroup` with generic arguments (`expected '>' to
+      close type arguments`).
+  - 49 fail with both engines with different diagnostics: the compiled
+    engine's wording for a missing trait (`no trait implementation …` for
+    the interpreter's ``{integer}` does not implement `Show``), panics that
+    add the macro's own source position (`at std/cinterop.sta:72:10`), and
+    stage-cycle errors reached in a different order.
+  - 7 fail to check with both engines, but a diagnostic in compiled
+    expansion reports `at byte N` instead of a line and column: a reparsed
+    result's spans have no location. A bug.
+  - 4 fail only with the interpreter: the Phase 5 list (a bare `Sequence` or
+    `Separated` splice, `Syntax` as a `parse_quote` context).
+  - 2 differ in which part of a cycle is named, or in the panic text of an
+    invalid identifier; 1 overflows the stack with both.
+  None of the bugs above is fixed yet. They are listed here with their
+  sample sources under `--out` when the script runs.
+- **Call cost.** Compiled calls cost 0.2–0.4 ms, against the interpreter's
+  0.1–0.8 ms in Phase 3: `if` is about 3.5 times slower, `typegroup` and
+  most derives faster. About a third of a call is the server's work; half
+  of that is rebuilding the slice's position (`stream_prefix`, then the
+  parser's line table and `describe_position` over the whole prefix), which
+  grows with the slice's offset in its file. B1–B3 warm take 0.56, 0.61 and
+  1.27 s against the interpreter's 0.33, 0.34 and 0.81 s.
+- **A blank output line.** A crashing macro's report starts with
+  ``macro `boom`: `` and nothing after it: the forwarded standard error is
+  one empty line. Cosmetic.
+- **Not from task 12:** `derive_eq::derives_compose_in_every_order_and_preserve_docs`
+  in `staple-compiler/tests` fails at `686679d2` too (a `when` stage cycle in
+  `std.string`). The earlier tasks' test runs didn't include the compiler's
+  integration tests.
+

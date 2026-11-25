@@ -62,6 +62,9 @@ struct Options {
     library: LibrarySpec,
     /// Which macro execution engine to use.
     macro_engine: crate::macro_backend::MacroEngine,
+    /// Hidden: `expand` prints the expanded tree as `canonical::tree_dump`
+    /// writes it, for comparing the macro engines.
+    tree_dump: bool,
 }
 
 pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String> {
@@ -135,7 +138,11 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
         let expanded = run_with_macro_engine(&options, || {
             expand_macros(program).map_err(format_diagnostics)
         })?;
-        let rendered = render_expanded_module(&expanded).map_err(|error| error.to_string())?;
+        let rendered = if options.tree_dump {
+            staple_compiler::macro_runtime::canonical::tree_dump(&expanded) + "\n"
+        } else {
+            render_expanded_module(&expanded).map_err(|error| error.to_string())?
+        };
         return match &options.output {
             Some(output) => {
                 std::fs::write(output, rendered)
@@ -615,6 +622,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         incremental: std::env::var_os("STAPLE_INCREMENTAL").is_none_or(|value| value != "0"),
         library: LibrarySpec::default(),
         macro_engine: crate::macro_backend::MacroEngine::Interp,
+        tree_dump: false,
     };
     let mut positional_only = false;
     let mut emit_specified = false;
@@ -724,6 +732,10 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         }
         if !positional_only && argument == "--library-trap-exit" {
             options.library.trap_exit = true;
+            continue;
+        }
+        if !positional_only && argument == "--tree-dump" && options.mode == Mode::Expand {
+            options.tree_dump = true;
             continue;
         }
         if !positional_only && argument == "--macro-engine" {
