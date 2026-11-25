@@ -975,8 +975,11 @@ let value: Bounded = Bounded.Value 42
 use std.syntax.*
 macro m: Expr -> Expr = e => if (True) { nope } else { e }
 let b: I32 = m 1
+let c: I32 = m 2
 ",
     );
     assert!(!ok);
     assert!(stderr.contains("unknown name `nope` at line 2, column 42"), "{stderr}");
+    // A library that fails to build is reported, and built, once.
+    assert_eq!(stderr.matches("unknown name `nope`").count(), 1, "{stderr}");
 }

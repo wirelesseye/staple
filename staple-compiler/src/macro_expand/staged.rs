@@ -307,6 +307,9 @@ impl MacroExpander {
                     // The library build checked the macro's code, so the
                     // interpreter's check would only report it again.
                     self.macro_checks.insert(definition.key.clone(), false);
+                    // The build fails the same way at every invocation, so
+                    // it is reported once, at the first.
+                    self.macros_failed.insert(definition.key.clone());
                     for mut diagnostic in diagnostics {
                         if matches!(diagnostic.span, Span::Compiler) {
                             diagnostic.span = call_span.clone();
