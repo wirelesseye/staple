@@ -461,6 +461,16 @@ What Phase 3 leaves for this phase:
 
 ### Phase 5: switch over
 
+Breakdown and status: [`staged-macro-compilation-phase-5.md`](staged-macro-compilation-phase-5.md).
+The breakdown adds four things to this section:
+- the macro backend moves into `staple-compiler`, so the compiler's tests and
+  the language server use the compiled engine too;
+- the switch is gated on warm performance within 25% of the interpreter;
+- `if` and `when` become templates if the interpreter can expand them the
+  same way;
+- the standard library uses `if` and `when` again. Its derives stay
+  hand-written (open question 5).
+
 What Phase 4 leaves for this phase (details in its Findings):
 
 - **Macro code that is only valid dynamically.** Compiling a macro
@@ -589,3 +599,10 @@ What Phase 4 leaves for this phase:
    in, for debugging cycles? Phase 1 added the hidden `STAPLE_MACRO_CYCLES`
    environment variable, which prints recorded cycles; a public flag is still
    open.
+5. Should closures be computed from checked code, with only the impls the type
+   checker selects? The `impl` rule takes every impl of a trait a closure holds
+   for every type it holds, so `Ordering` and `ConversionError` are in the
+   derive closures although the derive code never uses them. Their `Eq`,
+   `Hash` and `Debug` impls stay hand-written until closures stop over-reaching.
+   Phase 5 considered leaving out generated impls optimistically, and dropped
+   it.
