@@ -370,6 +370,29 @@ written into those sections.
 ### Phase 4: building and running phase-1 libraries
 
 Breakdown and status: [`staged-macro-compilation-phase-4.md`](staged-macro-compilation-phase-4.md).
+
+**Status (2026-11-25): done.** Macro code compiles into shared libraries for
+the host and runs in `staple __macro-server`, behind the hidden
+`--macro-engine=compiled`. A package's own macros get one closure library
+each, built in stage order as expansion reaches them, and a dependency's
+macros one package library per fingerprint. The standard library expands
+from scratch with compiled `if`, `when` and `typegroup` and no macro body run
+by the interpreter. Libraries are cached by fingerprint in the package's
+`target` and the user cache, and installing the standard library prebuilds
+its own. A panic, `compile_error`, timeout, stack overflow or crash is a
+diagnostic at the invocation, and the server restarts. A macro that can
+reach a forbidden function is rejected with the chain. Libraries are built
+at `O0`: `O1` showed no call-time gain and corrupted one run. A closure
+library takes about 4 s, the cold standard library about 57 s; warm, B1–B3
+take 0.56, 0.61 and 1.27 s against the interpreter's 0.33, 0.34 and 0.81 s.
+`scripts/compare-engines.py` expands and checks every input with both
+engines. The standard library, examples, fixtures and corpus match, and
+1857 of 1989 integration-test sources do; the rest are listed by kind below.
+Interpreter expansion is unchanged apart from the standard-library files
+rewritten without `if`, the closure check is clean, and the workspace tests
+pass apart from one failure that predates the phase. `Staple.md` documents
+the limits, macro output, host layouts and caching.
+
 The breakdown changes three proposals here: requests are not batched,
 effects are enforced by reachability from the entry functions rather than by a
 restricted runtime, and the hidden `--macro-engine` flag arrives in this phase.
@@ -438,18 +461,50 @@ What Phase 3 leaves for this phase:
 
 ### Phase 5: switch over
 
+What Phase 4 leaves for this phase (details in its Findings):
+
+- **Macro code that is only valid dynamically.** Compiling a macro
+  type-checks it, so code the interpreter accepted fails: refutable `let Ok x
+  = …`, `move` markers that don't match the annotation, `std.syntax` types
+  used without an import, match arms of different result types. In the
+  integration tests these are most of the 132 sources that differ between
+  the engines. Each needs its test source fixed, or a language decision.
+- **Macros without a declared result type.** One that ends in `parse_quote`
+  has no type to parse as once compiled; the interpreter takes it from the
+  call (25 test sources). Decide whether to require the result type or infer
+  it from the parameters.
+- **Diagnostic wording.** The compiled engine reports a missing trait as `no
+  trait implementation …`, adds the macro's source position to a panic, and
+  can reach stage cycles in another order.
+- **Call cost.** Compiled `if` costs 383 µs a call against the interpreter's
+  110 µs. About a third of a call is the server's work, and half of that is
+  rebuilding the fragment's position from the start of its file. Fix that
+  before the switch.
+- **Optimization.** An `O1` package library lost a `Sequence`'s elements in
+  a later call, probably because optimized code keeps only derived pointers
+  that the conservative stack scan misses. Find it before raising the level.
+- **Concurrent builds.** Two builds of one package prune each other's
+  libraries. Pruning must keep libraries another process may be using.
+- **The language server.** Library builds run inside expansion and take
+  seconds, a server never unloads a library, and a failed build leaves its
+  macro's invocations unexpanded. The task 14 findings say what the language
+  server needs from each.
+- **Not from the engines.** A cycle between two type definitions names
+  either type from run to run, and
+  `derive_eq::derives_compose_in_every_order_and_preserve_docs` fails with a
+  `when` stage cycle in `std.string` under the interpreter.
+
+
 - Phase 4 adds the hidden `--macro-engine=interp|compiled`. The compiled engine
   expands in stage order through the server, and template macros stay in the
   parent.
   With the compiled engine, normal builds start enforcing syntax ownership, so
   user macros that reuse a non-`Copy` value without a clone stop compiling.
-- Differential testing: run both engines on the standard library, every test
-  in `staple-compiler/tests` (about 450 macro tests), and the examples. Compare
-  the expanded syntax trees from `render_expanded_module`, normalized for
-  syntax ids. Mismatches are fixed or documented as intended changes.
-  `render_expanded_module` can't render every interpreted expansion: a
-  quotation substituted as a tree keeps its template's `$name` tokens. Phase
-  3's comparison (`macro_runtime/compare.rs`) compares debug trees instead.
+- Differential testing: `scripts/compare-engines.py` (Phase 4) already runs
+  both engines on the standard library, the examples, the fixtures, the
+  corpus and every program the compiler's integration tests load, comparing
+  the debug trees (`staple expand --tree-dump`) and `staple check`'s
+  diagnostics. Mismatches are fixed or documented as intended changes.
 - Expected differences, found in Phase 3 task 11 and normalized there: the
   `implied` flag on parser-supplied nodes, a `resolution_name` equal to the
   name, a single-name `let $pattern = …` read back as a plain `let`, and a
@@ -467,6 +522,17 @@ What Phase 3 leaves for this phase:
   edits, with debouncing. The old library is used until the new one is ready.
 
 ### Phase 6: delete the interpreter
+
+What Phase 4 leaves for this phase:
+
+- Closure programs add the `@compiled_only` items after the build and keep
+  their imports through `CheckSnapshot.added`. Once the markers are gone those
+  are ordinary items, and that path goes.
+- A macro with a library skips the interpreter's static check of its code,
+  since the library build checked it. The check goes with the interpreter.
+- The interpreter and the compiled `type_parameters_arguments` intrinsic
+  share `macro_expand::type_parameter_arguments`; keep it when the evaluator
+  goes.
 
 - Remove `Value`, `ProductValue`, `SequenceValue`, `CompileType` and its
   helpers, compile-time trait dispatch (`macro_expand/traits.rs`), the

@@ -516,7 +516,7 @@ Update this section as you work (see "Rules for the implementor").
 | 11. Optimization | done | `6cd3e143` | `EmissionUnit::with_optimization` runs LLVM's `default<O1>`/`default<O2>` pipeline. Package libraries and macro-mode objects use `O1`, closure libraries `O0` (`PACKAGE_OPTIMIZATION`, `CLOSURE_OPTIMIZATION` in `macro_backend.rs`); no level changed call time. `STAPLE_MACRO_STATS` prints calls per macro. The wire encoder no longer rescans a file for each call: `if` calls 665 µs to 409 µs. See Findings. |
 | 12. End to end | done | `3b01a4cb`, `ea5a6578` | `scripts/compare-engines.py` expands every input with both engines (`staple expand --tree-dump`, hidden) and checks it with both. Standard library, examples, fixtures and corpus: 232/232 match. Integration-test sources (`STAPLE_SOURCE_DUMP`): 1705/1847 matched at first. Fixed six compiled-engine bugs: bodyless derives, `@compiled_only` imports, `at byte N` positions, `typegroup` generic arguments, companion imports, blanket companion methods. After the fixes 1901/2034 match overall. The remaining differences are macro code valid only when interpreted, expected ownership errors, the result-type decision and wording, plus one engine-independent cycle-naming flake (Findings). Also fixed: single-file `expand` made no compiled calls; package libraries back to `O0` (`O1` corrupted a run). B1–B3, call cost, server start and restart measured. Tests pass (compiler library 603, CLI 294, server 4, compiled 11 plus a new ignored test for the fixes, compiler integration all but the pre-existing `derive_eq` failure); closure check clean (232 inputs). |
 | 13. Language reference | done | `9307b705` | `Staple.md`, "Compile-time effects": the check runs when macro code is compiled and reports the chain. New "Compiled macro code": the limits and their diagnostics, labeled macro output on standard error, host layouts and pointer width, cache locations and rebuilds. `--macro-engine` is not documented. |
-| 14. Close out | not started | | |
+| 14. Close out | done | `29c193a3`, `37436645`, see log | Expansion comparison against `bba16df7`: 218/232 (the 14 files task 6 rewrote). Closure check clean. Engines: 1902/2034. Workspace tests pass but the pre-existing `derive_eq` failure. Fixed: a failed closure library was rebuilt and reported at every invocation; the install-script test predated the macro prebuild. Findings record what the language server needs; the umbrella plan has the Phase 4 status and what Phases 5 and 6 inherit. |
 
 ## Measurements
 
@@ -1378,3 +1378,66 @@ Record:
   `std.string`). The earlier tasks' test runs didn't include the compiler's
   integration tests.
 
+
+### Task 14: Close out
+
+- **A failed library was rebuilt at every invocation.** When a closure
+  library failed to build (its code doesn't type-check), the macro wasn't
+  remembered as failed, so each later invocation built the check program
+  again and reported the same diagnostics again: three invocations of a
+  macro with one type error took 9.8 s and printed the error three times,
+  where the interpreter prints it once. The build failure now marks the macro
+  failed, so it is reported at the first invocation and the others stay
+  unexpanded, as with a stage cycle. The task 12 regression test covers it.
+- **Verification.** Release `staple` at `37436645`, 2026-11-25.
+  - `scripts/compare-expansion.py` against `bba16df7`, the start of the
+    phase: `218/232 matched`. The 14 differences are the 14 standard-library
+    files task 6 rewrote with `match` and `loop`, as at task 6.
+  - `scripts/check-macro-closures.py --mode all`: `232 inputs, 0 with
+    diagnostics, 0 distinct messages`.
+  - `scripts/compare-engines.py`: the standard library 45/45 (one at a time),
+    the rest 1857/1989 with the integration tests' sources, 1902/2034 in all.
+    The 132 differences are the kinds listed under task 12; the cycle-naming
+    flake didn't occur this run.
+  - `cargo test --release --workspace`: everything passes but
+    `derive_eq::derives_compose_in_every_order_and_preserve_docs`, which
+    fails at the start of task 12 too. `scripts/test-macro-libraries.sh`:
+    2 and 12 passed.
+  - `incremental::the_install_script_prebuilds_the_stdlib_and_replaces_stale_objects`
+    had failed since task 8 made the install script prebuild the macro
+    library: it counted two objects under `target/` and expected the user
+    cache to stay empty. It now expects the macro-mode object, and that a run
+    adds nothing to the cache (`37436645`). Earlier tasks didn't run this
+    suite.
+- **What the language server needs.**
+  - *Builds are synchronous.* `make_ready` builds a closure library inside
+    expansion, at the first invocation that needs it. A closure library takes
+    3.6–4.3 s and the cold standard library about 57 s (Measurements), so the
+    language server must build off the expansion thread. Until the new
+    library is ready it needs to keep using the old one. Manifests key entries
+    by package, module path, macro and overload, not by fingerprint, so the
+    previous library can still be looked up by key; the expander would need a
+    way to ask for "the latest library for this key" rather than the one for
+    the current fingerprint.
+  - *Pruning removes libraries in use.* Every build prunes its package's
+    macro directory down to the current fingerprints. An editor and a
+    terminal build of one package would remove each other's libraries (task
+    12's concurrent-build finding). Pruning has to keep recent libraries, or
+    libraries another process has open, before the language server shares a
+    cache with the command line.
+  - *A server per session accumulates libraries.* A `CliMacroBackend` owns
+    one `MacroClient`, which spawns its server lazily and shuts it down when
+    the backend is dropped. A server never unloads a library (`dlclose` runs
+    only when it exits), so a session that rebuilds a macro after each edit
+    would keep every version mapped. The language server needs an unload
+    message, or should restart its server after some number of loads; a
+    restart costs 10–13 ms plus about 1 ms per library reloaded.
+  - *A failed build leaves invocations unexpanded.* A library that fails to
+    build reports its diagnostics at the first invocation (located in the
+    macro's code), and every invocation of that macro is left unexpanded for
+    the rest of the expansion. A panic, timeout or crash is reported at its
+    own invocation and leaves only that one unexpanded; the server is
+    restarted and later calls run. The rest of the file is still expanded and
+    checked in both cases, which is the recovery the language server needs.
+- **What Phases 5 and 6 inherit** is in the umbrella plan's Phase 5 and
+  Phase 6 sections.
