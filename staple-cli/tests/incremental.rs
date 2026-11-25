@@ -320,11 +320,17 @@ fn the_install_script_prebuilds_the_stdlib_and_replaces_stale_objects() {
     assert!(destination.join("std").is_dir());
     assert!(!destination.join("target/old").exists());
     let installed = names(&objects(&destination.join("target")));
-    assert_eq!(installed.len(), 2, "{installed:?}");
+    // The standard library's object, the runtime's, and the standard
+    // library's macro-mode object, prebuilt with its macro library.
+    assert_eq!(installed.len(), 3, "{installed:?}");
+    assert!(installed.iter().any(|name| name.starts_with("std-macro-")), "{installed:?}");
 
     succeeded(&install());
     assert_eq!(names(&objects(&destination.join("target"))), installed);
 
+    // Installing also caches what the macro libraries were linked from; a
+    // run on the installed standard library adds nothing.
+    let cached = names(&objects(&scratch.cache()));
     let file = repo_root().join("staple-compiler/examples/hello_world.sta");
     let run = staple(
         &scratch,
@@ -334,7 +340,7 @@ fn the_install_script_prebuilds_the_stdlib_and_replaces_stale_objects() {
     );
     succeeded(&run);
     assert_eq!(String::from_utf8_lossy(&run.stdout), "Hello, world!\n");
-    assert!(objects(&scratch.cache()).is_empty());
+    assert_eq!(names(&objects(&scratch.cache())), cached);
 }
 
 #[test]
