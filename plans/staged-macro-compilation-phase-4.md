@@ -514,7 +514,7 @@ Update this section as you work (see "Rules for the implementor").
 | 9. Caching | done | `2dcf60b1` | `cache::package_macro_fingerprints` (dependency macro-mode fingerprints + opt level); closure library fingerprinting (`closure_library_fingerprint`, `hash_normalized_items`), atomic caching (`ensure_library`), manifest/version rebuilds, pruning, and concurrent/reuse/invalidation tests. See Findings. |
 | 10. Build cost | done | `cb8650d2` | `STAPLE_MACRO_STATS` prints each library's steps. `Copy` answers are cached in `TypedModule` and in lowering's trait selection, sum alternatives are sorted with cached keys, and the closure fingerprint prints `Syntax` compactly. A closure library takes 3.6–4.3 s (about 10 s before), the cold standard library 63 s (165 s before). Neither Phase 0 option was kept; see Findings. |
 | 11. Optimization | done | `6cd3e143` | `EmissionUnit::with_optimization` runs LLVM's `default<O1>`/`default<O2>` pipeline. Package libraries and macro-mode objects use `O1`, closure libraries `O0` (`PACKAGE_OPTIMIZATION`, `CLOSURE_OPTIMIZATION` in `macro_backend.rs`); no level changed call time. `STAPLE_MACRO_STATS` prints calls per macro. The wire encoder no longer rescans a file for each call: `if` calls 665 µs to 409 µs. See Findings. |
-| 12. End to end | in progress | `3b01a4cb` | `scripts/compare-engines.py` expands every input with both engines (`staple expand --tree-dump`, hidden) and checks it with both. Standard library, examples, fixtures and corpus: 232/232 match. Integration-test sources (`STAPLE_SOURCE_DUMP`): 1705/1847 match; the 142 differences are triaged in Findings, and most are not fixed yet. Fixed: single-file `expand` made no compiled calls; package libraries back to `O0` (`O1` corrupted a run). B1–B3, call cost, server start and restart measured. Tests pass (compiler library 603, CLI 294, server 4, compiled 11 including a new two-engine test, compiler integration all but the pre-existing `derive_eq` failure); closure check clean. |
+| 12. End to end | done | `3b01a4cb`, fixes uncommitted | `scripts/compare-engines.py` expands every input with both engines (`staple expand --tree-dump`, hidden) and checks it with both. Standard library, examples, fixtures and corpus: 232/232 match. Integration-test sources (`STAPLE_SOURCE_DUMP`): 1705/1847 matched at first. Fixed six compiled-engine bugs: bodyless derives, `@compiled_only` imports, `at byte N` positions, `typegroup` generic arguments, companion imports, blanket companion methods. After the fixes 1901/2034 match overall. The remaining differences are macro code valid only when interpreted, expected ownership errors, the result-type decision and wording, plus one engine-independent cycle-naming flake (Findings). Also fixed: single-file `expand` made no compiled calls; package libraries back to `O0` (`O1` corrupted a run). B1–B3, call cost, server start and restart measured. Tests pass (compiler library 603, CLI 294, server 4, compiled 11 plus a new ignored test for the fixes, compiler integration all but the pre-existing `derive_eq` failure); closure check clean (232 inputs). |
 | 13. Language reference | not started | | |
 | 14. Close out | not started | | |
 
@@ -1319,8 +1319,50 @@ Record:
     `Separated` splice, `Syntax` as a `parse_quote` context).
   - 2 differ in which part of a cycle is named, or in the panic text of an
     invalid identifier; 1 overflows the stack with both.
-  None of the bugs above is fixed yet. They are listed here with their
-  sample sources under `--out` when the script runs.
+  The script writes each difference's sample source and both sides under
+  `--out`.
+- **Fixes for the differences above.** A new ignored `compiled_macros` test
+  covers each fix with a small source: both engines must give the same tree
+  and the compiled `check` must pass.
+  - *Bodyless derives:* `sequence_syntax` joined `type Enabled` and the
+    derived `impl`, and the `impl` kept its quotation indentation, so the
+    parser read the indented line as a continuation of the `type`. The
+    rest's leading whitespace and newlines are now dropped whenever a
+    separator is inserted.
+  - *`is_empty` unknown:* `@compiled_only` items were spliced into the
+    closure program after the import filter, which had already dropped
+    imports of their names. `CheckSnapshot.added` now lists them, so the
+    filter keeps those imports.
+  - *`at byte N`:* closure-library diagnostics carried spans without a
+    location. `MacroExpander::locate_span` computes the line and column
+    from the source file.
+  - *`typegroup` generic arguments:* the compiled `type_parameters_arguments`
+    sliced the declaration's header text. It now uses the same builder as
+    the interpreter (`macro_expand::type_parameter_arguments`).
+  - *Companion imports* (`Done`, `Yield` unknown in `std.list`, `std.flow`,
+    `std.syntax`): an import names a type's companion namespace, but the
+    closure items live in its companion blocks. The filter now takes the
+    union of the names the blocks define.
+  - *Blanket companion methods* (`xs |> count`: *no compatible local
+    function*): a blanket companion only joined the closure once its bound
+    trait was already in it, and nothing else brought that trait in. It now
+    also joins when a pending implementation of the bound exists for types
+    in the closure, and brings the bound in with it.
+- **After the fixes: 1901/2034 match** (standard library 45/45, the rest
+  1856/1989). Of the 133 differences, one is new and is not an engine
+  difference: the cyclic definitions `type A wrap B` / `type B from (I32 |
+  A)` name `A` or `B` from run to run under either engine. The companion
+  and blanket-method fixes left the count unchanged, because the inputs they
+  affect also differ for other reasons. The remaining differences are:
+  - macros without a declared result type (the language decision above);
+  - the expected ownership differences;
+  - macro code that is valid only when interpreted: refutable `let Ok x =
+    …`, `move` markers that don't match the annotation, `std.syntax` types
+    used without being imported (`Pattern`, `Syntax`, `Type`,
+    `TypeDeclarationItem`), arms whose result types differ (`Result<Comma>`
+    against `Result<Tagged>`), and a juxtaposed `error_at`;
+  - the wording and ordering differences listed above.
+  None of these is an engine bug.
 - **Call cost.** Compiled calls cost 0.2–0.4 ms, against the interpreter's
   0.1–0.8 ms in Phase 3: `if` is about 3.5 times slower, `typegroup` and
   most derives faster. About a third of a call is the server's work; half

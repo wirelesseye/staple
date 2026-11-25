@@ -1076,7 +1076,11 @@ impl ClosureIndex {
             });
             // A companion function joins once its name is used as a method or
             // member and the types its companion targets are in the closure. A
-            // blanket companion joins once one of its bounds is.
+            // blanket companion joins once one of its bounds is, or once a
+            // bound has an implementation for a type in the closure: `xs |>
+            // count` on a `Sequence` names neither `Iterator` nor its
+            // implementation. The bound joins with it, so the implementation
+            // follows.
             for name in &wanted {
                 let Some(candidates) = self.methods.get(name).cloned() else {
                     continue;
@@ -1085,18 +1089,35 @@ impl ClosureIndex {
                     if closure.items.contains(&origin) {
                         continue;
                     }
+                    let implemented = |bound: &ItemId| {
+                        pending_impls.iter().any(|(group, index)| {
+                            let implementation = &group[*index];
+                            implementation.traits.contains(bound)
+                                && !implementation.blanket
+                                && !implementation.selves.is_empty()
+                                && implementation.selves.iter().all(|item| closure.items.contains(item))
+                        })
+                    };
+                    let mut bounds = Vec::new();
                     let reachable = self.companions_of(lookup, origin).iter().any(|entry| {
                         if entry.blanket {
-                            entry.blanket_traits.is_empty()
-                                || entry
-                                    .blanket_traits
-                                    .iter()
-                                    .any(|item| closure.items.contains(item))
+                            if entry.blanket_traits.is_empty()
+                                || entry.blanket_traits.iter().any(|item| closure.items.contains(item))
+                            {
+                                return true;
+                            }
+                            bounds.extend(entry.blanket_traits.iter().copied().filter(implemented));
+                            !bounds.is_empty()
                         } else {
                             entry.selves.iter().all(|item| closure.items.contains(item))
                         }
                     });
                     if reachable {
+                        for bound in bounds {
+                            if closure.items.insert(bound) {
+                                work.push(bound);
+                            }
+                        }
                         closure.items.insert(origin);
                         work.push(origin);
                         added = true;

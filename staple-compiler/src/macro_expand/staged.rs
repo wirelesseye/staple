@@ -259,6 +259,7 @@ impl MacroExpander {
             groups,
             compile_time: HashMap::new(),
             macros: vec![checked],
+            added: compiled_only.items.clone(),
         };
         let (mut check_program, templates) = super::check_program::build_check_program_with(
             &shell,
@@ -270,7 +271,7 @@ impl MacroExpander {
         );
         if !compiled_only.items.is_empty() {
             let mut per_module: Vec<Vec<Item>> = vec![Vec::new(); check_program.modules().len()];
-            for (module, item) in &compiled_only.items {
+            for (module, item) in &snapshot.added {
                 per_module[module.0].push(item.clone());
             }
             for (module_index, compiled_items) in per_module.into_iter().enumerate() {
@@ -310,6 +311,7 @@ impl MacroExpander {
                         if matches!(diagnostic.span, Span::Compiler) {
                             diagnostic.span = call_span.clone();
                         }
+                        self.locate_span(&mut diagnostic.span);
                         self.diagnostics.push(diagnostic);
                     }
                     return Err(());

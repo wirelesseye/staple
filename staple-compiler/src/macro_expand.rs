@@ -6908,6 +6908,24 @@ impl MacroExpander {
         None
     }
 
+    /// Gives a user span its line and column when it has none, from the text
+    /// of its source file. Spans of syntax a macro produced inside another
+    /// macro's code carry only a byte range.
+    fn locate_span(&mut self, span: &mut Span) {
+        let Span::User { source: Some(source), range, location: location @ None } = span else {
+            return;
+        };
+        let Some(file) = self.source_files.get_mut(source) else {
+            return;
+        };
+        let text = file
+            .text
+            .get_or_insert_with(|| file.tokens.iter().map(|token| token.text.as_str()).collect());
+        if range.start <= text.len() {
+            *location = Some(source_location_at(text, range.start));
+        }
+    }
+
     /// Expands `std.source.line`, `column`, or `file`. A call written at the
     /// outermost invocation site reports its own location; one produced by a
     /// macro definition reports the outermost invocation that led to it.
@@ -15097,10 +15115,10 @@ fn parameter_node(parameter: &staple_syntax::TypeParameter) -> Value {
     })
 }
 
-/// The `TypeParameters` value a parsed declaration header stands for. The
-/// `arguments` field holds only the ordinary parameters, without defaults or
-/// bounds, so rebuilding the header can apply the type.
-fn type_parameters_value(parameters: staple_syntax::TypeParameters) -> Value {
+/// A declaration header's arguments: its parameter names, effects first in
+/// braces and then the ordinary ones in angle brackets, without defaults or
+/// bounds. Both engines build `TypeParameters.arguments` from it.
+pub(crate) fn type_parameter_arguments(parameters: &staple_syntax::TypeParameters) -> Syntax {
     let mut argument_tokens = Vec::new();
     let tokens = parameters.syntax.tokens();
     let punctuation = |kind, text: &str| {
@@ -15168,6 +15186,14 @@ fn type_parameters_value(parameters: staple_syntax::TypeParameters) -> Value {
     let mut arguments = parameters.syntax.clone();
     arguments.token_range = 0..argument_tokens.len();
     arguments.tokens = argument_tokens.into();
+    arguments
+}
+
+/// The `TypeParameters` value a parsed declaration header stands for. The
+/// `arguments` field holds only the ordinary parameters, without defaults or
+/// bounds, so rebuilding the header can apply the type.
+fn type_parameters_value(parameters: staple_syntax::TypeParameters) -> Value {
+    let arguments = type_parameter_arguments(&parameters);
     let fields = vec![
         (
             Some("parameters".into()),

@@ -66,6 +66,10 @@ pub(crate) struct CheckSnapshot {
     /// What each compile-time helper and macro declaration expanded to.
     pub(crate) compile_time: HashMap<ItemId, Vec<Item>>,
     pub(crate) macros: Vec<CheckedMacro>,
+    /// Items the caller adds to their modules after the program is built,
+    /// such as the `@compiled_only` items of a closure library. Imports of
+    /// their names are kept.
+    pub(crate) added: Vec<(ModuleId, Item)>,
 }
 
 impl MacroExpander {
@@ -249,6 +253,7 @@ impl MacroExpander {
             groups,
             compile_time,
             macros,
+            added: Vec::new(),
         }
     }
 }
@@ -376,9 +381,19 @@ fn build_check_program_scoped(
         .iter()
         .zip(program.modules())
         .map(|(module, source)| {
-            defined_names(module.iter().chain(expanded_of(source.id).iter().filter(
-                |item| matches!(item, Item::Submodule(submodule) if !submodule.companion),
-            )))
+            let added = snapshot
+                .added
+                .iter()
+                .filter(|(owner, _)| *owner == source.id)
+                .map(|(_, item)| item);
+            defined_names(
+                module
+                    .iter()
+                    .chain(expanded_of(source.id).iter().filter(
+                        |item| matches!(item, Item::Submodule(submodule) if !submodule.companion),
+                    ))
+                    .chain(added),
+            )
         })
         .collect::<Vec<_>>();
     let module_names = program
@@ -409,14 +424,26 @@ fn build_check_program_scoped(
                     let mut declaration = declaration.clone();
                     let target = check_import_target(program, module.id, &declaration, &module_names);
                     if let Some(target) = target {
+                        // A companion's names may be defined in any of its
+                        // blocks, while an import names its namespace.
+                        let blocks = program.companion_blocks(target);
+                        let target_defined = match blocks.as_slice() {
+                            [only] => std::borrow::Cow::Borrowed(&defined[only.0]),
+                            _ => std::borrow::Cow::Owned(
+                                blocks
+                                    .iter()
+                                    .flat_map(|block| defined[block.0].iter().cloned())
+                                    .collect::<HashSet<_>>(),
+                            ),
+                        };
                         let keep = match (&declaration.kind, declaration.path.last()) {
                             (UseKind::Dotted, Some(last))
                                 if program.module_dotted_name(target).as_deref()
                                     != Some(dotted_import_path(program, module.id, &declaration).as_str()) =>
                             {
-                                defined[target.0].contains(last)
+                                target_defined.contains(last)
                             }
-                            _ => keep_import(&mut declaration.kind, &defined[target.0]),
+                            _ => keep_import(&mut declaration.kind, &target_defined),
                         };
                         if !keep {
                             continue;

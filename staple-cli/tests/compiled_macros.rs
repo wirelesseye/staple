@@ -878,3 +878,105 @@ let b: I32 = when { a > 1 => 3, True => keep 4 }
     assert!(compiled.contains("Match"), "{compiled}");
     assert_eq!(interpreted, compiled);
 }
+
+/// Differences task 12's engine comparison found, each fixed in the compiled
+/// engine: an item sequence after a bodyless type, an `@compiled_only` name
+/// imported by a closure, iteration (an import from a companion, and a blanket
+/// companion method), a generic `typegroup`, and the position of an error in
+/// syntax a macro produced inside another macro's code.
+#[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
+fn compiled_expansion_matches_the_interpreter_on_task_12_differences() {
+    let temp = TempDir::new("task-12");
+    let cache = temp.0.join("cache");
+    let run = |name: &str, engine: &str, command: &[&str], source: &str| {
+        let path = temp.0.join(name);
+        fs::write(&path, source).unwrap();
+        let output = staple_cmd(&temp.0, &cache)
+            .args(command)
+            .arg(format!("--macro-engine={engine}"))
+            .arg("--stdlib")
+            .arg(repo_root().join("stdlib"))
+            .arg(&path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        (output.status.success(), stdout, stderr)
+    };
+    let sources = [
+        (
+            "bodyless.sta",
+            "\
+@derive_eq
+type Enabled
+@derive_eq
+type Plain wrap I32
+let same: Bool = Enabled == Enabled
+",
+        ),
+        (
+            "compiled_only.sta",
+            "\
+use std.syntax.(Syntax, Expr, Braced, Parse, ParseError, stream, is_empty, parse_quote)
+macro first_of: move Braced<Syntax> -> Expr = move body => {
+    let Braced (contents) = body
+    let mut input = stream contents
+    let first = match (Parse.parse.<Expr> input) {
+        Ok value => value,
+        ParseError (message) => panic message,
+    }
+    if (is_empty input) { parse_quote { $first } } else { panic \"trailing syntax\" }
+}
+let value: I32 = first_of { 1 }
+",
+        ),
+        (
+            "iteration.sta",
+            "\
+use std.syntax.*
+macro size: move Sequence<Ident<String>> -> Expr = move xs => {
+    let n = xs |> count
+    if (n == 3) { parse_quote { 3 } } else { parse_quote { 0 } }
+}
+macro walk: move Sequence<Ident<String>> -> Expr = move xs => {
+    let mut total = 0
+    for _ in xs { total = total + 1 }
+    if (total == 3) { parse_quote { 3 } } else { parse_quote { 0 } }
+}
+let a: I32 = size x y z
+let b: I32 = walk x y z
+",
+        ),
+        (
+            "typegroup.sta",
+            "\
+trait Allowed T {}
+impl Allowed I32 {}
+typegroup Bounded<T = I32 where Allowed T> { Empty, Value wrap pub T, }
+let value: Bounded = Bounded.Value 42
+",
+        ),
+    ];
+    for (name, source) in sources {
+        let (ok, interpreted, stderr) = run(name, "interp", &["expand", "--tree-dump"], source);
+        assert!(ok, "{name}: interpreter failed: {stderr}");
+        let (ok, compiled, stderr) = run(name, "compiled", &["expand", "--tree-dump"], source);
+        assert!(ok, "{name}: compiled engine failed: {stderr}");
+        assert_eq!(interpreted, compiled, "{name}");
+        let (ok, _, stderr) = run(name, "compiled", &["check"], source);
+        assert!(ok, "{name}: compiled check failed: {stderr}");
+    }
+    let (ok, _, stderr) = run(
+        "located.sta",
+        "compiled",
+        &["check"],
+        "\
+use std.syntax.*
+macro m: Expr -> Expr = e => if (True) { nope } else { e }
+let b: I32 = m 1
+",
+    );
+    assert!(!ok);
+    assert!(stderr.contains("unknown name `nope` at line 2, column 42"), "{stderr}");
+}

@@ -2033,6 +2033,9 @@ fn starts_line(rest: &Syntax) -> bool {
 extern "C" fn sequence_syntax(origin: u64, first: u64, rest: u64) -> u64 {
     let first_syntax = syntax_value(first);
     let rest_syntax = syntax_value(rest);
+    // The separator replaces the rest's leading whitespace: a quotation keeps
+    // the indentation of its source, and an item on a new line that is
+    // indented past the one before it reads as a continuation of it.
     let spaced = |origin: Option<&Syntax>| {
         let mut parts = vec![(first, None)];
         if !first_syntax.tokens().is_empty() && !rest_syntax.tokens().is_empty() {
@@ -2042,8 +2045,17 @@ extern "C" fn sequence_syntax(origin: u64, first: u64, rest: u64) -> u64 {
                 single_space()
             };
             parts.push((0, Some(vec![sep])));
+            let mut tokens = Vec::new();
+            append_syntax_tokens(&mut tokens, &rest_syntax, None);
+            let start = tokens
+                .iter()
+                .position(|token| !matches!(token.kind, TokenKind::Whitespace | TokenKind::Newline))
+                .unwrap_or(tokens.len());
+            tokens.drain(..start);
+            parts.push((0, Some(tokens)));
+        } else {
+            parts.push((rest, None));
         }
-        parts.push((rest, None));
         syntax_from_parts(origin, &parts)
     };
     let Some(origin_syntax) = (origin != 0).then(|| syntax_value(origin)) else {
@@ -3054,25 +3066,7 @@ extern "C" fn type_parameters_declaration(syntax: u64) -> u64 {
 extern "C" fn type_parameters_arguments(syntax: u64) -> u64 {
     let syntax = syntax_value(syntax);
     let parameters = type_parameters(&syntax);
-    let arguments = {
-        let tokens = parameters.syntax.tokens();
-        let mut angles = 0usize;
-        let mut close = tokens.len();
-        for (index, token) in tokens.iter().enumerate() {
-            match token.kind {
-                TokenKind::Operator if token.text == "<" => angles += 1,
-                TokenKind::Operator if token.text == ">" => {
-                    angles = angles.saturating_sub(1);
-                    if angles == 0 {
-                        close = index + 1;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        syntax_slice(&parameters.syntax, 0, close)
-    };
+    let arguments = crate::macro_expand::type_parameter_arguments(&parameters);
     arena::with_arena(|arena| arena.insert_syntax(arguments).into())
 }
 
@@ -3211,6 +3205,8 @@ mod tests {
             ("/// B.\ntype B", "type A\n/// B.\ntype B"),
             ("let b = 1", "type A\nlet b = 1"),
             ("pub def b = 1", "type A\npub def b = 1"),
+            ("\n    impl Eq A {\n    }", "type A\nimpl Eq A {\n    }"),
+            ("  b", "type A b"),
         ] {
             let rest = fragment(rest, &mut next);
             assert_eq!(syntax_text_of(sequence_syntax(0, first, rest)), joined);
