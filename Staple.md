@@ -963,8 +963,41 @@ macros are compiled to native code, a macro is rejected if its code can reach:
   input (`std.io`) or operating-system randomness (`std.rand`).
 
 Only code the macro can actually run counts, including functions it passes as
-values; a function nothing calls doesn't. The interpreter that runs macros by
-default doesn't check this.
+values; a function nothing calls doesn't. The check runs when the macro's code
+is compiled, before any of it runs, and reports each function reached with the
+chain of calls from the macro, as in ``macro `m` reaches `std.fs.read_file`,
+which macro code can't use``. The interpreter that runs macros by default
+doesn't check this.
+
+#### Compiled macro code
+
+When macros are compiled to native code, their code runs in a separate
+process, and each call is limited:
+
+| Case | Diagnostic at the invocation |
+|---|---|
+| The call runs longer than 10 seconds | ``macro `m` did not finish within 10 s`` |
+| `panic` | ``macro `m` panicked: <message>`` |
+| `compile_error` | the macro's message |
+| The call overflows its 256 MiB stack | ``macro `m` overflowed its stack`` |
+| Any other crash | ``macro `m` crashed (<signal>)`` |
+
+Memory is limited only by the operating system. After a timeout or a crash,
+expansion continues with a new process. What a macro writes to standard output
+or standard error is shown on standard error, each line labeled with the
+macro, as in ``macro `m`: <line>``.
+
+Macro code runs on the machine that compiles, so it sees that machine's type
+layouts and pointer width, not the target's: `USize` in a macro is the host's
+width even when cross-compiling.
+
+Compiled macros are cached as shared libraries. A package's own macros go
+under `<package>/target/staple/<triple>/macros`, the standard library's under
+`<stdlib>/target/<triple>/macros`, where installing it prebuilds them, and
+both are also cached under `macros/` in the user cache (`$XDG_CACHE_HOME/staple`,
+else `~/.cache/staple`). A library is rebuilt when the macro code it holds, a
+dependency's macro code or the compiler changes, so a reinstalled compiler
+rebuilds them.
 
 #### `@track_caller` and `Location`
 
