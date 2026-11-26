@@ -14,7 +14,9 @@ Each input is expanded with `staple expand --tree-dump` under
 found normalized. Each is also checked with `staple check` under both engines,
 which resolves and type-checks the expansion. An input matches when both
 engines give the same exit status, the same tree and the same diagnostics.
-Mismatches are written under `--out` with both sides.
+Mismatches are written under `--out` with both sides. The script also counts
+the inputs whose output says a macro "could not be run as compiled code", which
+is a compiler fault, and exits non-zero when there is one.
 
 The compiled engine shares one macro cache, warmed on a trivial program first
 so the standard library's libraries are built once.
@@ -81,6 +83,16 @@ def differences(sides):
     return found
 
 
+REFUSED = "could not be run as compiled code"
+
+
+def refused(sides):
+    """Whether any output says compiled code could not run a macro. That is a
+    compiler fault wherever it appears, so it is counted apart from differences."""
+    return any(REFUSED in sides[engine][step][stream]
+               for engine in sides for step in ["expand", "check"] for stream in ["stdout", "stderr"])
+
+
 def write_mismatch(out, name, sides, found):
     target = out / name
     target.mkdir(parents=True, exist_ok=True)
@@ -140,7 +152,11 @@ def main():
     failing = sum(1 for sides in results if sides["interp"]["check"]["status"] != 0)
     print(f"Engines: {len(results) - mismatched}/{len(results)} matched "
           f"({failing} inputs fail to check with the interpreter); mismatches under {out}")
-    return 1 if mismatched else 0
+    refusals = [name for name, sides in zip(inputs, results) if refused(sides)]
+    for name in refusals:
+        print(f"REFUSED {name}")
+    print(f"Inputs reporting `{REFUSED}`: {len(refusals)}")
+    return 1 if mismatched or refusals else 0
 
 
 if __name__ == "__main__":

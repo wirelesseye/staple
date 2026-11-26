@@ -302,7 +302,7 @@ fn reexports_public_items_through_selected_renamed_glob_and_chained_uses() {
         concat!(
             "pub type Number = I32\n",
             "pub let value: Number = 42\n",
-            "pub macro reveal = item => parse_quote { $item }\n",
+            "pub macro reveal = item: Expr => parse_quote { $item }\n",
         ),
     );
     fixture.write(
@@ -667,7 +667,7 @@ fn block_scoped_submodule_macros_are_reachable_within_their_block() {
         concat!(
             "let result: I32 = {\n",
             "    mod inner {\n",
-            "        pub macro reveal = value => value\n",
+            "        pub macro reveal = value: Expr => value\n",
             "    }\n",
             "    inner.reveal 42\n",
             "}\n",
@@ -1041,7 +1041,7 @@ fn block_scoped_use_of_a_macro_is_usable_within_its_block() {
     let fixture = Fixture::new();
     fixture.write(
         "library.sta",
-        "pub macro reveal = item => parse_quote { $item }\n",
+        "pub macro reveal = item: Expr => parse_quote { $item }\n",
     );
     fixture.write(
         "main.sta",
@@ -1232,7 +1232,7 @@ fn inline_glob_reexports_types_traits_and_macros() {
             "    use std.syntax.(parse_quote)\n",
             "    pub type Number = I32\n",
             "    pub trait Identity T { identity: T -> T }\n",
-            "    pub macro reveal = item => parse_quote { $item }\n",
+            "    pub macro reveal = item: Expr => parse_quote { $item }\n",
             "    pub mod Variant { pub type Ready }\n",
             "}\n",
             "pub use child.*\n",
@@ -2090,7 +2090,7 @@ fn imports_user_macros_with_definition_site_hygiene() {
         "helpers.sta",
         concat!(
             "def private_identity: I32 -> I32 = value => value\n",
-            "pub macro reveal = value => parse_quote { private_identity $value }\n",
+            "pub macro reveal = value: Expr => parse_quote { private_identity $value }\n",
         ),
     );
 
@@ -2297,7 +2297,7 @@ fn imports_user_macros_through_selected_and_renamed_forms() {
     );
     fixture.write(
         "helpers.sta",
-        "pub macro reveal = value => parse_quote { $value }\n",
+        "pub macro reveal = value: Expr => parse_quote { $value }\n",
     );
 
     fixture

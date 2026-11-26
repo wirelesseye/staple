@@ -1913,7 +1913,7 @@ mod tests {
             "    Hello\n",
             "}\n",
             "\n",
-            "macro what = x => parse_quote {$x}\n",
+            "macro what = x: Expr => parse_quote {$x}\n",
             "\n",
             "def main = () => {\n",
             "    let generated = A.Hello\n",

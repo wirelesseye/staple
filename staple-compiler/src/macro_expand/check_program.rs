@@ -1249,15 +1249,15 @@ mod tests {
         let built = build(
             concat!(
                 "macro pair: (Ident; Option<Expr>) -> Expr = (name; value) => name\n",
-                "macro bare = value => value\n",
+                "macro bare = value: Expr => value\n",
                 "let a = pair x\nlet b = bare 1\n",
             ),
             CheckMode::Invoked,
         );
         let functions = function_names(entry_items(&built));
         assert!(functions.iter().any(|name| name.starts_with("entry#pair#")), "{functions:?}");
-        // A macro with an untyped parameter has no parameter types to decode.
-        assert!(!functions.iter().any(|name| name.starts_with("entry#bare#")), "{functions:?}");
+        // A parameter typed on itself gets one too.
+        assert!(functions.iter().any(|name| name.starts_with("entry#bare#")), "{functions:?}");
         let entry = entry_items(&built)
             .iter()
             .find_map(|item| match item {

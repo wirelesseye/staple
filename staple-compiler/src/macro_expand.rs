@@ -4644,6 +4644,21 @@ impl MacroExpander {
                     "generic user-defined macros are not supported",
                 ));
             }
+            if let (MacroKind::User(value), None) =
+                (&definition.kind, definition.declaration.annotation.as_ref())
+            {
+                let mut untyped = Vec::new();
+                untyped_macro_parameters(value, &mut untyped);
+                for (name, syntax) in untyped {
+                    self.diagnostics.push(Diagnostic::new(
+                        syntax.span.clone(),
+                        format!(
+                            "parameter `{name}` of macro `{}` has no type; annotate the macro (`macro {}: Expr -> Expr = …`) or give the parameter a type (`{name}: Expr`)",
+                            definition.key.name, definition.key.name
+                        ),
+                    ));
+                }
+            }
             groups
                 .entry((
                     definition.key.module.0,
@@ -10636,6 +10651,35 @@ fn expression_arity(expression: &Expression) -> usize {
     }
 }
 
+/// The parameters of an unannotated macro that have no type of their own, as
+/// the name to report and where it is written.
+fn untyped_macro_parameters<'a>(value: &'a Expression, out: &mut Vec<(String, &'a Syntax)>) {
+    fn visit<'a>(pattern: &'a Pattern, out: &mut Vec<(String, &'a Syntax)>) {
+        match pattern {
+            Pattern::Binding(binding) if matches!(binding.ty, Type::Inferred(_)) => {
+                out.push((binding.name.clone(), &binding.syntax));
+            }
+            Pattern::Wildcard(wildcard) if matches!(wildcard.ty, Type::Inferred(_)) => {
+                out.push(("_".to_owned(), &wildcard.syntax));
+            }
+            Pattern::At(at) if matches!(at.binding.ty, Type::Inferred(_)) => {
+                visit(&at.pattern, out);
+            }
+            Pattern::Product(product) if product.annotation.is_none() => {
+                for element in &product.elements {
+                    visit(element, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut current = value;
+    while let Expression::Function(function) = current {
+        visit(&function.pattern, out);
+        current = &function.body;
+    }
+}
+
 fn macro_annotation_arity(annotation: &Type) -> usize {
     match annotation {
         Type::Function(function) => {
@@ -13900,6 +13944,8 @@ fn inferred_macro_signature(value: Option<&Expression>) -> (Vec<MetaType>, MetaT
     let mut parameters = Vec::new();
     let mut current = value;
     while let Some(Expression::Function(function)) = current {
+        // A parameter with no type is reported where the macro is validated;
+        // `SyntaxNode` only keeps the rest of the check going.
         parameters.push(pattern_meta_type(&function.pattern).unwrap_or(MetaType::SyntaxNode));
         current = Some(&function.body);
     }
@@ -13983,14 +14029,8 @@ pub(crate) fn pattern_meta_type(pattern: &Pattern) -> Option<MetaType> {
             Type::Inferred(_) => pattern_meta_type(&at.pattern),
             ty => meta_type(ty),
         },
-        Pattern::Binding(binding) => match &binding.ty {
-            Type::Inferred(_) => Some(MetaType::SyntaxNode),
-            ty => meta_type(ty),
-        },
-        Pattern::Wildcard(wildcard) => match &wildcard.ty {
-            Type::Inferred(_) => Some(MetaType::SyntaxNode),
-            ty => meta_type(ty),
-        },
+        Pattern::Binding(binding) => meta_type(&binding.ty),
+        Pattern::Wildcard(wildcard) => meta_type(&wildcard.ty),
         Pattern::Product(product) => {
             let elements = product
                 .elements
@@ -14436,6 +14476,22 @@ fn quote_result_type(meta: &MetaType) -> bool {
     }
 }
 
+/// Whether a parameter pattern can match syntax. A part without a type takes
+/// it from the macro's annotation, or is reported as untyped.
+fn parameter_pattern_is_valid(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Binding(binding) if matches!(binding.ty, Type::Inferred(_)) => true,
+        Pattern::Wildcard(wildcard) if matches!(wildcard.ty, Type::Inferred(_)) => true,
+        Pattern::At(at) if matches!(at.binding.ty, Type::Inferred(_)) => {
+            parameter_pattern_is_valid(&at.pattern)
+        }
+        Pattern::Product(product) if product.annotation.is_none() => {
+            product.elements.iter().all(parameter_pattern_is_valid)
+        }
+        pattern => pattern_meta_type(pattern).is_some(),
+    }
+}
+
 fn valid_macro_parameter_patterns(expression: &Expression, arity: usize) -> bool {
     if arity == 0 {
         return true;
@@ -14443,7 +14499,7 @@ fn valid_macro_parameter_patterns(expression: &Expression, arity: usize) -> bool
     let Expression::Function(function) = expression else {
         return false;
     };
-    let valid_pattern = pattern_meta_type(&function.pattern).is_some();
+    let valid_pattern = parameter_pattern_is_valid(&function.pattern);
     valid_pattern && valid_macro_parameter_patterns(&function.body, arity - 1)
 }
 

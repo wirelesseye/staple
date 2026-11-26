@@ -1601,7 +1601,7 @@ mod tests {
             "use tools\n",
             "type Item = I32\n",
             "trait Show T { show: T -> String }\n",
-            "macro identity = value => parse_quote { $value }\n",
+            "macro identity = value: Expr => parse_quote { $value }\n",
             "def project: <T> T -> T = <T> value => (field: value).field\n",
             "mod child { def nested = () => 1 }\n",
             "type Clock wrap I32\n",
@@ -1664,8 +1664,8 @@ mod tests {
     #[test]
     fn classifies_quotation_calls_semantically() {
         let source = concat!(
-            "macro bare = value => quote { $value }\n",
-            "macro qualified = value => std.syntax.parse_quote { $value }\n",
+            "macro bare = value: Expr => quote { $value }\n",
+            "macro qualified = value: Expr => std.syntax.parse_quote { $value }\n",
         );
         let module = parse(source).unwrap();
         let labels = labels(source, &tokens(source, Some(&module), None, None));
@@ -1722,7 +1722,7 @@ mod tests {
             "use dependency\n",
             "macro choose: Expr -> Expr = _: Expr => parse_quote { 1 }\n",
             "macro choose: CallExpr -> Expr = _: CallExpr => parse_quote { 2 }\n",
-            "macro inferred = value => parse_quote { $value }\n",
+            "macro inferred = value: Expr => parse_quote { $value }\n",
             "macro @identity: Item -> Item = item: Item => item\n",
             "let selected = choose (discarded 0)\n",
             "let inferred_value = inferred 4\n",
@@ -1988,7 +1988,7 @@ mod tests {
                 "pub def callable = () => 1\n",
                 "pub type Number = I32\n",
                 "pub trait Printable T {}\n",
-                "pub macro identity = value => parse_quote { $value }\n",
+                "pub macro identity = value: Expr => parse_quote { $value }\n",
             ),
         )
         .unwrap();

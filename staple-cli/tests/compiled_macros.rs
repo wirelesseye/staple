@@ -983,3 +983,80 @@ let c: I32 = m 2
     // A library that fails to build is reported, and built, once.
     assert_eq!(stderr.matches("unknown name `nope`").count(), 1, "{stderr}");
 }
+
+/// Runs `check` on a one-file package with `engine`, returning whether it
+/// passed and its standard error.
+fn check_with_engine(label: &str, source: &str, engine: &str) -> (bool, String) {
+    let temp = TempDir::new(label);
+    let pkg = write_package(&temp.0, label, source);
+    let check = staple_cmd(&pkg, &temp.0.join("cache"))
+        .args(["check", &format!("--macro-engine={engine}"), "--stdlib"])
+        .arg(repo_root().join("stdlib"))
+        .output()
+        .unwrap();
+    (
+        check.status.success(),
+        String::from_utf8_lossy(&check.stderr).into_owned(),
+    )
+}
+
+#[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
+fn a_macro_with_a_typed_parameter_or_annotation_runs_compiled() {
+    let source = "\
+use std.syntax.*
+
+macro annotated: Expr -> Expr = expr => {
+    let wrapped: Expr = parse_quote { ($expr) }
+    wrapped
+}
+macro typed = expr: Expr => {
+    let wrapped: Expr = parse_quote { ($expr) }
+    wrapped
+}
+
+pub def main = () => {
+    let a: I32 = annotated 1
+    let b: I32 = typed 2
+    let _sum = a + b
+}
+";
+    let (passed, stderr) = check_with_engine("typed-parameters", source, "compiled");
+    assert!(passed, "check failed: {stderr}");
+    assert!(stderr.contains(": annotated"), "{stderr}");
+    assert!(stderr.contains(": typed"), "{stderr}");
+    assert!(!stderr.contains("could not be run as compiled code"), "{stderr}");
+}
+
+#[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
+fn a_macro_parameter_without_a_type_is_rejected_by_both_engines() {
+    let source = "\
+use std.syntax.*
+
+macro bare = expr => expr
+macro mixed = (typed: Expr; untyped) => typed
+
+pub def main = () => {
+    let _a: I32 = bare 1
+    let _b: I32 = mixed 1 2
+}
+";
+    let messages = [("interp", "untyped-interp"), ("compiled", "untyped-compiled")].map(
+        |(engine, label)| {
+            let (passed, stderr) = check_with_engine(label, source, engine);
+            assert!(!passed, "{engine} accepted an untyped parameter: {stderr}");
+            stderr
+                .lines()
+                .filter(|line| line.contains("has no type"))
+                .map(|line| line[line.find("parameter `").unwrap()..].to_owned())
+                .collect::<Vec<_>>()
+        },
+    );
+    assert_eq!(messages[0].len(), 2, "{messages:?}");
+    assert!(messages[0][0].contains("parameter `expr` of macro `bare`"), "{messages:?}");
+    assert!(messages[0][0].contains("annotate the macro"), "{messages:?}");
+    assert!(messages[0][0].contains("give the parameter a type"), "{messages:?}");
+    assert!(messages[0][1].contains("parameter `untyped` of macro `mixed`"), "{messages:?}");
+    assert_eq!(messages[0], messages[1], "the engines word it differently");
+}

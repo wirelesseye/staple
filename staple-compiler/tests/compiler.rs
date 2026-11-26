@@ -6172,7 +6172,7 @@ fn c_string_rejects_interior_nul_bytes() {
 #[test]
 fn expands_user_defined_macros_hygienically() {
     let module = type_check(concat!(
-        "macro keep = value => parse_quote { { let temporary = 1; $value } }\n",
+        "macro keep = value: Expr => parse_quote { { let temporary = 1; $value } }\n",
         "let temporary = 2\n",
         "let result: I32 = keep temporary\n",
     ));
@@ -6508,7 +6508,7 @@ fn expands_explicit_and_inferred_item_macros() {
 #[test]
 fn expands_item_modifier_macros_with_nearest_modifier_first() {
     let module = type_check(concat!(
-        "macro @identity = item => item\n",
+        "macro @identity = item: Item => item\n",
         "macro @outer: Item -> Item = _ => parse_quote { let selected: I32 = 42 }\n",
         "macro @inner: Item -> Item = _ => parse_quote { let selected: String = \"inner\" }\n",
         "@identity\n",
@@ -6527,7 +6527,7 @@ fn expands_item_modifier_macros_with_nearest_modifier_first() {
 #[test]
 fn modifier_arguments_support_expression_type_and_pattern_syntax() {
     let module = type_check(concat!(
-        "macro @value = (value; _) => parse_quote { let generated: I32 = $value }\n",
+        "macro @value = (value: Expr; _: Item) => parse_quote { let generated: I32 = $value }\n",
         "macro @typed: (Parenthesized<Type>; Item) -> Item = (ty; _) => parse_quote { let typed: $ty = 1 }\n",
         "macro @bind: (Parenthesized<Pattern>; Item) -> Item = (pattern; _) => parse_quote { let $pattern = (40, 2) }\n",
         "@value(42)\n",
@@ -8097,7 +8097,7 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
             "modifier macro `@plain` does not accept an argument",
         ),
         (
-            "macro ordinary = value => parse_quote { $value }\n@ordinary\nlet value = 1\n",
+            "macro ordinary = value: Expr => parse_quote { $value }\n@ordinary\nlet value = 1\n",
             "macro `ordinary` is function-style and cannot be used as modifier `@ordinary`",
         ),
         (
@@ -8308,7 +8308,7 @@ fn quote_result_excludes_syntax_which_remains_quotes_alone() {
             "let result = invalid (1)\n",
         ),
         concat!(
-            "macro invalid = value => Syntax :: parse_quote { $value }\n",
+            "macro invalid = value: Expr => Syntax :: parse_quote { $value }\n",
             "let result = invalid (1)\n",
         ),
     ] {
@@ -8710,10 +8710,10 @@ fn diagnoses_invalid_item_macro_outputs_and_placements() {
 fn evaluates_pure_syntax_helpers_and_conditional_macros() {
     let module = type_check(concat!(
         "def syntax_identity: SyntaxNode -> SyntaxNode = value => value\n",
-        "macro choose = (condition; then; else) => parse_quote {\n",
+        "macro choose = (condition: Expr; then: Expr; else: Expr) => parse_quote {\n",
         "    match $condition { True => $then, False => $else, }\n",
         "}\n",
-        "macro passthrough = value => syntax_identity value\n",
+        "macro passthrough = value: SyntaxNode => syntax_identity value\n",
         "let condition: Bool = True\n",
         "let result: I32 = passthrough (choose condition 1 2)\n",
     ));
@@ -9705,7 +9705,7 @@ fn rejects_duplicate_default_type_bound_for_the_same_parameter() {
 #[test]
 fn evaluates_pure_compile_time_control_flow_and_arithmetic() {
     let module = type_check(concat!(
-        "macro computed = unused => match 1 + 1 == 2 {\n",
+        "macro computed = unused: Expr => match 1 + 1 == 2 {\n",
         "    True() => parse_quote { 42 },\n",
         "    False() => parse_quote { 0 },\n",
         "}\n",
@@ -9720,9 +9720,9 @@ fn evaluates_pure_compile_time_control_flow_and_arithmetic() {
 #[test]
 fn composes_nested_macros_and_applies_excess_arguments() {
     let module = type_check(concat!(
-        "macro inner = value => parse_quote { $value }\n",
-        "macro outer = value => parse_quote { inner $value }\n",
-        "macro identity = value => parse_quote { $value }\n",
+        "macro inner = value: Expr => parse_quote { $value }\n",
+        "macro outer = value: Expr => parse_quote { inner $value }\n",
+        "macro identity = value: Expr => parse_quote { $value }\n",
         "def increment: I32 -> I32 = value => value + 1\n",
         "let nested: I32 = outer 41\n",
         "let applied: I32 = identity increment 41\n",
@@ -9760,7 +9760,7 @@ fn diagnoses_incomplete_and_non_syntax_macros() {
     let incomplete = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            "macro pair = (left; right) => parse_quote { ($left, $right) }\npair 1\n",
+            "macro pair = (left: Expr; right: Expr) => parse_quote { ($left, $right) }\npair 1\n",
             root,
         )
         .expect("source should parse");
@@ -9775,7 +9775,7 @@ fn diagnoses_incomplete_and_non_syntax_macros() {
 
     let invalid = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source("macro invalid = value => 42\n", root)
+        .load_source("macro invalid = value: Expr => 42\n", root)
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(invalid)
@@ -9858,7 +9858,7 @@ fn diagnoses_recursive_macro_expansion() {
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             &with_syntax_imports(
-                "macro recursive = value => parse_quote { recursive $value }\nrecursive 1\n",
+                "macro recursive = value: Expr => parse_quote { recursive $value }\nrecursive 1\n",
             ),
             root,
         )
@@ -20939,11 +20939,31 @@ fn template_macros_keep_hygiene() {
 #[test]
 fn template_modifiers_return_their_parameter() {
     let text = expanded_text(concat!(
-        "macro @same = item => item\n",
+        "macro @same = item: Item => item\n",
         "@same\n",
         "pub let answer = 42\n",
     ));
     assert!(text.contains("pub let answer = 42"), "{text}");
+}
+
+#[test]
+fn a_macro_parameter_needs_a_type_from_the_annotation_or_the_parameter() {
+    for accepted in [
+        "macro identity: Expr -> Expr = expr => expr\n",
+        "macro identity = expr: Expr => expr\n",
+        "macro pair: (Expr; Expr) -> Expr = (left; right) => left\n",
+        "macro pair = (left: Expr; right: Expr) => left\n",
+    ] {
+        assert_eq!(expansion_messages(accepted), Vec::<String>::new(), "{accepted}");
+    }
+    let messages = expansion_messages("macro identity = expr => expr\n");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].contains("parameter `expr` of macro `identity` has no type"), "{messages:?}");
+    assert!(messages[0].contains("annotate the macro"), "{messages:?}");
+    assert!(messages[0].contains("give the parameter a type"), "{messages:?}");
+    let messages = expansion_messages("macro mixed = (typed: Expr; untyped) => typed\n");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].contains("parameter `untyped` of macro `mixed` has no type"), "{messages:?}");
 }
 
 /// The messages from expanding `source`, or none when it expands.

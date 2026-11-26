@@ -3643,7 +3643,7 @@ mod tests {
             "use dependency\n",
             "macro choose: Expr -> Expr = _: Expr => parse_quote { 1 }\n",
             "macro choose: CallExpr -> Expr = _: CallExpr => parse_quote { 2 }\n",
-            "macro inferred = value => parse_quote { $value }\n",
+            "macro inferred = value: Expr => parse_quote { $value }\n",
             "macro satisfied = expr: Expr => Expr :: parse_quote { $expr }\n",
             "macro @identity: Item -> Item = item: Item => item\n",
             "let selected = choose (discarded 0)\n",
@@ -3675,7 +3675,7 @@ mod tests {
         assert!(signatures.contains(&("choose", "macro choose: CallExpr -> Expr")));
         assert!(signatures.contains(&("identity", "macro @identity: Item -> Item")));
         assert!(signatures.contains(&("doc", "macro @doc: (Parenthesized<Expr>; Item) -> Item")));
-        assert!(signatures.contains(&("inferred", "macro inferred: SyntaxNode -> Expr")));
+        assert!(signatures.contains(&("inferred", "macro inferred: Expr -> Expr")));
         assert!(signatures.contains(&("satisfied", "macro satisfied: Expr -> Expr")));
         assert!(signatures.contains(&("imported", "macro imported: Expr -> Expr")));
         assert!(
@@ -4087,7 +4087,7 @@ mod tests {
                 "/// A printable trait.\n",
                 "pub trait Printable T {}\n",
                 "/// An identity macro.\n",
-                "pub macro identity = value => parse_quote { $value }\n",
+                "pub macro identity = value: Expr => parse_quote { $value }\n",
             ),
         )
         .unwrap();
@@ -4120,7 +4120,7 @@ mod tests {
             ("Printable", "trait Printable T", " A printable trait."),
             (
                 "identity",
-                "macro identity: SyntaxNode -> Expr",
+                "macro identity: Expr -> Expr",
                 " An identity macro.",
             ),
             ("callable", "def callable: () -> I32", " A callable."),

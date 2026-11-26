@@ -519,7 +519,7 @@ Update this section as you work (see "Rules for the implementor").
 | Task | Status | Commit | Notes |
 |---|---|---|---|
 | 1. A clean baseline | done | `fa5f0b99` | Closure lookup falls back to the use site for names a macro wrote (the `derive_eq` cycle); constructors, singleton values and macro definitions are checked in declaration order; a dead server's forwarded output loses its blank lines. Tests: workspace 2378 passed, 0 failed. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest 1904/2036, the same 132 differences on two runs. See Findings. |
-| 2. Every macro has an entry function | not started | | |
+| 2. Every macro has an entry function | done | _pending_ | An untyped macro parameter is an error under both engines, reported at the parameter, and the interpreter's `SyntaxNode` default and the entry-function exception are gone. Tests: workspace 2377 passed in the full run, whose only 2 failures (LSP hover signatures reading `SyntaxNode`) were fixed and the LSP, new and `check_program` tests rerun green; the two new compiled-engine tests (ignored, `test-macro-libraries.sh`) pass. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest 1910/2042 with the same 132 differences; ``could not be run as compiled code``: 0 inputs. See Findings. |
 | 3. `parse_quote` without a contextual type | not started | | |
 | 4. Macro code under the ordinary rules | not started | | |
 | 5. `if` and `when` as templates | not started | | |
@@ -590,6 +590,46 @@ commit and the command. Include:
   code valid only when interpreted, wording and ordering). The cycle-naming
   difference is gone. The integration tests' sources grew by two inputs, the
   new tests, which match.
+
+### Task 2
+
+- **The rule.** `validate_definitions` (`macro_expand.rs`) reports each
+  parameter of an unannotated macro that has no type, at the parameter. The
+  message names the parameter and the macro and gives both fixes: annotate the
+  macro, or give the parameter a type. Both engines run this check, so they
+  word it the same. A macro with an annotation types its parameters from it,
+  as before. The check applies to modifier macros too, so `macro @same = item
+  => item` becomes `item: Item => item`.
+- **Removed.** `pattern_meta_type` no longer reads an untyped binding or
+  wildcard as `SyntaxNode`. The unit test that asserted no entry function for an
+  untyped parameter now expects one for a typed parameter. `lambda_parameters`
+  still returns nothing for an untyped slot, which can no longer reach it. `inferred_macro_signature` still falls back to `SyntaxNode`, only
+  so checking continues after the error is reported.
+- **Sources changed: 28 and one unit test.** All used `Expr` except where the
+  macro read something else: `passthrough` passes its argument to a function of
+  `SyntaxNode`, and the modifiers' item parameters are `Item`.
+  - `compiler.rs`: 12 sources, plus the `check_program.rs` unit test.
+  - `modules.rs`: 6 `reveal` macros.
+  - The language server's unit tests: 10 sources in `semantic.rs`, `hover.rs`,
+    `completion.rs`, `definition.rs` and `mod.rs`. Hover signatures for an
+    unannotated macro now read `Expr -> Expr`, not `SyntaxNode -> Expr`.
+  - `Staple.md`: the `choose` example, and the sentence saying an omitted
+    parameter type means `SyntaxNode`.
+  - No standard-library or example macro had an untyped parameter. The
+    integration tests' sources found by the dump are all fixed; the only two
+    that still report the error are the new tests'.
+- **No test showed an untyped parameter working**, so none changed to expect
+  the error. The new ones do: one non-ignored test in `compiler.rs`, and two in
+  `compiled_macros.rs` (ignored, like the other compiled-engine tests): typed
+  parameter and annotation both run compiled, and an untyped parameter, alone
+  or mixed with a typed one, is rejected by both engines with the same
+  diagnostic.
+- **`compare-engines.py`** counts ``could not be run as compiled code`` in every
+  output, lists each input and exits non-zero. It found none, so no input
+  needed a fix.
+- **The comparison.** The same 132 differences as at task 1, and 6 more inputs
+  that match (the new tests' sources). The expansion comparison matches
+  because no standard-library, example or fixture input changed.
 
 ### To record
 

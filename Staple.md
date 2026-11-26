@@ -86,11 +86,13 @@ variadic products, spreads, and products with `mut` or `move` elements are
 inspection only: a `Type` value is spliced as written. A macro body is a compile-time Staple function
 whose parameters use a slotted list, followed by a single `=>` before the
 body — never a curried `a => b => body` chain. Every parameter consumes one
-atomic syntax unit; an omitted parameter type means `SyntaxNode`, not opaque
-`Syntax`:
+atomic syntax unit, and every parameter needs a type, either from the macro's
+annotation (`macro identity: Expr -> Expr = expr => expr`) or written on the
+parameter (`macro identity = expr: Expr => expr`). A parameter with neither is
+an error:
 
 ```staple
-macro choose = (condition; then; else) => Expr :: parse_quote {
+macro choose = (condition: Expr; then: Expr; else: Expr) => Expr :: parse_quote {
     match $condition {
         True => $then,
         False => $else,
