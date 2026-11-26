@@ -14065,6 +14065,36 @@ fn statically_checks_macro_match_coverage_before_expansion() {
 }
 
 #[test]
+fn reports_macro_definition_errors_in_declaration_order() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for _ in 0..8 {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(
+                &with_syntax_imports(concat!(
+                    "macro invalid: Item -> Item = item => item\n",
+                    "macro invoked: Expr -> Expr = _ => 0\n",
+                )),
+                root,
+            )
+            .expect("the source should parse");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err_diagnostics("both definitions are invalid");
+        let position = |text: &str| {
+            diagnostics
+                .iter()
+                .position(|diagnostic| diagnostic.message.contains(text))
+                .unwrap_or_else(|| panic!("no diagnostic mentions {text}: {diagnostics:#?}"))
+        };
+        assert!(
+            position("macro `invalid`") < position("macro `invoked`"),
+            "{diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
 fn infers_nested_compile_time_match_bindings() {
     type_check(concat!(
         "use std.syntax.(Sequence, Modifier, Ident, Type, Item)\n",

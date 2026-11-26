@@ -500,7 +500,7 @@ Update this section as you work (see "Rules for the implementor").
 
 | Task | Status | Commit | Notes |
 |---|---|---|---|
-| 1. A clean baseline | not started | | |
+| 1. A clean baseline | done | | Closure lookup falls back to the use site for names a macro wrote (the `derive_eq` cycle); constructors, singleton values and macro definitions are checked in declaration order; a dead server's forwarded output loses its blank lines. Tests: workspace 2378 passed, 0 failed. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest 1904/2036, the same 132 differences on two runs. See Findings. |
 | 2. Every macro has an entry function | not started | | |
 | 3. `parse_quote` without a contextual type | not started | | |
 | 4. Macro code under the ordinary rules | not started | | |
@@ -529,7 +529,53 @@ commit and the command. Include:
 
 ## Findings
 
-_None yet._ Record:
+### Task 1
+
+- **The `derive_eq` failure.** In `@all(@derive_eq, @derive_debug) typegroup
+  Switch { … }`, the derives write `impl Eq Switch` and `impl Debug Switch`.
+  The `Switch` in those impls carries the derive's module (`std.cmp`) as its
+  definition module, and the closure lookup searched only that module, so the
+  impls' self types resolved to nothing. An impl with no resolved self type
+  joins any closure that holds its trait, as if it were for a builtin type. So
+  `when`'s closure, which holds `Eq` and `Debug`, took the user's whole
+  generated group, whose bodies reach `std.string`'s `Debug` and `decode_at`.
+  Both use `when`, so `when` needed itself.
+  - Fix (`macro_expand/closure.rs`): as in name resolution
+    (`lookup_unqualified_type`), a name its definition module doesn't declare
+    is looked up at the use site. A self type may also resolve to a macro
+    call's unit, such as the `typegroup` call, because that unit declares the
+    types its expansion does.
+  - **The cause.** Bisecting from `88fdea78` to `686679d2` gives `1d473565`
+    (Phase 4 task 6). The test passed before it. That commit made every quoting
+    macro's closure include `__quote`, `Parse`, `Sequence` and `Splice` with
+    their impls, which brought `Eq` and `Debug` into `when`'s closure. The
+    lookup fault dates from `5da38086` (Phase 1), and the closure rules
+    haven't changed since. The same commit rewrote `std` modules without `if`;
+    the cycle doesn't pass through a rewritten item, but the two halves of the
+    commit weren't tested apart.
+- **The type-definition cycle.** `seed_constructors` and
+  `seed_singleton_values` (`typecheck.rs`) walked hash maps, so the first
+  declaration resolved, and the one the cycle is reported at, changed from run
+  to run under either engine. They now go in declaration order:
+  `type A wrap B` / `type B from (I32 | A)` always reports `B`.
+- **The blank output line.** It came from stack overflows, not crashes in
+  general: the runtime prints an empty line before its overflow message, and
+  only the message was filtered. Blank lines at either end of a dead server's
+  standard error are now dropped too (`crash_output` in `client.rs`).
+- **Another ordering fault.** The first two `compare-engines.py` runs differed
+  by one integration-test source: two macro definition errors came out in
+  either order under both engines, at `3534a88f` too. `validate_definitions`
+  (`macro_expand.rs`) walked the definitions' hash map; it now goes in
+  declaration order.
+- **The comparison.** The 132 remaining differences are the kinds Phase 4
+  listed (macros without a declared result type, ownership differences, macro
+  code valid only when interpreted, wording and ordering). The cycle-naming
+  difference is gone. The integration tests' sources grew by two inputs, the
+  new tests, which match.
+
+### To record
+
+Record:
 
 - the cause of the `derive_eq` failure (task 1);
 - the test sources changed for each language decision, grouped by kind (tasks 3

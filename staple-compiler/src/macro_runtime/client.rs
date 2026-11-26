@@ -483,15 +483,7 @@ mod unix {
             } else {
                 server.wait_and_collect_stderr()
             };
-            let mut shown = String::new();
-            for line in String::from_utf8_lossy(&stderr)
-                .lines()
-                .filter(|line| !is_overflow_message(line))
-            {
-                shown.push_str(line);
-                shown.push('\n');
-            }
-            self.forward_output(macro_name, shown.as_bytes());
+            self.forward_output(macro_name, crash_output(&stderr).as_bytes());
             (status, stderr)
         }
 
@@ -627,6 +619,26 @@ mod unix {
         }
     }
 
+    /// A dead server's standard error without the runtime's overflow message
+    /// or the blank lines around it and at either end.
+    pub(super) fn crash_output(stderr: &[u8]) -> String {
+        let text = String::from_utf8_lossy(stderr);
+        let lines = text
+            .lines()
+            .filter(|line| !is_overflow_message(line))
+            .collect::<Vec<_>>();
+        let first = lines.iter().position(|line| !line.trim().is_empty());
+        let last = lines.iter().rposition(|line| !line.trim().is_empty());
+        let mut shown = String::new();
+        if let (Some(first), Some(last)) = (first, last) {
+            for line in &lines[first..=last] {
+                shown.push_str(line);
+                shown.push('\n');
+            }
+        }
+        shown
+    }
+
     fn is_overflow_message(line: &str) -> bool {
         line.contains("overflowed its stack") || line.contains("fatal runtime error: stack overflow")
     }
@@ -741,6 +753,21 @@ mod tests {
         assert_eq!(
             unix::classify_crash("m", Some(9), b""),
             "macro `m` crashed (SIGKILL)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crash_output_drops_the_overflow_message_and_surrounding_blank_lines() {
+        assert_eq!(
+            unix::crash_output(
+                b"\nthread 'macro-server-worker' has overflowed its stack\nfatal runtime error: stack overflow\n"
+            ),
+            ""
+        );
+        assert_eq!(
+            unix::crash_output(b"\nfirst\n\nsecond\n\nfatal runtime error: stack overflow\n"),
+            "first\n\nsecond\n"
         );
     }
 }

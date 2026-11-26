@@ -621,6 +621,23 @@ impl ClosureIndex {
         modifier: bool,
     ) -> Vec<ItemId> {
         let context = reference.definition.unwrap_or(module);
+        let found = self.resolve_in(lookup, context, reference, modifier);
+        // As in name resolution, a name a macro wrote that its definition
+        // module doesn't declare refers to the use site's item: a derive
+        // names the type it was applied to.
+        if found.is_empty() && context != module {
+            return self.resolve_in(lookup, module, reference, modifier);
+        }
+        found
+    }
+
+    fn resolve_in(
+        &self,
+        lookup: &Lookup,
+        context: ModuleId,
+        reference: &RawRef,
+        modifier: bool,
+    ) -> Vec<ItemId> {
         let Some(first) = reference.path.first() else {
             return Vec::new();
         };
@@ -814,10 +831,12 @@ impl ClosureIndex {
                     !(head.namespace.is_none() && parameters.contains(head.name.as_str()))
                 })
                 .flat_map(|head| self.resolve_ref(lookup, module, &named_ref(&head), false))
+                // A macro call's unit declares whatever types its expansion
+                // does, so it counts as a type here.
                 .filter(|target| {
                     self.items
                         .get(target)
-                        .is_some_and(|item| item.kind == ItemKind::Type)
+                        .is_some_and(|item| matches!(item.kind, ItemKind::Type | ItemKind::Other))
                 })
                 .collect::<Vec<_>>();
             entries.push(ImplEntry {

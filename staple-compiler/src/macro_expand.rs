@@ -4630,8 +4630,12 @@ impl MacroExpander {
     }
 
     fn validate_definitions(&mut self) {
-        let mut groups = HashMap::<(ModuleId, String, bool), Vec<MacroDefinition>>::new();
-        for definition in self.definitions.values() {
+        // In declaration order, so the diagnostics come out the same every run.
+        let mut ordered = self.definitions.values().collect::<Vec<_>>();
+        ordered.sort_by_key(|definition| definition.key.syntax.0);
+        let mut groups =
+            std::collections::BTreeMap::<(usize, String, bool), Vec<MacroDefinition>>::new();
+        for definition in ordered.iter().copied() {
             if !definition.declaration.type_parameters.is_empty()
                 && !matches!(definition.kind, MacroKind::ParseQuote)
             {
@@ -4642,7 +4646,7 @@ impl MacroExpander {
             }
             groups
                 .entry((
-                    definition.key.module,
+                    definition.key.module.0,
                     definition.key.name.clone(),
                     definition.key.modifier,
                 ))
@@ -4672,7 +4676,7 @@ impl MacroExpander {
                 }
             }
         }
-        for definition in self.definitions.values() {
+        for definition in ordered {
             if let Some(annotation) = &definition.declaration.annotation {
                 let before = self.diagnostics.len();
                 reject_compile_forall(annotation, &mut self.diagnostics);

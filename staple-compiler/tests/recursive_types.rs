@@ -209,6 +209,19 @@ fn mutually_recursive_types_without_an_indirection_are_still_cyclic() {
     );
 }
 
+#[test]
+fn a_cycle_between_type_definitions_names_the_same_type_every_time() {
+    let names = (0..16)
+        .map(|_| {
+            check_errors("type A wrap B\ntype B from (I32 | A)\n")
+                .into_iter()
+                .find(|message| message.starts_with("cyclic type definition"))
+                .expect("the definitions are cyclic")
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(names.len(), 1, "the cycle is named differently: {names:#?}");
+}
+
 #[cfg(unix)]
 #[test]
 fn recursive_product_with_a_singleton_sum_field_runs_when_walked_in_a_loop() {

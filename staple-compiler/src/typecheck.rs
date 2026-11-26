@@ -7686,7 +7686,11 @@ impl TypeChecker {
     }
 
     fn seed_constructors(&mut self, module: &ResolvedModule) {
-        for (symbol, id) in module.constructors() {
+        // In declaration order, so a cycle between declarations is reported
+        // at the same one every run.
+        let mut constructors = module.constructors().iter().collect::<Vec<_>>();
+        constructors.sort_by_key(|(symbol, id)| (id.0, symbol.0));
+        for (symbol, id) in constructors {
             if module.recursive_construction(*id) == Some(crate::RecursiveConstruction::Syntax) {
                 continue;
             }
@@ -7752,7 +7756,9 @@ impl TypeChecker {
     }
 
     fn seed_singleton_values(&mut self, module: &ResolvedModule) {
-        for (symbol, id) in module.singleton_values() {
+        let mut singletons = module.singleton_values().iter().collect::<Vec<_>>();
+        singletons.sort_by_key(|(symbol, id)| (id.0, symbol.0));
+        for (symbol, id) in singletons {
             let value_type = self.instantiate_type_declaration(module, *id, Vec::new());
             self.symbol_types.insert(*symbol, value_type);
         }
