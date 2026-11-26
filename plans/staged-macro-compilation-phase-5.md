@@ -71,8 +71,10 @@ All of these were read from the source at `3534a88f`.
 - **Strict mode.** With the compiled engine, a call the compiled code couldn't
   take reports ``internal error: macro `m` could not be run as compiled code``
   (`refuse_interpreter`, `macro_expand.rs:5858`). A macro with an omitted
-  parameter type gets no entry function (`check_program.rs:1259`), although
-  `Staple.md` says an omitted parameter type means `SyntaxNode`.
+  parameter type gets no entry function (`check_program.rs:1259`), so it
+  always falls back to the interpreter. `Staple.md` says an omitted parameter
+  type means `SyntaxNode`, and its `choose` example (`Staple.md:93`) omits
+  them. About 13 of the integration tests' sources do too.
 - **The comparison.** `scripts/compare-engines.py` expands and checks each input
   with both engines (`staple expand --tree-dump`, `staple check`). With
   `--dump-tests` it also covers every source the compiler's integration tests
@@ -175,10 +177,16 @@ All of these were read from the source at `3534a88f`.
    isn't a new decision: Phase 2 already held closures to the ordinary rules,
    behind an opt-in check. Fix each affected test source. A test that exists
    to show the interpreter accepting such code changes to expect the error.
-4. **An omitted parameter type gets an entry function, as `SyntaxNode`.** This
-   matches `Staple.md`. After this, strict mode's ``could not be run as
-   compiled code`` is a compiler bug wherever it appears, and the comparison
-   checks that no input produces it.
+4. **A macro parameter must have a type** (language change). The type comes
+   from the macro's annotation or from the parameter itself:
+   - `macro identity: Expr -> Expr = expr => expr` and
+     `macro identity = expr: Expr => expr` are valid;
+   - `macro identity = expr => expr` is rejected under both engines.
+
+   This replaces `Staple.md`'s rule that an omitted parameter type means
+   `SyntaxNode`. Every macro then has an entry function, so strict mode's
+   ``could not be run as compiled code`` is a compiler bug wherever it
+   appears, and the comparison checks that no input produces it.
 5. **The compiled engine's wording is the wording** (language decision). Macro
    code is checked by the ordinary type checker, so its diagnostics read like
    any other code's.
@@ -291,12 +299,22 @@ the phase.
 
 ### 2. Every macro has an entry function
 
-- Give a macro with an omitted parameter type an entry function, reading the
-  parameter as `SyntaxNode` (Decision 4).
+- Implement Decision 4. A macro parameter with no type, from neither the
+  macro's annotation nor the parameter, is an error under both engines, at the
+  parameter. The diagnostic names both fixes: annotate the macro, or give the
+  parameter a type.
+- Update every source the error finds: `Staple.md`'s `choose` example, the
+  integration tests' sources, and any standard-library or example macro. Use
+  the type the parameter actually reads, usually `Expr`, not `SyntaxNode` by
+  rote. A test that exists to show an untyped parameter changes to expect the
+  error. Record the count in Findings.
+- Remove the interpreter's `SyntaxNode` default for untyped parameters, and the
+  entry-function exception for them (`check_program.rs:1259`).
 - Make `compare-engines.py` count ``could not be run as compiled code`` and fail
   when it is non-zero. Fix every case it finds.
-- Tests: a macro with omitted parameter types runs compiled, and so does one
-  that mixes typed and untyped parameters.
+- Tests: `identity` with an annotation and with a typed parameter runs compiled;
+  an untyped parameter, alone or mixed with typed ones, is rejected by both
+  engines with the same diagnostic.
 
 ### 3. `parse_quote` without a contextual type
 
@@ -453,8 +471,8 @@ the phase.
   paragraph and the interpreter's limits go in Phase 6, with the interpreter.
 - Document that a macro's result type is inferred from its body as a
   function's is, and that `parse_quote` takes its type only from context,
-  never from the call site (Decision 2). Also document that an omitted
-  parameter type means `SyntaxNode` in compiled code too.
+  never from the call site (Decision 2). Also document that every macro
+  parameter needs a type, from the annotation or the parameter (Decision 4).
 - Say that the first build without a prebuilt standard library compiles its
   macros, and how long that roughly takes.
 - Don't document `--macro-engine`.
