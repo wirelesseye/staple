@@ -147,25 +147,38 @@ All of these were read from the source at `3534a88f`.
      cache that normal incremental builds use moves too, rather than being
      split across two crates.
 2. **A macro's result type is inferred from its body, as a function's is, and
-   `parse_quote` needs a contextual type** (language decision). An unannotated
-   macro stays valid wherever an unannotated function would be. Only a
-   `parse_quote`, or a `Parse.parse` or `Parse.parse_all`, whose target type
-   nothing determines is rejected. The interpreter's fallback that takes the
-   type from the call site goes.
-   - These stay valid, and pass under both engines at `3534a88f`:
+   every `parse_quote` needs a contextual type** (language decision). An
+   unannotated macro is valid exactly where an unannotated function would be. A
+   `parse_quote`, `Parse.parse` or `Parse.parse_all` whose target type nothing
+   outside it determines is rejected, including when it is the macro's whole
+   body. The interpreter's fallback that takes the type from the call site goes,
+   and so does the rule, in both engines, that a whole-body `parse_quote` gives
+   the macro the type its template parses as.
+   - Valid:
      - `macro identity = expr: Expr => expr`, whose result is `Expr`, as for the
        same function;
-     - `macro bare = expr: Expr => parse_quote { $expr + 1 }`, where the
-       `parse_quote` is the macro's result.
-   - These are rejected:
+     - `macro bare: Expr -> Expr = expr => parse_quote { $expr + 1 }` and
+       `macro bare = expr: Expr => Expr :: parse_quote { $expr + 1 }`, where
+       the declared result or the ascription gives the type.
+   - Rejected:
+     - `macro bare = expr: Expr => parse_quote { $expr + 1 }`. Both engines
+       accept it at `3534a88f`, by reading the template's shape: an expression
+       gives `Expr`, one item `Item`, several `Sequence<Item>`. That guess is
+       wrong without warning for a bare splice (`x: Item => parse_quote { $x }`
+       gives `Expr`), for types and patterns (`parse_quote { Some(value) }` is
+       never a pattern), and when an item is added (`Item` becomes
+       `Sequence<Item>` at every call site). It also stops applying as soon as
+       the quote moves into a block. The same body in an unannotated function
+       is already rejected.
      - `let result = parse_quote { $expr + 1 }; result`. Nothing gives the
        binding a type. The compiled engine rejects it at `3534a88f`, and the
        interpreter accepts it.
      - `Parse.parse_all (quote { … })` with no target. Both engines reject it
        today, with different wording.
-   - `Staple.md` already says this ("a `parse_quote` reached with no contextual
-     type at all … is rejected"). Only the interpreter's call-site fallback
-     made the 25 sources work.
+   - `Staple.md` already says this for helpers ("a `parse_quote` reached with
+     no contextual type at all … is rejected"); it now holds for macros too.
+     The interpreter's call-site fallback made 25 sources work, and the shape
+     rule more; all of them change.
    - The diagnostic names the fixes it already lists for `parse_quote`: annotate
      the binding, use `T :: expression`, or declare the macro's result type. It
      reads the same under both engines.
@@ -319,16 +332,20 @@ the phase.
 ### 3. `parse_quote` without a contextual type
 
 - Implement Decision 2. Remove the interpreter's call-site fallback, so the
-  interpreter rejects what the compiled engine rejects. Use one diagnostic for
+  interpreter rejects what the compiled engine rejects, and remove the
+  whole-body `parse_quote` shape rule from both engines. Use one diagnostic for
   both engines, worded as `parse_quote`'s existing one.
-- Update the 25 test sources, and any standard-library or example macro the
-  error finds, by annotating the binding or declaring the macro's result type.
+- Update the 25 test sources, the sources the shape rule made work, and any
+  standard-library or example macro the error finds, by annotating the
+  binding, adding `T ::` or declaring the macro's result type.
   Record which fix each needed in Findings.
 - Tests:
-  - an unannotated macro returning a parameter (`identity`) and one ending in
-    `parse_quote` are accepted by both engines;
-  - an unannotated binding of `parse_quote`, and `Parse.parse_all` with no
-    target, are rejected by both engines with the same diagnostic;
+  - an unannotated macro returning a parameter (`identity`) is accepted by
+    both engines;
+  - an unannotated macro whose whole body is a `parse_quote` (`bare`), a bare
+    splice (`x: Item => parse_quote { $x }`), an unannotated binding of
+    `parse_quote`, and `Parse.parse_all` with no target are rejected by both
+    engines with the same diagnostic;
   - each of the three fixes the diagnostic names makes the macro valid.
 
 ### 4. Macro code under the ordinary rules
@@ -471,8 +488,10 @@ the phase.
   paragraph and the interpreter's limits go in Phase 6, with the interpreter.
 - Document that a macro's result type is inferred from its body as a
   function's is, and that `parse_quote` takes its type only from context,
-  never from the call site (Decision 2). Also document that every macro
-  parameter needs a type, from the annotation or the parameter (Decision 4).
+  never from the call site or its template's shape (Decision 2). Remove any
+  example that relies on a whole-body `parse_quote` without a type. Also
+  document that every macro parameter needs a type, from the annotation or the
+  parameter (Decision 4).
 - Say that the first build without a prebuilt standard library compiles its
   macros, and how long that roughly takes.
 - Don't document `--macro-engine`.
