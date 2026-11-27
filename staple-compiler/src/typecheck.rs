@@ -17896,6 +17896,9 @@ impl TypeChecker {
         }
         let mut matches = Vec::new();
         let mut unavailable = false;
+        // Set when a `Parse` member was reached with nothing to say which
+        // type it parses to.
+        let mut undetermined_parse_target = None;
         for method in candidates {
             let Some(template) = self.trait_method_types.get(method).cloned() else {
                 continue;
@@ -17946,6 +17949,24 @@ impl TypeChecker {
             let Some(arguments) = self.resolve_trait_obligation(trait_id, &partial_arguments)
             else {
                 unavailable = true;
+                if partial_arguments
+                    .iter()
+                    .all(|argument| matches!(argument, CheckedType::Inferred))
+                    && resolved_trait.declaration.name == "Parse"
+                {
+                    let member = resolved_trait
+                        .methods
+                        .iter()
+                        .position(|candidate| candidate == method)
+                        .and_then(|index| resolved_trait.declaration.members.get(index));
+                    undetermined_parse_target = match member.map(|member| member.name.as_str()) {
+                        Some("parse_quote") => Some(crate::macro_expand::NO_PARSE_QUOTE_CONTEXT),
+                        Some("parse" | "parse_all") => {
+                            Some(crate::macro_expand::NO_PARSE_TARGET)
+                        }
+                        _ => undetermined_parse_target,
+                    };
+                }
                 continue;
             };
             if arguments
@@ -18058,10 +18079,19 @@ impl TypeChecker {
             );
             return value_type;
         }
+        // An argument that is already an error has been reported where it
+        // went wrong, so it says nothing about the trait.
+        if matches.is_empty() && matches!(argument, Some(CheckedType::Error)) {
+            return CheckedType::Error;
+        }
         self.diagnostics.push(Diagnostic::new(
             span,
             if matches.len() > 1 {
                 "ambiguous trait method; qualify the trait name"
+            } else if let Some(message) = undetermined_parse_target
+                && unavailable
+            {
+                message
             } else if unavailable {
                 "no trait implementation or matching bound is available"
             } else {

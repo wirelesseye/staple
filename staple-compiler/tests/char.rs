@@ -114,10 +114,10 @@ fn char_macros_round_trip_literals() {
         r#"
 use std.io.println
 use std.syntax.*
-macro echo = value: CharExpr => parse_quote { $value }
+macro echo: CharExpr -> Expr = value => parse_quote { $value }
 macro snowman = () => CharExpr '\u{2603}'
 macro rebuild = value: CharExpr => match value { CharExpr c => CharExpr c, }
-macro parsed = body: Braced<Syntax> => {
+macro parsed: Braced<Syntax> -> Expr = body => {
     let Braced contents = body
     match (Parse.parse_all.<CharExpr> contents) {
         Ok value => parse_quote { $value },

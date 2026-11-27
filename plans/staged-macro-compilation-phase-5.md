@@ -539,7 +539,7 @@ Update this section as you work (see "Rules for the implementor").
 |---|---|---|---|
 | 1. A clean baseline | done | `fa5f0b99` | Closure lookup falls back to the use site for names a macro wrote (the `derive_eq` cycle); constructors, singleton values and macro definitions are checked in declaration order; a dead server's forwarded output loses its blank lines. Tests: workspace 2378 passed, 0 failed. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest 1904/2036, the same 132 differences on two runs. See Findings. |
 | 2. Every macro has an entry function | done | `d2d346fc` | An untyped macro parameter is an error under both engines, reported at the parameter, and the interpreter's `SyntaxNode` default and the entry-function exception are gone. Tests: workspace 2379 passed, 0 failed (rerun after fixing two LSP hover signatures that read `SyntaxNode`); the two new compiled-engine tests (ignored, `test-macro-libraries.sh`) pass. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest 1910/2042 with the same 132 differences; ``could not be run as compiled code``: 0 inputs. See Findings. |
-| 3. `parse_quote` without a contextual type | not started | | |
+| 3. `parse_quote` without a contextual type | done | `_pending_` | A `parse_quote` with no contextual type is an error under both engines with one diagnostic, as is `Parse.parse`/`Parse.parse_all` with no target; a whole-body `parse_quote` no longer fixes a macro's result, and the interpreter no longer takes a quote's type from the call site. Tests: workspace 2382 passed, 0 failed; `test-macro-libraries.sh` passes. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest without it 1935/2052 with 117 differences; ``could not be run as compiled code``: 0 inputs. See Findings. |
 | 4. Macro code under the ordinary rules | not started | | |
 | 5. `if` and `when` as templates | not started | | |
 | 6. `if` and `when` back in the standard library | not started | | |
@@ -649,6 +649,71 @@ commit and the command. Include:
 - **The comparison.** The same 132 differences as at task 1, and 6 more inputs
   that match (the new tests' sources). The expansion comparison matches
   because no standard-library, example or fixture input changed.
+
+### Task 3
+
+- **The rule.** Every `parse_quote` needs a contextual type from an annotation,
+  `T ::`, or the macro's declared result type, as in an unannotated function.
+  A whole-body `parse_quote` does not fix the macro's result, so `macro bare =
+  expr: Expr => parse_quote { $expr + 1 }` is rejected, and so is a bare splice
+  such as `macro m = ty: Type => parse_quote { $ty }`. Both engines give
+  ``parse_quote` requires a contextual syntax type; annotate the binding, use `T
+  :: expression`, or declare the macro's result type`. `Parse.parse` and
+  `Parse.parse_all` with no target give the interpreter's existing ``Parse.parse`
+  requires a contextual `Result<T, ParseError>` type or an explicit type
+  argument` from both. Both texts are constants in `macro_expand.rs` that the
+  type checker uses too. `macro identity = expr: Expr => expr` stays valid.
+- **The interpreter.** An unannotated macro whose body didn't show a result got
+  `SyntaxNode`, which became the quote context of every `parse_quote` in the
+  body, and `inferred_result_meta_type` also read a result from a quotation's
+  shape, through blocks and `match` arms. Now only a `quote` (`Syntax`), or a
+  `T ::`, fixes an inferred result, and `MacroDefinition::result_unconstrained`
+  marks the rest: no quote context, and the body is checked against an unknown
+  result. The static check rejects a `parse_quote` with nothing expected. The
+  runtime reads the type the static check recorded for the quote's position
+  before the macro's result, so `item_identity parse_quote { type G }` takes
+  `Item` from the helper's parameter. Modifier macros keep `Item` as their
+  declared result.
+- **The compiled engine.** It never inferred a result from a `parse_quote`;
+  block, `match` and whole-body tails were rejected with `no trait implementation
+  or matching bound is available` and cascades such as `the type of `v` is not
+  available here`. A `Parse` member reached with nothing fixing its type now
+  gets the shared text (`typecheck.rs`, `resolve_trait_method_use`), and a trait
+  call on an argument that is already an error reports nothing more. The
+  closure check (`check_program.rs`) was left as `88fe7bc2` made it, assuming no
+  result for an unannotated macro, so it agrees with this rule.
+- **More changed than the plan's 25.** The interpreter inferred a macro's result
+  through block tails, `match` arms and whole-body quotations, which the
+  compiled engine never did, so far more sources relied on it than the 25
+  macros Phase 4 counted: about 60 tests at first, and about 190 macro
+  definitions once whole-body quotations went too.
+- **Sources changed.** No standard-library, example or fixture macro needed a
+  change; the expansion comparison is unchanged.
+  - Declared the macro's result type: about 180 macros, `Expr -> Expr` or `Item
+    -> Item`, in `compiler.rs`, `modules.rs`, `char.rs`, `track_caller.rs`,
+    `staged.rs`, `staple-cli`'s `compile.rs` and the language server's unit tests.
+  - `T ::`: 13 quotations, in the constructor tests (`Parenthesized`, `Braced`,
+    `Separated`), the `ModifiedItem` argument, three macros that must keep their
+    parameter shape (`conditional`, `same`, `here`), and three `Staple.md`
+    samples (`conditional`, `replace_argument`, `define_alias`).
+  - Annotated a binding: 5 (`unmoved`, `moved`, `committed`, and the two
+    `generated: Item` bindings in `derive_default.rs`).
+  - `derive_default.rs`'s `@describe` still differs between the engines for a
+    reason that has nothing to do with this: its `move` marker disagrees with
+    the annotation (task 4).
+- **Tests.** `compiler.rs` (interpreter) and `compiled_macros.rs` (ignored, both
+  engines with equal diagnostics): `identity` accepted; `bare`, a bare splice, a
+  binding, a block tail and `Parse.parse_all` with no target rejected; each of
+  the three fixes accepted. `a_parse_quote_result_needs_a_type` still expects
+  `untyped` to be rejected; it now matches the `parse_quote` message, since the
+  expander reports it before the closure check does.
+- **The comparison.** The standard library is 45/45. The rest, run without the
+  standard library entries (they hit the known concurrent-build fault when run
+  with the other inputs, 7 of them in the first try), was 1935/2052 with 117
+  differences, against 132 before the task, and none says `could not be run as
+  compiled code`. The input count is higher than before because the dump now
+  holds 1865 test sources: 1855 existed before any change in this task and the
+  rest are its own tests; the earlier runs' 1810 are not explained.
 
 ### To record
 

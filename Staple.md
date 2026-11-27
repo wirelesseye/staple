@@ -133,7 +133,7 @@ macro conditional = (
     _: Ident<"else">;
     else_branch: Expr;
 ) =>
-    parse_quote {
+    Expr :: parse_quote {
         match $condition {
             True => $then_branch,
             False => $else_branch,
@@ -491,7 +491,7 @@ compile-time values:
 macro replace_argument = (value: CallExpr; move replacement: Expr) => {
     let mut changed = Clone.clone value
     changed.argument = replacement
-    parse_quote { ($value, $changed) }
+    Expr :: parse_quote { ($value, $changed) }
 }
 
 macro build_call = _: Expr => {
@@ -662,7 +662,7 @@ pub type MacroCallMetadata wrap (
 ```staple
 macro define_alias = (metadata: MacroCallMetadata; ty: Type) => {
     let visibility = metadata.visibility
-    parse_quote { $visibility type Generated = $ty }
+    Item :: parse_quote { $visibility type Generated = $ty }
 }
 
 pub define_alias I32

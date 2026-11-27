@@ -115,6 +115,10 @@ struct MacroDefinition {
     arity: usize,
     parameters: Vec<MetaType>,
     result: MetaType,
+    /// Whether `result` is only a placeholder: the macro declares no result
+    /// and nothing in its body fixes one. The body's `parse_quote`s then have
+    /// no contextual type from the macro itself.
+    result_unconstrained: bool,
     kind: MacroKind,
     /// Whether this overload's body only fills in a quotation or returns a
     /// parameter, so it can be instantiated without evaluating anything.
@@ -2487,6 +2491,7 @@ impl MacroExpander {
                                     staple_syntax::ProductExpression::empty(),
                                 ))
                             };
+                        let mut result_unconstrained = false;
                         let (arity, mut parameters, mut result) =
                             if matches!(kind, MacroKind::Quote | MacroKind::ParseQuote) {
                                 let (parameters, result) = declaration
@@ -2507,13 +2512,15 @@ impl MacroExpander {
                                             .map(expression_arity)
                                             .unwrap_or(0)
                                     });
-                                let (parameters, result) = declaration
+                                let (parameters, result, unconstrained) = declaration
                                     .annotation
                                     .as_ref()
                                     .and_then(macro_signature)
+                                    .map(|(parameters, result)| (parameters, result, false))
                                     .unwrap_or_else(|| {
                                         inferred_macro_signature(declaration.value.as_ref())
                                     });
+                                result_unconstrained = unconstrained;
                                 (arity, parameters, result)
                             };
                         if declaration.modifier && declaration.annotation.is_none() {
@@ -2530,6 +2537,7 @@ impl MacroExpander {
                                 *last = MetaType::Item;
                             }
                             result = MetaType::Item;
+                            result_unconstrained = false;
                         }
                         let is_template = matches!(&kind, MacroKind::User(value)
                             if templates::template_parts(value).is_some());
@@ -2541,6 +2549,7 @@ impl MacroExpander {
                                 arity,
                                 parameters,
                                 result,
+                                result_unconstrained,
                                 kind,
                                 is_template,
                             },
@@ -3526,7 +3535,11 @@ impl MacroExpander {
         };
         let previous = self.check_expanded_compile_time;
         self.check_expanded_compile_time = self.macros_ready.contains(&definition.key);
-        let mut expected = CompileType::Meta(definition.result.clone());
+        let mut expected = if definition.result_unconstrained {
+            CompileType::Unknown
+        } else {
+            CompileType::Meta(definition.result.clone())
+        };
         for (index, parameter) in definition.parameters.iter().enumerate().rev() {
             let parameter = if definition.key.modifier && index + 1 != definition.parameters.len()
             {
@@ -3906,7 +3919,18 @@ impl MacroExpander {
                             CompileType::Error
                         }
                         Some(ty @ CompileType::Meta(_)) => ty.clone(),
-                        _ => inferred_compile_quote_type(quote),
+                        // An error was already reported where the type went
+                        // wrong; nothing more is learned here.
+                        Some(CompileType::Error) => CompileType::Error,
+                        // Nothing gives the quotation a type. Its own shape is
+                        // not one, since a call site cannot supply it either.
+                        _ => {
+                            self.diagnostics.push(Diagnostic::new(
+                                quote.syntax.span.clone(),
+                                NO_PARSE_QUOTE_CONTEXT,
+                            ));
+                            CompileType::Error
+                        }
                     },
                 }
             }
@@ -5906,7 +5930,9 @@ impl MacroExpander {
         } else {
             None
         };
-        let previous_context = if quote_result_type(&definition.result) {
+        let previous_context = if quote_result_type(&definition.result)
+            && !definition.result_unconstrained
+        {
             self.quote_context.replace(definition.result.clone())
         } else {
             self.quote_context.take()
@@ -7124,7 +7150,9 @@ impl MacroExpander {
                 if self.refuse_interpreter(definition, &call_span) {
                     return None;
                 }
-                let previous_context = if quote_result_type(&definition.result) {
+                let previous_context = if quote_result_type(&definition.result)
+                    && !definition.result_unconstrained
+                {
                     self.quote_context.replace(definition.result.clone())
                 } else {
                     self.quote_context.take()
@@ -7484,12 +7512,19 @@ impl MacroExpander {
             Expression::Quote(quote) => {
                 let expected = match quote.kind {
                     staple_syntax::QuoteKind::Quote => MetaType::Syntax,
-                    staple_syntax::QuoteKind::ParseQuote => match self.quote_context.clone() {
+                    // The static check recorded the type the position expects;
+                    // a macro's own result type is the context otherwise.
+                    staple_syntax::QuoteKind::ParseQuote => match self
+                        .call_target
+                        .clone()
+                        .filter(quote_result_type)
+                        .or_else(|| self.quote_context.clone())
+                    {
                         Some(expected) => expected,
                         None => {
                             self.diagnostics.push(Diagnostic::new(
                                 quote.syntax.span.clone(),
-                                "`parse_quote` requires a contextual syntax type; annotate the binding, use `T :: expression`, or declare the macro's result type",
+                                NO_PARSE_QUOTE_CONTEXT,
                             ));
                             return None;
                         }
@@ -12689,14 +12724,13 @@ fn compile_type_as_meta(ty: &CompileType) -> Option<MetaType> {
     }
 }
 
-fn inferred_compile_quote_type(quote: &staple_syntax::QuoteExpression) -> CompileType {
-    CompileType::Meta(match &quote.template {
-        staple_syntax::QuoteTemplate::Expression(_) => MetaType::Expr,
-        staple_syntax::QuoteTemplate::Item(_) => MetaType::Item,
-        staple_syntax::QuoteTemplate::Items(_) => MetaType::Sequence(Box::new(MetaType::Item)),
-        staple_syntax::QuoteTemplate::Raw => MetaType::Syntax,
-    })
-}
+/// The diagnostic for a `parse_quote` whose syntax type nothing determines.
+/// The type checker reports the same text for compiled macro code.
+pub(crate) const NO_PARSE_QUOTE_CONTEXT: &str = "`parse_quote` requires a contextual syntax type; annotate the binding, use `T :: expression`, or declare the macro's result type";
+
+/// The diagnostic for a `Parse.parse` or `Parse.parse_all` with no target type.
+/// The type checker reports the same text for compiled macro code.
+pub(crate) const NO_PARSE_TARGET: &str = "`Parse.parse` requires a contextual `Result<T, ParseError>` type or an explicit type argument";
 
 fn compile_types_compatible(actual: &CompileType, expected: &CompileType) -> bool {
     if let (CompileType::Result(ao, ae), CompileType::Result(eo, ee)) = (actual, expected) {
@@ -13940,7 +13974,7 @@ fn compiler_macro_signature(annotation: &Type) -> Option<(Vec<MetaType>, MetaTyp
     ))
 }
 
-fn inferred_macro_signature(value: Option<&Expression>) -> (Vec<MetaType>, MetaType) {
+fn inferred_macro_signature(value: Option<&Expression>) -> (Vec<MetaType>, MetaType, bool) {
     let mut parameters = Vec::new();
     let mut current = value;
     while let Some(Expression::Function(function)) = current {
@@ -13949,48 +13983,36 @@ fn inferred_macro_signature(value: Option<&Expression>) -> (Vec<MetaType>, MetaT
         parameters.push(pattern_meta_type(&function.pattern).unwrap_or(MetaType::SyntaxNode));
         current = Some(&function.body);
     }
-    (
-        parameters,
-        current
-            .map(inferred_result_meta_type)
-            .unwrap_or(MetaType::Syntax),
-    )
+    // A body that fixes no result leaves `SyntaxNode` as a placeholder, as a
+    // function's result is left to its body's type.
+    match current.and_then(inferred_result_meta_type) {
+        Some(result) => (parameters, result, false),
+        None => (parameters, MetaType::SyntaxNode, true),
+    }
 }
 
-fn inferred_result_meta_type(expression: &Expression) -> MetaType {
+/// What a macro's body says its result is, when it says so without a context.
+/// A `quote` is `Syntax`. A `parse_quote` fixes nothing: it takes its type from
+/// an annotation, a `T ::` or the macro's declared result, as in a function.
+fn inferred_result_meta_type(expression: &Expression) -> Option<MetaType> {
     match expression {
-        // `quote` always returns opaque `Syntax`, regardless of what its
-        // contents would otherwise parse as; only `parse_quote` infers a
-        // result from the quoted template's shape.
         Expression::Quote(quote) if quote.kind == staple_syntax::QuoteKind::Quote => {
-            MetaType::Syntax
+            Some(MetaType::Syntax)
         }
-        Expression::Quote(quote) => match &quote.template {
-            staple_syntax::QuoteTemplate::Expression(_) => MetaType::Expr,
-            staple_syntax::QuoteTemplate::Item(_) => MetaType::Item,
-            staple_syntax::QuoteTemplate::Items(_) => MetaType::Sequence(Box::new(MetaType::Item)),
-            staple_syntax::QuoteTemplate::Raw => MetaType::Syntax,
-        },
-        Expression::Block(block) => block
-            .items
-            .last()
-            .and_then(|item| match item {
-                Item::Expression(expression) => Some(inferred_result_meta_type(expression)),
-                Item::Return(return_) => Some(inferred_result_meta_type(&return_.value)),
-                _ => None,
-            })
-            .unwrap_or(MetaType::SyntaxNode),
+        Expression::Block(block) => block.items.last().and_then(|item| match item {
+            Item::Expression(expression) => inferred_result_meta_type(expression),
+            Item::Return(return_) => inferred_result_meta_type(&return_.value),
+            _ => None,
+        }),
         Expression::Match(match_) => match_
             .arms
             .first()
-            .map(|arm| inferred_result_meta_type(&arm.body))
-            .unwrap_or(MetaType::SyntaxNode),
-        // A type ascription asserts the result type of the quoted
-        // template, so infer from it directly when it names a meta type;
-        // otherwise fall back to the annotated value's own shape.
-        Expression::TypeAscription(ascription) => meta_type(&ascription.ty)
-            .unwrap_or_else(|| inferred_result_meta_type(&ascription.value)),
-        _ => MetaType::SyntaxNode,
+            .and_then(|arm| inferred_result_meta_type(&arm.body)),
+        // A type ascription asserts the result type of the quoted template.
+        Expression::TypeAscription(ascription) => {
+            meta_type(&ascription.ty).or_else(|| inferred_result_meta_type(&ascription.value))
+        }
+        _ => None,
     }
 }
 

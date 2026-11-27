@@ -1273,7 +1273,7 @@ impl MacroExpander {
                     None => {
                         self.diagnostics.push(Diagnostic::new(
                             span,
-                            "`Parse.parse` requires a contextual `Result<T, ParseError>` type or an explicit type argument",
+                            super::NO_PARSE_TARGET,
                         ));
                         return None;
                     }
@@ -1672,7 +1672,7 @@ impl MacroExpander {
                 _ => {
                     self.diagnostics.push(Diagnostic::new(
                         span.clone(),
-                        "`Parse.parse` requires a contextual `Result<T, ParseError>` type or an explicit type argument",
+                        super::NO_PARSE_TARGET,
                     ));
                     CompileType::Error
                 }

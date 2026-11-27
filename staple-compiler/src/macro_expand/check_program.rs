@@ -1517,7 +1517,9 @@ mod tests {
             "def main = () => 0\n",
         ));
         assert!(
-            diagnostics.iter().any(|diagnostic| diagnostic.contains("macro `untyped`")),
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("`parse_quote` requires a contextual syntax type")),
             "{diagnostics:?}"
         );
 

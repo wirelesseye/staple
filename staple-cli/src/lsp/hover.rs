@@ -3643,7 +3643,7 @@ mod tests {
             "use dependency\n",
             "macro choose: Expr -> Expr = _: Expr => parse_quote { 1 }\n",
             "macro choose: CallExpr -> Expr = _: CallExpr => parse_quote { 2 }\n",
-            "macro inferred = value: Expr => parse_quote { $value }\n",
+            "macro inferred: Expr -> Expr = value => parse_quote { $value }\n",
             "macro satisfied = expr: Expr => Expr :: parse_quote { $expr }\n",
             "macro @identity: Item -> Item = item: Item => item\n",
             "let selected = choose (discarded 0)\n",
@@ -4087,7 +4087,7 @@ mod tests {
                 "/// A printable trait.\n",
                 "pub trait Printable T {}\n",
                 "/// An identity macro.\n",
-                "pub macro identity = value: Expr => parse_quote { $value }\n",
+                "pub macro identity: Expr -> Expr = value => parse_quote { $value }\n",
             ),
         )
         .unwrap();

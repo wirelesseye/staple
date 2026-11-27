@@ -272,7 +272,7 @@ fn macro_generated_calls_report_the_outermost_invocation() {
             "@track_caller\n",
             "def here = () => Location :: Location.caller ()\n",
             "use std.syntax.(parse_quote)\n",
-            "macro call_here = () => parse_quote { here () }\n",
+            "macro call_here: () -> Expr = () => parse_quote { here () }\n",
             "println \"${call_here ()}\"\n",
         )
     );

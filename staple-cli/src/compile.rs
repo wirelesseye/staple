@@ -1569,7 +1569,7 @@ mod tests {
                 "    },\n",
                 "    _ => parse_quote { let tagged: I32 = 0 },\n",
                 "}\n",
-                "macro qualifier = (metadata: MacroCallMetadata; value: Expr) => match metadata.modifiers {\n",
+                "macro qualifier: (MacroCallMetadata; Expr) -> Item = (metadata; value) => match metadata.modifiers {\n",
                 "    Sequence (first, rest) => match first {\n",
                 "        ModifierCall (Sequence (segment, more), _, _) => parse_quote { let qualified: I32 = $segment },\n",
                 "        _ => parse_quote { let qualified: I32 = 0 },\n",

@@ -829,7 +829,7 @@ mod tests {
         let order = ready_order(concat!(
             "macro first = value: Expr => helper value\n",
             "def helper = value: Expr => Expr :: second value\n",
-            "macro second = value: Expr => { let copy = value; parse_quote { $copy } }\n",
+            "macro second: Expr -> Expr = value => { let copy = value; parse_quote { $copy } }\n",
             "let a = first 1\n",
         ));
         let position = |name: &str| order.iter().position(|ready| ready == name);
@@ -906,7 +906,7 @@ mod tests {
     #[test]
     fn template_macros_are_never_made_ready() {
         let order = ready_order(concat!(
-            "macro wrap = value: Expr => parse_quote { ($value) }\n",
+            "macro wrap: Expr -> Expr = value => parse_quote { ($value) }\n",
             "let a = wrap 1\n",
         ));
         assert!(!order.iter().any(|ready| ready == "wrap"), "{order:?}");

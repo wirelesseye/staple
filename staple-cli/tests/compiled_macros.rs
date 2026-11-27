@@ -1060,3 +1060,105 @@ pub def main = () => {
     assert!(messages[0][1].contains("parameter `untyped` of macro `mixed`"), "{messages:?}");
     assert_eq!(messages[0], messages[1], "the engines word it differently");
 }
+
+#[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
+fn an_unannotated_macro_keeps_the_result_its_body_has_under_both_engines() {
+    let source = "\
+use std.syntax.*
+
+macro identity = expr: Expr => expr
+
+pub def main = () => {
+    let _a: I32 = identity 1
+}
+";
+    for (engine, label) in [("interp", "result-interp"), ("compiled", "result-compiled")] {
+        let (passed, stderr) = check_with_engine(label, source, engine);
+        assert!(passed, "{engine} rejected the macro: {stderr}");
+    }
+}
+
+/// The lines of `stderr` that carry a diagnostic containing `marker`, without
+/// the file they were reported in.
+fn diagnostics_containing(stderr: &str, marker: &str) -> Vec<String> {
+    stderr
+        .lines()
+        .filter_map(|line| line.find(marker).map(|start| line[start..].to_owned()))
+        .collect()
+}
+
+#[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
+fn parse_quote_and_parse_all_without_a_type_are_rejected_by_both_engines() {
+    let main = "\npub def main = () => {\n    let _a: I32 = bad 1\n}\n";
+    let sources = [
+        (
+            "whole-body",
+            "use std.syntax.*\n\nmacro bad = expr: Expr => parse_quote { $expr + 1 }\n",
+            "`parse_quote` requires",
+        ),
+        (
+            "bare-splice",
+            "use std.syntax.*\n\nmacro bad = expr: Expr => parse_quote { $expr }\n",
+            "`parse_quote` requires",
+        ),
+        (
+            "binding",
+            "use std.syntax.*\n\nmacro bad = expr: Expr => {\n    let result = parse_quote { $expr + 1 }\n    result\n}\n",
+            "`parse_quote` requires",
+        ),
+        (
+            "nested",
+            "use std.syntax.*\n\nmacro bad = expr: Expr => {\n    let n = 1\n    parse_quote { $expr + 1 }\n}\n",
+            "`parse_quote` requires",
+        ),
+        (
+            "parse-all",
+            "use std.syntax.*\n\nmacro bad = expr: Expr => {\n    let parsed = Parse.parse_all (quote { $expr })\n    expr\n}\n",
+            "`Parse.parse` requires",
+        ),
+    ];
+    for (name, macro_source, marker) in sources {
+        let source = format!("{macro_source}{main}");
+        let messages = ["interp", "compiled"].map(|engine| {
+            let (passed, stderr) = check_with_engine(&format!("{name}-{engine}"), &source, engine);
+            assert!(!passed, "{engine} accepted `{name}`: {stderr}");
+            diagnostics_containing(&stderr, marker)
+        });
+        assert_eq!(messages[0].len(), 1, "{name}: {messages:?}");
+        assert_eq!(messages[0], messages[1], "{name}: the engines word it differently");
+        if marker.contains("parse_quote") {
+            assert!(messages[0][0].contains("annotate the binding"), "{name}: {messages:?}");
+            assert!(messages[0][0].contains("use `T :: expression`"), "{name}: {messages:?}");
+            assert!(messages[0][0].contains("declare the macro's result type"), "{name}: {messages:?}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
+fn each_fix_the_parse_quote_diagnostic_names_is_accepted_by_both_engines() {
+    for (name, macro_source) in [
+        (
+            "binding",
+            "macro good = expr: Expr => {\n    let result: Expr = parse_quote { $expr + 1 }\n    result\n}\n",
+        ),
+        (
+            "ascription",
+            "macro good = expr: Expr => Expr :: parse_quote { $expr + 1 }\n",
+        ),
+        (
+            "declared",
+            "macro good: Expr -> Expr = expr => parse_quote { $expr + 1 }\n",
+        ),
+    ] {
+        let source = format!(
+            "use std.syntax.*\n\n{macro_source}\npub def main = () => {{\n    let _a: I32 = good 1\n}}\n"
+        );
+        for engine in ["interp", "compiled"] {
+            let (passed, stderr) = check_with_engine(&format!("fix-{name}-{engine}"), &source, engine);
+            assert!(passed, "{engine} rejected the `{name}` fix: {stderr}");
+        }
+    }
+}

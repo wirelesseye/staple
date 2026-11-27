@@ -302,7 +302,7 @@ fn reexports_public_items_through_selected_renamed_glob_and_chained_uses() {
         concat!(
             "pub type Number = I32\n",
             "pub let value: Number = 42\n",
-            "pub macro reveal = item: Expr => parse_quote { $item }\n",
+            "pub macro reveal: Expr -> Expr = item => parse_quote { $item }\n",
         ),
     );
     fixture.write(
@@ -885,7 +885,7 @@ fn block_scoped_type_constructors_do_not_enter_macro_definition_scope() {
         "main.sta",
         concat!(
             "type Wrapped wrap I32\n",
-            "macro make = _: Expr => parse_quote { Wrapped 42 }\n",
+            "macro make: Expr -> Expr = _ => parse_quote { Wrapped 42 }\n",
             "{ type Wrapped wrap Bool; () }\n",
             "let result: Wrapped = make ()\n",
         ),
@@ -1041,7 +1041,7 @@ fn block_scoped_use_of_a_macro_is_usable_within_its_block() {
     let fixture = Fixture::new();
     fixture.write(
         "library.sta",
-        "pub macro reveal = item: Expr => parse_quote { $item }\n",
+        "pub macro reveal: Expr -> Expr = item => parse_quote { $item }\n",
     );
     fixture.write(
         "main.sta",
@@ -1232,7 +1232,7 @@ fn inline_glob_reexports_types_traits_and_macros() {
             "    use std.syntax.(parse_quote)\n",
             "    pub type Number = I32\n",
             "    pub trait Identity T { identity: T -> T }\n",
-            "    pub macro reveal = item: Expr => parse_quote { $item }\n",
+            "    pub macro reveal: Expr -> Expr = item => parse_quote { $item }\n",
             "    pub mod Variant { pub type Ready }\n",
             "}\n",
             "pub use child.*\n",
@@ -2090,7 +2090,7 @@ fn imports_user_macros_with_definition_site_hygiene() {
         "helpers.sta",
         concat!(
             "def private_identity: I32 -> I32 = value => value\n",
-            "pub macro reveal = value: Expr => parse_quote { private_identity $value }\n",
+            "pub macro reveal: Expr -> Expr = value => parse_quote { private_identity $value }\n",
         ),
     );
 
@@ -2245,7 +2245,7 @@ fn imports_and_reexports_metadata_aware_macros() {
     fixture.write(
         "helpers.sta",
         concat!(
-            "pub macro define = metadata: MacroCallMetadata => { let visibility = metadata.visibility; parse_quote {\n",
+            "pub macro define: MacroCallMetadata -> Item = metadata => { let visibility = metadata.visibility; parse_quote {\n",
             "    $visibility let generated: I32 = 42\n",
             "} }\n",
         ),
@@ -2273,8 +2273,8 @@ fn generated_type_and_pattern_splices_keep_caller_hygiene() {
     fixture.write(
         "helpers.sta",
         concat!(
-            "pub macro define_alias = ty: Type => parse_quote { type Generated = $ty }\n",
-            "pub macro destructure = (pattern: Pattern; value: Expr) => parse_quote { let $pattern = $value }\n",
+            "pub macro define_alias: Type -> Item = ty => parse_quote { type Generated = $ty }\n",
+            "pub macro destructure: (Pattern; Expr) -> Item = (pattern; value) => parse_quote { let $pattern = $value }\n",
         ),
     );
 
@@ -2297,7 +2297,7 @@ fn imports_user_macros_through_selected_and_renamed_forms() {
     );
     fixture.write(
         "helpers.sta",
-        "pub macro reveal = value: Expr => parse_quote { $value }\n",
+        "pub macro reveal: Expr -> Expr = value => parse_quote { $value }\n",
     );
 
     fixture
@@ -2311,8 +2311,8 @@ fn preserves_macro_overload_sets_through_imports_and_reexports() {
     fixture.write(
         "helpers.sta",
         concat!(
-            "pub macro reveal = value: Expr => parse_quote { $value }\n",
-            "pub macro reveal = (value: Expr; _: Ident<\"then\">; replacement: Expr) => parse_quote { $replacement }\n",
+            "pub macro reveal: Expr -> Expr = value => parse_quote { $value }\n",
+            "pub macro reveal: (Expr; Ident<\"then\">; Expr) -> Expr = (value; _; replacement) => parse_quote { $replacement }\n",
         ),
     );
     fixture.write("bridge.sta", "pub use helpers.reveal\n");
@@ -2339,11 +2339,11 @@ fn does_not_merge_macro_overloads_from_unrelated_imports() {
     let fixture = Fixture::new();
     fixture.write(
         "left.sta",
-        "pub macro choose = value: Expr => parse_quote { 1 }\n",
+        "pub macro choose: Expr -> Expr = value => parse_quote { 1 }\n",
     );
     fixture.write(
         "right.sta",
-        "pub macro choose = (value: Expr; other: Expr) => parse_quote { 2 }\n",
+        "pub macro choose: (Expr; Expr) -> Expr = (value; other) => parse_quote { 2 }\n",
     );
     fixture.write(
         "main.sta",
@@ -3465,7 +3465,7 @@ fn a_companion_macro_in_another_module_is_reached_through_the_type() {
             "use std.syntax.*\n",
             "use units.Meters\n",
             "companion Meters {\n",
-            "    pub macro of = value: Expr => parse_quote { Meters $value }\n",
+            "    pub macro of: Expr -> Expr = value => parse_quote { Meters $value }\n",
             "}\n",
         ),
     );

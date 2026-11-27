@@ -2009,7 +2009,7 @@ mod tests {
                 "pub def callable = () => 1\n",
                 "pub type Number = I32\n",
                 "pub trait Printable T {}\n",
-                "pub macro identity = value: Expr => parse_quote { $value }\n",
+                "pub macro identity: Expr -> Expr = value => parse_quote { $value }\n",
             ),
         )
         .unwrap();
