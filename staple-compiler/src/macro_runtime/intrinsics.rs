@@ -1211,7 +1211,10 @@ fn parsed<T>(handle: u64, kind: NodeKind, read: impl FnOnce(Option<&Node>) -> T)
                 .map(Node::Pattern),
             NodeKind::Item => staple_syntax::parse_item_fragment(&syntax, &mut next)
                 .ok()
-                .map(|item| Node::Item(Box::new(item))),
+                .map(|mut item| {
+                    include_leading_docs(&mut item, &syntax);
+                    Node::Item(Box::new(item))
+                }),
             NodeKind::Modifier => staple_syntax::parse_modifier_fragment(&syntax, &mut next)
                 .ok()
                 .map(Node::Modifier),
@@ -1222,6 +1225,28 @@ fn parsed<T>(handle: u64, kind: NodeKind, read: impl FnOnce(Option<&Node>) -> T)
         arena::with_arena(|arena| arena.set_parsed(handle.into(), kind, node));
     }
     arena::with_arena(|arena| read(arena.parsed(handle.into(), kind).flatten()))
+}
+
+/// Makes a documented item's tokens start where the fragment does. The parser
+/// reads doc comments into the item's `docs` and leaves them out of its
+/// tokens, so compiled code, which writes items back from their tokens, would
+/// drop them.
+fn include_leading_docs(item: &mut Item, fragment: &Syntax) {
+    let (docs, syntax) = match item {
+        Item::TypeDeclaration(value) => (&value.docs, &mut value.syntax),
+        Item::MacroDeclaration(value) => (&value.docs, &mut value.syntax),
+        Item::TraitDeclaration(value) => (&value.docs, &mut value.syntax),
+        Item::Submodule(value) => (&value.docs, &mut value.syntax),
+        Item::Binding(value) => (&value.docs, &mut value.syntax),
+        _ => return,
+    };
+    if docs.is_empty() || !std::sync::Arc::ptr_eq(&syntax.tokens, &fragment.tokens) {
+        return;
+    }
+    let start = fragment.token_range().start;
+    if start < syntax.token_range.start {
+        syntax.token_range.start = start;
+    }
 }
 
 fn cached_expression(handle: u64) -> Result<Expression, ()> {
@@ -2131,7 +2156,13 @@ extern "C" fn modified_item_modifier(syntax: u64, index: usize) -> u64 {
         .modifiers
         .get(index)
         .expect("modifier index is in range");
-    arena::with_arena(|arena| arena.insert_syntax(modifier.syntax.clone()).into())
+    // A doc comment has no tokens of its own in the modified item, so a copy
+    // that writes the modifiers out would lose it; it is written as text.
+    let syntax = match &modifier.doc {
+        Some(doc) => lex_syntax_from_text(&format!("///{doc}\n"), &mut 0),
+        None => modifier.syntax.clone(),
+    };
+    arena::with_arena(|arena| arena.insert_syntax(syntax).into())
 }
 
 /// A type declaration's name.

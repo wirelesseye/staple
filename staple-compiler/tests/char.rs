@@ -117,7 +117,7 @@ use std.syntax.*
 macro echo: CharExpr -> Expr = value => parse_quote { $value }
 macro snowman = () => CharExpr '\u{2603}'
 macro rebuild = value: CharExpr => match value { CharExpr c => CharExpr c, }
-macro parsed: Braced<Syntax> -> Expr = body => {
+macro parsed: move Braced<Syntax> -> Expr = move body => {
     let Braced contents = body
     match (Parse.parse_all.<CharExpr> contents) {
         Ok value => parse_quote { $value },

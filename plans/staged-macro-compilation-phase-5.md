@@ -540,7 +540,7 @@ Update this section as you work (see "Rules for the implementor").
 | 1. A clean baseline | done | `fa5f0b99` | Closure lookup falls back to the use site for names a macro wrote (the `derive_eq` cycle); constructors, singleton values and macro definitions are checked in declaration order; a dead server's forwarded output loses its blank lines. Tests: workspace 2378 passed, 0 failed. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest 1904/2036, the same 132 differences on two runs. See Findings. |
 | 2. Every macro has an entry function | done | `d2d346fc` | An untyped macro parameter is an error under both engines, reported at the parameter, and the interpreter's `SyntaxNode` default and the entry-function exception are gone. Tests: workspace 2379 passed, 0 failed (rerun after fixing two LSP hover signatures that read `SyntaxNode`); the two new compiled-engine tests (ignored, `test-macro-libraries.sh`) pass. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest 1910/2042 with the same 132 differences; ``could not be run as compiled code``: 0 inputs. See Findings. |
 | 3. `parse_quote` without a contextual type | done | `5049c33e` | A `parse_quote` with no contextual type is an error under both engines with one diagnostic, as is `Parse.parse`/`Parse.parse_all` with no target; a whole-body `parse_quote` no longer fixes a macro's result, and the interpreter no longer takes a quote's type from the call site. Tests: workspace 2382 passed, 0 failed; `test-macro-libraries.sh` passes. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest without it 1935/2052 with 117 differences; ``could not be run as compiled code``: 0 inputs. See Findings. |
-| 4. Macro code under the ordinary rules | not started | | |
+| 4. Macro code under the ordinary rules | done | `_pending_` | Before a macro outside the standard library first runs, the interpreter resolves and type-checks its closure as ordinary code (default on, `STAPLE_CHECK_MACRO_CLOSURES=0` turns it off), so its diagnostics are the compiled engine's; a panic names where it was called from and keeps the `while expanding macro` line; a modifier's `Parenthesized<X>` argument is an `X` in both engines. Tests: workspace 2382 passed, 0 failed (26 ignored); `test-macro-libraries.sh` passes (2 + 17). `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest without it 2028/2052 with 24 differences (117 before); ``could not be run as compiled code``: 0 inputs. **Not at the plan's "only four remain"**: see Findings. |
 | 5. `if` and `when` as templates | not started | | |
 | 6. `if` and `when` back in the standard library | not started | | |
 | 7. Call cost | not started | | |
@@ -714,6 +714,103 @@ commit and the command. Include:
   compiled code`. The input count is higher than before because the dump now
   holds 1865 test sources: 1855 existed before any change in this task and the
   rest are its own tests; the earlier runs' 1810 are not explained.
+
+### Task 4
+
+- **The closure check under the interpreter.** `check_before_run`
+  (`macro_expand.rs`, `staged.rs`): when a macro outside the standard library is
+  made ready, `prepare_compiled_macro` builds the same closure-only check
+  program the compiled engine builds, resolves and type-checks it, and reports
+  failures at the call like a failed library build, before the macro runs. The
+  standard library's macros are skipped (they are checked with the library, and
+  the closure check of the whole corpus stays clean). The interpreter's own
+  static check still runs for the contextual types it records, but its
+  complaints are dropped once the real check passed. `STAPLE_CHECK_MACRO_CLOSURES`
+  unset means this check; `0` turns it off; `1` or `all` keep the old
+  after-expansion check (the closure script uses `all`).
+  - **Cost.** The closure-only check program is small: a one-macro program went
+    from about 0.33 s to about 0.36 s with `staple expand`, and a program with
+    only standard-library macros is unchanged except for cloning the program
+    once per expansion (about 0.05-0.1 s on a loaded machine). The
+    after-expansion check checks every dependency package whole and costs 6 s
+    for the standard library alone (0.3 s to 6.4 s on a program of one `if`),
+    which is why it is not the default. The full workspace run took about the
+    same time as before.
+- **Wording (Decision 5).** A `panic` in macro code reports ``at <file>:<line>:<column>``
+  after its message, with the standard library's files under `std/`, as compiled
+  code does, and the `while expanding macro` line is no longer dropped after a
+  panic or `compile_error`. A syntax fragment read back from compiled code keeps
+  line and column in its diagnostics (they said `at byte N`).
+- **A modifier's argument.** `Staple.md` says `macro @replace: (Parenthesized<Expr>; Item)`
+  gets the contents (`$value` is `42` for `@replace(42)`), and the interpreter did
+  that, but the check program and the compiled call typed and passed the group.
+  Both now take the contents: `checked_annotation` (`check_program.rs`) types the
+  parameter `X` for `Parenthesized<X>`, and `modifier_arguments` no longer wraps
+  the tree. One harness expectation changed with it (`let tag = N`, not `(N)`).
+- **Docs.** A documented item given to compiled code lost its comments when the
+  argument was written from tokens. Doc comments are now written in front of the
+  item's tokens, and a parsed doc modifier is written as text. This fixes the
+  common case; four inputs still lose docs (below).
+- **Sources changed, by kind.** All in the compiler's tests, the harness and a
+  unit test in `staged.rs`; nothing in the standard library or examples.
+  - Missing imports: `with_syntax_imports` (`compiler.rs`) now imports every
+    `std.syntax` name a source mentions as a word, except one it declares.
+  - Moving out of a borrowed parameter or match subject, about 45 macros and
+    helpers: `move` on the parameter (`move Braced<Syntax> -> Expr = move body`
+    in 26 places, `(move ty: Type; value: Expr) => Item :: …` where a slot needs
+    it, since `move` cannot be written in a slotted annotation), or
+    `Clone.clone` of the value or of the field (`Clone.clone value.callee`).
+  - Refutable `let Ok x = Parse.parse …` (11): a `match` on the result.
+  - `?` in a macro whose result is syntax: a `match` that panics on the error.
+  - `Sequence` written as a product or as a list pattern: `Sequence (first,
+    rest)` nested, and `Sequence (first: …, rest: …)` to construct. The
+    interpreter reads `Sequence (a, b)` as a list and compiled code as a cons
+    cell; use `first` and `rest` names so they agree.
+  - Modifier macros with an argument: `move` on `item` cannot be annotated, so
+    `item` is borrowed and cloned (`Clone.clone item`).
+  - Other typing the interpreter let through: `collect` without a target type,
+    `let apply = pair value` (partial application of a slotted function),
+    an unannotated `Sequence ()`, opaque `UnstructuredItem`/`UnstructuredModifier`
+    matched as a pattern, `Parse` impl arms returning `failure`, juxtaposed
+    arguments that fill one slot (`pair ...(a; b)`), and a closure writing a
+    captured binding (removed: it needs `state.write`, which macro code can't
+    have; the test is renamed `mutates_call_syntax_with_value_semantics`).
+  - Wording: 14 expectations moved to the compiled engine's text, among them the
+    `panic` position and trailer, `unknown name`, `product has no element named`,
+    `cannot write through `value`; its binding is not declared `mut``, and
+    `no trait implementation or matching bound is available`.
+- **Stage cycles.** Already deterministic since task 1 (declaration order); no
+  comparison input reports a cycle in another order any more.
+- **Remaining `compare-engines.py` differences (24 inputs).** The plan expected
+  four inputs that only the interpreter rejects. There are eight, and sixteen
+  more of other kinds.
+  - Only the interpreter rejects (8): a bare `Sequence` or `Separated` splice in
+    expression and in nested item position (2); `Syntax` as a `parse_quote`
+    context (1); `Parenthesized<(Expr, Expr)>` as one (1); a visibility spliced
+    where an expression goes (1); `Ident<String>` as one (2, the same source
+    twice); and `Show.show 1` with two integer impls, which the interpreter calls
+    ambiguous and the type checker defaults (1). All are limits of the
+    interpreter's evaluator; they go with it in Phase 6.
+  - Both reject with different text (7): an invalid quotation result or bare list
+    splice in type and pattern position, where the interpreter reports the
+    quotation and compiled code reports the parse error (`invalid`, `bad`,
+    4 inputs), an empty `Separated` with a trailing separator (2), and a
+    `@again` cycle whose location is read from different tokens (1).
+  - Intended: a loop that never ends reports the interpreter's step limit or the
+    compiled call's 10 s limit (1).
+  - Compiled bugs, not intended (7): documented declarations that a compiled
+    macro rebuilds with `Clone.clone` or a `typegroup` still lose their docs
+    (4 inputs; the arguments carry them, the rebuilt `Item` does not), an
+    `Ident` with an invalid spelling panics the server's Rust code instead of
+    reporting an error (1), `macro refuse = value: Expr => compile_error "…"`
+    fails to lower (1), and splicing a `TypeParameters` header in front of
+    `wrap pub $argument` loses the `wrap` (1). These need work in
+    the runtime or the standard library's `syntax` module and are left open.
+  - `compare-engines.py` now drops the process-specific thread number from a
+    crash report, which made a stack overflow differ from run to run.
+- **Counts.** The rest without the standard library: 1935/2052 (117) before,
+  2025/2052 after the first pass, 2028/2052 (24) after fixing three sources the
+  engines read differently. The dump holds 1865 test sources both times.
 
 ### To record
 

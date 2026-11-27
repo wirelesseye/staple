@@ -191,14 +191,19 @@ impl MacroExpander {
         call_span: &Span,
     ) -> Result<(), ()> {
         let start = definition.declaration.syntax.id;
-        if !super::compiled_call::compiling()
+        let compiling = super::compiled_call::compiling();
+        if !(compiling || self.check_before_run)
             || definition.is_template
             || !matches!(definition.kind, super::MacroKind::User(_))
             || self.prepared_macros.contains(&start)
         {
             return Ok(());
         }
-        if super::compiled_call::compiled_library_available(definition.key.module, start) {
+        if !compiling && self.in_standard_library(definition.key.module) {
+            // The standard library's macro code is checked with the library.
+            return Ok(());
+        }
+        if compiling && super::compiled_call::compiled_library_available(definition.key.module, start) {
             self.prepared_macros.insert(start);
             return Ok(());
         }
@@ -290,22 +295,34 @@ impl MacroExpander {
             }
         }
         let entry_name = super::check_program::entry_function_name(&definition.declaration);
-        let request = super::compiled_call::ClosureLibraryRequest {
-            program: &shell,
-            check_program,
-            templates,
-            entries: vec![(definition.key.module, start, entry_name)],
-            next_syntax_id: self.next_syntax_id,
-            program_time: program_started.elapsed(),
+        let result = if compiling {
+            let request = super::compiled_call::ClosureLibraryRequest {
+                program: &shell,
+                check_program,
+                templates,
+                entries: vec![(definition.key.module, start, entry_name)],
+                next_syntax_id: self.next_syntax_id,
+                program_time: program_started.elapsed(),
+            };
+            super::compiled_call::prepare_compiled_library(request)
+        } else {
+            // Nothing is compiled, but the macro's code is still resolved and
+            // type-checked as ordinary code before it runs.
+            Some(
+                crate::NameResolver::pre_expanded(self.next_syntax_id)
+                    .resolve_program(check_program)
+                    .and_then(|resolved| crate::TypeChecker::new().check(resolved))
+                    .map(|_| vec![start]),
+            )
         };
-        if let Some(result) = super::compiled_call::prepare_compiled_library(request) {
+        if let Some(result) = result {
             match result {
                 Ok(ready_ids) => {
                     self.prepared_macros.extend(ready_ids);
                 }
                 Err(diagnostics) => {
-                    // The library build checked the macro's code, so the
-                    // interpreter's check would only report it again.
+                    // The check of the macro's code is the real one, so the
+                    // interpreter's would only report it again.
                     self.macro_checks.insert(definition.key.clone(), false);
                     // The build fails the same way at every invocation, so
                     // it is reported once, at the first.
@@ -322,6 +339,14 @@ impl MacroExpander {
             }
         }
         Ok(())
+    }
+
+    /// Whether `module` belongs to the standard library's package.
+    pub(super) fn in_standard_library(&self, module: ModuleId) -> bool {
+        self.syntax_module.is_some_and(|syntax| {
+            self.module_packages[syntax.0].is_some()
+                && self.module_packages[syntax.0] == self.module_packages[module.0]
+        })
     }
 
     /// Makes an expression that compile-time code evaluates in `module`, such
@@ -827,9 +852,9 @@ mod tests {
     #[test]
     fn a_macro_is_ready_after_the_macros_its_closure_calls() {
         let order = ready_order(concat!(
-            "macro first = value: Expr => helper value\n",
-            "def helper = value: Expr => Expr :: second value\n",
-            "macro second: Expr -> Expr = value => { let copy = value; parse_quote { $copy } }\n",
+            "macro first = move value: Expr => helper value\n",
+            "def helper = move value: Expr => Expr :: second value\n",
+            "macro second: Expr -> Expr = value => { let copy = Clone.clone value; parse_quote { $copy } }\n",
             "let a = first 1\n",
         ));
         let position = |name: &str| order.iter().position(|ready| ready == name);
@@ -846,7 +871,10 @@ mod tests {
             .with_standard_library_root(root.join("stdlib"))
             .load_source(&source, &root)
             .expect("source should load");
-        let (_, analysis) = super::super::expand_program(program).expect("source should expand");
+        // The program is invalid, since nothing but `make` defines `Made`, but
+        // expansion still records what it found.
+        let (_, analysis, _) = super::super::expand_program_recovering(program, true)
+            .expect("expansion should finish");
         analysis.cycles
     }
 
@@ -892,12 +920,12 @@ mod tests {
             "    pub def doubled = (b: Box) => b\n",
             "    pub def tripled = (b: Box) => b\n",
             "}\n",
-            "def helper = value: Expr => Expr :: {\n",
+            "def helper = move value: Expr => Expr :: {\n",
             "    let piped = Box 1 |> doubled\n",
             "    let named = Box.tripled piped\n",
             "    value\n",
             "}\n",
-            "macro m = value: Expr => helper value\n",
+            "macro m = move value: Expr => helper value\n",
             "let a = m 1\n",
         ));
         assert!(misses.is_empty(), "{misses:?}");

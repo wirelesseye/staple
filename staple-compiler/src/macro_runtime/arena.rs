@@ -180,12 +180,13 @@ impl Arena {
             Span::Compiler => None,
         };
         let mut tokens = syntax.token_stream().to_vec();
-        for token in &mut tokens {
+        let mut locations = token_locations(&tokens, &syntax.span);
+        for (token, location) in tokens.iter_mut().zip(locations.drain(..)) {
             if token.origin.is_none() && !token.kind.is_trivia() {
                 token.origin = Some(Span::User {
                     source: source.clone(),
                     range: token.span.clone(),
-                    location: None,
+                    location,
                 });
             }
         }
@@ -460,4 +461,35 @@ mod tests {
         reset();
         assert!(with_arena(|arena| arena.syntax(handle).is_none()));
     }
+}
+
+/// The line and column of each token of a fragment, from the location of the
+/// fragment's own start. A token the start doesn't reach has none.
+fn token_locations(
+    tokens: &[SyntaxToken],
+    span: &Span,
+) -> Vec<Option<staple_syntax::SourceLocation>> {
+    let mut locations = vec![None; tokens.len()];
+    let Span::User { range, location: Some(start), .. } = span else {
+        return locations;
+    };
+    let Some(first) = tokens.iter().position(|token| token.span.start == range.start) else {
+        return locations;
+    };
+    let (mut line, mut column) = (start.line, start.column);
+    for (index, token) in tokens.iter().enumerate().skip(first) {
+        locations[index] = Some(staple_syntax::SourceLocation { line, column });
+        let mut characters = token.text.chars().peekable();
+        while let Some(character) = characters.next() {
+            match character {
+                '\r' if characters.peek() == Some(&'\n') => {}
+                '\r' | '\n' => {
+                    line += 1;
+                    column = 1;
+                }
+                _ => column += 1,
+            }
+        }
+    }
+    locations
 }

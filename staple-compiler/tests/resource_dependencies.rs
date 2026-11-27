@@ -584,7 +584,7 @@ fn type_declaration_items_expose_the_dependency_clause() {
         r#"
 use std.syntax.(Item, ResourceDependency, Sequence, TypeDeclarationItem, WrapperBody)
 type Logger wrap ()
-macro @inspect: move Item -> Item = move item => match item {
+macro @inspect: move Item -> Item = move item => match Clone.clone item {
     TypeDeclarationItem(_, _, _, Some (WrapperBody _), dependencies) => {
         let entries: Sequence<ResourceDependency> = dependencies
         item
@@ -608,17 +608,21 @@ fn type_declaration_items_expose_dependency_mutability() {
 use std.syntax.(Item, ResourceDependency, Sequence, TypeDeclarationItem, WrapperBody)
 type Logger wrap ()
 type Clock wrap ()
-macro @inspect: move Item -> Item = move item => match item {
-    TypeDeclarationItem(
-        _, _, _, Some (WrapperBody _),
-        Sequence (ResourceDependency (_, first), ResourceDependency (_, second)),
-    ) => {
-        if first {
-            if second { panic "second entry reported as mutable" }
-            item
-        } else {
-            panic "first entry reported as immutable"
-        }
+macro @inspect: move Item -> Item = move item => match Clone.clone item {
+    TypeDeclarationItem(_, _, _, Some (WrapperBody _), Sequence (first, rest)) => match first {
+        ResourceDependency (_, logger) => match rest {
+            Sequence (first, rest) => match first {
+                ResourceDependency (_, clock) => {
+                    if logger {
+                        if clock { panic "second entry reported as mutable" }
+                        item
+                    } else {
+                        panic "first entry reported as immutable"
+                    }
+                },
+            },
+            _ => panic "dependencies were not exposed",
+        },
     },
     _ => panic "dependencies were not exposed",
 }

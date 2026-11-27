@@ -57,6 +57,8 @@ def run(binary, arguments, source, cache, timeout):
     except subprocess.TimeoutExpired:
         return dict(status="timeout", stdout="", stderr="")
     stderr = result.stderr.decode(errors="replace").replace(str(source), "<input>")
+    # A crash names the thread by its process-specific number.
+    stderr = re.sub(r"(thread '[^']*') \(\d+\)", r"\1", stderr)
     return dict(status=result.returncode, stdout=compare.normalize(result.stdout.decode(errors="replace")),
                 stderr=compare.normalize(stderr))
 

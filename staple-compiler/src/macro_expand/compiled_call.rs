@@ -456,10 +456,44 @@ impl MacroExpander {
 fn modifier_arguments(argument: Option<(&Value, &Syntax)>, item: &Item) -> Option<Vec<ArgTree>> {
     let mut arguments = Vec::new();
     if let Some((value, syntax)) = argument {
-        arguments.push(ArgTree::Group(trimmed(syntax), Box::new(arg_tree(value)?)));
+        // The macro is given what is inside the parentheses.
+        let _ = syntax;
+        arguments.push(arg_tree(value)?);
     }
-    arguments.push(ArgTree::Node(trimmed(&modified_syntax(item)?)));
+    arguments.push(ArgTree::Node(trimmed(&with_docs(item, modified_syntax(item)?))));
     Some(arguments)
+}
+
+/// An item's fragment with its documentation written as doc comments in
+/// front. The parser reads doc comments into the item's docs and leaves them
+/// out of its tokens, so compiled code, which sees only tokens, would lose
+/// them.
+fn with_docs(item: &Item, syntax: Syntax) -> Syntax {
+    let docs: &[String] = match item {
+        Item::TypeDeclaration(value) => &value.docs,
+        Item::MacroDeclaration(value) => &value.docs,
+        Item::TraitDeclaration(value) => &value.docs,
+        Item::Submodule(value) => &value.docs,
+        Item::Binding(value) => &value.docs,
+        _ => &[],
+    };
+    if docs.is_empty() {
+        return syntax;
+    }
+    let leading = syntax
+        .tokens()
+        .iter()
+        .find(|token| !token.kind.is_trivia() || token.text.starts_with("///"));
+    if leading.is_some_and(|token| token.text.starts_with("///")) {
+        return syntax;
+    }
+    let mut tokens = staple_syntax::lex(&docs.iter().map(|doc| format!("///{doc}\n")).collect::<String>());
+    super::syntax_ops::append_syntax_tokens(&mut tokens, &syntax, None);
+    super::syntax_ops::number_stream(&mut tokens);
+    let mut joined = syntax;
+    joined.token_range = 0..tokens.len();
+    joined.tokens = tokens.into();
+    joined
 }
 
 /// The fragment of the item a modifier is applied to. A modified item keeps
@@ -512,7 +546,12 @@ fn arg_tree(value: &Value) -> Option<ArgTree> {
         Value::Syntax(SyntaxValue::Items(items)) => ArgTree::List(
             items
                 .iter()
-                .map(|item| ArgTree::Node(trimmed(super::syntax_ops::item_syntax(item))))
+                .map(|item| {
+                    ArgTree::Node(trimmed(&with_docs(
+                        item,
+                        super::syntax_ops::item_syntax(item).clone(),
+                    )))
+                })
                 .collect(),
         ),
         // A doc comment is a modifier with no tokens of its own, and a
@@ -630,6 +669,11 @@ fn trimmed(syntax: &Syntax) -> Syntax {
     let last = tokens
         .iter()
         .rposition(|token| !token.kind.is_trivia())
+        .unwrap_or(first);
+    // A doc comment before a declaration documents it, so it stays.
+    let first = tokens[..first]
+        .iter()
+        .position(|token| token.kind == TokenKind::LineComment && token.text.starts_with("///"))
         .unwrap_or(first);
     if first == 0 && last + 1 == tokens.len() {
         return syntax.clone();

@@ -1909,7 +1909,7 @@ macro touch = () => {
             ("declare", &["pub type A1 = I32", "type B1 = I32"]),
             ("inspect", &["pub let traced = 1", "pub let plain = 2"]),
             ("mark", &["type M = I32"]),
-            ("tagged", &["type O = I32\nlet tag = (N)"]),
+            ("tagged", &["type O = I32\nlet tag = N"]),
         ];
         for (name, texts_expected) in expected {
             assert_eq!(&texts(name), texts_expected, "`{name}`");

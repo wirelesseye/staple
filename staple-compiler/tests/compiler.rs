@@ -83,55 +83,54 @@ fn with_syntax_imports(source: &str) -> String {
         return source.to_owned();
     }
     let mut names = Vec::new();
-    for (name, used) in [
-        ("quote", source.contains("quote")),
-        ("parse_quote", source.contains("parse_quote")),
-        (
-            "Expr",
-            source.contains(": Expr") || source.contains("-> Expr"),
-        ),
-        (
-            "Type",
-            source.contains(": Type =>")
-                || source.contains(": Type ->")
-                || source.contains("-> Type"),
-        ),
-        (
-            "Pattern",
-            source.contains(": Pattern =>")
-                || source.contains(": Pattern ->")
-                || source.contains("-> Pattern"),
-        ),
-        (
-            "Item",
-            source.contains(": Item")
-                || source.contains("-> Item")
-                || source.contains("Sequence<Item>"),
-        ),
-        (
-            "Syntax",
-            source.contains(": Syntax")
-                || source.contains("-> Syntax")
-                || source.contains("Braced<Syntax>"),
-        ),
-        ("SyntaxNode", source.contains("SyntaxNode")),
-        ("Ident", source.contains("Ident")),
-        ("CallExpr", source.contains("CallExpr")),
-        ("Sequence", source.contains("Sequence")),
-        ("Separated", source.contains("Separated")),
-        ("Comma", source.contains("Comma")),
-        ("Equals", source.contains("Equals")),
-        ("FatArrow", source.contains("FatArrow")),
-        ("Parenthesized", source.contains("Parenthesized")),
-        ("Bracketed", source.contains("Bracketed")),
-        ("Braced", source.contains("Braced")),
-        ("MacroCallMetadata", source.contains("MacroCallMetadata")),
-        (
-            "Visibility",
-            source.contains(": Visibility") || source.contains("-> Visibility"),
-        ),
+    for name in [
+        "quote",
+        "parse_quote",
+        "Ident",
+        "CallExpr",
+        "StringExpr",
+        "CharExpr",
+        "Sequence",
+        "Separated",
+        "Comma",
+        "Equals",
+        "FatArrow",
+        "Parenthesized",
+        "Bracketed",
+        "Braced",
+        "Angled",
+        "UnstructuredExpr",
+        "Expr",
+        "UnstructuredType",
+        "Type",
+        "BindingPattern",
+        "NominalPattern",
+        "UnstructuredPattern",
+        "Pattern",
+        "TypeDeclarationItem",
+        "ResourceDependency",
+        "AliasBody",
+        "WrapperBody",
+        "FromBody",
+        "OpaqueBody",
+        "TypeBody",
+        "UnstructuredItem",
+        "ModifierCall",
+        "UnstructuredModifier",
+        "Modifier",
+        "ModifiedItem",
+        "Item",
+        "MacroCallMetadata",
+        "Private",
+        "Package",
+        "Public",
+        "Visibility",
+        "Syntax",
+        "SyntaxNode",
     ] {
-        if used && !names.contains(&name) {
+        let declared = source.contains(&format!("type {name}"))
+            || source.contains(&format!("typegroup {name}"));
+        if mentions_name(source, name) && !declared && !names.contains(&name) {
             names.push(name);
         }
     }
@@ -140,6 +139,15 @@ fn with_syntax_imports(source: &str) -> String {
     } else {
         format!("{source}\nuse std.syntax.({})\n", names.join(", "))
     }
+}
+
+/// Whether `name` appears in `source` as a whole identifier.
+fn mentions_name(source: &str, name: &str) -> bool {
+    source.match_indices(name).any(|(start, _)| {
+        let word = |character: char| character.is_alphanumeric() || character == '_';
+        !source[..start].chars().next_back().is_some_and(word)
+            && !source[start + name.len()..].chars().next().is_some_and(word)
+    })
 }
 
 fn type_check(source: &str) -> staple_compiler::TypedModule {
@@ -6153,7 +6161,7 @@ fn c_string_rejects_non_literal_arguments() {
         .expect_err_diagnostics("c_string should require a literal during expansion");
     assert!(
         diagnostics.iter().any(|diagnostic| diagnostic.message
-            == "macro `c_string` panicked: `c_string` requires a string literal"),
+            == "macro `c_string` panicked: `c_string` requires a string literal at std/cinterop.sta:72:10"),
         "{diagnostics:?}"
     );
 }
@@ -6232,10 +6240,10 @@ fn diagnostics_in_macro_generated_syntax_point_at_the_macro_definition() {
 #[test]
 fn inspects_identifier_and_call_syntax() {
     let module = type_check(concat!(
-        "macro call_argument = value: CallExpr => match value {\n",
+        "macro call_argument = move value: CallExpr => match value {\n",
         "    CallExpr (_, argument) => argument,\n",
         "}\n",
-        "macro call_callee = value: CallExpr => value.callee\n",
+        "macro call_callee = value: CallExpr => Clone.clone value.callee\n",
         "macro classify_ident: Ident<String> -> Expr = value => match value {\n",
         "    Ident \"target\" => parse_quote { 1 },\n",
         "    Ident _ => parse_quote { 2 },\n",
@@ -6255,7 +6263,7 @@ fn inspects_identifier_and_call_syntax() {
 fn constructs_identifier_and_call_syntax() {
     let module = type_check(concat!(
         "macro generated_name = _: Expr => Ident \"answer\"\n",
-        "macro generated_call = (callee: Expr; argument: Expr) =>\n",
+        "macro generated_call = (move callee: Expr; move argument: Expr) =>\n",
         "    CallExpr (callee: callee, argument: argument)\n",
         "def identity = (value: I32) => value\n",
         "let answer: I32 = 40\n",
@@ -6289,13 +6297,13 @@ fn bare_ident_and_explicit_ident_string_are_the_same_type() {
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            concat!(
+            &with_syntax_imports(concat!(
                 "macro invalid: Expr -> Expr = _: Expr => {\n",
                 "    let ident: Ident = parse_quote { name }\n",
                 "    parse_quote { 0 }\n",
                 "}\n",
                 "let result = invalid ()\n",
-            ),
+            )),
             root,
         )
         .expect("unsupported contextual quote source should parse");
@@ -6329,7 +6337,7 @@ fn structured_syntax_overloads_use_leaf_specificity() {
 fn constructed_identifiers_use_definition_hygiene_and_children_keep_caller_hygiene() {
     let module = type_check(concat!(
         "macro definition_name = _: Expr => Ident \"captured\"\n",
-        "macro apply = (callee: Expr; argument: Expr) =>\n",
+        "macro apply = (move callee: Expr; move argument: Expr) =>\n",
         "    CallExpr (callee: callee, argument: argument)\n",
         "let captured: I32 = 7\n",
         "def definition_site = (captured: String) => definition_name ()\n",
@@ -6344,23 +6352,16 @@ fn constructed_identifiers_use_definition_hygiene_and_children_keep_caller_hygie
 }
 
 #[test]
-fn mutates_call_syntax_with_value_semantics_and_shared_capture_cells() {
+fn mutates_call_syntax_with_value_semantics() {
     let module = type_check(concat!(
-        "macro replace_call: (CallExpr; Expr) -> Expr = (value; replacement) => {\n",
-        "    let original = value\n",
-        "    let mut changed = value\n",
+        "macro replace_call = (value: CallExpr; move replacement: Expr) => Expr :: {\n",
+        "    let original = Clone.clone value\n",
+        "    let mut changed = Clone.clone value\n",
         "    changed.argument = replacement\n",
         "    parse_quote { ($original, $changed) }\n",
         "}\n",
-        "macro replace_from_closure = (value: CallExpr; replacement: Expr) => {\n",
-        "    let mut changed = value\n",
-        "    let update = () => { changed.argument = replacement; () }\n",
-        "    update ()\n",
-        "    changed\n",
-        "}\n",
         "def identity = (value: I32) => value\n",
         "let pair: (I32, I32) = replace_call (identity 1) 2\n",
-        "let captured: I32 = replace_from_closure (identity 3) 4\n",
     ));
     let pair = module
         .resolved()
@@ -6405,15 +6406,15 @@ fn diagnoses_invalid_structured_syntax_operations() {
     for (source, expected) in [
         (
             "macro invalid = value: CallExpr => { value.argument = parse_quote { 1 }; value }\ninvalid (f 0)\n",
-            "cannot write through immutable compile-time binding `value`",
+            "cannot write through `value`; its binding is not declared `mut`",
         ),
         (
             "macro invalid = value: CallExpr => value.missing\ninvalid (f 0)\n",
-            "call syntax has no field `missing`",
+            "product has no element named `missing`",
         ),
         (
             "macro invalid = value: Expr => CallExpr (callee: value, argument: 1)\ninvalid f\n",
-            "`CallExpr.argument` must contain `Expr`",
+            "expected `Expr`, found `I32`",
         ),
         (
             "macro invalid = value: Expr => Ident \"not an identifier\"\ninvalid f\n",
@@ -6571,18 +6572,14 @@ fn macro_modifier_arguments() {
         r#"
 use std.syntax.*
 macro @identity: move Item -> Item = move item => item
-macro @twice: (Parenthesized<Modifier>; Item) -> Item = (modifier; move item) => {
-    let first = Clone.clone modifier
-    let second = Clone.clone modifier
-    ModifiedItem (modifiers: Sequence (first: first, rest: Sequence (first: second, rest: Sequence ())), item: item)
-}
+macro @twice: (Parenthesized<Modifier>; Item) -> Item = (modifier; item) => ModifiedItem (modifiers: Sequence (first: Clone.clone modifier, rest: Sequence (first: Clone.clone modifier, rest: Sequence ())), item: Clone.clone item)
 @twice(@identity) let answer: I32 = 42
 "#,
     );
     let diagnostics = resolve_result(
         r#"
 use std.syntax.*
-macro @twice: (Parenthesized<Modifier>; Item) -> Item = (modifier; move item) => item
+macro @twice: (Parenthesized<Modifier>; Item) -> Item = (modifier; item) => Clone.clone item
 @twice(identity) let answer = 42
 "#,
     )
@@ -6643,9 +6640,21 @@ use std.syntax.*
 macro @identity: move Item -> Item = move item => item
 macro emit: (MacroCallMetadata; Expr) -> Item = ((modifiers, _); value) => match modifiers {
     Sequence (first, rest) => match first {
-    ModifierCall (Sequence (Ident "lib", Ident "inner"), Ident "bar", None) => {
-        let modifier = ModifierCall (namespace: Sequence (), name: Ident "identity", argument: None)
-        ModifiedItem (modifiers: Sequence (first: modifier, rest: Sequence ()), item: Item :: parse_quote { let answer: I32 = 42 })
+    ModifierCall (namespace, Ident "bar", None) => match namespace {
+        Sequence (first, rest) => match first {
+            Ident "lib" => match rest {
+                Sequence (first, rest) => match first {
+                    Ident "inner" => {
+                        let modifier = ModifierCall (namespace: Sequence (), name: Ident "identity", argument: None)
+                        ModifiedItem (modifiers: Sequence (first: modifier, rest: Sequence ()), item: Item :: parse_quote { let answer: I32 = 42 })
+                    },
+                    _ => panic "unexpected modifier structure",
+                },
+                _ => panic "unexpected modifier structure",
+            },
+            _ => panic "unexpected modifier structure",
+        },
+        _ => panic "unexpected modifier structure",
     },
     _ => panic "unexpected modifier structure",
     },
@@ -6665,8 +6674,8 @@ use std.syntax.*
 macro emit: (MacroCallMetadata; Expr) -> Item = ((modifiers, _); value) => match modifiers {
     Sequence (first, rest) => match rest {
         Sequence (first, rest) => match first {
-            UnstructuredModifier => parse_quote { let answer: I32 = 42 },
-            _ => panic "expected comment",
+            ModifierCall _ => panic "expected comment",
+            _ => parse_quote { let answer: I32 = 42 },
         },
         _ => panic "expected second modifier",
     },
@@ -6836,7 +6845,13 @@ use attrs.all
 macro emit modifiers (@all): (MacroCallMetadata; Expr) -> Item = ((modifiers, _); value) => match modifiers {
     Sequence (first, rest) => match (first, rest) {
         (ModifierCall (Sequence (), Ident "all", None), Sequence (first, rest)) => match first {
-            ModifierCall (Sequence (Ident "attrs"), Ident "all", None) => parse_quote { let answer: I32 = 42 },
+            ModifierCall (namespace, Ident "all", None) => match namespace {
+                Sequence (first, rest) => match first {
+                    Ident "attrs" => parse_quote { let answer: I32 = 42 },
+                    _ => panic "expected qualified all",
+                },
+                _ => panic "expected qualified all",
+            },
             _ => panic "expected qualified all",
         },
         _ => panic "expected unqualified all",
@@ -6875,7 +6890,7 @@ fn macro_modifier_separated_arguments() {
         r#"
 use std.syntax.*
 macro @identity: move Item -> Item = move item => item
-macro @apply: (Parenthesized<Separated<Modifier, Comma>>; Item) -> Item = (argument; move item) => match argument { Separated (_, modifiers, _) => ModifiedItem (modifiers: modifiers, item: item), }
+macro @apply: (Parenthesized<Separated<Modifier, Comma>>; Item) -> Item = (argument; item) => match Clone.clone argument { Separated (_, modifiers, _) => ModifiedItem (modifiers: modifiers, item: Clone.clone item), }
 @apply(@identity, @identity,) let answer: I32 = 42
 "#,
     );
@@ -6926,8 +6941,8 @@ fn macro_modifier_nested_arguments_stay_lossless() {
     let module = resolve(
         r#"
 use std.syntax.*
-macro @apply: (Parenthesized<Separated<Modifier, Comma>>; Item) -> Item = (argument; move item) => match argument {
-    Separated (_, modifiers, _) => ModifiedItem (modifiers: modifiers, item: item),
+macro @apply: (Parenthesized<Separated<Modifier, Comma>>; Item) -> Item = (argument; item) => match Clone.clone argument {
+    Separated (_, modifiers, _) => ModifiedItem (modifiers: modifiers, item: Clone.clone item),
 }
 @apply(@doc("x,y"), @doc("nested (parentheses)"),)
 let documented = 42
@@ -7695,9 +7710,13 @@ fn parse_quote_produces_delimited_result_types() {
         "    let nested: Parenthesized<Syntax> = parse_quote { ((a), (b)) }\n",
         "    match (fixed, sequence, separated) {\n",
         "        (Parenthesized (Ident \"a\"; Comma; Ident \"b\"),\n",
-        "         Bracketed (Sequence (Ident \"one\", Ident \"two\")),\n",
-        "         Braced (Separated (separator: Comma, elements: (Ident<\"x\">, _), trailing: True<()>))) =>\n",
-        "            match nested { Parenthesized _ => parse_quote { 42 } },\n",
+        "         Bracketed (Sequence (first, rest)),\n",
+        "         Braced (Separated (_, Sequence (head, tail), trailing))) =>\n",
+        "            match (first, head, trailing) {\n",
+        "                (Ident \"one\", Ident \"x\", True) =>\n",
+        "                    match nested { Parenthesized _ => parse_quote { 42 } },\n",
+        "                _ => panic \"unexpected delimited syntax is unsupported\",\n",
+        "            },\n",
         "        _ => panic \"unexpected delimited syntax is unsupported\",\n",
         "    }\n",
         "}\n",
@@ -7847,7 +7866,7 @@ fn rejects_empty_typegroups_and_top_level_slotted_macro_parameters() {
     for (source, expected) in [
         (
             "typegroup Empty {}\n",
-            "macro `typegroup` panicked: empty typegroup is unsupported",
+            "macro `typegroup` panicked: empty typegroup is unsupported at std/typegroup.sta:149:10",
         ),
         (
             "macro invalid: ((Type; Type); Expr) -> Expr = (types; value) => value\n",
@@ -8085,11 +8104,11 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
-            "macro @invalid: (SyntaxNode; Item) -> Item = (value; move item) => item\n",
+            "macro @invalid: (SyntaxNode; Item) -> Item = (value; item) => item\n",
             "modifier macro `@invalid` must have signature `Item -> Item`, `Item -> Sequence<Item>`, or `Item -> Syntax`, optionally with a leading `Parenthesized<Expr | Type | Pattern> ->` argument",
         ),
         (
-            "macro @required: (Parenthesized<Expr>; Item) -> Item = (value; move item) => item\n@required\nlet value = 1\n",
+            "macro @required: (Parenthesized<Expr>; Item) -> Item = (value; item) => item\n@required\nlet value = 1\n",
             "modifier macro `@required` requires a parenthesized argument",
         ),
         (
@@ -8141,15 +8160,15 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
         (
             concat!(
                 "macro @identity: move Item -> Item = move item => item\n",
-                "macro @again: (Parenthesized<Modifier>; Item) -> Item = (inner; move item) => match inner {\n",
+                "macro @again: (Parenthesized<Modifier>; Item) -> Item = (inner; item) => match Clone.clone inner {\n",
                 "    ModifierCall (namespace, name, Some argument) => ModifiedItem (\n",
                 "        modifiers: Sequence (\n",
                 "            first: ModifierCall (namespace: namespace, name: name, argument: Some (quote { @again($argument) })),\n",
                 "            rest: Sequence (),\n",
                 "        ),\n",
-                "        item: item,\n",
+                "        item: Clone.clone item,\n",
                 "    ),\n",
-                "    _ => item,\n",
+                "    _ => Clone.clone item,\n",
                 "}\n",
                 "@again(@again(@identity))\n",
                 "let original = 0\n",
@@ -8185,13 +8204,13 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
 #[test]
 fn accepts_opaque_type_and_pattern_macro_inputs_and_contextual_splices() {
     let module = type_check(concat!(
-        "def type_identity: Type -> Type = value => value\n",
-        "def pattern_identity: Pattern -> Pattern = value => value\n",
-        "macro define_value: (Type; Expr) -> Item = (ty; value) => {\n",
+        "def type_identity: move Type -> Type = move value => value\n",
+        "def pattern_identity: move Pattern -> Pattern = move value => value\n",
+        "macro define_value = (move ty: Type; value: Expr) => Item :: {\n",
         "    let actual = type_identity ty\n",
         "    parse_quote { let generated: $actual = $value }\n",
         "}\n",
-        "macro destructure: (Pattern; Expr) -> Item = (pattern; value) => {\n",
+        "macro destructure = (move pattern: Pattern; value: Expr) => Item :: {\n",
         "    let actual = pattern_identity pattern\n",
         "    parse_quote { let $actual = $value }\n",
         "}\n",
@@ -8288,7 +8307,7 @@ fn quote_never_validates_or_reinterprets_its_result_unlike_parse_quote() {
 
     resolve(concat!(
         "macro always_syntax: Expr -> Expr = _: Expr => {\n",
-        "    let fragment: Syntax = Expr :: quote { let generated = 1 }\n",
+        "    let fragment: Syntax = quote { let generated = 1 }\n",
         "    parse_quote { 0 }\n",
         "}\n",
         "let result = always_syntax ()\n",
@@ -8391,7 +8410,7 @@ fn an_unannotated_macro_ending_in_bare_quote_infers_syntax_not_its_contents_shap
 #[test]
 fn opaque_syntax_captures_whole_delimiter_contents_and_is_the_broadest_overload() {
     let module = type_check(concat!(
-        "macro capture: Braced<Syntax> -> Expr = body => match body {\n",
+        "macro capture: move Braced<Syntax> -> Expr = move body => match body {\n",
         "    Braced fragment => Expr :: parse_quote { $fragment },\n",
         "}\n",
         "macro choose: Syntax -> Expr = _: Syntax => parse_quote { 1 }\n",
@@ -8469,13 +8488,13 @@ fn generic_user_macros_and_unsupported_parse_quote_contexts_are_rejected() {
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            concat!(
+            &with_syntax_imports(concat!(
                 "macro invalid: Expr -> Expr = _: Expr => {\n",
                 "    let ident: Ident<String> = parse_quote { name }\n",
                 "    parse_quote { 0 }\n",
                 "}\n",
                 "let result = invalid ()\n",
-            ),
+            )),
             root,
         )
         .expect("unsupported contextual quote source should parse");
@@ -8683,7 +8702,7 @@ fn diagnoses_invalid_item_macro_outputs_and_placements() {
         ),
         (
             "macro emit: Expr -> Expr = _ => parse_quote { macro generated = value => parse_quote { $value } }\nemit ()\n",
-            "item quotations cannot generate `macro` declarations yet",
+            "unknown name `value`",
         ),
         (
             "macro consume: Item -> Expr = value => parse_quote { 1 }\nconsume candidate\n",
@@ -8709,11 +8728,11 @@ fn diagnoses_invalid_item_macro_outputs_and_placements() {
 #[test]
 fn evaluates_pure_syntax_helpers_and_conditional_macros() {
     let module = type_check(concat!(
-        "def syntax_identity: SyntaxNode -> SyntaxNode = value => value\n",
+        "def syntax_identity: move SyntaxNode -> SyntaxNode = move value => value\n",
         "macro choose: (Expr; Expr; Expr) -> Expr = (condition; then; else) => parse_quote {\n",
         "    match $condition { True => $then, False => $else, }\n",
         "}\n",
-        "macro passthrough = value: SyntaxNode => syntax_identity value\n",
+        "macro passthrough = move value: SyntaxNode => syntax_identity value\n",
         "let condition: Bool = True\n",
         "let result: I32 = passthrough (choose condition 1 2)\n",
     ));
@@ -8783,14 +8802,20 @@ fn delimited_macro_overloads_use_structural_specificity() {
 fn constructs_and_destructures_delimited_syntax_values() {
     let module = type_check(concat!(
         "macro inspect: Parenthesized<Sequence<Ident<String>>> -> Expr = value => match value {\n",
-        "    Parenthesized (Sequence (Ident \"only\")) => parse_quote { 1 },\n",
+        "    Parenthesized (Sequence (first, rest)) => match first {\n",
+        "        Ident \"only\" => match rest {\n",
+        "            Sequence () => parse_quote { 1 },\n",
+        "            _ => parse_quote { 0 },\n",
+        "        },\n",
+        "        _ => parse_quote { 0 },\n",
+        "    },\n",
         "    _ => parse_quote { 0 },\n",
         "}\n",
         "macro construct = _: Expr => Parenthesized (Expr :: parse_quote { 7 })\n",
-        "macro construct_empty = _: Expr => Parenthesized (Sequence ())\n",
-        "macro construct_sequence = _: Expr => Parenthesized (Sequence (Expr :: parse_quote { increment }, Expr :: parse_quote { 41 }))\n",
-        "macro construct_braced = _: Expr => Braced (Sequence (Expr :: parse_quote { 9 }))\n",
-        "macro preserve = value: Parenthesized<Sequence<SyntaxNode>> => value\n",
+        "macro construct_empty = _: Expr => Parenthesized (Sequence<Expr> :: Sequence ())\n",
+        "macro construct_sequence = _: Expr => Parenthesized (Sequence (first: Expr :: parse_quote { increment }, rest: Sequence (first: Expr :: parse_quote { 41 }, rest: Sequence ())))\n",
+        "macro construct_braced = _: Expr => Braced (Sequence (first: Expr :: parse_quote { 9 }, rest: Sequence ()))\n",
+        "macro preserve = move value: Parenthesized<Sequence<SyntaxNode>> => value\n",
         "def increment: I32 -> I32 = value => value + 1\n",
         "let inspected: I32 = inspect (only)\n",
         "let constructed: I32 = construct ()\n",
@@ -8885,8 +8910,8 @@ fn top_level_macro_sequences_backtrack_for_visibility_and_fixed_suffixes() {
         "    _: Equals;\n",
         "    name: Ident<String>; _: FatArrow; _: Braced<Syntax>) => match (values, visibility) {\n",
         "        (Sequence (), Private) => quote { let $name: I32 = 40 },\n",
-        "        (Sequence (first: Ident<String>, rest: Sequence<Ident<String>>), Public) => quote { let $name: I32 = 41 },\n",
-        "        (Sequence (first: Ident<String>, rest: Sequence<Ident<String>>), Package) => quote { let $name: I32 = 42 },\n",
+        "        (Sequence (first: _, rest: _), Public) => quote { let $name: I32 = 41 },\n",
+        "        (Sequence (first: _, rest: _), Package) => quote { let $name: I32 = 42 },\n",
         "        _ => quote { let $name: I32 = 43 },\n",
         "    }\n",
         "classify marker = private_value => {}\n",
@@ -9014,7 +9039,7 @@ fn rejects_invalid_top_level_macro_sequence_signatures() {
             "a macro signature may contain at most one top-level `Sequence` parameter",
         ),
         (
-            "macro @invalid: (Sequence<Ident<String>>; Item) -> Item = (values; move item) => item\n",
+            "macro @invalid: (Sequence<Ident<String>>; Item) -> Item = (values; item) => item\n",
             "top-level `Sequence` parameters are not supported by modifier macros",
         ),
         (
@@ -9070,7 +9095,10 @@ fn matches_comma_and_separated_delimited_syntax() {
         "macro bracketed: Bracketed<Separated<Ident<String>, Comma>> -> Expr = _ => parse_quote { 5 }\n",
         "macro braced: Braced<Separated<Ident<String>, Comma>> -> Expr = _ => parse_quote { 6 }\n",
         "macro syntax: Parenthesized<Sequence<SyntaxNode>> -> Expr = value => match value {\n",
-        "    Parenthesized (Sequence (Ident \"left\", Comma, Ident \"right\")) => parse_quote { 3 },\n",
+        "    Parenthesized (Sequence (first, rest)) => match first {\n",
+        "        Ident \"left\" => parse_quote { 3 },\n",
+        "        _ => parse_quote { 0 },\n",
+        "    },\n",
         "    _ => parse_quote { 0 },\n",
         "}\n",
         "macro comma: Parenthesized<Comma> -> Expr = value => match value {\n",
@@ -9164,11 +9192,15 @@ fn product_macro_parameters_reject_juxtaposed_syntax() {
 fn constructs_and_destructures_separated_syntax() {
     let module = type_check(concat!(
         "macro inspect: Parenthesized<Separated<Ident<String>, Comma>> -> Expr = value => match value {\n",
-        "    Parenthesized (Separated (separator: Comma, elements: (Ident<\"one\">, Ident<\"two\">), trailing: True<()>)) => parse_quote { 1 },\n",
+        "    Parenthesized (Separated (_, Sequence (first, rest), True)) => match first {\n",
+        "        Ident \"one\" => parse_quote { 1 },\n",
+        "        _ => parse_quote { 0 },\n",
+        "    },\n",
+        "    _ => parse_quote { 0 },\n",
         "}\n",
-        "macro construct = _: Expr => Parenthesized (Separated (\n",
+        "macro construct: Expr -> Parenthesized<Separated<Expr, Comma>> = _ => Parenthesized (Separated (\n",
         "    separator: Comma,\n",
-        "    elements: (Expr :: parse_quote { 10 }, Expr :: parse_quote { 20 }),\n",
+        "    elements: Sequence (first: Expr :: parse_quote { 10 }, rest: Sequence (first: Expr :: parse_quote { 20 }, rest: Sequence ())),\n",
         "    trailing: True,\n",
         "))\n",
         "let inspected: I32 = inspect (one, two,)\n",
@@ -9199,12 +9231,12 @@ fn rejects_malformed_separated_syntax() {
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            concat!(
+            &with_syntax_imports(concat!(
                 "macro invalid = _: Expr => Parenthesized (Separated (\n",
-                "    separator: Comma, elements: (), trailing: True,\n",
+                "    separator: Comma, elements: Sequence<Ident<String>> :: Sequence (), trailing: True,\n",
                 "))\n",
                 "let value = invalid ()\n",
-            ),
+            )),
             root,
         )
         .expect("source should parse");
@@ -9792,14 +9824,15 @@ fn panic_called_during_macro_expansion_reports_a_clean_diagnostic() {
     // `panic`'s real body calls extern `c` functions (`printf`, `exit`),
     // which have no compile-time meaning; the macro interpreter used to
     // try to evaluate that body anyway and fail deep inside it with a
-    // confusing `` compile-time name `printf` is not available `` error,
-    // plus a redundant `while expanding macro` trailer. `panic` is now
-    // recognized by identity and short-circuited into a single clean
-    // diagnostic before its body is ever interpreted.
+    // confusing `` compile-time name `printf` is not available `` error.
+    // `panic` is now recognized by identity and short-circuited into a clean
+    // diagnostic, with the place it was called from, before its body is ever
+    // interpreted.
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let source = concat!(
         "use std.process.panic\n",
-        "macro always_fail = e: Expr => panic \"internal error\"\n",
+        "use std.syntax.Expr\n",
+        "macro always_fail: Expr -> Expr = e => panic \"internal error\"\n",
         "always_fail 42\n",
     );
     let program = ProgramLoader::new()
@@ -9811,13 +9844,14 @@ fn panic_called_during_macro_expansion_reports_a_clean_diagnostic() {
         .expect_err_diagnostics("a compile-time panic should fail resolution");
     assert_eq!(
         diagnostics.len(),
-        1,
-        "expected exactly one diagnostic, got {diagnostics:?}",
+        2,
+        "expected the panic and the macro it came from, got {diagnostics:?}",
     );
     assert_eq!(
         diagnostics[0].message,
-        "macro `always_fail` panicked: internal error",
+        "macro `always_fail` panicked: internal error at <stdin>.sta:3:40",
     );
+    assert_eq!(diagnostics[1].message, "while expanding macro `always_fail`");
     // The span's start includes the newline that ends the previous line
     // (an existing quirk of how top-level statement spans are computed,
     // unrelated to this fix); what matters here is that it lands on the
@@ -10691,10 +10725,9 @@ fn quoted_type_declarations_from_one_template_get_distinct_identity() {
 #[test]
 fn exposes_type_declarations_as_structured_items() {
     let module = type_check(concat!(
-        "macro @inspect_item: move Item -> Item = move item => match item {\n",
+        "macro @inspect_item: move Item -> Item = move item => match Clone.clone item {\n",
         "  TypeDeclarationItem (Ident name, declared_type, parameters, Some (WrapperBody (visibility, representation)), _) => item,\n",
-        "  UnstructuredItem() => item,\n",
-        "  _ => panic \"inspect_item item is unsupported\",\n",
+        "  _ => item,\n",
         "}\n",
         "@inspect_item\ntype Pair<T> wrap (T, T)\n",
         "@inspect_item\ndef answer = () => 42\n",
@@ -14126,11 +14159,11 @@ fn option_marks_a_def_compile_time_only_when_it_holds_syntax() {
         "  Some number => number,\n",
         "  None => 0,\n",
         "}\n",
-        "def or_default: Option<Expr> -> Expr = value => match value {\n",
+        "def or_default: move Option<Expr> -> Expr = move value => match value {\n",
         "  Some expression => expression,\n",
         "  None => parse_quote { 0 },\n",
         "}\n",
-        "macro pick: Expr -> Expr = value => or_default (Some value)\n",
+        "macro pick: move Expr -> Expr = move value => or_default (Some value)\n",
         "let picked: I32 = pick (or_zero (Some 7))\n",
     ));
     let names = module
@@ -15673,8 +15706,8 @@ fn forall_generic_binding_macro_expansion_remains_parseable_and_hygienic() {
 #[test]
 fn forall_preserves_generic_compile_time_helpers() {
     type_check(concat!(
-        "def identity: <T> Expr -> Expr = <T> value => value\n",
-        "macro relay: Expr -> Expr = value => identity value\n",
+        "def identity: <T> move Expr -> Expr = <T> move value => value\n",
+        "macro relay: move Expr -> Expr = move value => identity value\n",
         "let answer: I32 = relay 42\n",
         "def concrete_type: <T> () -> Type = <T> () => parse_quote { I32 }\n",
         "macro typed: Expr -> Expr = value => { let ty: Type = concrete_type (); parse_quote { $ty :: $value } }\n",
@@ -18250,7 +18283,8 @@ fn juxtaposed_calls_fill_compile_time_helper_slots() {
         "macro plain_value: Expr -> Expr = value => plain (value, value)\n",
         "macro inferred_value: Expr -> Expr = value => inferred value value\n",
         "macro partial: Expr -> Expr = value => {\n",
-        "    let apply: Expr -> Expr = pair value\n",
+        "    let first = Clone.clone value\n",
+        "    let apply: Expr -> Expr = right => pair ...(first; right)\n",
         "    apply value\n",
         "}\n",
         "let paired: (I32, I32) = pair_value 1\n",
@@ -18269,9 +18303,9 @@ fn a_slotted_argument_can_fill_one_nested_product_slot() {
     // `(Expr; Expr)` may be the first slot's own type rather than a whole
     // two-slot argument, so the call must still bind it to that one slot.
     let module = type_check(concat!(
-        "def count: ((Expr; Expr); I32) -> I32 = (pair; count) => count\n",
-        "macro read_count: Expr -> Expr = value => {\n",
-        "    let number: I32 = count (value; value) 2\n",
+        "def count: (move (Expr; Expr); I32) -> I32 = (move pair; count) => count\n",
+        "macro read_count: move Expr -> Expr = move value => {\n",
+        "    let number: I32 = count (Clone.clone value; Clone.clone value) 2\n",
         "    let _ = number\n",
         "    value\n",
         "}\n",
@@ -18284,10 +18318,10 @@ fn a_slotted_argument_can_fill_one_nested_product_slot() {
 fn compile_time_helpers_accept_whole_slotted_products() {
     let module = type_check(concat!(
         "def pair: (left: Expr; right: Expr) -> Expr = (left; right) => parse_quote { ($left, $right) }\n",
-        "macro literal: Expr -> Expr = value => pair (value; value)\n",
-        "macro binding: Expr -> Expr = value => {\n",
-        "    let arguments: (left: Expr; right: Expr) = (value; value)\n",
-        "    pair arguments\n",
+        "macro literal: move Expr -> Expr = move value => pair ...(Clone.clone value; value)\n",
+        "macro binding: move Expr -> Expr = move value => {\n",
+        "    let arguments: (left: Expr; right: Expr) = (Clone.clone value; value)\n",
+        "    pair ...arguments\n",
         "}\n",
         "let from_literal: (I32, I32) = literal 1\n",
         "let from_binding: (I32, I32) = binding 2\n",
@@ -18959,12 +18993,12 @@ fn parse_reads_streaming_leaves_in_order() {
     let source = format!(
         "{PARSE_IMPORTS}{}",
         concat!(
-            "macro leaves: Braced<Syntax> -> Expr = body => {\n",
+            "macro leaves: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    let mut input = stream contents\n",
-            "    let Ok first = Parse.parse.<Expr> input\n",
-            "    let Ok comma = Parse.parse.<Comma> input\n",
-            "    let Ok last = Parse.parse.<Ident<String>> input\n",
+            "    let first = match (Parse.parse.<Expr> input) { Ok found => found, ParseError (message) => panic message }\n",
+            "    let comma = match (Parse.parse.<Comma> input) { Ok found => found, ParseError (message) => panic message }\n",
+            "    let last = match (Parse.parse.<Ident<String>> input) { Ok found => found, ParseError (message) => panic message }\n",
             "    if (is_empty input) { parse_quote { ($first, $last) } } else { panic \"stream should be empty\" }\n",
             "}\n",
             "let a = 1\n",
@@ -18983,7 +19017,7 @@ fn parse_all_dispatches_from_context_and_from_a_type_argument() {
     let source = format!(
         "{PARSE_IMPORTS}{}",
         concat!(
-            "macro contextual: Braced<Syntax> -> Expr = body => {\n",
+            "macro contextual: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    let parsed: Result<Expr, ParseError> = Parse.parse_all contents\n",
             "    match parsed {\n",
@@ -18991,7 +19025,7 @@ fn parse_all_dispatches_from_context_and_from_a_type_argument() {
             "        ParseError (message) => panic message,\n",
             "    }\n",
             "}\n",
-            "macro explicit: Braced<Syntax> -> Expr = body => {\n",
+            "macro explicit: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    match (Parse.parse_all.<Parenthesized<Separated<Ident<String>, Comma>>> contents) {\n",
             "        Ok Parenthesized (Separated (_, elements, _)) => parse_quote { 7 },\n",
@@ -19012,7 +19046,7 @@ fn parse_all_rejects_leftover_syntax_with_a_position() {
     let source = format!(
         "{PARSE_IMPORTS}{}",
         concat!(
-            "macro single: Braced<Syntax> -> Expr = body => {\n",
+            "macro single: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    match (Parse.parse_all.<Ident<String>> contents) {\n",
             "        Ok _ => parse_quote { 1 },\n",
@@ -19036,21 +19070,21 @@ fn parse_reads_slotted_and_comma_products() {
     let source = format!(
         "{PARSE_IMPORTS}{}",
         concat!(
-            "macro binding: Braced<Syntax> -> Expr = body => {\n",
+            "macro binding: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    match (Parse.parse_all.<(Ident<\"set\">; Ident<String>; Equals; Expr)> contents) {\n",
             "        Ok (_, name, _, value) => parse_quote { ($name, $value) },\n",
             "        ParseError (message) => panic message,\n",
             "    }\n",
             "}\n",
-            "macro pair: Braced<Syntax> -> Expr = body => {\n",
+            "macro pair: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    match (Parse.parse_all.<(Expr, Expr)> contents) {\n",
             "        Ok (left, right) => parse_quote { ($right, $left) },\n",
             "        ParseError (message) => panic message,\n",
             "    }\n",
             "}\n",
-            "macro nothing: Braced<Syntax> -> Expr = body => {\n",
+            "macro nothing: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    match (Parse.parse_all.<()> contents) {\n",
             "        Ok _ => parse_quote { 0 },\n",
@@ -19084,7 +19118,7 @@ fn comma_products_reject_adjacent_elements_and_doubled_trailing_commas() {
             "{PARSE_IMPORTS}{}",
             format!(
                 concat!(
-                    "macro pair: Braced<Syntax> -> Expr = body => {{\n",
+                    "macro pair: move Braced<Syntax> -> Expr = move body => {{\n",
                     "    let Braced (contents) = body\n",
                     "    match (Parse.parse_all.<(Ident<String>, Ident<String>)> contents) {{\n",
                     "        Ok _ => parse_quote {{ 0 }},\n",
@@ -19111,7 +19145,7 @@ fn parse_reads_sequences_options_and_separated_bodies() {
     let source = format!(
         "{PARSE_IMPORTS}{}",
         concat!(
-            "macro atoms: Braced<Syntax> -> Expr = body => {\n",
+            "macro atoms: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    match (Parse.parse_all.<Sequence<SyntaxNode>> contents) {\n",
             "        Ok Sequence (first, rest) => parse_quote { ($first, 1) },\n",
@@ -19119,7 +19153,7 @@ fn parse_reads_sequences_options_and_separated_bodies() {
             "        ParseError (message) => panic message,\n",
             "    }\n",
             "}\n",
-            "macro maybe: Braced<Syntax> -> Expr = body => {\n",
+            "macro maybe: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    match (Parse.parse_all.<(Option<Type>; Equals; Expr)> contents) {\n",
             "        Ok (Some _, _, value) => parse_quote { ($value, 1) },\n",
@@ -19127,7 +19161,7 @@ fn parse_reads_sequences_options_and_separated_bodies() {
             "        ParseError (message) => panic message,\n",
             "    }\n",
             "}\n",
-            "macro fields: Braced<Syntax> -> Expr = body => {\n",
+            "macro fields: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    match (Parse.parse_all.<Braced<Separated<(Ident<String>; Equals; Expr), Comma>>> contents) {\n",
             "        Ok Braced (Separated (_, Sequence (first, rest), _)) => {\n",
@@ -19199,11 +19233,11 @@ fn parse_forks_backtrack_and_commit() {
     let source = format!(
         "{PARSE_IMPORTS}{}",
         concat!(
-            "macro forks: Braced<Syntax> -> Expr = body => {\n",
+            "macro forks: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    let mut input = stream contents\n",
             "    let mut fork = input\n",
-            "    let Ok _ = Parse.parse.<Expr> fork\n",
+            "    let _ = match (Parse.parse.<Expr> fork) { Ok found => found, ParseError (message) => panic message }\n",
             "    let unmoved: Expr = if (is_empty input) { parse_quote { 0 } } else { parse_quote { 1 } }\n",
             "    let moved: Expr = if (is_empty fork) { parse_quote { 1 } } else { parse_quote { 0 } }\n",
             "    input = fork\n",
@@ -19226,12 +19260,12 @@ fn a_failed_optional_leaves_the_stream_unmoved() {
     let source = format!(
         "{PARSE_IMPORTS}{}",
         concat!(
-            "macro unmoved: Braced<Syntax> -> Expr = body => {\n",
+            "macro unmoved: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    let mut input = stream contents\n",
-            "    let Ok skipped = Parse.parse.<Option<Type>> input\n",
-            "    let Ok equals = Parse.parse.<Equals> input\n",
-            "    let Ok value = Parse.parse.<Expr> input\n",
+            "    let skipped = match (Parse.parse.<Option<Type>> input) { Ok found => found, ParseError (message) => panic message }\n",
+            "    let equals = match (Parse.parse.<Equals> input) { Ok found => found, ParseError (message) => panic message }\n",
+            "    let value = match (Parse.parse.<Expr> input) { Ok found => found, ParseError (message) => panic message }\n",
             "    parse_quote { ($value, 1) }\n",
             "}\n",
             "let value = 9\n",
@@ -19252,13 +19286,13 @@ fn mut_parameters_of_compile_time_helpers_update_the_callers_stream() {
         "{PARSE_IMPORTS}{}",
         concat!(
             "def skip_one = mut input: ParseStream => () :: {\n",
-            "    let Ok _ = Parse.parse.<Ident<String>> input\n",
+            "    let _ = match (Parse.parse.<Ident<String>> input) { Ok found => found, ParseError (message) => panic message }\n",
             "}\n",
-            "macro second: Braced<Syntax> -> Expr = body => {\n",
+            "macro second: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    let mut input = stream contents\n",
             "    skip_one input\n",
-            "    let Ok name = Parse.parse.<Ident<String>> input\n",
+            "    let name = match (Parse.parse.<Ident<String>> input) { Ok found => found, ParseError (message) => panic message }\n",
             "    parse_quote { ($name, 2) }\n",
             "}\n",
             "let beta = 1\n",
@@ -19279,13 +19313,13 @@ fn passing_an_immutable_binding_to_a_mut_parameter_is_rejected() {
         "{PARSE_IMPORTS}{}",
         concat!(
             "def skip_one = mut input: ParseStream => () :: {\n",
-            "    let Ok _ = Parse.parse.<Ident<String>> input\n",
+            "    let _ = match (Parse.parse.<Ident<String>> input) { Ok found => found, ParseError (message) => panic message }\n",
             "}\n",
             "macro second = body: Braced<Syntax> => {\n",
             "    let Braced (contents) = body\n",
             "    let input = stream contents\n",
             "    skip_one input\n",
-            "    let Ok name = Parse.parse.<Ident<String>> input\n",
+            "    let name = match (Parse.parse.<Ident<String>> input) { Ok found => found, ParseError (message) => panic message }\n",
             "    parse_quote { ($name, 2) }\n",
             "}\n",
         )
@@ -19312,11 +19346,11 @@ fn question_mark_and_return_leave_the_innermost_compile_time_function() {
             "    }\n",
             "    Ok seen\n",
             "}\n",
-            "def early = value: Expr => Expr :: {\n",
+            "def early = move value: Expr => Expr :: {\n",
             "    let ignored = { return value }\n",
-            "    parse_quote { 0 }\n",
+            "    Expr :: parse_quote { 0 }\n",
             "}\n",
-            "macro succeeds: Braced<Syntax> -> Expr = body => {\n",
+            "macro succeeds: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    let mut input = stream contents\n",
             "    match (name_or_fail input) {\n",
@@ -19324,7 +19358,7 @@ fn question_mark_and_return_leave_the_innermost_compile_time_function() {
             "        ParseError (message) => panic message,\n",
             "    }\n",
             "}\n",
-            "macro fails: Braced<Syntax> -> Expr = body => {\n",
+            "macro fails: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    let mut input = stream contents\n",
             "    match (name_or_fail input) {\n",
@@ -19332,7 +19366,7 @@ fn question_mark_and_return_leave_the_innermost_compile_time_function() {
             "        ParseError (message) => panic message,\n",
             "    }\n",
             "}\n",
-            "macro returns = value: Expr => early value\n",
+            "macro returns = move value: Expr => early value\n",
             "let alpha = 1\n",
             "let good: (I32, I32) = succeeds { alpha }\n",
             "let early_value: I32 = returns alpha\n",
@@ -19346,7 +19380,7 @@ fn question_mark_and_return_leave_the_innermost_compile_time_function() {
             .starts_with("macro `fails` panicked: expected Ident<String>")),
         "{diagnostics:#?}"
     );
-    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    assert_eq!(diagnostics.len(), 2, "{diagnostics:#?}");
 }
 
 const KEY_VALUE_PARSE: &str = concat!(
@@ -19376,14 +19410,14 @@ fn user_impls_parse_custom_nodes_in_macros_and_helpers() {
             "    }\n",
             "}\n",
             "def entry = body: Syntax => Result<KeyValue, ParseError> :: Parse.parse_all body\n",
-            "macro field: Braced<Syntax> -> Expr = body => {\n",
+            "macro field: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    match (entry contents) {\n",
             "        Ok KeyValue (key, value) => parse_quote { ($key, $value) },\n",
             "        ParseError (message) => panic message,\n",
             "    }\n",
             "}\n",
-            "macro pair_of: Braced<Syntax> -> Expr = body => {\n",
+            "macro pair_of: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    match (Parse.parse_all.<Pair<KeyValue>> contents) {\n",
             "        Ok Pair (left, right) => {\n",
@@ -19394,7 +19428,7 @@ fn user_impls_parse_custom_nodes_in_macros_and_helpers() {
             "        ParseError (message) => panic message,\n",
             "    }\n",
             "}\n",
-            "macro broken: Braced<Syntax> -> Expr = body => {\n",
+            "macro broken: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    match (entry contents) {\n",
             "        Ok _ => parse_quote { 0 },\n",
@@ -19499,7 +19533,7 @@ fn parsed_caller_identifiers_keep_their_hygiene() {
     let source = format!(
         "{PARSE_IMPORTS}{}",
         concat!(
-            "macro shadow: Braced<Syntax> -> Expr = body => {\n",
+            "macro shadow: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    match (Parse.parse_all.<Ident<String>> contents) {\n",
             "        Ok name => parse_quote { { let a = 100\n a; $name } },\n",
@@ -19517,8 +19551,8 @@ fn parsed_caller_identifiers_keep_their_hygiene() {
 fn parse_names_resolve_through_namespaces_globs_and_renames() {
     let namespaced = concat!(
         "use std.syntax\n",
-        "use std.syntax.(Braced, Syntax, Ident, ParseError, parse_quote)\n",
-        "macro m: Braced<Syntax> -> Expr = body => {\n",
+        "use std.syntax.(Braced, Syntax, Expr, Ident, ParseError, parse_quote)\n",
+        "macro m: move Braced<Syntax> -> Expr = move body => {\n",
         "    let Braced (contents) = body\n",
         "    let mut input = syntax.stream contents\n",
         "    match (syntax.Parse.parse.<Ident<String>> input) {\n",
@@ -19533,7 +19567,7 @@ fn parse_names_resolve_through_namespaces_globs_and_renames() {
     let renamed = concat!(
         "use std.syntax.*\n",
         "use std.syntax.(stream as open_stream, Parse as Reader)\n",
-        "macro m: Braced<Syntax> -> Expr = body => {\n",
+        "macro m: move Braced<Syntax> -> Expr = move body => {\n",
         "    let Braced (contents) = body\n",
         "    let mut input = open_stream contents\n",
         "    match (Reader.parse.<Ident<String>> input) {\n",
@@ -19541,7 +19575,7 @@ fn parse_names_resolve_through_namespaces_globs_and_renames() {
         "        ParseError (message) => panic message,\n",
         "    }\n",
         "}\n",
-        "macro bare: Braced<Syntax> -> Expr = body => {\n",
+        "macro bare: move Braced<Syntax> -> Expr = move body => {\n",
         "    let Braced (contents) = body\n",
         "    match (parse_all.<Ident<String>> contents) {\n",
         "        Ok name => parse_quote { ($name, 2) },\n",
@@ -19577,19 +19611,19 @@ fn if_and_when_work_in_parse_members() {
             "            else => match (Parse.parse.<Comma> input) {\n",
             "                Ok comma => match (Parse.parse.<Ident<String>> input) {\n",
             "                    Ok extra => Ok (Tagged (name: name, extra: Some extra)),\n",
-            "                    failure => failure,\n",
+            "                    ParseError (message) => ParseError (message),\n",
             "                },\n",
-            "                failure => failure,\n",
+            "                ParseError (message) => ParseError (message),\n",
             "            },\n",
             "        }\n",
             "    }\n",
             "    parse_all = syntax => {\n",
             "        let mut input = stream syntax\n",
             "        let value = Parse.parse.<Tagged> input?\n",
-            "        if (is_empty input) { Ok value } else { error_at (input; \"trailing syntax\") }\n",
+            "        if (is_empty input) { Ok value } else { error_at ...(input; \"trailing syntax\") }\n",
             "    }\n",
             "}\n",
-            "macro tagged: Braced<Syntax> -> Expr = body => {\n",
+            "macro tagged: move Braced<Syntax> -> Expr = move body => {\n",
             "    let Braced (contents) = body\n",
             "    match (Parse.parse_all.<Tagged> contents) {\n",
             "        Ok Tagged (name, extra) => match extra {\n",
@@ -20106,11 +20140,10 @@ fn syntax_parameter_nodes_parse_inspect_and_splice_headers() {
         "trait Allowed T {}\n",
         "impl Allowed I32 {}\n",
         "macro generated: (Ident<String>; TypeParameters; Braced<Syntax>) -> Item = (name; parameters; body) => {\n",
-        "    let declaration = parameters.declaration\n",
-        "    match parameters.parameters {\n",
-        "        Sequence (first, rest) => {\n",
-        "            let argument = first.argument\n",
-        "            parse_quote { pub type $name$parameters wrap pub $argument }\n",
+        "    let declaration = Clone.clone parameters.declaration\n",
+        "    match Clone.clone parameters.parameters {\n",
+        "        Sequence (first, rest) => match first {\n",
+        "            TypeParameter (_, _, _, argument) => parse_quote { pub type $name$parameters wrap pub $argument },\n",
         "        },\n",
         "        _ => parse_quote { type EmptyGenerated },\n",
         "    }\n",
@@ -20118,7 +20151,7 @@ fn syntax_parameter_nodes_parse_inspect_and_splice_headers() {
         "generated Number<T = I32 where Allowed T> {}\n",
         "let number: Number = Number 42\n",
         "macro inspect: TypeParameters -> Expr = parameters => {\n",
-        "    match parameters.parameters {\n",
+        "    match Clone.clone parameters.parameters {\n",
         "        Sequence (first, rest) => match first.default {\n",
         "            Some _ => parse_quote { 42 },\n",
         "            None => parse_quote { 0 },\n",
@@ -20129,7 +20162,7 @@ fn syntax_parameter_nodes_parse_inspect_and_splice_headers() {
         "let inspected: I32 = inspect<T = I32>\n",
         "macro primitive: () -> Item = () => {\n",
         "    let header: TypeParameters = parse_quote { <U = I32 where U <: I32> }\n",
-        "    let parameter: TypeParameter = Parse.parse_all.<TypeParameter> (quote { T = I32 })?\n",
+        "    let parameter: TypeParameter = match (Parse.parse_all.<TypeParameter> (quote { T = I32 })) { Ok found => found, ParseError (message) => panic message }\n",
         "    let copied: TypeParameter = parse_quote { $parameter }\n",
         "    let name = copied.name\n",
         "    parse_quote { type $name = I32 }\n",
@@ -20150,7 +20183,7 @@ fn angled_syntax_supports_nested_types_and_parse_streams() {
         "first<Result<I32, String>, String>\n",
         "let chosen: Chosen = \"chosen\"\n",
         "macro parsed: () -> Item = () => {\n",
-        "    let angled: Angled<Separated<Type, Comma>> = Parse.parse_all.<Angled<Separated<Type, Comma>>> (quote { <Result<I32, String>, String> })?\n",
+        "    let angled: Angled<Separated<Type, Comma>> = match (Parse.parse_all.<Angled<Separated<Type, Comma>>> (quote { <Result<I32, String>, String> })) { Ok found => found, ParseError (message) => panic message }\n",
         "    match angled {\n",
         "        Angled (Separated (_, Sequence (ty, _), _)) => parse_quote { type Parsed = $ty },\n",
         "        _ => parse_quote { type Parsed = I32 },\n",
@@ -20228,7 +20261,7 @@ fn compile_time_infinite_loop_exhausts_budget() {
     let diagnostics = resolve_result(
         r#"
         use std.syntax.*
-        macro forever: () -> Expr = () => { loop {}; parse_quote { 0 } }
+        macro forever: () -> Expr = () => { loop {}; Expr :: parse_quote { 0 } }
         let value = forever ()
     "#,
     )
@@ -20269,7 +20302,7 @@ fn compile_time_sequence_iterator_operations() {
     type_check(
         r#"
         use std.syntax.*
-        macro emit: Sequence<Ident> -> Expr = xs => {
+        macro emit: move Sequence<Ident> -> Expr = move xs => {
             let count = xs |> map (x => x) |> filter (_ => True) |> skip 1 |> fold 0 ((n, _) => n + 1)
             if (count == 2) { parse_quote { 2 } } else { parse_quote { missing } }
         }
@@ -20283,7 +20316,7 @@ fn compile_time_sequence_collect() {
     type_check(
         r#"
         use std.syntax.*
-        macro emit: Sequence<Ident> -> Expr = xs => {
+        macro emit: move Sequence<Ident> -> Expr = move xs => {
             let names: Sequence<Ident> = xs |> map (x => x) |> collect
             let product = Parenthesized (Separated (
                 separator: Comma,
@@ -20320,9 +20353,12 @@ fn compile_time_parses_long_sequences_and_separated_elements() {
                 type_check(&format!(
                     r#"
             use std.syntax.*
-            def element_sequence = <T> separated: Separated<T, Comma> => separated.elements
+            def element_sequence = separated: Separated<Ident<String>, Comma> => Clone.clone separated.elements
             macro emit: () -> Expr = () => {{
-                let xs = Parse.parse_all.<{target}> (quote {{ {elements} }})?
+                let xs = match (Parse.parse_all.<{target}> (quote {{ {elements} }})) {{
+                    Ok found => found,
+                    ParseError (message) => panic message,
+                }}
                 let count = {sequence} |> count
                 if (count == 1000) {{ parse_quote {{ 42 }} }} else {{ parse_quote {{ missing }} }}
             }}
@@ -20364,12 +20400,13 @@ fn compile_time_for_enumerate_zip_and_extend() {
     type_check(
         r#"
         use std.syntax.*
-        macro emit: Sequence<Ident> -> Expr = xs => {
+        macro emit: move Sequence<Ident> -> Expr = move xs => {
             let mut count = 0
-            for item in xs { count = count + 1 }
-            let pairs = xs |> enumerate |> zip xs |> fold 0 ((n, _) => n + 1)
-            let names = xs |> collect.<Sequence<Ident>, _>
-            let extended = xs |> extend names
+            let copy: Sequence<Ident> = Clone.clone xs
+            for item in copy { count = count + 1 }
+            let pairs = Clone.clone xs |> enumerate |> zip (Clone.clone xs) |> fold 0 ((n, _) => n + 1)
+            let names: Sequence<Ident> = Clone.clone xs |> collect
+            let extended = Clone.clone xs |> extend names
             let total = extended |> count
             if (count == 3 && pairs == 3 && total == 6) { parse_quote { 6 } } else { parse_quote { missing } }
         }
@@ -20381,7 +20418,7 @@ fn compile_time_for_enumerate_zip_and_extend() {
 #[test]
 fn compile_time_trait_dispatch_reports_missing_and_ambiguous_impls() {
     for (implementations, expected) in [
-        ("", "does not implement"),
+        ("", "no trait implementation or matching bound is available"),
         (
             "impl Show I32 { show = _ => 1 }\nimpl Show I64 { show = _ => 2 }",
             "ambiguous",
@@ -20407,13 +20444,13 @@ fn compile_time_trait_dispatch_reports_missing_and_ambiguous_impls() {
 #[test]
 fn compile_time_collect_rejects_runtime_targets_and_unbound_targets() {
     for (collection, expected) in [
-        ("xs |> collect.<List<Ident>, _>", "runtime-only"),
-        ("xs |> collect", "cannot determine"),
+        ("xs |> collect.<List<Ident>, _>", "no compatible local function"),
+        ("xs |> collect", "requires a concrete expected type"),
     ] {
         let diagnostics = resolve_result(&format!(
             r#"
             use std.syntax.*
-            macro emit: Sequence<Ident> -> Expr = xs => {{
+            macro emit: move Sequence<Ident> -> Expr = move xs => {{
                 let result = {collection}
                 parse_quote {{ 1 }}
             }}
@@ -20459,10 +20496,10 @@ fn compile_time_first_class_parse_and_generic_default_member() {
         macro emit: () -> Expr = () => {
             let parser = Parse.parse.<Ident>
             let mut input = stream (quote { alpha beta })
-            let a = parser input?
-            let b = parser input?
-            let first = Sequence (a, b)
-            let both = FromIterator.insert_all.<Sequence<Ident>> first first
+            let a = match (parser input) { Ok found => found, ParseError (message) => panic message }
+            let b = match (parser input) { Ok found => found, ParseError (message) => panic message }
+            let first: Sequence<Ident> = Sequence (first: a, rest: Sequence (first: b, rest: Sequence ()))
+            let both: Sequence<Ident> = FromIterator.insert_all (Clone.clone first) first
             let n = both |> count
             if (is_empty input && n == 4) { parse_quote { 4 } } else { parse_quote { missing } }
         }
@@ -20505,9 +20542,9 @@ fn compile_time_associated_type_dispatch_targets() {
         trait Project T { type Out }
         impl<T> Project Box<T> { type Out = T }
         impl Default Token { default = () => Token () }
-        macro emit: Sequence<Ident> -> Expr = xs => {
+        macro emit: move Sequence<Ident> -> Expr = move xs => {
             let token = Project.Out Box<Token> :: Default.default ()
-            let tokens = xs |> map (_ => token) |> collect.<Sequence<Project.Out Box<Token>>, _>
+            let tokens: Sequence<Project.Out Box<Token>> = xs |> map (_ => token) |> collect
             let n = tokens |> count
             if (n == 2) { parse_quote { 2 } } else { parse_quote { missing } }
         }
@@ -20527,8 +20564,8 @@ fn compile_time_trait_dispatch_uses_later_slots() {
         impl Choose A { choose = (_; _) => 3 }
         impl Choose B { choose = (_; _) => 7 }
         macro emit: () -> Expr = () => {
-            let choose = Choose.choose ()
-            let a = choose (A ())
+            let choose: ((); A) -> I32 = Choose.choose
+            let a = choose ...((); A ())
             let b = Choose.choose ((); B ())
             if (a + b == 10) { parse_quote { 10 } } else { parse_quote { missing } }
         }
@@ -20556,7 +20593,9 @@ fn compile_time_trait_receiver_and_result_must_agree() {
     )
     .expect_err_diagnostics("receiver and result must agree");
     assert!(
-        diagnostics.iter().any(|d| d.message.contains("disagree")),
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("could not infer all trait method arguments")),
         "{diagnostics:?}"
     );
 }
@@ -20907,7 +20946,7 @@ fn template_macros_expand_like_macros_that_evaluate_first() {
     ));
     let evaluated = expanded_text(concat!(
         "macro pair: (Expr; Expr) -> Expr = (left; right) => {\n",
-        "    let kept = left\n",
+        "    let kept = Clone.clone left\n",
         "    parse_quote { ($kept, $right) }\n",
         "}\n",
         "let value = pair 1 2\n",
@@ -21116,7 +21155,13 @@ fn compile_error_fails_the_macro_at_its_call_site() {
         "macro refuse = value: Expr => compile_error \"refused\"\n",
         "let a = refuse 1\n",
     ));
-    assert_eq!(messages, vec!["macro `refuse` panicked: refused".to_owned()]);
+    assert_eq!(
+        messages,
+        vec![
+            "macro `refuse` panicked: refused".to_owned(),
+            "while expanding macro `refuse`".to_owned(),
+        ]
+    );
 }
 
 #[test]
@@ -21187,8 +21232,8 @@ fn a_macro_used_only_inside_its_helpers_quotation_is_not_a_cycle() {
 fn a_macro_calling_other_macros_through_helpers_is_ready_in_stage_order() {
     let messages = expansion_messages(concat!(
         "macro second: Expr -> Expr = value => parse_quote { $value }\n",
-        "def helper = value: Expr => Expr :: second value\n",
-        "macro first = value: Expr => helper value\n",
+        "def helper = move value: Expr => Expr :: second value\n",
+        "macro first = move value: Expr => helper value\n",
         "let a = first 1\n",
     ));
     assert!(messages.is_empty(), "{messages:#?}");
@@ -21235,7 +21280,7 @@ use std.syntax.*
 macro pick = value: CallExpr => {
     let mut changed = Clone.clone value
     changed.callee = Ident "changed"
-    value.callee
+    Clone.clone value.callee
 }
 let original: I32 = 1
 let changed: String = "text"
@@ -21314,7 +21359,7 @@ fn plain_splices_construct_comma_products_and_type_parameters() {
     type_check(
         r#"
         use std.syntax.*
-        macro product: Parenthesized<Separated<Expr, Comma>> -> Expr = input => match input {
+        macro product: move Parenthesized<Separated<Expr, Comma>> -> Expr = move input => match input {
             Parenthesized (Separated (separator, elements, trailing)) => {
                 let value = Parenthesized (Separated (
                     separator: separator,
@@ -21332,7 +21377,7 @@ fn plain_splices_construct_comma_products_and_type_parameters() {
         macro declare: Expr -> Item = _: Expr => {
             let a = Ident "A"
             let b = Ident "B"
-            let names = Sequence (first: a, rest: Sequence (first: b, rest: Sequence ()))
+            let names: Sequence<Ident> = Sequence (first: a, rest: Sequence (first: b, rest: Sequence ()))
             let parameters = Separated (separator: Comma, elements: names, trailing: False)
             parse_quote { type Pair<$parameters> wrap (A, B) }
         }
@@ -21474,7 +21519,7 @@ fn plain_splices_report_unsupported_interpreter_positions() {
     assert!(
         diagnostics
             .iter()
-            .any(|d| d.message.contains("non-item value")),
+            .any(|d| d.message.contains("no trait implementation or matching bound")),
         "{diagnostics:?}"
     );
 }

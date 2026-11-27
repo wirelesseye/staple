@@ -102,6 +102,9 @@ impl SourceLocationMacro {
 struct SourceFile {
     /// The path reported by `file`.
     path: String,
+    /// The path a `panic` names, which also puts a standard-library file under
+    /// the `std` directory the way a compiled panic does.
+    panic_path: String,
     /// The lossless token stream of the whole file.
     tokens: Arc<[staple_syntax::SyntaxToken]>,
     /// The file text, reconstructed from `tokens` on first use.
@@ -933,6 +936,9 @@ fn splice_hygiene(value: &SyntaxValue, syntax: &Syntax) -> Option<(usize, u64)> 
 /// package) when the file lies inside it.
 fn source_files(program: &Program) -> HashMap<Arc<str>, SourceFile> {
     let mut files = HashMap::new();
+    let library = program
+        .standard_library_syntax()
+        .and_then(|module| program.package_of(module));
     for module in program.modules() {
         let syntax = &module.syntax.syntax;
         let Span::User {
@@ -943,6 +949,11 @@ fn source_files(program: &Program) -> HashMap<Arc<str>, SourceFile> {
         };
         files.entry(name.clone()).or_insert_with(|| SourceFile {
             path: program.module_source_path(module.id),
+            panic_path: if library.is_some() && program.package_of(module.id) == library {
+                format!("std/{}", program.module_source_path(module.id))
+            } else {
+                program.module_source_path(module.id)
+            },
             tokens: syntax.tokens.clone(),
             text: None,
         });
@@ -1855,6 +1866,11 @@ pub(crate) fn expand_program_checked(
                 return Err(expander.diagnostics);
             }
         }
+    } else if check_mode.is_none() && check_program::check_before_run_enabled() {
+        expander.check_before_run = true;
+        expander.program_shell = Some(program.clone());
+    }
+    if compiled_call::compiling() || expander.check_before_run {
         expander.compiled_only_items = stages.compiled.clone();
         expander.interpreted_only_items = stages.interpreted.clone();
     }
@@ -2241,6 +2257,9 @@ struct MacroExpander {
     /// Pre-walk snapshot of `Program` used to build closure-only check
     /// programs and library manifests when a [`MacroBackend`] is active.
     program_shell: Option<Program>,
+    /// Whether a macro's closure is resolved and type-checked before the
+    /// macro first runs, with no compiled engine making the calls.
+    check_before_run: bool,
     /// Macro declarations whose closure libraries have already been prepared
     /// by the active [`MacroBackend`].
     prepared_macros: HashSet<SyntaxId>,
@@ -3215,6 +3234,7 @@ impl MacroExpander {
             macros_ready: HashSet::new(),
             macros_failed: HashSet::new(),
             program_shell: compiled_call::compiling().then(|| program.clone()),
+            check_before_run: false,
             prepared_macros: HashSet::new(),
             compiled_only_items: Vec::new(),
             interpreted_only_items: HashSet::new(),
@@ -3521,7 +3541,17 @@ impl MacroExpander {
         let start = self.diagnostics.len();
         self.static_check_failed = false;
         self.check_macro_definition(definition);
-        let passed = self.diagnostics.len() == start && !self.static_check_failed;
+        let mut passed = self.diagnostics.len() == start && !self.static_check_failed;
+        if !passed && self.check_before_run && self.prepared_macros.contains(&definition.declaration.syntax.id) {
+            // The macro's code was resolved and type-checked as ordinary
+            // code, which is the real check. The interpreter's models only
+            // what the interpreter can run, so a complaint of its own is
+            // dropped. Running the check still records the contextual types
+            // the interpreter reads.
+            self.diagnostics.truncate(start);
+            self.static_check_failed = false;
+            passed = true;
+        }
         self.macro_checks.insert(definition.key.clone(), passed);
         passed
     }
@@ -9356,6 +9386,10 @@ impl MacroExpander {
                             .unwrap_or_else(|_| message.clone()),
                         _ => "compile-time panic".to_string(),
                     };
+                    let message = match self.source_position_text(&span) {
+                        Some(position) => format!("{message} at {position}"),
+                        None => message,
+                    };
                     self.report_compile_time_panic(&message, span);
                     return None;
                 }
@@ -9384,6 +9418,22 @@ impl MacroExpander {
         }
     }
 
+    /// `file:line:column` for the start of `span`, as a compiled `panic` names
+    /// the place it was called from.
+    fn source_position_text(&mut self, span: &Span) -> Option<String> {
+        let Span::User { source: Some(source), range, location } = span else {
+            return None;
+        };
+        let file = self.source_files.get_mut(source)?;
+        let location = location.unwrap_or_else(|| {
+            let text = file
+                .text
+                .get_or_insert_with(|| file.tokens.iter().map(|token| token.text.as_str()).collect());
+            source_location_at(text, range.start)
+        });
+        Some(format!("{}:{}:{}", file.panic_path, location.line, location.column))
+    }
+
     /// Reports a failure raised by compile-time code, at the call site of the
     /// macro being expanded.
     pub(super) fn report_compile_time_panic(&mut self, message: &str, span: Span) {
@@ -9394,7 +9444,6 @@ impl MacroExpander {
         let report_span = self.invocation_spans.last().cloned().unwrap_or(span);
         self.diagnostics
             .push(Diagnostic::new(report_span, description));
-        self.suppress_expansion_trailer = true;
     }
 
     fn eval_binary_expression(

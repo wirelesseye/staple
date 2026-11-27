@@ -940,9 +940,13 @@ needs a type to parse as: declare the macro's result, as in
 `macro next: Expr -> Expr = value => parse_quote { $value + 1 }`, or ascribe the
 quotation, as in `macro next = value: Expr => Expr :: parse_quote { $value + 1 }`.
 Without either, the check reports `no trait implementation or matching bound is
-available`. Expansion itself still infers the result from the fragment's shape.
+available`.
 
-The check is not on by default, and it does not change what macros do.
+A macro that the standard library doesn't define is checked this way before it
+first runs, under either engine, and a macro whose code fails the check does
+not run. The standard library's own macros are checked with the library. Setting
+`STAPLE_CHECK_MACRO_CLOSURES` to `0` turns the check off under the interpreter.
+The check does not change what macros do.
 
 #### Compile-time effects
 
