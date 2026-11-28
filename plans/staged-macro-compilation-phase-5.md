@@ -291,6 +291,36 @@ All of these were read from the source at `3534a88f`.
       the over-reach properly. It is left for later (umbrella plan, open
       questions).
 
+13. **A modifier's explicit argument is the whole parenthesized group**
+    (language decision). A modifier declared `(Parenthesized<X>; Item) -> …`
+    receives a `Parenthesized<X>`, as any macro's `Parenthesized<X>` parameter
+    does, and its body takes the contents out with `Parenthesized (x)`:
+
+    ```staple
+    macro @typed: (Parenthesized<Type>; Item) -> Item = (argument; _) => {
+        let Parenthesized (ty) = Clone.clone argument
+        parse_quote { let typed: $ty = 1 }
+    }
+    ```
+
+    The argument is borrowed, as every parameter not declared `move` is, so
+    the body clones it to take the contents out.
+
+    - At `3534a88f` the engines disagree. The interpreter binds the contents
+      (`ty` is the `Type` `I32` for `@typed(I32)`), while the closure check and
+      compiled calls type the parameter as the group. Task 4 first made both
+      bind the contents; that is reverted.
+    - `Staple.md` declares the argument `Parenthesized` "matching how every
+      other delimited macro argument is declared", so the parameter's type is
+      the annotation's, with no modifier-only exception.
+    - An unannotated modifier types its argument on the parameter, as
+      `(value: Parenthesized<Expr>; item: Item)`. The interpreter no longer
+      wraps a bare `value: Expr` in `Parenthesized` for it.
+    - Every modifier with an argument and a body unwraps it: the test sources,
+      the `examples` and harness modifiers, and `Staple.md`'s `@replace`
+      example. `std.annotation`'s `@doc` and `@feature` have no body, so they
+      don't change.
+
 ## Tasks
 
 Tasks 1 to 5 close the differences between the engines. Task 6 gives the
@@ -361,6 +391,8 @@ the phase.
   check.
 - Change test expectations to the compiled wording (Decision 5), and make stage
   cycles deterministic.
+- Bind a modifier's explicit argument as the whole group under both engines
+  (Decision 13), and unwrap it in every modifier that takes one.
 - Done when `compare-engines.py` reports only the four inputs that only the
   interpreter rejects (a bare `Sequence` or `Separated` splice, and `Syntax` as a
   `parse_quote` context), each listed in Findings as intended.
@@ -491,7 +523,8 @@ the phase.
   never from the call site or its template's shape (Decision 2). Remove any
   example that relies on a whole-body `parse_quote` without a type. Also
   document that every macro parameter needs a type, from the annotation or the
-  parameter (Decision 4).
+  parameter (Decision 4), and that a modifier's explicit argument is the whole
+  `Parenthesized` group (Decision 13).
 - Say that the first build without a prebuilt standard library compiles its
   macros, and how long that roughly takes.
 - Don't document `--macro-engine`.
@@ -540,7 +573,7 @@ Update this section as you work (see "Rules for the implementor").
 | 1. A clean baseline | done | `fa5f0b99` | Closure lookup falls back to the use site for names a macro wrote (the `derive_eq` cycle); constructors, singleton values and macro definitions are checked in declaration order; a dead server's forwarded output loses its blank lines. Tests: workspace 2378 passed, 0 failed. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest 1904/2036, the same 132 differences on two runs. See Findings. |
 | 2. Every macro has an entry function | done | `d2d346fc` | An untyped macro parameter is an error under both engines, reported at the parameter, and the interpreter's `SyntaxNode` default and the entry-function exception are gone. Tests: workspace 2379 passed, 0 failed (rerun after fixing two LSP hover signatures that read `SyntaxNode`); the two new compiled-engine tests (ignored, `test-macro-libraries.sh`) pass. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest 1910/2042 with the same 132 differences; ``could not be run as compiled code``: 0 inputs. See Findings. |
 | 3. `parse_quote` without a contextual type | done | `5049c33e` | A `parse_quote` with no contextual type is an error under both engines with one diagnostic, as is `Parse.parse`/`Parse.parse_all` with no target; a whole-body `parse_quote` no longer fixes a macro's result, and the interpreter no longer takes a quote's type from the call site. Tests: workspace 2382 passed, 0 failed; `test-macro-libraries.sh` passes. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest without it 1935/2052 with 117 differences; ``could not be run as compiled code``: 0 inputs. See Findings. |
-| 4. Macro code under the ordinary rules | done | `64b67662` | Before a macro outside the standard library first runs, the interpreter resolves and type-checks its closure as ordinary code (default on, `STAPLE_CHECK_MACRO_CLOSURES=0` turns it off), so its diagnostics are the compiled engine's; a panic names where it was called from and keeps the `while expanding macro` line; a modifier's `Parenthesized<X>` argument is an `X` in both engines. Tests: workspace 2382 passed, 0 failed (26 ignored); `test-macro-libraries.sh` passes (2 + 17). `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest without it 2028/2052 with 24 differences (117 before); ``could not be run as compiled code``: 0 inputs. **Not at the plan's "only four remain"**: see Findings. |
+| 4. Macro code under the ordinary rules | done | `64b67662` | Before a macro outside the standard library first runs, the interpreter resolves and type-checks its closure as ordinary code (default on, `STAPLE_CHECK_MACRO_CLOSURES=0` turns it off), so its diagnostics are the compiled engine's; a panic names where it was called from and keeps the `while expanding macro` line; a modifier's `Parenthesized<X>` argument is the whole group in both engines (Decision 13, follow-up `_pending_`), and a one-slot group's pattern matches its contents in the interpreter. Tests: workspace 2383 passed, 0 failed (after the follow-up); `test-macro-libraries.sh` passes (2 + 17). `compare-expansion.py` against `3534a88f`: 232/232 (231/232 after the follow-up: `examples/macros.sta`'s `@replace` source text changed, its expansion didn't). Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest without it 2028/2052 with 24 differences (117 before), 2030/2054 with the same 24 after the follow-up (two new test inputs); ``could not be run as compiled code``: 0 inputs. **Not at the plan's "only four remain"**: see Findings. |
 | 5. `if` and `when` as templates | not started | | |
 | 6. `if` and `when` back in the standard library | not started | | |
 | 7. Call cost | not started | | |
@@ -741,12 +774,25 @@ commit and the command. Include:
   code does, and the `while expanding macro` line is no longer dropped after a
   panic or `compile_error`. A syntax fragment read back from compiled code keeps
   line and column in its diagnostics (they said `at byte N`).
-- **A modifier's argument.** `Staple.md` says `macro @replace: (Parenthesized<Expr>; Item)`
-  gets the contents (`$value` is `42` for `@replace(42)`), and the interpreter did
-  that, but the check program and the compiled call typed and passed the group.
-  Both now take the contents: `checked_annotation` (`check_program.rs`) types the
-  parameter `X` for `Parenthesized<X>`, and `modifier_arguments` no longer wraps
-  the tree. One harness expectation changed with it (`let tag = N`, not `(N)`).
+- **A modifier's argument (Decision 13).** `@replace(42)`'s argument is the
+  whole group `(42)` under both engines, as for any `Parenthesized<X>`
+  parameter. The first version of this task made both bind the contents
+  instead; that was reverted after review.
+  - The interpreter binds the group (`modifier_argument_group`) and checks a
+    modifier's parameters as declared. An unannotated modifier's
+    `value: Expr` is no longer wrapped in `Parenthesized` for it.
+  - The check program and compiled calls type and pass the group again
+    (`checked_annotation` is gone; `modifier_arguments` passes the group's
+    tree).
+  - Fixed on the way, an older interpreter fault: a one-slot group's pattern
+    matched a one-element product instead of the contents, so
+    `Parenthesized (Ident "a")` never matched `(a)` in any macro, while
+    compiled code matched it.
+  - Sources: the 10 modifiers with an argument in `compiler.rs`, one in
+    `derive_default.rs`, the harness's `@tagged`, `examples/macros.sta`'s
+    `@replace` and `Staple.md`'s. Each takes the contents with
+    `let Parenthesized (x) = Clone.clone argument`, or matches
+    `Parenthesized (…)`. Test `a_modifier_argument_is_the_whole_parenthesized_group`.
 - **Docs.** A documented item given to compiled code lost its comments when the
   argument was written from tokens. Doc comments are now written in front of the
   item's tokens, and a parsed doc modifier is written as text. This fixes the

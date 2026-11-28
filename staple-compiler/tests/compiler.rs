@@ -6528,9 +6528,9 @@ fn expands_item_modifier_macros_with_nearest_modifier_first() {
 #[test]
 fn modifier_arguments_support_expression_type_and_pattern_syntax() {
     let module = type_check(concat!(
-        "macro @value = (value: Expr; _: Item) => parse_quote { let generated: I32 = $value }\n",
-        "macro @typed: (Parenthesized<Type>; Item) -> Item = (ty; _) => parse_quote { let typed: $ty = 1 }\n",
-        "macro @bind: (Parenthesized<Pattern>; Item) -> Item = (pattern; _) => parse_quote { let $pattern = (40, 2) }\n",
+        "macro @value = (value: Parenthesized<Expr>; _: Item) => parse_quote { let generated: I32 = $value }\n",
+        "macro @typed: (Parenthesized<Type>; Item) -> Item = (argument; _) => { let Parenthesized (ty) = Clone.clone argument; parse_quote { let typed: $ty = 1 } }\n",
+        "macro @bind: (Parenthesized<Pattern>; Item) -> Item = (argument; _) => { let Parenthesized (pattern) = Clone.clone argument; parse_quote { let $pattern = (40, 2) } }\n",
         "@value(42)\n",
         "let replaced = 0\n",
         "@typed(I32)\n",
@@ -6543,6 +6543,39 @@ fn modifier_arguments_support_expression_type_and_pattern_syntax() {
     CodeGenerator::new(&context)
         .compile_root(&lower(&module))
         .expect("modifier arguments and generated items should compile");
+}
+
+#[test]
+fn a_modifier_argument_is_the_whole_parenthesized_group() {
+    // Spliced whole, the group keeps its parentheses; matched, it gives the
+    // contents, so `inside` is the `I32` one.
+    type_check(concat!(
+        "macro @whole: (Parenthesized<Expr>; Item) -> Item = (argument; _) => parse_quote { let whole: I32 = $argument }\n",
+        "macro @inside: (Parenthesized<Ident<String>>; Item) -> Item = (argument; _) => match Clone.clone argument {\n",
+        "    Parenthesized (Ident \"chosen\") => parse_quote { let inside: I32 = 1 },\n",
+        "    _ => parse_quote { let inside: String = \"other\" },\n",
+        "}\n",
+        "@whole(41 + 1)\n",
+        "let first = 0\n",
+        "@inside(chosen)\n",
+        "let second = 0\n",
+        "let result: I32 = whole + inside\n",
+        // A one-slot group's pattern matches its contents in any macro.
+        "macro pick: Parenthesized<Ident<String>> -> Expr = value => match Clone.clone value {\n",
+        "    Parenthesized (Ident \"a\") => Expr :: parse_quote { 1 },\n",
+        "    _ => Expr :: parse_quote { \"two\" },\n",
+        "}\n",
+        "let picked: I32 = pick (a)\n",
+    ));
+
+    // The contents are not the argument: a `Parenthesized<Type>` is not a type.
+    let diagnostics = resolve_result(concat!(
+        "macro @typed: (Parenthesized<Type>; Item) -> Item = (ty; _) => parse_quote { let typed: $ty = 1 }\n",
+        "@typed(I32)\n",
+        "let original = 0\n",
+    ))
+    .expect_err_diagnostics("a group spliced as a type");
+    assert!(!diagnostics.is_empty());
 }
 
 #[test]
@@ -6572,7 +6605,10 @@ fn macro_modifier_arguments() {
         r#"
 use std.syntax.*
 macro @identity: move Item -> Item = move item => item
-macro @twice: (Parenthesized<Modifier>; Item) -> Item = (modifier; item) => ModifiedItem (modifiers: Sequence (first: Clone.clone modifier, rest: Sequence (first: Clone.clone modifier, rest: Sequence ())), item: Clone.clone item)
+macro @twice: (Parenthesized<Modifier>; Item) -> Item = (argument; item) => {
+    let Parenthesized (modifier) = Clone.clone argument
+    ModifiedItem (modifiers: Sequence (first: Clone.clone modifier, rest: Sequence (first: modifier, rest: Sequence ())), item: Clone.clone item)
+}
 @twice(@identity) let answer: I32 = 42
 "#,
     );
@@ -6890,7 +6926,7 @@ fn macro_modifier_separated_arguments() {
         r#"
 use std.syntax.*
 macro @identity: move Item -> Item = move item => item
-macro @apply: (Parenthesized<Separated<Modifier, Comma>>; Item) -> Item = (argument; item) => match Clone.clone argument { Separated (_, modifiers, _) => ModifiedItem (modifiers: modifiers, item: Clone.clone item), }
+macro @apply: (Parenthesized<Separated<Modifier, Comma>>; Item) -> Item = (argument; item) => match Clone.clone argument { Parenthesized (Separated (_, modifiers, _)) => ModifiedItem (modifiers: modifiers, item: Clone.clone item), }
 @apply(@identity, @identity,) let answer: I32 = 42
 "#,
     );
@@ -6942,7 +6978,7 @@ fn macro_modifier_nested_arguments_stay_lossless() {
         r#"
 use std.syntax.*
 macro @apply: (Parenthesized<Separated<Modifier, Comma>>; Item) -> Item = (argument; item) => match Clone.clone argument {
-    Separated (_, modifiers, _) => ModifiedItem (modifiers: modifiers, item: Clone.clone item),
+    Parenthesized (Separated (_, modifiers, _)) => ModifiedItem (modifiers: modifiers, item: Clone.clone item),
 }
 @apply(@doc("x,y"), @doc("nested (parentheses)"),)
 let documented = 42
@@ -7186,12 +7222,12 @@ fn returning_modified_input_continues_to_a_zero_item_modifier() {
 #[test]
 fn modified_item_can_be_destructured_and_reconstructed_losslessly() {
     let module = type_check(concat!(
-        "use std.syntax.(ModifiedItem, parse_quote, Item)\n",
+        "use std.syntax.(ModifiedItem, parse_quote, Item, Parenthesized, Expr)\n",
         "macro @outer: move Item -> Item = move item => match item {\n",
         "    ModifiedItem (modifiers, inner) => ModifiedItem (modifiers: modifiers, item: inner),\n",
         "    _ => panic \"outer item is unsupported\",\n",
         "}\n",
-        "macro @inner: (Parenthesized<Expr>; Item) -> Item = (value; _) => parse_quote { let reconstructed: I32 = $value }\n",
+        "macro @inner: (Parenthesized<Expr>; Item) -> Item = (argument; _) => { let Parenthesized (value) = Clone.clone argument; parse_quote { let reconstructed: I32 = $value } }\n",
         "@outer\n",
         "@inner(1)\n",
         "let original: I32 = 0\n",
@@ -8161,7 +8197,7 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
             concat!(
                 "macro @identity: move Item -> Item = move item => item\n",
                 "macro @again: (Parenthesized<Modifier>; Item) -> Item = (inner; item) => match Clone.clone inner {\n",
-                "    ModifierCall (namespace, name, Some argument) => ModifiedItem (\n",
+                "    Parenthesized (ModifierCall (namespace, name, Some argument)) => ModifiedItem (\n",
                 "        modifiers: Sequence (\n",
                 "            first: ModifierCall (namespace: namespace, name: name, argument: Some (quote { @again($argument) })),\n",
                 "            rest: Sequence (),\n",

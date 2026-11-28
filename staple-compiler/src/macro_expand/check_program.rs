@@ -554,28 +554,6 @@ fn convert_item(
     }
 }
 
-/// The annotation a macro's code is checked against. A modifier's explicit
-/// argument is written `Parenthesized<X>`, but the macro is given what is
-/// inside the parentheses, so its parameter is an `X`.
-fn checked_annotation(declaration: &MacroDeclaration) -> Option<staple_syntax::Type> {
-    let annotation = declaration.annotation.as_ref()?;
-    if !declaration.modifier {
-        return Some(annotation.clone());
-    }
-    let mut annotation = annotation.clone();
-    if let staple_syntax::Type::Function(signature) = &mut annotation
-        && let staple_syntax::Type::Product(product) = signature.parameter.as_mut()
-        && product.slotted
-        && product.elements.len() == 2
-        && let staple_syntax::Type::Application(application) = &product.elements[0].ty
-        && matches!(application.callee.as_ref(), staple_syntax::Type::Named(named) if named.name == "Parenthesized")
-    {
-        let inner = application.argument.as_ref().clone();
-        product.elements[0].ty = inner;
-    }
-    Some(annotation)
-}
-
 /// The function a macro overload with a body becomes. Its name is generated and
 /// holds a character no source name can, so no code refers to it.
 fn macro_function(
@@ -615,7 +593,7 @@ fn macro_function(
         mutable: false,
         signal: false,
         name: macro_function_name(declaration),
-        annotation: checked_annotation(declaration),
+        annotation: declaration.annotation.clone(),
         companion_target: None,
         companion_generics: None,
         track_caller: false,
@@ -821,8 +799,7 @@ fn entry_function(
     next_syntax_id: &mut usize,
     syntax_module: ModuleId,
 ) -> Option<Binding> {
-    let annotation = checked_annotation(declaration);
-    let parameters = match (annotation.as_ref(), declaration.value.as_ref()) {
+    let parameters = match (declaration.annotation.as_ref(), declaration.value.as_ref()) {
         (Some(staple_syntax::Type::Function(signature)), _) => {
             signature_parameters(&signature.parameter).into_iter().cloned().collect()
         }

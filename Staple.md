@@ -559,8 +559,10 @@ and applied immediately before a resolver-safe definition:
 ```staple
 macro @identity: Item -> Item = item => item
 
-macro @replace: (Parenthesized<Expr>; Item) -> Item =
-    (value; item) => parse_quote { let generated = $value }
+macro @replace: (Parenthesized<Expr>; Item) -> Item = (argument; item) => {
+    let Parenthesized (value) = Clone.clone argument
+    parse_quote { let generated = $value }
+}
 
 @identity
 @replace(42)
@@ -597,7 +599,8 @@ A modifier has signature `Item -> Item`, `Item -> Sequence<Item>`, or
 argument before the compiler-supplied item. `Parenthesized` is required
 because the explicit argument is always delimited by parentheses, including
 an expression argument, matching how every other delimited macro argument is
-declared. `Ident`, `CallExpr`, and `UnstructuredExpr` may be used as narrower
+declared. As for any `Parenthesized<X>` parameter, the macro receives the whole
+parenthesized group and takes the `X` out with `Parenthesized (x)`. `Ident`, `CallExpr`, and `UnstructuredExpr` may be used as narrower
 expression parameter types. `SyntaxNode`, opaque `Syntax`, and `Item` are not
 valid explicit modifier arguments.
 

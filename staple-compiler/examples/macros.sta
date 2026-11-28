@@ -107,12 +107,14 @@ generate_pair 41
 
 // Modifier macros receive one opaque Item from the compiler. An optional
 // explicit Parenthesized<Expr>, Parenthesized<Type>, or Parenthesized<Pattern>
-// argument is always written in parentheses. The outermost modifier runs
-// first; here @identity returns the ModifiedItem it receives, explicitly
-// continuing expansion with @replace.
+// argument is always written in parentheses, and the macro receives the whole
+// parenthesized group. The outermost modifier runs first; here @identity
+// returns the ModifiedItem it receives, explicitly continuing expansion with
+// @replace.
 macro @identity: move Item -> Item = move item => item
-macro @replace: (Parenthesized<Expr>; Item) -> Item = (value; item) => parse_quote {
-    let replaced: I32 = $value
+macro @replace: (Parenthesized<Expr>; Item) -> Item = (argument; item) => {
+    let Parenthesized (value) = Clone.clone argument
+    parse_quote { let replaced: I32 = $value }
 }
 
 @identity

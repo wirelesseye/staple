@@ -448,16 +448,11 @@ impl MacroExpander {
     }
 }
 
-/// A modifier call's trees: its argument, when it has one, and the item.
-///
-/// The interpreter binds a modifier's `Parenthesized<…>` argument to what is
-/// inside the parentheses. Its declared type is the group, so the tree is the
-/// group, around the argument's parenthesized syntax.
+/// A modifier call's trees: its argument, when it has one, and the item. The
+/// argument is the whole `Parenthesized<…>` group, so its tree is a group.
 fn modifier_arguments(argument: Option<(&Value, &Syntax)>, item: &Item) -> Option<Vec<ArgTree>> {
     let mut arguments = Vec::new();
-    if let Some((value, syntax)) = argument {
-        // The macro is given what is inside the parentheses.
-        let _ = syntax;
+    if let Some((value, _)) = argument {
         arguments.push(arg_tree(value)?);
     }
     arguments.push(ArgTree::Node(trimmed(&with_docs(item, modified_syntax(item)?))));

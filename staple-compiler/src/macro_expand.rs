@@ -2542,16 +2542,9 @@ impl MacroExpander {
                                 result_unconstrained = unconstrained;
                                 (arity, parameters, result)
                             };
+                        // An explicit argument is typed `Parenthesized<X>` on
+                        // the parameter, as in an annotation.
                         if declaration.modifier && declaration.annotation.is_none() {
-                            if parameters.len() == 2 {
-                                if parameters[0] == MetaType::SyntaxNode {
-                                    parameters[0] = MetaType::Expr;
-                                }
-                                parameters[0] = MetaType::Delimited(
-                                    DelimiterKind::Parenthesized,
-                                    DelimitedMetaContents::Slotted(vec![parameters[0].clone()]),
-                                );
-                            }
                             if let Some(last) = parameters.last_mut() {
                                 *last = MetaType::Item;
                             }
@@ -3570,24 +3563,13 @@ impl MacroExpander {
         } else {
             CompileType::Meta(definition.result.clone())
         };
-        for (index, parameter) in definition.parameters.iter().enumerate().rev() {
-            let parameter = if definition.key.modifier && index + 1 != definition.parameters.len()
-            {
-                match modifier_argument_meta_type(parameter) {
-                    Some(MetaType::Delimited(
-                        _,
-                        DelimitedMetaContents::Separated { element, separator },
-                    )) => CompileType::Meta(MetaType::Nominal(
-                        "Separated".to_owned(),
-                        vec![element.as_ref().clone(), separator.as_ref().clone()],
-                    )),
-                    Some(inner) => CompileType::Meta(inner.clone()),
-                    None => CompileType::Meta(parameter.clone()),
-                }
-            } else {
-                CompileType::Meta(parameter.clone())
-            };
-            expected = CompileType::Function(Box::new(parameter), Box::new(expected));
+        // A modifier's explicit argument is the whole parenthesized group, so
+        // every parameter has its declared type.
+        for parameter in definition.parameters.iter().rev() {
+            expected = CompileType::Function(
+                Box::new(CompileType::Meta(parameter.clone())),
+                Box::new(expected),
+            );
         }
         let mut environment = CompileEnvironment::new();
         self.check_compile_expression(
@@ -5866,7 +5848,12 @@ impl MacroExpander {
             (Some(argument), [leading, MetaType::Item]) => {
                 let expected = modifier_argument_meta_type(leading)
                     .expect("selected modifier signature must match its invocation");
-                Some(self.modifier_argument_value(expected, argument)?)
+                let contents = self.modifier_argument_value(expected, argument)?;
+                Some(modifier_argument_group(
+                    contents,
+                    argument,
+                    &mut self.next_syntax_id,
+                ))
             }
             (None, [MetaType::Item]) => None,
             _ => unreachable!("selected modifier signature must match its invocation"),
@@ -12053,6 +12040,34 @@ fn modifier_argument_meta_type(declared: &MetaType) -> Option<&MetaType> {
     }
 }
 
+/// A modifier's explicit argument as the macro receives it: the whole
+/// parenthesized group, as for any `Parenthesized<X>` parameter, holding the
+/// contents parsed as the declared type.
+fn modifier_argument_group(contents: Value, argument: &ModifierArgument, ids: &mut usize) -> Value {
+    let contents = match contents {
+        Value::Separated {
+            elements,
+            separator,
+            trailing,
+        } => DelimitedValueContents::Separated {
+            elements,
+            separator,
+            trailing,
+        },
+        value => DelimitedValueContents::Slotted(vec![(None, value)]),
+    };
+    let expression = staple_syntax::parse_expression_fragment(&argument.syntax, ids)
+        .ok()
+        .map(Box::new);
+    Value::Syntax(SyntaxValue::Delimited(DelimitedSyntaxValue {
+        kind: DelimiterKind::Parenthesized,
+        syntax: argument.syntax.clone(),
+        contents,
+        generated: Vec::new(),
+        expression,
+    }))
+}
+
 fn modifier_argument_matches(expected: &MetaType, argument: &ModifierArgument) -> bool {
     parse_modifier_argument_value(expected, argument, &mut 0).is_some()
 }
@@ -14868,11 +14883,10 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                 && delimited.kind == kind
             {
                 let contents = match &delimited.contents {
+                    // One slot is the contents themselves, so
+                    // `Parenthesized (Ident "a")` matches `(a)`.
                     DelimitedValueContents::Slotted(values)
-                        if matches!(
-                            values.as_slice(),
-                            [(None, Value::Syntax(SyntaxValue::Raw(_)))]
-                        ) =>
+                        if matches!(values.as_slice(), [(None, _)]) =>
                     {
                         values[0].1.clone()
                     }
