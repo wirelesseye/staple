@@ -11,7 +11,10 @@ use std::sync::{Arc, mpsc};
 
 use super::arena;
 use super::args;
-use super::intrinsics::{self, clear_compile_error, resolve_intrinsic, take_compile_error};
+use super::intrinsics::{
+    self, clear_compile_error, clear_syntax_diagnostic, resolve_intrinsic, take_compile_error,
+    take_syntax_diagnostic,
+};
 use super::quote::{self, CallContext};
 use super::wire::{
     ErrorKind, FrameReadError, Message, PROTOCOL_VERSION, WIRE_VERSION, WireError, read_frame,
@@ -495,6 +498,7 @@ mod dynamic {
 
             quote::install_templates(self.templates.clone());
             clear_compile_error();
+            clear_syntax_diagnostic();
             quote::begin_call(context);
             let arg_handle = args::insert_arguments(arguments);
 
@@ -502,6 +506,13 @@ mod dynamic {
 
             if result_handle == u64::MAX {
                 arena::reset();
+                if let Some(message) = take_syntax_diagnostic() {
+                    return Message::Error {
+                        kind: ErrorKind::Diagnostic,
+                        message,
+                        output,
+                    };
+                }
                 if let Some(message) = take_compile_error() {
                     return Message::Error {
                         kind: ErrorKind::CompileError,

@@ -603,7 +603,7 @@ Update this section as you work (see "Rules for the implementor").
 | 2. Every macro has an entry function | done | `d2d346fc` | An untyped macro parameter is an error under both engines, reported at the parameter, and the interpreter's `SyntaxNode` default and the entry-function exception are gone. Tests: workspace 2379 passed, 0 failed (rerun after fixing two LSP hover signatures that read `SyntaxNode`); the two new compiled-engine tests (ignored, `test-macro-libraries.sh`) pass. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest 1910/2042 with the same 132 differences; ``could not be run as compiled code``: 0 inputs. See Findings. |
 | 3. `parse_quote` without a contextual type | done | `5049c33e` | A `parse_quote` with no contextual type is an error under both engines with one diagnostic, as is `Parse.parse`/`Parse.parse_all` with no target; a whole-body `parse_quote` no longer fixes a macro's result, and the interpreter no longer takes a quote's type from the call site. Tests: workspace 2382 passed, 0 failed; `test-macro-libraries.sh` passes. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest without it 1935/2052 with 117 differences; ``could not be run as compiled code``: 0 inputs. See Findings. |
 | 4. Macro code under the ordinary rules | done | `64b67662` | Before a macro outside the standard library first runs, the interpreter resolves and type-checks its closure as ordinary code (default on, `STAPLE_CHECK_MACRO_CLOSURES=0` turns it off), so its diagnostics are the compiled engine's; a panic names where it was called from and keeps the `while expanding macro` line; a modifier's `Parenthesized<X>` argument is the whole group in both engines (Decision 13, follow-up `97652f24`), and a one-slot group's pattern matches its contents in the interpreter. Tests: workspace 2383 passed, 0 failed (after the follow-up); `test-macro-libraries.sh` passes (2 + 17). `compare-expansion.py` against `3534a88f`: 232/232 (231/232 after the follow-up: `examples/macros.sta`'s `@replace` source text changed, its expansion didn't). Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest without it 2028/2052 with 24 differences (117 before), 2030/2054 with the same 24 after the follow-up (two new test inputs); ``could not be run as compiled code``: 0 inputs. **Not at the plan's "only four remain"**: see Findings. |
-| 5. Compiled-engine faults the comparison found | not started | | |
+| 5. Compiled-engine faults the comparison found | done | | All seven compiled-engine faults fixed: documented items keep their leading `///` comments across `parse_leaf_intrinsic`, `modified_item_syntax`, and `with_docs`; invalid `Ident` spellings report `` `{text}` is not a valid identifier spelling `` at the macro call via `ErrorKind::Diagnostic` instead of panicking in Rust; `macro refuse = value: Expr => compile_error "…"` lowers and reports its message; `type_parameters_syntax` places `>` after `bounds`. Tests: `staple-compiler` (1864 passed, 0 failed), `staple-syntax` (209 passed, 0 failed), `staple` unit tests (294 passed, 0 failed; `tests/fs.rs` passes outside the sandbox), `test-macro-libraries.sh` (2 + 21 passed, 0 failed, including 4 new tests). `check-macro-closures.py --mode all`: clean (232 inputs). `compare-engines.py`: stdlib 45/45 (one at a time), the rest 2036/2054 with 18 differences (the 17 intended from task 4 plus the invalid `Ident` call-site location); `could not be run as compiled code`: 0 inputs. See Findings. |
 | 6. `if` and `when` as templates | not started | | |
 | 7. `if` and `when` back in the standard library | not started | | |
 | 8. Call cost | not started | | |
@@ -889,6 +889,43 @@ commit and the command. Include:
 - **Counts.** The rest without the standard library: 1935/2052 (117) before,
   2025/2052 after the first pass, 2028/2052 (24) after fixing three sources the
   engines read differently. The dump holds 1865 test sources both times.
+
+### Task 5
+
+- **Documented declarations (`Clone.clone`, `typegroup`, and derives, 4 inputs).**
+  - `parse_leaf_intrinsic` (`intrinsics.rs`) decoded `Item` values without
+    calling `include_leading_docs`, and `include_leading_docs` required
+    `Arc::ptr_eq` on `tokens` even though `parse_fragment_with` copies tokens
+    into a new `Arc`. Both `parse_leaf_intrinsic` and `include_leading_docs` now
+    keep leading `///` comments on copied slices, so `Clone.clone` and `typegroup`
+    items retain their origin's docs.
+  - `modified_item_syntax` (`intrinsics.rs`) placed outer modifiers directly
+    before an inner item's `///` comments, which `parse_anchored_item` skipped
+    as trivia; leading `///` comments on the inner item are now written as
+    `@doc(…)` modifiers after `modifiers_syntax` so doc order matches the
+    interpreter.
+  - `with_docs` (`compiled_call.rs`) only checked the first token for `///` and
+    was blind to `Item::Modified`, duplicating docs when outer modifiers
+    preceded `///` (e.g. `@derive_eq @derive_default @derive_debug /// …`). It
+    now recurses into `Item::Modified` and checks the whole modifier/header
+    prefix up to the declaration keyword before prepending `///`.
+- **Invalid `Ident` spelling (1 input).** `ident_syntax` (`intrinsics.rs`)
+  now checks the lexed tokens (filtering trivia) and records
+  `` `{text}` is not a valid identifier spelling `` in `SYNTAX_DIAGNOSTIC`,
+  returning `0`; `Splice for Ident` (`std.syntax`) exits on `__syntax_is_null`
+  and `server.rs`/`wire.rs`/`client.rs` forward `ErrorKind::Diagnostic` at the
+  macro call. Both engines now reject with the same wording (`1cd5494643c925c3.sta`
+  differs only by reporting at the call site rather than inside the macro body).
+- **Macros whose body is `compile_error` (1 input).** `check_binding`
+  (`typecheck.rs`) gave an unannotated diverging binding `CheckedType::Error`
+  instead of `CheckedType::Never`. `lower_call` and `visit_call` (`lower.rs`)
+  now handle an unreachable `CallRoute::Indirect` (such as `Splice.splice
+  result` in the generated entry function) when its argument has type
+  `CheckedType::Never` and its callee has no checked metadata.
+- **`TypeParameters` before `wrap` (1 input).** `type_parameters_syntax`
+  (`intrinsics.rs`) closed `>` before `bounds` (`<T = I32> where Allowed T`),
+  which broke `pub type $name$parameters wrap pub $argument`. Closing `>` after
+  `bounds` (`<T = I32 where Allowed T>`) fixes it.
 
 ### To record
 

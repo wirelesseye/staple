@@ -470,16 +470,33 @@ fn with_docs(item: &Item, syntax: Syntax) -> Syntax {
         Item::TraitDeclaration(value) => &value.docs,
         Item::Submodule(value) => &value.docs,
         Item::Binding(value) => &value.docs,
+        Item::Modified(modified) => return with_docs(&modified.item, syntax),
         _ => &[],
     };
     if docs.is_empty() {
         return syntax;
     }
-    let leading = syntax
+    let header_end = syntax
         .tokens()
         .iter()
-        .find(|token| !token.kind.is_trivia() || token.text.starts_with("///"));
-    if leading.is_some_and(|token| token.text.starts_with("///")) {
+        .position(|token| {
+            matches!(
+                token.kind,
+                TokenKind::Pub
+                    | TokenKind::Type
+                    | TokenKind::Def
+                    | TokenKind::Trait
+                    | TokenKind::Impl
+                    | TokenKind::Extern
+                    | TokenKind::Let
+                    | TokenKind::LBrace
+            )
+        })
+        .unwrap_or(syntax.tokens().len());
+    if syntax.tokens()[..header_end]
+        .iter()
+        .any(|token| token.kind == TokenKind::LineComment && token.text.starts_with("///"))
+    {
         return syntax;
     }
     let mut tokens = staple_syntax::lex(&docs.iter().map(|doc| format!("///{doc}\n")).collect::<String>());

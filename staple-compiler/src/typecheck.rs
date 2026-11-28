@@ -11952,7 +11952,7 @@ impl TypeChecker {
                 .insert(function.syntax.id, scheme.body.as_ref().clone());
         }
         let checked_type = if self.did_return {
-            declared_type.clone().unwrap_or(CheckedType::Error)
+            declared_type.clone().unwrap_or(CheckedType::Never)
         } else {
             match (value_type, declared_type) {
                 (Some(actual), Some(expected)) => {

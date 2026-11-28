@@ -171,6 +171,10 @@ impl MacroClient {
                 self.forward_output(macro_name, &output);
                 format!("macro `{macro_name}` panicked: {message}")
             }
+            ErrorKind::Diagnostic => {
+                self.forward_output(macro_name, &output);
+                message
+            }
             ErrorKind::Exit => {
                 let (panic_message, rest) = split_panic_output(&output);
                 self.forward_output(macro_name, &rest);

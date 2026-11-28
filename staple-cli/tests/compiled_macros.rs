@@ -1162,3 +1162,139 @@ fn each_fix_the_parse_quote_diagnostic_names_is_accepted_by_both_engines() {
         }
     }
 }
+
+fn expand_tree_dump_with_engine(label: &str, source: &str, engine: &str) -> String {
+    let temp = TempDir::new(label);
+    let pkg = write_package(&temp.0, label, source);
+    let expand = staple_cmd(&pkg, &temp.0.join("cache"))
+        .args(["expand", "--tree-dump", &format!("--macro-engine={engine}"), "--stdlib"])
+        .arg(repo_root().join("stdlib"))
+        .arg("src/main.sta")
+        .output()
+        .unwrap();
+    assert!(
+        expand.status.success(),
+        "{engine} expand failed: {}",
+        String::from_utf8_lossy(&expand.stderr)
+    );
+    String::from_utf8_lossy(&expand.stdout).into_owned()
+}
+
+#[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
+fn documented_declarations_rebuilt_with_clone_or_typegroup_keep_docs_under_both_engines() {
+    let clone_source = "\
+use std.syntax.*
+
+macro @clone_item: Item -> Item = item => Clone.clone item
+
+/// A documented type.
+@clone_item
+type Documented = I32
+";
+    let interp_clone = expand_tree_dump_with_engine("docs-clone-interp", clone_source, "interp");
+    let compiled_clone = expand_tree_dump_with_engine("docs-clone-compiled", clone_source, "compiled");
+    assert!(
+        compiled_clone.contains("\" A documented type.\""),
+        "compiled Clone.clone dropped docs:\n{compiled_clone}"
+    );
+    assert_eq!(interp_clone, compiled_clone);
+
+    let typegroup_source = "\
+use std.syntax.*
+
+def add_doc = (syntax: Syntax, move item: Item) => Item :: match Parse.parse_all.<Modifier> syntax {
+    Ok modifier => ModifiedItem (modifiers: Sequence (first: modifier, rest: Sequence ()), item: item),
+    _ => panic \"expected doc modifier\",
+}
+
+macro @a: move Item -> Item = move item => add_doc (quote { @doc(\"a\") }, item)
+macro @b: move Item -> Item = move item => add_doc (quote { @doc(\"b\") }, item)
+macro @c: move Item -> Item = move item => add_doc (quote { @doc(\"c\") }, item)
+
+@all(@a) @variants(@c) @doc(\"group\")
+typegroup Switch { @b Enabled, Disabled }
+";
+    let interp_tg = expand_tree_dump_with_engine("docs-tg-interp", typegroup_source, "interp");
+    let compiled_tg = expand_tree_dump_with_engine("docs-tg-compiled", typegroup_source, "compiled");
+    assert_eq!(interp_tg, compiled_tg);
+}
+
+#[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
+fn invalid_ident_spelling_reports_the_same_diagnostic_under_both_engines() {
+    let source = "\
+use std.syntax.*
+
+macro invalid = _value: Expr => Ident \"not an identifier\"
+
+pub def main = () => {
+    let _x = invalid 1
+}
+";
+    let messages = ["interp", "compiled"].map(|engine| {
+        let (passed, stderr) = check_with_engine(&format!("invalid-ident-{engine}"), source, engine);
+        assert!(!passed, "{engine} accepted invalid Ident spelling: {stderr}");
+        let lines = diagnostics_containing(&stderr, "`not an identifier` is not a valid identifier spelling");
+        assert_eq!(lines.len(), 1, "{engine}: {stderr}");
+        lines[0]
+            .split(" at line ")
+            .next()
+            .unwrap()
+            .to_owned()
+    });
+    assert_eq!(messages[0], messages[1]);
+}
+
+#[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
+fn macro_whose_body_is_compile_error_reports_its_message_under_both_engines() {
+    let source = "\
+use std.syntax.*
+
+macro refuse = _value: Expr => compile_error \"refused\"
+
+pub def main = () => {
+    let _x = refuse 1
+}
+";
+    let messages = ["interp", "compiled"].map(|engine| {
+        let (passed, stderr) = check_with_engine(&format!("compile-error-{engine}"), source, engine);
+        assert!(!passed, "{engine} accepted compile_error macro: {stderr}");
+        diagnostics_containing(&stderr, "macro `refuse` panicked: refused")
+    });
+    assert_eq!(messages[0].len(), 1, "{messages:?}");
+    assert_eq!(messages[0], messages[1]);
+}
+
+#[test]
+#[ignore = "builds macro libraries; run scripts/test-macro-libraries.sh"]
+fn splicing_type_parameters_before_wrap_keeps_wrap_under_both_engines() {
+    let source = "\
+use std.syntax.*
+
+trait Allowed T {}
+impl Allowed I32 {}
+
+macro generated: (Ident<String>; TypeParameters; Braced<Syntax>) -> Item = (name; parameters; _body) => {
+    match Clone.clone parameters.parameters {
+        Sequence (first, rest) => match first {
+            TypeParameter (_, _, _, argument) => parse_quote { pub type $name$parameters wrap pub $argument },
+        },
+        _ => parse_quote { type EmptyGenerated },
+    }
+}
+
+generated Number<T = I32 where Allowed T> {}
+
+let number: Number = Number 42
+
+pub def main = () => {
+    let _copy: Number = number
+}
+";
+    for engine in ["interp", "compiled"] {
+        let (passed, stderr) = check_with_engine(&format!("typeparams-wrap-{engine}"), source, engine);
+        assert!(passed, "{engine} rejected TypeParameters before wrap: {stderr}");
+    }
+}

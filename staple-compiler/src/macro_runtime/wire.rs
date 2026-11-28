@@ -160,6 +160,8 @@ pub enum ErrorKind {
     Internal,
     /// The macro called `compile_error`.
     CompileError,
+    /// A syntax intrinsic reported a diagnostic.
+    Diagnostic,
     /// The macro exited (e.g. `panic`), leaving its message in captured output.
     Exit,
 }
@@ -312,6 +314,7 @@ pub fn encode(message: &Message) -> Vec<u8> {
                 ErrorKind::Internal => 0u8,
                 ErrorKind::CompileError => 1u8,
                 ErrorKind::Exit => 2u8,
+                ErrorKind::Diagnostic => 3u8,
             };
             writer.payload.push(kind_code);
             writer.string(message);
@@ -427,6 +430,7 @@ fn decode_body(body: &[u8]) -> Result<Message, WireError> {
                 0 => ErrorKind::Internal,
                 1 => ErrorKind::CompileError,
                 2 => ErrorKind::Exit,
+                3 => ErrorKind::Diagnostic,
                 other => return Err(WireError::Invalid("error kind", u64::from(other))),
             };
             let message = reader.string()?.to_string();

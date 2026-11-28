@@ -294,6 +294,11 @@ pub(crate) const INTRINSICS: &[Intrinsic] = &[
         syntax_is_empty
     ),
     intrinsic!(
+        "__syntax_is_null",
+        "__staple_syntax_syntax_is_null",
+        syntax_is_null
+    ),
+    intrinsic!(
         "__same_syntax",
         "__staple_syntax_same_syntax",
         same_syntax
@@ -625,6 +630,7 @@ pub(crate) fn symbol_name(name: &str) -> &'static str {
         "__unstructured_modifier" => "__staple_syntax_unstructured_modifier",
         "__empty_syntax" => "__staple_syntax_empty_syntax",
         "__syntax_is_empty" => "__staple_syntax_syntax_is_empty",
+        "__syntax_is_null" => "__staple_syntax_syntax_is_null",
         "__same_syntax" => "__staple_syntax_same_syntax",
         "__syntax_or_origin" => "__staple_syntax_syntax_or_origin",
         "__join_separated_syntax" => "__staple_syntax_join_separated_syntax",
@@ -769,6 +775,8 @@ extern "C" fn error_at(stream: u64, message: *const u8, message_length: usize) -
 thread_local! {
     /// The message recorded by the active call's `compile_error`, before it exits.
     static COMPILE_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The diagnostic recorded by a syntax intrinsic before exiting.
+    static SYNTAX_DIAGNOSTIC: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Clears any previously recorded `compile_error` message on this thread.
@@ -781,6 +789,16 @@ pub(crate) fn clear_compile_error() {
 #[allow(dead_code)] // Used by library calls and the server in later tasks.
 pub(crate) fn take_compile_error() -> Option<String> {
     COMPILE_ERROR.with_borrow_mut(Option::take)
+}
+
+/// Clears any previously recorded syntax diagnostic on this thread.
+pub(crate) fn clear_syntax_diagnostic() {
+    SYNTAX_DIAGNOSTIC.with_borrow_mut(|slot| *slot = None);
+}
+
+/// Takes the syntax diagnostic recorded on this thread, if any.
+pub(crate) fn take_syntax_diagnostic() -> Option<String> {
+    SYNTAX_DIAGNOSTIC.with_borrow_mut(Option::take)
 }
 
 /// Records the `compile_error` message in the host before Staple calls `exit`.
@@ -945,6 +963,11 @@ extern "C" fn syntax_is_empty(syntax: u64) -> u8 {
     u8::from(syntax_value(syntax).tokens().is_empty())
 }
 
+/// `1` when a syntax handle is null (`0`).
+extern "C" fn syntax_is_null(syntax: u64) -> u8 {
+    u8::from(syntax == 0)
+}
+
 /// `1` when two syntax handles are the same handle.
 extern "C" fn same_syntax(left: u64, right: u64) -> u8 {
     u8::from(left == right)
@@ -1093,7 +1116,12 @@ extern "C" fn parse_leaf_intrinsic(stream: u64, kind: u8, spelling: u64) -> u64 
         } else {
             let leaf = leaf_kind(kind).expect("the leaf kind was checked above");
             let parsed = parse_leaf(leaf, spelling.as_deref(), &rest, &mut next);
-            parsed.map(|(leaf, consumed)| (1, leaf.into_syntax(), consumed))
+            parsed.map(|(mut leaf, consumed)| {
+                if let super::super::macro_expand::syntax_ops::ParsedLeaf::Item(item) = &mut leaf {
+                    include_leading_docs(item, &rest);
+                }
+                (1, leaf.into_syntax(), consumed)
+            })
         };
         arena.set_next_syntax_id(next);
         let outcome = match outcome {
@@ -1240,10 +1268,16 @@ fn include_leading_docs(item: &mut Item, fragment: &Syntax) {
         Item::Binding(value) => (&value.docs, &mut value.syntax),
         _ => return,
     };
-    if docs.is_empty() || !std::sync::Arc::ptr_eq(&syntax.tokens, &fragment.tokens) {
+    if docs.is_empty() {
         return;
     }
-    let start = fragment.token_range().start;
+    let start = if std::sync::Arc::ptr_eq(&syntax.tokens, &fragment.tokens) {
+        fragment.token_range().start
+    } else if *syntax.tokens == *fragment.tokens() {
+        0
+    } else {
+        return;
+    };
     if start < syntax.token_range.start {
         syntax.token_range.start = start;
     }
@@ -1555,11 +1589,17 @@ extern "C" fn ident_syntax(origin: u64, text: u64) -> u64 {
             return origin;
         }
     }
-    let tokens = staple_syntax::lex(&text);
-    assert!(
-        matches!(tokens.as_slice(), [token] if token.kind == TokenKind::Identifier),
-        "`{text}` is not an identifier"
-    );
+    let tokens: Vec<_> = staple_syntax::lex(&text)
+        .into_iter()
+        .filter(|token| !token.kind.is_trivia())
+        .collect();
+    if !matches!(tokens.as_slice(), [token] if token.kind == TokenKind::Identifier && token.text == text)
+    {
+        SYNTAX_DIAGNOSTIC.with_borrow_mut(|slot| {
+            *slot = Some(format!("`{text}` is not a valid identifier spelling"));
+        });
+        return 0;
+    }
     // An identifier with no origin was constructed by the macro, and takes
     // its hygiene from the call.
     let constructed = origin_syntax
@@ -2598,12 +2638,34 @@ extern "C" fn modified_item_syntax(origin: u64, modifiers: u64, item: u64) -> u6
     let modifiers_syntax = syntax_value(modifiers);
     let item_syntax = syntax_value(item);
     let origin_syntax = (origin != 0).then(|| syntax_value(origin));
+    let item_tokens = item_syntax.tokens();
+    let leading_end = item_tokens
+        .iter()
+        .position(|token| !token.kind.is_trivia())
+        .unwrap_or(item_tokens.len());
+    let leading_docs: Vec<&str> = item_tokens[..leading_end]
+        .iter()
+        .filter(|token| token.kind == TokenKind::LineComment && token.text.starts_with("///"))
+        .map(|token| &token.text[3..])
+        .collect();
     let mut tokens = Vec::new();
     append_syntax_tokens(&mut tokens, &modifiers_syntax, None);
-    if !modifiers_syntax.tokens().is_empty() && !item_syntax.tokens().is_empty() {
+    let item_rest_start = if !leading_docs.is_empty() && !modifiers_syntax.tokens().is_empty() {
+        for doc in leading_docs {
+            tokens.push(single_space());
+            tokens.extend(literal_tokens(&format!("@doc({doc:?})")));
+        }
+        leading_end
+    } else {
+        0
+    };
+    if !tokens.is_empty() && item_rest_start < item_tokens.len() {
         tokens.push(single_space());
     }
-    append_syntax_tokens(&mut tokens, &item_syntax, None);
+    let mut item_rest = item_syntax.clone();
+    item_rest.token_range =
+        item_syntax.token_range.start + item_rest_start..item_syntax.token_range.end;
+    append_syntax_tokens(&mut tokens, &item_rest, None);
     finish_syntax(origin, origin_syntax.as_ref(), tokens)
 }
 
@@ -3119,11 +3181,11 @@ extern "C" fn type_parameters_syntax(
     let origin_syntax = (origin != 0).then(|| syntax_value(origin));
     let mut tokens = literal_tokens("<");
     append_syntax_tokens(&mut tokens, &parameters, None);
-    tokens.extend(literal_tokens(">"));
     if !bounds.tokens().is_empty() {
         tokens.push(single_space());
         append_syntax_tokens(&mut tokens, &bounds, None);
     }
+    tokens.extend(literal_tokens(">"));
     let _ = (declaration, arguments);
     finish_syntax(origin, origin_syntax.as_ref(), tokens)
 }

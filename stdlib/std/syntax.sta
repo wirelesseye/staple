@@ -520,6 +520,7 @@ extern "staple-intrinsic" {
     __unstructured_modifier: Syntax -> UnstructuredModifier
     __empty_syntax: () -> Syntax
     __syntax_is_empty: Syntax -> U8
+    __syntax_is_null: Syntax -> U8
     __same_syntax: (Syntax, Syntax) -> U8
     __syntax_or_origin: (Syntax, Syntax) -> Syntax
     __join_separated_syntax: (Syntax, Syntax, Syntax, U8) -> Syntax
@@ -804,7 +805,11 @@ impl Splice CallExpr {
 impl<S where S <: String> Splice Ident<S> {
     splice = value => {
         let bytes = string_shared_bytes (__ident_spelling value.*)
-        __ident_syntax (__origin value, __text_new (SharedBuffer.unsafe_data bytes, SharedBuffer.length bytes))
+        let result = __ident_syntax (__origin value, __text_new (SharedBuffer.unsafe_data bytes, SharedBuffer.length bytes))
+        match (__syntax_is_null result == 1) {
+            True => exit 1,
+            False => result,
+        }
     }
 }
 

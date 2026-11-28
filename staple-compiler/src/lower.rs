@@ -8332,6 +8332,21 @@ impl LoweredProgram {
                 )
             }
             CallRoute::Indirect => {
+                if module.type_of_expression(call.argument.syntax().id)
+                    == Some(&CheckedType::Never)
+                    && module.symbol_for(callee_syntax).is_none()
+                    && module.access_for(callee_syntax).is_none()
+                    && module.trait_dispatch_for(callee_syntax).is_none()
+                    && module.type_of_expression(callee_syntax).is_none()
+                {
+                    let arg = self.lower_expression(module, owner, context, &call.argument)?;
+                    let call_block = self.blocks.push(LoweredBlock {
+                        origin,
+                        items: Vec::new(),
+                        result: Some(arg),
+                    });
+                    return Ok(LoweredExpressionKind::Block(call_block));
+                }
                 let callee = self.lower_expression(module, owner, context, &call.callee)?;
                 let function_type = match module.type_of_expression(callee_syntax) {
                     Some(CheckedType::Function(function_type)) => function_type.clone(),
@@ -16113,7 +16128,15 @@ impl<'a> SourceCoverage<'a> {
                 }
             }
             CallRoute::Indirect => {
-                self.visit_expression(owner, &call.callee);
+                if !(self.module.type_of_expression(call.argument.syntax().id)
+                    == Some(&CheckedType::Never)
+                    && self.module.symbol_for(call.callee.syntax().id).is_none()
+                    && self.module.access_for(call.callee.syntax().id).is_none()
+                    && self.module.trait_dispatch_for(call.callee.syntax().id).is_none()
+                    && self.module.type_of_expression(call.callee.syntax().id).is_none())
+                {
+                    self.visit_expression(owner, &call.callee);
+                }
                 self.visit_call_argument(owner, &call.argument);
             }
             CallRoute::Intrinsic
