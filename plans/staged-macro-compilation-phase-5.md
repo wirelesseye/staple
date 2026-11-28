@@ -36,18 +36,18 @@ Before the switch:
 - Don't refer to the plan files or phase numbers in the code and
   documentation, except from the plan files themselves.
 - Don't run `staple fmt` (see `AGENTS.md`), and don't use its output in tests.
-- Until task 11 switches the default, interpreter expansion must not change.
+- Until task 12 switches the default, interpreter expansion must not change.
   Run `scripts/compare-expansion.py` against the start of the phase after every
   task that touches the expander or the standard library, and explain every
   difference in Findings.
 - `scripts/check-macro-closures.py --mode all` stays clean after every commit.
 - Run `scripts/compare-engines.py` after every task that touches either engine,
   the standard library or test sources, and keep its count in the status
-  table. Run the standard library's entries one at a time until task 9 fixes
+  table. Run the standard library's entries one at a time until task 10 fixes
   concurrent builds.
 - Each language decision below is a proposal for the user to confirm before it
   is implemented. If the user changes one, update the decision here first.
-- Until task 6 restores them, don't add `if`, `when`, `for` or `while` to code in
+- Until task 7 restores them, don't add `if`, `when`, `for` or `while` to code in
   `std.syntax`, or to code the syntax runtime reaches. Write it with `match` and
   `loop`.
 - Work on macOS and Linux. Other hosts keep the interpreter as their default,
@@ -209,7 +209,7 @@ All of these were read from the source at `3534a88f`.
      the macro.
    - Stage-cycle diagnostics must be deterministic. Which item a cycle names
      follows a fixed order, such as source order, not hash order.
-6. **Performance gates the switch.** Before task 11 changes the default, warm
+6. **Performance gates the switch.** Before task 12 changes the default, warm
    B1–B3 with the compiled engine must be within 25% of the interpreter, and a
    closure library must build in under 2 s on the development machine.
    - If a target can't be reached, record why in Findings and ask the user
@@ -257,7 +257,7 @@ All of these were read from the source at `3534a88f`.
     optimization level made calls faster (Phase 4, task 11). So libraries stay
     at `O0` until the fault is found. The fault may be a collector bug that
     optimized run-time code would hit too, so it gets a time-boxed
-    investigation of its own (task 13).
+    investigation of its own (task 14).
 
 12. **The standard library uses `if` and `when` again, and its derives stay
     hand-written** (decided). This branch removed both to break stage cycles:
@@ -323,10 +323,10 @@ All of these were read from the source at `3534a88f`.
 
 ## Tasks
 
-Tasks 1 to 5 close the differences between the engines. Task 6 gives the
-standard library `if` and `when` back. Tasks 7 to 9 make the compiled engine
-fast and safe to share. Task 10 moves the backend into the compiler. Task 11
-switches the default. Task 12 is the language server, and tasks 13 to 15 finish
+Tasks 1 to 6 close the differences between the engines. Task 7 gives the
+standard library `if` and `when` back. Tasks 8 to 10 make the compiled engine
+fast and safe to share. Task 11 moves the backend into the compiler. Task 12
+switches the default. Task 13 is the language server, and tasks 14 to 16 finish
 the phase.
 
 ### 1. A clean baseline
@@ -393,11 +393,40 @@ the phase.
   cycles deterministic.
 - Bind a modifier's explicit argument as the whole group under both engines
   (Decision 13), and unwrap it in every modifier that takes one.
-- Done when `compare-engines.py` reports only the four inputs that only the
-  interpreter rejects (a bare `Sequence` or `Separated` splice, and `Syntax` as a
-  `parse_quote` context), each listed in Findings as intended.
+- Done when `compare-engines.py` reports only differences that Findings lists
+  as intended (the interpreter alone rejecting an input, different wording
+  for an input both engines reject, or each engine's own loop limit) or hands
+  to task 5 as compiled-engine faults. The plan first expected only the four
+  inputs that only the interpreter rejects (a bare `Sequence` or `Separated`
+  splice, and `Syntax` as a `parse_quote` context); the comparison found 17
+  intended differences and 7 faults.
 
-### 5. `if` and `when` as templates
+### 5. Compiled-engine faults the comparison found
+
+Task 4's comparison left seven inputs where compiled code gets a macro wrong
+and the interpreter gets it right. Each would reach users once task 12 makes
+compiled code the default, so they are fixed before the switch:
+
+- A documented declaration that a compiled macro rebuilds, with
+  `Clone.clone` or through a `typegroup`, loses its docs (four inputs). The
+  argument carries the docs; the rebuilt `Item` drops them. Make a rebuilt item
+  keep the docs its parts carry, as the interpreter does.
+- An `Ident` whose spelling isn't a valid identifier panics in the macro
+  server's Rust code (`intrinsics.rs`, `ident_syntax`). It must report a
+  diagnostic at the macro call, worded as the interpreter's.
+- `macro refuse = value: Expr => compile_error "…"` fails to lower, with
+  internal errors. A macro whose body is a `compile_error` must compile and
+  report its message when called.
+- Splicing a `TypeParameters` header before `wrap pub $argument` loses the
+  `wrap`. The spliced declaration must keep every part.
+
+For each fault, add a test that fails before the fix, under both engines
+where the interpreter can run it (the ignored compiled-engine tests in
+`staple-cli/tests/compiled_macros.rs`, run by `test-macro-libraries.sh`).
+Done when `compare-engines.py` reports none of the seven, and only the
+17 differences task 4's Findings list as intended remain.
+
+### 6. `if` and `when` as templates
 
 - Follow Decision 7. Write each as overloads that expand to a call of themselves
   on the remaining arguments. Keep `compile_error` for the missing-branch cases.
@@ -405,9 +434,9 @@ the phase.
   standard library still has no stage cycles.
 - Measure B1 and B3 under both engines before and after.
 
-### 6. `if` and `when` back in the standard library
+### 7. `if` and `when` back in the standard library
 
-- This needs task 5. If `if` and `when` became templates, restore every use this
+- This needs task 6. If `if` and `when` became templates, restore every use this
   branch rewrote.
   - Take the old text from `main`, as it was before the rewrite (`git diff
     $(git merge-base HEAD main) HEAD -- stdlib`), and keep any later change to
@@ -424,7 +453,7 @@ the phase.
   The expansion comparison against the start of the phase will show the
   restored files. Explain them in Findings.
 
-### 7. Call cost
+### 8. Call cost
 
 - Let the parser start at a given offset, line and column, instead of padding a
   fragment with `stream_prefix`. Make the parser intrinsics keep the fragment's
@@ -436,7 +465,7 @@ the phase.
 - Record per-call and B1–B3 figures after each change, against Decision 6's
   target.
 
-### 8. Closure-library build cost
+### 9. Closure-library build cost
 
 - A closure library spends about 1.2 s type-checking and 1.7 s lowering, most of
   it on code the closure doesn't own. Find what lowering seeds beyond the closure
@@ -447,7 +476,7 @@ the phase.
 - Target: under 2 s per closure library (Decision 6). Record each step's time
   before and after, using `STAPLE_MACRO_STATS`.
 
-### 9. Pruning and concurrent builds
+### 10. Pruning and concurrent builds
 
 - Implement Decision 8. A build doesn't delete a library that is current, or that
   was loaded in the last 24 hours. Loading a library updates its modification
@@ -458,7 +487,7 @@ the phase.
   - a stale library older than the limit is removed.
 - Then run `compare-engines.py` on the standard library's entries in parallel.
 
-### 10. The backend in the compiler
+### 11. The backend in the compiler
 
 - Move `CliMacroBackend`, the cache, the linker invocation and the server client
   into `staple-compiler`, as Decision 1 says. Give `NameResolver` an engine option.
@@ -472,9 +501,9 @@ the phase.
   and why, and record it. Many tests may share one macro, and a library is
   cached by its closure.
 
-### 11. Switch the default
+### 12. Switch the default
 
-- Check Decision 6's targets, and that tasks 1 to 10 are done. If a target isn't
+- Check Decision 6's targets, and that tasks 1 to 11 are done. If a target isn't
   met, stop and ask the user (Decision 6).
 - Make `compiled` the default for every command, for `NameResolver` and for the
   compiler's tests. Keep `--macro-engine=interp` hidden (Decision 10).
@@ -484,7 +513,7 @@ the phase.
 - Run the full comparison, the closure check and the workspace tests with the
   new default, and record the results.
 
-### 12. The language server
+### 13. The language server
 
 - Implement Decision 9:
   - analysis uses the newest library for each macro's stable key;
@@ -501,7 +530,7 @@ the phase.
   - a stale build is dropped;
   - the server restarts after its load limit.
 
-### 13. The `O1` fault
+### 14. The `O1` fault
 
 - Time-box to two days. Reproduce Phase 4's case: two top-level `if`s, then a
   later `if` in `std.number.types` whose `Sequence` argument loses its elements,
@@ -513,7 +542,7 @@ the phase.
 - Record the result. If it is fixed, measure `O1` libraries again, and choose the
   levels from those measurements.
 
-### 14. Language reference
+### 15. Language reference
 
 - Describe the compiled engine as how macros run. Remove or rewrite statements
   that only describe the interpreter. The "Compile-time evaluation supports …"
@@ -529,7 +558,7 @@ the phase.
   macros, and how long that roughly takes.
 - Don't document `--macro-engine`.
 
-### 15. Close out
+### 16. Close out
 
 - Run the expansion comparison, the closure check, the engine comparison and the
   workspace tests, and record the results.
@@ -574,28 +603,29 @@ Update this section as you work (see "Rules for the implementor").
 | 2. Every macro has an entry function | done | `d2d346fc` | An untyped macro parameter is an error under both engines, reported at the parameter, and the interpreter's `SyntaxNode` default and the entry-function exception are gone. Tests: workspace 2379 passed, 0 failed (rerun after fixing two LSP hover signatures that read `SyntaxNode`); the two new compiled-engine tests (ignored, `test-macro-libraries.sh`) pass. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest 1910/2042 with the same 132 differences; ``could not be run as compiled code``: 0 inputs. See Findings. |
 | 3. `parse_quote` without a contextual type | done | `5049c33e` | A `parse_quote` with no contextual type is an error under both engines with one diagnostic, as is `Parse.parse`/`Parse.parse_all` with no target; a whole-body `parse_quote` no longer fixes a macro's result, and the interpreter no longer takes a quote's type from the call site. Tests: workspace 2382 passed, 0 failed; `test-macro-libraries.sh` passes. `compare-expansion.py` against `3534a88f`: 232/232. Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest without it 1935/2052 with 117 differences; ``could not be run as compiled code``: 0 inputs. See Findings. |
 | 4. Macro code under the ordinary rules | done | `64b67662` | Before a macro outside the standard library first runs, the interpreter resolves and type-checks its closure as ordinary code (default on, `STAPLE_CHECK_MACRO_CLOSURES=0` turns it off), so its diagnostics are the compiled engine's; a panic names where it was called from and keeps the `while expanding macro` line; a modifier's `Parenthesized<X>` argument is the whole group in both engines (Decision 13, follow-up `97652f24`), and a one-slot group's pattern matches its contents in the interpreter. Tests: workspace 2383 passed, 0 failed (after the follow-up); `test-macro-libraries.sh` passes (2 + 17). `compare-expansion.py` against `3534a88f`: 232/232 (231/232 after the follow-up: `examples/macros.sta`'s `@replace` source text changed, its expansion didn't). Closure check clean (232 inputs). `compare-engines.py`: the standard library 45/45 (one at a time), the rest without it 2028/2052 with 24 differences (117 before), 2030/2054 with the same 24 after the follow-up (two new test inputs); ``could not be run as compiled code``: 0 inputs. **Not at the plan's "only four remain"**: see Findings. |
-| 5. `if` and `when` as templates | not started | | |
-| 6. `if` and `when` back in the standard library | not started | | |
-| 7. Call cost | not started | | |
-| 8. Closure-library build cost | not started | | |
-| 9. Pruning and concurrent builds | not started | | |
-| 10. The backend in the compiler | not started | | |
-| 11. Switch the default | not started | | |
-| 12. The language server | not started | | |
-| 13. The `O1` fault | not started | | |
-| 14. Language reference | not started | | |
-| 15. Close out | not started | | |
+| 5. Compiled-engine faults the comparison found | not started | | |
+| 6. `if` and `when` as templates | not started | | |
+| 7. `if` and `when` back in the standard library | not started | | |
+| 8. Call cost | not started | | |
+| 9. Closure-library build cost | not started | | |
+| 10. Pruning and concurrent builds | not started | | |
+| 11. The backend in the compiler | not started | | |
+| 12. Switch the default | not started | | |
+| 13. The language server | not started | | |
+| 14. The `O1` fault | not started | | |
+| 15. Language reference | not started | | |
+| 16. Close out | not started | | |
 
 ## Measurements
 
 _None yet._ For each one, record what was measured, the result, the machine, the
 commit and the command. Include:
 
-- warm B1–B3 and per-call cost under both engines, before and after tasks 5,
-  6 and 7;
-- closure-library build time per step, before and after task 8;
-- the compiler's test suite under each engine (task 10);
-- `O1` against `O0`, if task 13 fixes the fault.
+- warm B1–B3 and per-call cost under both engines, before and after tasks 6,
+  7 and 8;
+- closure-library build time per step, before and after task 9;
+- the compiler's test suite under each engine (task 11);
+- `O1` against `O0`, if task 14 fixes the fault.
 
 ## Findings
 
@@ -837,11 +867,13 @@ commit and the command. Include:
     twice); and `Show.show 1` with two integer impls, which the interpreter calls
     ambiguous and the type checker defaults (1). All are limits of the
     interpreter's evaluator; they go with it in Phase 6.
-  - Both reject with different text (7): an invalid quotation result or bare list
+  - Both reject with different text (8): an invalid quotation result or bare list
     splice in type and pattern position, where the interpreter reports the
     quotation and compiled code reports the parse error (`invalid`, `bad`,
-    4 inputs), an empty `Separated` with a trailing separator (2), and a
-    `@again` cycle whose location is read from different tokens (1).
+    4 inputs), an empty `Separated` with a trailing separator (2), a visibility
+    spliced onto a destructuring `let`, which the interpreter reports at the
+    splice and compiled code as a parse error (1), and a `@again` cycle whose
+    location is read from different tokens (1).
   - Intended: a loop that never ends reports the interpreter's step limit or the
     compiled call's 10 s limit (1).
   - Compiled bugs, not intended (7): documented declarations that a compiled
@@ -851,7 +883,7 @@ commit and the command. Include:
     reporting an error (1), `macro refuse = value: Expr => compile_error "…"`
     fails to lower (1), and splicing a `TypeParameters` header in front of
     `wrap pub $argument` loses the `wrap` (1). These need work in
-    the runtime or the standard library's `syntax` module and are left open.
+    the runtime or the standard library's `syntax` module; task 5 fixes them.
   - `compare-engines.py` now drops the process-specific thread number from a
     crash report, which made a stack overflow differ from run to run.
 - **Counts.** The rest without the standard library: 1935/2052 (117) before,
@@ -865,9 +897,9 @@ Record:
 - the cause of the `derive_eq` failure (task 1);
 - the test sources changed for each language decision, grouped by kind (tasks 3
   and 4);
-- whether `if` and `when` became templates, and if not, why (task 5);
-- which flow-macro uses went back, and which stayed rewritten and why (task 6);
-- whether Decision 6's targets were met, and the user's answer if not (task 11);
-- the result of the `O1` investigation (task 13);
+- whether `if` and `when` became templates, and if not, why (task 6);
+- which flow-macro uses went back, and which stayed rewritten and why (task 7);
+- whether Decision 6's targets were met, and the user's answer if not (task 12);
+- the result of the `O1` investigation (task 14);
 - every remaining difference between the engines, with its reason;
 - anything that changes Phase 6.
